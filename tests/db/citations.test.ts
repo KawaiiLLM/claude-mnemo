@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import {
@@ -7,9 +7,11 @@ import {
   getSessionEffectiveCitations,
   getTurnCitations,
   parseInlineCitations,
-  replaceTurnCitations,
+  recomputeTurnCitedPairs,
 } from "../../src/db/citations";
 import { createDatabase } from "../../src/db/database";
+import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
+import { recordNoteIdExposure } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
@@ -115,7 +117,14 @@ describe("inline citation grammar", () => {
   });
 });
 
-describe("turn_citations edge table", () => {
+// The generic body-free structured edge write (`replaceTurnCitations`, spec
+// C6) is retired outright — a `{turn, relation}` list with no prose backing
+// it made every rule in the `recomputeTurnCitedPairs` describe block below
+// bypassable in one call. These fixtures now seed edges through
+// `writeMemoryEdges` directly — the primitive both the old function and
+// `recomputeTurnCitedPairs` are built on — so the schema/delete-trigger
+// coverage (spec C15) they exist for survives the retirement unchanged.
+describe("memory_edges schema and delete triggers (spec C15)", () => {
   let db: Database;
   let sessionA: number;
   let sessionB: number;
@@ -129,6 +138,35 @@ describe("turn_citations edge table", () => {
          VALUES (?, ?, 'extracted', 'fixture', 100) RETURNING id`,
       )
       .get(sessionId, promptNumber)!.id;
+
+  function citeFrom(
+    citingTurnId: number,
+    citedTurnId: number,
+    relation: "evidence-for" | "supersedes" | "depends-on",
+    nowEpoch = 500,
+  ): void {
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citingTurnId },
+          cited: { kind: "turn", id: citedTurnId },
+          relation,
+          provenance: "judged",
+        },
+      ],
+      nowEpoch,
+    );
+    // getSessionCitationInDegree/getEffectiveCitations read the structured
+    // edge only once this flag is set (spec §B's from-absent-vs-recorded-empty
+    // predicate) — the retired `replaceTurnCitations` used to flip it in the
+    // same transaction as the edge write; a raw `writeMemoryEdges` call does
+    // not, so tests that read through the effective-citations layer set it
+    // by hand here, same as `writeMemoryEdges`'s other direct callers do.
+    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(
+      citingTurnId,
+    );
+  }
 
   beforeEach(() => {
     db = createDatabase(":memory:");
@@ -163,224 +201,13 @@ describe("turn_citations edge table", () => {
     db.close();
   });
 
-  test("writes edges and records the flag", () => {
-    const result = replaceTurnCitations(
-      db,
-      turns[2]!,
-      [
-        { id: turns[0]!, relation: "supersedes" },
-        { id: turns[1]!, relation: "evidence-for" },
-      ],
-      500,
-    );
-
-    expect(result.droppedIds).toEqual([]);
-    expect(getTurnCitations(db, turns[2]!)).toEqual([
-      {
-        citingTurnId: turns[2]!,
-        citedTurnId: turns[0]!,
-        relation: "supersedes",
-        createdAtEpoch: 500,
-      },
-      {
-        citingTurnId: turns[2]!,
-        citedTurnId: turns[1]!,
-        relation: "evidence-for",
-        createdAtEpoch: 500,
-      },
-    ]);
-    expect(getTurnById(db, turns[2]!)?.citesRecorded).toBe(true);
-  });
-
-  test("replaces the whole edge set on resend instead of accumulating", () => {
-    replaceTurnCitations(
-      db,
-      turns[2]!,
-      [{ id: turns[0]!, relation: "evidence-for" }],
-      500,
-    );
-    replaceTurnCitations(
-      db,
-      turns[2]!,
-      [{ id: turns[1]!, relation: "depends-on" }],
-      600,
-    );
-
-    expect(getTurnCitations(db, turns[2]!)).toEqual([
-      {
-        citingTurnId: turns[2]!,
-        citedTurnId: turns[1]!,
-        relation: "depends-on",
-        createdAtEpoch: 600,
-      },
-    ]);
-  });
-
-  test("an explicit empty set clears the edges and keeps the flag recorded", () => {
-    replaceTurnCitations(
-      db,
-      turns[2]!,
-      [{ id: turns[0]!, relation: "evidence-for" }],
-      500,
-    );
-    replaceTurnCitations(db, turns[2]!, [], 600);
-
-    expect(getTurnCitations(db, turns[2]!)).toEqual([]);
-    expect(getTurnById(db, turns[2]!)?.citesRecorded).toBe(true);
-  });
-
-  test("de-duplicates a repeated identical edge but rejects a conflicting relation on the same target (spec C5)", () => {
-    const result = replaceTurnCitations(
-      db,
-      turns[2]!,
-      [
-        { id: turns[0]!, relation: "evidence-for" },
-        { id: turns[0]!, relation: "evidence-for" },
-        { id: turns[0]!, relation: "supersedes" },
-      ],
-      500,
-    );
-
-    // The identical repeat collapses silently; the same target under a
-    // SECOND, different relation is dropped — a pair carries at most one
-    // current relation, and a single batch cannot say which of two claims
-    // about the same pair is the correction.
-    expect(result.written).toHaveLength(1);
-    expect(result.droppedIds).toEqual([turns[0]!]);
-    expect(
-      getTurnCitations(db, turns[2]!).map((edge) => edge.relation),
-    ).toEqual(["evidence-for"]);
-  });
-
-  test("drops unresolvable and self ids with a log line and writes the rest", () => {
-    const warn = spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const result = replaceTurnCitations(
-        db,
-        turns[2]!,
-        [
-          { id: turns[0]!, relation: "evidence-for" },
-          { id: 999_999, relation: "evidence-for" },
-          { id: turns[2]!, relation: "supersedes" },
-        ],
-        500,
-      );
-
-      expect(result.droppedIds).toEqual([999_999, turns[2]!]);
-      expect(
-        getTurnCitations(db, turns[2]!).map((edge) => edge.citedTurnId),
-      ).toEqual([turns[0]!]);
-      expect(warn.mock.calls.at(0)?.[0]).toContain("999999");
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  test("drops semantically invalid integer ids per edge instead of per call", () => {
-    const warn = spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const result = replaceTurnCitations(
-        db,
-        turns[2]!,
-        [
-          { id: 0, relation: "evidence-for" },
-          { id: -3, relation: "evidence-for" },
-          { id: 999_999, relation: "evidence-for" },
-          { id: turns[2]!, relation: "supersedes" },
-          { id: turns[0]!, relation: "depends-on" },
-        ],
-        500,
-      );
-
-      expect(result.droppedIds).toEqual([0, -3, 999_999, turns[2]!]);
-      expect(result.written).toHaveLength(1);
-      expect(getTurnCitations(db, turns[2]!)).toEqual([
-        {
-          citingTurnId: turns[2]!,
-          citedTurnId: turns[0]!,
-          relation: "depends-on",
-          createdAtEpoch: 500,
-        },
-      ]);
-      expect(getTurnById(db, turns[2]!)?.citesRecorded).toBe(true);
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  test("rolls the whole replace-set back when one insert fails", () => {
-    replaceTurnCitations(
-      db,
-      turns[2]!,
-      [{ id: turns[0]!, relation: "evidence-for" }],
-      500,
-    );
-    db.exec(`
-      CREATE TRIGGER block_citation BEFORE INSERT ON memory_edges
-      WHEN NEW.cited_kind = 'turn' AND NEW.cited_id = ${turns[1]!}
-      BEGIN SELECT RAISE(ABORT, 'citation write blocked'); END;
-    `);
-
-    // No enclosing transaction: the operation must be atomic on its own, or a
-    // direct caller publishes a cleared/half-written set.
-    expect(() =>
-      replaceTurnCitations(
-        db,
-        turns[2]!,
-        [
-          { id: turns[0]!, relation: "supersedes" },
-          { id: turns[1]!, relation: "evidence-for" },
-        ],
-        600,
-      ),
-    ).toThrow();
-
-    expect(getTurnCitations(db, turns[2]!)).toEqual([
-      {
-        citingTurnId: turns[2]!,
-        citedTurnId: turns[0]!,
-        relation: "evidence-for",
-        createdAtEpoch: 500,
-      },
-    ]);
-
-    // …and a first-ever write that fails leaves the flag unrecorded.
-    expect(() =>
-      replaceTurnCitations(
-        db,
-        turns[3]!,
-        [{ id: turns[1]!, relation: "evidence-for" }],
-        600,
-      ),
-    ).toThrow();
-    expect(getTurnCitations(db, turns[3]!)).toEqual([]);
-    expect(getTurnById(db, turns[3]!)?.citesRecorded).toBe(false);
-  });
-
   test("writes cross-session edges but excludes them from session-local in-degree", () => {
     // Two same-session citers of turns[0], one cross-session citer, and one
     // outbound cross-session edge.
-    replaceTurnCitations(
-      db,
-      turns[1]!,
-      [{ id: turns[0]!, relation: "depends-on" }],
-      500,
-    );
-    replaceTurnCitations(
-      db,
-      turns[2]!,
-      [
-        { id: turns[0]!, relation: "supersedes" },
-        { id: foreignTurn, relation: "evidence-for" },
-      ],
-      500,
-    );
-    replaceTurnCitations(
-      db,
-      foreignTurn,
-      [{ id: turns[0]!, relation: "depends-on" }],
-      500,
-    );
+    citeFrom(turns[1]!, turns[0]!, "depends-on");
+    citeFrom(turns[2]!, turns[0]!, "supersedes");
+    citeFrom(turns[2]!, foreignTurn, "evidence-for");
+    citeFrom(foreignTurn, turns[0]!, "depends-on");
 
     // The cross-session edges are persisted as provenance …
     expect(
@@ -396,22 +223,23 @@ describe("turn_citations edge table", () => {
     expect(getSessionCitationInDegree(db, sessionB).size).toBe(0);
   });
 
-  test("a rejected second relation on the same pair does not inflate in-degree", () => {
-    // Under spec C5 a pair carries at most one relation, so "files several
-    // relations" for the SAME target can no longer happen — the second is
-    // dropped (covered above). What must still hold is that in-degree counts
-    // the one surviving relation once, not zero and not twice.
-    replaceTurnCitations(
-      db,
-      turns[1]!,
-      [
-        { id: turns[0]!, relation: "evidence-for" },
-        { id: turns[0]!, relation: "supersedes" },
-      ],
-      500,
-    );
+  test("a corrected relation on the same pair does not inflate in-degree", () => {
+    // Under spec C5 a pair carries at most one current relation: a SECOND
+    // write to the same pair replaces the relation in place rather than
+    // adding a second row (memory-edges.test.ts covers the upsert itself).
+    // What must still hold here is that in-degree counts the one surviving
+    // pair once, not zero and not twice.
+    citeFrom(turns[1]!, turns[0]!, "evidence-for");
+    citeFrom(turns[1]!, turns[0]!, "supersedes");
 
-    expect(getTurnCitations(db, turns[1]!)).toHaveLength(1);
+    expect(getTurnCitations(db, turns[1]!)).toEqual([
+      {
+        citingTurnId: turns[1]!,
+        citedTurnId: turns[0]!,
+        relation: "supersedes",
+        createdAtEpoch: 500,
+      },
+    ]);
     expect(getSessionCitationInDegree(db, sessionA).get(turns[0]!)).toBe(1);
   });
 
@@ -426,18 +254,8 @@ describe("turn_citations edge table", () => {
   // turns/segments/sessions; these two tests prove the endpoint's edges are
   // actually gone afterward, not merely dangling.
   test("deleting the cited endpoint's session removes its edges via the kind-aware delete trigger (spec C15)", () => {
-    replaceTurnCitations(
-      db,
-      turns[1]!,
-      [{ id: turns[0]!, relation: "depends-on" }],
-      500,
-    );
-    replaceTurnCitations(
-      db,
-      foreignTurn,
-      [{ id: turns[0]!, relation: "evidence-for" }],
-      500,
-    );
+    citeFrom(turns[1]!, turns[0]!, "depends-on");
+    citeFrom(foreignTurn, turns[0]!, "evidence-for");
     expect(
       db.query<{ count: number }, []>(
         "SELECT COUNT(*) AS count FROM memory_edges WHERE citing_kind = 'turn' AND cited_kind = 'turn'",
@@ -539,18 +357,8 @@ describe("turn_citations edge table", () => {
   });
 
   test("deleting the citing endpoint's session removes only that endpoint's edges (spec C15)", () => {
-    replaceTurnCitations(
-      db,
-      turns[1]!,
-      [{ id: turns[0]!, relation: "depends-on" }],
-      500,
-    );
-    replaceTurnCitations(
-      db,
-      foreignTurn,
-      [{ id: turns[0]!, relation: "evidence-for" }],
-      500,
-    );
+    citeFrom(turns[1]!, turns[0]!, "depends-on");
+    citeFrom(foreignTurn, turns[0]!, "evidence-for");
 
     db.query("DELETE FROM sessions WHERE id = ?").run(sessionB);
 
@@ -603,6 +411,237 @@ describe("turn_citations edge table", () => {
         )
         .run(turns[1]!, turns[0]!),
     ).not.toThrow();
+  });
+});
+
+describe("recomputeTurnCitedPairs (spec C6)", () => {
+  let db: Database;
+  let sessionId: number;
+  let otherSessionId: number;
+  let turns: number[];
+
+  const insertTurn = (sessionDbId: number, promptNumber: number): number =>
+    db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, title, created_at_epoch)
+         VALUES (?, ?, 'extracted', 'fixture', 100) RETURNING id`,
+      )
+      .get(sessionDbId, promptNumber)!.id;
+
+  /** Exposes every turn id to `sessionId`'s ledger — recomputeTurnCitedPairs' own gate. */
+  function exposeAll(rideTurnId: number, exposedTurnIds: readonly number[]): void {
+    recordNoteIdExposure(db, {
+      sessionId,
+      rideTurnId,
+      exposedTurnIds,
+      source: "reminder",
+      nowEpoch: 100,
+    });
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "recompute-a",
+      project: "claude-mnemo",
+      title: "A",
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+    otherSessionId = upsertSession(db, {
+      contentSessionId: "recompute-b",
+      project: "claude-mnemo",
+      title: "B",
+      insight: null,
+      createdAtEpoch: 200,
+      updatedAtEpoch: 200,
+      completedAtEpoch: null,
+    }).id;
+    turns = [1, 2, 3, 4].map((promptNumber) => insertTurn(sessionId, promptNumber));
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // Acceptance criterion 1: a bare `[S/T]` in a citation-bearing field creates
+  // an unattributed (relation: null) pair — no relation field, no separate
+  // structured input, the body alone.
+  test("a bare qualified reference in content creates an unattributed pair", () => {
+    exposeAll(turns[3]!, [turns[0]!]);
+
+    const result = recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `Builds on [S${sessionId}/T1].`, insight: null },
+      500,
+      sessionId,
+    );
+
+    expect(result.rejected).toEqual([]);
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).map((edge) => [
+        edge.cited,
+        edge.relation,
+      ]),
+    ).toEqual([[{ kind: "turn", id: turns[0]! }, null]]);
+  });
+
+  test("title and insight are citation-bearing fields too", () => {
+    exposeAll(turns[3]!, [turns[0]!, turns[1]!]);
+
+    recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      {
+        title: `design: reverses [S${sessionId}/T1]`,
+        content: null,
+        insight: `Same lesson as [S${sessionId}/T2].`,
+      },
+      500,
+      sessionId,
+    );
+
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: turns[2]! })
+        .map((edge) => edge.cited.id)
+        .sort((a, b) => a - b),
+    ).toEqual([turns[0]!, turns[1]!]);
+  });
+
+  // Acceptance criterion 3: reproduce the SEQUENCE — write a body citing two
+  // turns (one carrying a relation another writer already attached), rewrite
+  // it citing only one, and prove the dropped pair is gone along with its
+  // relation. Not merely "a delete helper exists".
+  test("a rewrite that drops a reference drops its pair and any relation it carried", () => {
+    exposeAll(turns[3]!, [turns[0]!, turns[1]!]);
+
+    recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `[S${sessionId}/T1] and [S${sessionId}/T2].`, insight: null },
+      500,
+      sessionId,
+    );
+    // A relation lands on the T1 pair from elsewhere (settlement, in
+    // production) — spec C7's "attach a relation on a pair that already
+    // exists" case, not this function's own job to create.
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: turns[2]! },
+          cited: { kind: "turn", id: turns[0]! },
+          relation: "supersedes",
+          provenance: "judged",
+        },
+      ],
+      500,
+    );
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: turns[2]! }),
+    ).toHaveLength(2);
+
+    const result = recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `Only [S${sessionId}/T1] now.`, insight: null },
+      600,
+      sessionId,
+    );
+
+    // T2's bare pair is gone …
+    const surviving = getOutgoingEdges(db, { kind: "turn", id: turns[2]! });
+    expect(surviving.map((edge) => edge.cited.id)).toEqual([turns[0]!]);
+    // … and the deleted pair's relation is reported, not silently dropped.
+    expect(result.deleted).toHaveLength(1);
+    expect(result.deleted[0]?.cited).toEqual({ kind: "turn", id: turns[1]! });
+  });
+
+  // Acceptance criterion 4: a relation on a pair the rewrite STILL cites
+  // survives untouched — the bare re-scan must not clear or relabel it.
+  test("a relation on a surviving pair is not disturbed by a rewrite that still cites it", () => {
+    exposeAll(turns[3]!, [turns[0]!]);
+    recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `[S${sessionId}/T1].`, insight: null },
+      500,
+      sessionId,
+    );
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: turns[2]! },
+          cited: { kind: "turn", id: turns[0]! },
+          relation: "evidence-for",
+          provenance: "judged",
+        },
+      ],
+      500,
+    );
+
+    recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `Restating [S${sessionId}/T1] once more.`, insight: null },
+      600,
+      sessionId,
+    );
+
+    const surviving = getOutgoingEdges(db, { kind: "turn", id: turns[2]! });
+    expect(surviving).toHaveLength(1);
+    expect(surviving[0]?.relation).toBe("evidence-for");
+  });
+
+  test("a reference to a turn this session was never shown is dropped, not written", () => {
+    // turns[0] deliberately NOT exposed.
+    const result = recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `[S${sessionId}/T1].`, insight: null },
+      500,
+      sessionId,
+    );
+
+    expect(result.rejected).toHaveLength(1);
+    expect(result.rejected[0]?.reason).toBe("unexposed");
+    expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
+  });
+
+  test("a cross-session reference is written as provenance", () => {
+    const foreign = insertTurn(otherSessionId, 1);
+    exposeAll(turns[3]!, [foreign]);
+
+    recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `[S${otherSessionId}/T1].`, insight: null },
+      500,
+      sessionId,
+    );
+
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).map((edge) => edge.cited.id),
+    ).toEqual([foreign]);
+  });
+
+  test("no citation-bearing field leaves the turn's outgoing set untouched at empty", () => {
+    const result = recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: null, insight: null },
+      500,
+      sessionId,
+    );
+
+    expect(result.written).toEqual([]);
+    expect(result.deleted).toEqual([]);
+    expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
   });
 });
 
@@ -666,7 +705,7 @@ describe("effective citations predicate", () => {
   });
 
   test("a recorded empty set means genuinely none, not legacy absence", () => {
-    replaceTurnCitations(db, citerId, [], 500);
+    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
 
     const effective = getEffectiveCitations(db, getTurnById(db, citerId)!);
     expect(effective.source).toBe("structured");
@@ -676,12 +715,19 @@ describe("effective citations predicate", () => {
   });
 
   test("structured edges win over disagreeing inline text", () => {
-    replaceTurnCitations(
+    writeMemoryEdges(
       db,
-      citerId,
-      [{ id: citedId, relation: "supersedes" }],
+      [
+        {
+          citing: { kind: "turn", id: citerId },
+          cited: { kind: "turn", id: citedId },
+          relation: "supersedes",
+          provenance: "judged",
+        },
+      ],
       500,
     );
+    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
 
     const effective = getEffectiveCitations(db, getTurnById(db, citerId)!);
     expect(effective.source).toBe("structured");
@@ -788,14 +834,26 @@ describe("session-wide effective citations", () => {
       selfCiter,
     );
 
-    replaceTurnCitations(
+    writeMemoryEdges(
       db,
-      structuredCiter,
       [
-        { id: anchor, relation: "supersedes" },
-        { id: foreignTurn, relation: "evidence-for" },
+        {
+          citing: { kind: "turn", id: structuredCiter },
+          cited: { kind: "turn", id: anchor },
+          relation: "supersedes",
+          provenance: "judged",
+        },
+        {
+          citing: { kind: "turn", id: structuredCiter },
+          cited: { kind: "turn", id: foreignTurn },
+          relation: "evidence-for",
+          provenance: "judged",
+        },
       ],
       500,
+    );
+    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(
+      structuredCiter,
     );
   });
 
@@ -844,7 +902,7 @@ describe("session-wide effective citations", () => {
   });
 
   test("a recorded empty set retracts what the prose still says", () => {
-    replaceTurnCitations(db, legacyCiter, [], 600);
+    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(legacyCiter);
 
     const effective = getSessionEffectiveCitations(db, sessionA);
     expect(effective.get(legacyCiter)?.source).toBe("structured");

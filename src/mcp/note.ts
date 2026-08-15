@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { recomputeTurnCitedPairs } from "../db/citations";
 import { runWriteTransaction } from "../db/database";
 import {
   closeNoteDebtAsDeclined,
@@ -607,10 +608,32 @@ export function noteTool(
       // `append`, required whenever the target field is non-empty) arrives
       // with the merged write tool in ticket 03, and retires `replace` and
       // `replaceTags` together. Until then this is a strict subset of it.
-      updateTurnById(db, turn.id, {
+      const finalTurn = updateTurnById(db, turn.id, {
         type: typeValues,
         replaceTags: tagValues,
       });
+
+      // Spec C6: this note IS the turn's official body from here on (裁决 27
+      // above), so its citation-bearing fields — title/content/insight, as
+      // `updateTurnById` just persisted them, not the locally stripped
+      // strings — are re-scanned and the turn's pair set in `memory_edges`
+      // is brought into agreement with them. A legacy-era note (the branch
+      // this `if` is inside of) never reaches here at all: P1 isolation
+      // leaves `turns` untouched, so there is no new body state to reconcile
+      // against.
+      if (finalTurn) {
+        recomputeTurnCitedPairs(
+          db,
+          finalTurn.id,
+          {
+            title: finalTurn.title,
+            content: finalTurn.content,
+            insight: finalTurn.insight,
+          },
+          nowEpoch,
+          finalTurn.sessionId,
+        );
+      }
     }
 
     return { ok: true, existing: existing !== null };

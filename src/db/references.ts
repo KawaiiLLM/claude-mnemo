@@ -291,6 +291,54 @@ export function validateReferences(
   return { accepted, rejected };
 }
 
+/**
+ * Existence-only resolution — the first of `validateReferences`' two gates,
+ * without the second. Exists for exactly one caller class: a storage-layer
+ * write (segments.ts's segment body, spec C6) that has no WRITER SESSION to
+ * gate against in the first place. A segment is not authored by one session —
+ * settlement composes its body from a window that spans a session's turns,
+ * and the module that stores it (segments.ts) is documented storage
+ * mechanics, not a judgement layer, so it is never handed the context
+ * `getExposedTurnIds` needs. "Does this address name a real row" is still
+ * answerable without that context, and per spec C6 that is the whole
+ * question a pair's EXISTENCE turns on — whether the writer was licensed to
+ * know about the target is a different question, already asked (by
+ * `validateReferences`) wherever a caller both writes prose AND has a writer
+ * session, e.g. `note`/`remember`'s turn and session routes.
+ */
+export function resolveExistingReferences(
+  db: Database,
+  references: readonly ParsedReference[],
+): ResolvedReference[] {
+  const resolved: ResolvedReference[] = [];
+  if (references.length === 0) {
+    return resolved;
+  }
+
+  const turnLookup = db.query<{ id: number }, [number, number]>(
+    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
+  );
+  const segmentLookup = db.query<{ id: number }, [number]>(
+    "SELECT id FROM segments WHERE id = ?",
+  );
+
+  for (const reference of references) {
+    if (reference.kind === "turn") {
+      const row = turnLookup.get(reference.sessionId, reference.promptNumber);
+      if (row) {
+        resolved.push({ reference, node: { kind: "turn", id: row.id } });
+      }
+      continue;
+    }
+    const row = segmentLookup.get(reference.segmentId);
+    if (row) {
+      resolved.push({ reference, node: { kind: "segment", id: row.id } });
+    }
+  }
+
+  return resolved;
+}
+
 /** Parse + validate in one step, the shape every write path wants. */
 export function resolveContentReferences(
   db: Database,

@@ -359,6 +359,76 @@ export function getIncomingEdges(db: Database, cited: EdgeNode): MemoryEdge[] {
     .map(mapEdgeRow);
 }
 
+export interface ReconcileCitedPairsResult {
+  /** The citing node's full outgoing set after reconciliation — new pairs and pairs that already existed alike. */
+  written: MemoryEdge[];
+  /** Pairs this call removed because no field supports them any more, relation included. */
+  deleted: MemoryEdge[];
+}
+
+/**
+ * Spec C6: a pair exists if and only if the citing node's body's post-state
+ * cites it. `citedNodes` is that post-state, already parsed and resolved by
+ * the caller (references.ts) — this function's only job is to make
+ * `memory_edges` agree with it, for ONE citing node's outgoing set.
+ *
+ * Two halves:
+ *
+ *   - every pair in `citedNodes` is upserted with `relation: null` — a bare,
+ *     unattributed citation (spec C5). For a pair that already existed this is
+ *     a no-op on relation/provenance: `writeMemoryEdges`'s null-relation
+ *     upsert never touches either (spec C14), so a relation attached by
+ *     another writer survives a rewrite that still cites the same target.
+ *   - every pair this node currently cites that is NOT in `citedNodes` is
+ *     DELETED outright, relation and all — a relation cannot outlive the pair
+ *     that carries it, and there is no "keep the relation, drop the pair"
+ *     state for it to fall back to.
+ *
+ * Whole-node rescan, not a per-field diff (spec C6's own text: turn, segment
+ * and session field counts are all bounded, so re-deriving the full set on
+ * every write and diffing it against what is already stored is simplest).
+ */
+export function reconcileCitedPairs(
+  db: Database,
+  citing: CitingNode,
+  citedNodes: readonly EdgeNode[],
+  nowEpoch: number,
+  provenance: EdgeProvenance,
+): ReconcileCitedPairsResult {
+  const desired = new Map<string, EdgeNode>();
+  for (const node of citedNodes) {
+    if (isValidCitedNode(node)) {
+      desired.set(`${node.kind}:${node.id}`, node);
+    }
+  }
+
+  const existing = getOutgoingEdges(db, citing);
+  const stale = existing.filter(
+    (edge) => !desired.has(`${edge.cited.kind}:${edge.cited.id}`),
+  );
+
+  const del = db.query<unknown, [CitingNodeKind, number, EdgeNodeKind, number]>(
+    `DELETE FROM memory_edges
+     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?`,
+  );
+  for (const edge of stale) {
+    del.run(citing.kind, citing.id, edge.cited.kind, edge.cited.id);
+  }
+
+  const { written } = writeMemoryEdges(
+    db,
+    [...desired.values()].map((cited) => ({
+      citing,
+      cited,
+      relation: null,
+      provenance,
+    })),
+    nowEpoch,
+  );
+
+  return { written, deleted: stale };
+}
+
 /**
  * De-duplicated in-degree (spec D8): how many DISTINCT nodes cite this one.
  * Two relations between the same pair cannot exist any more (spec C5), but a

@@ -1,5 +1,11 @@
 import type { Database } from "bun:sqlite";
 
+import { reconcileCitedPairs, type MemoryEdge } from "./memory-edges";
+import {
+  parseQualifiedReferences,
+  validateReferences,
+  type RejectedReference,
+} from "./references";
 import type { TurnRecord } from "./turns";
 
 /**
@@ -28,11 +34,6 @@ export function isCitationRelation(value: unknown): value is CitationRelation {
     typeof value === "string" &&
     (CITATION_RELATIONS as readonly string[]).includes(value)
   );
-}
-
-export interface CitationInput {
-  id: number;
-  relation: CitationRelation;
 }
 
 export interface TurnCitationEdge {
@@ -224,134 +225,73 @@ export function parseInlineCitations(
   return ids;
 }
 
-export interface ReplaceTurnCitationsResult {
-  written: TurnCitationEdge[];
-  droppedIds: number[];
+export interface RecomputeTurnCitedPairsFields {
+  title: string | null;
+  content: string | null;
+  insight: string | null;
 }
 
-const REPLACE_SAVEPOINT = "mnemo_replace_turn_citations";
+export interface RecomputeTurnCitedPairsResult {
+  /** The turn's full outgoing pair set after reconciliation. */
+  written: MemoryEdge[];
+  /** Pairs dropped because no field supports them any more, relation included (spec C6). */
+  deleted: MemoryEdge[];
+  /** References the body named that did not resolve, or that this session was never shown. */
+  rejected: RejectedReference[];
+}
 
 /**
- * Replace-set write (spec §B; storage narrowed by ticket 05/spec C5): the
- * supplied array becomes the citing turn's ENTIRE turn→turn edge set in
- * `memory_edges`, so a re-sent turn converges instead of accumulating. An
- * omitted `cites` field must never reach here (that means "no change"); an
- * explicit empty array clears the edges and still records the flag. Writes
- * land with `provenance = 'asserted'` (spec C12) — the main agent authored
- * the citing prose in the SAME call, so the argument and the claim arrive
- * together, the strongest evidence this system has for a relation.
+ * Spec C6: a bare `[S<session>/T<n>]`/`[E<n>]` in ANY of a turn's
+ * citation-bearing fields is a real, storable citation, and a rewrite that
+ * drops the reference drops the pair — relation included, since a relation
+ * cannot outlive the pair that carries it. This is the sole write path left
+ * for a turn's outgoing edges: the earlier `replaceTurnCitations` accepted a
+ * bare `{turn, relation}` list with no prose backing it at all, which made
+ * every rule below bypassable in one call (spec C6's "generic body-free
+ * structured edge write is removed").
  *
- * Ids that are not positive integers, that do not resolve to an existing turn
- * (typo, not-yet-created "future" id), or that name the citing turn itself are
- * dropped PER EDGE with a log line and the rest is written — a whole-batch
- * rejection would throw away good edges over one bad id, and a self-loop would
- * let a turn confirm its own in-degree. The same target named twice under TWO
- * DIFFERENT relations is also dropped on its second occurrence (spec C5: a
- * pair carries at most one current relation, and a single batch cannot say
- * which of two claims about the same pair is the correction) — the first
- * relation seen for that target wins, exactly like an unresolvable id.
+ * `fields` is the turn's title/content/insight AS THEY STAND after the
+ * caller's own write — `note`/`remember` pass the row a prior write in the
+ * same transaction just returned, so this always rescans the true post-state
+ * rather than the caller's possibly-partial input (a `remember` call that
+ * only touches `content` must still see title/insight's stored text).
  *
- * Cross-session ids ARE written: they are provenance. Session-local consumers
- * (confirmation in-degree, victim demotion, ↳ rendering) exclude them at read
- * time — see `getSessionEffectiveCitations`.
- *
- * DELETE + inserts + flag run inside a SAVEPOINT, so the operation is atomic on
- * its own (a failed insert can never publish a cleared or half-written set) and
- * still nests correctly inside a caller's transaction — the production remember
- * route wraps this together with the turn update and the nested regrade.
+ * References are resolved through the SAME two gates every writer-attributed
+ * citation goes through (references.ts: existence, then this turn's own
+ * session's exposure ledger) — a hallucinated or unshown id is dropped and
+ * logged, never written. Provenance is always `text-ref` (spec C12): nothing
+ * in this call carries a relation, so there is no main-agent ASSERTION to
+ * record, only a bare textual reference. Attaching a relation to a pair a
+ * body creates is spec C7/ticket 07's, not this function's.
  */
-export function replaceTurnCitations(
+export function recomputeTurnCitedPairs(
   db: Database,
-  citingTurnId: number,
-  cites: readonly CitationInput[],
+  turnId: number,
+  fields: RecomputeTurnCitedPairsFields,
   nowEpoch: number,
-): ReplaceTurnCitationsResult {
-  const turnExists = db.query<{ id: number }, [number]>(
-    "SELECT id FROM turns WHERE id = ?",
+  writerSessionId: number,
+  logger?: Pick<Console, "warn">,
+): RecomputeTurnCitedPairsResult {
+  const references = [
+    ...parseQualifiedReferences(fields.title),
+    ...parseQualifiedReferences(fields.content),
+    ...parseQualifiedReferences(fields.insight),
+  ];
+
+  const { accepted, rejected } = validateReferences(db, references, {
+    writerSessionId,
+    logger,
+  });
+
+  const { written, deleted } = reconcileCitedPairs(
+    db,
+    { kind: "turn", id: turnId },
+    accepted.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref",
   );
 
-  const written: TurnCitationEdge[] = [];
-  const droppedIds: number[] = [];
-  const relationByTarget = new Map<number, CitationRelation>();
-
-  for (const cite of cites) {
-    const citedTurnId = cite?.id;
-    if (
-      !Number.isSafeInteger(citedTurnId) ||
-      citedTurnId <= 0 ||
-      citedTurnId === citingTurnId ||
-      !isCitationRelation(cite.relation) ||
-      turnExists.get(citedTurnId) == null
-    ) {
-      droppedIds.push(citedTurnId);
-      continue;
-    }
-
-    const existingRelation = relationByTarget.get(citedTurnId);
-    if (existingRelation !== undefined) {
-      // Same target seen again: a repeat of the SAME relation is a harmless
-      // dedupe (silently absorbed); a DIFFERENT relation is the "more than
-      // one relation field" case spec C5 requires rejecting.
-      if (existingRelation !== cite.relation) {
-        droppedIds.push(citedTurnId);
-      }
-      continue;
-    }
-    relationByTarget.set(citedTurnId, cite.relation);
-    written.push({
-      citingTurnId,
-      citedTurnId,
-      relation: cite.relation,
-      createdAtEpoch: nowEpoch,
-    });
-  }
-
-  if (droppedIds.length > 0) {
-    console.warn(
-      `[claude-mnemo] remember T${citingTurnId}: dropped ${droppedIds.length} unresolvable cite(s): ${droppedIds.join(", ")}`,
-    );
-  }
-
-  db.exec(`SAVEPOINT ${REPLACE_SAVEPOINT}`);
-  try {
-    db.query<unknown, [number]>(
-      `DELETE FROM memory_edges
-       WHERE citing_kind = 'turn' AND citing_id = ? AND cited_kind = 'turn'`,
-    ).run(citingTurnId);
-
-    // `written` is typed `TurnCitationEdge[]` (relation now `CitationRelation
-    // | null`, spec C5), but every entry here came from a validated
-    // `CitationInput` above and always carries a real relation — the `string
-    // | null` on the bind parameter is accuracy about the column, not a sign
-    // this path ever inserts a bare edge.
-    const insert = db.query<unknown, [number, number, string | null, number]>(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?)`,
-    );
-    for (const edge of written) {
-      insert.run(
-        edge.citingTurnId,
-        edge.citedTurnId,
-        edge.relation,
-        edge.createdAtEpoch,
-      );
-    }
-
-    db.query<unknown, [number]>(
-      "UPDATE turns SET cites_recorded = 1 WHERE id = ?",
-    ).run(citingTurnId);
-  } catch (error) {
-    // ROLLBACK TO leaves the savepoint on the stack; RELEASE pops it. Outside an
-    // enclosing transaction the outermost savepoint IS the transaction, so this
-    // pair also ends it cleanly.
-    db.exec(`ROLLBACK TO ${REPLACE_SAVEPOINT}`);
-    db.exec(`RELEASE ${REPLACE_SAVEPOINT}`);
-    throw error;
-  }
-  db.exec(`RELEASE ${REPLACE_SAVEPOINT}`);
-
-  return { written, droppedIds };
+  return { written, deleted, rejected };
 }
 
 /**

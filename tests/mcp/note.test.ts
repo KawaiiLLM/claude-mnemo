@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { getNoteDebt, listOwedNoteTurns } from "../../src/db/note-debt";
+import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
+import { getNoteDebt, listOwedNoteTurns, recordNoteIdExposure } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { upsertSession } from "../../src/db/sessions";
@@ -936,5 +937,121 @@ describe("note tool", () => {
       );
       expect(resultText(declared)).toContain("closed as declined");
     });
+  });
+});
+
+// Spec C6: a bare `[S<session>/T<n>]` in an era-promoted note's title,
+// content or insight creates the pair — no relation, no separate structured
+// input. Era-promoted only: a legacy-era note never touches `turns`
+// (P1 isolation), so there is no new body state for `memory_edges` to agree
+// with (see noteTool's promotesTurnRecord branch).
+describe("note tool citations (spec C6)", () => {
+  let db: Database;
+  let sessionId: number;
+  let targetTurnId: number;
+  let citedTurnId: number;
+
+  function expose(rideTurnId: number, exposedTurnIds: readonly number[]): void {
+    recordNoteIdExposure(db, {
+      sessionId,
+      rideTurnId,
+      exposedTurnIds,
+      source: "reminder",
+      nowEpoch: 100,
+    });
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    sessionId = upsertSession(db, {
+      contentSessionId: "note-cites-session",
+      project: "claude-mnemo",
+      title: "Note citations",
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 110,
+      completedAtEpoch: null,
+    }).id;
+
+    const insertTurn = db.query<{ id: number }, [number, number, string, number]>(
+      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
+    );
+    citedTurnId = insertTurn.get(sessionId, 1, "Earlier work", 100)!.id;
+    targetTurnId = insertTurn.get(sessionId, 2, "The turn being noted", 110)!.id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // Acceptance criterion 1: a bare `[S/T]` in a note body creates an
+  // unattributed pair.
+  test("a bare qualified reference in content creates an unattributed pair", () => {
+    expose(targetTurnId, [citedTurnId]);
+
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T2`,
+        title: "design+routing: reverses an earlier call",
+        content: `Reverses [S${sessionId}/T1].`,
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: targetTurnId }),
+    ).toEqual([
+      {
+        citing: { kind: "turn", id: targetTurnId },
+        cited: { kind: "turn", id: citedTurnId },
+        relation: null,
+        provenance: "text-ref",
+        createdAtEpoch: 900,
+      },
+    ]);
+  });
+
+  test("a rewrite (replace: true) that drops a reference drops its pair and any relation it carried", () => {
+    expose(targetTurnId, [citedTurnId]);
+    noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T2`,
+        title: "design+routing: first pass",
+        content: `Cites [S${sessionId}/T1].`,
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: targetTurnId },
+          cited: { kind: "turn", id: citedTurnId },
+          relation: "supersedes",
+          provenance: "judged",
+        },
+      ],
+      950,
+    );
+
+    noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T2`,
+        title: "design+routing: revised, no longer citing T1",
+        content: "Stands on its own now.",
+        replace: true,
+      },
+      { now: () => 1000, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 });

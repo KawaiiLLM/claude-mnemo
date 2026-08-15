@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 
+import { reconcileCitedPairs } from "./memory-edges";
+import { parseQualifiedReferences, resolveExistingReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
 import { normalizeTypeValues, type MemoryType } from "../shared/type-vocabulary";
 
@@ -276,7 +278,42 @@ export function createSegment(
     throw new Error("Failed to create segment.");
   }
   indexSegment(db, inserted);
+  reconcileSegmentCitedPairs(db, inserted, input.nowEpoch);
   return inserted;
+}
+
+/**
+ * Spec C6: a segment's title/content is its whole citation-bearing surface
+ * (type/tags/status are structured, not prose). Every write that lands a
+ * segment row — creation and `applySegmentWrites`' compare-and-set rewrite
+ * alike — calls this so a bare `[S<session>/T<n>]`/`[E<n>]` in either field
+ * is a real, storable citation and a rewrite that drops one drops the pair.
+ *
+ * Existence-only resolution (references.ts's `resolveExistingReferences`),
+ * NOT the full exposure-ledger gate `validateReferences` applies to a
+ * turn/session write: this module is documented storage mechanics with no
+ * writer-session context of its own — a segment is not authored by one
+ * session, settlement composes its body from a whole window — so "was the
+ * writer shown this" is not a question this layer can ask. It answers the
+ * narrower one spec C6 actually turns on: does the address name a real row.
+ */
+function reconcileSegmentCitedPairs(
+  db: Database,
+  segment: SegmentRecord,
+  nowEpoch: number,
+): void {
+  const references = [
+    ...parseQualifiedReferences(segment.title),
+    ...parseQualifiedReferences(segment.content),
+  ];
+  const resolved = resolveExistingReferences(db, references);
+  reconcileCitedPairs(
+    db,
+    { kind: "segment", id: segment.id },
+    resolved.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref",
+  );
 }
 
 /** Keep the segment's search row in step with the row it was written from. */
@@ -504,6 +541,7 @@ export function applySegmentWrites(
       }
 
       indexSegment(db, updated);
+      reconcileSegmentCitedPairs(db, updated, options.nowEpoch);
       applied.push(updated);
     }
   } catch (error) {

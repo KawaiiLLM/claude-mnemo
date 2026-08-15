@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
+import { recordNoteIdExposure } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import {
   getRecentSessions,
@@ -9,6 +11,7 @@ import {
   getSessionByContentId,
   setSessionTranscriptPathIfAbsent,
   updateCompactAnchor,
+  updateSessionSummaryRewrite,
   upsertSession,
 } from "../../src/db/sessions";
 
@@ -299,5 +302,163 @@ describe("session queries", () => {
     // provisional (T2) and active (T3) are both in-progress re-extraction
     // targets; the anchor must stay on the last finalized turn (T1).
     expect(getSession(db, session.id)?.lastCompactTurn).toBe(1);
+  });
+
+  // Spec C6/C10: a session field can carry a bare `[S<session>/T<n>]`
+  // citation, same grammar as a turn or segment body — `updateSessionSummaryRewrite`
+  // is the ONE session write path (spec D2), so it is where the recompute lives.
+  describe("cited pairs from a session summary (spec C6/C10)", () => {
+    function seedSessionAndTurn(): { sessionId: number; turnId: number } {
+      const session = upsertSession(db, {
+        contentSessionId: "session-cites",
+        project: "claude-mnemo",
+        title: null,
+        content: null,
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: null,
+        completedAtEpoch: null,
+      });
+      const turnId = db
+        .query<{ id: number }, [number]>(
+          `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+           VALUES (?, 1, 'extracted', 100) RETURNING id`,
+        )
+        .get(session.id)!.id;
+      // The recompute's writer-session IS the session being written (a
+      // session states nothing about anyone else's exposure ledger), so its
+      // own citations are exposure-gated the same way a note's are.
+      recordNoteIdExposure(db, {
+        sessionId: session.id,
+        rideTurnId: turnId,
+        exposedTurnIds: [turnId],
+        source: "reminder",
+        nowEpoch: 100,
+      });
+      return { sessionId: session.id, turnId };
+    }
+
+    const emptySummary = {
+      title: "",
+      content: "",
+      decision: "",
+      done: "",
+      current: "",
+      nextSteps: "",
+      reference: "",
+    };
+
+    test("a bare qualified reference in ANY summary field creates an unattributed pair", () => {
+      const { sessionId, turnId } = seedSessionAndTurn();
+
+      updateSessionSummaryRewrite(
+        db,
+        sessionId,
+        { ...emptySummary, decision: `Chose the fold-in over a rewrite, per [S${sessionId}/T1].` },
+        200,
+      );
+
+      expect(
+        getOutgoingEdges(db, { kind: "session", id: sessionId }),
+      ).toEqual([
+        {
+          citing: { kind: "session", id: sessionId },
+          cited: { kind: "turn", id: turnId },
+          relation: null,
+          provenance: "text-ref",
+          createdAtEpoch: 200,
+        },
+      ]);
+    });
+
+    // Acceptance criterion 3 (session side): the rewrite-drops-citation
+    // sequence, relation included.
+    test("a rewrite that drops a reference drops its pair and any relation it carried", () => {
+      const { sessionId, turnId } = seedSessionAndTurn();
+      const other = db
+        .query<{ id: number }, [number]>(
+          `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+           VALUES (?, 2, 'extracted', 100) RETURNING id`,
+        )
+        .get(sessionId)!.id;
+      recordNoteIdExposure(db, {
+        sessionId,
+        rideTurnId: turnId,
+        exposedTurnIds: [other],
+        source: "reminder",
+        nowEpoch: 100,
+      });
+
+      updateSessionSummaryRewrite(
+        db,
+        sessionId,
+        {
+          ...emptySummary,
+          decision: `[S${sessionId}/T1].`,
+          reference: `Also [S${sessionId}/T2].`,
+        },
+        200,
+      );
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "session", id: sessionId },
+            cited: { kind: "turn", id: turnId },
+            relation: "depends-on",
+            provenance: "judged",
+          },
+        ],
+        250,
+      );
+      expect(
+        getOutgoingEdges(db, { kind: "session", id: sessionId }),
+      ).toHaveLength(2);
+
+      updateSessionSummaryRewrite(
+        db,
+        sessionId,
+        { ...emptySummary, decision: `Only [S${sessionId}/T1] now.` },
+        300,
+      );
+
+      const surviving = getOutgoingEdges(db, { kind: "session", id: sessionId });
+      expect(surviving.map((edge) => edge.cited.id)).toEqual([turnId]);
+      expect(surviving[0]?.relation).toBe("depends-on");
+      expect(surviving.some((edge) => edge.cited.id === other)).toBe(false);
+    });
+
+    test("a rewrite that still cites a pair does not disturb its relation", () => {
+      const { sessionId, turnId } = seedSessionAndTurn();
+      updateSessionSummaryRewrite(
+        db,
+        sessionId,
+        { ...emptySummary, decision: `[S${sessionId}/T1].` },
+        200,
+      );
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "session", id: sessionId },
+            cited: { kind: "turn", id: turnId },
+            relation: "evidence-for",
+            provenance: "judged",
+          },
+        ],
+        250,
+      );
+
+      updateSessionSummaryRewrite(
+        db,
+        sessionId,
+        { ...emptySummary, decision: `Restating [S${sessionId}/T1] once more.` },
+        300,
+      );
+
+      const surviving = getOutgoingEdges(db, { kind: "session", id: sessionId });
+      expect(surviving).toHaveLength(1);
+      expect(surviving[0]?.relation).toBe("evidence-for");
+    });
   });
 });

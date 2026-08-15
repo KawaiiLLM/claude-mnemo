@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-import { CITATION_RELATIONS } from "../db/citations";
 import { NOTE_TOKEN_BUDGET } from "../shared/note-budget";
 
 export const MNEMO_TOOL_DESCRIPTIONS = {
@@ -59,27 +58,16 @@ export const rememberInputShape = {
     })
     .strict()
     .optional(),
-  // Structured causal edges for a turn (spec §B). Replace-set: the array given
-  // here becomes the turn's ENTIRE citation set, so a re-sent turn converges
-  // instead of accumulating. Omitted = leave the existing edges alone; an
-  // explicit `[]` clears them and records "this turn genuinely cites nothing".
-  // `id` is the bare DB turn id (8501), not the `T8501` selector form.
+  // Structured causal edges are no longer a caller input (spec C6): a bare
+  // `[S<session>/T<n>]`/`[E<n>]` in title/content/insight IS the citation —
+  // see recomputeTurnCitedPairs (db/citations.ts). The earlier `cites` field
+  // (a `{id, relation}` list with no prose backing it at all) is REMOVED
+  // rather than kept, because keeping it would let a caller mint a pair — and
+  // attach a relation — with nothing in the body to support either, which
+  // makes every other rule in this area bypassable in one call. The schema
+  // is `.strict()` (below), so a caller that still sends `cites` gets a
+  // parse error naming the unrecognised key, not a silent drop.
   //
-  // The shape check stops at "integer" on purpose (spec §B): a wrong TYPE is a
-  // caller bug worth rejecting the call over, but a merely INVALID id — zero,
-  // negative, a typo that names no turn, the turn citing itself — is dropped
-  // per edge with a log line so one bad id cannot discard a whole extraction's
-  // good edges. See replaceTurnCitations.
-  cites: z
-    .array(
-      z
-        .object({
-          id: z.number().int(),
-          relation: z.enum(CITATION_RELATIONS),
-        })
-        .strict(),
-    )
-    .optional(),
   // Multi-valued since ticket 02 (spec B5), matching a segment's `type`.
   // Omitted = leave the existing list alone; an explicit `[]` clears it —
   // `[]` already means "no type" (spec B7), so it is both the empty state

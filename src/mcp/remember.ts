@@ -1,9 +1,8 @@
 import type { Database } from "bun:sqlite";
 
 import {
-  replaceTurnCitations,
-  type CitationInput,
-  type ReplaceTurnCitationsResult,
+  recomputeTurnCitedPairs,
+  type RecomputeTurnCitedPairsResult,
 } from "../db/citations";
 import { runWriteTransaction } from "../db/database";
 import { updateObservation } from "../db/observations";
@@ -57,7 +56,6 @@ export interface RememberToolInput {
     id: string;
     grade: number;
   };
-  cites?: CitationInput[];
   // Multi-valued (ticket 02, spec B5): `undefined` leaves the stored list
   // alone; a defined array (including `[]`) replaces it whole — `[]` already
   // means "no type" (spec B7), so there is no separate null-clear value the
@@ -323,7 +321,7 @@ function deriveTurnStatusForUpdate(
 
 interface TurnRememberWrite {
   turn: TurnRecord;
-  citations: ReplaceTurnCitationsResult | null;
+  citations: RecomputeTurnCitedPairsResult;
 }
 
 /**
@@ -465,11 +463,22 @@ function handleTurnRemember(
         return null;
       }
 
-      // Field absent = leave the edge set alone; present (even empty) = replace.
-      const citations =
-        input.cites === undefined
-          ? null
-          : replaceTurnCitations(db, turnId, input.cites, nowEpoch);
+      // Spec C6: a turn's outgoing pairs are owned by its citation-bearing
+      // fields, not by a separate structured input — the earlier `cites`
+      // field (a bare `{turn, relation}` list with no prose backing it) is
+      // gone (spec C6's "generic body-free structured edge write is
+      // removed"; see recomputeTurnCitedPairs). This runs on EVERY turn
+      // write, not only one that touched title/content/insight: `turn` here
+      // is the row's true post-state (updateTurnById's own RETURNING),
+      // whatever fields this call did or did not touch, so a no-op write
+      // reconciles against unchanged text and finds nothing stale.
+      const citations = recomputeTurnCitedPairs(
+        db,
+        turnId,
+        { title: turn.title, content: turn.content, insight: turn.insight },
+        nowEpoch,
+        turn.sessionId,
+      );
 
       if (regradeTarget && input.regrade) {
         // Re-checked INSIDE the transaction: the pre-validation above ran before
@@ -503,13 +512,17 @@ function handleTurnRemember(
   if (regradeTarget && input.regrade) {
     message += ` Regraded turn T${regradeTarget.id} to ${input.regrade.grade}.`;
   }
-  if (written.citations) {
-    message += ` Recorded ${written.citations.written.length} citation(s).`;
-    if (written.citations.droppedIds.length > 0) {
-      message += ` Dropped unresolvable: ${written.citations.droppedIds
-        .map((id) => `T${id}`)
-        .join(", ")}.`;
+  if (written.citations.written.length > 0 || written.citations.deleted.length > 0) {
+    message += ` Cites ${written.citations.written.length} pair(s)`;
+    if (written.citations.deleted.length > 0) {
+      message += `, dropped ${written.citations.deleted.length} no longer referenced`;
     }
+    message += ".";
+  }
+  if (written.citations.rejected.length > 0) {
+    message += ` Dropped ${written.citations.rejected.length} unresolvable reference(s): ${written.citations.rejected
+      .map((entry) => `${entry.reference.raw} (${entry.reason})`)
+      .join(", ")}.`;
   }
 
   return textResult(message);
@@ -534,7 +547,6 @@ function handleObservationRemember(
     input.type !== undefined ||
     input.grade !== undefined ||
     input.regrade !== undefined ||
-    input.cites !== undefined ||
     input.insight !== undefined ||
     input.tags !== undefined ||
     input.next_steps !== undefined ||
@@ -575,14 +587,8 @@ function handleSessionRemember(
   if (statusError) {
     return parameterError(statusError);
   }
-  if (
-    input.grade !== undefined ||
-    input.regrade !== undefined ||
-    input.cites !== undefined
-  ) {
-    return parameterError(
-      "session remember does not accept grade, regrade, or cites.",
-    );
+  if (input.grade !== undefined || input.regrade !== undefined) {
+    return parameterError("session remember does not accept grade or regrade.");
   }
 
   const session = getSession(db, sessionId);

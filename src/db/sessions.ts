@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 
+import { reconcileCitedPairs } from "./memory-edges";
+import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSessionToFTS } from "./search";
 
 // The 4-state lineage resolution status. Only `resolved`/`root` are terminal;
@@ -264,6 +266,34 @@ export function updateSessionSummaryRewrite(
   }
 
   indexSessionToFTS(db, session);
+
+  // Spec C6/C10: a session field can carry a bare `[S<session>/T<n>]` /
+  // `[E<n>]` citation, same grammar as a turn or segment body. The seven
+  // fields this rewrite just persisted (`insight` is not among them — D3
+  // clears it unconditionally, it is never something this call writes) are
+  // the session's whole citation-bearing surface, so re-scanning all of them
+  // and reconciling against `memory_edges` is a full rescan, not a diff. The
+  // writer session IS the session being written — a session states nothing
+  // about anyone else's exposure ledger, only its own.
+  const references = [
+    ...parseQualifiedReferences(session.title),
+    ...parseQualifiedReferences(session.content),
+    ...parseQualifiedReferences(session.decision),
+    ...parseQualifiedReferences(session.done),
+    ...parseQualifiedReferences(session.current),
+    ...parseQualifiedReferences(session.nextSteps),
+    ...parseQualifiedReferences(session.reference),
+  ];
+  const { accepted } = validateReferences(db, references, {
+    writerSessionId: sessionId,
+  });
+  reconcileCitedPairs(
+    db,
+    { kind: "session", id: sessionId },
+    accepted.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref",
+  );
 
   return session;
 }

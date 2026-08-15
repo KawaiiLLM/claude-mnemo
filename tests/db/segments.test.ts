@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import {
   addSegmentMembers,
@@ -299,6 +300,150 @@ describe("segments, topics and membership", () => {
       expect(rewrite.excluded[0]?.reason).toBe("frozen");
       expect(getSegment(db, segment.id)?.content).toBeNull();
       expect(listOpenSegments(db)).toHaveLength(0);
+    });
+  });
+
+  // Spec C6: a segment's title/content is its whole citation-bearing surface.
+  // Creation and `applySegmentWrites`' rewrite both reconcile `memory_edges`
+  // against it — a bare `[S<session>/T<n>]`/`[E<n>]` creates the pair, and a
+  // rewrite that stops naming it drops the pair.
+  describe("cited pairs from a segment body (spec C6)", () => {
+    test("a bare qualified reference in a NEW segment's content creates an unattributed pair", () => {
+      const target = addTurn(1);
+
+      const segment = createSegment(db, {
+        title: "spine work",
+        content: `Builds on [S${sessionId}/T1].`,
+        nowEpoch: 100,
+      });
+
+      expect(
+        getOutgoingEdges(db, { kind: "segment", id: segment.id }),
+      ).toEqual([
+        {
+          citing: { kind: "segment", id: segment.id },
+          cited: { kind: "turn", id: target },
+          relation: null,
+          provenance: "text-ref",
+          createdAtEpoch: 100,
+        },
+      ]);
+    });
+
+    // Acceptance criterion 2 (segment side): the same grammar in the TITLE,
+    // and the segment-address `[E<n>]` form.
+    test("a title citation and a segment-to-segment [E<n>] citation both create pairs", () => {
+      const target = addTurn(1);
+      const other = createSegment(db, { title: "the older chapter", nowEpoch: 90 });
+
+      const segment = createSegment(db, {
+        title: `continues [S${sessionId}/T1]`,
+        content: `See also [E${other.id}].`,
+        nowEpoch: 100,
+      });
+
+      const citedKey = (node: { kind: string; id: number }) => `${node.kind}:${node.id}`;
+      expect(
+        getOutgoingEdges(db, { kind: "segment", id: segment.id })
+          .map((edge) => citedKey(edge.cited))
+          .sort(),
+      ).toEqual(
+        [citedKey({ kind: "turn", id: target }), citedKey({ kind: "segment", id: other.id })].sort(),
+      );
+    });
+
+    // Acceptance criterion 3 (segment side): the rewrite-drops-citation
+    // sequence, relation included.
+    test("a rewrite that drops a reference drops its pair and any relation it carried", () => {
+      const kept = addTurn(1);
+      const dropped = addTurn(2);
+      const segment = createSegment(db, {
+        title: "spine work",
+        content: `Cites [S${sessionId}/T1] and [S${sessionId}/T2].`,
+        nowEpoch: 100,
+      });
+      // A relation lands on the surviving pair from elsewhere (settlement).
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "segment", id: segment.id },
+            cited: { kind: "turn", id: kept },
+            relation: "supersedes",
+            provenance: "judged",
+          },
+        ],
+        150,
+      );
+      expect(
+        getOutgoingEdges(db, { kind: "segment", id: segment.id }),
+      ).toHaveLength(2);
+
+      applySegmentWrites(
+        db,
+        [
+          {
+            segmentId: segment.id,
+            expectedRevision: segment.revision,
+            content: `Only [S${sessionId}/T1] now.`,
+          },
+        ],
+        { nowEpoch: 200 },
+      );
+
+      const surviving = getOutgoingEdges(db, { kind: "segment", id: segment.id });
+      expect(surviving.map((edge) => edge.cited.id)).toEqual([kept]);
+      expect(surviving[0]?.relation).toBe("supersedes");
+      expect(surviving.some((edge) => edge.cited.id === dropped)).toBe(false);
+    });
+
+    test("a rewrite that still cites a pair does not disturb its relation", () => {
+      const target = addTurn(1);
+      const segment = createSegment(db, {
+        title: "spine work",
+        content: `Cites [S${sessionId}/T1].`,
+        nowEpoch: 100,
+      });
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "segment", id: segment.id },
+            cited: { kind: "turn", id: target },
+            relation: "evidence-for",
+            provenance: "judged",
+          },
+        ],
+        150,
+      );
+
+      applySegmentWrites(
+        db,
+        [
+          {
+            segmentId: segment.id,
+            expectedRevision: segment.revision,
+            content: `Restating [S${sessionId}/T1] once more.`,
+          },
+        ],
+        { nowEpoch: 200 },
+      );
+
+      const surviving = getOutgoingEdges(db, { kind: "segment", id: segment.id });
+      expect(surviving).toHaveLength(1);
+      expect(surviving[0]?.relation).toBe("evidence-for");
+    });
+
+    test("a reference naming no real row is dropped, not written", () => {
+      const segment = createSegment(db, {
+        title: "spine work",
+        content: `Cites [S${sessionId}/T999] and [E999999].`,
+        nowEpoch: 100,
+      });
+
+      expect(
+        getOutgoingEdges(db, { kind: "segment", id: segment.id }),
+      ).toEqual([]);
     });
   });
 });
