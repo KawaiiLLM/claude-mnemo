@@ -102,13 +102,11 @@ describe("segment member derived rank (spec D8)", () => {
     ids: Record<string, number>;
   } {
     const corrector = makeTurn({ promptNumber: 1 });
-    // `rolled-back` left the type vocabulary (ticket 02, spec B4) and the
-    // storage column is now a JSON array (spec B5) — a scalar `= 'rolled-back'`
-    // comparison can never match `["rolled-back"]`, so `isRolledBack` is
-    // permanently 0 for every row post-migration, this legacy-shaped one
-    // included. The variable name is kept to document exactly that: a turn
-    // that would have sunk under the old scheme now ranks on its other facts
-    // alone (see segment-rank.ts's own comment on `isRolledBack`).
+    // `rolled-back` left the type vocabulary (ticket 02, spec B4) — the stale
+    // `type: "rolled-back"` on this row proves nothing by itself post-migration
+    // (see segment-rank.ts's own comment on `isRolledBack`). What sinks it is
+    // the REAL signal: an inbound `supersedes` edge from `corrector`, wired up
+    // below via `citeFrom(rolledBack, [corrector], "supersedes")`.
     const rolledBack = makeTurn({ promptNumber: 2, type: "rolled-back" });
     const citedTwice = makeTurn({ promptNumber: 3 });
     const citedOnceShipped = makeTurn({ promptNumber: 4 });
@@ -128,15 +126,16 @@ describe("segment member derived rank (spec D8)", () => {
     // Citers live OUTSIDE the segment so they cannot perturb the member list.
     const citerA = makeTurn({ promptNumber: 90 });
     const citerB = makeTurn({ promptNumber: 91 });
-    const victim = makeTurn({ promptNumber: 92 });
 
-    citeFrom(victim, [corrector], "supersedes");
     citeFrom(citedTwice, [citerA, citerB]);
     citeFrom(citedOnceShipped, [citerA]);
     citeFrom(citedOnce, [citerA]);
     // A rolled-back turn with the HIGHEST in-degree in the fixture: key ② has to
     // sink it below everything anyway.
     citeFrom(rolledBack, [citerA, citerB, corrector]);
+    // The real isRolledBack signal: an inbound supersedes edge, in-segment this
+    // time, so its effect on the ORDER (not just the graph) is visible.
+    citeFrom(rolledBack, [corrector], "supersedes");
 
     const segment = createSegment(db, {
       title: "implement the spine",
@@ -191,16 +190,16 @@ describe("segment member derived rank (spec D8)", () => {
 
     expect(ranked.map((member) => member.turnId)).toEqual([
       ids.corrector, //          ① corrector
-      // ② is permanently inert post-migration (see the fixture comment
-      // above), so this in-degree-3 row no longer sinks — it ranks on ③ alone,
-      // ahead of every other cited row.
-      ids.rolledBack, //         ③ in-degree 3
       ids.citedTwice, //         ③ in-degree 2
       ids.citedOnceShipped, //   ③ in-degree 1, ④ shipped
       ids.citedOnce, //          ③ in-degree 1, not shipped
       ids.manyFiles, //          ⑤ 3 files
       ids.newerOneFile, //       ⑤ 1 file, ⑥ newer
       ids.olderOneFile, //       ⑤ 1 file, ⑥ older
+      // ② now reads a REAL inbound supersedes edge (ticket 13, spec B4): this
+      // row has the highest in-degree (3) in the whole fixture, and key ② still
+      // sinks it below every non-superseded row anyway.
+      ids.rolledBack, //         ② superseded
     ]);
   });
 
@@ -217,10 +216,9 @@ describe("segment member derived rank (spec D8)", () => {
     });
     expect(byTurnId.get(ids.rolledBack!)).toMatchObject({
       isCorrector: 0,
-      // Permanently 0: a scalar `= 'rolled-back'` comparison can never match
-      // the JSON-array column (spec B5), and the word left the vocabulary
-      // besides (spec B4).
-      isRolledBack: 0,
+      // The stale `type: "rolled-back"` value proves nothing (spec B4) — this
+      // is 1 because `corrector` wrote a real inbound supersedes edge to it.
+      isRolledBack: 1,
       citedBy: 3,
     });
     expect(byTurnId.get(ids.citedOnceShipped!)).toMatchObject({
@@ -321,14 +319,14 @@ describe("segment member derived rank (spec D8)", () => {
     const ranked = rankSegmentMembers(db, segmentId);
 
     expect(ranked.map((member) => member.turnId)).toEqual([
-      ids.olderOneFile, //  ⚓1, body order, despite ranking last but one
+      ids.olderOneFile, //  ⚓1, body order, despite ranking near the bottom
       ids.citedOnce, //     ⚓2
       ids.corrector,
-      ids.rolledBack,
       ids.citedTwice,
       ids.citedOnceShipped,
       ids.manyFiles,
       ids.newerOneFile,
+      ids.rolledBack, //    ② superseded — last even with an anchor pulled ahead of it
     ]);
     expect(ranked.slice(0, 2).map((member) => member.anchorPosition)).toEqual([1, 2]);
     expect(ranked.slice(2).every((member) => member.anchorPosition === null)).toBe(true);
@@ -377,6 +375,29 @@ describe("segment member derived rank (spec D8)", () => {
     expect(resolveSegmentAnchorTurnIds(db, getSegment(db, segment.id)!)).toEqual([]);
     expect(rankSegmentMembers(db, segment.id).map((m) => m.turnId)).toEqual([member]);
     expect(neighbour).toBeGreaterThan(0);
+  });
+
+  test("isRolledBack reads an inbound supersedes edge, never the retired type value (spec B4/13)", () => {
+    const corrector = makeTurn({ promptNumber: 1 });
+    // The real signal: nothing about `victim`'s own stored fields says it was
+    // overturned — only the edge corrector writes below does.
+    const victim = makeTurn({ promptNumber: 2 });
+    // The decoy: carries the exact stale type word but no edge at all, so it
+    // must prove nothing (this is what the old scalar comparison got wrong).
+    const staleTyped = makeTurn({ promptNumber: 3, type: "rolled-back" });
+
+    citeFrom(victim, [corrector], "supersedes");
+
+    const segment = createSegment(db, { title: "isRolledBack coverage", nowEpoch: ERA });
+    addSegmentMembers(db, segment.id, [corrector, victim, staleTyped], ERA);
+
+    const byTurnId = new Map(
+      rankSegmentMembers(db, segment.id).map((member) => [member.turnId, member]),
+    );
+
+    expect(byTurnId.get(victim)?.isRolledBack).toBe(1);
+    expect(byTurnId.get(staleTyped)?.isRolledBack).toBe(0);
+    expect(byTurnId.get(corrector)?.isRolledBack).toBe(0);
   });
 });
 
@@ -494,14 +515,15 @@ describe("segment spine and orphan anchors (spec D11)", () => {
     const orphanIds = orphans.map((row) => row.facts.turnId);
 
     // corrector first (key ①), then the cited rows; `victim` is cited by the
-    // corrector's supersedes edge, so it too has an in-degree.
+    // corrector's supersedes edge, so it too has an in-degree AND an inbound
+    // supersedes edge of its own (spec B4/13: isRolledBack now reads that
+    // edge, not a stated type).
     expect(orphanIds).toContain(corrector);
     expect(orphanIds).toContain(cited);
     expect(orphanIds).toContain(victim);
-    // `rolled-back` left the type vocabulary (ticket 02, spec B4) and the
-    // isRolledBack fact is permanently 0 post-migration (a scalar comparison
-    // can never match the JSON-array column, spec B5) — this legacy-typed
-    // turn now carries no signal at all, same as `quiet`.
+    // `rolled-back` left the type vocabulary (ticket 02, spec B4) and carries
+    // no edge here — a stale type value alone proves nothing anymore (ticket
+    // 13), so this legacy-typed turn has no signal at all, same as `quiet`.
     expect(orphanIds).not.toContain(reversed);
     // No signal, already in a segment, or not renderable at all.
     expect(orphanIds).not.toContain(quiet);
@@ -514,8 +536,13 @@ describe("segment spine and orphan anchors (spec D11)", () => {
     expect(orphans.find((row) => row.facts.turnId === cited)?.signals).toEqual([
       "cited 1",
     ]);
-    // victim and cited tie on citedBy (1 each); the later-created row (victim)
-    // wins key ⑥, leaving cited last.
-    expect(orphanIds[orphanIds.length - 1]).toBe(cited);
+    // `victim` carries a real inbound supersedes edge now, so it shows BOTH
+    // signals — and key ② (isRolledBack ASC) sinks it below `cited` despite
+    // their tied in-degree, where the old dead key left the tie to key ⑥.
+    expect(orphans.find((row) => row.facts.turnId === victim)?.signals).toEqual([
+      "rolled-back",
+      "cited 1",
+    ]);
+    expect(orphanIds[orphanIds.length - 1]).toBe(victim);
   });
 });

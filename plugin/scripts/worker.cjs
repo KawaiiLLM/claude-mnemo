@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msumv2cr" : "dev";
+var BUILD_ID = true ? "0.10.0-msuq1mwm" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -753,6 +753,631 @@ function createDiaryStateStore(db) {
       });
     }
   };
+}
+
+// src/db/note-debt.ts
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = 'noted', reason = NULL,
+             closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ?
+           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
+  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
+}
+function recordDeclinedNoteDebt(db, turn, nowEpoch) {
+  return db.query(
+    `INSERT OR IGNORE INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
+}
+function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+       SET status = 'skipped', reason = 'closed',
+           closed_at_epoch = ?, updated_at_epoch = ?
+       WHERE session_id = ? AND status = 'pending'`
+  ).run(nowEpoch, nowEpoch, sessionId).changes;
+}
+function realPromptPredicate(alias = "t") {
+  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(${alias}.type) WHERE value = 'compact'))`;
+}
+function listOwedNoteTurnsInRange(db, sessionId, rangeStart, rangeEnd) {
+  return db.query(
+    `SELECT
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.prompt_number BETWEEN ? AND ?
+         AND ${realPromptPredicate("t")}
+         AND NOT EXISTS (
+           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM note_debt d
+           WHERE d.turn_id = t.id
+             AND d.status = 'skipped'
+             AND d.reason = 'declined'
+         )
+       ORDER BY t.prompt_number ASC`
+  ).all(sessionId, rangeStart, rangeEnd);
+}
+function recordNoteIdExposure(db, input) {
+  const statement = db.query(
+    `INSERT OR IGNORE INTO note_id_exposures (
+       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?)`
+  );
+  let written = 0;
+  for (const exposedTurnId of input.exposedTurnIds) {
+    statement.run(
+      input.sessionId,
+      input.rideTurnId,
+      exposedTurnId,
+      input.source,
+      input.nowEpoch
+    );
+    written += 1;
+  }
+  return written;
+}
+function getExposedTurnIds(db, sessionId, source) {
+  const rows = source ? db.query(
+    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
+           FROM note_id_exposures WHERE session_id = ? AND source = ?`
+  ).all(sessionId, source) : db.query(
+    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
+           FROM note_id_exposures WHERE session_id = ?`
+  ).all(sessionId);
+  return new Set(rows.map((row) => row.exposedTurnId));
+}
+
+// src/db/references.ts
+var REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
+var ADDRESS_TOKEN_PATTERN = /^\[[ \t]*(?:S\d+[ \t]*\/[ \t]*T\d+|E\d+)[ \t]*\]$/;
+function isBareAddressToken(bracketed) {
+  return ADDRESS_TOKEN_PATTERN.test(bracketed);
+}
+function topLevelBracketGroups(content) {
+  const groups = [];
+  for (let index = 0; index < content.length; index += 1) {
+    if (content[index] !== "[") {
+      continue;
+    }
+    const start = index;
+    let depth = 0;
+    let nested = false;
+    let cursor = index;
+    for (; cursor < content.length; cursor += 1) {
+      const char = content[cursor];
+      if (char === "[") {
+        depth += 1;
+        if (depth > 1) {
+          nested = true;
+        }
+      } else if (char === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          break;
+        }
+      }
+    }
+    if (depth !== 0) {
+      break;
+    }
+    if (!nested) {
+      groups.push(content.slice(start, cursor + 1));
+    }
+    index = cursor;
+  }
+  return groups;
+}
+function parsePositiveId(digits) {
+  if (digits === void 0) {
+    return null;
+  }
+  const value = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+function parseQualifiedReferences(content) {
+  if (!content) {
+    return [];
+  }
+  const references = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const group of topLevelBracketGroups(content)) {
+    const match = REFERENCE_PATTERN.exec(group);
+    if (match === null) {
+      continue;
+    }
+    const raw = match[0];
+    const segmentId = parsePositiveId(match[3]);
+    if (segmentId !== null) {
+      const key2 = `E${segmentId}`;
+      if (!seen.has(key2)) {
+        seen.add(key2);
+        references.push({ kind: "segment", raw, segmentId });
+      }
+      continue;
+    }
+    const sessionId = parsePositiveId(match[1]);
+    const promptNumber = parsePositiveId(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    const key = `S${sessionId}/T${promptNumber}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      references.push({ kind: "turn", raw, sessionId, promptNumber });
+    }
+  }
+  return references;
+}
+function validateReferences(db, references, options) {
+  const accepted = [];
+  const rejected = [];
+  if (references.length === 0) {
+    return { accepted, rejected };
+  }
+  const exposedTurnIds = getExposedTurnIds(db, options.writerSessionId);
+  const turnLookup = db.query(
+    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
+  );
+  const segmentLookup = db.query(
+    "SELECT id FROM segments WHERE id = ?"
+  );
+  for (const reference of references) {
+    if (reference.kind === "turn") {
+      const row2 = turnLookup.get(reference.sessionId, reference.promptNumber);
+      if (!row2) {
+        rejected.push({ reference, reason: "unresolved" });
+        continue;
+      }
+      if (!exposedTurnIds.has(row2.id)) {
+        rejected.push({ reference, reason: "unexposed" });
+        continue;
+      }
+      accepted.push({ reference, node: { kind: "turn", id: row2.id } });
+      continue;
+    }
+    const row = segmentLookup.get(reference.segmentId);
+    if (!row) {
+      rejected.push({ reference, reason: "unresolved" });
+      continue;
+    }
+    if (options.exposedSegmentIds !== void 0 && !options.exposedSegmentIds.has(reference.segmentId)) {
+      rejected.push({ reference, reason: "unexposed" });
+      continue;
+    }
+    accepted.push({ reference, node: { kind: "segment", id: row.id } });
+  }
+  if (rejected.length > 0) {
+    const logger = options.logger ?? console;
+    logger.warn?.(
+      `[claude-mnemo] S${options.writerSessionId}: dropped ${rejected.length} illegal reference(s): ${rejected.map((entry) => `${entry.reference.raw} (${entry.reason})`).join(", ")}`
+    );
+  }
+  return { accepted, rejected };
+}
+function resolveExistingReferences(db, references) {
+  const resolved = [];
+  if (references.length === 0) {
+    return resolved;
+  }
+  const turnLookup = db.query(
+    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
+  );
+  const segmentLookup = db.query(
+    "SELECT id FROM segments WHERE id = ?"
+  );
+  for (const reference of references) {
+    if (reference.kind === "turn") {
+      const row2 = turnLookup.get(reference.sessionId, reference.promptNumber);
+      if (row2) {
+        resolved.push({ reference, node: { kind: "turn", id: row2.id } });
+      }
+      continue;
+    }
+    const row = segmentLookup.get(reference.segmentId);
+    if (row) {
+      resolved.push({ reference, node: { kind: "segment", id: row.id } });
+    }
+  }
+  return resolved;
+}
+
+// src/db/citations.ts
+var CITATION_RELATIONS = [
+  "evidence-for",
+  "evidence-against",
+  "supersedes",
+  "depends-on"
+];
+function isCitationRelation(value) {
+  return typeof value === "string" && CITATION_RELATIONS.includes(value);
+}
+var INLINE_RANGE_EXPANSION_CAP = 8;
+var RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
+var LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
+var LIST_ELEMENT_PATTERN = /T(\d+)/g;
+var SINGLE_PATTERN = /^T(\d+)$/;
+var ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
+function parsePositiveId2(digits) {
+  const id = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+function* citationBracketBodies(content) {
+  let index = 0;
+  while (index < content.length) {
+    const open3 = content.indexOf("[", index);
+    if (open3 === -1) {
+      return;
+    }
+    const close = content.indexOf("]", open3 + 1);
+    if (close === -1) {
+      return;
+    }
+    const body = content.slice(open3 + 1, close);
+    index = close + 1;
+    if (body.includes("[")) {
+      continue;
+    }
+    yield body;
+  }
+}
+function expandBracketBody(body) {
+  if (/[\n\r]/.test(body)) {
+    return [];
+  }
+  const inner = body.trim();
+  const range = RANGE_PATTERN.exec(inner);
+  if (range) {
+    const start = parsePositiveId2(range[1]);
+    const end = parsePositiveId2(range[2]);
+    if (start === null || end === null || end < start) {
+      return [];
+    }
+    const span = end - start + 1;
+    if (span > INLINE_RANGE_EXPANSION_CAP) {
+      return [start, end];
+    }
+    const ids = [];
+    for (let id = start; id <= end; id += 1) {
+      ids.push(id);
+    }
+    return ids;
+  }
+  if (LIST_PATTERN.test(inner)) {
+    const ids = [];
+    LIST_ELEMENT_PATTERN.lastIndex = 0;
+    let element;
+    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
+      const id = parsePositiveId2(element[1]);
+      if (id === null) {
+        return [];
+      }
+      ids.push(id);
+    }
+    return ids;
+  }
+  const single = SINGLE_PATTERN.exec(inner);
+  if (single) {
+    const id = parsePositiveId2(single[1]);
+    return id === null ? [] : [id];
+  }
+  const annotated = ANNOTATED_PATTERN.exec(inner);
+  if (annotated) {
+    const id = parsePositiveId2(annotated[1]);
+    return id === null ? [] : [id];
+  }
+  return [];
+}
+function parseInlineCitations(content, maxRefs) {
+  if (!content) {
+    return [];
+  }
+  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
+  if (cap <= 0) {
+    return [];
+  }
+  const ids = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const body of citationBracketBodies(content)) {
+    for (const id of expandBracketBody(body)) {
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      ids.push(id);
+      if (ids.length >= cap) {
+        return ids;
+      }
+    }
+  }
+  return ids;
+}
+function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, logger) {
+  const references = [
+    ...parseQualifiedReferences(fields.title),
+    ...parseQualifiedReferences(fields.content),
+    ...parseQualifiedReferences(fields.insight)
+  ];
+  const { accepted, rejected } = validateReferences(db, references, {
+    writerSessionId,
+    logger
+  });
+  const { written, deleted } = reconcileCitedPairs(
+    db,
+    { kind: "turn", id: turnId },
+    accepted.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref"
+  );
+  return { written, deleted, rejected };
+}
+function dedupeCitedIds(edges) {
+  const citedTurnIds = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (seen.has(edge.citedTurnId)) {
+      continue;
+    }
+    seen.add(edge.citedTurnId);
+    citedTurnIds.push(edge.citedTurnId);
+  }
+  return citedTurnIds;
+}
+function getSessionEffectiveCitations(db, sessionId) {
+  const turns = db.query(
+    `SELECT id, content, cites_recorded AS citesRecorded
+       FROM turns
+       WHERE session_id = ?
+       ORDER BY prompt_number ASC, id ASC`
+  ).all(sessionId);
+  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
+  const edgesByCiter = /* @__PURE__ */ new Map();
+  const edgeRows = db.query(
+    `SELECT
+         e.citing_id AS citingTurnId,
+         e.cited_id AS citedTurnId,
+         e.relation,
+         e.created_at_epoch AS createdAtEpoch
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
+       JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
+       WHERE citing.session_id = ? AND cited.session_id = ?
+       ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
+  ).all(sessionId, sessionId);
+  for (const edge of edgeRows) {
+    if (edge.citedTurnId === edge.citingTurnId) {
+      continue;
+    }
+    const bucket = edgesByCiter.get(edge.citingTurnId);
+    if (bucket) {
+      bucket.push(edge);
+    } else {
+      edgesByCiter.set(edge.citingTurnId, [edge]);
+    }
+  }
+  const effective = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    if (turn.citesRecorded === 1) {
+      const edges = edgesByCiter.get(turn.id) ?? [];
+      effective.set(turn.id, {
+        source: "structured",
+        citedTurnIds: dedupeCitedIds(edges),
+        edges
+      });
+      continue;
+    }
+    effective.set(turn.id, {
+      source: "inline",
+      citedTurnIds: parseInlineCitations(turn.content).filter(
+        (id) => id !== turn.id && sessionTurnIds.has(id)
+      ),
+      edges: []
+    });
+  }
+  return effective;
+}
+
+// src/db/memory-edges.ts
+var EDGE_NODE_KINDS = ["turn", "segment"];
+var CITING_NODE_KINDS = ["turn", "segment", "session"];
+var EDGE_PROVENANCES = [
+  "retrieval",
+  "text-ref",
+  "rollback",
+  "judged",
+  "asserted"
+];
+var PROVENANCE_RANK = {
+  retrieval: 0,
+  rollback: 1,
+  "text-ref": 2,
+  judged: 3,
+  asserted: 4
+};
+function rankEdgeProvenance(provenance) {
+  return PROVENANCE_RANK[provenance];
+}
+function isEdgeNodeKind(value) {
+  return typeof value === "string" && EDGE_NODE_KINDS.includes(value);
+}
+function isCitingNodeKind(value) {
+  return typeof value === "string" && CITING_NODE_KINDS.includes(value);
+}
+function isEdgeProvenance(value) {
+  return typeof value === "string" && EDGE_PROVENANCES.includes(value);
+}
+var EDGE_COLUMNS = `
+  citing_kind AS citingKind,
+  citing_id AS citingId,
+  cited_kind AS citedKind,
+  cited_id AS citedId,
+  relation,
+  provenance,
+  created_at_epoch AS createdAtEpoch
+`;
+function mapEdgeRow(row) {
+  return {
+    citing: { kind: row.citingKind, id: row.citingId },
+    cited: { kind: row.citedKind, id: row.citedId },
+    relation: row.relation,
+    provenance: row.provenance,
+    createdAtEpoch: row.createdAtEpoch
+  };
+}
+function isValidCitingNode(node) {
+  return node !== void 0 && isCitingNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
+}
+function isValidCitedNode(node) {
+  return node !== void 0 && isEdgeNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
+}
+function pairKey(edge) {
+  return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
+}
+function writeMemoryEdges(db, edges, nowEpoch) {
+  const written = [];
+  const rejected = [];
+  const relationsByPair = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited) || !isCitationRelation(edge.relation)) {
+      continue;
+    }
+    const key = pairKey(edge);
+    const relations = relationsByPair.get(key) ?? /* @__PURE__ */ new Set();
+    relations.add(edge.relation);
+    relationsByPair.set(key, relations);
+  }
+  const conflictingPairs = new Set(
+    [...relationsByPair.entries()].filter(([, relations]) => relations.size > 1).map(([key]) => key)
+  );
+  const upsert = db.query(
+    `
+      INSERT INTO memory_edges (
+        citing_kind, citing_id, cited_kind, cited_id,
+        relation, provenance, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id)
+        DO UPDATE SET
+          -- Spec C14: no rank test between an authorised write and the
+          -- relation it sets. A relation-bearing write replaces relation AND
+          -- provenance together, unconditionally; a bare write (relation
+          -- NULL) touches neither \u2014 it can create a pair but never modify a
+          -- relation one already carries.
+          relation = CASE
+            WHEN excluded.relation IS NOT NULL THEN excluded.relation
+            ELSE memory_edges.relation
+          END,
+          provenance = CASE
+            WHEN excluded.relation IS NOT NULL THEN excluded.provenance
+            ELSE memory_edges.provenance
+          END
+      RETURNING ${EDGE_COLUMNS}
+    `
+  );
+  for (const edge of edges) {
+    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
+      rejected.push({ input: edge, reason: "invalid-node" });
+      continue;
+    }
+    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
+      rejected.push({ input: edge, reason: "self-loop" });
+      continue;
+    }
+    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
+      rejected.push({ input: edge, reason: "invalid-relation" });
+      continue;
+    }
+    if (!isEdgeProvenance(edge.provenance)) {
+      rejected.push({ input: edge, reason: "invalid-provenance" });
+      continue;
+    }
+    if (edge.relation !== null && conflictingPairs.has(pairKey(edge))) {
+      rejected.push({ input: edge, reason: "conflicting-relation" });
+      continue;
+    }
+    const row = upsert.get(
+      edge.citing.kind,
+      edge.citing.id,
+      edge.cited.kind,
+      edge.cited.id,
+      edge.relation,
+      edge.provenance,
+      edge.createdAtEpoch ?? nowEpoch
+    );
+    if (row) {
+      written.push(mapEdgeRow(row));
+    }
+  }
+  return { written, rejected };
+}
+function getOutgoingEdges(db, citing) {
+  return db.query(
+    `SELECT ${EDGE_COLUMNS} FROM memory_edges
+       WHERE citing_kind = ? AND citing_id = ?
+       ORDER BY cited_kind ASC, cited_id ASC, relation ASC`
+  ).all(citing.kind, citing.id).map(mapEdgeRow);
+}
+function reconcileCitedPairs(db, citing, citedNodes, nowEpoch, provenance) {
+  const desired = /* @__PURE__ */ new Map();
+  for (const node of citedNodes) {
+    if (isValidCitedNode(node)) {
+      desired.set(`${node.kind}:${node.id}`, node);
+    }
+  }
+  const existing = getOutgoingEdges(db, citing);
+  const stale = existing.filter(
+    (edge) => !desired.has(`${edge.cited.kind}:${edge.cited.id}`)
+  );
+  const del = db.query(
+    `DELETE FROM memory_edges
+     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?`
+  );
+  for (const edge of stale) {
+    del.run(citing.kind, citing.id, edge.cited.kind, edge.cited.id);
+  }
+  const { written } = writeMemoryEdges(
+    db,
+    [...desired.values()].map((cited) => ({
+      citing,
+      cited,
+      relation: null,
+      provenance
+    })),
+    nowEpoch
+  );
+  return { written, deleted: stale };
 }
 
 // src/db/search.ts
@@ -1566,6 +2191,25 @@ function updateSessionSummaryRewrite(db, sessionId, fields, nowEpoch) {
     return null;
   }
   indexSessionToFTS(db, session);
+  const references = [
+    ...parseQualifiedReferences(session.title),
+    ...parseQualifiedReferences(session.content),
+    ...parseQualifiedReferences(session.decision),
+    ...parseQualifiedReferences(session.done),
+    ...parseQualifiedReferences(session.current),
+    ...parseQualifiedReferences(session.nextSteps),
+    ...parseQualifiedReferences(session.reference)
+  ];
+  const { accepted } = validateReferences(db, references, {
+    writerSessionId: sessionId
+  });
+  reconcileCitedPairs(
+    db,
+    { kind: "session", id: sessionId },
+    accepted.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref"
+  );
   return session;
 }
 function getSession(db, id) {
@@ -1586,112 +2230,6 @@ function updateCompactAnchor(db, sessionId) {
      )
      WHERE id = ?`
   ).run(sessionId, sessionId);
-}
-
-// src/db/note-debt.ts
-var NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = 'noted', reason = NULL,
-             closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ?
-           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
-  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
-}
-function recordDeclinedNoteDebt(db, turn, nowEpoch) {
-  return db.query(
-    `INSERT OR IGNORE INTO note_debt (
-           turn_id, session_id, prompt_number, status, reason,
-           opened_at_epoch, closed_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
-}
-function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-       SET status = 'skipped', reason = 'closed',
-           closed_at_epoch = ?, updated_at_epoch = ?
-       WHERE session_id = ? AND status = 'pending'`
-  ).run(nowEpoch, nowEpoch, sessionId).changes;
-}
-function realPromptPredicate(alias = "t") {
-  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(${alias}.type) WHERE value = 'compact'))`;
-}
-function listOwedNoteTurnsInRange(db, sessionId, rangeStart, rangeEnd) {
-  return db.query(
-    `SELECT
-         t.id AS turnId,
-         t.session_id AS sessionId,
-         t.prompt_number AS promptNumber
-       FROM turns t
-       WHERE t.session_id = ?
-         AND t.prompt_number BETWEEN ? AND ?
-         AND ${realPromptPredicate("t")}
-         AND NOT EXISTS (
-           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM note_debt d
-           WHERE d.turn_id = t.id
-             AND d.status = 'skipped'
-             AND d.reason = 'declined'
-         )
-       ORDER BY t.prompt_number ASC`
-  ).all(sessionId, rangeStart, rangeEnd);
-}
-function recordNoteIdExposure(db, input) {
-  const statement = db.query(
-    `INSERT OR IGNORE INTO note_id_exposures (
-       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-     ) VALUES (?, ?, ?, ?, ?)`
-  );
-  let written = 0;
-  for (const exposedTurnId of input.exposedTurnIds) {
-    statement.run(
-      input.sessionId,
-      input.rideTurnId,
-      exposedTurnId,
-      input.source,
-      input.nowEpoch
-    );
-    written += 1;
-  }
-  return written;
-}
-function getExposedTurnIds(db, sessionId, source) {
-  const rows = source ? db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ? AND source = ?`
-  ).all(sessionId, source) : db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ?`
-  ).all(sessionId);
-  return new Set(rows.map((row) => row.exposedTurnId));
 }
 
 // src/db/observations.ts
@@ -2214,379 +2752,6 @@ function loadConfigEraCutoff() {
   } catch {
     return null;
   }
-}
-
-// src/db/citations.ts
-var CITATION_RELATIONS = [
-  "evidence-for",
-  "evidence-against",
-  "supersedes",
-  "depends-on"
-];
-function isCitationRelation(value) {
-  return typeof value === "string" && CITATION_RELATIONS.includes(value);
-}
-var INLINE_RANGE_EXPANSION_CAP = 8;
-var RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
-var LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
-var LIST_ELEMENT_PATTERN = /T(\d+)/g;
-var SINGLE_PATTERN = /^T(\d+)$/;
-var ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
-function parsePositiveId(digits) {
-  const id = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
-}
-function* citationBracketBodies(content) {
-  let index = 0;
-  while (index < content.length) {
-    const open3 = content.indexOf("[", index);
-    if (open3 === -1) {
-      return;
-    }
-    const close = content.indexOf("]", open3 + 1);
-    if (close === -1) {
-      return;
-    }
-    const body = content.slice(open3 + 1, close);
-    index = close + 1;
-    if (body.includes("[")) {
-      continue;
-    }
-    yield body;
-  }
-}
-function expandBracketBody(body) {
-  if (/[\n\r]/.test(body)) {
-    return [];
-  }
-  const inner = body.trim();
-  const range = RANGE_PATTERN.exec(inner);
-  if (range) {
-    const start = parsePositiveId(range[1]);
-    const end = parsePositiveId(range[2]);
-    if (start === null || end === null || end < start) {
-      return [];
-    }
-    const span = end - start + 1;
-    if (span > INLINE_RANGE_EXPANSION_CAP) {
-      return [start, end];
-    }
-    const ids = [];
-    for (let id = start; id <= end; id += 1) {
-      ids.push(id);
-    }
-    return ids;
-  }
-  if (LIST_PATTERN.test(inner)) {
-    const ids = [];
-    LIST_ELEMENT_PATTERN.lastIndex = 0;
-    let element;
-    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
-      const id = parsePositiveId(element[1]);
-      if (id === null) {
-        return [];
-      }
-      ids.push(id);
-    }
-    return ids;
-  }
-  const single = SINGLE_PATTERN.exec(inner);
-  if (single) {
-    const id = parsePositiveId(single[1]);
-    return id === null ? [] : [id];
-  }
-  const annotated = ANNOTATED_PATTERN.exec(inner);
-  if (annotated) {
-    const id = parsePositiveId(annotated[1]);
-    return id === null ? [] : [id];
-  }
-  return [];
-}
-function parseInlineCitations(content, maxRefs) {
-  if (!content) {
-    return [];
-  }
-  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
-  if (cap <= 0) {
-    return [];
-  }
-  const ids = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const body of citationBracketBodies(content)) {
-    for (const id of expandBracketBody(body)) {
-      if (seen.has(id)) {
-        continue;
-      }
-      seen.add(id);
-      ids.push(id);
-      if (ids.length >= cap) {
-        return ids;
-      }
-    }
-  }
-  return ids;
-}
-var REPLACE_SAVEPOINT = "mnemo_replace_turn_citations";
-function replaceTurnCitations(db, citingTurnId, cites, nowEpoch) {
-  const turnExists = db.query(
-    "SELECT id FROM turns WHERE id = ?"
-  );
-  const written = [];
-  const droppedIds = [];
-  const relationByTarget = /* @__PURE__ */ new Map();
-  for (const cite of cites) {
-    const citedTurnId = cite?.id;
-    if (!Number.isSafeInteger(citedTurnId) || citedTurnId <= 0 || citedTurnId === citingTurnId || !isCitationRelation(cite.relation) || turnExists.get(citedTurnId) == null) {
-      droppedIds.push(citedTurnId);
-      continue;
-    }
-    const existingRelation = relationByTarget.get(citedTurnId);
-    if (existingRelation !== void 0) {
-      if (existingRelation !== cite.relation) {
-        droppedIds.push(citedTurnId);
-      }
-      continue;
-    }
-    relationByTarget.set(citedTurnId, cite.relation);
-    written.push({
-      citingTurnId,
-      citedTurnId,
-      relation: cite.relation,
-      createdAtEpoch: nowEpoch
-    });
-  }
-  if (droppedIds.length > 0) {
-    console.warn(
-      `[claude-mnemo] remember T${citingTurnId}: dropped ${droppedIds.length} unresolvable cite(s): ${droppedIds.join(", ")}`
-    );
-  }
-  db.exec(`SAVEPOINT ${REPLACE_SAVEPOINT}`);
-  try {
-    db.query(
-      `DELETE FROM memory_edges
-       WHERE citing_kind = 'turn' AND citing_id = ? AND cited_kind = 'turn'`
-    ).run(citingTurnId);
-    const insert = db.query(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?)`
-    );
-    for (const edge of written) {
-      insert.run(
-        edge.citingTurnId,
-        edge.citedTurnId,
-        edge.relation,
-        edge.createdAtEpoch
-      );
-    }
-    db.query(
-      "UPDATE turns SET cites_recorded = 1 WHERE id = ?"
-    ).run(citingTurnId);
-  } catch (error49) {
-    db.exec(`ROLLBACK TO ${REPLACE_SAVEPOINT}`);
-    db.exec(`RELEASE ${REPLACE_SAVEPOINT}`);
-    throw error49;
-  }
-  db.exec(`RELEASE ${REPLACE_SAVEPOINT}`);
-  return { written, droppedIds };
-}
-function dedupeCitedIds(edges) {
-  const citedTurnIds = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (seen.has(edge.citedTurnId)) {
-      continue;
-    }
-    seen.add(edge.citedTurnId);
-    citedTurnIds.push(edge.citedTurnId);
-  }
-  return citedTurnIds;
-}
-function getSessionEffectiveCitations(db, sessionId) {
-  const turns = db.query(
-    `SELECT id, content, cites_recorded AS citesRecorded
-       FROM turns
-       WHERE session_id = ?
-       ORDER BY prompt_number ASC, id ASC`
-  ).all(sessionId);
-  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
-  const edgesByCiter = /* @__PURE__ */ new Map();
-  const edgeRows = db.query(
-    `SELECT
-         e.citing_id AS citingTurnId,
-         e.cited_id AS citedTurnId,
-         e.relation,
-         e.created_at_epoch AS createdAtEpoch
-       FROM memory_edges e
-       JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
-       JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
-       WHERE citing.session_id = ? AND cited.session_id = ?
-       ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
-  ).all(sessionId, sessionId);
-  for (const edge of edgeRows) {
-    if (edge.citedTurnId === edge.citingTurnId) {
-      continue;
-    }
-    const bucket = edgesByCiter.get(edge.citingTurnId);
-    if (bucket) {
-      bucket.push(edge);
-    } else {
-      edgesByCiter.set(edge.citingTurnId, [edge]);
-    }
-  }
-  const effective = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    if (turn.citesRecorded === 1) {
-      const edges = edgesByCiter.get(turn.id) ?? [];
-      effective.set(turn.id, {
-        source: "structured",
-        citedTurnIds: dedupeCitedIds(edges),
-        edges
-      });
-      continue;
-    }
-    effective.set(turn.id, {
-      source: "inline",
-      citedTurnIds: parseInlineCitations(turn.content).filter(
-        (id) => id !== turn.id && sessionTurnIds.has(id)
-      ),
-      edges: []
-    });
-  }
-  return effective;
-}
-
-// src/db/memory-edges.ts
-var EDGE_NODE_KINDS = ["turn", "segment"];
-var CITING_NODE_KINDS = ["turn", "segment", "session"];
-var EDGE_PROVENANCES = [
-  "retrieval",
-  "text-ref",
-  "rollback",
-  "judged",
-  "asserted"
-];
-var PROVENANCE_RANK = {
-  retrieval: 0,
-  rollback: 1,
-  "text-ref": 2,
-  judged: 3,
-  asserted: 4
-};
-function rankEdgeProvenance(provenance) {
-  return PROVENANCE_RANK[provenance];
-}
-function isEdgeNodeKind(value) {
-  return typeof value === "string" && EDGE_NODE_KINDS.includes(value);
-}
-function isCitingNodeKind(value) {
-  return typeof value === "string" && CITING_NODE_KINDS.includes(value);
-}
-function isEdgeProvenance(value) {
-  return typeof value === "string" && EDGE_PROVENANCES.includes(value);
-}
-var EDGE_COLUMNS = `
-  citing_kind AS citingKind,
-  citing_id AS citingId,
-  cited_kind AS citedKind,
-  cited_id AS citedId,
-  relation,
-  provenance,
-  created_at_epoch AS createdAtEpoch
-`;
-function mapEdgeRow(row) {
-  return {
-    citing: { kind: row.citingKind, id: row.citingId },
-    cited: { kind: row.citedKind, id: row.citedId },
-    relation: row.relation,
-    provenance: row.provenance,
-    createdAtEpoch: row.createdAtEpoch
-  };
-}
-function isValidCitingNode(node) {
-  return node !== void 0 && isCitingNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
-}
-function isValidCitedNode(node) {
-  return node !== void 0 && isEdgeNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
-}
-function pairKey(edge) {
-  return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
-}
-function writeMemoryEdges(db, edges, nowEpoch) {
-  const written = [];
-  const rejected = [];
-  const relationsByPair = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited) || !isCitationRelation(edge.relation)) {
-      continue;
-    }
-    const key = pairKey(edge);
-    const relations = relationsByPair.get(key) ?? /* @__PURE__ */ new Set();
-    relations.add(edge.relation);
-    relationsByPair.set(key, relations);
-  }
-  const conflictingPairs = new Set(
-    [...relationsByPair.entries()].filter(([, relations]) => relations.size > 1).map(([key]) => key)
-  );
-  const upsert = db.query(
-    `
-      INSERT INTO memory_edges (
-        citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id)
-        DO UPDATE SET
-          -- Spec C14: no rank test between an authorised write and the
-          -- relation it sets. A relation-bearing write replaces relation AND
-          -- provenance together, unconditionally; a bare write (relation
-          -- NULL) touches neither \u2014 it can create a pair but never modify a
-          -- relation one already carries.
-          relation = CASE
-            WHEN excluded.relation IS NOT NULL THEN excluded.relation
-            ELSE memory_edges.relation
-          END,
-          provenance = CASE
-            WHEN excluded.relation IS NOT NULL THEN excluded.provenance
-            ELSE memory_edges.provenance
-          END
-      RETURNING ${EDGE_COLUMNS}
-    `
-  );
-  for (const edge of edges) {
-    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
-      rejected.push({ input: edge, reason: "invalid-node" });
-      continue;
-    }
-    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
-      rejected.push({ input: edge, reason: "self-loop" });
-      continue;
-    }
-    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
-      rejected.push({ input: edge, reason: "invalid-relation" });
-      continue;
-    }
-    if (!isEdgeProvenance(edge.provenance)) {
-      rejected.push({ input: edge, reason: "invalid-provenance" });
-      continue;
-    }
-    if (edge.relation !== null && conflictingPairs.has(pairKey(edge))) {
-      rejected.push({ input: edge, reason: "conflicting-relation" });
-      continue;
-    }
-    const row = upsert.get(
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id,
-      edge.relation,
-      edge.provenance,
-      edge.createdAtEpoch ?? nowEpoch
-    );
-    if (row) {
-      written.push(mapEdgeRow(row));
-    }
-  }
-  return { written, rejected };
 }
 
 // src/db/schema.ts
@@ -5429,7 +5594,22 @@ function createSegment(db, input) {
     throw new Error("Failed to create segment.");
   }
   indexSegment(db, inserted);
+  reconcileSegmentCitedPairs(db, inserted, input.nowEpoch);
   return inserted;
+}
+function reconcileSegmentCitedPairs(db, segment, nowEpoch) {
+  const references = [
+    ...parseQualifiedReferences(segment.title),
+    ...parseQualifiedReferences(segment.content)
+  ];
+  const resolved = resolveExistingReferences(db, references);
+  reconcileCitedPairs(
+    db,
+    { kind: "segment", id: segment.id },
+    resolved.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref"
+  );
 }
 function indexSegment(db, segment) {
   indexSegmentToFTS(db, {
@@ -5525,6 +5705,7 @@ function applySegmentWrites(db, writes, options) {
         continue;
       }
       indexSegment(db, updated);
+      reconcileSegmentCitedPairs(db, updated, options.nowEpoch);
       applied.push(updated);
     }
   } catch (error49) {
@@ -5675,134 +5856,6 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
-// src/db/references.ts
-var REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
-var ADDRESS_TOKEN_PATTERN = /^\[[ \t]*(?:S\d+[ \t]*\/[ \t]*T\d+|E\d+)[ \t]*\]$/;
-function isBareAddressToken(bracketed) {
-  return ADDRESS_TOKEN_PATTERN.test(bracketed);
-}
-function topLevelBracketGroups(content) {
-  const groups = [];
-  for (let index = 0; index < content.length; index += 1) {
-    if (content[index] !== "[") {
-      continue;
-    }
-    const start = index;
-    let depth = 0;
-    let nested = false;
-    let cursor = index;
-    for (; cursor < content.length; cursor += 1) {
-      const char = content[cursor];
-      if (char === "[") {
-        depth += 1;
-        if (depth > 1) {
-          nested = true;
-        }
-      } else if (char === "]") {
-        depth -= 1;
-        if (depth === 0) {
-          break;
-        }
-      }
-    }
-    if (depth !== 0) {
-      break;
-    }
-    if (!nested) {
-      groups.push(content.slice(start, cursor + 1));
-    }
-    index = cursor;
-  }
-  return groups;
-}
-function parsePositiveId2(digits) {
-  if (digits === void 0) {
-    return null;
-  }
-  const value = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-function parseQualifiedReferences(content) {
-  if (!content) {
-    return [];
-  }
-  const references = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const group of topLevelBracketGroups(content)) {
-    const match = REFERENCE_PATTERN.exec(group);
-    if (match === null) {
-      continue;
-    }
-    const raw = match[0];
-    const segmentId = parsePositiveId2(match[3]);
-    if (segmentId !== null) {
-      const key2 = `E${segmentId}`;
-      if (!seen.has(key2)) {
-        seen.add(key2);
-        references.push({ kind: "segment", raw, segmentId });
-      }
-      continue;
-    }
-    const sessionId = parsePositiveId2(match[1]);
-    const promptNumber = parsePositiveId2(match[2]);
-    if (sessionId === null || promptNumber === null) {
-      continue;
-    }
-    const key = `S${sessionId}/T${promptNumber}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      references.push({ kind: "turn", raw, sessionId, promptNumber });
-    }
-  }
-  return references;
-}
-function validateReferences(db, references, options) {
-  const accepted = [];
-  const rejected = [];
-  if (references.length === 0) {
-    return { accepted, rejected };
-  }
-  const exposedTurnIds = getExposedTurnIds(db, options.writerSessionId);
-  const turnLookup = db.query(
-    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
-  );
-  const segmentLookup = db.query(
-    "SELECT id FROM segments WHERE id = ?"
-  );
-  for (const reference of references) {
-    if (reference.kind === "turn") {
-      const row2 = turnLookup.get(reference.sessionId, reference.promptNumber);
-      if (!row2) {
-        rejected.push({ reference, reason: "unresolved" });
-        continue;
-      }
-      if (!exposedTurnIds.has(row2.id)) {
-        rejected.push({ reference, reason: "unexposed" });
-        continue;
-      }
-      accepted.push({ reference, node: { kind: "turn", id: row2.id } });
-      continue;
-    }
-    const row = segmentLookup.get(reference.segmentId);
-    if (!row) {
-      rejected.push({ reference, reason: "unresolved" });
-      continue;
-    }
-    if (options.exposedSegmentIds !== void 0 && !options.exposedSegmentIds.has(reference.segmentId)) {
-      rejected.push({ reference, reason: "unexposed" });
-      continue;
-    }
-    accepted.push({ reference, node: { kind: "segment", id: row.id } });
-  }
-  if (rejected.length > 0) {
-    const logger = options.logger ?? console;
-    logger.warn?.(
-      `[claude-mnemo] S${options.writerSessionId}: dropped ${rejected.length} illegal reference(s): ${rejected.map((entry) => `${entry.reference.raw} (${entry.reason})`).join(", ")}`
-    );
-  }
-  return { accepted, rejected };
-}
-
 // src/db/segment-rank.ts
 var RANK_FACT_COLUMNS = `
   t.id AS turnId,
@@ -5819,14 +5872,18 @@ var RANK_FACT_COLUMNS = `
    )) AS isCorrector,
   -- 'rolled-back' left the type vocabulary (ticket 02, spec B4): a reversal is
   -- knowable only after the fact and is carried by a supersedes edge, never a
-  -- type a turn states about itself. This scalar comparison against t.type
-  -- -- now a JSON-array column (spec B5) -- is therefore permanently false
-  -- for every row: no legacy turn ever carried a bare 'rolled-back' scalar
-  -- either (it was a settlement-only, segment-only value), so this key was
-  -- already inert before the migration and stays inert after it. Moving it to
-  -- an inbound-supersedes-edge test is spec B4's explicit direction but is
-  -- edge work this ticket does not own (ticket 06/13).
-  (COALESCE(t.type, '') = 'rolled-back') AS isRolledBack,
+  -- type a turn states about itself. The old scalar comparison against t.type,
+  -- a JSON-array column (spec B5), was therefore permanently false -- already
+  -- inert before the migration, since no legacy turn ever carried a bare
+  -- 'rolled-back' scalar either (it was a settlement-only, segment-only
+  -- value). Ticket 13 moves the test to what spec B4 always pointed at: an
+  -- INBOUND supersedes edge names this turn as another turn's victim, which is
+  -- exactly what "rolled back" means.
+  (EXISTS (
+     SELECT 1 FROM memory_edges e
+     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
+       AND e.relation = 'supersedes'
+   )) AS isRolledBack,
   (SELECT COUNT(*) FROM (
      SELECT DISTINCT e.citing_kind, e.citing_id
      FROM memory_edges e
@@ -8138,13 +8195,7 @@ function selectMilestoneTurns(view) {
     resolveCited: (id) => universeById.get(id),
     taskCausalityEraCutoffEpoch: eraCutoff
   });
-  const effGradeOf = (turn) => {
-    const raw = milestoneEffGrade(turn, eraCutoff);
-    if (graph.supersededVictims.has(turn.id)) {
-      return Math.min(raw, 1);
-    }
-    return graph.correctors.has(turn.id) ? Math.max(raw, 3) : raw;
-  };
+  const effGradeOf = (turn) => milestoneEffGrade(turn, eraCutoff);
   const endpoints = /* @__PURE__ */ new Set([seq[0].id]);
   const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
   endpoints.add((lastTitled ?? seq[seq.length - 1]).id);
@@ -8153,13 +8204,9 @@ function selectMilestoneTurns(view) {
     const marker = milestoneMarker(turn);
     return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
   };
-  const isVictim = (turn) => graph.supersededVictims.has(turn.id);
   const isAlwaysKeep = (turn) => {
     if (endpoints.has(turn.id)) {
       return true;
-    }
-    if (isVictim(turn)) {
-      return false;
     }
     if (graph.correctors.has(turn.id)) {
       return true;
@@ -8176,7 +8223,7 @@ function selectMilestoneTurns(view) {
   for (const turn of seq) {
     const effGrade = effGradeOf(turn);
     const alwaysKeep = isAlwaysKeep(turn);
-    const spine = !isVictim(turn) && effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
+    const spine = effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
     if (!alwaysKeep && !spine && effGrade < MILESTONE_POOL_MIN_EFF_GRADE) {
       continue;
     }
@@ -8655,8 +8702,9 @@ function renderUnitLines(unit, trim, titleCap, signal) {
   }
   const head = prompt !== "" && title !== "" ? `${prompt} \u2192 ${title}` : `${prompt}${title}`;
   const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
+  const mainBackLink = milestone.supersededBy && milestone.supersededBy.length > 0 ? ` \u2192\u88ABT${milestone.supersededBy.join("/T")}\u63A8\u7FFB` : "";
   const lines = [
-    `   ${glyph} T${milestone.turn.promptNumber} ${typeEmoji(milestone.turn.type)} G${milestone.effGrade} ${head}${filesTail}`.trimEnd()
+    `   ${glyph} T${milestone.turn.promptNumber} ${typeEmoji(milestone.turn.type)} G${milestone.effGrade} ${head}${filesTail}${mainBackLink}`.trimEnd()
   ];
   if (trim.showDesc) {
     const raw = milestoneDescText(milestone.turn);
@@ -46736,23 +46784,16 @@ var rememberInputShape = {
     id: external_exports.string(),
     grade: external_exports.number().int().min(0).max(4)
   }).strict().optional(),
-  // Structured causal edges for a turn (spec §B). Replace-set: the array given
-  // here becomes the turn's ENTIRE citation set, so a re-sent turn converges
-  // instead of accumulating. Omitted = leave the existing edges alone; an
-  // explicit `[]` clears them and records "this turn genuinely cites nothing".
-  // `id` is the bare DB turn id (8501), not the `T8501` selector form.
+  // Structured causal edges are no longer a caller input (spec C6): a bare
+  // `[S<session>/T<n>]`/`[E<n>]` in title/content/insight IS the citation —
+  // see recomputeTurnCitedPairs (db/citations.ts). The earlier `cites` field
+  // (a `{id, relation}` list with no prose backing it at all) is REMOVED
+  // rather than kept, because keeping it would let a caller mint a pair — and
+  // attach a relation — with nothing in the body to support either, which
+  // makes every other rule in this area bypassable in one call. The schema
+  // is `.strict()` (below), so a caller that still sends `cites` gets a
+  // parse error naming the unrecognised key, not a silent drop.
   //
-  // The shape check stops at "integer" on purpose (spec §B): a wrong TYPE is a
-  // caller bug worth rejecting the call over, but a merely INVALID id — zero,
-  // negative, a typo that names no turn, the turn citing itself — is dropped
-  // per edge with a log line so one bad id cannot discard a whole extraction's
-  // good edges. See replaceTurnCitations.
-  cites: external_exports.array(
-    external_exports.object({
-      id: external_exports.number().int(),
-      relation: external_exports.enum(CITATION_RELATIONS)
-    }).strict()
-  ).optional(),
   // Multi-valued since ticket 02 (spec B5), matching a segment's `type`.
   // Omitted = leave the existing list alone; an explicit `[]` clears it —
   // `[]` already means "no type" (spec B7), so it is both the empty state
@@ -47036,10 +47077,23 @@ function noteTool(db, rawInput, options = {}) {
         insight,
         updatedAtEpoch: nowEpoch
       });
-      updateTurnById(db, turn.id, {
+      const finalTurn = updateTurnById(db, turn.id, {
         type: typeValues,
         replaceTags: tagValues
       });
+      if (finalTurn) {
+        recomputeTurnCitedPairs(
+          db,
+          finalTurn.id,
+          {
+            title: finalTurn.title,
+            content: finalTurn.content,
+            insight: finalTurn.insight
+          },
+          nowEpoch,
+          finalTurn.sessionId
+        );
+      }
     }
     return { ok: true, existing: existing !== null };
   });
@@ -47301,7 +47355,13 @@ function handleTurnRemember(db, turnId, input) {
       if (!turn) {
         return null;
       }
-      const citations = input.cites === void 0 ? null : replaceTurnCitations(db, turnId, input.cites, nowEpoch);
+      const citations = recomputeTurnCitedPairs(
+        db,
+        turnId,
+        { title: turn.title, content: turn.content, insight: turn.insight },
+        nowEpoch,
+        turn.sessionId
+      );
       if (regradeTarget && input.regrade) {
         const regraded = updateTurnById(db, regradeTarget.id, {
           significanceGrade: input.regrade.grade
@@ -47327,11 +47387,15 @@ function handleTurnRemember(db, turnId, input) {
   if (regradeTarget && input.regrade) {
     message += ` Regraded turn T${regradeTarget.id} to ${input.regrade.grade}.`;
   }
-  if (written.citations) {
-    message += ` Recorded ${written.citations.written.length} citation(s).`;
-    if (written.citations.droppedIds.length > 0) {
-      message += ` Dropped unresolvable: ${written.citations.droppedIds.map((id) => `T${id}`).join(", ")}.`;
+  if (written.citations.written.length > 0 || written.citations.deleted.length > 0) {
+    message += ` Cites ${written.citations.written.length} pair(s)`;
+    if (written.citations.deleted.length > 0) {
+      message += `, dropped ${written.citations.deleted.length} no longer referenced`;
     }
+    message += ".";
+  }
+  if (written.citations.rejected.length > 0) {
+    message += ` Dropped ${written.citations.rejected.length} unresolvable reference(s): ${written.citations.rejected.map((entry) => `${entry.reference.raw} (${entry.reason})`).join(", ")}.`;
   }
   return textResult2(message);
 }
@@ -47344,7 +47408,7 @@ function handleObservationRemember(db, observationId, input) {
   if (statusError) {
     return parameterError2(statusError);
   }
-  if (input.type !== void 0 || input.grade !== void 0 || input.regrade !== void 0 || input.cites !== void 0 || input.insight !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0) {
+  if (input.type !== void 0 || input.grade !== void 0 || input.regrade !== void 0 || input.insight !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0) {
     return parameterError2(
       "observation remember only accepts title, content, and status."
     );
@@ -47368,10 +47432,8 @@ function handleSessionRemember(db, sessionId, input) {
   if (statusError) {
     return parameterError2(statusError);
   }
-  if (input.grade !== void 0 || input.regrade !== void 0 || input.cites !== void 0) {
-    return parameterError2(
-      "session remember does not accept grade, regrade, or cites."
-    );
+  if (input.grade !== void 0 || input.regrade !== void 0) {
+    return parameterError2("session remember does not accept grade or regrade.");
   }
   const session = getSession(db, sessionId);
   if (!session) {

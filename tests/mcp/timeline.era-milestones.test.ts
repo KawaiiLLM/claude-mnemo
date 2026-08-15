@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { replaceTurnCitations } from "../../src/db/citations";
+import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import {
   addSegmentMembers,
@@ -22,7 +22,7 @@ import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
  * This fixture builds ONE session, following `seedEraFixture`'s construction
  * pattern (tests/mcp/segment-spine.test.ts): raw turn inserts, segments via
  * `createSegment`/`addSegmentMembers`, a structured `supersedes` edge via
- * `replaceTurnCitations`. It is a SEPARATE fixture rather than an edit to
+ * `writeMemoryEdges`. It is a SEPARATE fixture rather than an edit to
  * `seedEraFixture`, so as not to disturb that file's 18 passing assertions
  * (several of which pin exact segment-row text and exact budget-shedding
  * counts that a shared-fixture edit could shift).
@@ -36,9 +36,12 @@ import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
  *                                status — admits NOTHING. This is the
  *                                byte-identical regression segment.
  *   E3 "graded segment" — T20 : significance_grade 3 (spine admission)
- *                        — T21 : corrector of five earlier turns (promoted
- *                                to G3, victims demoted and pulled through,
- *                                one beyond the 4-antecedent cap folds).
+ *                        — T21 : corrector of five earlier turns (kept on the
+ *                                corrector always-keep bullet at its own G0 —
+ *                                spec H1: no longer promoted; the victims'
+ *                                own G0 stands too, so they still clear the
+ *                                pull-through ceiling and render under it,
+ *                                one beyond the 4-antecedent cap folding).
  *   E4 "bracket late"   — T30 : the window's global LAST-titled turn
  *                                (endpoint, always-keep) — G0, ungraded.
  *
@@ -134,18 +137,26 @@ function seedGradedEraFixture(db: Database): {
   });
   ids.bracketLate = makeTurn(30, { type: "review", title: "close out the arc" });
 
-  replaceTurnCitations(
+  // `replaceTurnCitations` (the old generic body-free structured-edge write)
+  // was retired under spec C6/ticket 06; writing straight through
+  // `writeMemoryEdges` sidesteps that churn (same fix as timeline.test.ts).
+  // Unlike the retired function, this does not itself flip `cites_recorded`
+  // (spec §B's fallback predicate: 0 means "never spoke", reads inline prose
+  // instead) — so it is set explicitly here to keep this a genuine structured
+  // read, same as the retired call used to guarantee.
+  writeMemoryEdges(
     db,
-    ids.corrector!,
-    [
-      { id: ids.victim1!, relation: "supersedes" },
-      { id: ids.victim2!, relation: "supersedes" },
-      { id: ids.victim3!, relation: "supersedes" },
-      { id: ids.victim4!, relation: "supersedes" },
-      { id: ids.victim5!, relation: "supersedes" },
-    ],
+    [ids.victim1!, ids.victim2!, ids.victim3!, ids.victim4!, ids.victim5!].map(
+      (victimId) => ({
+        citing: { kind: "turn" as const, id: ids.corrector! },
+        cited: { kind: "turn" as const, id: victimId },
+        relation: "supersedes" as const,
+        provenance: "judged" as const,
+      }),
+    ),
     CUTOFF,
   );
+  db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(ids.corrector!);
 
   const bracketEarly = createSegment(db, {
     title: "bracket early",
@@ -254,14 +265,15 @@ describe("milestone rows nest under segment lines (ticket 03)", () => {
     expect(t5Row).toContain(" G0 ");
   });
 
-  test("the printed grade is effGrade after corrector promotion, not the stored (null) grade", () => {
+  test("the printed grade is effGrade at the turn's own value — a corrector is no longer promoted (spec H1)", () => {
     const output = renderArc();
     const correctorRow = output
       .split("\n")
       .find((line) => line.includes("correct the approach"))!;
-    // T21's stored significance_grade is null; the corrector rule forces
-    // effGrade to >= 3, and that promoted value is what prints.
-    expect(correctorRow).toContain(" G3 ");
+    // T21's stored significance_grade is null → effGrade 0 (era, ungraded).
+    // Before ticket 13 the corrector rule forced this to >= 3; now the row is
+    // kept on the corrector always-keep bullet alone, and its own G0 prints.
+    expect(correctorRow).toContain(" G0 ");
   });
 
   test("an overturned era turn renders as a demoted casualty beneath its corrector", () => {

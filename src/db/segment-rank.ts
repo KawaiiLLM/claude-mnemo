@@ -19,7 +19,8 @@ import { typeListsEqual } from "../shared/type-vocabulary";
  * The keys, in the spec's order:
  *
  *   ① is a corrector      DESC — hindsight outranks the thing it corrected
- *   ② type is rolled-back ASC  — an overturned conclusion sinks
+ *   ② was superseded      ASC  — an overturned conclusion sinks (spec B4: an
+ *                                inbound `supersedes` edge, not a stated type)
  *   ③ de-duplicated in-degree DESC — how many DISTINCT nodes consumed this
  *   ④ is a delivered segment's member DESC — work that shipped
  *   ⑤ files_modified count DESC — mechanical weight
@@ -60,7 +61,7 @@ export interface MemberRankFacts {
   createdAtEpoch: number;
   /** 1 when this turn carries an outgoing `supersedes` edge. */
   isCorrector: number;
-  /** 1 when this turn's type is the settlement-only `rolled-back` value. */
+  /** 1 when an inbound `supersedes` edge names this turn as its victim (spec B4). */
   isRolledBack: number;
   /** DISTINCT citing nodes over `memory_edges` — one pair counts once. */
   citedBy: number;
@@ -93,14 +94,18 @@ const RANK_FACT_COLUMNS = `
    )) AS isCorrector,
   -- 'rolled-back' left the type vocabulary (ticket 02, spec B4): a reversal is
   -- knowable only after the fact and is carried by a supersedes edge, never a
-  -- type a turn states about itself. This scalar comparison against t.type
-  -- -- now a JSON-array column (spec B5) -- is therefore permanently false
-  -- for every row: no legacy turn ever carried a bare 'rolled-back' scalar
-  -- either (it was a settlement-only, segment-only value), so this key was
-  -- already inert before the migration and stays inert after it. Moving it to
-  -- an inbound-supersedes-edge test is spec B4's explicit direction but is
-  -- edge work this ticket does not own (ticket 06/13).
-  (COALESCE(t.type, '') = 'rolled-back') AS isRolledBack,
+  -- type a turn states about itself. The old scalar comparison against t.type,
+  -- a JSON-array column (spec B5), was therefore permanently false -- already
+  -- inert before the migration, since no legacy turn ever carried a bare
+  -- 'rolled-back' scalar either (it was a settlement-only, segment-only
+  -- value). Ticket 13 moves the test to what spec B4 always pointed at: an
+  -- INBOUND supersedes edge names this turn as another turn's victim, which is
+  -- exactly what "rolled back" means.
+  (EXISTS (
+     SELECT 1 FROM memory_edges e
+     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
+       AND e.relation = 'supersedes'
+   )) AS isRolledBack,
   (SELECT COUNT(*) FROM (
      SELECT DISTINCT e.citing_kind, e.citing_id
      FROM memory_edges e

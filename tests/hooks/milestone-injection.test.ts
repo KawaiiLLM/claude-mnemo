@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { createDatabase } from "../../src/db/database";
-import { replaceTurnCitations } from "../../src/db/citations";
+import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
@@ -92,18 +92,25 @@ function turnDbId(
   return record.id;
 }
 
+// `replaceTurnCitations` (the old generic body-free structured-edge write)
+// was retired under spec C6/ticket 06; writing straight through
+// `writeMemoryEdges` sidesteps that churn (same fix as timeline.test.ts).
+// `cites_recorded = 1` is already set for every row by `seedSession` above,
+// so no extra flag flip is needed here (unlike timeline.era-milestones.test.ts).
 function cite(
   db: ReturnType<typeof createDatabase>,
   sessionId: number,
   citingPrompt: number,
   citedPrompts: number[],
 ): void {
-  replaceTurnCitations(
+  const citingId = turnDbId(db, sessionId, citingPrompt);
+  writeMemoryEdges(
     db,
-    turnDbId(db, sessionId, citingPrompt),
     citedPrompts.map((promptNumber) => ({
-      id: turnDbId(db, sessionId, promptNumber),
+      citing: { kind: "turn" as const, id: citingId },
+      cited: { kind: "turn" as const, id: turnDbId(db, sessionId, promptNumber) },
       relation: "evidence-for" as const,
+      provenance: "judged" as const,
     })),
     ERA_BASE,
   );

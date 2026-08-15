@@ -389,6 +389,69 @@ function loadConfigEraCutoff() {
   }
 }
 
+// src/db/memory-edges.ts
+var PROVENANCE_RANK = {
+  retrieval: 0,
+  rollback: 1,
+  "text-ref": 2,
+  judged: 3,
+  asserted: 4
+};
+function rankEdgeProvenance(provenance) {
+  return PROVENANCE_RANK[provenance];
+}
+
+// src/db/note-debt.ts
+function realPromptPredicate(alias = "t") {
+  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(${alias}.type) WHERE value = 'compact'))`;
+}
+var NOTE_DEBT_AGING_TURNS = 50;
+function listOwedNoteTurns(db, sessionId, currentPromptNumber, options = {}) {
+  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  return db.query(
+    `SELECT
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber,
+         t.user_prompt AS userPrompt
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.prompt_number < ?
+         AND t.prompt_number >= ?
+         AND ${realPromptPredicate("t")}
+         AND NOT EXISTS (
+           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM note_debt d
+           WHERE d.turn_id = t.id AND d.status = 'skipped'
+         )
+       ORDER BY t.prompt_number ASC`
+  ).all(sessionId, currentPromptNumber, currentPromptNumber - agingTurns).map((row) => ({
+    ...row,
+    pendingTurns: currentPromptNumber - row.promptNumber
+  }));
+}
+function recordNoteIdExposure(db, input) {
+  const statement = db.query(
+    `INSERT OR IGNORE INTO note_id_exposures (
+       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?)`
+  );
+  let written = 0;
+  for (const exposedTurnId of input.exposedTurnIds) {
+    statement.run(
+      input.sessionId,
+      input.rideTurnId,
+      exposedTurnId,
+      input.source,
+      input.nowEpoch
+    );
+    written += 1;
+  }
+  return written;
+}
+
 // src/db/citations.ts
 var CITATION_RELATIONS = [
   "evidence-for",
@@ -563,18 +626,6 @@ function getSessionEffectiveCitations(db, sessionId) {
     });
   }
   return effective;
-}
-
-// src/db/memory-edges.ts
-var PROVENANCE_RANK = {
-  retrieval: 0,
-  rollback: 1,
-  "text-ref": 2,
-  judged: 3,
-  asserted: 4
-};
-function rankEdgeProvenance(provenance) {
-  return PROVENANCE_RANK[provenance];
 }
 
 // src/db/search.ts
@@ -3690,7 +3741,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msumv2cr" : "dev";
+var BUILD_ID = true ? "0.10.0-msuq1mwm" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -20201,57 +20252,6 @@ function captureConsultedMemories(db, turnId, call) {
   return recordConsultedMemories(db, turnId, addresses).length;
 }
 
-// src/db/note-debt.ts
-function realPromptPredicate(alias = "t") {
-  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(${alias}.type) WHERE value = 'compact'))`;
-}
-var NOTE_DEBT_AGING_TURNS = 50;
-function listOwedNoteTurns(db, sessionId, currentPromptNumber, options = {}) {
-  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-  return db.query(
-    `SELECT
-         t.id AS turnId,
-         t.session_id AS sessionId,
-         t.prompt_number AS promptNumber,
-         t.user_prompt AS userPrompt
-       FROM turns t
-       WHERE t.session_id = ?
-         AND t.prompt_number < ?
-         AND t.prompt_number >= ?
-         AND ${realPromptPredicate("t")}
-         AND NOT EXISTS (
-           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM note_debt d
-           WHERE d.turn_id = t.id AND d.status = 'skipped'
-         )
-       ORDER BY t.prompt_number ASC`
-  ).all(sessionId, currentPromptNumber, currentPromptNumber - agingTurns).map((row) => ({
-    ...row,
-    pendingTurns: currentPromptNumber - row.promptNumber
-  }));
-}
-function recordNoteIdExposure(db, input) {
-  const statement = db.query(
-    `INSERT OR IGNORE INTO note_id_exposures (
-       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-     ) VALUES (?, ?, ?, ?, ?)`
-  );
-  let written = 0;
-  for (const exposedTurnId of input.exposedTurnIds) {
-    statement.run(
-      input.sessionId,
-      input.rideTurnId,
-      exposedTurnId,
-      input.source,
-      input.nowEpoch
-    );
-    written += 1;
-  }
-  return written;
-}
-
 // src/db/observations.ts
 var OBSERVATION_COLUMNS = `
   id,
@@ -20667,14 +20667,18 @@ var RANK_FACT_COLUMNS = `
    )) AS isCorrector,
   -- 'rolled-back' left the type vocabulary (ticket 02, spec B4): a reversal is
   -- knowable only after the fact and is carried by a supersedes edge, never a
-  -- type a turn states about itself. This scalar comparison against t.type
-  -- -- now a JSON-array column (spec B5) -- is therefore permanently false
-  -- for every row: no legacy turn ever carried a bare 'rolled-back' scalar
-  -- either (it was a settlement-only, segment-only value), so this key was
-  -- already inert before the migration and stays inert after it. Moving it to
-  -- an inbound-supersedes-edge test is spec B4's explicit direction but is
-  -- edge work this ticket does not own (ticket 06/13).
-  (COALESCE(t.type, '') = 'rolled-back') AS isRolledBack,
+  -- type a turn states about itself. The old scalar comparison against t.type,
+  -- a JSON-array column (spec B5), was therefore permanently false -- already
+  -- inert before the migration, since no legacy turn ever carried a bare
+  -- 'rolled-back' scalar either (it was a settlement-only, segment-only
+  -- value). Ticket 13 moves the test to what spec B4 always pointed at: an
+  -- INBOUND supersedes edge names this turn as another turn's victim, which is
+  -- exactly what "rolled back" means.
+  (EXISTS (
+     SELECT 1 FROM memory_edges e
+     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
+       AND e.relation = 'supersedes'
+   )) AS isRolledBack,
   (SELECT COUNT(*) FROM (
      SELECT DISTINCT e.citing_kind, e.citing_id
      FROM memory_edges e
@@ -22042,13 +22046,7 @@ function selectMilestoneTurns(view) {
     resolveCited: (id) => universeById.get(id),
     taskCausalityEraCutoffEpoch: eraCutoff
   });
-  const effGradeOf = (turn) => {
-    const raw = milestoneEffGrade(turn, eraCutoff);
-    if (graph.supersededVictims.has(turn.id)) {
-      return Math.min(raw, 1);
-    }
-    return graph.correctors.has(turn.id) ? Math.max(raw, 3) : raw;
-  };
+  const effGradeOf = (turn) => milestoneEffGrade(turn, eraCutoff);
   const endpoints = /* @__PURE__ */ new Set([seq[0].id]);
   const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
   endpoints.add((lastTitled ?? seq[seq.length - 1]).id);
@@ -22057,13 +22055,9 @@ function selectMilestoneTurns(view) {
     const marker = milestoneMarker(turn);
     return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
   };
-  const isVictim = (turn) => graph.supersededVictims.has(turn.id);
   const isAlwaysKeep = (turn) => {
     if (endpoints.has(turn.id)) {
       return true;
-    }
-    if (isVictim(turn)) {
-      return false;
     }
     if (graph.correctors.has(turn.id)) {
       return true;
@@ -22080,7 +22074,7 @@ function selectMilestoneTurns(view) {
   for (const turn of seq) {
     const effGrade = effGradeOf(turn);
     const alwaysKeep = isAlwaysKeep(turn);
-    const spine = !isVictim(turn) && effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
+    const spine = effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
     if (!alwaysKeep && !spine && effGrade < MILESTONE_POOL_MIN_EFF_GRADE) {
       continue;
     }
@@ -22559,8 +22553,9 @@ function renderUnitLines(unit, trim, titleCap, signal) {
   }
   const head = prompt !== "" && title !== "" ? `${prompt} \u2192 ${title}` : `${prompt}${title}`;
   const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
+  const mainBackLink = milestone.supersededBy && milestone.supersededBy.length > 0 ? ` \u2192\u88ABT${milestone.supersededBy.join("/T")}\u63A8\u7FFB` : "";
   const lines = [
-    `   ${glyph} T${milestone.turn.promptNumber} ${typeEmoji(milestone.turn.type)} G${milestone.effGrade} ${head}${filesTail}`.trimEnd()
+    `   ${glyph} T${milestone.turn.promptNumber} ${typeEmoji(milestone.turn.type)} G${milestone.effGrade} ${head}${filesTail}${mainBackLink}`.trimEnd()
   ];
   if (trim.showDesc) {
     const raw = milestoneDescText(milestone.turn);

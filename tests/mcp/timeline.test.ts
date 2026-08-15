@@ -52,10 +52,8 @@ import { timelineInputSchema } from "../../src/mcp/definitions";
 // `truncateText` comes from the renderer it is shared with: timeline used to
 // export a second function of the same name, and the two cut differently.
 import { NAVIGATION_LEGEND, truncateText } from "../../src/mcp/format";
-import {
-  replaceTurnCitations,
-  type CitationRelation,
-} from "../../src/db/citations";
+import { type CitationRelation } from "../../src/db/citations";
+import { writeMemoryEdges } from "../../src/db/memory-edges";
 
 // `type` accepts a single string as a convenience (ticket 02, spec B5 widened
 // storage to a list; most call sites below predate that and pass one word).
@@ -1667,7 +1665,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     expect(result.ranked.some((row) => row.turn.type.includes("compact"))).toBe(false);
   });
 
-  it("promotes a G0 corrector to the spine and demotes what it supersedes into a ↳ antecedent", () => {
+  it("keeps a G0 corrector at its own grade and its victim at its own grade — no promotion, no demotion (spec H1)", () => {
     const rows = [
       turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
       turn({ id: 2, promptNumber: 2, type: "decision", title: "first conclusion", significanceGrade: 3, createdAtEpoch: era + 60 }),
@@ -1679,17 +1677,22 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
       citations: structuredCitations({ 3: [[2, "supersedes"]] }),
     });
 
-    expect(kept(result)).toEqual([1, 3, 4]);
-    expect(rowFor(result, 3)?.effGrade).toBe(3);
+    // T3 is still kept — it is still a corrector, and a corrector's always-keep
+    // slot survives ticket 13 — but at its OWN G0, not lifted to G3.
+    expect(rowFor(result, 3)?.effGrade).toBe(0);
     expect(rowFor(result, 3)?.alwaysKeep).toBe(true);
-    expect(result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber])).toEqual([
-      [2, 3],
-    ]);
-    expect(result.pulled[0]!.effGrade).toBe(1);
-    expect(result.pulled[0]!.supersededBy).toEqual([3]);
+    expect(rowFor(result, 3)?.spine).toBe(false);
+    // T2 is no longer floored to G1: its own G3 clears the spine bar on its own
+    // merit, so it is now a main row in its own right instead of a ↳
+    // antecedent — an edge no longer decides its eligibility.
+    expect(kept(result)).toEqual([1, 2, 3, 4]);
+    expect(rowFor(result, 2)?.effGrade).toBe(3);
+    expect(rowFor(result, 2)?.spine).toBe(true);
+    expect(rowFor(result, 2)?.supersededBy).toEqual([3]);
+    expect(result.pulled).toHaveLength(0);
   });
 
-  it("leaves a corrector demoted when it is itself superseded (① runs before ②)", () => {
+  it("a turn that is both corrector and victim keeps its own grade either way (spec H1)", () => {
     const rows = [
       turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
       turn({ id: 2, promptNumber: 2, type: "decision", title: "first answer", significanceGrade: 2, createdAtEpoch: era + 60 }),
@@ -1705,19 +1708,30 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
       }),
     });
 
-    // T3 corrected T2 but was itself overturned. Its own G3 is floored to 1 —
-    // demotion runs first, so the promotion it would otherwise earn never lands.
-    expect(kept(result)).toEqual([1, 4, 5]);
+    // T3 corrected T2 and was itself overturned by T4. Neither fact moves its
+    // grade any more (spec H1: there is no demotion/promotion order to run) —
+    // its own G3 stands, clears the spine bar, and it keeps the back-link to
+    // its own corrector.
+    expect(kept(result)).toEqual([1, 3, 4, 5]);
+    expect(rowFor(result, 3)?.effGrade).toBe(3);
+    expect(rowFor(result, 3)?.spine).toBe(true);
+    expect(rowFor(result, 3)?.supersededBy).toEqual([4]);
+    // T4's own G0 stands too — it is kept only because it is a corrector, not
+    // because superseding T3 lifted it.
+    expect(rowFor(result, 4)?.effGrade).toBe(0);
     expect(rowFor(result, 4)?.alwaysKeep).toBe(true);
-    const antecedent = result.pulled.find((p) => p.turn.promptNumber === 3);
-    expect(antecedent?.effGrade).toBe(1);
-    expect(antecedent?.supersededBy).toEqual([4]);
-    // T2's only citer (T3) is not a kept row, so T2 is not pulled either: ↳ rows
-    // hang off admitted rows, not off the whole citation graph.
-    expect(result.pulled.map((p) => p.turn.promptNumber)).toEqual([3]);
+    expect(rowFor(result, 4)?.spine).toBe(false);
+    // T2's own G2 stays out of spine range on its own merit and T3 — its actual
+    // citer — is a kept row, so T2 is pulled under it at its own grade, not a
+    // demoted one.
+    expect(result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber])).toEqual([
+      [2, 3],
+    ]);
+    expect(result.pulled[0]!.effGrade).toBe(2);
+    expect(result.pulled[0]!.supersededBy).toEqual([3]);
   });
 
-  it("moves the anchor from a superseded G4 to its corrector", () => {
+  it("keeps a superseded G4's own anchor claim; its corrector is admitted separately, not by inheriting it", () => {
     const rows = [
       turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
       turn({ id: 2, promptNumber: 2, type: "decision", title: "arc origin, later refounded", significanceGrade: 4, createdAtEpoch: era + 60 }),
@@ -1729,14 +1743,22 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
       citations: structuredCitations({ 3: [[2, "supersedes"]] }),
     });
 
-    expect(kept(result)).toEqual([1, 3, 4]);
-    // The G4 anchor claim dies with the demotion; the G2 corrector inherits it.
-    expect(rowFor(result, 3)?.effGrade).toBe(3);
+    // Nothing moves any more (spec H1): T2's own G4 still clears the era-G4
+    // always-keep bullet AND the spine bar, so it keeps its own main row and
+    // its own back-link. T3 is admitted too, but on the corrector bullet alone
+    // — its own G2 never touches the spine bar.
+    expect(kept(result)).toEqual([1, 2, 3, 4]);
+    expect(rowFor(result, 2)?.effGrade).toBe(4);
+    expect(rowFor(result, 2)?.alwaysKeep).toBe(true);
+    expect(rowFor(result, 2)?.spine).toBe(true);
+    expect(rowFor(result, 2)?.supersededBy).toEqual([3]);
+    expect(rowFor(result, 3)?.effGrade).toBe(2);
     expect(rowFor(result, 3)?.alwaysKeep).toBe(true);
-    expect(result.pulled.map((p) => p.turn.promptNumber)).toEqual([2]);
+    expect(rowFor(result, 3)?.spine).toBe(false);
+    expect(result.pulled).toHaveLength(0);
   });
 
-  it("keeps a victim that is also a window endpoint and hands it the back-link", () => {
+  it("keeps a victim's own grade even at a window endpoint, and still hands it the back-link", () => {
     const rows = [
       turn({ id: 1, promptNumber: 1, type: "decision", title: "opening premise", significanceGrade: 4, createdAtEpoch: era }),
       turn({ id: 2, promptNumber: 2, type: "decision", title: "overturns the premise", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 60 }),
@@ -1747,8 +1769,11 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     });
 
     expect(kept(result)).toEqual([1, 2]);
-    expect(rowFor(result, 1)?.effGrade).toBe(1);
-    expect(rowFor(result, 1)?.spine).toBe(false);
+    // T1's own G4 stands (spec H1: no floor) — it was already going to be kept
+    // as a window endpoint, but now it also clears the spine bar on its own
+    // merit, and the back-link still renders.
+    expect(rowFor(result, 1)?.effGrade).toBe(4);
+    expect(rowFor(result, 1)?.spine).toBe(true);
     expect(rowFor(result, 1)?.supersededBy).toEqual([2]);
     // Already a main row, so it is not ALSO pulled in as its corrector's ↳.
     expect(result.pulled).toHaveLength(0);
@@ -1791,11 +1816,27 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     ];
 
     const result = select(rows);
-    expect(kept(result)).toEqual([1, 3, 4]);
-    expect(rowFor(result, 3)?.effGrade).toBe(3); // legacy bugfix G2, promoted
+    // T2 is a SECOND-ORDER consequence of removing the victim-ineligibility
+    // branches (spec H1): under the old rule, being a victim short-circuited
+    // `isAlwaysKeep` to `false` before it ever reached the reversed-marker
+    // bullet, so a reversed-AND-corrected legacy turn was always demoted and
+    // pulled under its corrector. With that short-circuit gone, the marker
+    // bullet now fires unconditionally — T2 is kept on its own, tag-driven
+    // "reversed" marker, whether or not a corrector also exists for it.
+    expect(kept(result)).toEqual([1, 2, 3, 4]);
+    expect(rowFor(result, 2)?.effGrade).toBe(1); // legacy discovery, unchanged
+    expect(rowFor(result, 2)?.marker).toBe("reversed");
+    expect(rowFor(result, 2)?.spine).toBe(false);
+    // The back-link data still populates on this now-main row (spec H3), even
+    // though today's renderer only turns it into `→被T<n>推翻` text on a ↳ row.
+    expect(rowFor(result, 2)?.supersededBy).toEqual([3]);
+    // Legacy bugfix G2, no longer promoted (spec H1) — T3 is kept anyway, on
+    // the corrector bullet alone.
+    expect(rowFor(result, 3)?.effGrade).toBe(2);
     expect(rowFor(result, 3)?.marker).toBeNull();
-    expect(result.pulled.map((p) => p.turn.promptNumber)).toEqual([2]);
-    expect(result.pulled[0]!.supersededBy).toEqual([3]);
+    // T2 is a kept main row now, so T3's citation of it is skipped by
+    // pull-through (`keptIds.has`) — there is nothing left to pull.
+    expect(result.pulled).toHaveLength(0);
   });
 
   it("revives a cited skipped turn as an antecedent with a prompt-prefix pseudo-title", () => {
@@ -2015,7 +2056,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     ).toEqual([2, 3, 10]);
   });
 
-  it("resolves a corrector's out-of-window victim from the full-session set", () => {
+  it("resolves a corrector against a full-session victim, but no longer inherits that victim's grade", () => {
     const victim = turn({ id: 5, promptNumber: 5, type: "decision", title: "early premise", significanceGrade: 4, createdAtEpoch: era });
     const windowRows = [
       turn({ id: 15, promptNumber: 15, type: "decision", title: "overturns it", significanceGrade: 0, citesRecorded: true, createdAtEpoch: era + 600 }),
@@ -2027,10 +2068,16 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
       citations: structuredCitations({ 15: [[5, "supersedes"]] }),
     });
 
-    expect(rowFor(result, 15)?.effGrade).toBe(3);
-    // The out-of-window victim is still pulled in as the corrector's ↳ row.
-    expect(result.pulled.map((p) => p.turn.promptNumber)).toEqual([5]);
-    expect(result.pulled[0]!.effGrade).toBe(1);
+    // T15 is still resolved as a corrector against the full-session victim
+    // (spec §B) and is still kept — as a window endpoint — but its own G0
+    // stands (spec H1), not a promoted 3.
+    expect(rowFor(result, 15)?.effGrade).toBe(0);
+    // The victim's own G4 now clears the spine bar on its own merit, so it no
+    // longer qualifies for pull-through (effGrade ≤ 2) — and being outside the
+    // window, a main row was never an option for it either. An edge that used
+    // to surface a high-grade out-of-window victim by demoting it into
+    // pull-through range no longer can; that is the cost spec H4 names.
+    expect(result.pulled).toHaveLength(0);
   });
 
   it("returns an empty selection for a window with no candidate rows", () => {
@@ -2238,8 +2285,13 @@ describe("milestone selection on a mixed-era, multi-day arc (frozen fixture)", (
     result.kept.find((row) => row.turn.promptNumber === promptNumber);
 
   it("pins the exact set of main rows", () => {
+    // T7 and T20 are NEW relative to the pre-ticket-13 set (spec H1): both are
+    // graph victims, and the old victim-ineligibility short-circuit used to
+    // return `false` out of `isAlwaysKeep` before any OTHER bullet — reversed
+    // marker, era G4 — ever ran for them. With that short-circuit gone, each
+    // now qualifies on its own separate bullet, same as a non-victim would.
     expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([
-      1, 5, 6, 8, 9, 10, 12, 14, 18, 22, 23, 26,
+      1, 5, 6, 7, 8, 9, 10, 12, 14, 18, 20, 22, 23, 26,
     ]);
   });
 
@@ -2256,47 +2308,72 @@ describe("milestone selection on a mixed-era, multi-day arc (frozen fixture)", (
     // Era G4.
     expect(rowFor(12)?.effGrade).toBe(4);
     expect(rowFor(12)?.alwaysKeep).toBe(true);
-    // Correctors, promoted from legacy G2 and era G2 respectively.
-    expect(rowFor(8)?.effGrade).toBe(3);
+    // Correctors, kept at their own legacy G2 and era G2 — no longer promoted
+    // to G3 (spec H1). Each is admitted on the corrector bullet alone; neither
+    // clears the spine bar on its own grade.
+    expect(rowFor(8)?.effGrade).toBe(2);
     expect(rowFor(8)?.alwaysKeep).toBe(true);
-    expect(rowFor(22)?.effGrade).toBe(3);
+    expect(rowFor(8)?.spine).toBe(false);
+    expect(rowFor(22)?.effGrade).toBe(2);
     expect(rowFor(22)?.alwaysKeep).toBe(true);
+    expect(rowFor(22)?.spine).toBe(false);
   });
 
-  it("demotes only the turns an actual supersession names", () => {
-    // T7 fell to the legacy inline adapter; T9 carries the same tag and the same
-    // citer shape but its edge says `builds-on`, so it keeps its own row.
-    expect(result.kept.map((row) => row.turn.promptNumber)).not.toContain(7);
+  it("no longer demotes or excludes a superseded turn; the edge only annotates it (spec H1)", () => {
+    // T7 fell to the legacy inline adapter — a REAL graph victim, carrying
+    // `supersededBy: [8]` — and T9 carries the same tag and the same citer
+    // shape but its edge says `builds-on`, so it is never a graph victim at
+    // all (`supersededBy` absent). Before ticket 13 that distinction decided
+    // whether the turn got a row; now BOTH keep their own row regardless — T7
+    // on the reversed-marker bullet, same as T9. The edge fact still shows up,
+    // just as data, not as a visibility difference.
+    expect(rowFor(7)?.marker).toBe("reversed");
+    expect(rowFor(7)?.alwaysKeep).toBe(true);
+    expect(rowFor(7)?.supersededBy).toEqual([8]);
     expect(rowFor(9)?.marker).toBe("reversed");
     expect(rowFor(9)?.alwaysKeep).toBe(true);
-    // T20's G4 anchor claim dies with the demotion; T22 inherits it.
-    expect(result.kept.map((row) => row.turn.promptNumber)).not.toContain(20);
-    expect(rowFor(22)?.spine).toBe(true);
+    expect(rowFor(9)?.supersededBy).toBeUndefined();
+    // T20's G4 anchor claim is its own (spec H1: no floor) — it clears the
+    // era-G4 always-keep bullet AND the spine bar on its own merit. T22 is
+    // ALSO admitted, independently, on the corrector bullet — not by
+    // inheriting T20's slot.
+    expect(result.kept.map((row) => row.turn.promptNumber)).toContain(20);
+    expect(rowFor(20)?.effGrade).toBe(4);
+    expect(rowFor(20)?.spine).toBe(true);
+    expect(rowFor(20)?.supersededBy).toEqual([22]);
+    expect(rowFor(22)?.spine).toBe(false);
   });
 
   it("pins the ↳ antecedents, their owners and their back-links", () => {
+    // T7 and T20 are gone from `pulled` — each now keeps its own row instead
+    // (see the always-keep test above), so pull-through's `keptIds` guard
+    // skips them. What is left is exactly the non-victim antecedents.
     expect(
       result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber, p.effGrade]),
     ).toEqual([
       [2, 5, 1], // plain legacy causal reference
-      [7, 8, 1], // demoted victim, legacy adapter
       [13, 14, 2], // era G2 evidence
       [17, 18, 0], // skipped probe revived
-      [20, 22, 1], // demoted G4 victim, structured edge
       [21, 22, 2], // shared antecedent: earliest kept citer only
     ]);
-    // Back-links ride on the victims and on nobody else.
-    expect(result.pulled.filter((p) => p.supersededBy.length > 0).map((p) => [
-      p.turn.promptNumber,
-      p.supersededBy,
-    ])).toEqual([
+    // None of the remaining ↳ rows carry a back-link — the two turns that DID
+    // (T7, T20) moved to `kept`, where the data still populates (spec H3) even
+    // though today's main-row renderer does not yet print it (unchanged by
+    // this ticket; see `KeptMilestone.supersededBy`'s own doc comment).
+    expect(result.pulled.every((p) => p.supersededBy.length === 0)).toBe(true);
+    expect(
+      result.kept
+        .filter((row) => (row.supersededBy?.length ?? 0) > 0)
+        .map((row) => [row.turn.promptNumber, row.supersededBy]),
+    ).toEqual([
       [7, [8]],
       [20, [22]],
     ]);
     // T23 also cites T21, but a shared antecedent renders once.
     expect(result.pulled.filter((p) => p.citedByPromptNumber === 23)).toHaveLength(0);
     // A skipped turn has no title, so the ↳ label falls back to its prompt.
-    expect(result.pulled[3]!.label).toBe(
+    // Index 2, not 3: T7's removal from `pulled` shifted everything after it.
+    expect(result.pulled[2]!.label).toBe(
       "check whether the watchdog ever observes a frozen timestamp",
     );
   });
@@ -2320,14 +2397,26 @@ describe("milestone selection on a mixed-era, multi-day arc (frozen fixture)", (
 
   it("ranks the pool as kept rows plus the G2 band, and nothing below it", () => {
     const ranked = result.ranked.map((row) => row.turn.promptNumber);
-    expect(ranked).toHaveLength(14);
+    // 16, not 14: the pool gate (`!alwaysKeep && !spine && effGrade < 2`) never
+    // excludes an always-keep row regardless of its grade, so T7 (G1) and T20
+    // (G4) both enter the pool now that they are always-keep in their own
+    // right — the same rule that used to gate them out of `kept` gated them
+    // out of `ranked` too.
+    expect(ranked).toHaveLength(16);
+    expect(ranked).toContain(7);
+    expect(ranked).toContain(20);
     expect(ranked).toContain(13);
     expect(ranked).toContain(21);
-    for (const promptNumber of [3, 4, 7, 11, 15, 16, 19, 20, 24, 25]) {
+    for (const promptNumber of [3, 4, 11, 15, 16, 19, 24, 25]) {
       expect(ranked).not.toContain(promptNumber);
     }
-    // Score order never crosses a grade tier: the G4 anchor leads.
-    expect(result.ranked[0]!.turn.promptNumber).toBe(12);
+    // Score order never crosses a grade tier, but WITHIN the G4 tier T20 now
+    // outranks T12: T20 is cited by its own corrector (T22), which T12 is not,
+    // and that in-degree tie-break (spec §C) was never in play for T20 before
+    // — it could not even reach the pool. This is a genuine ranking inversion
+    // ticket 13 introduces, not a pre-existing one.
+    expect(result.ranked[0]!.turn.promptNumber).toBe(20);
+    expect(result.ranked[1]!.turn.promptNumber).toBe(12);
   });
 });
 
@@ -3649,18 +3738,25 @@ function turnDbId(db: Database, sessionId: number, promptNumber: number): number
   return record.id;
 }
 
+// `replaceTurnCitations` (the old generic body-free structured-edge write) was
+// retired under spec C6/ticket 06 in favour of a body-derived recompute, which
+// this test file's fixtures have no body prose for. Writing straight through
+// `writeMemoryEdges` — the same stable primitive `recomputeTurnCitedPairs`
+// itself now builds on — sidesteps that churn entirely.
 function citeTurns(
   db: Database,
   sessionId: number,
   citingPrompt: number,
   cites: Array<[number, CitationRelation]>,
 ): void {
-  replaceTurnCitations(
+  const citingId = turnDbId(db, sessionId, citingPrompt);
+  writeMemoryEdges(
     db,
-    turnDbId(db, sessionId, citingPrompt),
     cites.map(([promptNumber, relation]) => ({
-      id: turnDbId(db, sessionId, promptNumber),
+      citing: { kind: "turn" as const, id: citingId },
+      cited: { kind: "turn" as const, id: turnDbId(db, sessionId, promptNumber) },
       relation,
+      provenance: "judged" as const,
     })),
     ERA_BASE,
   );
@@ -3844,13 +3940,58 @@ describe("unified row renderer — row formats (spec §D)", () => {
     seedDesignArc(db);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
-    // T3 was superseded by T5: it renders as a casualty under its corrector,
-    // with the back-link that keeps a reader from reading it as current fact.
-    expect(out).toContain("      ↳ 🚫 T3 ⚖️ G1 Volume anchoring →被T5推翻");
     // A non-victim antecedent renders with no glyph and no back-link.
     expect(out).toContain("      ↳ T2 🔵 G2 12-14% error");
     // ↳ rows are title-only: the antecedent's desc never renders.
     expect(out).not.toContain("Sampled 200 cards");
+  });
+
+  it("still renders the →被T<n>推翻 back-link when a victim's own grade keeps it pulled (spec H1/H3)", () => {
+    // T3 in `seedDesignArc` is a poor fixture for this now: its own G3 clears
+    // the spine bar (spec H1: no floor), so it becomes its OWN row instead of
+    // a ↳ antecedent (see the frozen-shapes test below) — main rows do not
+    // print the back-link today. This fixture keeps the victim's own grade
+    // LOW enough that it still qualifies for pull-through on its own merit,
+    // which is what still proves the back-link mechanism survives. A leading
+    // origin turn keeps the victim (T2) from being a window endpoint itself,
+    // which would keep it regardless of grade and defeat the point.
+    const db = createDatabase(":memory:");
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "开题",
+        title: "Opened the question",
+        content: "Started the volume-count investigation.",
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "discovery",
+        significanceGrade: 1,
+        userPrompt: "先猜个数字",
+        title: "Guessed the volume count",
+        content: "An early, low-confidence guess.",
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "推翻猜测",
+        title: "Measured the real count",
+        content: "Corrected the earlier guess with a real measurement.",
+        createdAtEpoch: ERA_BASE + 120,
+      }),
+    ];
+    const session = seedArcSession(db, rows);
+    citeTurns(db, session.id, 3, [[2, "supersedes"]]);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    expect(out).toContain(
+      "      ↳ 🚫 T2 🔵 G1 Guessed the volume count →被T3推翻",
+    );
   });
 
   it("collapses a harness-injected prompt to a marker instead of spending row budget", () => {
@@ -3959,9 +4100,10 @@ describe("unified row renderer — row formats (spec §D)", () => {
     expect(cells).toHaveLength(7);
     expect(cells[5]).toBe("G3");
     // The turn table prints the SAME effGrade the arc view does — T3 was
-    // superseded, so both surfaces show it demoted rather than at its stored 3.
+    // superseded, but an edge no longer moves a grade (spec H1), so both
+    // surfaces show it at its own stored 3, not demoted.
     expect(out.split("\n").find((line) => line.startsWith("T3 |"))!.split(" | ")[5]).toBe(
-      "G1",
+      "G3",
     );
   });
 
@@ -4069,10 +4211,60 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
   });
 
   it("lets a spine row keep two ↳ antecedents intact inside the cap", () => {
+    // `seedDesignArc`'s own T5 no longer pulls two antecedents: its second
+    // citation target (T3) now clears the spine bar on its own G3 (spec H1),
+    // so it renders as its own row instead of a ↳ line (see the frozen-shapes
+    // test). This bespoke fixture reuses the same two content bodies, wired as
+    // plain non-victim citations under a separate spine row, to keep testing
+    // what this test is actually about — the token cap, not supersession. A
+    // leading origin turn keeps the two antecedents from being window
+    // endpoints themselves, which would pull them out of `pulled` for free.
     const db = createDatabase(":memory:");
-    seedDesignArc(db);
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "开题",
+        title: "Framed the slicing problem",
+        content: "Opened the arc: what does downstream actually consume?",
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "discovery",
+        significanceGrade: 2,
+        userPrompt: "先量误差",
+        title: "12-14% error",
+        content: "Sampled 200 cards; the error is structural, not noise.",
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "discovery",
+        significanceGrade: 1,
+        userPrompt: "按卷号锚",
+        title: "Volume anchoring",
+        content: "Anchored slices on volume numbers.",
+        createdAtEpoch: ERA_BASE + 120,
+      }),
+      turn({
+        promptNumber: 4,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "没有卷数怎么办",
+        title: "Cursor slicing",
+        content: "User questioned whether volume numbers are even needed downstream.",
+        createdAtEpoch: ERA_BASE + 180,
+      }),
+    ];
+    const session = seedArcSession(db, rows);
+    citeTurns(db, session.id, 4, [
+      [2, "evidence-for"],
+      [3, "evidence-for"],
+    ]);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
-    const block = unitBlockFor(out, 5);
+    const block = unitBlockFor(out, 4);
 
     // The 100-token cap could not have fitted this: a full spine row plus two
     // ~25-32-token antecedents overruns it, so both ↳ rows would have folded
@@ -4978,11 +5170,23 @@ describe("unified row renderer — frozen shapes", () => {
     seedDesignArc(db);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
+    // Before ticket 13, T3 (its own stored G3) was floored to G1 by the
+    // supersedes edge and rendered as a ↳ casualty under T5 with the
+    // →被T5推翻 back-link. Spec H1 removes that floor: T3's own G3 clears the
+    // spine bar, so it now renders as its OWN row, in prompt order ahead of
+    // T5 — and, since main rows do not print the back-link (pre-existing, not
+    // changed by this ticket), the →被T5推翻 text is gone from this output
+    // entirely, even though `KeptMilestone.supersededBy` still carries it as
+    // data (see the dedicated back-link test above).
+    //
+    // T2 also moves: T3 cites it too (evidence-for), and a shared antecedent
+    // homes under its EARLIEST kept citer — now T3, not T5, since T3 itself
+    // is kept where it used to be excluded.
     expect(bodyRows(out)).toEqual([
       "      T1 ⚖️ G4 卷号锚定要解决什么 → Framed the slicing problem  ✏️slicing.md",
-      "      T5 ⚖️ G3 没有卷数怎么办 → Cursor slicing",
+      "      T3 ⚖️ G3 按卷号锚 → Volume anchoring →被T5推翻",
       "      ↳ T2 🔵 G2 12-14% error",
-      "      ↳ 🚫 T3 ⚖️ G1 Volume anchoring →被T5推翻",
+      "      T5 ⚖️ G3 没有卷数怎么办 → Cursor slicing",
       "   🏁 T6 🟣 G2 发布 → 0.9.0 released  ✏️package.json,plugin.json",
       '        … +1 more @ within T4..T4',
     ]);

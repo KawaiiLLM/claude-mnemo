@@ -82,9 +82,9 @@ export interface TimelineView {
    */
   milestonePulled: PulledAntecedent[];
   /**
-   * effGrade per turn DB id (spec §C truth table, after victim demotion and
-   * corrector promotion), so every view can print the grade column. Turns with
-   * no main-row candidacy at all (compact markers) are absent.
+   * effGrade per turn DB id (spec §C truth table; an edge no longer moves it,
+   * spec H1), so every view can print the grade column. Turns with no main-row
+   * candidacy at all (compact markers) are absent.
    */
   turnEffGrades: ReadonlyMap<number, number>;
   milestoneDayGroups: MilestoneDayGroup[];
@@ -116,10 +116,9 @@ export interface TimelineView {
   orphanAnchors: OrphanAnchorRow[];
   /**
    * Milestone-row selection for the era window (ticket 03), from the SAME
-   * `selectMilestoneTurns` the legacy body calls — admission, victim demotion
-   * and corrector promotion all run unchanged, just over `eraWindowTurns`
-   * instead of the legacy window. In prompt order. Empty with no era cutoff or
-   * no eligible era turn.
+   * `selectMilestoneTurns` the legacy body calls — the same admission rules,
+   * just over `eraWindowTurns` instead of the legacy window. In prompt order.
+   * Empty with no era cutoff or no eligible era turn.
    */
   eraKeptMilestones: KeptMilestone[];
   /**
@@ -349,7 +348,7 @@ export interface KeptMilestone {
   turn: TurnRecord;
   /** effGrade + tie-break (spec §C). Ordering only; never crosses a grade tier. */
   score: number;
-  /** The truth-table grade AFTER victim demotion / corrector promotion. */
+  /** The truth-table grade (spec §C); an edge no longer moves it (spec H1). */
   effGrade: number;
   /** Kept for a structural reason, so a budget may degrade it but never drop it. */
   alwaysKeep: boolean;
@@ -357,9 +356,12 @@ export interface KeptMilestone {
   spine: boolean;
   marker: MilestoneMarker;
   /**
-   * Prompt numbers of the turns that superseded this one, ascending. Present
-   * only on a kept row that is itself a victim (a victim can still be kept as a
-   * window endpoint); the renderer turns it into the `→被T<n>推翻` back-link.
+   * Prompt numbers of the turns that superseded this one, ascending. Present on
+   * any kept row that is itself a victim, however it got kept — its own grade
+   * decided that (spec H1), not the edge. Carried for parity with
+   * `PulledAntecedent.supersededBy`; today's renderer only turns the latter into
+   * the `→被T<n>推翻` back-link, since a spine/always-keep main row does not yet
+   * print one (pre-existing, unchanged by this ticket).
    */
   supersededBy?: number[];
 }
@@ -428,9 +430,8 @@ export interface MilestoneSelection {
   overflowByDay: OverflowHint[];
   /**
    * effGrade for EVERY main-row candidate in the window, keyed by DB id — the
-   * post-demotion/post-promotion value, not the stored grade. The turns view
-   * renders a grade column off this, so its `G` cell agrees with the arc view
-   * instead of re-deriving a raw grade that a supersession has already voided.
+   * truth-table value (spec §C), not the stored grade. The turns view renders a
+   * grade column off this, so its `G` cell agrees with the arc view.
    */
   effGradeByTurnId: Map<number, number>;
 }
@@ -978,7 +979,7 @@ function inlineCitationFallback(
  * Session-local DISTINCT-citer in-degree, derived from the citation map the
  * caller already holds. Same result as `getSessionCitationInDegree`, without a
  * second pass over the DB — selection reads the map once and reuses it for
- * in-degree, victim demotion and pull-through alike.
+ * in-degree, the correction graph and pull-through alike.
  */
 function citationInDegree(
   citations: ReadonlyMap<number, EffectiveCitations>,
@@ -1049,9 +1050,12 @@ export interface CorrectionGraph {
   /** DB ids of turns that supersede at least one resolvable predecessor. */
   correctors: Set<number>;
   /**
-   * DB ids of superseded turns. A victim resolved from OUTSIDE the window is
-   * included: it holds no main-row slot to lose, but its demoted grade still
-   * decides whether pull-through revives it as a `↳` antecedent.
+   * DB ids of superseded turns. Annotation only (spec H1): a victim's grade and
+   * spine eligibility are untouched by this set, which now drives only the
+   * renderer's `→被T<n>推翻` back-link and the `rolled-back` orphan signal. A
+   * victim resolved from OUTSIDE the window is still included, so a ranged
+   * view's back-link is correct even when the corrector that named it sits
+   * outside the range.
    */
   supersededVictims: Set<number>;
   /** Victim DB id → superseding DB ids, ascending by the superseder's prompt number. */
@@ -1059,16 +1063,19 @@ export interface CorrectionGraph {
 }
 
 /**
- * Builds the supersession graph (spec §B/§C). A turn is a *corrector* when it
+ * Builds the supersession graph (spec §B, H1). A turn is a *corrector* when it
  * carries a `supersedes` edge to an earlier same-session turn; that turn is the
- * *victim*, which selection demotes to effGrade ≤ 1 and strips of spine
- * eligibility, and which the renderer marks with a `→被T<n>推翻` back-link.
+ * *victim*. The graph is an annotation, not a scorer (spec H1): a victim keeps
+ * the grade it was given and is exactly as eligible to anchor a milestone
+ * selection as any other turn. What the graph still drives is display — a
+ * corrector's unconditional always-keep slot, the renderer's `→被T<n>推翻`
+ * back-link, and the `rolled-back` orphan signal (spec D11) — never a grade.
  *
  * Victimhood comes off the EDGE, not off the victim's tags. The previous model
  * required the victim to already carry a `rolled-back` tag before any of this
  * fired, which meant a partial reversal (the common case — the corrector knows
  * what it overturned, the victim does not know it was overturned) produced
- * neither a demotion nor a back-link.
+ * neither a back-link nor a corrector always-keep slot.
  *
  * The legacy adapter covers pre-era citers whose citations came from INLINE
  * prose, which carries no relation: for those, citing a turn that is *marked*
@@ -1081,11 +1088,12 @@ export interface CorrectionGraph {
  * the cutoff and extracted after it. Such a turn's `depends-on` / `evidence-for`
  * edge states a relation, and that relation is not `supersedes`; reading the
  * victim's tag over it would invent a correction the extractor declined to
- * record, demoting the target and promoting a mere consumer.
+ * record, mislabeling a mere consumer as a corrector.
  *
  * A cited victim is matched first against `turns`, then via `resolveCited` (the
  * full-session set), so a ranged view whose corrector cites a victim OUTSIDE the
- * window still promotes that corrector and still demotes that victim.
+ * window still gives that corrector its always-keep slot and still renders the
+ * victim's back-link wherever the victim itself is shown.
  */
 export function buildCorrectionGraph(
   turns: readonly TurnRecord[],
@@ -1529,18 +1537,23 @@ export function compareMilestoneRank(
 }
 
 /**
- * Grade-first milestone selection (spec §C). The six steps run in this order and
+ * Grade-first milestone selection (spec §C, H1). The steps run in this order and
  * the order is load-bearing:
  *
- *   ① victim demotion (effGrade → ≤1, spine eligibility revoked)
- *   ② corrector promotion (effGrade → ≥3) — AFTER ①, so a corrector that was
- *     itself later overturned stays demoted rather than anchoring the arc
- *   ③ always-keep: endpoints ∪ non-victim correctors ∪ reversed-with-no-corrector
- *     ∪ era G4; `type='compact'` is in none of it and holds no kept slot
- *   ④ spine admission: effGrade ≥ 3
- *   ⑤ pull-through: effGrade ≤ 2 turns (INCLUDING skipped ones) cited by a kept
+ *   ① always-keep: endpoints ∪ correctors ∪ reversed (spec H1: no longer
+ *     conditioned on having no corrector — that condition was an accident of
+ *     the removed victim-ineligibility short-circuit, which used to return
+ *     false for a victim before this bullet ever ran) ∪ era G4;
+ *     `type='compact'` is in none of it and holds no kept slot
+ *   ② spine admission: effGrade ≥ 3 — the truth-table grade alone. An edge is
+ *     an annotation and does not move it (spec H1): a `supersedes` edge neither
+ *     floors its victim's grade nor lifts its corrector's, so a superseded turn
+ *     is admitted on its own merit exactly like any other. The always-keep
+ *     bullet above is the only place the graph still decides anything, and only
+ *     for structural inclusion, never for grade.
+ *   ③ pull-through: effGrade ≤ 2 turns (INCLUDING skipped ones) cited by a kept
  *     row become its ↳ antecedents
- *   ⑥ budget/degradation — NOT here. Selection returns the whole eligible set
+ *   ④ budget/degradation — NOT here. Selection returns the whole eligible set
  *     plus `ranked`; the unified renderer (ticket 03) does the cutting.
  */
 export function selectMilestoneTurns(view: {
@@ -1592,16 +1605,11 @@ export function selectMilestoneTurns(view: {
     taskCausalityEraCutoffEpoch: eraCutoff,
   });
 
-  // ① + ②, in that order: a corrector that is itself a victim keeps the demotion.
-  const effGradeOf = (turn: TurnRecord): number => {
-    const raw = milestoneEffGrade(turn, eraCutoff);
-    if (graph.supersededVictims.has(turn.id)) {
-      return Math.min(raw, 1);
-    }
-    return graph.correctors.has(turn.id) ? Math.max(raw, 3) : raw;
-  };
+  // An edge annotates; it does not move a grade (spec H1). No floor for a
+  // victim, no ceiling-lift for a corrector — the truth-table grade stands.
+  const effGradeOf = (turn: TurnRecord): number => milestoneEffGrade(turn, eraCutoff);
 
-  // ③ endpoints: window first candidate + window last *titled* candidate.
+  // Part of ①: window first candidate + window last *titled* candidate.
   const endpoints = new Set<number>([seq[0]!.id]);
   const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
   endpoints.add((lastTitled ?? seq[seq.length - 1]!).id);
@@ -1612,20 +1620,17 @@ export function selectMilestoneTurns(view: {
     return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
   };
 
-  const isVictim = (turn: TurnRecord): boolean => graph.supersededVictims.has(turn.id);
   const isAlwaysKeep = (turn: TurnRecord): boolean => {
     if (endpoints.has(turn.id)) {
       return true;
-    }
-    if (isVictim(turn)) {
-      // A victim is already carried by its corrector's ↳ row; it never anchors.
-      return false;
     }
     if (graph.correctors.has(turn.id)) {
       return true;
     }
     if (milestoneMarker(turn) === "reversed") {
-      // Reversed with nobody correcting it: the dead end IS the record.
+      // Unconditional (spec H1): a corrector no longer suppresses this, so a
+      // legacy turn that is BOTH tag-reversed and edge-corrected is kept on
+      // this bullet too, not demoted and pulled under its corrector.
       return true;
     }
     return (
@@ -1638,14 +1643,14 @@ export function selectMilestoneTurns(view: {
       .map((id) => universeById.get(id)?.promptNumber ?? inWindowById.get(id)?.promptNumber)
       .filter((promptNumber): promptNumber is number => promptNumber !== undefined);
 
-  // ③ + ④: the eligible main rows, plus the wider scored pool for ticket 03.
+  // ① + ②: the eligible main rows, plus the wider scored pool for ticket 03.
   const keptIds = new Set<number>();
   const rows: KeptMilestone[] = [];
   const poolRows: KeptMilestone[] = [];
   for (const turn of seq) {
     const effGrade = effGradeOf(turn);
     const alwaysKeep = isAlwaysKeep(turn);
-    const spine = !isVictim(turn) && effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
+    const spine = effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
     if (!alwaysKeep && !spine && effGrade < MILESTONE_POOL_MIN_EFF_GRADE) {
       continue;
     }
@@ -1669,7 +1674,7 @@ export function selectMilestoneTurns(view: {
 
   const ranked = [...poolRows].sort(compareMilestoneRank);
 
-  // ⑤ pull-through. Rows are already in prompt order, so the first row to claim
+  // ③ pull-through. Rows are already in prompt order, so the first row to claim
   // an antecedent IS its earliest citer — a shared antecedent renders once.
   const pulled: PulledAntecedent[] = [];
   const pulledIds = new Set<number>();
@@ -1941,10 +1946,10 @@ export function buildTimelineView(
   const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
-  // One read for BOTH selections: in-degree, victim demotion and pull-through
-  // all consume this map (spec §B), and the legacy and era selections must see
-  // the identical snapshot for the same reason settlement hands its own
-  // snapshot in rather than paying for a second read.
+  // One read for BOTH selections: in-degree, the correction graph and
+  // pull-through all consume this map (spec §B), and the legacy and era
+  // selections must see the identical snapshot for the same reason settlement
+  // hands its own snapshot in rather than paying for a second read.
   const citations = preloadedCitations ?? getSessionEffectiveCitations(db, session.id);
   const milestoneSelection = selectMilestoneTurns({
     session,
@@ -1996,8 +2001,8 @@ export function buildTimelineView(
     : [];
   // Milestone rows nested under a segment line (ticket 03): the SAME selection
   // machinery the legacy body calls, over the era window instead of the legacy
-  // one — admission, victim demotion and corrector promotion are unchanged.
-  // Gated with the spine itself, since neither is spent outside the arc view.
+  // one — admission is unchanged. Gated with the spine itself, since neither is
+  // spent outside the arc view.
   const eraMilestoneSelection = renderSegments
     ? selectMilestoneTurns({
         session,
@@ -2476,9 +2481,20 @@ function renderUnitLines(
       ? `${prompt} → ${title}`
       : `${prompt}${title}`;
   const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
+  // Spec H3: the back-link survives the removal of the grade coupling, and
+  // surviving means appearing where the row now IS. Before ticket 13 a
+  // superseded turn could only reach a main row through the endpoint bullet —
+  // every other path demoted or excluded it — so this line reads as new code
+  // when it is really the same fact rendered at the position the row moved to.
+  // Rendering it only under ↳ would have deleted the back-link from output for
+  // the common case, which is the regression H3 exists to forbid.
+  const mainBackLink =
+    milestone.supersededBy && milestone.supersededBy.length > 0
+      ? ` →被T${milestone.supersededBy.join("/T")}推翻`
+      : "";
 
   const lines = [
-    `   ${glyph} T${milestone.turn.promptNumber} ${typeEmoji(milestone.turn.type)} G${milestone.effGrade} ${head}${filesTail}`.trimEnd(),
+    `   ${glyph} T${milestone.turn.promptNumber} ${typeEmoji(milestone.turn.type)} G${milestone.effGrade} ${head}${filesTail}${mainBackLink}`.trimEnd(),
   ];
 
   if (trim.showDesc) {
