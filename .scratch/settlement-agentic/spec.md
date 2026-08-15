@@ -229,7 +229,24 @@ The three unsafe rows need decisions before implementation: a stable idempotency
 
 **G6.** Each settlement write tool must carry an **unforgeable job identity**. The atomic write-back validated the job's claim generation and claimed status at the opening of its transaction and discarded the entire result when the lease had been reclaimed under a new generation. The public write tools have no such capability, so a stale attempt that lost its lease would keep committing business writes and fail only at the final completion compare-and-set. The job id and claim generation must be injected by the in-process server closure — never passed by the model — and checked for claimed ownership **inside each tool's own write transaction**.
 
-**G7.** The completion gate must **prove segmentation ran**. Checking empty fields cannot: a window whose per-turn fields are all written but which crashed before the segment tool has no empty fields, so a retry sees nothing owed and marks it done, permanently unsegmented. A non-empty `type` is evidence the first duty completed, never the third. This needs either a persisted per-phase disposition on the job, or a per-turn verdict recording that the turn was assigned to a segment or deliberately left out.
+**G7.** The completion gate must **prove segmentation ran**. Checking empty fields cannot: a window whose per-turn fields are all written but which crashed before the segment tool has no empty fields, so a retry sees nothing owed and marks it done, permanently unsegmented. A non-empty `type` is evidence the first duty completed, never the third.
+
+What has to be proven is a **state predicate over the window**, not a recorded event. A `segmentation_complete` flag is the agent's own attestation, and G2's rule is that the completion gate trusts nobody — the flag can be true while turns are missing. A flag the *server* sets only after verifying coverage would be correct, but then the per-turn facts are what prove it and the flag is a redundant cache that can desynchronise. It is not added.
+
+The positive fact is already persisted and add-only: segment membership, keyed `(segment, turn)`, with no removal path anywhere in the codebase. The one thing the data model cannot express is the **negative verdict** — this turn was reviewed and deliberately belongs to no segment. So the minimal addition records only the exceptions, not an assigned/unassigned row per turn:
+
+```
+note_settlement_segment_exclusions(
+  job_id, turn_id, created_at_epoch,
+  PRIMARY KEY (job_id, turn_id)
+)
+```
+
+Completion becomes an anti-join recomputed over the frozen window, run inside the same transaction as the completion compare-and-set and therefore under G6's generation fence. Every segmentation-eligible turn must satisfy one of: it is a segment member; it carries a no-segment exclusion for this job; or it is `status = skipped` — a skipped turn has no information gain and no type, so it is never a segment member and its status is already the negative fact.
+
+Crash semantics then fall out rather than being designed: membership written but the exclusion not yet leaves the anti-join short, so the window stays incomplete until a retry fills it.
+
+The exclusion is **job-scoped and must not become a column on the turn.** The window is a frozen work unit, and A2a requires a partial-window audit surface; a turn-level column would lose which window issued the negative verdict and would stop a later repair job from re-adjudicating it.
 
 ### H. Milestone selection decouples from edges
 
