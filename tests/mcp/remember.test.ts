@@ -100,12 +100,11 @@ describe("remember tool routing and validation", () => {
     ).toThrow();
   });
 
-  test("public schema distinguishes an explicit null (clear) from an absent field (omit) on grade/type/title/content/insight (D10)", () => {
+  test("public schema distinguishes an explicit null (clear) from an absent field (omit) on grade/title/content/insight (D10)", () => {
     // Explicit null parses through — the clear expression the ticket adds.
     const cleared = rememberInputSchema.parse({
       id: `T${turnId}`,
       grade: null,
-      type: null,
       title: null,
       content: null,
       insight: null,
@@ -113,12 +112,11 @@ describe("remember tool routing and validation", () => {
     expect(cleared).toEqual({
       id: `T${turnId}`,
       grade: null,
-      type: null,
       title: null,
       content: null,
       insight: null,
     });
-    for (const key of ["grade", "type", "title", "content", "insight"] as const) {
+    for (const key of ["grade", "title", "content", "insight"] as const) {
       expect(Object.prototype.hasOwnProperty.call(cleared, key)).toBe(true);
       expect(cleared[key]).toBeNull();
     }
@@ -126,10 +124,22 @@ describe("remember tool routing and validation", () => {
     // Omitting the same fields leaves them absent from the parsed object —
     // never coerced to null, which would collapse omit into clear.
     const omitted = rememberInputSchema.parse({ id: `T${turnId}` });
-    for (const key of ["grade", "type", "title", "content", "insight"] as const) {
+    for (const key of ["grade", "title", "content", "insight"] as const) {
       expect(Object.prototype.hasOwnProperty.call(omitted, key)).toBe(false);
       expect(omitted[key]).toBeUndefined();
     }
+  });
+
+  // Multi-valued since ticket 02 (spec B5): `type` has no separate null-clear
+  // value the way grade/title/content/insight do — `[]` already means "no
+  // type" (spec B7), so it is both the empty state and the explicit clear.
+  test("public schema treats an empty type array as a clear, omission as leave-alone", () => {
+    const cleared = rememberInputSchema.parse({ id: `T${turnId}`, type: [] });
+    expect(cleared.type).toEqual([]);
+
+    const omitted = rememberInputSchema.parse({ id: `T${turnId}` });
+    expect(Object.prototype.hasOwnProperty.call(omitted, "type")).toBe(false);
+    expect(omitted.type).toBeUndefined();
   });
 
   test("updates an existing turn by T{id}", () => {
@@ -138,7 +148,7 @@ describe("remember tool routing and validation", () => {
       title: "Fix auth race",
       content: "Persists the extracted turn through its stable DB id.",
       insight: "- mutex added",
-      type: "fix",
+      type: ["fix"],
       tags: ["auth", "concurrency"],
       grade: 2,
     });
@@ -160,7 +170,7 @@ describe("remember tool routing and validation", () => {
       title: "Earlier estimate",
       content: "Recorded the initial estimate.",
       insight: "- initial",
-      type: "research",
+      type: ["research"],
       tags: ["topic:estimate"],
       grade: 2,
     });
@@ -178,7 +188,7 @@ describe("remember tool routing and validation", () => {
       id: `T${currentTurnId}`,
       title: "Corrected estimate",
       content: `Evidence disproved [T${turnId}].`,
-      type: "research",
+      type: ["research"],
       tags: ["correction", "topic:estimate"],
       grade: 2,
       regrade: { id: `T${turnId}`, grade: 1 },
@@ -272,7 +282,7 @@ describe("remember tool routing and validation", () => {
       title: "Fix auth race",
       content: "Persists the extracted turn through its stable DB id.",
       insight: "- mutex added",
-      type: "fix",
+      type: ["fix"],
       tags: ["auth", "concurrency"],
       grade: 2,
     });
@@ -548,7 +558,7 @@ describe("remember tool routing and validation", () => {
       id: `T${laterId}`,
       title: "Revert the inversion",
       content: `Reverted the fg inversion from T&lt;${turnId}&gt; and bare T${turnId} due to arrow contamination.`,
-      type: "fix",
+      type: ["fix"],
       grade: 2,
     });
 
@@ -565,7 +575,7 @@ describe("remember tool routing and validation", () => {
       id: `T${turnId}`,
       title: "Fix auth race",
       content: "Persists the extracted turn.",
-      type: "fix",
+      type: ["fix"],
       tags: ["topic:a&amp;b", "rolled-back"],
       grade: 2,
     });
@@ -612,7 +622,7 @@ describe("remember tool routing and validation", () => {
   test("type/tags-only turn remember yields skipped, not extracted (no phantom)", () => {
     rememberTool(db, {
       id: `T${turnId}`,
-      type: "fix",
+      type: ["fix"],
       tags: ["auth"],
       grade: 0,
     });
@@ -626,7 +636,7 @@ describe("remember tool routing and validation", () => {
       id: `T${turnId}`,
       title: "Fix auth race",
       content: "Initial extracted content.",
-      type: "fix",
+      type: ["fix"],
       grade: 2,
     });
 
@@ -647,7 +657,7 @@ describe("remember tool routing and validation", () => {
       id: `T${turnId}`,
       title: "Fix auth race",
       content: "Initial extracted content.",
-      type: "fix",
+      type: ["fix"],
       tags: ["auth"],
       grade: 2,
     });
@@ -659,35 +669,37 @@ describe("remember tool routing and validation", () => {
     expect(turn.significanceGrade).toBe(3);
     expect(turn.title).toBe("Fix auth race");
     expect(turn.content).toBe("Initial extracted content.");
-    expect(turn.type).toBe("fix");
+    expect(turn.type).toEqual(["fix"]);
     expect(turn.tags).toEqual(["auth"]);
   });
 
-  test("an explicit null clears grade and type, distinguishable from omitting them (D10)", () => {
+  test("an explicit null clears grade; an explicit [] clears type — both distinguishable from omitting them (D10)", () => {
     rememberTool(db, {
       id: `T${turnId}`,
       title: "Fix auth race",
       content: "Initial extracted content.",
-      type: "fix",
+      type: ["fix"],
       grade: 2,
     });
 
     // Omitting grade/type leaves them as they were …
     rememberTool(db, { id: `T${turnId}`, content: "Still investigating." });
     expect(getTurn(db, sessionId, 1)!.significanceGrade).toBe(2);
-    expect(getTurn(db, sessionId, 1)!.type).toBe("fix");
+    expect(getTurn(db, sessionId, 1)!.type).toEqual(["fix"]);
 
-    // … an explicit null clears them, and nothing else on the row moves.
+    // … an explicit null clears grade, an explicit [] clears type (spec B7:
+    // [] already means "no type", so it is type's own clear expression), and
+    // nothing else on the row moves.
     const result = rememberTool(db, {
       id: `T${turnId}`,
       grade: null,
-      type: null,
+      type: [],
     });
 
     expect(result.content[0]?.text).toContain(`Updated turn T${turnId}`);
     const turn = getTurn(db, sessionId, 1)!;
     expect(turn.significanceGrade).toBeNull();
-    expect(turn.type).toBeNull();
+    expect(turn.type).toEqual([]);
     expect(turn.title).toBe("Fix auth race");
     expect(turn.content).toBe("Still investigating.");
   });
@@ -698,7 +710,7 @@ describe("remember tool routing and validation", () => {
       title: "Fix auth race",
       content: "Initial extracted content.",
       insight: "- mutex added",
-      type: "fix",
+      type: ["fix"],
       grade: 2,
     });
 
@@ -715,7 +727,7 @@ describe("remember tool routing and validation", () => {
     expect(turn.content).toBeNull();
     expect(turn.insight).toBeNull();
     // Fields not mentioned in the clearing call are untouched.
-    expect(turn.type).toBe("fix");
+    expect(turn.type).toEqual(["fix"]);
     expect(turn.significanceGrade).toBe(2);
   });
 
@@ -739,7 +751,7 @@ describe("remember tool routing and validation", () => {
     const result = rememberTool(db, {
       id: `T${turnId}`,
       title: "Fix auth race",
-      type: "bugfix",
+      type: ["bugfix"],
       grade: 2,
     });
 
@@ -755,19 +767,19 @@ describe("remember tool routing and validation", () => {
     const result = rememberTool(db, {
       id: `T${turnId}`,
       title: "Fix auth race",
-      type: "fix",
+      type: ["fix"],
       grade: 2,
     });
 
     expect(result.content[0]?.text).toContain(`Updated turn T${turnId}`);
-    expect(getTurn(db, sessionId, 1)!.type).toBe("fix");
+    expect(getTurn(db, sessionId, 1)!.type).toEqual(["fix"]);
   });
 
   test("turn remember with a title yields extracted status", () => {
     rememberTool(db, {
       id: `T${turnId}`,
       title: "Fix auth race",
-      type: "fix",
+      type: ["fix"],
       grade: 2,
     });
 
@@ -791,7 +803,7 @@ describe("remember tool routing and validation", () => {
       id: `T${laterId}`,
       title: "Revert the inversion",
       content: `Reverted the fg inversion from T${turnId} due to arrow contamination.`,
-      type: "fix",
+      type: ["fix"],
       grade: 2,
     });
 
@@ -836,7 +848,7 @@ describe("remember tool routing and validation", () => {
       id: `T${laterId}`,
       title: "Unrelated work",
       content: `Incidental mention of T${otherTurnId} and a forward T999999 ref.`,
-      type: "implement",
+      type: ["implement"],
       grade: 1,
     });
 

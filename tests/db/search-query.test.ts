@@ -152,3 +152,81 @@ describe("searchMemory tag filter", () => {
     expect(searchMemory(db, { tag: "topic:svg_filter" })).toEqual([]);
   });
 });
+
+// ticket 02 (spec B5/B6): `type` is multi-valued now, matched the same way
+// `tag` already is — a queried word must match ANY element of the stored
+// list, not the whole list as a unit.
+describe("searchMemory type filter (ticket 02, spec B5)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    const session = upsertSession(db, {
+      contentSessionId: "session-type-filter",
+      project: "claude-mnemo",
+      title: "Type filter session",
+      content: "Holds a multi-valued turn",
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    saveTurn(db, {
+      sessionId: session.id,
+      promptNumber: 1,
+      userPrompt: "Ship the release and review the fix",
+      assistantResponse: "Reviewed the fix, then shipped it.",
+      title: "Multi-valued turn",
+      content: "Carries two stated activities",
+      insight: null,
+      type: ["review", "ops"],
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 110,
+      updatedAtEpoch: null,
+      observations: [],
+    });
+
+    saveTurn(db, {
+      sessionId: session.id,
+      promptNumber: 2,
+      userPrompt: "Unrelated follow-up",
+      assistantResponse: "No activity stated here.",
+      title: "Untyped turn",
+      content: "Untyped turn",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 120,
+      updatedAtEpoch: null,
+      observations: [],
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("matches a word that is one of several stored values, not the whole list", () => {
+    const byFirst = searchMemory(db, { scope: "turns", type: "review" });
+    expect(byFirst.some((r) => r.title === "Multi-valued turn")).toBe(true);
+
+    const bySecond = searchMemory(db, { scope: "turns", type: "ops" });
+    expect(bySecond.some((r) => r.title === "Multi-valued turn")).toBe(true);
+
+    // The untyped turn never matches either word.
+    expect(byFirst.some((r) => r.title === "Untyped turn")).toBe(false);
+    expect(bySecond.some((r) => r.title === "Untyped turn")).toBe(false);
+  });
+
+  test("a word the turn never stated does not match", () => {
+    expect(
+      searchMemory(db, { scope: "turns", type: "design" }).some(
+        (r) => r.title === "Multi-valued turn",
+      ),
+    ).toBe(false);
+  });
+});

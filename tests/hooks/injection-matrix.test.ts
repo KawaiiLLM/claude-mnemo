@@ -52,14 +52,14 @@ describe("SessionStart injection matrix", () => {
           session_id, prompt_number, status, user_prompt,
           assistant_response, title, type, created_at_epoch
         ) VALUES (?, 1, 'extracted', 'prior prompt', 'prior response',
-          'Prior milestone', 'feature', 1700000010)`,
+          'Prior milestone', '["feature"]', 1700000010)`,
       ).run(prior.id);
       db.query(
         `INSERT INTO turns (
           session_id, prompt_number, status, user_prompt,
           assistant_response, title, type, created_at_epoch
         ) VALUES (?, 1, 'extracted', 'current prompt', 'current response',
-          'Current milestone', 'feature', 1700000110)`,
+          'Current milestone', '["feature"]', 1700000110)`,
       ).run(current.id);
       createRuleStore(db).create({
         name: `matrix-rule-${source}`,

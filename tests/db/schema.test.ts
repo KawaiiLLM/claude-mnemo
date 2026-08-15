@@ -14,12 +14,13 @@ import {
 import { createSegment } from "../../src/db/segments";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { runTranscriptPathBackfill } from "../../src/db/transcript-path-backfill";
-import { getTurnById } from "../../src/db/turns";
+import { getTurn, getTurnById } from "../../src/db/turns";
 import * as searchModule from "../../src/db/search";
 import {
   resolveSessionTranscriptPath,
   resolveTranscriptPath,
 } from "../../src/shared/paths";
+import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
 
 describe("initializeSchema", () => {
   let db: Database;
@@ -220,6 +221,16 @@ describe("initializeSchema", () => {
   });
 
   test("adds significance_grade to an existing turns table without backfilling old rows", () => {
+    // `content_prompt_id`/`user_prompt`/`title`/`content`/`insight`/`type`/
+    // `tags`/`files_read`/`files_modified`/`tool_call_count` are day-one
+    // columns with no ALTER migration anywhere in this file (unlike
+    // `significance_grade`, which this test exercises) — no real database
+    // has ever existed without them, so they are included here even though
+    // this fixture predates every OTHER later column. Ticket 02's
+    // `ensureTurnTypeMultiValueColumn` runs unconditionally as part of
+    // `initializeSchema` and rebuilds `turns` from an explicit column list;
+    // omitting a day-one column here would fail that rebuild for a schema
+    // shape no real installation has.
     db.exec(`
       CREATE TABLE sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,8 +242,20 @@ describe("initializeSchema", () => {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id INTEGER NOT NULL,
         prompt_number INTEGER NOT NULL,
+        content_prompt_id TEXT,
         status TEXT NOT NULL DEFAULT 'active',
-        created_at_epoch INTEGER NOT NULL
+        user_prompt TEXT,
+        assistant_response TEXT,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        type TEXT,
+        tags TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        tool_call_count INTEGER,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER
       );
       INSERT INTO sessions (content_session_id, project, created_at_epoch)
       VALUES ('grade-migration', 'claude-mnemo', 1);
@@ -1621,4 +1644,188 @@ describe("initializeSchema", () => {
     db.close();
   });
 
+});
+
+/**
+ * ticket 02 (spec B5) — widens `turns.type` from a nullable scalar to a JSON
+ * array. A CHECK constraint cannot be ALTERed, so this is a table rebuild
+ * (`ensureTurnTypeMultiValueColumn`); it must value-preserve every existing
+ * scalar, including the legacy `compact` sentinel the mechanical PreCompact
+ * marker depends on, and its render surface (⏸) must survive unchanged.
+ */
+describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
+  test("wraps every legacy scalar into a one-element array, NULL and '' into '[]', and a migrated compact row still renders its ⏸ marker", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionId = upsertSession(db, {
+      contentSessionId: "session-type-migration",
+      project: "/tmp/project",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    // Back `turns` out to its pre-widening shape: every OTHER migration has
+    // already run against it (this is what a real installation looks like
+    // the moment before this one lands), only `type` is still the old
+    // nullable scalar with no CHECK.
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec("DROP TABLE turns");
+    db.exec(`
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        prompt_number INTEGER NOT NULL,
+        content_prompt_id TEXT,
+        was_interrupted INTEGER NOT NULL DEFAULT 0,
+        was_rolled_back INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        user_prompt TEXT,
+        assistant_response TEXT,
+        assistant_transcript TEXT,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        type TEXT,
+        significance_grade INTEGER,
+        tags TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        tool_call_count INTEGER,
+        transcript_line_start INTEGER,
+        cites_recorded INTEGER NOT NULL DEFAULT 0,
+        consulted_memories TEXT,
+        compact_boundary_uuid TEXT,
+        parent_turn_id INTEGER,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        UNIQUE(session_id, prompt_number)
+      );
+    `);
+    const insert = db.query<
+      { id: number },
+      [number, number, string, string | null, string, number]
+    >(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, type, title, created_at_epoch
+       ) VALUES (?, ?, 'extracted', ?, ?, ?)
+       RETURNING id`,
+    );
+    const discoveryId = insert.get(sessionId, 1, "discovery", "legacy discovery row", 100)!.id;
+    const compactId = insert.get(sessionId, 2, "compact", "/compact", 200)!.id;
+    const nullId = insert.get(sessionId, 3, null, "never typed", 300)!.id;
+    const emptyId = insert.get(sessionId, 4, "", "empty string typed", 400)!.id;
+    db.exec("PRAGMA foreign_keys = ON");
+
+    // The rebuild runs as part of the ordinary migration chain.
+    initializeSchema(db);
+
+    expect(getTurnById(db, discoveryId)!.type).toEqual(["discovery"]);
+    expect(getTurnById(db, compactId)!.type).toEqual(["compact"]);
+    expect(getTurnById(db, nullId)!.type).toEqual([]);
+    expect(getTurnById(db, emptyId)!.type).toEqual([]);
+
+    // The CHECK constraint is live going forward: a raw scalar write is
+    // rejected, and only a JSON array is accepted.
+    expect(() =>
+      db
+        .query("UPDATE turns SET type = 'not-json-array' WHERE id = ?")
+        .run(discoveryId),
+    ).toThrow();
+
+    // The migrated compact row still renders its ⏸ marker — the timeline's
+    // whole reason for reading `type` at all on this row.
+    const view = buildTimelineView(db, { id: `S${sessionId}`, view: "turns" });
+    const rendered = renderTimeline(view);
+    expect(rendered).toContain("⏸ /compact");
+
+    expect(getTurn(db, sessionId, 2)!.type).toEqual(["compact"]);
+
+    db.close();
+  });
+});
+
+/**
+ * ticket 02 (spec B6) — the `topic:` namespace is retired, so the prefix is
+ * stripped off stored tags once rather than translated on every read. The
+ * three machinery namespaces that remain (`compact:`, `invalidated:`,
+ * `delivery:`) are untouched: after this runs, a bare tag is what the turn was
+ * about and a prefixed one is bookkeeping.
+ */
+describe("stripRetiredTopicTagNamespace (ticket 02, spec B6)", () => {
+  function seed(db: ReturnType<typeof createDatabase>, tags: string[][]) {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "session-topic-strip",
+      project: "/tmp/project",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    const insert = db.query<{ id: number }, [number, number, string, number]>(
+      `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?, ?)
+       RETURNING id`,
+    );
+    return tags.map(
+      (value, index) =>
+        insert.get(sessionId, index + 1, JSON.stringify(value), 100 + index)!.id,
+    );
+  }
+
+  function tagsOf(db: ReturnType<typeof createDatabase>, id: number): string[] {
+    return JSON.parse(
+      db
+        .query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?")
+        .get(id)!.tags,
+    );
+  }
+
+  test("strips the prefix, keeps machinery namespaces, and de-duplicates a turn that carried both spellings", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const [plain, machinery, collided, bareOnly] = seed(db, [
+      ["topic:svg-filter", "topic:tokenomics"],
+      ["topic:vram", "compact:auto", "invalidated:stale", "delivery:dropped"],
+      // The one shape that makes stripping lossy if done naively: both
+      // spellings of one word already present on the same turn.
+      ["topic:cache-hit", "cache-hit", "topic:vram"],
+      ["already-bare"],
+    ]);
+
+    initializeSchema(db);
+
+    expect(tagsOf(db, plain!)).toEqual(["svg-filter", "tokenomics"]);
+    // Only `topic:` goes. The machinery namespaces are the reason a prefix
+    // still means something after this.
+    expect(tagsOf(db, machinery!)).toEqual([
+      "vram",
+      "compact:auto",
+      "invalidated:stale",
+      "delivery:dropped",
+    ]);
+    // First-occurrence order survives and the duplicate collapses to one.
+    expect(tagsOf(db, collided!)).toEqual(["cache-hit", "vram"]);
+    expect(tagsOf(db, bareOnly!)).toEqual(["already-bare"]);
+
+    db.close();
+  });
+
+  test("is idempotent — a second pass finds nothing prefixed left to strip", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const [only] = seed(db, [["topic:svg-filter", "compact:auto"]]);
+
+    initializeSchema(db);
+    const afterFirst = tagsOf(db, only!);
+    initializeSchema(db);
+
+    expect(tagsOf(db, only!)).toEqual(afterFirst);
+    expect(afterFirst).toEqual(["svg-filter", "compact:auto"]);
+
+    db.close();
+  });
 });

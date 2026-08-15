@@ -22,6 +22,7 @@ import {
 } from "../db/turns";
 import { isSegmentEra } from "../segment-era";
 import { resolveSessionTranscriptPath } from "../shared/paths";
+import { typeListsEqual } from "../shared/type-vocabulary";
 
 import {
   appendNavigationLegend,
@@ -311,9 +312,11 @@ function parseQueryFilters(query: string | undefined): QueryFilters {
       continue;
     }
     if (token.startsWith("tag:")) {
-      // Exact-match a stored tag (whole array element). The value keeps any
-      // namespace prefix, so `tag:rolled-back` matches a bare role tag and
-      // `tag:topic:svg-filter` matches a `topic:`-prefixed topic tag. An empty
+      // Exact-match a stored tag (whole array element). Subject words are
+      // bare since the `topic:` namespace was retired (spec B6), so
+      // `tag:svg-filter` is the whole spelling; the value keeps any prefix it
+      // is given, which is how the surviving machinery namespaces
+      // (`compact:`, `invalidated:`, `delivery:`) stay reachable. An empty
       // value (`tag:` alone) is dropped, never searched as free text.
       const tag = token.slice("tag:".length);
       if (tag) {
@@ -968,7 +971,7 @@ function buildSegmentFacts(
 ): {
   memberCount: number;
   dominantType: string | null;
-  phaseTrace: string[];
+  phaseTrace: string[][];
   anchorRefs: string[];
   members: RankedSegmentMember[];
 } {
@@ -980,15 +983,26 @@ function buildSegmentFacts(
     return left.turnId - right.turnId;
   });
 
+  // Flattened: a multi-valued member contributes every one of its own words
+  // to the mode count (spec B5), not just a "first" pick — `deriveDominantType`
+  // itself is untouched.
   const dominantType = deriveDominantType(
-    chronological.map((member) => member.type),
+    chronological.flatMap((member) => member.type),
     segment.type,
   );
 
-  const phaseTrace: string[] = [];
+  // Consecutive runs of an IDENTICAL type list collapse to one entry (ticket
+  // 02, spec B5) — same ordered-list rule the timeline's own phase grouping
+  // applies (`typeListsEqual`), so the two "a function switch is not a
+  // segment boundary" traces agree on what counts as a boundary.
+  const phaseTrace: string[][] = [];
   for (const member of chronological) {
-    if (member.type && phaseTrace[phaseTrace.length - 1] !== member.type) {
-      phaseTrace.push(member.type);
+    if (member.type.length === 0) {
+      continue;
+    }
+    const previous = phaseTrace[phaseTrace.length - 1];
+    if (!previous || !typeListsEqual(previous, member.type)) {
+      phaseTrace.push([...member.type]);
     }
   }
 

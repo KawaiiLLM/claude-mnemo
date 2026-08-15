@@ -72,7 +72,7 @@ describe("createMilestoneContextHandler", () => {
         title,
         type,
         created_at_epoch
-      ) VALUES (?, 1, 'extracted', 'ship it', 'done', 'Shipped', 'feature', ?)`,
+      ) VALUES (?, 1, 'extracted', 'ship it', 'done', 'Shipped', '["feature"]', ?)`,
     ).run(session.id, 1_700_000_060);
     const render = mock((_db, sessionId: number) => `milestones for S${sessionId}`);
     const before = totalChanges(db);
@@ -122,7 +122,7 @@ describe("createMilestoneContextHandler", () => {
         promptNumber,
         `prompt ${promptNumber}`,
         `${"重大里程碑".repeat(18)} ${promptNumber}`,
-        promptNumber % 2 === 0 ? "decision" : "feature",
+        promptNumber % 2 === 0 ? '["decision"]' : '["feature"]',
         1_700_000_000 + promptNumber * 21_600,
       );
     }

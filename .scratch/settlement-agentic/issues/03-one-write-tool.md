@@ -10,7 +10,9 @@ Merging is not tidiness: it removes an unfenced third writer of a turn's grade, 
 
 - [ ] One tool writes turns and sessions; the old second entry point is gone
 - [ ] Session fields take the omit-versus-clear distinction turns already have: absent leaves alone, explicit null clears
-- [ ] A write to a non-empty session field must declare `append` or `overwrite`; omitting the mode is an error, and an empty field needs no mode
+- [ ] A write to **any** non-empty field — turn or session — must declare `append` or `overwrite`; omitting the mode is an error, and an empty field needs no mode
+- [ ] `replace`, `replaceTags` and the bespoke tag merge are gone, not kept alongside the modes. Ticket 02 left every turn field on the strict subset of this rule (absent leaves alone, present overwrites), so this ticket adds the mode requirement on top rather than changing any field's meaning
+- [ ] No field carries a merge behaviour of its own. The count to drive to zero is five: that is how many disagreeing answers to "what does omission mean" the turn write path had before D5a
 - [ ] The receipt reports an accumulating field's total AFTER the write, not the delta
 - [ ] Content carrying tool-call syntax is rejected with a readable error rather than silently swallowing a field — 97 rows in production carry it today
 - [ ] Full suite green

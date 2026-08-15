@@ -165,7 +165,7 @@ describe("capture repairs", () => {
         skipped: 0,
       });
       const markers = getTurnsForSession(db, sessionId).filter(
-        (turn) => turn.type === "compact",
+        (turn) => turn.type.includes("compact"),
       );
       expect(markers).toHaveLength(9);
       expect(markers.map((turn) => turn.promptNumber)).toEqual([
@@ -230,7 +230,7 @@ describe("capture repairs", () => {
 
       expect(second?.compact.inserted).toBe(1);
       expect(
-        getTurnsForSession(db, sessionId).find((turn) => turn.type === "compact")
+        getTurnsForSession(db, sessionId).find((turn) => turn.type.includes("compact"))
           ?.compactBoundaryUuid,
       ).toBe("boundary-1");
       expect(session().scanCursorLine).toBe(3);
@@ -261,7 +261,7 @@ describe("capture repairs", () => {
            session_id, prompt_number, content_prompt_id, status, title, content,
            type, tags, files_read, files_modified, tool_call_count, created_at_epoch
          ) VALUES (?, 1, 'prompt-1', 'extracted', '/compact', 'legacy summary',
-                   'compact', ?, '[]', '[]', 0, 100)`,
+                   '["compact"]', ?, '[]', '[]', 0, 100)`,
       ).run(sessionId, JSON.stringify(["compact:pre_tokens=128", "compact:trigger=auto"]));
 
       const outcome = repair(path);
@@ -305,7 +305,7 @@ describe("capture repairs", () => {
            cites_recorded, created_at_epoch, updated_at_epoch
          ) VALUES (?, 7, 'prompt-9', 41, 'extracted', 'the real prompt',
                    'the real response', 'full narration',
-                   'Real title', 'Real content', 'Real insight', 'decision', 3, ?,
+                   'Real title', 'Real content', 'Real insight', '["decision"]', 3, ?,
                    ?, ?, 12, 1, 1, ?, 700, 800)`,
       ).run(
         sessionId,
@@ -362,7 +362,7 @@ describe("capture repairs", () => {
         createdAtEpoch: 700,
         contentPromptId: "prompt-9",
         // set
-        type: "compact",
+        type: ["compact"],
         status: "extracted",
         title: "/compact",
         compactBoundaryUuid: "boundary-1",
@@ -889,7 +889,7 @@ describe("capture repairs", () => {
       expect(repair(path)?.compact.inserted).toBe(1);
 
       expect(
-        getTurnsForSession(db, sessionId).find((turn) => turn.type === "compact"),
+        getTurnsForSession(db, sessionId).find((turn) => turn.type.includes("compact")),
       ).toMatchObject({
         compactBoundaryUuid: "boundary-1",
         tags: ["compact:pre_tokens=777", "compact:trigger=auto"],
@@ -1019,9 +1019,9 @@ describe("capture repairs", () => {
 
       const turns = getTurnsForSession(db, sessionId);
       expect(turns.map((turn) => [turn.promptNumber, turn.type])).toEqual([
-        [1, null],
-        [2, "compact"],
-        [3, null],
+        [1, []],
+        [2, ["compact"]],
+        [3, []],
       ]);
       expect(turns[2]).toMatchObject({ status: "active", userPrompt: "next prompt" });
       expect(session().scanCursorLine).toBe(2);
@@ -1082,7 +1082,7 @@ describe("capture repairs", () => {
 
       expect(seen).toEqual([path]);
       expect(
-        getTurnsForSession(db, sessionId).some((turn) => turn.type === "compact"),
+        getTurnsForSession(db, sessionId).some((turn) => turn.type.includes("compact")),
       ).toBe(true);
     });
 
@@ -1145,7 +1145,7 @@ describe("capture repairs", () => {
       expect(result.continue).toBe(true);
       // The repair ran…
       expect(
-        getTurnsForSession(db, sessionId).some((turn) => turn.type === "compact"),
+        getTurnsForSession(db, sessionId).some((turn) => turn.type.includes("compact")),
       ).toBe(true);
       // …but the activity snapshot predates it, so the old orphan is left alone.
       expect(
@@ -1336,7 +1336,7 @@ describe("capture repairs", () => {
       expect(getTurnById(db, racingTurn)?.status).toBe("active");
       // The repair's own marker is outside the fence for the same reason.
       expect(
-        getTurnsForSession(db, sessionId).find((turn) => turn.type === "compact")
+        getTurnsForSession(db, sessionId).find((turn) => turn.type.includes("compact"))
           ?.status,
       ).toBe("extracted");
     });
@@ -1381,7 +1381,7 @@ describe("capture repairs", () => {
       expect(result.continue).toBe(true);
       // Claims, links and cursor all rolled back together.
       expect(
-        getTurnsForSession(db, sessionId).some((turn) => turn.type === "compact"),
+        getTurnsForSession(db, sessionId).some((turn) => turn.type.includes("compact")),
       ).toBe(false);
       expect(session().scanCursorByteOffset).toBe(0);
       expect(logLines.some((line) => line.includes("capture repair failed"))).toBe(true);
@@ -1397,7 +1397,7 @@ describe("capture repairs", () => {
 
       // The same window is repaired on re-entry — nothing was lost.
       expect(
-        getTurnsForSession(db, sessionId).find((turn) => turn.type === "compact")
+        getTurnsForSession(db, sessionId).find((turn) => turn.type.includes("compact"))
           ?.compactBoundaryUuid,
       ).toBe("boundary-1");
       expect(session().scanCursorLine).toBe(2);

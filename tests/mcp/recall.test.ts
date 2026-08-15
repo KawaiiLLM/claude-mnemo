@@ -951,7 +951,7 @@ describe("fork-lineage breadcrumb in recall", () => {
 
     db.query(
       `INSERT INTO turns (session_id, prompt_number, status, title, content, type, tags, files_read, files_modified, created_at_epoch)
-       VALUES (?, ?, 'extracted', 'Parent turn title', 'parent turn content', 'discovery', '[]', '[]', '[]', ?)`,
+       VALUES (?, ?, 'extracted', 'Parent turn title', 'parent turn content', '["discovery"]', '[]', '[]', '[]', ?)`,
     ).run(parent.id, 1, 1_001);
 
     const parentTurnId = db
@@ -978,7 +978,7 @@ describe("fork-lineage breadcrumb in recall", () => {
 
     db.query(
       `INSERT INTO turns (session_id, prompt_number, status, title, content, type, tags, files_read, files_modified, parent_turn_id, created_at_epoch)
-       VALUES (?, ?, 'extracted', 'Child turn title', 'child turn content', 'discovery', '[]', '[]', '[]', ?, ?)`,
+       VALUES (?, ?, 'extracted', 'Child turn title', 'child turn content', '["discovery"]', '[]', '[]', '[]', ?, ?)`,
     ).run(child.id, 1, parentTurnId, 2_001);
 
     // Re-index child session for FTS

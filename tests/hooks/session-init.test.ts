@@ -749,7 +749,7 @@ describe("owed-notes injection (spec D3/D4/D9)", () => {
   test("a compact marker row is never owed and never shown", async () => {
     db.query<unknown, [number]>(
       `INSERT INTO turns (session_id, prompt_number, status, title, type, created_at_epoch)
-       VALUES (?, 1, 'extracted', '/compact', 'compact', 1000)`,
+       VALUES (?, 1, 'extracted', '/compact', '["compact"]', 1000)`,
     ).run(sessionId);
 
     const result = await createSessionInitHandler({ db })(

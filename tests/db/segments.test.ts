@@ -16,11 +16,7 @@ import {
   upsertTopic,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
-import {
-  draftTypeFromTitle,
-  normalizeTypeValues,
-  RestrictedTypeError,
-} from "../../src/shared/type-vocabulary";
+import { normalizeTypeValues } from "../../src/shared/type-vocabulary";
 
 describe("segments, topics and membership", () => {
   let db: Database;
@@ -87,73 +83,52 @@ describe("segments, topics and membership", () => {
     });
   });
 
-  describe("type draft from the title prefix", () => {
-    test("resolves a matching prefix to its enum value", () => {
-      expect(draftTypeFromTitle("修复 worker 的重试竞态")).toBe("fix");
-      expect(draftTypeFromTitle("Investigate the stall watchdog")).toBe("research");
-      expect(draftTypeFromTitle("发版 0.9.0")).toBe("ops");
-      expect(draftTypeFromTitle("review the extraction spec")).toBe("review");
-    });
-
-    test("falls to unknown rather than guessing", () => {
-      expect(draftTypeFromTitle("竞态问题的三个候选")).toBe("unknown");
-      expect(draftTypeFromTitle("addendum to the plan")).toBe("unknown");
-      expect(draftTypeFromTitle("")).toBe("unknown");
-      expect(draftTypeFromTitle(null)).toBe("unknown");
-    });
-
-    test("cannot mint the rolled-back value from a title", () => {
-      expect(draftTypeFromTitle("rolled-back the mutex change")).toBe("unknown");
-      expect(draftTypeFromTitle("回退 mutex 改动")).toBe("unknown");
-    });
-
-    test("a segment born without an explicit type carries the draft", () => {
-      const drafted = createSegment(db, {
-        title: "实现 段成员边表",
-        nowEpoch: 100,
-      });
-      const unmatched = createSegment(db, {
-        title: "竞态问题的三个候选",
-        nowEpoch: 100,
-      });
-
-      expect(drafted.type).toEqual(["implement"]);
-      expect(unmatched.type).toEqual([]);
-    });
-  });
-
-  describe("the rolled-back type is settlement-only", () => {
-    test("normalizeTypeValues refuses it from the mechanical path", () => {
-      expect(() => normalizeTypeValues(["fix", "rolled-back"])).toThrow(
-        RestrictedTypeError,
-      );
-      expect(normalizeTypeValues(["fix", "rolled-back"], "settlement")).toEqual([
-        "fix",
-        "rolled-back",
+  // ticket 02 (spec B1/B5): the mechanical title-to-type derivation is
+  // retired, not kept as a fallback — a segment's `type` is exactly what the
+  // caller states, multi-valued, and empty when omitted.
+  describe("normalizeTypeValues (spec B2/B7)", () => {
+    test("validates against the current 11-word vocabulary, deduping and preserving order", () => {
+      expect(normalizeTypeValues(["review", "ops", "review"])).toEqual([
+        "review",
+        "ops",
       ]);
       expect(() => normalizeTypeValues(["invented"])).toThrow("unknown type value");
     });
 
-    test("creation rejects it from a draft writer and accepts it from settlement", () => {
-      expect(() =>
-        createSegment(db, {
-          title: "A reversed decision",
-          type: ["design", "rolled-back"],
-          nowEpoch: 100,
-        }),
-      ).toThrow(RestrictedTypeError);
+    test("rolled-back left the vocabulary; correction is an ordinary peer, no restriction", () => {
+      expect(() => normalizeTypeValues(["rolled-back"])).toThrow(
+        "unknown type value",
+      );
+      expect(normalizeTypeValues(["correction"])).toEqual(["correction"]);
+    });
+  });
 
-      const settled = createSegment(db, {
-        title: "A reversed decision",
-        type: ["design", "rolled-back"],
-        typeSource: "settlement",
+  describe("a segment's type is exactly what the caller states", () => {
+    test("an explicit multi-valued type lands as given", () => {
+      const segment = createSegment(db, {
+        title: "实现 段成员边表",
+        type: ["implement", "review"],
         nowEpoch: 100,
       });
-      expect(settled.type).toEqual(["design", "rolled-back"]);
+
+      expect(segment.type).toEqual(["implement", "review"]);
     });
 
-    test("an open-segment write rejects it without touching the row", () => {
-      const segment = createSegment(db, { title: "设计 段结算流程", nowEpoch: 100 });
+    test("an omitted type is empty — never a guess derived from the title", () => {
+      const segment = createSegment(db, {
+        title: "竞态问题的三个候选",
+        nowEpoch: 100,
+      });
+
+      expect(segment.type).toEqual([]);
+    });
+
+    test("an open-segment write rejects an unrecognised word without touching the row", () => {
+      const segment = createSegment(db, {
+        title: "设计 段结算流程",
+        type: ["design"],
+        nowEpoch: 100,
+      });
 
       const result = applySegmentWrites(
         db,
@@ -161,7 +136,7 @@ describe("segments, topics and membership", () => {
           {
             segmentId: segment.id,
             expectedRevision: segment.revision,
-            type: ["rolled-back"],
+            type: ["invented"],
           },
         ],
         { nowEpoch: 200 },
@@ -178,12 +153,12 @@ describe("segments, topics and membership", () => {
           {
             segmentId: segment.id,
             expectedRevision: segment.revision,
-            type: ["design", "rolled-back"],
+            type: ["design", "correction"],
           },
         ],
-        { nowEpoch: 300, source: "settlement" },
+        { nowEpoch: 300 },
       );
-      expect(settled.applied[0]?.type).toEqual(["design", "rolled-back"]);
+      expect(settled.applied[0]?.type).toEqual(["design", "correction"]);
     });
   });
 

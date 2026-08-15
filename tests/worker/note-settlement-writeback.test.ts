@@ -21,12 +21,13 @@ import type { NoteSettlementResponse } from "../../src/worker/note-settlement-re
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
- * Ticket 02 (spec D7/D8) — the mechanical backfill's write path. It must draft
- * a reconstructed note's turn exactly as `note.ts`'s agent-written path does:
- * same title, same derivation, same columns. This does not re-cover the rest
- * of `applyNoteSettlementWriteBack` (segments, edges, the gap-coverage guard —
- * untested elsewhere and out of this ticket's scope); it isolates the one
- * behaviour this ticket adds.
+ * Extraction-redesign ticket 05 (spec D7/D8) — the mechanical backfill's
+ * write path. Settlement-agentic ticket 02 (spec B1) retired the mechanical
+ * title-to-type derivation this file used to isolate: a reconstruction now
+ * writes only the note (title/content/insight); type and tags land through
+ * `turn_review` in the SAME pass, never drafted from the title. This does not
+ * re-cover the rest of `applyNoteSettlementWriteBack` (segments, edges, the
+ * gap-coverage guard — untested elsewhere and out of scope here).
  */
 
 const NOW = 1_800_000_000;
@@ -156,9 +157,16 @@ describe("parseAddressToken", () => {
   });
 });
 
-test("a mechanical reconstruction drafts its turn's type and tag exactly as an agent-written note does", () => {
+test("a mechanical reconstruction writes only the note; type and tags stay empty regardless of the title's shape", () => {
+  // ticket 02 (spec B1): no mechanical title-to-type derivation any more, for
+  // a reconstruction any more than for the agent's own note. Three title
+  // shapes that used to matter to the retired derivation — a
+  // fully-shaped `<activity>+<topic>:` title, an activity word outside the
+  // old alias list, and a title with no shape at all — now all behave
+  // identically: the reconstruction commits the note and leaves type/tags at
+  // their default `[]`, because nothing in this call states them.
   const sessionDbId = seedSession();
-  const turnId = seedHoleTurn(sessionDbId, 1);
+  const shapedTurnId = seedHoleTurn(sessionDbId, 1);
   const job = claimWindow(sessionDbId, 1, 1);
 
   const result = applyNoteSettlementWriteBack(db, {
@@ -172,78 +180,20 @@ test("a mechanical reconstruction drafts its turn's type and tag exactly as an a
       },
     ]),
     nowEpoch: NOW,
-    reconstructableTurnIds: new Set([turnId]),
+    reconstructableTurnIds: new Set([shapedTurnId]),
     reviewableTurnIds: allSeededTurnIds(),
     contextBuiltAtEpoch: NOW,
     exposedSegmentIds: new Set(),
-    rideTurnId: turnId,
+    rideTurnId: shapedTurnId,
   });
 
   expect(result.committed).toBe(true);
   expect(result.notesReconstructed).toBe(1);
 
-  const turn = getTurnById(db, turnId)!;
-  expect(turn.type).toBe("implement");
-  expect(turn.tags).toContain("topic:shadow-store");
-  expect(getShadowNote(db, turnId)?.writerOrigin).toBe("settlement");
-});
-
-test("an unrecognised activity word leaves the reconstruction's type empty, same as the agent path", () => {
-  const sessionDbId = seedSession();
-  const turnId = seedHoleTurn(sessionDbId, 1);
-  const job = claimWindow(sessionDbId, 1, 1);
-
-  applyNoteSettlementWriteBack(db, {
-    job,
-    response: emptyResponse([
-      {
-        turn: `S${sessionDbId}/T1`,
-        title: "addendum+the-plan: appended a clause",
-        content: "The activity word has no alias.",
-        insight: null,
-      },
-    ]),
-    nowEpoch: NOW,
-    reconstructableTurnIds: new Set([turnId]),
-    reviewableTurnIds: allSeededTurnIds(),
-    contextBuiltAtEpoch: NOW,
-    exposedSegmentIds: new Set(),
-    rideTurnId: turnId,
-  });
-
-  const turn = getTurnById(db, turnId)!;
-  expect(turn.type).toBeNull();
-  expect(turn.tags).toContain("topic:the-plan");
-});
-
-test("a malformed reconstruction title drafts neither, and the reconstruction still commits", () => {
-  const sessionDbId = seedSession();
-  const turnId = seedHoleTurn(sessionDbId, 1);
-  const job = claimWindow(sessionDbId, 1, 1);
-
-  const result = applyNoteSettlementWriteBack(db, {
-    job,
-    response: emptyResponse([
-      {
-        turn: `S${sessionDbId}/T1`,
-        title: "a plain title with no delimiters",
-        content: "No shape to parse.",
-        insight: null,
-      },
-    ]),
-    nowEpoch: NOW,
-    reconstructableTurnIds: new Set([turnId]),
-    reviewableTurnIds: allSeededTurnIds(),
-    contextBuiltAtEpoch: NOW,
-    exposedSegmentIds: new Set(),
-    rideTurnId: turnId,
-  });
-
-  expect(result.committed).toBe(true);
-  expect(result.notesReconstructed).toBe(1);
-  const turn = getTurnById(db, turnId)!;
-  expect(turn.type).toBeNull();
+  const turn = getTurnById(db, shapedTurnId)!;
+  expect(turn.type).toEqual([]);
   expect(turn.tags).toEqual([]);
+  expect(getShadowNote(db, shapedTurnId)?.writerOrigin).toBe("settlement");
 });
 
 /** `turn_review` addresses are gated by the writer's exposure ledger — the
@@ -317,8 +267,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const result = applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T1`, grade: 2, type: "design", tag: "widgets" },
-        { turn: `S${sessionDbId}/T2`, grade: 0, type: null, tag: null },
+        { turn: `S${sessionDbId}/T1`, grade: 2, type: ["design"], tag: "widgets" },
+        { turn: `S${sessionDbId}/T2`, grade: 0, type: [], tag: null },
       ]),
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
@@ -334,18 +284,21 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
 
     const turn1 = getTurnById(db, t1)!;
     expect(turn1.significanceGrade).toBe(2);
-    expect(turn1.type).toBe("design");
-    expect(turn1.tags).toContain("topic:widgets");
+    expect(turn1.type).toEqual(["design"]);
+    expect(turn1.tags).toContain("widgets");
     // Review never touches the note itself — only turns columns.
     expect(getShadowNote(db, t1)?.title).toBe("agent's own title");
 
     const turn2 = getTurnById(db, t2)!;
     expect(turn2.significanceGrade).toBe(0);
-    expect(turn2.type).toBeNull();
+    expect(turn2.type).toEqual([]);
     expect(turn2.tags).toEqual([]);
   });
 
-  test("preserves a non-topic tag while replacing the topic slice", () => {
+  test("additively merges the bare tag with whatever tags already exist", () => {
+    // spec B6: bare topic words, additive — a `topic:`-prefixed row from
+    // before this ticket is left exactly as it is (never migrated), and a
+    // new bare tag is merged in beside it, not swapped for it.
     const sessionDbId = seedSession();
     const t1 = seedHoleTurn(sessionDbId, 1);
     db.query<unknown, [number]>(
@@ -357,7 +310,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T1`, grade: 1, type: null, tag: "fresh-topic" },
+        { turn: `S${sessionDbId}/T1`, grade: 1, type: [], tag: "fresh-topic" },
       ]),
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
@@ -369,8 +322,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
 
     const turn = getTurnById(db, t1)!;
     expect(turn.tags).toContain("deferred");
-    expect(turn.tags).toContain("topic:fresh-topic");
-    expect(turn.tags).not.toContain("topic:stale");
+    expect(turn.tags).toContain("topic:stale");
+    expect(turn.tags).toContain("fresh-topic");
   });
 
   test("an unexposed or nonexistent turn address fails the whole window, committing nothing", () => {
@@ -382,9 +335,9 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const result = applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T1`, grade: 3, type: "fix", tag: "widgets" },
+        { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tag: "widgets" },
         // Never shown to this writer — no address at prompt_number 999.
-        { turn: `S${sessionDbId}/T999`, grade: 1, type: null, tag: null },
+        { turn: `S${sessionDbId}/T999`, grade: 1, type: [], tag: null },
       ]),
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
@@ -400,7 +353,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     // land either — half a review is not a smaller correct one.
     const turn = getTurnById(db, t1)!;
     expect(turn.significanceGrade).toBeNull();
-    expect(turn.type).toBeNull();
+    expect(turn.type).toEqual([]);
   });
 
   test("re-applying the same window's response converges rather than accumulating", () => {
@@ -409,7 +362,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const job = claimWindow(sessionDbId, 1, 1);
     expose(sessionDbId, t1, [t1]);
     const response = emptyResponse([], [
-      { turn: `S${sessionDbId}/T1`, grade: 3, type: "fix", tag: "widgets" },
+      { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tag: "widgets" },
     ]);
 
     const first = applyNoteSettlementWriteBack(db, {
@@ -443,9 +396,12 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
 
     const turn = getTurnById(db, t1)!;
     expect(turn.significanceGrade).toBe(3);
-    expect(turn.type).toBe("fix");
-    // Not duplicated — SET semantics, not append.
-    expect(turn.tags).toEqual(["topic:widgets"]);
+    expect(turn.type).toEqual(["fix"]);
+    // Not duplicated — the additive merge dedupes (spec G5's tags-replay
+    // concern: a stable request key would be needed to make this true for a
+    // GENUINELY revised judgement, but a byte-identical retry of the same
+    // directive converges here because the word is already present).
+    expect(turn.tags).toEqual(["widgets"]);
   });
 
   /**
@@ -473,6 +429,11 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
           turn: `S${sessionDbId}/T1`,
           title: "design+scheduling: the agent's own live account",
           content: "Written by the main agent while its turn was still running.",
+          // ticket 02 (spec B1): the caller states type/tags directly now —
+          // this is what the agent's OWN account of the turn says, and it is
+          // exactly the pair the review below must not be allowed to clobber.
+          type: ["design"],
+          tags: ["scheduling"],
         },
         // Strictly after `claimWindow`'s claim at NOW — this note was not in
         // the prompt the reviewer answered.
@@ -484,7 +445,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const result = applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T1`, grade: 3, type: "fix", tag: "settlement" },
+        { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tag: "settlement" },
       ]),
       nowEpoch: NOW + 6,
       reconstructableTurnIds: new Set(),
@@ -502,10 +463,10 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     );
     // The contended pair: the review's verdict described a NOTE-LESS turn, so
     // it must not restate this note's facts. Were the fence only "re-read the
-    // row", these two would read `fix` / `topic:settlement`.
-    expect(turn.type).toBe("design");
-    expect(turn.tags).toContain("topic:scheduling");
-    expect(turn.tags).not.toContain("topic:settlement");
+    // row", these two would read `fix` / `settlement`.
+    expect(turn.type).toEqual(["design"]);
+    expect(turn.tags).toContain("scheduling");
+    expect(turn.tags).not.toContain("settlement");
     // Grade is the review's own column — judged from raw material, not from
     // the note — so it lands regardless.
     expect(turn.significanceGrade).toBe(3);
@@ -517,14 +478,16 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const sessionDbId = seedSession();
     const t1 = seedHoleTurn(sessionDbId, 1);
     // The mirror image of the test above: this note predates the claim, so it
-    // IS what the reviewer read, and its mechanical draft is exactly what the
-    // review exists to confirm or override.
+    // IS what the reviewer read, and the review is exactly what confirms or
+    // overrides the writer's own account of type/tags.
     const written = noteTool(
       db,
       {
         turn: `S${sessionDbId}/T1`,
         title: "design+scheduling: written well before the window was claimed",
         content: "Visible in the prompt the reviewer answered.",
+        type: ["design"],
+        tags: ["scheduling"],
       },
       { now: () => NOW - 60, env: {}, eraCutoffEpoch: SETTLEMENT_ERA_CUTOFF_EPOCH },
     );
@@ -536,7 +499,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const result = applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T1`, grade: 3, type: "fix", tag: "settlement" },
+        { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tag: "settlement" },
       ]),
       nowEpoch: NOW + 1,
       reconstructableTurnIds: new Set(),
@@ -549,9 +512,11 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     expect(result.committed).toBe(true);
     expect(result.reviewsYieldedToLateNote).toBe(0);
     const turn = getTurnById(db, t1)!;
-    expect(turn.type).toBe("fix");
-    expect(turn.tags).toContain("topic:settlement");
-    expect(turn.tags).not.toContain("topic:scheduling");
+    expect(turn.type).toEqual(["fix"]);
+    expect(turn.tags).toContain("settlement");
+    // The review OVERRODE type (design → fix); tags are additive, so the
+    // writer's own "scheduling" survives alongside the review's "settlement".
+    expect(turn.tags).toContain("scheduling");
   });
 
   test("an exposed turn this prompt did not show is refused, not silently revised", () => {
@@ -568,7 +533,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const result = applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T2`, grade: 4, type: "fix", tag: "hallucinated" },
+        { turn: `S${sessionDbId}/T2`, grade: 4, type: ["fix"], tag: "hallucinated" },
       ]),
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
@@ -603,7 +568,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
             insight: null,
           },
         ],
-        [{ turn: `S${sessionDbId}/T1`, grade: 3, type: "fix", tag: "settlement" }],
+        [{ turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tag: "settlement" }],
       ),
       nowEpoch: NOW + 6,
       reconstructableTurnIds: new Set([t1]),
@@ -617,8 +582,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     expect(result.notesReconstructed).toBe(1);
     expect(result.reviewsYieldedToLateNote).toBe(0);
     const turn = getTurnById(db, t1)!;
-    expect(turn.type).toBe("fix");
-    expect(turn.tags).toContain("topic:settlement");
+    expect(turn.type).toEqual(["fix"]);
+    expect(turn.tags).toContain("settlement");
   });
 });
 
@@ -658,6 +623,6 @@ test("a yielded reconstruction (an agent note already won) never touches the tur
   expect(result.notesYielded).toBe(1);
   expect(result.notesReconstructed).toBe(0);
   const turn = getTurnById(db, turnId)!;
-  expect(turn.type).toBeNull();
+  expect(turn.type).toEqual([]);
   expect(turn.tags).toEqual([]);
 });

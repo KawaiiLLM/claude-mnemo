@@ -1,13 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { indexSegmentToFTS } from "./search";
-import {
-  draftTypeFromTitle,
-  normalizeTypeValues,
-  UNKNOWN_TYPE,
-  type MemoryType,
-  type TypeWriteSource,
-} from "../shared/type-vocabulary";
+import { normalizeTypeValues, type MemoryType } from "../shared/type-vocabulary";
 
 /**
  * Segments and the topic registry (spec D6).
@@ -241,12 +235,10 @@ export interface CreateSegmentInput {
   title: string;
   topicId?: number | null;
   content?: string | null;
-  /** Omitted → the mechanical title-prefix draft (spec D5). */
+  /** Omitted → `[]` (ticket 02: no mechanical title-prefix draft any more). */
   type?: string[];
   tags?: string[];
   status?: SegmentStatus;
-  /** `settlement` is the only source allowed to write the `rolled-back` type. */
-  typeSource?: TypeWriteSource;
   nowEpoch: number;
 }
 
@@ -254,7 +246,7 @@ export function createSegment(
   db: Database,
   input: CreateSegmentInput,
 ): SegmentRecord {
-  const type = resolveTypeDraft(input.title, input.type, input.typeSource);
+  const type = normalizeTypeValues(input.type ?? []);
 
   const inserted = mapSegmentRow(
     db
@@ -296,24 +288,6 @@ function indexSegment(db: Database, segment: SegmentRecord): void {
     type: JSON.stringify(segment.type),
     tags: JSON.stringify(segment.tags),
   });
-}
-
-/**
- * The birth-time type value: an explicit list wins, otherwise the title prefix
- * decides and an unmatched title stays EMPTY rather than guessing (spec D5's
- * `unknown` — represented as no value at all, so `type:` filters never match a
- * placeholder).
- */
-function resolveTypeDraft(
-  title: string,
-  explicit: string[] | undefined,
-  source: TypeWriteSource | undefined,
-): MemoryType[] {
-  if (explicit) {
-    return normalizeTypeValues(explicit, source ?? "draft");
-  }
-  const draft = draftTypeFromTitle(title);
-  return draft === UNKNOWN_TYPE ? [] : [draft];
 }
 
 export function getSegment(db: Database, segmentId: number): SegmentRecord | null {
@@ -433,8 +407,6 @@ export interface ApplySegmentWritesResult {
 
 export interface ApplySegmentWritesOptions {
   nowEpoch: number;
-  /** `settlement` is the only source allowed to write the `rolled-back` type. */
-  source?: TypeWriteSource;
 }
 
 const SEGMENT_WRITE_SAVEPOINT = "mnemo_segment_writes";
@@ -477,9 +449,7 @@ export function applySegmentWrites(
 
       let type: MemoryType[];
       try {
-        type = write.type
-          ? normalizeTypeValues(write.type, options.source ?? "draft")
-          : current.type;
+        type = write.type ? normalizeTypeValues(write.type) : current.type;
       } catch (error) {
         excluded.push({
           write,

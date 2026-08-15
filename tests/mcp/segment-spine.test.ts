@@ -79,7 +79,7 @@ function seedEraFixture(
     db
       .query<
         { id: number },
-        [number, number, string | null, number, string | null, number | null, string]
+        [number, number, string, number, string | null, number | null, string]
       >(
         `INSERT INTO turns (
            session_id, prompt_number, status, type, created_at_epoch, title,
@@ -91,7 +91,7 @@ function seedEraFixture(
       .get(
         sessionId,
         promptNumber,
-        options.type ?? null,
+        options.type ? JSON.stringify([options.type]) : "[]",
         options.createdAtEpoch ?? CUTOFF + promptNumber,
         options.title ?? `title ${promptNumber}`,
         options.grade ?? null,
@@ -402,6 +402,13 @@ describe("a null era cutoff is byte-identical to the pre-segment renderer", () =
   // hint's repeated `→ timeline(...)` command is gone (said once now, in the
   // response-level legend appended below) — this is an intentional legacy
   // renderer change, per the comment above, so the pin moved with it.
+  //
+  // Updated again for the settlement-agentic spec (ticket 02, B5): glyph
+  // resolution now covers the full current-vocabulary word set, not only the
+  // legacy 6-word render map — a "review"-typed turn gets its own glyph (✅)
+  // instead of falling through to the generic • placeholder. `review` was
+  // already a legal value on this column before this ticket; only the
+  // renderer's blind spot for it is what changed.
   const PRE_SEGMENT_ARC = `- [S1] 2030-03-17 15:00 → 19:10 (4h 10m)
   /tmp/project | 7 turns | 0 tool_calls
   types: 🟣1 ⚖️1 (session-wide)
@@ -411,7 +418,7 @@ describe("a null era cutoff is byte-identical to the pre-segment renderer", () =
 ── 2030-03-17 Sun · T1–T14 · 2 kept ──
       T1 ⚖️ G3 the user asked something → legacy decision one
         body text
-      T14 • G0 the user asked something → review the fix
+      T14 ✅ G0 the user asked something → review the fix
         body text
         … +5 more @ within T2..T13
 

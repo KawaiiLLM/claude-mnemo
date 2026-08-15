@@ -25,10 +25,6 @@ import {
   getOutgoingEdges,
 } from "../../src/db/memory-edges";
 import {
-  draftTurnFactsFromTitle,
-  draftTypeFromTitle,
-} from "../../src/shared/type-vocabulary";
-import {
   buildNoteSettlementContext,
   NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET,
 } from "../../src/worker/note-settlement-context";
@@ -304,41 +300,25 @@ describe("settlement context assembly", () => {
   });
 
   /**
-   * Ticket 05: the prompt's `type_draft`/`tag_draft` must be the SAME
-   * derivation storage uses (`draftTurnFactsFromTitle`), not the looser
-   * whole-title scan the old `type_draft` alone used — the two disagreed on a
-   * title like "review the extraction spec" (matches the `review` prefix,
-   * but never matches the `<activity>+<topic>:` shape storage requires).
+   * ticket 02 (spec B1): the mechanical title-to-type derivation is retired,
+   * not kept as a fallback — a window turn's line carries only mechanical
+   * facts (kind, tool count, files, gap), never a drafted type/tag, and the
+   * model states type/tags itself through `turn_review`.
    */
-  test("the window's type_draft/tag_draft are exactly what draftTurnFactsFromTitle would store", () => {
+  test("the window's rendered line carries no drafted type or tag", () => {
     const fixture = seedInteriorHoleWindow();
     const context = buildNoteSettlementContext(db, fixture.job, {
       nowEpoch: NOW,
     })!;
 
     const t1 = context.windowTurns.find((turn) => turn.promptNumber === 1)!;
-    expect(t1.typeDraft).toBe("design");
-    expect(t1.tagDraft).toBe("topic:settlement");
-    const t3 = context.windowTurns.find((turn) => turn.promptNumber === 3)!;
-    expect(t3.typeDraft).toBe("implement");
-    expect(t3.tagDraft).toBe("topic:settlement");
+    expect(t1).not.toHaveProperty("typeDraft");
+    expect(t1).not.toHaveProperty("tagDraft");
 
     const prompt = renderNoteSettlementPrompt(context);
     const window = prompt.slice(prompt.indexOf("## Window turns"));
-    expect(window).toContain("type_draft=design");
-    expect(window).toContain("tag_draft=topic:settlement");
-    expect(window).toContain("type_draft=implement");
-
-    // A title that would NOT parse under the strict shape check draws no
-    // draft at all in the prompt either — the same title
-    // `draftTypeFromTitle`'s looser scan alone would have matched (it starts
-    // with the `review` alias), which is exactly the disagreement ticket 05
-    // closes: one derivation, used by both what is shown and what is stored.
-    expect(draftTurnFactsFromTitle("review the extraction spec")).toEqual({
-      type: null,
-      tag: null,
-    });
-    expect(draftTypeFromTitle("review the extraction spec")).toBe("review");
+    expect(window).not.toContain("type_draft=");
+    expect(window).not.toContain("tag_draft=");
   });
 
   test("the prompt states the rubric verbatim (imported, not restated) and the three-step order with segmentation last", () => {
@@ -405,7 +385,7 @@ describe("settlement write-back", () => {
           content:
             "Lease fencing landed. The generation check in [S1/T3] is what " +
             "makes a late dispatch harmless; the shape came from [S1/T1].",
-          type: ["implement", "rolled-back"],
+          type: ["implement", "correction"],
           tags: ["note-settlement", "lease"],
           status: "open",
           members: ["S1/T1", "S1/T3"],
@@ -465,11 +445,11 @@ describe("settlement write-back", () => {
     )({ job: fixture.job });
     expect(outcome).toEqual({ ok: true });
 
-    // Segments: one extended (with the settlement-only `rolled-back` type), one
-    // created against a freshly minted topic.
+    // Segments: one extended (multi-valued type, spec B5), one created
+    // against a freshly minted topic.
     const extended = getSegment(db, existing.id)!;
     expect(extended.revision).toBe(existing.revision + 1);
-    expect(extended.type).toEqual(["implement", "rolled-back"]);
+    expect(extended.type).toEqual(["implement", "correction"]);
     expect(extended.tags).toEqual(["note-settlement", "lease"]);
     const created = listOpenSegments(db).find(
       (segment) => segment.id !== existing.id,
@@ -840,10 +820,10 @@ describe("settlement write-back", () => {
         { turn: "S1/T4", title: "research+lease: trailing hole reconstructed", content: "Filled in." },
       ],
       turn_review: [
-        { turn: "S1/T1", grade: 4, type: "design", tag: "settlement" },
-        { turn: "S1/T2", grade: 1, type: "research", tag: "lease" },
-        { turn: "S1/T3", grade: 2, type: "implement", tag: "settlement" },
-        { turn: "S1/T4", grade: 1, type: "research", tag: "lease" },
+        { turn: "S1/T1", grade: 4, type: ["design"], tag: "settlement" },
+        { turn: "S1/T2", grade: 1, type: ["research"], tag: "lease" },
+        { turn: "S1/T3", grade: 2, type: ["implement"], tag: "settlement" },
+        { turn: "S1/T4", grade: 1, type: ["research"], tag: "lease" },
       ],
     });
     const firstOutcome = await dispatchWith(stubQuery(firstReply))({
@@ -870,7 +850,7 @@ describe("settlement write-back", () => {
     const secondReply = JSON.stringify({
       // T1's arc turned out short-lived — demoted now that its real scale is
       // visible, exactly what the rubric's own Grade-4 language expects.
-      turn_review: [{ turn: "S1/T1", grade: 0, type: "design", tag: "settlement" }],
+      turn_review: [{ turn: "S1/T1", grade: 0, type: ["design"], tag: "settlement" }],
     });
 
     const metricsSeen: NoteSettlementWindowMetrics[] = [];
@@ -1046,7 +1026,8 @@ describe("settlement response schema", () => {
           expected_revision: 1,
           title: "t",
           content: "c",
-          type: ["refactor"],
+          // A retired legacy word — never in the current vocabulary (spec B2).
+          type: ["bugfix"],
           tags: [],
         },
       ],
@@ -1062,19 +1043,19 @@ describe("settlement response schema", () => {
   test("turn_review: accepts a full verdict and rejects an out-of-range grade or an unknown type whole (ticket 05)", () => {
     const good = JSON.stringify({
       turn_review: [
-        { turn: "S1/T1", grade: 4, type: "design", tag: "widgets" },
-        { turn: "S1/T2", grade: 0, type: null, tag: null },
+        { turn: "S1/T1", grade: 4, type: ["design"], tag: "widgets" },
+        { turn: "S1/T2", grade: 0, type: [], tag: null },
       ],
     });
     const parsed = parseNoteSettlementResponse(good);
     expect(parsed.ok).toBe(true);
     expect(parsed.ok && parsed.response.turnReview).toEqual([
-      { turn: "S1/T1", grade: 4, type: "design", tag: "widgets" },
-      { turn: "S1/T2", grade: 0, type: null, tag: null },
+      { turn: "S1/T1", grade: 4, type: ["design"], tag: "widgets" },
+      { turn: "S1/T2", grade: 0, type: [], tag: null },
     ]);
 
     const outOfRangeHigh = JSON.stringify({
-      turn_review: [{ turn: "S1/T1", grade: 5, type: null, tag: null }],
+      turn_review: [{ turn: "S1/T1", grade: 5, type: [], tag: null }],
     });
     const rejectedHigh = parseNoteSettlementResponse(outOfRangeHigh);
     expect(rejectedHigh.ok).toBe(false);
@@ -1083,17 +1064,18 @@ describe("settlement response schema", () => {
     );
 
     const outOfRangeLow = JSON.stringify({
-      turn_review: [{ turn: "S1/T1", grade: -1, type: null, tag: null }],
+      turn_review: [{ turn: "S1/T1", grade: -1, type: [], tag: null }],
     });
     expect(parseNoteSettlementResponse(outOfRangeLow).ok).toBe(false);
 
     const missingGrade = JSON.stringify({
-      turn_review: [{ turn: "S1/T1", type: null, tag: null }],
+      turn_review: [{ turn: "S1/T1", type: [], tag: null }],
     });
     expect(parseNoteSettlementResponse(missingGrade).ok).toBe(false);
 
     const badVocabWord = JSON.stringify({
-      turn_review: [{ turn: "S1/T1", grade: 2, type: "refactor", tag: null }],
+      // A retired legacy word — never in the current vocabulary (spec B2).
+      turn_review: [{ turn: "S1/T1", grade: 2, type: ["bugfix"], tag: null }],
     });
     const rejectedType = parseNoteSettlementResponse(badVocabWord);
     expect(rejectedType.ok).toBe(false);

@@ -1,10 +1,6 @@
 import { isCitationRelation, type CitationRelation } from "../db/citations";
 import { SEGMENT_STATUSES, type SegmentStatus } from "../db/segments";
-import {
-  isMemoryType,
-  MEMORY_TYPES,
-  type MemoryType,
-} from "../shared/type-vocabulary";
+import { isMemoryType, MEMORY_TYPES } from "../shared/type-vocabulary";
 
 /**
  * The settlement call's structured output (spec D9: "Sonnet 输出走结构化 schema").
@@ -58,16 +54,16 @@ export interface SettlementNoteDirective {
  * `grade` is REQUIRED, matching the retired resident agent's own rubric
  * ("grade: REQUIRED integer 0-4") — the model states a verdict for every turn
  * it reviews, confirming or correcting, never leaving the field ambiguous
- * between "unchanged" and "omitted". `type`/`tag` are nullable: `null` is an
- * explicit clear (a turn whose title carries no activity or topic, or whose
- * type/topic the model is retracting), never "leave alone" — this schema has
- * no way to say "leave alone" for a field it is reviewing, by design.
+ * between "unchanged" and "omitted". `type` is multi-valued (spec B5); `[]`
+ * is an explicit "none fit" (spec B7), never "leave alone" — this schema has
+ * no way to say "leave alone" for a field it is reviewing, by design. `tag`
+ * keeps its own nullable single-value shape: `null` is an explicit clear.
  */
 export interface SettlementTurnReviewDirective {
   turn: string;
   grade: number;
-  type: MemoryType | null;
-  /** Bare topic word, not yet namespaced — the writeback owns the `topic:` prefix. */
+  type: string[];
+  /** Bare topic word — no `topic:` prefix is applied (spec B6). */
   tag: string | null;
 }
 
@@ -175,18 +171,6 @@ function asGrade(value: unknown, what: string): number {
     fail(`${what} is not an integer 0-4`);
   }
   return value;
-}
-
-/** Explicit `null` is a clear; anything else must be in the closed vocabulary. */
-function asMemoryTypeOrNull(value: unknown, what: string): MemoryType | null {
-  if (value === null) {
-    return null;
-  }
-  const text = asString(value, what);
-  if (!isMemoryType(text)) {
-    fail(`${what} "${text}" is not one of ${MEMORY_TYPES.join(", ")}`);
-  }
-  return text;
 }
 
 /** Explicit `null` or empty is a clear — the tag facet has no "leave alone". */
@@ -332,22 +316,24 @@ function parseTurnReview(
 ): SettlementTurnReviewDirective {
   const what = `turn_review[${index}]`;
   const record = asRecord(value, what);
-  // An OMITTED field is a schema violation; only an explicit `null` clears.
-  // The two used to be the same, which meant a model that answered
+  // An OMITTED field is a schema violation; only an explicit `null`/`[]`
+  // clears. The two used to be the same, which meant a model that answered
   // `{"turn": …, "grade": 2}` — lazily, or because its output was truncated
   // mid-array — silently wiped the type and topic tag off every turn it
   // touched, up to a whole window plus its lookback. Failing loudly costs a
-  // retry; the alternative cost real facts, invisibly. `null` still means
+  // retry; the alternative cost real facts, invisibly. `null`/`[]` still mean
   // clear, so the expressiveness this schema was built for survives.
   for (const field of ["type", "tag"] as const) {
     if (!(field in record)) {
-      fail(`${what}.${field} is missing (use null to clear it)`);
+      fail(`${what}.${field} is missing (use null/[] to clear it)`);
     }
   }
   return {
     turn: asNonEmptyString(record.turn, `${what}.turn`),
     grade: asGrade(record.grade, `${what}.grade`),
-    type: asMemoryTypeOrNull(record.type, `${what}.type`),
+    // `asTypeArray` reads a bare `null` the same as an omitted value — `[]`
+    // (spec B7's "none fit"), which is exactly the clear this field needs.
+    type: asTypeArray(record.type, `${what}.type`),
     tag: asTagOrNull(record.tag, `${what}.tag`),
   };
 }

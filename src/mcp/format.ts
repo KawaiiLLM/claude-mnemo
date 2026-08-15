@@ -1,15 +1,6 @@
 import { renderFileTree } from "../shared/file-tree";
 import { projectToolCall, type ProjectedCall } from "./tool-projection";
 
-export const TYPE_EMOJI: Record<string, string> = {
-  bugfix: "🔴",
-  feature: "🟣",
-  refactor: "🔄",
-  change: "✅",
-  discovery: "🔵",
-  decision: "⚖️",
-};
-
 /**
  * One mark for a cut field, on every read surface. This renderer ended a cut
  * with "..." while the timeline ended it with "…", so the same session read

@@ -130,7 +130,13 @@ const SCHEMA_SQL = `
     title TEXT,
     content TEXT,
     insight TEXT,
-    type TEXT,
+    -- Multi-valued (ticket 02, spec B5): a JSON array, matching segments.type
+    -- exactly. Empty is never a claim (spec B7) — '[]' means "no activity word
+    -- was stated", the same fact NULL used to carry. On a database that
+    -- predates this shape, ensureTurnTypeMultiValueColumn rebuilds the table
+    -- (a CHECK constraint cannot be ALTERed onto an existing column) and wraps
+    -- every existing non-null scalar into a one-element array.
+    type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
     significance_grade INTEGER CHECK (
       significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
     ),
@@ -1207,6 +1213,77 @@ export function initializeSchema(db: Database): void {
   retireLegacyPendingNoteDebts(db);
   ensureNoteSettlementSessionEndTrigger(db);
   dropLegacyMemoriesTable(db);
+  // Last on purpose: every other turns-column migration above (parent_turn_id,
+  // compact_boundary_uuid, consulted_memories, cites_recorded, ...) must have
+  // already landed on `turns` before this rebuild copies it, or the copy would
+  // silently drop a column a database created between those migrations and
+  // this one still needs.
+  ensureTurnTypeMultiValueColumn(db);
+  // After the rebuild, not before: this rewrites rows in whichever table
+  // answers to `turns` at the end of the chain.
+  stripRetiredTopicTagNamespace(db);
+}
+
+/**
+ * Strip the retired `topic:` namespace off `turns.tags` (spec B6, ticket 02).
+ *
+ * The prefix existed to hold a topic facet apart from session-arc role words
+ * inside one column. The roles have since become `type` values, so the prefix
+ * marks nothing: of 7229 prefixed values in the live corpus, 6427 were
+ * `topic:`, and the three namespaces left behind (`compact:` 414,
+ * `invalidated:` 340, `delivery:` 46) are all machinery. Stripping leaves one
+ * rule a reader can hold — a bare tag is what the turn was about, a prefixed
+ * one is bookkeeping — in place of a read-side mechanism obliged to match two
+ * spellings of every topic forever. That is the whole reason to migrate the
+ * data rather than translate on read.
+ *
+ * Order-preserving and de-duplicating, because a turn can already carry both
+ * spellings of one word; exactly one row in the live corpus does. Naturally
+ * idempotent — a second run finds nothing prefixed left to strip.
+ */
+function stripRetiredTopicTagNamespace(db: Database): void {
+  const rows = db
+    .query<{ id: number; tags: string }, []>(
+      `SELECT id, tags FROM turns
+       WHERE tags IS NOT NULL
+         AND EXISTS (
+           SELECT 1 FROM json_each(turns.tags) j WHERE j.value LIKE 'topic:%'
+         )`,
+    )
+    .all();
+  if (rows.length === 0) {
+    return;
+  }
+
+  const update = db.query<unknown, [string, number]>(
+    "UPDATE turns SET tags = ? WHERE id = ?",
+  );
+  runWriteTransaction(db, () => {
+    for (const row of rows) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.tags);
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(parsed)) {
+        continue;
+      }
+      const stripped: string[] = [];
+      for (const value of parsed) {
+        if (typeof value !== "string") {
+          continue;
+        }
+        const bare = value.startsWith("topic:")
+          ? value.slice("topic:".length)
+          : value;
+        if (bare.length > 0 && !stripped.includes(bare)) {
+          stripped.push(bare);
+        }
+      }
+      update.run(JSON.stringify(stripped), row.id);
+    }
+  });
 }
 
 // `note_debt` shipped in 0.9.0 with a two-value reason vocabulary; residual
@@ -1719,6 +1796,181 @@ function ensureTurnPromptIdIndex(db: Database): void {
 function dropLegacyMemoriesTable(db: Database): void {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DELETE FROM memory_fts WHERE layer = 'memory'");
+}
+
+// `turns.type` shipped nullable-scalar and ticket 02 (spec B5) widens it to a
+// JSON array, matching `segments.type`. Same detection idiom as
+// `ensureNoteDebtReasonVocabulary`: read the stored DDL rather than track a
+// version counter, so a fresh database (whose CREATE TABLE already carries the
+// CHECK) skips the rebuild entirely.
+function turnsTypeColumnIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'turns'",
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("CHECK (json_valid(type))");
+}
+
+/**
+ * Widen `turns.type` from a nullable scalar to a JSON array (ticket 02, spec
+ * B5). Every existing non-null scalar is wrapped into a one-element array
+ * (`discovery` → `["discovery"]`, spec's Out of Scope: a value-preserving
+ * wrap, never a remap onto the new vocabulary); NULL and empty-string become
+ * `'[]'`.
+ *
+ * A CHECK constraint cannot be ALTERed onto an existing column, so this is a
+ * table rebuild, not an `ALTER TABLE ... ADD COLUMN` — same family of move as
+ * `ensureNoteDebtReasonVocabulary` / `ensureNoteSettlementSessionEndTrigger`,
+ * but `turns` cannot reuse their rename-the-old-table-away shape. Six other
+ * tables (`note_debt`, `observations`, `shadow_notes`, `note_id_exposures`
+ * ×2, `segment_members`) hold `REFERENCES turns(id)`, and with
+ * `PRAGMA foreign_keys = ON` (database.ts) SQLite's rename repoints every one
+ * of those clauses at the RENAMED table — so renaming `turns` itself would
+ * leave the real table an orphaned FK target forever, with six tables quietly
+ * pointing at a name nothing answers to. The standard 12-step procedure
+ * sidesteps this: build the NEW table under a temporary name, drop the OLD
+ * `turns`, then rename the new table INTO `turns`. The six REFERENCES clauses
+ * never move, because the table named `turns` they point at is swapped out
+ * from under a name that never changes.
+ *
+ * `PRAGMA foreign_keys` is a no-op inside a transaction (SQLite refuses to
+ * toggle it once BEGIN has run), so it is set OFF on the connection before
+ * `runWriteTransaction` opens one, and restored after — this connection is
+ * the process's only handle to the database, and leaving FK enforcement off
+ * would silently disable it for everything this process does afterward.
+ *
+ * The five indexes and the one AFTER DELETE trigger that reference `turns`
+ * are dropped along with the old table (SQLite drops a table's indexes and
+ * triggers with it) and are recreated explicitly here rather than left to the
+ * functions that normally own them: this rebuild runs LAST in
+ * `initializeSchema`, after every one of those functions has already run
+ * against the old table this call, so nothing later in the chain would
+ * recreate what this rebuild just destroyed.
+ */
+function ensureTurnTypeMultiValueColumn(db: Database): void {
+  if (!turnsTypeColumnIsStale(db)) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!turnsTypeColumnIsStale(db)) {
+        return;
+      }
+
+      db.exec(`
+        CREATE TABLE turns_pre_multivalued_type_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          prompt_number INTEGER NOT NULL,
+          content_prompt_id TEXT,
+          was_interrupted INTEGER NOT NULL DEFAULT 0,
+          was_rolled_back INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'active',
+          user_prompt TEXT,
+          assistant_response TEXT,
+          assistant_transcript TEXT,
+          title TEXT,
+          content TEXT,
+          insight TEXT,
+          type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+          significance_grade INTEGER CHECK (
+            significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
+          ),
+          tags TEXT,
+          files_read TEXT,
+          files_modified TEXT,
+          tool_call_count INTEGER,
+          transcript_line_start INTEGER,
+          cites_recorded INTEGER NOT NULL DEFAULT 0,
+          consulted_memories TEXT,
+          compact_boundary_uuid TEXT,
+          parent_turn_id INTEGER,
+          created_at_epoch INTEGER NOT NULL,
+          updated_at_epoch INTEGER,
+          UNIQUE(session_id, prompt_number)
+        )
+      `);
+
+      db.exec(`
+        INSERT INTO turns_pre_multivalued_type_new (
+          id, session_id, prompt_number, content_prompt_id, was_interrupted,
+          was_rolled_back, status, user_prompt, assistant_response,
+          assistant_transcript, title, content, insight, type,
+          significance_grade, tags, files_read, files_modified,
+          tool_call_count, transcript_line_start, cites_recorded,
+          consulted_memories, compact_boundary_uuid, parent_turn_id,
+          created_at_epoch, updated_at_epoch
+        )
+        SELECT
+          id, session_id, prompt_number, content_prompt_id, was_interrupted,
+          was_rolled_back, status, user_prompt, assistant_response,
+          assistant_transcript, title, content, insight,
+          CASE
+            WHEN type IS NULL OR type = '' THEN '[]'
+            ELSE json_array(type)
+          END,
+          significance_grade, tags, files_read, files_modified,
+          tool_call_count, transcript_line_start, cites_recorded,
+          consulted_memories, compact_boundary_uuid, parent_turn_id,
+          created_at_epoch, updated_at_epoch
+        FROM turns
+      `);
+
+      db.exec("DROP TABLE turns");
+      db.exec(
+        "ALTER TABLE turns_pre_multivalued_type_new RENAME TO turns",
+      );
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
+          ON turns(session_id, prompt_number)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_turns_status_created
+          ON turns(status, created_at_epoch)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_turns_created_at
+          ON turns(created_at_epoch)
+      `);
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_compact_boundary_uuid
+          ON turns(session_id, compact_boundary_uuid)
+          WHERE compact_boundary_uuid IS NOT NULL
+      `);
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_prompt_id
+          ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
+      `);
+      db.exec(`
+        CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
+          AFTER DELETE ON turns
+          BEGIN
+            DELETE FROM memory_edges
+            WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
+               OR (cited_kind = 'turn' AND cited_id = OLD.id);
+          END;
+      `);
+    });
+
+    // Matches the 12-step procedure's own verification step: every id was
+    // carried over unchanged (explicit column list, no id remapping), so a
+    // clean bill of health here is expected, not aspirational.
+    const violations = db
+      .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+      .all();
+    if (violations.length > 0) {
+      throw new Error(
+        `turns table rebuild left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`,
+      );
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
 }
 
 /**

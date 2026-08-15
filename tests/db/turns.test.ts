@@ -437,7 +437,7 @@ describe("turn queries", () => {
     const turnId = db
       .query<{ id: number }, [number]>(
         `INSERT INTO turns (session_id, prompt_number, status, assistant_response, title, content, insight, type, created_at_epoch)
-         VALUES (?, 50, 'provisional', 'r', 'Old title', 'Old content', 'Old insight', 'feature', 5000)
+         VALUES (?, 50, 'provisional', 'r', 'Old title', 'Old content', 'Old insight', '["feature"]', 5000)
          RETURNING id`,
       )
       .get(sessionId)!.id;
@@ -457,7 +457,7 @@ describe("turn queries", () => {
     expect(t.title).toBeNull();
     expect(t.content).toBeNull();
     expect(t.insight).toBeNull();
-    expect(t.type).toBeNull();
+    expect(t.type).toEqual([]);
     expect(t.tags).toEqual(["delivery:dropped:notify-pending"]); // freeform dropped, internal kept
     expect(t.assistantResponse).toBe("r");                       // source kept
     // The extraction fields leave the index, but the captured originals stay:

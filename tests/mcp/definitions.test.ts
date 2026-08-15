@@ -101,6 +101,10 @@ describe("tool surface", () => {
     expect(note).toContain("whatever the tool count");
     // Field contract essentials and the revision/guard semantics.
     expect(note).toContain("the real stage, never a hoped-for one");
+    // ticket 02 (spec B1/B2/B7): the writer states type/tags directly, no
+    // mechanical title-to-type derivation any more.
+    expect(note).toContain("omit or [] when none fit, never guess");
+    expect(note).toContain("bare topic words, no prefix");
     expect(note).toContain("never restate the title, never narrate looking");
     expect(note).toContain("claim first, evidence after");
     expect(note).toContain("token counts against these budgets");

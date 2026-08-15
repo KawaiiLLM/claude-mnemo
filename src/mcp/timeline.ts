@@ -18,6 +18,11 @@ import { isSegmentEra } from "../segment-era";
 import { resolveSessionTranscriptPath } from "../shared/paths";
 import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
 import { isTaskCausalityEra } from "../task-causality-era";
+import {
+  COMPACT_TYPE_GLYPH,
+  typeListGlyph,
+  typeListsEqual,
+} from "../shared/type-vocabulary";
 
 import {
   appendNavigationLegend,
@@ -288,7 +293,8 @@ export interface ResolvedWindow {
 
 export interface Phase {
   kind: "typed" | "pending";
-  type: string | null;
+  /** Multi-valued (ticket 02, spec B5); `[]` for a "pending" phase. */
+  type: string[];
   emoji: string;
   startPromptNumber: number;
   endPromptNumber: number;
@@ -440,16 +446,6 @@ export interface MilestoneDayGroup {
   overflow: OverflowHint | null; // attached only on the final slice
 }
 
-export const TYPE_EMOJI_MAP: Record<string, string> = {
-  bugfix: "🔴",
-  feature: "🟣",
-  refactor: "🔄",
-  change: "✅",
-  discovery: "🔵",
-  decision: "⚖️",
-  compact: "⏸",
-};
-
 export const PENDING_EMOJI = "⏳";
 const MISSING_LINE_ANCHOR = "—";
 const MISSING_GRADE_CELL = "—";
@@ -458,9 +454,17 @@ const MISSING_GRADE_CELL = "—";
 export const TURN_TABLE_HEADER =
   "T# | line | time | gap | stats | G | prompt → title";
 
-function typeEmoji(type: string | null): string {
-  if (type === null) return PENDING_EMOJI;
-  return TYPE_EMOJI_MAP[type] ?? "•";
+/**
+ * The glyph for a turn's type list (ticket 02, spec B5): `[]` — no type
+ * stated — is the pending placeholder, never a positive value (spec B7);
+ * otherwise `typeListGlyph` resolves current AND legacy vocabulary words
+ * alike, joining more than one into a multi-glyph read.
+ */
+function typeEmoji(type: readonly string[]): string {
+  if (type.length === 0) {
+    return PENDING_EMOJI;
+  }
+  return typeListGlyph(type);
 }
 
 type PaginatedItems<T> = { items: T[]; total: number; pageCount: number };
@@ -786,7 +790,7 @@ export function milestoneMarker(
 
   const keywordReversal =
     options.enableReversalKeyword === true &&
-    turn.type === "decision" &&
+    turn.type.includes("decision") &&
     turn.tags.some((tag) => REVERSAL_KEYWORD_TAGS.has(tag));
   const roleReversal = turn.tags.some((tag) => REVERSED_ROLE_TAGS.has(tag));
 
@@ -880,9 +884,15 @@ export function milestoneEffGrade(
 }
 
 function legacyEffGrade(turn: TurnRecord): number {
-  let grade = MILESTONE_LEGACY_TYPE_GRADE[turn.type ?? ""] ?? 0;
+  // This whole function is exercised only against pre-era turns (spec's own
+  // doc comment above), which the ticket 02 migration wraps one legacy word
+  // per one-element array — so the first (and only) element IS the value
+  // this map has always been keyed on. Untouched behaviour for every row this
+  // function actually sees.
+  const legacyType = turn.type[0] ?? "";
+  let grade = MILESTONE_LEGACY_TYPE_GRADE[legacyType] ?? 0;
   if (
-    (turn.type === "feature" || turn.type === "refactor" || turn.type === "change") &&
+    (legacyType === "feature" || legacyType === "refactor" || legacyType === "change") &&
     turn.filesModified.length === 0
   ) {
     grade = 0;
@@ -1193,10 +1203,17 @@ export function segmentPhases(turns: TurnRecord[]): Phase[] {
       continue;
     }
 
-    const kind: Phase["kind"] = turn.type === null ? "pending" : "typed";
+    const kind: Phase["kind"] = turn.type.length === 0 ? "pending" : "typed";
     const emoji = typeEmoji(turn.type);
 
-    if (current === null || current.kind !== kind || current.type !== turn.type) {
+    // ticket 02, spec B5: `type` is a list now, so a phase boundary is
+    // identity over the WHOLE ordered list, not a scalar `!==` — two turns
+    // share a phase iff their type lists are identical (`typeListsEqual`).
+    if (
+      current === null ||
+      current.kind !== kind ||
+      !typeListsEqual(current.type, turn.type)
+    ) {
       if (current !== null) {
         current.durationMs = (currentEndEpoch - currentStartEpoch) * 1000;
       }
@@ -1259,10 +1276,17 @@ export function computeTypesDistribution(turns: TurnRecord[]): TypesDistribution
       continue;
     }
 
-    if (turn.type === null) {
+    // `TypesDistribution` is a closed LEGACY vocabulary (this function predates
+    // ticket 02's multi-value change and is not in its scope), so a
+    // multi-valued turn is read by its first stated word — the same word a
+    // single-valued legacy row's one-element array carries — and a current-
+    // vocabulary-only word (never in this closed set) simply counts toward
+    // neither bucket, same as an unrecognised word already did.
+    const legacyType = turn.type[0] ?? null;
+    if (legacyType === null) {
       distribution.pending += 1;
-    } else if (isTypedTurnKind(turn.type)) {
-      distribution[turn.type] += 1;
+    } else if (isTypedTurnKind(legacyType)) {
+      distribution[legacyType] += 1;
     }
   }
 
@@ -1491,7 +1515,7 @@ export function selectMilestoneTurns(view: {
   // in as an antecedent), and a compact marker is structural noise that the arc
   // view no longer spends a row on.
   const seq = sortTurnsForAnalysis(view.windowTurns).filter(
-    (turn) => turn.status !== "skipped" && turn.type !== "compact",
+    (turn) => turn.status !== "skipped" && !turn.type.includes("compact"),
   );
   if (seq.length === 0) {
     return {
@@ -1618,7 +1642,7 @@ export function selectMilestoneTurns(view: {
       const cited = universeById.get(citedTurnId);
       if (
         cited === undefined ||
-        cited.type === "compact" ||
+        cited.type.includes("compact") ||
         cited.sessionId !== row.turn.sessionId ||
         // Predecessor guard: a causal reference points backward.
         cited.promptNumber >= row.turn.promptNumber
@@ -1850,7 +1874,7 @@ export function buildTimelineView(
   const compactBoundaries = [
     ...new Set(
       allTurns
-        .filter((turn) => turn.type === "compact")
+        .filter((turn) => turn.type.includes("compact"))
         .map((turn) => turn.promptNumber),
     ),
   ].sort((a, b) => a - b);
@@ -3378,15 +3402,16 @@ function renderTurnRow(
   signal?: TruncationSignal,
 ): string {
   const isUndone = turn.status === "undone";
-  const compactMetadata = turn.type === "compact" ? getCompactMetadata(turn.tags) : null;
+  const isCompactMarker = turn.type.includes("compact");
+  const compactMetadata = isCompactMarker ? getCompactMetadata(turn.tags) : null;
   const gapSuffix = isBrokenPromptCandidate ? " ※" : "";
   const sourceBadges = extractSourceTags(turn.tags)
     .map((source) => `[ext:${source}]`)
     .join(" ");
   const promptCore =
-    turn.type === "compact" ? "/compact" : cleanPromptForLabel(turn.userPrompt);
+    isCompactMarker ? "/compact" : cleanPromptForLabel(turn.userPrompt);
   const promptWithBadges =
-    turn.type === "compact"
+    isCompactMarker
       ? promptCore
       : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
   const promptText = sanitizeTimelineField(
@@ -3430,14 +3455,16 @@ function renderStats(turn: TurnRecord): string {
 }
 
 /**
- * The glyph for a turn's type, including the case where it has none.
+ * The glyph for a turn's type list, including the case where it is empty
+ * (ticket 02, spec B5/B7).
  *
- * A turn's `type` is written by the settlement review pass, so between a turn
- * landing and its window being reviewed the column is simply absent — that is
- * the normal state of recent work, not a defect. The `•` stands in for it.
+ * A turn's `type` is stated by the writer when it notes the turn, so between
+ * a turn landing and its note being written the column is simply absent —
+ * that is the normal state of recent work, not a defect. The `•` stands in
+ * for it. A multi-valued list renders as more than one glyph.
  */
-function typeGlyph(type: string | null): string {
-  return (type === null ? undefined : TYPE_EMOJI_MAP[type]) ?? "•";
+function typeGlyph(type: readonly string[]): string {
+  return typeListGlyph(type);
 }
 
 function renderTitleCell(
@@ -3450,10 +3477,10 @@ function renderTitleCell(
 ): string {
   const markerPrefix = marker ? `${marker} ` : "";
 
-  if (turn.type === "compact") {
+  if (turn.type.includes("compact")) {
     const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
     const trigger = compactMetadata?.trigger ?? "manual";
-    return `${markerPrefix}${TYPE_EMOJI_MAP.compact} /compact ${preTokens} tokens, ${trigger}`;
+    return `${markerPrefix}${COMPACT_TYPE_GLYPH} /compact ${preTokens} tokens, ${trigger}`;
   }
 
   // A missing type no longer withholds the title. Gating on it conflated "is
@@ -3549,7 +3576,7 @@ function renderPhases(
     const leadTitle = sanitizeTimelineField(truncateText(leadText, { limit: titleCap, signal }));
 
     lines.push(
-      `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd(),
+      `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type.join(",")).padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd(),
     );
     previousPhaseEpoch = phase.endEpoch;
   }

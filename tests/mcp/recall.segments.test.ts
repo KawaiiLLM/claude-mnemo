@@ -32,7 +32,7 @@ describe("recall segment selector and cross-granularity filters", () => {
     options: { type?: string | null; title?: string; tags?: string[]; epoch?: number } = {},
   ): number {
     const id = db
-      .query<{ id: number }, [number, number, string | null, string, string, number]>(
+      .query<{ id: number }, [number, number, string, string, string, number]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, type, title, tags, created_at_epoch,
            user_prompt, assistant_response, content, files_read, files_modified
@@ -43,7 +43,7 @@ describe("recall segment selector and cross-granularity filters", () => {
       .get(
         sessionId,
         promptNumber,
-        options.type ?? null,
+        options.type ? JSON.stringify([options.type]) : "[]",
         options.title ?? `title ${promptNumber}`,
         JSON.stringify(options.tags ?? []),
         options.epoch ?? CUTOFF + promptNumber,

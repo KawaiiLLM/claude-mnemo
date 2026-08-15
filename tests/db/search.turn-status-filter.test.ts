@@ -27,7 +27,7 @@ describe("recall turn hits are filtered by render status", () => {
            title, content, tags, type, created_at_epoch
          ) VALUES (?, ?, ?, 'zebrafish prompt', 'zebrafish response',
                    'zebrafish title', 'zebrafish content', '["topic:zebrafish"]',
-                   'bugfix', 100)
+                   '["bugfix"]', 100)
          RETURNING id`,
       )
       .get(sessionId, promptNumber, status)!.id;

@@ -142,8 +142,22 @@ export function collectCompactBoundaryClaims(
 
 interface OwnerRow {
   id: number;
+  /** Raw JSON array text straight off the column (ticket 02, spec B5) — parsed by the one caller that needs to. */
   type: string | null;
   compactBoundaryUuid: string | null;
+}
+
+/** Does a raw `turns.type` JSON-array column value name `compact`? */
+function typeColumnIsCompactMarker(raw: string | null): boolean {
+  if (!raw) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) && parsed.includes("compact");
+  } catch {
+    return false;
+  }
 }
 
 /** Rendering metadata every marker carries, inserted or converted alike. */
@@ -187,7 +201,7 @@ function convertOccupiedTurnToMarker(
 ): void {
   db.query<unknown, [string, number, string, number]>(
     `UPDATE turns
-     SET type = 'compact',
+     SET type = '["compact"]',
          status = 'extracted',
          title = '/compact',
          compact_boundary_uuid = ?,
@@ -292,7 +306,7 @@ export function claimCompactBoundaries(
       // A marker created by the retired PostCompact path (no UUID column yet).
       // Adopt it — stamping the identity key is enough; rewriting it would
       // destroy the token/trigger tags it already carries.
-      if (owner.type === "compact") {
+      if (typeColumnIsCompactMarker(owner.type)) {
         db.query<unknown, [string, number]>(
           `UPDATE turns SET compact_boundary_uuid = ?
            WHERE id = ? AND compact_boundary_uuid IS NULL`,
@@ -332,7 +346,7 @@ export function claimCompactBoundaries(
          tool_call_count,
          compact_boundary_uuid,
          created_at_epoch
-       ) VALUES (?, ?, ?, 'extracted', '/compact', ?, 'compact', ?, ?, '[]', '[]', 0, ?, ?)`,
+       ) VALUES (?, ?, ?, 'extracted', '/compact', ?, '["compact"]', ?, ?, '[]', '[]', 0, ?, ?)`,
     ).run(
       sessionId,
       maxPromptNumber + 1,

@@ -108,7 +108,9 @@ The result a user sees: a timeline whose rows carry real activity words again; a
 
 **B5.** `type` becomes **multi-valued** on a turn, as it already is on a segment. A rolled-back design is `design` plus a `supersedes` edge; a turn that both reviewed and shipped is `review`+`ops`. Observed multi-value rate is 43-49% one word, 45-47% two, 3-11% three or more — calibrated, neither degenerate nor saturating.
 
-**B6.** Turn `tags` are bare topic words. The `topic:` namespace prefix is **not** applied; existing prefixed rows are left alone rather than migrated. Session-arc role words (`correction`, `blocked`, `deferred`) are not turn tags: `correction` becomes a `type`, and status words stay out of the function vocabulary.
+**B6.** Turn `tags` are bare subject words and the `topic:` namespace is **retired**, existing rows included — the prefix is stripped once in a migration rather than translated on every read. Leaving the old rows in place was the earlier plan and it was wrong: a read side obliged to match two spellings of every subject forever is a mechanism kept alive to serve a distinction that no longer exists. Measured before the decision: 7229 prefixed values against 18292 bare, of which `topic:` is 6427 and the remainder is three machinery namespaces (`compact:` 414, `invalidated:` 340, `delivery:` 46). Stripping therefore leaves a rule a reader can hold in one line — **a bare tag is what the turn was about, a prefixed one is bookkeeping.** Exactly one live row carries both spellings of a word, so the strip de-duplicates, order-preserving.
+
+Session-arc role words (`correction`, `blocked`, `deferred`) are not turn tags: `correction` becomes a `type`, and status words stay out of the function vocabulary.
 
 **B7.** An illegal or absent activity word leaves `type` empty. Empty is never a claim.
 
@@ -212,6 +214,10 @@ The constraint on C6 stands regardless of the direction: its recompute-and-delet
 **D4.** **No session-level `type` or `tags`.** A session is a container, not a semantic unit: its type would saturate to the union of everything it touched. The unit with one topic and one arc is the segment, which is why type and tags live there and at turn level.
 
 **D5.** Writes are per-field. Each write declares **`append` or `overwrite`**; the mode is required when the field is non-empty and its absence is an error, the same guard the note tool's `replace` already applies. A field that is empty needs no mode.
+
+**D5a. One mode vocabulary governs every field of every write tool — turn fields included — and no field gets a mechanism of its own.** This started as a session-write rule and is now universal, because the per-field alternative was tried and measured: the turn write path grew five disagreeing answers to the single question "what does omission mean" — `title`/`content`/`insight` left a value alone, `type` cleared it, `tags` merged into it, `replaceTags` overwrote it, and note's `replace` gated the whole row. Each was locally defensible and together they were incoherent, and the incoherence lived in the **defaults**, where nobody had to state it. A mode the caller names moves the decision into the open, which is the only place it can be reviewed.
+
+This retires `replace`, `replaceTags` and the bespoke tag merge together. Until the merged write tool lands (ticket 03), turn fields take the strict subset that invents nothing: **absent leaves the stored value alone, present overwrites it whole.** In particular an omitted `type` must not clear a stored one — B7 says empty is never a claim, so writing empty cannot be the act of claiming there is no type, and clearing takes an explicit empty list. This is C14/C16's rule reached a third time from a third direction: the absence of a statement is not a statement of absence.
 
 **D6.** The session write path needs the omit-versus-clear distinction the turn path already has: absent means leave alone, explicit null means clear. Today's upsert coalesces, so "this field no longer applies" is inexpressible.
 

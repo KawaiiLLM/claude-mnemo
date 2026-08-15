@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { parseQualifiedReferences } from "./references";
 import { getSegment, type SegmentRecord } from "./segments";
 import { isSegmentEra } from "../segment-era";
+import { typeListsEqual } from "../shared/type-vocabulary";
 
 /**
  * Derived ordering for the segment read surfaces (spec D8).
@@ -31,13 +32,30 @@ import { isSegmentEra } from "../segment-era";
  * places between two renders of the same data.
  */
 
+/** Raw row shape straight off `RANK_FACT_COLUMNS`: `type` is unparsed JSON-array text (ticket 02, spec B5). */
+interface MemberRankFactsRow {
+  turnId: number;
+  sessionId: number;
+  promptNumber: number;
+  title: string | null;
+  type: string;
+  status: string;
+  createdAtEpoch: number;
+  isCorrector: number;
+  isRolledBack: number;
+  citedBy: number;
+  isDeliveryMember: number;
+  filesModifiedCount: number;
+}
+
 /** The fact columns the ORDER BY reads, carried out so a caller can print them. */
 export interface MemberRankFacts {
   turnId: number;
   sessionId: number;
   promptNumber: number;
   title: string | null;
-  type: string | null;
+  /** Multi-valued (ticket 02, spec B5); `[]` when the turn stated no type. */
+  type: string[];
   status: string;
   createdAtEpoch: number;
   /** 1 when this turn carries an outgoing `supersedes` edge. */
@@ -73,9 +91,15 @@ const RANK_FACT_COLUMNS = `
      WHERE e.citing_kind = 'turn' AND e.citing_id = t.id
        AND e.relation = 'supersedes'
    )) AS isCorrector,
-  -- COALESCE, not a bare comparison: comparing NULL to a literal yields NULL,
-  -- and SQLite sorts NULL FIRST under ASC — an untyped turn would have
-  -- outranked every typed one on this key by accident of three-valued logic.
+  -- 'rolled-back' left the type vocabulary (ticket 02, spec B4): a reversal is
+  -- knowable only after the fact and is carried by a supersedes edge, never a
+  -- type a turn states about itself. This scalar comparison against t.type
+  -- -- now a JSON-array column (spec B5) -- is therefore permanently false
+  -- for every row: no legacy turn ever carried a bare 'rolled-back' scalar
+  -- either (it was a settlement-only, segment-only value), so this key was
+  -- already inert before the migration and stays inert after it. Moving it to
+  -- an inbound-supersedes-edge test is spec B4's explicit direction but is
+  -- edge work this ticket does not own (ticket 06/13).
   (COALESCE(t.type, '') = 'rolled-back') AS isRolledBack,
   (SELECT COUNT(*) FROM (
      SELECT DISTINCT e.citing_kind, e.citing_id
@@ -90,6 +114,25 @@ const RANK_FACT_COLUMNS = `
   (CASE WHEN json_valid(t.files_modified)
         THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount
 `;
+
+/** `RANK_FACT_COLUMNS`' raw `type` text, parsed once for every reader (ticket 02, spec B5). */
+function parseTypeList(raw: string | null): string[] {
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function mapMemberRankFactsRow(row: MemberRankFactsRow): MemberRankFacts {
+  return { ...row, type: parseTypeList(row.type) };
+}
 
 /** The spec's key order, written once so both readers cannot disagree. */
 const DERIVED_RANK_ORDER = `
@@ -170,7 +213,7 @@ export function rankSegmentMembers(
   }
 
   const rows = db
-    .query<MemberRankFacts, number[]>(
+    .query<MemberRankFactsRow, number[]>(
       `SELECT ${RANK_FACT_COLUMNS}
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
@@ -178,7 +221,8 @@ export function rankSegmentMembers(
          ${eraCutoffEpoch === null ? "" : "AND t.created_at_epoch >= ?"}
        ${DERIVED_RANK_ORDER}`,
     )
-    .all(...(eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]));
+    .all(...(eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]))
+    .map(mapMemberRankFactsRow);
 
   const anchorIds = resolveSegmentAnchorTurnIds(db, segment);
   const anchorPosition = new Map(
@@ -216,11 +260,14 @@ export interface SegmentSpineRow {
   firstEpoch: number;
   lastEpoch: number;
   /**
-   * Member types in chronological order with consecutive repeats collapsed: the
-   * phase trace (spec D6 — a function switch is not a segment boundary, so the
-   * trace is what shows the shape of the work inside one).
+   * Member type LISTS in chronological order with consecutive equal lists
+   * collapsed (ticket 02, spec B5): the phase trace (spec D6 — a function
+   * switch is not a segment boundary, so the trace is what shows the shape of
+   * the work inside one). Equality is the same ordered-list rule
+   * `typeListsEqual` applies to the timeline's own phase grouping — two
+   * members share a run iff their type lists are identical.
    */
-  phaseTrace: string[];
+  phaseTrace: string[][];
 }
 
 interface SpineMemberRow {
@@ -228,7 +275,8 @@ interface SpineMemberRow {
   turnId: number;
   sessionId: number;
   promptNumber: number;
-  type: string | null;
+  /** Multi-valued (ticket 02, spec B5); `[]` when the turn stated no type. */
+  type: string[];
   createdAtEpoch: number;
 }
 
@@ -263,7 +311,7 @@ export function listSegmentSpineForSession(
   }
 
   const memberRows = db
-    .query<SpineMemberRow, [number, number, number]>(
+    .query<Omit<SpineMemberRow, "type"> & { type: string }, [number, number, number]>(
       `SELECT
          sm.segment_id AS segmentId,
          t.id AS turnId,
@@ -282,7 +330,8 @@ export function listSegmentSpineForSession(
          )
        ORDER BY t.created_at_epoch ASC, t.id ASC`,
     )
-    .all(eraCutoffEpoch, sessionId, eraCutoffEpoch);
+    .all(eraCutoffEpoch, sessionId, eraCutoffEpoch)
+    .map((row) => ({ ...row, type: parseTypeList(row.type) }));
 
   const bySegment = new Map<number, SpineMemberRow[]>();
   for (const row of memberRows) {
@@ -308,8 +357,11 @@ export function listSegmentSpineForSession(
 
     rows.push({
       segment,
+      // Flattened: a multi-valued member contributes every one of its own
+      // words to the mode count (spec B5), not just a "first" pick —
+      // `deriveDominantType`'s own logic is untouched (pin: it stays).
       dominantType: deriveDominantType(
-        members.map((member) => member.type),
+        members.flatMap((member) => member.type),
         segment.type,
       ),
       memberCount: members.length,
@@ -318,10 +370,8 @@ export function listSegmentSpineForSession(
       lastPromptNumber: prompts.length > 0 ? Math.max(...prompts) : null,
       firstEpoch: members[0]!.createdAtEpoch,
       lastEpoch: members[members.length - 1]!.createdAtEpoch,
-      phaseTrace: collapseRuns(
-        members
-          .map((member) => member.type)
-          .filter((type): type is string => type !== null && type !== ""),
+      phaseTrace: collapseTypeListRuns(
+        members.map((member) => member.type).filter((type) => type.length > 0),
       ),
     });
   }
@@ -346,8 +396,7 @@ export function listSegmentSpineForSession(
  * no mode, and rather than break it by arrival order the row defers to the
  * segment's OWN first type value: that list is the settlement pass's judgement,
  * and a judgement beats an arbitrary tiebreak. With neither available the row
- * shows no type at all rather than guessing, which is the same call
- * `draftTypeFromTitle` makes.
+ * shows no type at all rather than guessing (spec B7: empty is never a claim).
  *
  * `memberTypes` must be in chronological order.
  */
@@ -382,16 +431,25 @@ export function deriveDominantType(
   // With no mode and nothing declared on the segment there is no answer to
   // give. Falling back to `best` here would be answering with "whichever tied
   // type was written first", which is arrival order wearing a mode's clothes —
-  // and an untyped segment is ordinary, not exotic: `resolveTypeDraft` stores
-  // an EMPTY list whenever the title matches no type prefix.
+  // and an untyped segment is ordinary, not exotic: an omitted `type` is
+  // stored as `[]`, never guessed at (spec B7).
   return segmentTypes[0] ?? null;
 }
 
-function collapseRuns(values: readonly string[]): string[] {
-  const out: string[] = [];
+/**
+ * Collapse consecutive chronological entries whose FULL type list is equal
+ * (ticket 02, spec B5) into one run each — the phase trace's own version of
+ * the timeline's `typeListsEqual` phase-grouping rule (ordered, exact list
+ * equality, not a flattened set).
+ */
+function collapseTypeListRuns(
+  values: readonly (readonly string[])[],
+): string[][] {
+  const out: string[][] = [];
   for (const value of values) {
-    if (out[out.length - 1] !== value) {
-      out.push(value);
+    const previous = out[out.length - 1];
+    if (!previous || !typeListsEqual(previous, value)) {
+      out.push([...value]);
     }
   }
   return out;
@@ -429,7 +487,7 @@ export function listOrphanAnchorTurns(
   }
 
   const rows = db
-    .query<MemberRankFacts, [number, number]>(
+    .query<MemberRankFactsRow, [number, number]>(
       `SELECT ${RANK_FACT_COLUMNS}
        FROM turns t
        WHERE t.session_id = ?
@@ -440,7 +498,8 @@ export function listOrphanAnchorTurns(
          )
        ${DERIVED_RANK_ORDER}`,
     )
-    .all(sessionId, eraCutoffEpoch);
+    .all(sessionId, eraCutoffEpoch)
+    .map(mapMemberRankFactsRow);
 
   return rows
     .filter((facts) => windowTurnIds === undefined || windowTurnIds.has(facts.turnId))

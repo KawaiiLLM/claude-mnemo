@@ -54,7 +54,11 @@ export interface RememberToolInput {
     grade: number;
   };
   cites?: CitationInput[];
-  type?: string | null;
+  // Multi-valued (ticket 02, spec B5): `undefined` leaves the stored list
+  // alone; a defined array (including `[]`) replaces it whole — `[]` already
+  // means "no type" (spec B7), so there is no separate null-clear value the
+  // way title/content/insight have one.
+  type?: string[];
   title?: string | null;
   content?: string | null;
   insight?: string | null;
@@ -93,7 +97,6 @@ function decodeRememberInput(input: RememberToolInput): RememberToolInput {
   const decoded: RememberToolInput = { ...input };
   for (const key of [
     "id",
-    "type",
     "title",
     "content",
     "insight",
@@ -231,17 +234,19 @@ function validateGrade(
 
 /**
  * The closed `type` vocabulary stays closed at the write boundary too: an
- * unrecognised word is rejected rather than landing in the column (spec's
- * "an illegal type … leave the column empty rather than write an unknown
- * word"). `null` (an explicit clear) and `undefined` (omitted) both pass
- * through untouched — validation only concerns a word that IS supplied.
+ * unrecognised word is rejected rather than landing in the column (spec B7:
+ * an illegal or absent activity word leaves the column empty rather than
+ * storing the bad word or a guess). `undefined` (omitted) passes through
+ * untouched — validation only concerns a word that IS supplied.
  */
-function validateType(value: string | null | undefined): string | null {
-  if (value === undefined || value === null) {
+function validateType(value: readonly string[] | undefined): string | null {
+  if (value === undefined) {
     return null;
   }
-  if (!isMemoryType(value)) {
-    return `type "${value}" is not a recognised type. Allowed: ${MEMORY_TYPES.join(", ")}.`;
+  for (const entry of value) {
+    if (!isMemoryType(entry)) {
+      return `type "${entry}" is not a recognised type. Allowed: ${MEMORY_TYPES.join(", ")}.`;
+    }
   }
   return null;
 }

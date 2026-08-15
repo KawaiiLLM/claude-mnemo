@@ -328,61 +328,64 @@ describe("era cutover write path", () => {
     });
   });
 
-  describe("note also drafts the turn's type and tag (ticket 02, spec D7/D8)", () => {
-    test("a recognised activity word drafts the type, and the topic half becomes the tag as written", () => {
+  describe("note accepts type/tags from the caller directly (ticket 02, spec B1/B2/B6/B7)", () => {
+    test("a recognised type list lands verbatim, and bare tags land with no namespace prefix", () => {
       const result = noteTool(
         db,
         {
           turn: `S${sessionId}/T11`,
           title: "implement+shadow-store: notes land in their own table",
           content: "Promotion writes turns directly.",
+          type: ["implement"],
+          tags: ["shadow-store"],
         },
         { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
       );
 
       expect(isNoteSuccess(result)).toBe(true);
       const turn = getTurnById(db, eraTurnId)!;
-      expect(turn.type).toBe("implement");
-      expect(turn.tags).toContain("topic:shadow-store");
+      expect(turn.type).toEqual(["implement"]);
+      expect(turn.tags).toContain("shadow-store");
     });
 
-    test("an activity word outside the closed vocabulary leaves type empty rather than written", () => {
+    test("an unrecognised activity word is a parameter error, never a stored guess", () => {
       const result = noteTool(
         db,
         {
           turn: `S${sessionId}/T11`,
           title: "addendum+the-plan: appended a clause nobody expected",
           content: "The activity word has no alias in the vocabulary.",
+          type: ["addendum"],
         },
         { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
       );
 
-      expect(isNoteSuccess(result)).toBe(true);
+      expect(isNoteSuccess(result)).toBe(false);
+      expect(result.content[0]?.text).toContain("addendum");
+      // The whole call was rejected: nothing landed at all, so the column
+      // stays at its default — never the literal unrecognised word.
       const turn = getTurnById(db, eraTurnId)!;
-      // Never the literal unrecognised word, and never the "unknown" sentinel
-      // either — the column stays empty, which is the reviewable state.
-      expect(turn.type).toBeNull();
-      expect(turn.tags).toContain("topic:the-plan");
+      expect(turn.type).toEqual([]);
     });
 
-    test("a title that does not match the <activity>+<topic>: shape yields neither, and is not an error", () => {
+    test("omitting type/tags leaves them empty — never a guess derived from the title (spec B7)", () => {
       const result = noteTool(
         db,
         {
           turn: `S${sessionId}/T11`,
-          title: "a plain title with no delimiters at all",
-          content: "Plenty of legacy-shaped titles won't match.",
+          title: "implement+the-plan: a title that LOOKS like it states an activity",
+          content: "But the caller never named a type, so none is stored.",
         },
         { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
       );
 
       expect(isNoteSuccess(result)).toBe(true);
       const turn = getTurnById(db, eraTurnId)!;
-      expect(turn.type).toBeNull();
+      expect(turn.type).toEqual([]);
       expect(turn.tags).toEqual([]);
     });
 
-    test("replace re-drafts: a corrected title's new type replaces the stale one", () => {
+    test("a multi-valued type round-trips in full, and a replace restates it rather than accumulating", () => {
       const options = { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF };
       noteTool(
         db,
@@ -390,40 +393,43 @@ describe("era cutover write path", () => {
           turn: `S${sessionId}/T11`,
           title: "implement+login-flow: first pass",
           content: "First answer.",
+          type: ["implement"],
+          tags: ["login-flow"],
         },
         options,
       );
-      expect(getTurnById(db, eraTurnId)!.type).toBe("implement");
+      expect(getTurnById(db, eraTurnId)!.type).toEqual(["implement"]);
 
       noteTool(
         db,
         {
           turn: `S${sessionId}/T11`,
-          title: "fix+auth-bug: corrected after review",
+          title: "fix+auth-bug: corrected after review, also reviewed the fix",
           content: "The first pass mischaracterised the turn.",
+          type: ["review", "fix"],
           replace: true,
         },
         { ...options, now: () => 3_400 },
       );
 
       const turn = getTurnById(db, eraTurnId)!;
-      // The stale "implement" from the first title must not survive a redraft.
-      expect(turn.type).toBe("fix");
-      // The topic is a single-valued facet, so a redraft replaces it rather
-      // than accumulating: a turn whose title was corrected claims one topic,
-      // not both. Replacement is scoped to the `topic:` namespace — the role
-      // tags and the `compact:` / `invalidated:` machinery share this column
-      // and must survive a redraft untouched.
-      expect(turn.tags).toContain("topic:auth-bug");
-      expect(turn.tags).not.toContain("topic:login-flow");
+      // A stated type replaces the stored one whole: the redraft says
+      // "review, fix", so the first call's "implement" is gone rather than
+      // accumulated onto.
+      expect(turn.type).toEqual(["review", "fix"]);
+      // This call stated no tags at all, and absent means leave alone — so
+      // the first call's "login-flow" is still there. It survives because
+      // nothing overwrote it, not because tags accumulate.
+      expect(turn.tags).toEqual(["login-flow"]);
     });
 
-    test("a corrected title that no longer parses clears the stale type and tag rather than leaving them (ticket 05)", () => {
-      // Before ticket 05, `if (drafted.type || drafted.tag)` skipped the
-      // write entirely whenever a title stopped matching the
-      // <activity>+<topic>: shape, so a REPLACE that corrected a title into
-      // a shape without a topic left the previous draft standing — a stale
-      // fact surviving a correction that should have retired it.
+    test("a corrected note that omits type leaves the stored value alone; clearing takes an explicit empty list (spec B7)", () => {
+      // B7 says empty is NEVER a claim, so writing empty cannot be the act of
+      // claiming there is no type — an omitted field is silence, and silence
+      // must not overwrite something another pass stated. The same shape was
+      // ruled on twice for relation edges (spec C14/C16): the absence of a
+      // statement is not a statement of absence. Clearing stays expressible,
+      // it just has to be said.
       const options = { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF };
       noteTool(
         db,
@@ -431,11 +437,11 @@ describe("era cutover write path", () => {
           turn: `S${sessionId}/T11`,
           title: "implement+login-flow: first pass",
           content: "First answer.",
+          type: ["implement"],
         },
         options,
       );
-      expect(getTurnById(db, eraTurnId)!.type).toBe("implement");
-      expect(getTurnById(db, eraTurnId)!.tags).toContain("topic:login-flow");
+      expect(getTurnById(db, eraTurnId)!.type).toEqual(["implement"]);
 
       noteTool(
         db,
@@ -447,11 +453,72 @@ describe("era cutover write path", () => {
         },
         { ...options, now: () => 3_400 },
       );
+      expect(getTurnById(db, eraTurnId)!.type).toEqual(["implement"]);
 
-      const turn = getTurnById(db, eraTurnId)!;
-      expect(turn.type).toBeNull();
-      expect(turn.tags).not.toContain("topic:login-flow");
-      expect(turn.tags.some((tag) => tag.startsWith("topic:"))).toBe(false);
+      noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "a correction that really does mean none of them fit",
+          content: "An explicit empty list is the way to say so.",
+          type: [],
+          replace: true,
+        },
+        { ...options, now: () => 3_500 },
+      );
+      expect(getTurnById(db, eraTurnId)!.type).toEqual([]);
+    });
+
+    test("tags present replace the stored set whole; tags absent leave it alone (one rule, not a per-field mechanism)", () => {
+      const options = { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF };
+      noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "implement+login-flow: first pass",
+          content: "First answer.",
+          tags: ["login-flow", "session-cookie"],
+        },
+        options,
+      );
+      expect(getTurnById(db, eraTurnId)!.tags).toEqual([
+        "login-flow",
+        "session-cookie",
+      ]);
+
+      // Present: a restatement, not an accumulation. `session-cookie` was not
+      // restated, so it goes — which is what makes a retry idempotent (G5).
+      noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "implement+login-flow: it was really about the redirect",
+          content: "Second answer.",
+          tags: ["login-flow", "oauth-redirect"],
+          replace: true,
+        },
+        { ...options, now: () => 3_400 },
+      );
+      expect(getTurnById(db, eraTurnId)!.tags).toEqual([
+        "login-flow",
+        "oauth-redirect",
+      ]);
+
+      // Absent: silence, same as every other field.
+      noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "implement+login-flow: wording only",
+          content: "Third answer.",
+          replace: true,
+        },
+        { ...options, now: () => 3_500 },
+      );
+      expect(getTurnById(db, eraTurnId)!.tags).toEqual([
+        "login-flow",
+        "oauth-redirect",
+      ]);
     });
   });
 
@@ -462,7 +529,7 @@ describe("era cutover write path", () => {
         {
           id: `T${eraTurnId}`,
           grade: 3,
-          type: "implement",
+          type: ["implement"],
           title: "observer's reconstruction",
           content: "Written from the transcript, not from the turn itself.",
           insight: "A late correction reaching the record.",
@@ -485,7 +552,7 @@ describe("era cutover write path", () => {
         "Written from the transcript, not from the turn itself.",
       );
       expect(turn.insight).toBe("A late correction reaching the record.");
-      expect(turn.type).toBe("implement");
+      expect(turn.type).toEqual(["implement"]);
       expect(turn.tags).toEqual(["era-cutover"]);
       expect(turn.significanceGrade).toBe(3);
       expect(turn.status).toBe("extracted");
@@ -675,7 +742,7 @@ describe("era cutover write path", () => {
         {
           id: `T${legacyTurnId}`,
           grade: 2,
-          type: "implement",
+          type: ["implement"],
           title: "legacy extraction",
           content: "The old pipeline still owns this row.",
           tags: ["legacy"],
@@ -687,7 +754,7 @@ describe("era cutover write path", () => {
       const turn = getTurnById(db, legacyTurnId)!;
       expect(turn.title).toBe("legacy extraction");
       expect(turn.content).toBe("The old pipeline still owns this row.");
-      expect(turn.type).toBe("implement");
+      expect(turn.type).toEqual(["implement"]);
       expect(turn.tags).toEqual(["legacy"]);
       expect(turn.significanceGrade).toBe(2);
       expect(turn.status).toBe("extracted");
@@ -719,7 +786,7 @@ describe("era cutover write path", () => {
         {
           id: `T${eraTurnId}`,
           grade: 3,
-          type: "implement",
+          type: ["implement"],
           title: "extraction still owns this",
           content: "Rolled back to the legacy write path.",
           tags: ["rollback"],
@@ -730,7 +797,7 @@ describe("era cutover write path", () => {
       expect(isRememberSuccess(result)).toBe(true);
       const turn = getTurnById(db, eraTurnId)!;
       expect(turn.title).toBe("extraction still owns this");
-      expect(turn.type).toBe("implement");
+      expect(turn.type).toEqual(["implement"]);
       expect(turn.tags).toEqual(["rollback"]);
       expect(turn.significanceGrade).toBe(3);
       expect(turn.status).toBe("extracted");

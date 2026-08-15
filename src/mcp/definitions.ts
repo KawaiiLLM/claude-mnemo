@@ -18,13 +18,13 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // only the batch-timing digest and points at this text. Capped at 500
   // tokens by tests/mcp/definitions.test.ts.
   note:
-    "Write a note about one of this session's turns. `turn` is the `S<session>/T<prompt>` address from the injected `mnemo current turn` line, its `owed:` suffix, or the backlog-relief block — the only sources of an address; never recall or invent one. Timing: the SessionStart block's three rules. A note describes its addressed turn only, in English; quoted user phrases keep their original language. title (~" +
+    "Write a note about one of this session's turns. `turn` is the `S<session>/T<prompt>` address from the injected current-turn line, its owed suffix, or the backlog-relief block — the only sources of an address; never recall or invent one. Timing: the SessionStart block's three rules. title (~" +
     NOTE_TOKEN_BUDGET.title +
-    " tokens): `<activity>+<topic>: <what this turn covered>` — the activity word states the real stage, never a hoped-for one. content (~" +
+    " tokens): `<activity>+<topic>: <what this turn covered>` — the activity word states the real stage, never a hoped-for one. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction — omit or [] when none fit, never guess. tags: bare topic words, no prefix. content (~" +
     NOTE_TOKEN_BUDGET.content +
-    " tokens): the conclusion, then the evidence chain that produced it — rejected alternatives with reasons, who decided (user/data/literature/inference); proper nouns over narration; never restate the title, never narrate looking (\"I checked X and found no Y\" is \"X has no Y\"). insight (~" +
+    " tokens): the conclusion, then the evidence chain that produced it — rejected alternatives with reasons, who decided; proper nouns over narration; never restate the title, never narrate looking (\"I checked X and found no Y\" is \"X has no Y\"). insight (~" +
     NOTE_TOKEN_BUDGET.insight +
-    " tokens): empty by default — only long-term, hard-to-reacquire knowledge orthogonal to the conclusion; it is read far from its turn, so claim first, evidence after, and no session-local literal in the opening sentence. The receipt reports token counts against these budgets — over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique in the turn; the check: deleting it from history would cost the project no decision, progress, or coherence. Content that left your context and is not recovered in passing is skipped, never invented; recovered in passing, it is writable again. Never skip a user decision, correction, or veto, or any turn with a conclusion, a rejected option, or a lesson — whatever the tool count. Re-sending a turn's note requires `replace: true` (receipt `Updated`) — send it whenever a later result changes what it should say; a real note after a skip needs no replace. `crossSession: true` only for another session's turn; you should never need it. The note call goes last in its batch; cite other turns only as [S15069/T332], only ids seen in injected context; never include <private> content.",
+    " tokens): empty by default — only long-term, hard-to-reacquire knowledge orthogonal to the conclusion; it is read far from its turn, so claim first, evidence after, and no session-local literal in the opening sentence. Receipt reports token counts against these budgets; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique in the turn; check: deleting it from history would cost the project no decision, progress, or coherence. Content gone from context and not recovered in passing is skipped, never invented; recovered in passing, it is writable again. Never skip a user decision, correction, or veto, or any turn with a conclusion, a rejected option, or a lesson — whatever the tool count. Re-sending a turn's note requires `replace: true` (receipt `Updated`) — send it whenever a later result changes what it should say; a real note after a skip needs no replace. `crossSession: true` only for another session's turn; rarely needed. The note call goes last in its batch; cite other turns only as [S15069/T332], only ids seen in injected context; never include <private> content.",
 } as const;
 
 export const recallInputShape = {
@@ -80,7 +80,11 @@ export const rememberInputShape = {
         .strict(),
     )
     .optional(),
-  type: z.string().nullable().optional(),
+  // Multi-valued since ticket 02 (spec B5), matching a segment's `type`.
+  // Omitted = leave the existing list alone; an explicit `[]` clears it —
+  // `[]` already means "no type" (spec B7), so it is both the empty state
+  // and the explicit-clear state at once, same as `cites` above.
+  type: z.array(z.string()).optional(),
   title: z.string().nullable().optional(),
   content: z.string().nullable().optional(),
   insight: z.string().nullable().optional(),
@@ -117,6 +121,15 @@ export const noteInputShape = {
   title: z.string().min(1).optional(),
   content: z.string().min(1).optional(),
   insight: z.string().optional(),
+  // spec B1/B2 (ticket 02): the writer states what a turn did directly — no
+  // mechanical title-to-type derivation any more. Omitted or `[]` both mean
+  // no activity word fit (spec B7); an unrecognised word is a parameter
+  // error, never silently dropped or stored as a guess.
+  type: z.array(z.string()).optional(),
+  // spec B6: bare subject words, no namespace prefix. Absent leaves the
+  // stored tags alone; present replaces them whole, the same rule every
+  // other field here follows.
+  tags: z.array(z.string()).optional(),
   skip: z.boolean().optional(),
   // spec D3: declares intent to overwrite an address that already has a note.
   replace: z.boolean().optional(),

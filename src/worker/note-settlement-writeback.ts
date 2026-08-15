@@ -33,11 +33,6 @@ import {
 import { updateSessionSummaryRewrite } from "../db/sessions";
 import { getShadowNote, upsertReconstructedShadowNote } from "../db/shadow-notes";
 import { getTurnById, updateTurnById } from "../db/turns";
-import {
-  draftTurnFactsFromTitle,
-  TOPIC_TAG_PREFIX,
-  withDraftedTopicTag,
-} from "../shared/type-vocabulary";
 import type {
   NoteSettlementResponse,
   SettlementSegmentDirective,
@@ -383,9 +378,6 @@ function applyNoteSettlementWriteBackTransaction(
         type: directive.type,
         tags: directive.tags,
         status: directive.status,
-        // Settlement is the only writer allowed to say a conclusion was
-        // overturned (`rolled-back`), because that value is hindsight.
-        typeSource: "settlement",
         nowEpoch: options.nowEpoch,
       });
       counts.segmentsCreated += 1;
@@ -408,7 +400,6 @@ function applyNoteSettlementWriteBackTransaction(
       }));
       const { applied, excluded } = applySegmentWrites(db, writes, {
         nowEpoch: options.nowEpoch,
-        source: "settlement",
       });
       for (const segment of applied) {
         const directive = extendDirectives.find(
@@ -521,28 +512,12 @@ function applyNoteSettlementWriteBackTransaction(
       if (written) {
         counts.notesReconstructed += 1;
 
-        // spec D7/D8, ticket 02: a mechanical reconstruction drafts its
-        // turn's type and tag exactly as an agent-written note does — same
-        // function, same title-derived answer, so a reader cannot tell which
-        // write path produced the draft. Unconditional now (ticket 05, same
-        // fix as note.ts's promotion path): a title with no `<activity>+
-        // <topic>:` shape drafts neither, and that must CLEAR any stale
-        // value rather than skip the write — there is nothing stale to clear
-        // on a first-ever reconstruction, but the two call sites share one
-        // derivation and one write discipline on purpose, so a future editor
-        // cannot fix the bug in one and leave it in the other.
-        //
-        // Re-read rather than carry the row down: the topic tag replaces
-        // only its own namespace, so the write needs whatever tags this turn
-        // holds AT THIS MOMENT, and a window can reconstruct several notes —
-        // or a `turn_review` directive further down can revise this same
-        // turn — before this point is reached.
-        const drafted = draftTurnFactsFromTitle(note.title);
-        const existingTags = getTurnById(db, turnId)?.tags ?? [];
-        updateTurnById(db, turnId, {
-          type: drafted.type,
-          replaceTags: withDraftedTopicTag(existingTags, drafted.tag),
-        });
+        // ticket 02 (spec B1): no mechanical title-to-type derivation any
+        // more, for a reconstruction any more than for the main agent's own
+        // note. This turn's type/tags land through `turn_review` below, in
+        // the SAME transaction and the SAME pass — duty 1 (spec's ordered
+        // steps) reviews every window turn, this reconstructed one included,
+        // before segmentation ever consumes the facts.
       } else {
         counts.notesYielded += 1;
       }
@@ -708,18 +683,18 @@ function applyNoteSettlementWriteBackTransaction(
           updateTurnById(db, turnId, { significanceGrade: directive.grade });
           counts.reviewsYieldedToLateNote += 1;
         } else {
-          const bareTag = directive.tag?.startsWith(TOPIC_TAG_PREFIX)
-            ? directive.tag.slice(TOPIC_TAG_PREFIX.length)
+          // spec B6: bare topic words, additive — same convention every other
+          // tags write in this codebase uses (note.ts, remember.ts). A stray
+          // `topic:` prefix the model writes anyway is stripped rather than
+          // trusted, since new writes never mint that namespace.
+          const bareTag = directive.tag?.startsWith("topic:")
+            ? directive.tag.slice("topic:".length)
             : directive.tag;
-          const nextTags = withDraftedTopicTag(
-            freshExisting.tags,
-            bareTag ? `${TOPIC_TAG_PREFIX}${bareTag}` : null,
-          );
 
           updateTurnById(db, turnId, {
             significanceGrade: directive.grade,
             type: directive.type,
-            replaceTags: nextTags,
+            tags: bareTag ? [bareTag] : [],
           });
         }
 
@@ -825,7 +800,7 @@ export function applyNoteSettlementSegmentReplay(
           status: options.status,
         },
       ],
-      { nowEpoch: options.nowEpoch, source: "settlement" },
+      { nowEpoch: options.nowEpoch },
     );
 
     const segment = applied[0];

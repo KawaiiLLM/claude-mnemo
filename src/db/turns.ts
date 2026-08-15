@@ -28,7 +28,15 @@ export interface TurnRecord {
   title: string | null;
   content: string | null;
   insight: string | null;
-  type: string | null;
+  /**
+   * Multi-valued (ticket 02, spec B5): the closed vocabulary allows more than
+   * one activity word per turn. `[]` means no type was stated — the same fact
+   * `null` used to carry — never a positive claim (spec B7). Legacy rows keep
+   * their pre-migration words wrapped one-per-element (spec's Out of Scope);
+   * `compact` survives the same way and is read-legal though outside the
+   * current vocabulary (see MEMORY_TYPES).
+   */
+  type: string[];
   significanceGrade: number | null;
   tags: string[];
   filesRead: string[];
@@ -66,7 +74,7 @@ interface TurnRow {
   title: string | null;
   content: string | null;
   insight: string | null;
-  type: string | null;
+  type: string;
   significanceGrade: number | null;
   tags: string | null;
   filesRead: string | null;
@@ -130,6 +138,7 @@ function mapTurnRow(row: TurnRow | null): TurnRecord | null {
     ...row,
     wasInterrupted: row.wasInterrupted === 1,
     wasRolledBack: row.wasRolledBack === 1,
+    type: parseJsonArray(row.type),
     tags: parseJsonArray(row.tags),
     filesRead: parseJsonArray(row.filesRead),
     filesModified: parseJsonArray(row.filesModified),
@@ -185,7 +194,13 @@ export interface UpdateTurnByIdInput {
   title?: string | null;
   content?: string | null;
   insight?: string | null;
-  type?: string | null;
+  /**
+   * Undefined = leave the stored list alone; a defined array (including `[]`)
+   * WHOLESALE REPLACES it. There is no separate "clear" value the way
+   * title/content/insight have one: `[]` already means "no type", so it is
+   * both the empty state and the explicit-clear state at once (spec B7).
+   */
+  type?: string[];
   significanceGrade?: number | null;
   transcriptLineStart?: number | null;
   tags?: string[];
@@ -227,7 +242,10 @@ export function updateTurnById(
   const mergedTitle = resolveNullable(input.title, existing.title);
   const mergedContent = resolveNullable(input.content, existing.content);
   const mergedInsight = resolveNullable(input.insight, existing.insight);
-  const mergedType = resolveNullable(input.type, existing.type);
+  // No `resolveNullable` here: type has no SQL-NULL "clear" state any more —
+  // `[]` already means "no type" (spec B7), so a defined array (empty or not)
+  // always wins over the stored value, and only `undefined` leaves it alone.
+  const mergedType = input.type === undefined ? existing.type : input.type;
   const mergedGrade = resolveNullable(
     input.significanceGrade,
     existing.significanceGrade,
@@ -251,7 +269,7 @@ export function updateTurnById(
           string | null,
           string | null,
           string | null,
-          string | null,
+          string,
           number | null,
           number | null,
           string,
@@ -315,7 +333,7 @@ export function updateTurnById(
         mergedTitle,
         mergedContent,
         mergedInsight,
-        mergedType,
+        stringifyArray(mergedType),
         mergedGrade,
         input.transcriptLineStart ?? existing.transcriptLineStart,
         stringifyArray(nextTags),
@@ -451,7 +469,7 @@ export function resetTurnExtractionFields(
            title = NULL,
            content = NULL,
            insight = NULL,
-           type = NULL,
+           type = '[]',
            tags = ?,
            updated_at_epoch = ?
        WHERE id = ?`,

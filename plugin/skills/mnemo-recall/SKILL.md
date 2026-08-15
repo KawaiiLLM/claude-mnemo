@@ -118,9 +118,9 @@ In the `S12/T3` form the turn id is a session-scoped prompt number. Bare `T418` 
 
 | Prefix | Applies to | Notes |
 |---|---|---|
-| `type:bugfix` | turns, observations | Matches stored type tags. |
+| `type:fix` | turns, observations | Matches a stored activity word. A turn's type is a list, so this matches a turn that carries the word among others. |
 | `file:src/auth.ts` | turns, observations | Substring match against `files_read` + `files_modified`. |
-| `tag:rolled-back` / `tag:topic:svg-filter` | sessions, turns | Exact-match a stored turn tag. Tags come in two namespaces: a **bare** tag is the turn's session-arc role (e.g. `rolled-back`); a **`topic:`-prefixed** tag is a topic facet. The match is anchored to a whole tag, so `tag:topic:svg` does NOT match `topic:svg-filter`. |
+| `tag:svg-filter` | sessions, turns | Exact-match a stored turn tag. A **bare** tag is what the turn was about; a **prefixed** one (`compact:`, `invalidated:`, `delivery:`) is bookkeeping. The match is anchored to a whole tag, so `tag:svg` does NOT match `svg-filter`. |
 | `project:/abs/path` | sessions, turns, observations | Exact match against `session.project`. |
 | `session:S12` | sessions, turns, observations | Restrict a full-text search to one session. Accepts `S12` or bare `12`; a malformed id is ignored. |
 

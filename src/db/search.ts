@@ -250,8 +250,8 @@ function buildFileClause(
 // Exact-match a single tag value against the JSON-array `tags` column via
 // json_each, so the match is on a whole array ELEMENT — not a substring. This
 // makes `tag:` truly exact and immune to LIKE-wildcard pitfalls: `tag:%`
-// matches only a literal `%` tag (not everything), `topic:svg` never matches
-// `topic:svg-filter`, and a NULL or `[]` tags column simply yields no rows.
+// matches only a literal `%` tag (not everything), `svg` never matches
+// `svg-filter`, and a NULL or `[]` tags column simply yields no rows.
 function buildTagClause(
   column: string,
   tag?: string,
@@ -760,7 +760,7 @@ function buildSessionTurnFacetClauses(options: SearchMemoryOptions): {
         FROM turns t
         WHERE t.session_id = s.id
           AND ${RENDERED_TURN_STATUS_CLAUSE}
-          AND t.type = ?
+          AND EXISTS (SELECT 1 FROM json_each(t.type) WHERE value = ?)
       )`,
     );
     params.push(options.type);
@@ -881,7 +881,7 @@ function queryTurnsByScope(
     const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
 
     if (options.type) {
-      whereClauses.push("t.type = ?");
+      whereClauses.push("EXISTS (SELECT 1 FROM json_each(t.type) WHERE value = ?)");
       params.push(options.type);
     }
 
@@ -917,7 +917,7 @@ function queryTurnsByScope(
   const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
 
   if (options.type) {
-    whereClauses.push("t.type = ?");
+    whereClauses.push("EXISTS (SELECT 1 FROM json_each(t.type) WHERE value = ?)");
     params.push(options.type);
   }
 

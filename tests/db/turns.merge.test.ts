@@ -60,7 +60,7 @@ describe("turn merge semantics", () => {
         title: "Retitled",
         content: "Original content",
         insight: "- original insight",
-        type: "feature",
+        type: ["feature"],
         tags: ["existing"],
         filesRead: ["src/original.ts"],
         filesModified: ["src/original.ts"],
@@ -142,7 +142,7 @@ describe("turn merge semantics", () => {
             tags,
             created_at_epoch,
             updated_at_epoch
-          ) VALUES (?, 3, 'active', 'Prompt', 'Title', 'Content', '- insight', 'decision', '["old"]', 30, 31)
+          ) VALUES (?, 3, 'active', 'Prompt', 'Title', 'Content', '- insight', '["decision"]', '["old"]', 30, 31)
           RETURNING id
         `,
       )
@@ -214,7 +214,7 @@ describe("turn merge semantics", () => {
         title: "Original title",
         content: "Original content",
         insight: "- original insight",
-        type: "decision",
+        type: ["decision"],
         tags: ["existing"],
       }),
     );

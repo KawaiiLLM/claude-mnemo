@@ -40,7 +40,7 @@ describe("segment member derived rank (spec D8)", () => {
 
   function makeTurn(spec: TurnSpec): number {
     return db
-      .query<{ id: number }, [number, number, string, string | null, string, number, string | null]>(
+      .query<{ id: number }, [number, number, string, string, string, number, string | null]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, type, files_modified,
            created_at_epoch, title, user_prompt, content
@@ -51,7 +51,7 @@ describe("segment member derived rank (spec D8)", () => {
         sessionId,
         spec.promptNumber,
         spec.status ?? "extracted",
-        spec.type ?? null,
+        spec.type ? JSON.stringify([spec.type]) : "[]",
         JSON.stringify(spec.filesModified ?? []),
         spec.createdAtEpoch ?? ERA + spec.promptNumber,
         spec.title ?? `T${spec.promptNumber} title`,
@@ -102,6 +102,13 @@ describe("segment member derived rank (spec D8)", () => {
     ids: Record<string, number>;
   } {
     const corrector = makeTurn({ promptNumber: 1 });
+    // `rolled-back` left the type vocabulary (ticket 02, spec B4) and the
+    // storage column is now a JSON array (spec B5) — a scalar `= 'rolled-back'`
+    // comparison can never match `["rolled-back"]`, so `isRolledBack` is
+    // permanently 0 for every row post-migration, this legacy-shaped one
+    // included. The variable name is kept to document exactly that: a turn
+    // that would have sunk under the old scheme now ranks on its other facts
+    // alone (see segment-rank.ts's own comment on `isRolledBack`).
     const rolledBack = makeTurn({ promptNumber: 2, type: "rolled-back" });
     const citedTwice = makeTurn({ promptNumber: 3 });
     const citedOnceShipped = makeTurn({ promptNumber: 4 });
@@ -184,13 +191,16 @@ describe("segment member derived rank (spec D8)", () => {
 
     expect(ranked.map((member) => member.turnId)).toEqual([
       ids.corrector, //          ① corrector
+      // ② is permanently inert post-migration (see the fixture comment
+      // above), so this in-degree-3 row no longer sinks — it ranks on ③ alone,
+      // ahead of every other cited row.
+      ids.rolledBack, //         ③ in-degree 3
       ids.citedTwice, //         ③ in-degree 2
       ids.citedOnceShipped, //   ③ in-degree 1, ④ shipped
       ids.citedOnce, //          ③ in-degree 1, not shipped
       ids.manyFiles, //          ⑤ 3 files
       ids.newerOneFile, //       ⑤ 1 file, ⑥ newer
       ids.olderOneFile, //       ⑤ 1 file, ⑥ older
-      ids.rolledBack, //         ② sinks despite in-degree 3
     ]);
   });
 
@@ -207,7 +217,10 @@ describe("segment member derived rank (spec D8)", () => {
     });
     expect(byTurnId.get(ids.rolledBack!)).toMatchObject({
       isCorrector: 0,
-      isRolledBack: 1,
+      // Permanently 0: a scalar `= 'rolled-back'` comparison can never match
+      // the JSON-array column (spec B5), and the word left the vocabulary
+      // besides (spec B4).
+      isRolledBack: 0,
       citedBy: 3,
     });
     expect(byTurnId.get(ids.citedOnceShipped!)).toMatchObject({
@@ -311,11 +324,11 @@ describe("segment member derived rank (spec D8)", () => {
       ids.olderOneFile, //  ⚓1, body order, despite ranking last but one
       ids.citedOnce, //     ⚓2
       ids.corrector,
+      ids.rolledBack,
       ids.citedTwice,
       ids.citedOnceShipped,
       ids.manyFiles,
       ids.newerOneFile,
-      ids.rolledBack,
     ]);
     expect(ranked.slice(0, 2).map((member) => member.anchorPosition)).toEqual([1, 2]);
     expect(ranked.slice(2).every((member) => member.anchorPosition === null)).toBe(true);
@@ -377,7 +390,7 @@ describe("segment spine and orphan anchors (spec D11)", () => {
     options: { type?: string | null; createdAtEpoch?: number; status?: string } = {},
   ): number {
     return db
-      .query<{ id: number }, [number, number, string, string | null, number]>(
+      .query<{ id: number }, [number, number, string, string, number]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, type, created_at_epoch,
            user_prompt, title, files_modified
@@ -388,7 +401,7 @@ describe("segment spine and orphan anchors (spec D11)", () => {
         sessionId,
         promptNumber,
         options.status ?? "extracted",
-        options.type ?? null,
+        options.type ? JSON.stringify([options.type]) : "[]",
         options.createdAtEpoch ?? CUTOFF + promptNumber,
       )!.id;
   }
@@ -440,7 +453,7 @@ describe("segment spine and orphan anchors (spec D11)", () => {
     const [row] = listSegmentSpineForSession(db, sessionId, CUTOFF);
 
     expect(row?.dominantType).toBe("research");
-    expect(row?.phaseTrace).toEqual(["research", "design", "implement", "research"]);
+    expect(row?.phaseTrace).toEqual([["research"], ["design"], ["implement"], ["research"]]);
     expect(row?.memberCount).toBe(5);
     expect(row?.firstPromptNumber).toBe(1);
     expect(row?.lastPromptNumber).toBe(5);
@@ -485,7 +498,11 @@ describe("segment spine and orphan anchors (spec D11)", () => {
     expect(orphanIds).toContain(corrector);
     expect(orphanIds).toContain(cited);
     expect(orphanIds).toContain(victim);
-    expect(orphanIds).toContain(reversed);
+    // `rolled-back` left the type vocabulary (ticket 02, spec B4) and the
+    // isRolledBack fact is permanently 0 post-migration (a scalar comparison
+    // can never match the JSON-array column, spec B5) — this legacy-typed
+    // turn now carries no signal at all, same as `quiet`.
+    expect(orphanIds).not.toContain(reversed);
     // No signal, already in a segment, or not renderable at all.
     expect(orphanIds).not.toContain(quiet);
     expect(orphanIds).not.toContain(claimed);
@@ -497,7 +514,8 @@ describe("segment spine and orphan anchors (spec D11)", () => {
     expect(orphans.find((row) => row.facts.turnId === cited)?.signals).toEqual([
       "cited 1",
     ]);
-    // Rolled-back sinks to the bottom even though it renders.
-    expect(orphanIds[orphanIds.length - 1]).toBe(reversed);
+    // victim and cited tie on citedBy (1 each); the later-created row (victim)
+    // wins key ⑥, leaving cited last.
+    expect(orphanIds[orphanIds.length - 1]).toBe(cited);
   });
 });

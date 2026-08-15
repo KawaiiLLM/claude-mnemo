@@ -12,10 +12,7 @@ import { getTurn, promoteTurnFromNote, updateTurnById } from "../db/turns";
 import { isSegmentEra } from "../segment-era";
 import { formatNoteBudget } from "../shared/note-budget";
 import { stripPrivateTags } from "../shared/tag-stripping";
-import {
-  draftTurnFactsFromTitle,
-  withDraftedTopicTag,
-} from "../shared/type-vocabulary";
+import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
 
 type ToolTextResult = {
   content: Array<{
@@ -29,6 +26,10 @@ export interface NoteToolInput {
   title?: unknown;
   content?: unknown;
   insight?: unknown;
+  /** What this turn did (spec B2) — omitted or `[]` means none fit; never guessed at (spec B7). */
+  type?: unknown;
+  /** Bare subject words; the `topic:` namespace is retired (spec B6). */
+  tags?: unknown;
   skip?: unknown;
   replace?: unknown;
   crossSession?: unknown;
@@ -282,7 +283,7 @@ function declineTurn(
   // PreCompact's transcript repair leaves behind (capture-repair.ts). It
   // carries no user prompt and no work of its own, so there is nothing a
   // skip could truthfully close.
-  if (turn.type === "compact") {
+  if (turn.type.includes("compact")) {
     return parameterError(compactMarkerMessage(address));
   }
 
@@ -421,6 +422,38 @@ export function noteTool(
     return parameterError("insight must be a string when present.");
   }
 
+  // spec B2/B7: the caller states what this turn did directly — no mechanical
+  // title-to-type derivation any more. An unrecognised word is rejected
+  // outright (same strictness `remember` already applies): a typo silently
+  // dropped would make a `type:` filter quietly lossy.
+  let typeValues: string[] | undefined;
+  if (rawInput.type !== undefined) {
+    if (
+      !Array.isArray(rawInput.type) ||
+      rawInput.type.some((value) => typeof value !== "string")
+    ) {
+      return parameterError("type must be an array of strings when present.");
+    }
+    try {
+      typeValues = normalizeTypeValues(rawInput.type as string[]);
+    } catch (error) {
+      return parameterError(
+        `${error instanceof Error ? error.message : String(error)}. Allowed: ${MEMORY_TYPES.join(", ")}.`,
+      );
+    }
+  }
+
+  let tagValues: string[] | undefined;
+  if (rawInput.tags !== undefined) {
+    if (
+      !Array.isArray(rawInput.tags) ||
+      rawInput.tags.some((value) => typeof value !== "string")
+    ) {
+      return parameterError("tags must be an array of strings when present.");
+    }
+    tagValues = rawInput.tags as string[];
+  }
+
   const turn = getTurn(db, address.sessionId, address.promptNumber);
   if (!turn) {
     return parameterError(
@@ -431,7 +464,7 @@ export function noteTool(
   // spec D2/D5: a compact marker carries no note-worthy content — see
   // `compactMarkerMessage`. Checked ahead of the cross-session guard, same as
   // the "no turn" case above: existence-and-kind is resolved before identity.
-  if (turn.type === "compact") {
+  if (turn.type.includes("compact")) {
     return parameterError(compactMarkerMessage(address));
   }
 
@@ -547,26 +580,24 @@ export function noteTool(
         updatedAtEpoch: nowEpoch,
       });
 
-      // spec D7/D8, ticket 02: the note title also drafts the turn's type and
-      // tag, gated behind the SAME era boundary the promotion above is — a
-      // legacy-era note leaves `turns` untouched entirely (P1 isolation), so
-      // the draft only ever lands alongside the promotion that already
-      // touches this row. `replace: true` re-runs this on every rewrite, so a
-      // corrected title's new answer is what lands, not the first one.
+      // spec B1/B2/B7, ticket 02: type is now stated by the caller directly,
+      // gated behind the SAME era boundary the promotion above is — a
+      // legacy-era note leaves `turns` untouched entirely (P1 isolation).
       //
-      // Unconditional now (ticket 05): the old `if (drafted.type ||
-      // drafted.tag)` guard skipped the write entirely when a corrected
-      // title no longer matched the `<activity>+<topic>:` shape, so a STALE
-      // type/tag from the turn's PREVIOUS title survived a correction that
-      // should have cleared it. `type: drafted.type` and the tag write below
-      // both carry `null` through explicitly — `updateTurnById`'s
-      // `resolveNullable` treats that as a real clear, not "leave alone" —
-      // so a title that stops parsing now clears both, same as one that never
-      // parsed would have left them.
-      const drafted = draftTurnFactsFromTitle(title);
+      // Both fields take the plainest semantics there is, the one `title`,
+      // `content` and `insight` already have: ABSENT leaves the stored value
+      // alone, PRESENT overwrites it whole. Neither field gets a mechanism of
+      // its own. An omitted `type` in particular must not clear a stored one:
+      // B7 says empty is never a claim, so writing empty cannot be the act of
+      // claiming there is no type — clearing takes an explicit `type: []`.
+      //
+      // The one mode vocabulary that will govern all of this (`overwrite` /
+      // `append`, required whenever the target field is non-empty) arrives
+      // with the merged write tool in ticket 03, and retires `replace` and
+      // `replaceTags` together. Until then this is a strict subset of it.
       updateTurnById(db, turn.id, {
-        type: drafted.type,
-        replaceTags: withDraftedTopicTag(turn.tags, drafted.tag),
+        type: typeValues,
+        replaceTags: tagValues,
       });
     }
 

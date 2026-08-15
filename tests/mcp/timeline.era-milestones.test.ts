@@ -78,7 +78,7 @@ function seedGradedEraFixture(db: Database): {
     db
       .query<
         { id: number },
-        [number, number, string | null, number, string | null, number | null, string]
+        [number, number, string, number, string | null, number | null, string]
       >(
         `INSERT INTO turns (
            session_id, prompt_number, status, type, created_at_epoch, title,
@@ -90,7 +90,7 @@ function seedGradedEraFixture(db: Database): {
       .get(
         sessionId,
         promptNumber,
-        options.type ?? null,
+        options.type ? JSON.stringify([options.type]) : "[]",
         options.createdAtEpoch ?? CUTOFF + promptNumber,
         options.title ?? `title ${promptNumber}`,
         options.grade ?? null,

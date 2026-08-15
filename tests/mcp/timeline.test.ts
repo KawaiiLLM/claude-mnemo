@@ -6,6 +6,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession, type UpsertSessionInput } from "../../src/db/sessions";
 import { getTurn, type TurnRecord } from "../../src/db/turns";
 import { resolveTranscriptPath } from "../../src/shared/paths";
+import { TYPE_GLYPH } from "../../src/shared/type-vocabulary";
 import {
   buildContextTimelineView,
   buildTimelineView,
@@ -55,7 +56,23 @@ import {
   type CitationRelation,
 } from "../../src/db/citations";
 
-function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
+// `type` accepts a single string as a convenience (ticket 02, spec B5 widened
+// storage to a list; most call sites below predate that and pass one word).
+type TurnOverrides = Partial<Omit<TurnRecord, "type">> & {
+  type?: string | string[] | null;
+};
+
+function normalizeTypeOverride(
+  value: string | string[] | null | undefined,
+): string[] {
+  if (!value) {
+    return [];
+  }
+  return Array.isArray(value) ? value : [value];
+}
+
+function turn(overrides: TurnOverrides = {}): TurnRecord {
+  const { type, ...rest } = overrides;
   return {
     id: 1,
     sessionId: 1,
@@ -70,7 +87,7 @@ function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
     title: null,
     content: null,
     insight: null,
-    type: null,
+    type: [],
     significanceGrade: null,
     tags: [],
     filesRead: [],
@@ -80,7 +97,8 @@ function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
     citesRecorded: false,
     createdAtEpoch: 1000,
     updatedAtEpoch: null,
-    ...overrides,
+    ...rest,
+    type: normalizeTypeOverride(type),
   };
 }
 
@@ -138,7 +156,7 @@ function seedSession(db: Database) {
       type === null ? null : `title for T${promptNumber}`,
       null,
       null,
-      type,
+      type === null ? "[]" : JSON.stringify([type]),
       JSON.stringify([]),
       JSON.stringify([]),
       JSON.stringify([]),
@@ -198,7 +216,7 @@ function seedLongSession(db: Database, count: number) {
       `title for T${promptNumber}`,
       null,
       null,
-      promptNumber >= count - 2 ? null : "discovery",
+      promptNumber >= count - 2 ? "[]" : JSON.stringify(["discovery"]),
       JSON.stringify([]),
       JSON.stringify([]),
       JSON.stringify([]),
@@ -277,7 +295,7 @@ function seedTimelineSession(
       row.title,
       row.content,
       row.insight,
-      row.type,
+      JSON.stringify(row.type),
       JSON.stringify(row.tags),
       JSON.stringify(row.filesRead),
       JSON.stringify(row.filesModified),
@@ -698,7 +716,33 @@ describe("segmentPhases", () => {
     ]);
 
     expect(phases).toHaveLength(1);
-    expect(phases[0].type).toBe("discovery");
+    expect(phases[0].type).toEqual(["discovery"]);
+  });
+
+  // ticket 02 (spec B5): a turn may state more than one activity; the phase
+  // renders it as more than one glyph rather than picking one to show.
+  it("a multi-valued type renders as a multi-glyph phase, not a single pick", () => {
+    const phases = segmentPhases([
+      turn({ promptNumber: 1, type: ["review", "ops"], createdAtEpoch: 1000 }),
+    ]);
+
+    expect(phases).toHaveLength(1);
+    expect(phases[0].type).toEqual(["review", "ops"]);
+    expect(phases[0].emoji).toBe(`${TYPE_GLYPH.review}${TYPE_GLYPH.ops}`);
+  });
+
+  // ticket 02 (spec B5): grouping is over the ORDERED list as a whole — two
+  // turns whose lists contain the same words in a different order are two
+  // distinct statements, not one phase, matching `typeListsEqual`'s contract.
+  it("two turns with the same words in a different order do not merge into one phase", () => {
+    const phases = segmentPhases([
+      turn({ promptNumber: 1, type: ["review", "ops"], createdAtEpoch: 1000 }),
+      turn({ promptNumber: 2, type: ["ops", "review"], createdAtEpoch: 1100 }),
+    ]);
+
+    expect(phases).toHaveLength(2);
+    expect(phases[0].type).toEqual(["review", "ops"]);
+    expect(phases[1].type).toEqual(["ops", "review"]);
   });
 
   it("run-length encodes adjacent same-type runs", () => {
@@ -712,17 +756,17 @@ describe("segmentPhases", () => {
 
     expect(phases).toHaveLength(3);
     expect(phases[0]).toMatchObject({
-      type: "discovery",
+      type: ["discovery"],
       startPromptNumber: 1,
       endPromptNumber: 3,
     });
     expect(phases[1]).toMatchObject({
-      type: "decision",
+      type: ["decision"],
       startPromptNumber: 4,
       endPromptNumber: 4,
     });
     expect(phases[2]).toMatchObject({
-      type: "discovery",
+      type: ["discovery"],
       startPromptNumber: 5,
       endPromptNumber: 5,
     });
@@ -763,7 +807,7 @@ describe("segmentPhases", () => {
 
     expect(phases).toHaveLength(1);
     expect(phases[0]).toMatchObject({
-      type: "discovery",
+      type: ["discovery"],
       startPromptNumber: 1,
       endPromptNumber: 3,
       turnCount: 2,
@@ -781,7 +825,7 @@ describe("segmentPhases", () => {
     expect(phases[0].kind).toBe("typed");
     expect(phases[1]).toMatchObject({
       kind: "pending",
-      type: null,
+      type: [],
       turnCount: 2,
     });
   });
@@ -825,20 +869,20 @@ describe("segmentPhases", () => {
 
     expect(phases).toHaveLength(3);
     expect(phases[0]).toMatchObject({
-      type: "discovery",
+      type: ["discovery"],
       startPromptNumber: 1,
       endPromptNumber: 2,
       durationMs: 100_000,
     });
     expect(phases[1]).toMatchObject({
       kind: "typed",
-      type: "decision",
+      type: ["decision"],
       startPromptNumber: 3,
       endPromptNumber: 3,
     });
     expect(phases[2]).toMatchObject({
       kind: "pending",
-      type: null,
+      type: [],
       startPromptNumber: 4,
       endPromptNumber: 4,
     });
@@ -1144,9 +1188,9 @@ describe("detectShapeSignals", () => {
 
 describe("milestoneEffGrade", () => {
   const era = 1_784_711_427;
-  const legacy = (overrides: Partial<TurnRecord>) =>
+  const legacy = (overrides: TurnOverrides) =>
     milestoneEffGrade(turn({ createdAtEpoch: era - 1, ...overrides }), era);
-  const current = (overrides: Partial<TurnRecord>) =>
+  const current = (overrides: TurnOverrides) =>
     milestoneEffGrade(turn({ createdAtEpoch: era, ...overrides }), era);
 
   it("takes an era turn's grade verbatim", () => {
@@ -1577,7 +1621,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
 
     const result = select(rows);
     expect(kept(result)).toEqual([2]);
-    expect(result.ranked.map((row) => row.turn.type)).not.toContain("compact");
+    expect(result.ranked.some((row) => row.turn.type.includes("compact"))).toBe(false);
   });
 
   it("promotes a G0 corrector to the spine and demotes what it supersedes into a ↳ antecedent", () => {
@@ -1966,7 +2010,7 @@ function milestoneFixtureTurns(): TurnRecord[] {
   const base = 1_779_782_400; // fixed; never Date.now(). Pre-era on purpose.
   const rows: TurnRecord[] = [];
   let pn = 0;
-  const add = (over: Partial<TurnRecord>, epoch: number) => {
+  const add = (over: TurnOverrides, epoch: number) => {
     pn += 1;
     rows.push(turn({ id: pn, promptNumber: pn, createdAtEpoch: epoch, title: `t${pn}`, ...over }));
   };
@@ -2035,7 +2079,7 @@ function mixedArcFixtureTurns(): TurnRecord[] {
   const add = (
     promptNumber: number,
     epoch: number,
-    over: Partial<TurnRecord>,
+    over: TurnOverrides,
   ) => {
     rows.push(turn({ id: promptNumber, promptNumber, createdAtEpoch: epoch, ...over }));
   };
@@ -2224,7 +2268,7 @@ describe("milestone selection on a mixed-era, multi-day arc (frozen fixture)", (
   });
 
   it("conserves every candidate turn across kept, pulled and overflow", () => {
-    const candidates = rows.filter((row) => row.status !== "skipped" && row.type !== "compact");
+    const candidates = rows.filter((row) => row.status !== "skipped" && !row.type.includes("compact"));
     const pulledInWindow = result.pulled.filter((p) => p.turn.status !== "skipped").length;
     const overflowTotal = result.overflowByDay.reduce((sum, d) => sum + d.count, 0);
     expect(result.kept.length + pulledInWindow + overflowTotal).toBe(candidates.length);
@@ -2440,7 +2484,7 @@ describe("buildTimelineView", () => {
 
     db.query(
       `UPDATE turns
-       SET type = 'compact',
+       SET type = '["compact"]',
            status = 'extracted',
            transcript_line_start = 210,
            tags = ?,
@@ -2465,7 +2509,7 @@ describe("buildTimelineView", () => {
 
     db.query(
       `UPDATE turns
-       SET type = 'compact',
+       SET type = '["compact"]',
            status = 'extracted',
            tags = ?,
            tool_call_count = 0
@@ -2846,7 +2890,7 @@ describe("renderTimeline", () => {
 
     db.query(
       `UPDATE turns
-       SET type = 'compact',
+       SET type = '["compact"]',
            status = 'extracted',
            user_prompt = 'ignored raw summary wrapper',
            title = '/compact',
@@ -3132,7 +3176,7 @@ describe("renderTimeline", () => {
     const session = seedSession(db);
 
     db.query(
-      "UPDATE turns SET type = 'discovery', title = ? WHERE session_id = ? AND prompt_number = 21",
+      "UPDATE turns SET type = '[\"discovery\"]', title = ? WHERE session_id = ? AND prompt_number = 21",
     ).run("left → right", session.id);
 
     const view = buildTimelineView(db, { id: "S1/T21..21" });
@@ -3888,7 +3932,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     const db = createDatabase(":memory:");
     const session = seedSession(db);
     db.query(
-      "UPDATE turns SET type = 'compact', title = '/compact' WHERE session_id = ? AND prompt_number = 21",
+      "UPDATE turns SET type = '[\"compact\"]', title = '/compact' WHERE session_id = ? AND prompt_number = 21",
     ).run(session.id);
 
     const out = renderTimeline(buildTimelineView(db, { id: "S1/T19..21" }));

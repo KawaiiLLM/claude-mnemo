@@ -71,7 +71,7 @@ function seedSession(
         row.prompt,
         row.title,
         row.content ?? null,
-        row.type,
+        JSON.stringify([row.type]),
         row.grade,
         row.toolCalls ?? 0,
         row.epoch,

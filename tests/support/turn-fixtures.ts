@@ -22,13 +22,25 @@ export interface SaveTurnFixtureInput {
   title: string | null;
   content?: string | null;
   insight: string | null;
-  type?: string | null;
+  // Multi-valued in storage since ticket 02 (spec B5) — `turns.type` is now
+  // `NOT NULL DEFAULT '[]'`. A single string is accepted as a convenience
+  // (every pre-ticket-02 fixture call site passes one) and normalized to a
+  // one-element array, matching exactly how the migration wraps a legacy
+  // scalar; `null`/undefined/`[]` all normalize to `[]`.
+  type?: string | string[] | null;
   tags?: string[];
   filesRead: string[];
   filesModified: string[];
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
   observations: ObservationFixtureInput[];
+}
+
+function normalizeTypeInput(value: string | string[] | null | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+  return Array.isArray(value) ? value : [value];
 }
 
 function stringifyArray(values: string[]): string {
@@ -78,6 +90,7 @@ export function saveTurnFixture(
     const existingTurn = getTurn(db, input.sessionId, input.promptNumber);
     const filesRead = stringifyArray(input.filesRead);
     const filesModified = stringifyArray(input.filesModified);
+    const type = stringifyArray(normalizeTypeInput(input.type));
 
     let turnId: number;
 
@@ -110,7 +123,7 @@ export function saveTurnFixture(
         input.title,
         input.content ?? null,
         input.insight,
-        input.type ?? null,
+        type,
         stringifyArray(input.tags ?? []),
         filesRead,
         filesModified,
@@ -133,7 +146,7 @@ export function saveTurnFixture(
             string | null,
             string | null,
             string | null,
-            string | null,
+            string,
             string,
             string,
             string,
@@ -168,7 +181,7 @@ export function saveTurnFixture(
           input.title,
           input.content ?? null,
           input.insight,
-          input.type ?? null,
+          type,
           stringifyArray(input.tags ?? []),
           filesRead,
           filesModified,

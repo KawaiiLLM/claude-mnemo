@@ -18,7 +18,6 @@ import { formatTurnAddress } from "../hooks/note-reminder";
 import { buildCollapsedTurnsForSession } from "../mcp/recall";
 import { formatTurnCollapsed } from "../mcp/format";
 import { renderSessionStateInjection } from "../mcp/session-output";
-import { draftTurnFactsFromTitle, type MemoryType } from "../shared/type-vocabulary";
 import { stripPrivateTags } from "../shared/tag-stripping";
 
 /**
@@ -84,23 +83,6 @@ export interface NoteSettlementWindowTurn {
   toolCallCount: number | null;
   filesModified: string[];
   wasRolledBack: boolean;
-  /**
-   * Mechanical prior the model only CONFIRMS OR OVERRIDES (spec D9's last
-   * discipline, ticket 05). `null` when the title's activity half was absent
-   * or unrecognised — never a guess.
-   *
-   * Ticket 05: this is now `draftTurnFactsFromTitle`, the SAME strict
-   * `<activity>+<topic>:` shape check the write path uses, not the looser
-   * whole-title prefix scan `draftTypeFromTitle` applies on its own. The two
-   * used to disagree on a title like "review the extraction spec" — shown
-   * here as a draft, never written by storage — which is exactly the
-   * confirm-a-guess-that-was-never-real problem ticket 05 closes. One
-   * derivation, used by both what the model reads and what gets stored.
-   */
-  typeDraft: MemoryType | null;
-  /** Sibling draft, already namespaced (`topic:...`) — the value that would
-   * be stored verbatim if confirmed. */
-  tagDraft: string | null;
   /** Seconds since the previous window turn — the silence signal. */
   gapSeconds: number | null;
 }
@@ -251,7 +233,6 @@ export function buildNoteSettlementContext(
     const note = notes.get(turn.id) ?? null;
     const kind = classifyTurn(note !== null, owedTurnIds.has(turn.id));
     const tokenBudget = kind === "hole" ? NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET : 0;
-    const drafted = draftTurnFactsFromTitle(note?.title ?? turn.title ?? "");
 
     windowTurns.push({
       turnId: turn.id,
@@ -265,8 +246,6 @@ export function buildNoteSettlementContext(
       toolCallCount: turn.toolCallCount,
       filesModified: turn.filesModified,
       wasRolledBack: turn.wasRolledBack,
-      typeDraft: drafted.type,
-      tagDraft: drafted.tag,
       gapSeconds:
         previousCreatedAt === null
           ? null

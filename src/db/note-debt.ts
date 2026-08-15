@@ -224,16 +224,24 @@ export function closePendingNoteDebtsAsClosed(
  * The prompt clock's "is this a REAL prompt" predicate (spec D1/D10): a row
  * only counts as session progression when it is not a sidechain's pending
  * marker (`undone`), not invalidated (`was_rolled_back`), and not a compact
- * marker (`type = 'compact'`). `listOwedNoteTurns`/`listOwedNoteTurnsInRange`
- * apply it to the CANDIDATE row below; db/turn-settlement.ts's settlement
- * candidate predicate and db/note-settlement.ts's `getMaxPromptNumber` apply
- * the same definition to decide whether a LATER row is real evidence that a
- * turn has ended — one definition, so "what counts as a real prompt" cannot
- * drift between readers (P1-1: a sidechain row born with a higher prompt
- * number must never read as proof that an earlier, still-running turn ended).
+ * marker (a `type` list containing `compact`). `listOwedNoteTurns`/
+ * `listOwedNoteTurnsInRange` apply it to the CANDIDATE row below;
+ * db/turn-settlement.ts's settlement candidate predicate and
+ * db/note-settlement.ts's `getMaxPromptNumber` apply the same definition to
+ * decide whether a LATER row is real evidence that a turn has ended — one
+ * definition, so "what counts as a real prompt" cannot drift between readers
+ * (P1-1: a sidechain row born with a higher prompt number must never read as
+ * proof that an earlier, still-running turn ended).
+ *
+ * `type` is a JSON array since ticket 02 (spec B5); matched via `json_each`
+ * rather than a scalar `!=`, same pattern as the `tag:` search facet. The
+ * column is `NOT NULL DEFAULT '[]'` post-migration, so the old `IS NULL`
+ * branch is dead weight kept only for a database mid-migration (schema.ts's
+ * rebuild runs at startup, but a read racing that same startup should not
+ * see a nonexistent state as "not a compact marker").
  */
 export function realPromptPredicate(alias = "t"): string {
-  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR ${alias}.type != 'compact')`;
+  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(${alias}.type) WHERE value = 'compact'))`;
 }
 
 /** Turns before which the reminder no longer counts a turn as owed (spec D1's only hard bound — it governs display, not writability; see mcp/note.ts). */

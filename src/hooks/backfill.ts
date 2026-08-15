@@ -99,7 +99,7 @@ export function backfillFromTranscript(
     // shape. Without the type guard the next Stop would write a derived
     // response and tool count back onto the marker.
     if (
-      pendingTurn.type === "compact" ||
+      pendingTurn.type.includes("compact") ||
       pendingTurn.assistantResponse ||
       !pendingTurn.userPrompt
     ) {

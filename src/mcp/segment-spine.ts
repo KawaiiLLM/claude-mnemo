@@ -1,8 +1,8 @@
 import type { SegmentRecord } from "../db/segments";
 import type { OrphanAnchorRow, SegmentSpineRow } from "../db/segment-rank";
-import { TYPE_GLYPH, isMemoryType } from "../shared/type-vocabulary";
+import { typeListGlyph } from "../shared/type-vocabulary";
 
-import { TYPE_EMOJI, truncateText } from "./format";
+import { truncateText } from "./format";
 
 /**
  * The segment spine (spec D11): the new era's default reading surface.
@@ -27,16 +27,18 @@ const SPINE_ROW_INDENT = "   ";
 /** Tags shown inline on a spine row before the rest collapse to `+N`. */
 export const SPINE_TAG_CAP = 2;
 
-export function segmentTypeGlyph(type: string | null | undefined): string {
-  if (!type) {
+/**
+ * A row's type glyph (ticket 02, spec B5): `typeListGlyph` handles both the
+ * current vocabulary and a legacy word reached through a member turn written
+ * before the switch, so this is a thin, dominant-type-shaped wrapper over it.
+ */
+export function segmentTypeGlyph(
+  type: string | readonly string[] | null | undefined,
+): string {
+  if (type === null || type === undefined) {
     return "•";
   }
-  if (isMemoryType(type)) {
-    return TYPE_GLYPH[type];
-  }
-  // A legacy-vocabulary type can still reach here through a member turn written
-  // before the switch; showing its old glyph beats showing none.
-  return TYPE_EMOJI[type] ?? "•";
+  return typeListGlyph(typeof type === "string" ? [type] : type);
 }
 
 function formatTags(tags: readonly string[]): string {
@@ -52,8 +54,15 @@ function sanitize(value: string): string {
   return value.replaceAll("|", "/").replaceAll("→", "->");
 }
 
-export function formatPhaseTrace(phaseTrace: readonly string[]): string {
-  return phaseTrace.map((type) => segmentTypeGlyph(type)).join("→");
+/**
+ * `phaseTrace` entries are whole type LISTS now (ticket 02, spec B5) — one
+ * per collapsed run — so each entry can itself render as more than one
+ * glyph (a run where members carried two simultaneous activities).
+ */
+export function formatPhaseTrace(
+  phaseTrace: readonly (readonly string[])[],
+): string {
+  return phaseTrace.map((types) => segmentTypeGlyph(types)).join("→");
 }
 
 function formatSpan(row: SegmentSpineRow): string {
@@ -199,7 +208,7 @@ export interface SegmentHeaderInput {
   segment: SegmentRecord;
   memberCount: number;
   dominantType: string | null;
-  phaseTrace: readonly string[];
+  phaseTrace: readonly (readonly string[])[];
   /** Qualified `S<n>/T<m>` addresses of the body's anchors, in body order. */
   anchorRefs: readonly string[];
   truncate: number;

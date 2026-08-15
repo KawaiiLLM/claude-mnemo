@@ -126,12 +126,16 @@ describe("note tool", () => {
     );
 
     const note = getShadowNote(db, targetTurnId)!;
-    // Neither field is a tool parameter — the caller cannot supply or forge it.
+    // Neither writer_model nor ride_turn is a tool parameter — the caller
+    // cannot supply or forge it. type/tags ARE parameters (ticket 02, spec
+    // B1/B2): the caller states them directly, no mechanical derivation.
     expect(Object.keys(noteInputSchema.shape)).toEqual([
       "turn",
       "title",
       "content",
       "insight",
+      "type",
+      "tags",
       "skip",
       "replace",
       "crossSession",
@@ -602,7 +606,7 @@ describe("note tool", () => {
         .query<{ id: number }, [number]>(
           `INSERT INTO turns (
              session_id, prompt_number, status, title, type, created_at_epoch
-           ) VALUES (?, 336, 'extracted', '/compact', 'compact', 200)
+           ) VALUES (?, 336, 'extracted', '/compact', '["compact"]', 200)
            RETURNING id`,
         )
         .get(sessionId)!.id;

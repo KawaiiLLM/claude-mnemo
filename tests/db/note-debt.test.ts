@@ -42,7 +42,7 @@ describe("listOwedNoteTurns (spec D1)", () => {
     } = {},
   ): number {
     return db
-      .query<{ id: number }, [number, number, string, string, number, string | null]>(
+      .query<{ id: number }, [number, number, string, string, number, string]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, user_prompt,
            was_rolled_back, created_at_epoch, type
@@ -55,7 +55,7 @@ describe("listOwedNoteTurns (spec D1)", () => {
         options.status ?? "active",
         options.prompt ?? `prompt ${promptNumber}`,
         options.rolledBack ? 1 : 0,
-        options.type ?? null,
+        options.type ? JSON.stringify([options.type]) : "[]",
       )!.id;
   }
 
