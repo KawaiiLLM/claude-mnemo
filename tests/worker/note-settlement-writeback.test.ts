@@ -299,6 +299,15 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     // spec B6: bare topic words, additive — a `topic:`-prefixed row from
     // before this ticket is left exactly as it is (never migrated), and a
     // new bare tag is merged in beside it, not swapped for it.
+    //
+    // spec D5a / ticket 03: this is the ONE surviving caller of `mergeTags`
+    // (db/turns.ts) and `UpdateTurnByIdInput.tags`. Every public write tool
+    // (the merged `note`) now overwrites tags whole via `replaceTags`, mode-
+    // gated — but this write-back's directive still carries a single `tag`,
+    // so an overwrite here would delete every tag the directive did not
+    // happen to mention. The merge survives deliberately, not by omission;
+    // ticket 10 deletes it once settlement's directive grows to a full list
+    // and moves onto the public tools.
     const sessionDbId = seedSession();
     const t1 = seedHoleTurn(sessionDbId, 1);
     db.query<unknown, [number]>(

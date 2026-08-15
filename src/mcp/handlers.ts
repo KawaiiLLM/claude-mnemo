@@ -2,7 +2,6 @@ import type { Database } from "bun:sqlite";
 
 import { noteTool } from "./note";
 import { recallMemory } from "./recall";
-import { rememberTool } from "./remember";
 import { timelineQuery } from "./timeline";
 import { resolveEraCutoff } from "../db/era";
 import { stripPrivateTags } from "../shared/tag-stripping";
@@ -23,7 +22,6 @@ export type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>
 
 export interface MnemoToolHandlers {
   recall: ToolHandler;
-  remember: ToolHandler;
   timeline: ToolHandler;
   note: ToolHandler;
 }
@@ -50,7 +48,7 @@ export interface CreateDatabaseBackedHandlersOptions {
    * it only changes on a reload — and defaults to the configured value, whose
    * own default (`null`) keeps every turn on the legacy path. This is the one
    * place the value is read for tool calls: reads (recall/timeline) and writes
-   * (note/remember) are handed the same number, so a turn cannot be written
+   * (note) are handed the same number, so a turn cannot be written
    * under one era's rules and rendered under the other's.
    */
   eraCutoffEpoch?: number | null;
@@ -151,12 +149,6 @@ export function createDatabaseBackedHandlers(
           truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : undefined,
           eraCutoffEpoch: eraCutoff(),
         }),
-      ),
-    remember: (args) =>
-      rememberTool(
-        database,
-        args as unknown as Parameters<typeof rememberTool>[1],
-        { eraCutoffEpoch: eraCutoff() },
       ),
     timeline: (args) =>
       workerTextResult(

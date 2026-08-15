@@ -4,7 +4,7 @@ import {
   MNEMO_TOOL_DESCRIPTIONS,
   timelineInputSchema,
   recallInputSchema,
-  rememberInputSchema,
+  noteInputSchema,
   workerRecallInputShape,
 } from "../../src/mcp/definitions";
 import { estimateTokens } from "../../src/utils/token-estimate";
@@ -54,13 +54,13 @@ describe("tool surface", () => {
   // re-grades a trailing window against the arc it belongs to, and that arc is
   // a timeline call. Still read-only — no new write surface.
   it("keeps the worker allowlist at the three read/write tools and exposes timeline descriptions", () => {
-    // `note` is deliberately absent: it is the MAIN agent's own note channel
+    // `note` is deliberately absent: it is the MAIN agent's own write channel
     // (spec D1). Handing it to the extraction worker would let the pipeline
-    // write the notes the P1 trial exists to compare it against.
+    // write the notes the P1 trial exists to compare it against. ticket 03
+    // (spec E1) merged `remember` into `note` — there is no second name left.
     expect(Object.keys(MNEMO_TOOL_DESCRIPTIONS).sort()).toEqual([
       "note",
       "recall",
-      "remember",
       "timeline",
     ]);
     expect(MNEMO_TOOL_DESCRIPTIONS.timeline).toContain("page/pageSize");
@@ -68,10 +68,6 @@ describe("tool surface", () => {
     expect(MNEMO_TOOL_DESCRIPTIONS.timeline).not.toContain("hard cap");
     expect(MNEMO_TOOL_DESCRIPTIONS.timeline).not.toContain("Optional `milestones`");
     expect(MNEMO_TOOL_DESCRIPTIONS.timeline).not.toContain("set false");
-    expect(rememberInputSchema.parse({ id: "S1", title: "ok" })).toEqual({
-      id: "S1",
-      title: "ok",
-    });
   });
 
   // Single home of the note contract (user ruling, S15069 T586): the
@@ -85,8 +81,7 @@ describe("tool surface", () => {
     // The address norm — the one thing the injected formats cannot teach on
     // sight (the formats themselves are undocumented by design: they explain
     // themselves when they appear).
-    expect(note).toContain("the only sources of an address");
-    expect(note).toContain("never recall or invent one");
+    expect(note).toContain("never recalled or invented");
     // Timing lives in the SessionStart block; the description defers, never
     // restates — a second copy is how the two surfaces diverged before.
     expect(note).toContain("Timing: the SessionStart block's three rules.");
@@ -94,29 +89,77 @@ describe("tool surface", () => {
     // no-invention red line, the user-decision hard line (S15069 T577–T581).
     expect(note).toContain("a future retriever would find nothing unique");
     expect(note).toContain(
-      "deleting it from history would cost the project no decision, progress, or coherence",
+      "deleting it costs no decision, progress, or coherence",
     );
     expect(note).toContain("never invented");
-    expect(note).toContain("Never skip a user decision, correction, or veto");
-    expect(note).toContain("whatever the tool count");
-    // Field contract essentials and the revision/guard semantics.
-    expect(note).toContain("the real stage, never a hoped-for one");
+    expect(note).toContain("Never skip a user decision, correction, veto");
+    // Field contract essentials.
+    expect(note).toContain("the real stage");
     // ticket 02 (spec B1/B2/B7): the writer states type/tags directly, no
     // mechanical title-to-type derivation any more.
     expect(note).toContain("omit or [] when none fit, never guess");
     expect(note).toContain("bare topic words, no prefix");
     expect(note).toContain("never restate the title, never narrate looking");
-    expect(note).toContain("claim first, evidence after");
-    expect(note).toContain("token counts against these budgets");
-    expect(note).toContain("`replace: true`");
-    expect(note).toContain("a real note after a skip needs no replace");
+    expect(note).toContain("claim first");
+    expect(note).toContain("token counts");
+    // ticket 03 (spec D5/D5a/E1): one mode vocabulary, one tool, two surfaces.
+    expect(note).toContain('mode.<field>');
+    expect(note).toContain('"overwrite"');
+    expect(note).toContain('"append"');
+    expect(note).toContain("session's summary");
     expect(note).toContain("`crossSession: true` only for another session's turn");
-    expect(note).toContain("goes last in its batch");
+    expect(note).toContain("Goes last in its batch");
     expect(note).toContain("never include <private> content");
-    // 500 tokens by user decree (S15069 T586), measured 500 as shipped: the
-    // description is in the cached prefix of every request, and the whole
-    // point of the single-home split was to stop paying for two copies.
+    // spec E2: tool-call syntax is rejected, not silently stored.
+    expect(note).toContain("Tool-call markup");
+    // 500 tokens by user decree (S15069 T586): the description is in the
+    // cached prefix of every request, and the whole point of the single-home
+    // split was to stop paying for two copies.
     expect(estimateTokens(note)).toBeLessThanOrEqual(500);
+  });
+
+  // ticket 03 (spec E1): the merged input shape covers both addressing
+  // surfaces and the mode vocabulary, `.strict()` so an unrecognised key
+  // (the retired `replace`/`regrade`/`cites`/`status`) is a parse error.
+  it("noteInputSchema accepts both addressing surfaces and rejects removed fields", () => {
+    expect(
+      noteInputSchema.parse({ turn: "S1/T1", title: "t", content: "c" }),
+    ).toEqual({ turn: "S1/T1", title: "t", content: "c" });
+    expect(
+      noteInputSchema.parse({ session: "S1", decision: "d" }),
+    ).toEqual({ session: "S1", decision: "d" });
+    expect(() =>
+      noteInputSchema.parse({ turn: "S1/T1", replace: true }),
+    ).toThrow();
+    expect(() =>
+      noteInputSchema.parse({
+        turn: "S1/T1",
+        regrade: { id: "T1", grade: 1 },
+      }),
+    ).toThrow();
+    expect(() =>
+      noteInputSchema.parse({ turn: "S1/T1", status: "extracted" }),
+    ).toThrow();
+    expect(() =>
+      noteInputSchema.parse({
+        turn: "S1/T1",
+        cites: [{ id: 1, relation: "supersedes" }],
+      }),
+    ).toThrow();
+    expect(
+      noteInputSchema.parse({
+        turn: "S1/T1",
+        content: "c",
+        mode: { content: "overwrite" },
+      }).mode,
+    ).toEqual({ content: "overwrite" });
+    expect(() =>
+      noteInputSchema.parse({
+        turn: "S1/T1",
+        content: "c",
+        mode: { content: "merge" },
+      }),
+    ).toThrow();
   });
 });
 

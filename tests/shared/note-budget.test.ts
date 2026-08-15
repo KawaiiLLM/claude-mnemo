@@ -87,13 +87,13 @@ describe("note budget line", () => {
     expect(source).toContain("NOTE_TOKEN_BUDGET.insight");
 
     expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
-      `(~${NOTE_TOKEN_BUDGET.title} tokens)`,
+      `(~${NOTE_TOKEN_BUDGET.title} tok)`,
     );
     expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
-      `(~${NOTE_TOKEN_BUDGET.content} tokens)`,
+      `(~${NOTE_TOKEN_BUDGET.content} tok)`,
     );
     expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
-      `(~${NOTE_TOKEN_BUDGET.insight} tokens)`,
+      `(~${NOTE_TOKEN_BUDGET.insight} tok`,
     );
 
     expect(NOTE_TAKING_INSTRUCTIONS).not.toContain("tokens)");

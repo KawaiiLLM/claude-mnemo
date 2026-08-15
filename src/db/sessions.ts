@@ -298,6 +298,160 @@ export function updateSessionSummaryRewrite(
   return session;
 }
 
+export interface UpdateSessionFieldsInput {
+  /** `undefined` = leave alone; `null` = clear; a string = the new value. */
+  title?: string | null;
+  content?: string | null;
+  decision?: string | null;
+  done?: string | null;
+  current?: string | null;
+  nextSteps?: string | null;
+  reference?: string | null;
+}
+
+/**
+ * The per-field session write (spec D5/D6, ticket 03): unlike
+ * `updateSessionSummaryRewrite` (which requires all seven fields and rewrites
+ * the row whole), this takes the same omit-leaves-alone / explicit-null-clears
+ * shape `resolveNullable` already gives turns — a caller corrects one field
+ * without restating the other six.
+ *
+ * `insight` is still cleared unconditionally on every call, same reasoning as
+ * the whole-rewrite path: any write through the current model means the
+ * session has moved onto it, and a stale legacy `insight` must not resurface
+ * through the decision-empty read fallback.
+ *
+ * The epoch advances unconditionally on every successful call (D5: even a
+ * byte-identical rewrite must clear the staleness reminder), and the full
+ * citation rescan runs over the row's POST-write values regardless of which
+ * fields this call touched — same reasoning as `updateSessionSummaryRewrite`.
+ */
+export function updateSessionFields(
+  db: Database,
+  sessionId: number,
+  input: UpdateSessionFieldsInput,
+  nowEpoch: number,
+): SessionRecord | null {
+  const existing = getSession(db, sessionId);
+  if (!existing) {
+    return null;
+  }
+
+  const resolve = (
+    value: string | null | undefined,
+    current: string | null,
+  ): string | null => {
+    if (value === undefined) {
+      return current;
+    }
+    if (value === null) {
+      return null;
+    }
+    return value.trim() === "" ? null : value;
+  };
+
+  const title = resolve(input.title, existing.title);
+  const content = resolve(input.content, existing.content);
+  const decision = resolve(input.decision, existing.decision);
+  const done = resolve(input.done, existing.done);
+  const current = resolve(input.current, existing.current);
+  const nextSteps = resolve(input.nextSteps, existing.nextSteps);
+  const reference = resolve(input.reference, existing.reference);
+
+  const session = db
+    .query<SessionRecord, [
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      number,
+      number,
+      number,
+    ]>(`
+      UPDATE sessions SET
+        title = ?,
+        content = ?,
+        decision = ?,
+        done = ?,
+        "current" = ?,
+        next_steps = ?,
+        "reference" = ?,
+        insight = NULL,
+        summary_updated_at_epoch = ?,
+        updated_at_epoch = ?
+      WHERE id = ?
+      RETURNING
+        id,
+        content_session_id AS contentSessionId,
+        project,
+        transcript_path AS transcriptPath,
+        title,
+        content,
+        insight,
+        next_steps AS nextSteps,
+        decision,
+        done,
+        "current" AS current,
+        "reference" AS reference,
+        last_compact_turn AS lastCompactTurn,
+            summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+        scan_cursor_byte_offset AS scanCursorByteOffset,
+        scan_cursor_line AS scanCursorLine,
+        parent_session_id AS parentSessionId,
+        lineage_status AS lineageStatus,
+        created_at_epoch AS createdAtEpoch,
+        updated_at_epoch AS updatedAtEpoch,
+        completed_at_epoch AS completedAtEpoch
+    `)
+    .get(
+      title,
+      content,
+      decision,
+      done,
+      current,
+      nextSteps,
+      reference,
+      nowEpoch,
+      nowEpoch,
+      sessionId,
+    );
+
+  if (!session) {
+    return null;
+  }
+
+  indexSessionToFTS(db, session);
+
+  // Spec C6/C10: full rescan of the session's whole citation-bearing surface,
+  // same reasoning as `updateSessionSummaryRewrite` — a per-field ledger would
+  // also work, but a session's field count is bounded, so a whole rescan is
+  // simpler and still correct against a call that touched only one field.
+  const references = [
+    ...parseQualifiedReferences(session.title),
+    ...parseQualifiedReferences(session.content),
+    ...parseQualifiedReferences(session.decision),
+    ...parseQualifiedReferences(session.done),
+    ...parseQualifiedReferences(session.current),
+    ...parseQualifiedReferences(session.nextSteps),
+    ...parseQualifiedReferences(session.reference),
+  ];
+  const { accepted } = validateReferences(db, references, {
+    writerSessionId: sessionId,
+  });
+  reconcileCitedPairs(
+    db,
+    { kind: "session", id: sessionId },
+    accepted.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref",
+  );
+
+  return session;
+}
+
 export function getSession(db: Database, id: number): SessionRecord | null {
   return (
     db

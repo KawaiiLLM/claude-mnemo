@@ -1,6 +1,9 @@
 import type { Database } from "bun:sqlite";
 
-import { recomputeTurnCitedPairs } from "../db/citations";
+import {
+  recomputeTurnCitedPairs,
+  type RecomputeTurnCitedPairsResult,
+} from "../db/citations";
 import { runWriteTransaction } from "../db/database";
 import {
   closeNoteDebtAsDeclined,
@@ -8,8 +11,20 @@ import {
   getNoteDebt,
   recordDeclinedNoteDebt,
 } from "../db/note-debt";
+import {
+  getSession,
+  updateSessionFields,
+  type SessionRecord,
+  type UpdateSessionFieldsInput,
+} from "../db/sessions";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
-import { getTurn, promoteTurnFromNote, updateTurnById } from "../db/turns";
+import {
+  getTurn,
+  getTurnById,
+  promoteTurnFromNote,
+  updateTurnById,
+  type TurnRecord,
+} from "../db/turns";
 import { isSegmentEra } from "../segment-era";
 import { formatNoteBudget } from "../shared/note-budget";
 import {
@@ -17,7 +32,12 @@ import {
   retiredTopicTagMessage,
   stripPrivateTags,
 } from "../shared/tag-stripping";
+import {
+  containsToolCallSyntax,
+  toolCallSyntaxMessage,
+} from "../shared/tool-call-syntax";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
+import { estimateTokens } from "../utils/token-estimate";
 
 type ToolTextResult = {
   content: Array<{
@@ -26,8 +46,36 @@ type ToolTextResult = {
   }>;
 };
 
+// D5/D5a: the one mode vocabulary. `append` accumulates (string concat with a
+// newline, array union); `overwrite` replaces the field whole, clear included.
+export type FieldMode = "append" | "overwrite";
+const FIELD_MODE_VALUES: readonly FieldMode[] = ["append", "overwrite"];
+
+const TURN_MODE_FIELDS = [
+  "title",
+  "content",
+  "insight",
+  "type",
+  "tags",
+  "grade",
+] as const;
+const SESSION_MODE_FIELDS = [
+  "title",
+  "content",
+  "decision",
+  "done",
+  "current",
+  "next_steps",
+  "reference",
+] as const;
+
 export interface NoteToolInput {
+  // Exactly one of `turn` / `session` addresses the write (D5/E1: one tool,
+  // both surfaces).
   turn?: unknown;
+  session?: unknown;
+
+  // Turn fields.
   title?: unknown;
   content?: unknown;
   insight?: unknown;
@@ -35,9 +83,22 @@ export interface NoteToolInput {
   type?: unknown;
   /** Bare subject words; the `topic:` namespace is retired (spec B6). */
   tags?: unknown;
+  grade?: unknown;
   skip?: unknown;
-  replace?: unknown;
   crossSession?: unknown;
+
+  // Session fields (D2/D4: seven fields, `current` included — ticket 04 trims
+  // the set, this ticket only adds the modes).
+  decision?: unknown;
+  done?: unknown;
+  current?: unknown;
+  next_steps?: unknown;
+  reference?: unknown;
+
+  // D5/D5a: per-field mode, required whenever the target field is currently
+  // non-empty. One object, shared vocabulary across every field of both
+  // addressing surfaces.
+  mode?: unknown;
 }
 
 export interface NoteToolOptions {
@@ -47,20 +108,20 @@ export interface NoteToolOptions {
   runWriteTransaction?: typeof runWriteTransaction;
   /**
    * P2 era boundary (spec D11/D12), resolved by the handler layer and never
-   * read from config here — `loadConfig` hits the filesystem on every call and
-   * a tool call must not pay for that. Absent or `null` = every turn is legacy,
-   * which is the P1 behaviour (shadow row only) and the rollback.
+   * read from config here. Absent or `null` = every turn is legacy, which is
+   * the P1 behaviour (shadow row only) and the rollback. Governs ONLY the
+   * title/content/insight promotion onto `turns` — `type`/`tags`/`grade`
+   * write `turns` directly regardless of era, same as the retired `remember`
+   * always did (settlement and the main agent both need to correct a legacy
+   * turn's grade/type/tags without a note ever promoting its prose).
    */
   eraCutoffEpoch?: number | null;
   /**
    * The mnemo session the caller belongs to (spec D2), resolved ONLY by the
-   * MCP process's direct-execution entry point (server.ts) from its own
-   * environment through `process_session_map`. Every other construction path —
-   * worker tool channels included, which inherit a hook's environment and
-   * would otherwise "look like" whatever session that hook belonged to — must
-   * leave this absent. Absent or null both mean "unknown", and unknown always
-   * admits: a wrong rejection here silently stops a turn's notes forever,
-   * which spec D2 rules out as the one unacceptable failure mode.
+   * MCP process's direct-execution entry point (server.ts). Every other
+   * construction path must leave this absent — see note.ts's prior history
+   * for the full rationale. Absent or null both mean "unknown", and unknown
+   * always admits.
    */
   callerSessionId?: number | null;
 }
@@ -75,13 +136,10 @@ function parameterError(message: string): ToolTextResult {
 
 /**
  * A note result is a successful write iff it opens with "Noted " (a first
- * write) or "Updated " (spec D5's replace) — the two receipts a real write
- * can produce. Failures are `Parameter error: …`, matching isRememberSuccess.
- * A declined turn answers "Skipped …", which is a successful CALL but not a
- * note, so it deliberately reads as false here.
- *
- * Trial metrics read this predicate directly: widen it whenever the receipt
- * wording changes, or every write under the new wording counts as a failure.
+ * write) or "Updated " (a write to a turn/session that already had one).
+ * Failures are `Parameter error: …`. A declined turn answers "Skipped …",
+ * which is a successful CALL but not a note, so it deliberately reads as
+ * false here.
  */
 export function isNoteSuccess(result: {
   content: Array<{ type: string; text?: string }>;
@@ -90,12 +148,8 @@ export function isNoteSuccess(result: {
   return text.startsWith("Noted ") || text.startsWith("Updated ");
 }
 
-// Spec D7/裁决 15: the ONLY address form a model ever writes is the fully
-// qualified `S<session>/T<prompt_number>`. A bare `T<n>` is rejected rather than
-// guessed at — the ambiguity that produced the 0.2.34 mis-citation bug came from
-// resolving relative ids against an assumed session, and the fix is to require
-// qualification, not to pick a default.
 const TURN_ADDRESS_PATTERN = /^S(\d+)\/T(\d+)$/i;
+const SESSION_ADDRESS_PATTERN = /^S(\d+)$/i;
 
 interface TurnAddress {
   sessionId: number;
@@ -117,12 +171,15 @@ export function parseTurnAddress(value: string): TurnAddress | null {
   return { sessionId, promptNumber };
 }
 
-// Mechanical provenance only (D4): a value is recorded when it is observed and
-// left NULL otherwise. Claude Code passes the MCP server no model identity —
-// no environment variable anywhere names the model, and the MCP request
-// carries no such field either. So this reads an explicit override if the
-// operator set one and returns null otherwise; the tool result states the
-// miss rather than letting the trial analyse an invented bucket as fact.
+function parseSessionAddress(value: string): number | null {
+  const match = SESSION_ADDRESS_PATTERN.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+  const sessionId = Number.parseInt(match[1]!, 10);
+  return Number.isSafeInteger(sessionId) ? sessionId : null;
+}
+
 const WRITER_MODEL_ENV_KEYS = [
   "CLAUDE_MNEMO_WRITER_MODEL",
   "ANTHROPIC_MODEL",
@@ -138,23 +195,9 @@ export function resolveWriterModel(
       return value.trim();
     }
   }
-
   return null;
 }
 
-/**
- * The turn the session is on right now — the turn the note is riding, as
- * opposed to the turn the note is ABOUT. Derived from the address's session, so
- * it needs no caller input and no session identity in the MCP process.
- *
- * `undone` rows are excluded: a sidechain prompt's row is born `undone` and
- * outranks the root turn in prompt order for the whole delegation window; it
- * is neither a valid ride nor a turn the session is "on".
- *
- * This is ride-turn attribution only — spec D5 retired the notion of a
- * "current turn" eligibility carve-out, so nothing here gates writability any
- * more (see `noteTool`'s eligibility comment).
- */
 function getSessionCurrentTurn(
   db: Database,
   sessionId: number,
@@ -170,44 +213,16 @@ function getSessionCurrentTurn(
   return row ?? null;
 }
 
-function requireText(
-  value: unknown,
-  field: string,
-): { ok: true; value: string } | { ok: false; message: string } {
-  if (typeof value !== "string") {
-    return { ok: false, message: `${field} is required and must be a string.` };
-  }
-  if (value.trim().length === 0) {
-    return { ok: false, message: `${field} must not be empty.` };
-  }
-  return { ok: true, value };
-}
-
-type NoteWriteOutcome =
-  | { ok: true; existing: boolean }
-  | { ok: false; message: string };
-
-/**
- * Overwrite must be declared (spec D3). A repeat write to an address that
- * already has a note is presumptively a mistake — the wrong address copied
- * from a stale reminder line, most often — and a caller that genuinely means
- * to revise says so with `replace: true` rather than silently clobbering.
- */
-function overwriteRequiredMessage(address: TurnAddress): string {
+function getRidePromptNumber(db: Database, turnId: number): number | null {
   return (
-    `S${address.sessionId}/T${address.promptNumber} already has a note.` +
-    " Resend with replace: true to confirm you want to overwrite it."
+    db
+      .query<{ promptNumber: number }, [number]>(
+        "SELECT prompt_number AS promptNumber FROM turns WHERE id = ?",
+      )
+      .get(turnId)?.promptNumber ?? null
   );
 }
 
-/**
- * A compact marker is not a turn (spec D2/D5). It is the mechanical row
- * PreCompact's transcript-repair path leaves at the boundary
- * (hooks/capture-repair.ts's `type = 'compact'`) — no user prompt reached it
- * and no work happened on it, so an address that resolves to one is rejected
- * the same way an address that resolves to nothing is: this is the one fact
- * left to state.
- */
 function compactMarkerMessage(address: TurnAddress): string {
   return (
     `S${address.sessionId}/T${address.promptNumber} is a compact marker, not a turn` +
@@ -215,13 +230,6 @@ function compactMarkerMessage(address: TurnAddress): string {
   );
 }
 
-/**
- * Cross-session write must be declared (spec D4). No legitimate use exists
- * today — every address a caller ever has came from its own session's
- * current-turn line or backlog relief — so this fires only on a mistyped or
- * borrowed address, and only when the caller's identity is actually known
- * (spec D2: unknown always admits, so this is skipped entirely otherwise).
- */
 function crossSessionRequiredMessage(
   address: TurnAddress,
   callerSessionId: number,
@@ -233,13 +241,6 @@ function crossSessionRequiredMessage(
   );
 }
 
-/**
- * Does this call know an identity, and does it disagree with the address?
- * `callerSessionId` is `undefined`/`null` on every path except the MCP
- * direct-execution entry, and even there it is null whenever the process
- * session has no recorded mapping yet — both read as "unknown" here, which is
- * the only reading spec D2 allows a miss to have.
- */
 function isCrossSessionWrite(
   callerSessionId: number | null | undefined,
   addressSessionId: number,
@@ -249,28 +250,282 @@ function isCrossSessionWrite(
   );
 }
 
+/**
+ * Backstop for fix #1: the memory agent reliably names the predecessor turn's
+ * DB id but, when the reference is woven mid-sentence ("reverted in T4244",
+ * "(T4243)"), writes it bare instead of the bracketed `[T<n>]` form the
+ * timeline resolver and recall key on. Ported from the retired `remember.ts` —
+ * every turn write goes through one content path now, so the convenience
+ * applies uniformly rather than only to the addressing scheme that used to
+ * reach it.
+ */
+export function bracketBareTurnReferences(
+  content: string,
+  isValidPredecessor: (candidateId: number) => boolean,
+): string {
+  if (!content) {
+    return content;
+  }
+  return content.replace(
+    /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
+    (match: string, lead: string, digits: string) => {
+      const id = Number.parseInt(digits, 10);
+      if (!Number.isFinite(id) || !isValidPredecessor(id)) {
+        return match;
+      }
+      const needsSpace =
+        lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
+      const prefix = needsSpace ? `${lead} ` : lead;
+      return `${prefix}[T${id}]`;
+    },
+  );
+}
+
+const HTML_ENTITY_MAP: Record<string, string> = { lt: "<", gt: ">", amp: "&" };
+
+// The memory agent sometimes emits HTML-escaped text even though every field
+// here is plain text; decode once at the persistence boundary. Single-pass so
+// `&amp;lt;` decodes to `&lt;`, never `<`.
+function decodeHtmlEntities(value: string): string {
+  return value.replace(/&(lt|gt|amp);/g, (_match, name: string) => HTML_ENTITY_MAP[name]!);
+}
+
+class NoteValidationError extends Error {}
+
+function fail(message: string): never {
+  throw new NoteValidationError(message);
+}
+
+function modeRequiredMessage(field: string): string {
+  return (
+    `${field} is not empty; declare mode.${field} as "overwrite" (replace it ` +
+    'whole) or "append" (add to it) — omitting the mode is not allowed on a ' +
+    "field that already holds something."
+  );
+}
+
+type FieldResolution<T> = { value: T };
+
+/**
+ * The one string-field resolver, shared by every prose field of both
+ * addressing surfaces (spec D5a: one mode vocabulary, no field gets a
+ * mechanism of its own).
+ *
+ * `nullable: false` (turn `title`/`content`) rejects both an explicit `null`
+ * and an empty string — the shadow_notes schema itself requires them non-null,
+ * so "clearing" one is not an operation this tool can express; the caller
+ * supplies a replacement or leaves the field alone. `nullable: true` (turn
+ * `insight`, every session field) treats an empty string as a plain synonym
+ * for `null` — the pre-existing convention for these columns — and both route
+ * through the same overwrite-mode-gated clear.
+ */
+function resolveStringField(
+  field: string,
+  provided: unknown,
+  existing: string | null,
+  mode: FieldMode | undefined,
+  opts: { nullable: boolean },
+): FieldResolution<string | null> {
+  if (provided === null) {
+    if (!opts.nullable) {
+      fail(`${field} cannot be cleared; supply a replacement value instead of null.`);
+    }
+    return resolveClear(field, existing, mode);
+  }
+  if (typeof provided !== "string") {
+    fail(`${field} must be a string${opts.nullable ? " or null" : ""} when present.`);
+  }
+  const decoded = decodeHtmlEntities(provided);
+  if (decoded.trim() === "") {
+    if (opts.nullable) {
+      return resolveClear(field, existing, mode);
+    }
+    fail(`${field} must not be empty.`);
+  }
+  if (containsToolCallSyntax(decoded)) {
+    fail(toolCallSyntaxMessage(field));
+  }
+  const isEmpty = existing === null || existing.trim() === "";
+  if (!isEmpty) {
+    if (mode === undefined) {
+      fail(modeRequiredMessage(field));
+    }
+    if (mode === "append") {
+      const base = existing!.trim();
+      return { value: base ? `${base}\n${decoded}` : decoded };
+    }
+  }
+  return { value: decoded };
+}
+
+function resolveClear(
+  field: string,
+  existing: string | null,
+  mode: FieldMode | undefined,
+): FieldResolution<string | null> {
+  const isEmpty = existing === null || existing.trim() === "";
+  if (isEmpty) {
+    return { value: null };
+  }
+  if (mode === undefined) {
+    fail(modeRequiredMessage(field));
+  }
+  if (mode === "append") {
+    fail(`${field} cannot be cleared with mode: "append" — use "overwrite".`);
+  }
+  return { value: null };
+}
+
+function resolveGradeField(
+  provided: unknown,
+  existing: number | null,
+  mode: FieldMode | undefined,
+): FieldResolution<number | null> | undefined {
+  if (provided === undefined) {
+    return undefined;
+  }
+  if (provided === null) {
+    if (existing === null) {
+      return { value: null };
+    }
+    if (mode === undefined) {
+      fail(modeRequiredMessage("grade"));
+    }
+    if (mode === "append") {
+      fail('grade cannot be cleared with mode: "append" — use "overwrite".');
+    }
+    return { value: null };
+  }
+  if (
+    typeof provided !== "number" ||
+    !Number.isInteger(provided) ||
+    provided < 0 ||
+    provided > 4
+  ) {
+    fail("grade must be an integer from 0 through 4.");
+  }
+  if (existing !== null) {
+    if (mode === undefined) {
+      fail(modeRequiredMessage("grade"));
+    }
+    if (mode === "append") {
+      fail('grade has no append operation; use mode: "overwrite".');
+    }
+  }
+  return { value: provided };
+}
+
+function resolveTypeField(
+  provided: unknown,
+  existing: readonly string[],
+  mode: FieldMode | undefined,
+): FieldResolution<string[]> | undefined {
+  if (provided === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(provided) || provided.some((value) => typeof value !== "string")) {
+    fail("type must be an array of strings when present.");
+  }
+  let normalized: string[];
+  try {
+    normalized = normalizeTypeValues(provided as string[]);
+  } catch (error) {
+    fail(
+      `${error instanceof Error ? error.message : String(error)}. Allowed: ${MEMORY_TYPES.join(", ")}.`,
+    );
+  }
+  const isEmpty = existing.length === 0;
+  if (!isEmpty) {
+    if (mode === undefined) {
+      fail(modeRequiredMessage("type"));
+    }
+    if (mode === "append") {
+      const merged = [...existing];
+      for (const value of normalized) {
+        if (!merged.includes(value)) {
+          merged.push(value);
+        }
+      }
+      return { value: merged };
+    }
+  }
+  return { value: normalized };
+}
+
+function resolveTagsField(
+  provided: unknown,
+  existing: readonly string[],
+  mode: FieldMode | undefined,
+): FieldResolution<string[]> | undefined {
+  if (provided === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(provided) || provided.some((value) => typeof value !== "string")) {
+    fail("tags must be an array of strings when present.");
+  }
+  const decoded = (provided as string[]).map((tag) => decodeHtmlEntities(tag));
+  const retired = findRetiredTopicTag(decoded);
+  if (retired !== null) {
+    fail(retiredTopicTagMessage(retired));
+  }
+  const isEmpty = existing.length === 0;
+  if (!isEmpty) {
+    if (mode === undefined) {
+      fail(modeRequiredMessage("tags"));
+    }
+    if (mode === "append") {
+      const merged = [...existing];
+      for (const tag of decoded) {
+        if (!merged.includes(tag)) {
+          merged.push(tag);
+        }
+      }
+      return { value: merged };
+    }
+  }
+  return { value: decoded };
+}
+
+function parseModeMap(
+  raw: unknown,
+  allowed: readonly string[],
+): Partial<Record<string, FieldMode>> {
+  if (raw === undefined) {
+    return {};
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    fail('mode must be an object mapping field names to "overwrite" or "append".');
+  }
+  const result: Partial<Record<string, FieldMode>> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!allowed.includes(key)) {
+      fail(`mode.${key} names a field this call does not accept a mode for.`);
+    }
+    if (!FIELD_MODE_VALUES.includes(value as FieldMode)) {
+      fail(`mode.${key} must be "overwrite" or "append".`);
+    }
+    result[key] = value as FieldMode;
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Decline (skip)
+// ---------------------------------------------------------------------------
+
 type DeclineOutcome =
   | { kind: "declined" }
   | { kind: "already-noted" }
   | { kind: "already-settled"; settledAs: string };
 
-/**
- * `note(turn, skip: true)` — the agent declining a listed turn (裁决 24).
- *
- * A skip is an ANSWER, not silence. The reminder lists each debt exactly once,
- * so a turn the agent cannot honestly write about would otherwise sit open until
- * the 50-turn bound aged it out, occupying one of the backlog relief's five
- * oldest-debt slots the whole time — and a compact strands exactly those oldest
- * debts, which is the common case this exists for. Declining closes the debt now
- * and records WHY, so refusal is distinguishable from neglect.
- *
- * Eligibility is address resolution alone (spec D5): the `getTurn` lookup
- * below is the whole check. The debt ledger is read afterwards only to decide
- * WHAT KIND of answer this skip records — declined, already-noted, or
- * already-settled — never whether the skip is allowed. When identity IS
- * known, the cross-session check adds an independent guard on top of address
- * resolution; a foreign turn is a parameter error exactly as writing one is.
- */
+function overwriteRequiredMessage(address: TurnAddress): string {
+  return (
+    `S${address.sessionId}/T${address.promptNumber} already has a note.` +
+    ' Declare mode.title/mode.content (or mode.insight) as "overwrite" or ' +
+    '"append" to confirm you want to touch it.'
+  );
+}
+
 function declineTurn(
   db: Database,
   address: TurnAddress,
@@ -284,20 +539,11 @@ function declineTurn(
     );
   }
 
-  // spec D2/D5: a compact marker is not a turn — it is the mechanical row
-  // PreCompact's transcript repair leaves behind (capture-repair.ts). It
-  // carries no user prompt and no work of its own, so there is nothing a
-  // skip could truthfully close.
   if (turn.type.includes("compact")) {
     return parameterError(compactMarkerMessage(address));
   }
 
-  // spec D4: a foreign-session address is rejected before any debt-state
-  // reasoning runs — identity, when known, outranks everything else.
-  if (
-    isCrossSessionWrite(options.callerSessionId, turn.sessionId) &&
-    !crossSession
-  ) {
+  if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
     return parameterError(
       crossSessionRequiredMessage(address, options.callerSessionId as number),
     );
@@ -307,27 +553,13 @@ function declineTurn(
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const ref = `S${turn.sessionId}/T${turn.promptNumber}`;
 
-  // No fast-path eligibility read gates entry to the transaction any more —
-  // the `getTurn` lookup above already resolved the address, and spec D5 says
-  // that resolution IS eligibility. What used to be a fast-path rejection for
-  // "no debt and not the current turn" is exactly the ordinary case a skip
-  // must now answer: a turn that finished with zero substantive tool calls
-  // never opened a debt row at all (T553/T562, spec Problem 2).
   const outcome = writeTransaction(db, (): DeclineOutcome => {
-    // A note already on record wins: the agent has answered this turn, and a
-    // stray skip must not undo that.
     if (getShadowNote(db, turn.id) !== null) {
       return { kind: "already-noted" };
     }
 
     const debt = getNoteDebt(db, turn.id);
     if (debt === null) {
-      // Born-closed decline: no debt row exists yet, whether because the turn
-      // is still live and classification has not reached it (裁决 25), or
-      // because it already finished trivially and classification never opened
-      // one at all. Both read the same way now that address existence is the
-      // only eligibility question — recordDeclinedNoteDebt is the same
-      // already-existing path either way.
       recordDeclinedNoteDebt(db, turn, nowEpoch);
       return { kind: "declined" };
     }
@@ -354,116 +586,68 @@ function declineTurn(
   }
 }
 
-/**
- * `note` — the main agent's own turn note (spec D1).
- *
- * Two behaviours, chosen per turn by the era predicate (spec D11/D12, ticket
- * 09). A turn created before the cutoff keeps the P1 arrangement exactly: the
- * note lands in the shadow store and `turns` is not touched at all, because the
- * legacy extraction pipeline still owns every column of those rows including
- * status. A turn created at or after it is promoted — the note becomes the
- * official record. The shadow row is written either way: it is the provenance
- * of who authored the text, and the trial's metrics read it.
- */
-export function noteTool(
+// ---------------------------------------------------------------------------
+// Turn write
+// ---------------------------------------------------------------------------
+
+interface TurnWriteTransactionResult {
+  turn: TurnRecord;
+  noteExisted: boolean;
+  touchedProse: boolean;
+  finalTitle: string | null | undefined;
+  finalContent: string | null | undefined;
+  finalInsight: string | null | undefined;
+  finalType: string[] | undefined;
+  finalTags: string[] | undefined;
+  finalGrade: number | null | undefined;
+  citations: RecomputeTurnCitedPairsResult | null;
+  stripped: boolean;
+}
+
+function isValidPredecessorFor(
   db: Database,
-  rawInput: NoteToolInput,
-  options: NoteToolOptions = {},
+  turn: { id: number; sessionId: number; promptNumber: number },
+): (candidateId: number) => boolean {
+  return (candidateId: number): boolean => {
+    if (candidateId === turn.id) {
+      return false;
+    }
+    const cited = getTurnById(db, candidateId);
+    return (
+      cited !== null &&
+      cited.sessionId === turn.sessionId &&
+      cited.promptNumber < turn.promptNumber
+    );
+  };
+}
+
+function handleTurnWrite(
+  db: Database,
+  address: TurnAddress,
+  input: NoteToolInput,
+  options: NoteToolOptions,
 ): ToolTextResult {
-  if (typeof rawInput.turn !== "string") {
-    return parameterError(
-      'turn is required: a fully qualified "S<session>/T<prompt>" address, e.g. "S15069/T332".',
-    );
-  }
-
-  const address = parseTurnAddress(rawInput.turn);
-  if (!address) {
-    return parameterError(
-      `turn must be a fully qualified "S<session>/T<prompt>" address, e.g. "S15069/T332"; got "${rawInput.turn}".`,
-    );
-  }
-
-  if (rawInput.skip !== undefined && typeof rawInput.skip !== "boolean") {
+  if (input.skip !== undefined && typeof input.skip !== "boolean") {
     return parameterError("skip must be a boolean when present.");
   }
-  if (rawInput.replace !== undefined && typeof rawInput.replace !== "boolean") {
-    return parameterError("replace must be a boolean when present.");
-  }
   if (
-    rawInput.crossSession !== undefined &&
-    typeof rawInput.crossSession !== "boolean"
+    input.crossSession !== undefined &&
+    typeof input.crossSession !== "boolean"
   ) {
     return parameterError("crossSession must be a boolean when present.");
   }
-  const replace = rawInput.replace === true;
-  const crossSession = rawInput.crossSession === true;
+  const crossSession = input.crossSession === true;
 
-  // 裁决 24: a declined turn needs `turn` alone. Everything a note would carry
-  // is not merely optional here but meaningless — the whole point of the skip is
-  // that there is nothing truthful to put in those fields — so they are ignored
-  // rather than validated, and the tool never has to decide what a half-filled
-  // skip meant. `crossSession` is the one flag a skip still reads (spec D4
-  // applies to every write, and a decline is one); `replace` has nothing to do
-  // with a skip and is silently ignored like title/content/insight are.
-  if (rawInput.skip === true) {
+  if (input.skip === true) {
     return declineTurn(db, address, options, crossSession);
   }
 
-  const titleInput = requireText(rawInput.title, "title");
-  if (!titleInput.ok) {
-    return parameterError(titleInput.message);
-  }
-
-  const contentInput = requireText(rawInput.content, "content");
-  if (!contentInput.ok) {
-    return parameterError(contentInput.message);
-  }
-
-  if (
-    rawInput.insight !== undefined &&
-    rawInput.insight !== null &&
-    typeof rawInput.insight !== "string"
-  ) {
-    return parameterError("insight must be a string when present.");
-  }
-
-  // spec B2/B7: the caller states what this turn did directly — no mechanical
-  // title-to-type derivation any more. An unrecognised word is rejected
-  // outright (same strictness `remember` already applies): a typo silently
-  // dropped would make a `type:` filter quietly lossy.
-  let typeValues: string[] | undefined;
-  if (rawInput.type !== undefined) {
-    if (
-      !Array.isArray(rawInput.type) ||
-      rawInput.type.some((value) => typeof value !== "string")
-    ) {
-      return parameterError("type must be an array of strings when present.");
+  for (const key of SESSION_MODE_FIELDS) {
+    if (key === "title" || key === "content") {
+      continue;
     }
-    try {
-      typeValues = normalizeTypeValues(rawInput.type as string[]);
-    } catch (error) {
-      return parameterError(
-        `${error instanceof Error ? error.message : String(error)}. Allowed: ${MEMORY_TYPES.join(", ")}.`,
-      );
-    }
-  }
-
-  let tagValues: string[] | undefined;
-  if (rawInput.tags !== undefined) {
-    if (
-      !Array.isArray(rawInput.tags) ||
-      rawInput.tags.some((value) => typeof value !== "string")
-    ) {
-      return parameterError("tags must be an array of strings when present.");
-    }
-    tagValues = rawInput.tags as string[];
-    // spec B6, peer review item 3: the retired `topic:` namespace stays
-    // retired at the write boundary — a caller reintroducing it is rejected
-    // loudly rather than silently stripped, the same strictness `type`
-    // already applies to an unrecognised word.
-    const retiredTag = findRetiredTopicTag(tagValues);
-    if (retiredTag !== null) {
-      return parameterError(retiredTopicTagMessage(retiredTag));
+    if ((input as Record<string, unknown>)[key] !== undefined) {
+      return parameterError(`${key} is a session field; this call addresses a turn.`);
     }
   }
 
@@ -474,214 +658,435 @@ export function noteTool(
     );
   }
 
-  // spec D2/D5: a compact marker carries no note-worthy content — see
-  // `compactMarkerMessage`. Checked ahead of the cross-session guard, same as
-  // the "no turn" case above: existence-and-kind is resolved before identity.
   if (turn.type.includes("compact")) {
     return parameterError(compactMarkerMessage(address));
   }
 
-  // spec D5: eligibility collapses to address resolution — the `getTurn` call
-  // above IS the eligibility check, full stop. The debt ledger is not read
-  // anywhere in this function any more: a turn that finished with zero
-  // substantive tool calls never opened a debt row, and the old debt-based
-  // reasoning read that absence as "ineligible" when the only real question
-  // was ever "does this turn exist" (T553/T562, spec Problem 2). This also
-  // retires the "current turn" carve-out (裁决 25) as a special case — it is
-  // now just the ordinary rule, since every existing turn is writable
-  // regardless of whether it is still live.
-  //
-  // spec D4, and BEFORE the replace guard — the same order `declineTurn`
-  // uses: identity, when known, outranks everything else. Under the old
-  // debt-based gate this guard was unreachable for the commonest foreign
-  // address of all, another session's finished turn, which "owed nothing" and
-  // so was refused with a message that named the wrong problem — and, worse,
-  // one that `crossSession: true` could not get past, leaving the documented
-  // escape hatch inoperable for that whole class.
-  //
-  // No race window exists to protect against (the caller's identity and the
-  // address's session are both fixed for the duration of this call), so unlike
-  // D3 below this is not re-checked inside the transaction.
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
     return parameterError(
       crossSessionRequiredMessage(address, options.callerSessionId as number),
     );
   }
 
-  // `current` is ride-turn attribution only (which turn the SESSION is on
-  // right now), not an eligibility gate — see getSessionCurrentTurn. Without
-  // it, a note addressed at another session's turn would silently attribute
-  // itself to THAT session's newest turn, since ride_turn is derived from the
-  // address's session.
-  const current = getSessionCurrentTurn(db, turn.sessionId);
-  const fastExisting = getShadowNote(db, turn.id);
-
-  // spec D3: fast-path half of the overwrite guard — an early exit that
-  // avoids opening a write transaction for a call that is going to be
-  // rejected anyway. The authorising check is the one inside the transaction
-  // below, because a concurrent note to this same address can flip "no
-  // existing note" to "existing note" between this read and that one.
-  if (fastExisting !== null && !replace) {
-    return parameterError(overwriteRequiredMessage(address));
+  const providedFields = TURN_MODE_FIELDS.filter(
+    (key) => (input as Record<string, unknown>)[key] !== undefined,
+  );
+  if (providedFields.length === 0) {
+    return parameterError(
+      "at least one of title, content, insight, type, tags, grade is required.",
+    );
   }
 
-  // Same removal the transcript capture path applies (D10). It runs at the
-  // persistence boundary, not at the caller's discretion: instruction
-  // discipline alone has no enforcement, and the strip is what makes the
-  // guarantee a property of the write path.
-  const rawTitle = titleInput.value;
-  const rawContent = contentInput.value;
-  const rawInsight =
-    typeof rawInput.insight === "string" ? rawInput.insight : null;
-
-  const title = stripPrivateTags(rawTitle);
-  const content = stripPrivateTags(rawContent);
-  const insight = rawInsight === null ? null : stripPrivateTags(rawInsight);
-
-  const stripped =
-    title !== rawTitle || content !== rawContent || insight !== rawInsight;
+  let modeMap: Partial<Record<string, FieldMode>>;
+  try {
+    modeMap = parseModeMap(input.mode, TURN_MODE_FIELDS);
+  } catch (error) {
+    if (error instanceof NoteValidationError) {
+      return parameterError(error.message);
+    }
+    throw error;
+  }
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writerModel = resolveWriterModel(options.env ?? process.env);
+  const current = getSessionCurrentTurn(db, turn.sessionId);
   const rideTurnId = current?.id ?? null;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const promotesTurnRecord = isSegmentEra(
-    turn.createdAtEpoch,
-    options.eraCutoffEpoch,
-  );
+  const promotesTurnRecord = isSegmentEra(turn.createdAtEpoch, options.eraCutoffEpoch);
 
-  // The note write and the debt's closure are one transaction. Eligibility no
-  // longer needs a re-check inside it — turn existence cannot change between
-  // the fast-path read and here, turns are never deleted — so the only
-  // authoritative re-read left is the overwrite guard below: an IMMEDIATE
-  // transaction takes the write lock before either statement inside it runs,
-  // so whatever this read observes is the state the write commits against.
-  //
-  // Age is still not consulted here — see closeNoteDebtAsNoted — closing a
-  // debt is best-effort bookkeeping downstream of the write, not a gate on it.
-  const outcome = writeTransaction(db, (): NoteWriteOutcome => {
-    const existing = getShadowNote(db, turn.id);
-    // spec D3, authoritative half: re-read fresh — a concurrent note between
-    // the fast-path read and this transaction's write lock must not be
-    // silently clobbered by a caller who never declared they meant to
-    // overwrite anything.
-    if (existing !== null && !replace) {
-      return { ok: false, message: overwriteRequiredMessage(address) };
-    }
+  let result: TurnWriteTransactionResult;
+  try {
+    result = writeTransaction(db, (): TurnWriteTransactionResult => {
+      const freshTurn = getTurnById(db, turn.id)!;
+      const existingNote = getShadowNote(db, turn.id);
+      const noteExisted = existingNote !== null;
 
-    upsertShadowNote(db, {
-      turnId: turn.id,
-      title,
-      content,
-      insight,
-      writerModel,
-      rideTurnId,
-      nowEpoch,
-    });
-    closeNoteDebtAsNoted(db, turn.id, nowEpoch);
+      const titleResolution =
+        input.title !== undefined
+          ? resolveStringField(
+              "title",
+              input.title,
+              existingNote?.title ?? null,
+              modeMap.title,
+              { nullable: false },
+            )
+          : undefined;
+      const contentResolution =
+        input.content !== undefined
+          ? resolveStringField(
+              "content",
+              input.content,
+              existingNote?.content ?? null,
+              modeMap.content,
+              { nullable: false },
+            )
+          : undefined;
+      const insightResolution =
+        input.insight !== undefined
+          ? resolveStringField(
+              "insight",
+              input.insight,
+              existingNote?.insight ?? null,
+              modeMap.insight,
+              { nullable: true },
+            )
+          : undefined;
 
-    // The cutover itself (裁决 27): in the new era this note is not a shadow
-    // record beside the official one, it IS the official one. It shares the
-    // transaction with the shadow row and the debt closure rather than
-    // following them, so no reader can observe a turn whose record, whose
-    // provenance and whose ledger disagree about whether it was noted.
-    if (promotesTurnRecord) {
-      promoteTurnFromNote(db, turn.id, {
-        title,
-        content,
-        insight,
-        updatedAtEpoch: nowEpoch,
-      });
+      const touchesProseInput =
+        titleResolution !== undefined ||
+        contentResolution !== undefined ||
+        insightResolution !== undefined;
+      if (!noteExisted && touchesProseInput) {
+        const hasTitle = titleResolution !== undefined;
+        const hasContent = contentResolution !== undefined;
+        if (!hasTitle || !hasContent) {
+          fail("a first note for this turn requires both title and content.");
+        }
+      }
 
-      // spec B1/B2/B7, ticket 02: type is now stated by the caller directly,
-      // gated behind the SAME era boundary the promotion above is — a
-      // legacy-era note leaves `turns` untouched entirely (P1 isolation).
-      //
-      // Both fields take the plainest semantics there is, the one `title`,
-      // `content` and `insight` already have: ABSENT leaves the stored value
-      // alone, PRESENT overwrites it whole. Neither field gets a mechanism of
-      // its own. An omitted `type` in particular must not clear a stored one:
-      // B7 says empty is never a claim, so writing empty cannot be the act of
-      // claiming there is no type — clearing takes an explicit `type: []`.
-      //
-      // The one mode vocabulary that will govern all of this (`overwrite` /
-      // `append`, required whenever the target field is non-empty) arrives
-      // with the merged write tool in ticket 03, and retires `replace` and
-      // `replaceTags` together. Until then this is a strict subset of it.
-      const finalTurn = updateTurnById(db, turn.id, {
-        type: typeValues,
-        replaceTags: tagValues,
-      });
+      const typeResolution = resolveTypeField(input.type, freshTurn.type, modeMap.type);
+      const tagsResolution = resolveTagsField(input.tags, freshTurn.tags, modeMap.tags);
+      const gradeResolution = resolveGradeField(
+        input.grade,
+        freshTurn.significanceGrade,
+        modeMap.grade,
+      );
 
-      // Spec C6: this note IS the turn's official body from here on (裁决 27
-      // above), so its citation-bearing fields — title/content/insight, as
-      // `updateTurnById` just persisted them, not the locally stripped
-      // strings — are re-scanned and the turn's pair set in `memory_edges`
-      // is brought into agreement with them. A legacy-era note (the branch
-      // this `if` is inside of) never reaches here at all: P1 isolation
-      // leaves `turns` untouched, so there is no new body state to reconcile
-      // against.
-      if (finalTurn) {
-        recomputeTurnCitedPairs(
+      const touchedProse =
+        titleResolution !== undefined ||
+        contentResolution !== undefined ||
+        insightResolution !== undefined;
+
+      let stripped = false;
+      let finalTitle = titleResolution?.value;
+      let finalContent = contentResolution?.value;
+      let finalInsight = insightResolution?.value;
+
+      if (touchedProse) {
+        const priorTitle = existingNote?.title ?? null;
+        const priorContent = existingNote?.content ?? null;
+        const priorInsight = existingNote?.insight ?? null;
+
+        const rawTitle = finalTitle !== undefined ? finalTitle : priorTitle;
+        const rawContent = finalContent !== undefined ? finalContent : priorContent;
+        const rawInsight = finalInsight !== undefined ? finalInsight : priorInsight;
+
+        const strippedTitle = rawTitle === null ? null : stripPrivateTags(rawTitle);
+        const strippedContent =
+          rawContent === null ? null : stripPrivateTags(rawContent);
+        const strippedInsight =
+          rawInsight === null ? null : stripPrivateTags(rawInsight);
+
+        stripped =
+          strippedTitle !== rawTitle ||
+          strippedContent !== rawContent ||
+          strippedInsight !== rawInsight;
+
+        const predecessor = isValidPredecessorFor(db, {
+          id: turn.id,
+          sessionId: turn.sessionId,
+          promptNumber: turn.promptNumber,
+        });
+        const bracketedContent =
+          strippedContent === null
+            ? null
+            : bracketBareTurnReferences(strippedContent, predecessor);
+
+        finalTitle = strippedTitle;
+        finalContent = bracketedContent;
+        finalInsight = strippedInsight;
+
+        upsertShadowNote(db, {
+          turnId: turn.id,
+          // shadow_notes.title/content are NOT NULL — by this point both are
+          // guaranteed non-null, either freshly resolved or inherited.
+          title: finalTitle as string,
+          content: finalContent as string,
+          insight: finalInsight,
+          writerModel,
+          rideTurnId,
+          nowEpoch,
+        });
+        closeNoteDebtAsNoted(db, turn.id, nowEpoch);
+      }
+
+      let updatedTurn = freshTurn;
+      let citations: RecomputeTurnCitedPairsResult | null = null;
+
+      const promotesThisWrite = touchedProse && promotesTurnRecord;
+      const wantsFieldsWrite =
+        typeResolution !== undefined ||
+        tagsResolution !== undefined ||
+        gradeResolution !== undefined;
+
+      if (promotesThisWrite) {
+        const promoted = promoteTurnFromNote(db, turn.id, {
+          title: finalTitle as string,
+          content: finalContent as string,
+          insight: finalInsight ?? null,
+          updatedAtEpoch: nowEpoch,
+        });
+        if (promoted) {
+          updatedTurn = promoted;
+        }
+      }
+      if (wantsFieldsWrite) {
+        const written = updateTurnById(db, turn.id, {
+          type: typeResolution?.value,
+          replaceTags: tagsResolution?.value,
+          significanceGrade: gradeResolution?.value,
+          updatedAtEpoch: nowEpoch,
+        });
+        if (written) {
+          updatedTurn = written;
+        }
+      }
+
+      if (touchedProse && promotesTurnRecord) {
+        citations = recomputeTurnCitedPairs(
           db,
-          finalTurn.id,
+          turn.id,
           {
-            title: finalTurn.title,
-            content: finalTurn.content,
-            insight: finalTurn.insight,
+            title: updatedTurn.title,
+            content: updatedTurn.content,
+            insight: updatedTurn.insight,
           },
           nowEpoch,
-          finalTurn.sessionId,
+          updatedTurn.sessionId,
         );
       }
+
+      return {
+        turn: updatedTurn,
+        noteExisted,
+        touchedProse,
+        finalTitle,
+        finalContent,
+        finalInsight,
+        finalType: typeResolution?.value,
+        finalTags: tagsResolution?.value,
+        finalGrade: gradeResolution?.value,
+        citations,
+        stripped,
+      };
+    });
+  } catch (error) {
+    if (error instanceof NoteValidationError) {
+      return parameterError(error.message);
     }
-
-    return { ok: true, existing: existing !== null };
-  });
-
-  if (!outcome.ok) {
-    return parameterError(outcome.message);
+    throw error;
   }
 
-  // spec D5: the verb itself carries new-vs-update, not just the trailing
-  // clause — a caller (or a trial metric skimming just the first word) can
-  // tell them apart without parsing the rest of the sentence.
+  const verb = result.noteExisted || !result.touchedProse ? "Updated" : "Noted";
   const parts = [
-    `${outcome.existing ? "Updated" : "Noted"} S${turn.sessionId}/T${turn.promptNumber}${
-      outcome.existing ? " (replaced the previous note)" : ""
+    `${verb} S${turn.sessionId}/T${turn.promptNumber}${
+      result.noteExisted && result.touchedProse ? " (replaced the previous note)" : ""
     }.`,
   ];
-  // The budget is stated to the agent at session start, but a number nobody
-  // measures is a number nobody keeps: sixteen consecutive notes on S15069 ran
-  // 1.5×–2.5× over it. Reporting the write's own cost back, on the write, is
-  // the only feedback the writer gets in time to spend it differently next
-  // turn. Successful writes only — a decline has nothing to measure.
-  parts.push(`budget: ${formatNoteBudget({ title, content, insight })}`);
-  parts.push(
-    rideTurnId === null
-      ? "ride_turn: unknown."
-      : `ride_turn: S${turn.sessionId}/T${
-          getRidePromptNumber(db, rideTurnId) ?? turn.promptNumber
-        }.`,
-  );
-  parts.push(
-    writerModel === null
-      ? "writer_model: not recorded — this environment does not expose the model to the MCP server."
-      : `writer_model: ${writerModel}.`,
-  );
-  if (stripped) {
-    parts.push("Private-tagged content was removed before storing.");
+
+  if (result.touchedProse) {
+    parts.push(
+      `budget: ${formatNoteBudget({
+        title: result.finalTitle ?? "",
+        content: result.finalContent ?? "",
+        insight: result.finalInsight,
+      })}`,
+    );
+    parts.push(
+      rideTurnId === null
+        ? "ride_turn: unknown."
+        : `ride_turn: S${turn.sessionId}/T${
+            getRidePromptNumber(db, rideTurnId) ?? turn.promptNumber
+          }.`,
+    );
+    parts.push(
+      writerModel === null
+        ? "writer_model: not recorded — this environment does not expose the model to the MCP server."
+        : `writer_model: ${writerModel}.`,
+    );
+    if (result.stripped) {
+      parts.push("Private-tagged content was removed before storing.");
+    }
+  }
+
+  if (result.finalType !== undefined) {
+    parts.push(`type: ${result.finalType.length > 0 ? result.finalType.join(", ") : "(none)"}.`);
+  }
+  if (result.finalTags !== undefined) {
+    parts.push(`tags: ${result.finalTags.length > 0 ? result.finalTags.join(", ") : "(none)"}.`);
+  }
+  if (result.finalGrade !== undefined) {
+    parts.push(`grade: ${result.finalGrade === null ? "(cleared)" : result.finalGrade}.`);
+  }
+
+  if (result.citations) {
+    if (result.citations.written.length > 0 || result.citations.deleted.length > 0) {
+      let citeLine = `Cites ${result.citations.written.length} pair(s)`;
+      if (result.citations.deleted.length > 0) {
+        citeLine += `, dropped ${result.citations.deleted.length} no longer referenced`;
+      }
+      citeLine += ".";
+      parts.push(citeLine);
+    }
+    if (result.citations.rejected.length > 0) {
+      parts.push(
+        `Dropped ${result.citations.rejected.length} unresolvable reference(s): ${result.citations.rejected
+          .map((entry) => `${entry.reference.raw} (${entry.reason})`)
+          .join(", ")}.`,
+      );
+    }
   }
 
   return textResult(parts.join(" "));
 }
 
-function getRidePromptNumber(db: Database, turnId: number): number | null {
-  return (
-    db
-      .query<{ promptNumber: number }, [number]>(
-        "SELECT prompt_number AS promptNumber FROM turns WHERE id = ?",
-      )
-      .get(turnId)?.promptNumber ?? null
+// ---------------------------------------------------------------------------
+// Session write
+// ---------------------------------------------------------------------------
+
+function handleSessionWrite(
+  db: Database,
+  sessionId: number,
+  input: NoteToolInput,
+  options: NoteToolOptions,
+): ToolTextResult {
+  for (const key of ["insight", "type", "tags", "grade", "skip", "crossSession"] as const) {
+    if ((input as Record<string, unknown>)[key] !== undefined) {
+      return parameterError(`${key} is a turn field; this call addresses a session.`);
+    }
+  }
+
+  const providedFields = SESSION_MODE_FIELDS.filter(
+    (key) => (input as Record<string, unknown>)[key] !== undefined,
   );
+  if (providedFields.length === 0) {
+    return parameterError(
+      "at least one of title, content, decision, done, current, next_steps, reference is required.",
+    );
+  }
+
+  let modeMap: Partial<Record<string, FieldMode>>;
+  try {
+    modeMap = parseModeMap(input.mode, SESSION_MODE_FIELDS);
+  } catch (error) {
+    if (error instanceof NoteValidationError) {
+      return parameterError(error.message);
+    }
+    throw error;
+  }
+
+  const session = getSession(db, sessionId);
+  if (!session) {
+    return textResult(`Session S${sessionId} not found.`);
+  }
+
+  const fieldMap: ReadonlyArray<
+    [key: (typeof SESSION_MODE_FIELDS)[number], existing: string | null]
+  > = [
+    ["title", session.title],
+    ["content", session.content],
+    ["decision", session.decision],
+    ["done", session.done],
+    ["current", session.current],
+    ["next_steps", session.nextSteps],
+    ["reference", session.reference],
+  ];
+
+  let resolvedInput: UpdateSessionFieldsInput;
+  const finals: Partial<Record<string, string | null>> = {};
+  try {
+    resolvedInput = {};
+    for (const [key, existing] of fieldMap) {
+      const provided = (input as Record<string, unknown>)[key];
+      if (provided === undefined) {
+        continue;
+      }
+      const resolution = resolveStringField(key, provided, existing, modeMap[key], {
+        nullable: true,
+      });
+      finals[key] = resolution.value;
+      const inputKey = key === "next_steps" ? "nextSteps" : key;
+      (resolvedInput as Record<string, string | null>)[inputKey] = resolution.value;
+    }
+  } catch (error) {
+    if (error instanceof NoteValidationError) {
+      return parameterError(error.message);
+    }
+    throw error;
+  }
+
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const updated = writeTransaction(db, () =>
+    updateSessionFields(db, sessionId, resolvedInput, nowEpoch),
+  );
+
+  if (!updated) {
+    return textResult(`Session S${sessionId} not found.`);
+  }
+
+  const verb = "Updated";
+  const parts = [`${verb} S${sessionId}.`];
+  const sizeParts = Object.entries(finals)
+    .filter(([, value]) => value !== null && value !== undefined)
+    .map(([key, value]) => `${key} ${estimateTokens(value as string)}tok`);
+  if (sizeParts.length > 0) {
+    parts.push(`sizes (after write): ${sizeParts.join(", ")}.`);
+  }
+
+  return textResult(parts.join(" "));
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/**
+ * `note` — the merged write tool (spec E1, ticket 03). One tool writes turns
+ * and sessions; the retired `remember` entry point is gone. Merging is not
+ * only tidiness: it removes an unfenced third writer of a turn's `grade`,
+ * `type` and `tags`, so the note-timestamp fence that protects a late note
+ * covers every write path without a new provenance column.
+ */
+export function noteTool(
+  db: Database,
+  rawInput: NoteToolInput,
+  options: NoteToolOptions = {},
+): ToolTextResult {
+  const hasTurn = typeof rawInput.turn === "string";
+  const hasSession = typeof rawInput.session === "string";
+
+  if (rawInput.turn !== undefined && !hasTurn) {
+    return parameterError("turn must be a string when present.");
+  }
+  if (rawInput.session !== undefined && !hasSession) {
+    return parameterError("session must be a string when present.");
+  }
+
+  if (hasTurn === hasSession) {
+    return parameterError(
+      hasTurn
+        ? "exactly one of turn or session is required, not both."
+        : 'exactly one of turn ("S<session>/T<prompt>") or session ("S<session>") is required.',
+    );
+  }
+
+  if (hasSession) {
+    const sessionId = parseSessionAddress(rawInput.session as string);
+    if (sessionId === null) {
+      return parameterError(
+        `session must be a "S<session>" address, e.g. "S15069"; got "${rawInput.session}".`,
+      );
+    }
+    return handleSessionWrite(db, sessionId, rawInput, options);
+  }
+
+  const address = parseTurnAddress(rawInput.turn as string);
+  if (!address) {
+    return parameterError(
+      `turn must be a fully qualified "S<session>/T<prompt>" address, e.g. "S15069/T332"; got "${rawInput.turn}".`,
+    );
+  }
+
+  return handleTurnWrite(db, address, rawInput, options);
 }

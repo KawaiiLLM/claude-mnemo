@@ -12,7 +12,6 @@ import {
   MNEMO_TOOL_DESCRIPTIONS,
   noteInputSchema,
   recallInputSchema,
-  rememberInputSchema,
   timelineInputSchema,
 } from "./definitions";
 import {
@@ -73,7 +72,7 @@ export function resolveCallerSessionIdFromEnv(
   return null;
 }
 
-type MainMcpToolName = "recall" | "timeline" | "remember" | "note";
+type MainMcpToolName = "recall" | "timeline" | "note";
 type MainMcpToolHandlers = Pick<MnemoToolHandlers, MainMcpToolName>;
 type ToolRegistrationTarget = Pick<McpServer, "registerTool">;
 
@@ -108,14 +107,6 @@ export function registerMainMcpTools(
       inputSchema: timelineInputSchema,
     },
     (args) => toolHandlers.timeline(args as Record<string, unknown>),
-  );
-  server.registerTool(
-    "remember",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.remember,
-      inputSchema: rememberInputSchema,
-    },
-    (args) => toolHandlers.remember(args as Record<string, unknown>),
   );
   server.registerTool(
     "note",
@@ -153,7 +144,6 @@ export function createMcpServer(
   const toolHandlers: MainMcpToolHandlers = {
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
     timeline: mergedHandlers.timeline ?? createStubHandler("timeline"),
-    remember: mergedHandlers.remember ?? createStubHandler("remember"),
     note: mergedHandlers.note ?? createStubHandler("note"),
   };
 

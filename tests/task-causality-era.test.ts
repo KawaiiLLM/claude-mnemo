@@ -4,7 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../src/db/database";
 import { initializeSchema } from "../src/db/schema";
 import { getTurn } from "../src/db/turns";
-import { rememberTool } from "../src/mcp/remember";
+import { noteTool } from "../src/mcp/note";
 import { isTaskCausalityEra } from "../src/task-causality-era";
 
 describe("task-causality era", () => {
@@ -53,7 +53,7 @@ describe("task-causality era", () => {
     ).toBe(true);
   });
 
-  test("regrade leaves the creation-epoch era unchanged", () => {
+  test("a grade correction leaves the creation-epoch era unchanged", () => {
     db.query(
       `INSERT INTO turns (
          session_id, prompt_number, status, user_prompt, significance_grade,
@@ -64,18 +64,26 @@ describe("task-causality era", () => {
     const legacyTurn = getTurn(db, sessionId, 1)!;
     const currentTurn = getTurn(db, sessionId, 2)!;
 
-    rememberTool(db, {
-      id: `T${currentTurn.id}`,
+    noteTool(db, {
+      turn: `S${sessionId}/T2`,
       title: "Correct premise",
       content: `Evidence overturned [T${legacyTurn.id}].`,
       type: ["research"],
       grade: 2,
-      regrade: { id: `T${legacyTurn.id}`, grade: 1 },
+    });
+    // spec I: `regrade` is retired — a settlement/main-agent correction of an
+    // earlier turn's grade is now just another addressed write, same as any
+    // other turn's.
+    noteTool(db, {
+      turn: `S${sessionId}/T1`,
+      grade: 1,
+      mode: { grade: "overwrite" },
     });
 
     const regraded = getTurn(db, sessionId, 1)!;
     expect(regraded.significanceGrade).toBe(1);
     expect(regraded.createdAtEpoch).toBe(cutoffEpoch - 1);
     expect(isTaskCausalityEra(regraded.createdAtEpoch, cutoffEpoch)).toBe(false);
+    expect(getTurn(db, sessionId, 2)?.significanceGrade).toBe(2);
   });
 });

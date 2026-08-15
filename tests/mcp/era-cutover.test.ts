@@ -11,7 +11,6 @@ import { settleOutstandingTurns } from "../../src/db/turn-settlement";
 import { getStrandedTurns, getTurnById } from "../../src/db/turns";
 import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
 import { isNoteSuccess, noteTool } from "../../src/mcp/note";
-import { isRememberSuccess, rememberTool } from "../../src/mcp/remember";
 
 /**
  * Ticket 09 — the P2 cutover: for turns created at or after the cutoff the main
@@ -22,10 +21,6 @@ import { isRememberSuccess, rememberTool } from "../../src/mcp/remember";
 
 const CUTOFF = 2_000;
 
-function resultText(result: { content: Array<{ text: string }> }): string {
-  return result.content[0]!.text;
-}
-
 /** Every column of a turns row, as stored — "nothing changed" needs all of it. */
 function snapshotTurnRow(db: Database, turnId: number): string {
   return JSON.stringify(
@@ -35,39 +30,6 @@ function snapshotTurnRow(db: Database, turnId: number): string {
       )
       .get(turnId),
   );
-}
-
-/**
- * Run `fire` the instant after the next read of a turns row, then get out of
- * the way. The main agent notes its own turn while the turn is still running,
- * so a note transaction really can commit between a writeback's read of the row
- * and its write; this reproduces that interleave deterministically.
- */
-function fireAfterNextTurnRead(db: Database, fire: () => void): void {
-  const originalQuery = db.query.bind(db);
-  let armed = true;
-  (db as unknown as { query: (sql: string) => unknown }).query = (
-    sql: string,
-  ) => {
-    const statement = originalQuery(sql) as unknown as {
-      get: (...args: unknown[]) => unknown;
-    };
-    if (!armed || !/^\s*SELECT/i.test(sql) || !/FROM turns/i.test(sql)) {
-      return statement;
-    }
-    const originalGet = statement.get.bind(statement);
-    statement.get = (...args: unknown[]) => {
-      const row = originalGet(...args);
-      if (armed) {
-        armed = false;
-        statement.get = originalGet;
-        (db as unknown as { query: unknown }).query = originalQuery;
-        fire();
-      }
-      return row;
-    };
-    return statement;
-  };
 }
 
 describe("era cutover write path", () => {
@@ -279,7 +241,10 @@ describe("era cutover write path", () => {
       expect(getNoteDebt(db, eraTurnId)?.status).toBe("pending");
     });
 
-    test("a rewrite that drops its insight stores the NULL rather than the old one", () => {
+    test("a rewrite that omits insight leaves it stored, both on the shadow row and its turns promotion", () => {
+      // spec D5a: omission is never a claim — the second call never named
+      // insight, so it is left alone rather than cleared, on both surfaces
+      // the note promotes to.
       const options = { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF };
       noteTool(
         db,
@@ -297,7 +262,37 @@ describe("era cutover write path", () => {
           turn: `S${sessionId}/T11`,
           title: "second title",
           content: "second content",
-          replace: true,
+          mode: { title: "overwrite", content: "overwrite" },
+        },
+        { ...options, now: () => 3_400 },
+      );
+
+      const turn = getTurnById(db, eraTurnId)!;
+      expect(turn.title).toBe("second title");
+      expect(turn.insight).toBe("first insight");
+      expect(getShadowNote(db, eraTurnId)!.insight).toBe("first insight");
+    });
+
+    test("an explicit insight clear (null + overwrite mode) stores NULL, on both surfaces", () => {
+      const options = { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF };
+      noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "first title",
+          content: "first content",
+          insight: "first insight",
+        },
+        options,
+      );
+      noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "second title",
+          content: "second content",
+          insight: null,
+          mode: { title: "overwrite", content: "overwrite", insight: "overwrite" },
         },
         { ...options, now: () => 3_400 },
       );
@@ -407,7 +402,7 @@ describe("era cutover write path", () => {
           title: "fix+auth-bug: corrected after review, also reviewed the fix",
           content: "The first pass mischaracterised the turn.",
           type: ["review", "fix"],
-          replace: true,
+          mode: { title: "overwrite", content: "overwrite", type: "overwrite" },
         },
         { ...options, now: () => 3_400 },
       );
@@ -449,7 +444,7 @@ describe("era cutover write path", () => {
           turn: `S${sessionId}/T11`,
           title: "a plain corrected title with no shape at all",
           content: "The correction dropped the <activity>+<topic>: shape.",
-          replace: true,
+          mode: { title: "overwrite", content: "overwrite" },
         },
         { ...options, now: () => 3_400 },
       );
@@ -462,7 +457,7 @@ describe("era cutover write path", () => {
           title: "a correction that really does mean none of them fit",
           content: "An explicit empty list is the way to say so.",
           type: [],
-          replace: true,
+          mode: { title: "overwrite", content: "overwrite", type: "overwrite" },
         },
         { ...options, now: () => 3_500 },
       );
@@ -495,7 +490,7 @@ describe("era cutover write path", () => {
           title: "implement+login-flow: it was really about the redirect",
           content: "Second answer.",
           tags: ["login-flow", "oauth-redirect"],
-          replace: true,
+          mode: { title: "overwrite", content: "overwrite", tags: "overwrite" },
         },
         { ...options, now: () => 3_400 },
       );
@@ -511,7 +506,7 @@ describe("era cutover write path", () => {
           turn: `S${sessionId}/T11`,
           title: "implement+login-flow: wording only",
           content: "Third answer.",
-          replace: true,
+          mode: { title: "overwrite", content: "overwrite" },
         },
         { ...options, now: () => 3_500 },
       );
@@ -522,12 +517,21 @@ describe("era cutover write path", () => {
     });
   });
 
-  describe("remember writes era turns like legacy ones (ticket 04, D10 — the era refusal is lifted)", () => {
-    test("a never-noted era turn (a hole) is fully writable through remember", () => {
-      const result = rememberTool(
+  describe("grade/type/tags write turns directly regardless of era; prose stays era-gated (ticket 03 merge)", () => {
+    // ticket 03 merges `remember`'s turn route into `note`. Its old shape
+    // wrote title/content/insight directly onto `turns` for EVERY turn,
+    // bypassing note's shadow store and era gate entirely — a second,
+    // unfenced writer of the exact fields note.ts already owned. The merge
+    // closes that: every prose write goes through the ONE era-gated path
+    // below, whichever address form named it. `grade`/`type`/`tags` keep
+    // remember's era-independent write (spec: settlement and the main agent
+    // both need to correct a legacy turn's grade/type/tags without a note
+    // ever promoting its prose).
+    test("a never-noted era turn (a hole) is fully writable through the merged tool, prose included", () => {
+      const result = noteTool(
         db,
         {
-          id: `T${eraTurnId}`,
+          turn: `S${sessionId}/T11`,
           grade: 3,
           type: ["implement"],
           title: "observer's reconstruction",
@@ -538,13 +542,7 @@ describe("era cutover write path", () => {
         { eraCutoffEpoch: CUTOFF },
       );
 
-      // Before ticket 04 this call would have read as a success while
-      // storing nothing (裁决 27, ticket 09's now-retired refusal). The
-      // review pass that replaced the resident extraction agent needs the
-      // opposite — a real write path — so every field supplied now lands,
-      // exactly as it would on a legacy turn.
-      expect(isRememberSuccess(result)).toBe(true);
-      expect(resultText(result)).toContain("status extracted");
+      expect(isNoteSuccess(result)).toBe(true);
 
       const turn = getTurnById(db, eraTurnId)!;
       expect(turn.title).toBe("observer's reconstruction");
@@ -558,17 +556,17 @@ describe("era cutover write path", () => {
       expect(turn.status).toBe("extracted");
     });
 
-    test("a settled hole given only a title still leaves the stranded selection", () => {
+    test("a settled hole given only a grade still leaves the stranded selection", () => {
       // The turn's own completion already took it out of the selection
-      // (status 'skipped', not 'active'/'provisional'); a remember call must
-      // not put it back there, whatever it supplies.
+      // (status 'skipped', not 'active'/'provisional'); a grade-only write
+      // must not put it back there.
       expect(getStrandedTurns(db, sessionId).map((t) => t.id)).not.toContain(
         eraTurnId,
       );
 
-      rememberTool(
+      noteTool(
         db,
-        { id: `T${eraTurnId}`, grade: 0, title: "nothing to extract" },
+        { turn: `S${sessionId}/T11`, grade: 0 },
         { eraCutoffEpoch: CUTOFF },
       );
 
@@ -577,7 +575,7 @@ describe("era cutover write path", () => {
       );
     });
 
-    test("a single field can be patched on an era turn without restating the rest, even after the main agent noted it", () => {
+    test("a grade patches onto an era turn without restating the note the main agent already wrote", () => {
       noteTool(
         db,
         {
@@ -588,176 +586,92 @@ describe("era cutover write path", () => {
         { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
       );
 
-      // grade-only: title/content are omitted, not restated.
-      const result = rememberTool(
+      // grade-only: title/content are omitted, not restated, and need no mode.
+      const result = noteTool(
         db,
-        { id: `T${eraTurnId}`, grade: 2 },
+        { turn: `S${sessionId}/T11`, grade: 2 },
         { eraCutoffEpoch: CUTOFF },
       );
 
-      expect(isRememberSuccess(result)).toBe(true);
+      expect(isNoteSuccess(result)).toBe(true);
       const turn = getTurnById(db, eraTurnId)!;
-      // The note's own title/content survive untouched (D10: per-field patch
-      // semantics already existed and are kept for era turns too).
       expect(turn.title).toBe("the agent's own note");
       expect(turn.content).toBe("First-person record of this turn.");
       expect(turn.significanceGrade).toBe(2);
       expect(turn.status).toBe("extracted");
     });
 
-    test("a field remember DOES supply overwrites even a note that committed mid-call — no special protection survives for era turns", () => {
-      // Before ticket 04, the retired refusal re-read the row inside its own
-      // UPDATE statement, so a note committing between remember's initial
-      // read and its write could never be clobbered — remember's payload was
-      // dropped wholesale regardless. Now era turns share the legacy write
-      // path, which has no equivalent protection: whatever field remember
-      // supplies wins over a concurrently-committed note, exactly like
-      // legacy always has. This is a direct, intended consequence of "per-
-      // field patch semantics already exist and are kept" (D10) — not
-      // something this ticket added protection against.
-      fireAfterNextTurnRead(db, () => {
-        noteTool(
-          db,
-          {
-            turn: `S${sessionId}/T11`,
-            title: "the agent's own note",
-            content: "Written while the writeback was still deciding.",
-          },
-          { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
-        );
-      });
-
-      const result = rememberTool(
-        db,
-        { id: `T${eraTurnId}`, grade: 1, title: "the observer's version" },
-        { eraCutoffEpoch: CUTOFF },
-      );
-
-      expect(isRememberSuccess(result)).toBe(true);
-      expect(resultText(result)).toContain("status extracted");
-      const turn = getTurnById(db, eraTurnId)!;
-      // title was supplied, so it overwrites the note's title …
-      expect(turn.title).toBe("the observer's version");
-      // … but content, which this call omitted, keeps what the note wrote.
-      expect(turn.content).toBe(
-        "Written while the writeback was still deciding.",
-      );
-      expect(turn.status).toBe("extracted");
-    });
-
-    test("a title-bearing remember call now resurrects a terminal era turn, matching legacy — the era-specific immunity is gone", () => {
-      // The retired refusal's own SQL guard (`status IN ('active',
-      // 'provisional')`) made 'failed' rows immune to remember. That guard
-      // was part of the refusal, not a separate protection — lifting the
-      // refusal lifts this too. An era turn now runs the exact status
-      // derivation a legacy turn always has (deriveTurnStatus), which has no
-      // terminal-status floor: a late, title-bearing call resurrects it.
+    test("a title+content call now resurrects a terminal era turn, matching legacy promotion", () => {
+      // promoteTurnFromNote's own status derivation has no terminal floor
+      // beyond `undone` — a late reconstruction of a 'failed' hole lands as
+      // 'extracted', same as it always has for a legacy turn.
       db.query<unknown, [number]>(
         "UPDATE turns SET status = 'failed' WHERE id = ?",
       ).run(eraTurnId);
 
-      const result = rememberTool(
+      const result = noteTool(
         db,
-        { id: `T${eraTurnId}`, grade: 2, title: "late observer" },
+        {
+          turn: `S${sessionId}/T11`,
+          grade: 2,
+          title: "late observer",
+          content: "Reconstructed after the turn was settled as a hole.",
+        },
         { eraCutoffEpoch: CUTOFF },
       );
 
-      expect(isRememberSuccess(result)).toBe(true);
-      expect(resultText(result)).toContain("status extracted");
+      expect(isNoteSuccess(result)).toBe(true);
       const turn = getTurnById(db, eraTurnId)!;
       expect(turn.title).toBe("late observer");
       expect(turn.status).toBe("extracted");
     });
 
-    test("an 'undone' sidechain row is no longer immune either — flagged, not fixed, as out of this ticket's scope", () => {
-      // note.ts's promoteTurnFromNote explicitly refuses an 'undone' row ("a
-      // sidechain row is not part of this session's arc, and promoting it
-      // would put it back in view"). remember.ts's deriveTurnStatus has no
-      // equivalent floor for an EXISTING undone row receiving an unrelated
-      // field — it only special-cases an explicit `status: "undone"` in the
-      // input. This was already true for legacy turns (untested, since a
-      // resident extraction agent never targeted a sidechain row in
-      // practice); routing era turns through the same path exposes it there
-      // too. Pinned here as a regression marker, not a guarantee to keep.
+    test("an 'undone' sidechain row is protected on every address form now — the divergence the pre-merge remember had is closed", () => {
+      // Before the merge, note.ts's promoteTurnFromNote floored an 'undone'
+      // row's status (a sidechain prompt is not part of the session's arc,
+      // so promoting it would put it back in view), but remember.ts's
+      // era-independent write had no equivalent floor. Grade/type/tags still
+      // write directly (unconditioned on status, same as before the merge),
+      // but with only one path left for prose, the floor now applies
+      // regardless of which field a caller touches.
       db.query<unknown, [number]>(
         "UPDATE turns SET status = 'undone' WHERE id = ?",
       ).run(rideTurnId);
 
-      const result = rememberTool(
+      const result = noteTool(
         db,
-        { id: `T${rideTurnId}`, title: "late observer" },
+        { turn: `S${sessionId}/T12`, grade: 1 },
         { eraCutoffEpoch: CUTOFF },
       );
 
-      expect(isRememberSuccess(result)).toBe(true);
+      expect(isNoteSuccess(result)).toBe(true);
       const turn = getTurnById(db, rideTurnId)!;
-      expect(turn.title).toBe("late observer");
-      expect(turn.status).toBe("extracted");
+      expect(turn.significanceGrade).toBe(1);
+      expect(turn.status).toBe("undone");
     });
 
-    test("status validation applies to era turns exactly as it does to legacy ones", () => {
-      // `extracted` was never in the turn route's allowed status set
-      // (TURN_REMEMBER_STATUSES). Before ticket 04 an era turn never reached
-      // this check — the retired refusal ran first and read as a success
-      // regardless of the input. Now every turn is validated identically.
-      const eraResult = rememberTool(
+    test("extracts a pre-cutoff turn's grade/type/tags directly while its prose stays shadow-only", () => {
+      const result = noteTool(
         db,
         {
-          id: `T${eraTurnId}`,
-          status: "extracted",
-          title: "observer's reconstruction",
-        },
-        { eraCutoffEpoch: CUTOFF },
-      );
-      const legacyResult = rememberTool(
-        db,
-        {
-          id: `T${legacyTurnId}`,
-          grade: 2,
-          status: "extracted",
-          title: "legacy extraction",
-        },
-        { eraCutoffEpoch: CUTOFF },
-      );
-
-      expect(resultText(eraResult)).toContain("Parameter error");
-      expect(getTurnById(db, eraTurnId)!.title).toBeNull();
-      expect(resultText(legacyResult)).toContain("Parameter error");
-      expect(getTurnById(db, legacyTurnId)!.title).toBeNull();
-    });
-
-    test("answers a missing turn with not-found, whatever the payload", () => {
-      const result = rememberTool(
-        db,
-        { id: "T999999", status: "extracted" },
-        { eraCutoffEpoch: CUTOFF },
-      );
-
-      expect(resultText(result)).toBe("Turn T999999 not found.");
-    });
-
-    test("extracts a pre-cutoff turn exactly as before while the era is on", () => {
-      const result = rememberTool(
-        db,
-        {
-          id: `T${legacyTurnId}`,
+          turn: `S${sessionId}/T10`,
           grade: 2,
           type: ["implement"],
-          title: "legacy extraction",
-          content: "The old pipeline still owns this row.",
           tags: ["legacy"],
         },
         { eraCutoffEpoch: CUTOFF },
       );
 
-      expect(isRememberSuccess(result)).toBe(true);
+      expect(isNoteSuccess(result)).toBe(true);
       const turn = getTurnById(db, legacyTurnId)!;
-      expect(turn.title).toBe("legacy extraction");
-      expect(turn.content).toBe("The old pipeline still owns this row.");
       expect(turn.type).toEqual(["implement"]);
       expect(turn.tags).toEqual(["legacy"]);
       expect(turn.significanceGrade).toBe(2);
-      expect(turn.status).toBe("extracted");
+      // P1 isolation is universal now: a legacy turn's official title/content
+      // stay whatever the old extraction pipeline last left them (NULL in
+      // this fixture), untouched by any address form.
+      expect(turn.title).toBeNull();
+      expect(turn.content).toBeNull();
     });
   });
 
@@ -780,27 +694,26 @@ describe("era cutover write path", () => {
       expect(getNoteDebt(db, eraTurnId)?.status).toBe("noted");
     });
 
-    test("remember extracts the same turn the era gate would have refused", () => {
-      const result = rememberTool(
+    test("grade/type/tags still land under a null cutoff; prose stays shadow-only", () => {
+      const result = noteTool(
         db,
         {
-          id: `T${eraTurnId}`,
+          turn: `S${sessionId}/T11`,
           grade: 3,
           type: ["implement"],
-          title: "extraction still owns this",
-          content: "Rolled back to the legacy write path.",
           tags: ["rollback"],
         },
         { eraCutoffEpoch: null },
       );
 
-      expect(isRememberSuccess(result)).toBe(true);
+      expect(isNoteSuccess(result)).toBe(true);
       const turn = getTurnById(db, eraTurnId)!;
-      expect(turn.title).toBe("extraction still owns this");
       expect(turn.type).toEqual(["implement"]);
       expect(turn.tags).toEqual(["rollback"]);
       expect(turn.significanceGrade).toBe(3);
-      expect(turn.status).toBe("extracted");
+      // No cutoff means every turn is legacy — prose never reaches `turns`.
+      expect(turn.title).toBeNull();
+      expect(turn.content).toBeNull();
     });
 
     test("an omitted cutoff behaves as a null one", () => {
@@ -822,7 +735,7 @@ describe("era cutover write path", () => {
   });
 
   describe("handler wiring", () => {
-    test("hands note the one resolved cutoff; remember writes regardless of it (ticket 04)", async () => {
+    test("hands note the one resolved cutoff for prose promotion; grade lands regardless of it", async () => {
       const handlers = createDatabaseBackedHandlers(db, {
         eraCutoffEpoch: CUTOFF,
       });
@@ -836,18 +749,17 @@ describe("era cutover write path", () => {
         "implement+era-cutover: wiring",
       );
 
-      // remember no longer branches on the era at all (ticket 04 lifted the
-      // refusal), so a later call overwrites the note's title exactly as it
-      // would on a legacy turn — the handler layer still hands it the
-      // resolved cutoff, but handleTurnRemember no longer reads it.
-      await handlers.remember!({
-        id: `T${eraTurnId}`,
+      // A second, grade-only call — the same resolved cutoff governs prose
+      // promotion, but grade is era-independent and needs no mode (empty).
+      await handlers.note!({
+        turn: `S${sessionId}/T11`,
         grade: 4,
-        title: "observer override",
-        content: "Now lands.",
       });
-      expect(getTurnById(db, eraTurnId)!.title).toBe("observer override");
-      expect(getTurnById(db, eraTurnId)!.content).toBe("Now lands.");
+      expect(getTurnById(db, eraTurnId)!.significanceGrade).toBe(4);
+      // The first call's title survives the grade-only second call untouched.
+      expect(getTurnById(db, eraTurnId)!.title).toBe(
+        "implement+era-cutover: wiring",
+      );
     });
 
     test("picks up a boundary recorded after the handlers were built", async () => {

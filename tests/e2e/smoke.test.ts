@@ -13,7 +13,7 @@ import { createPostToolUseHandler } from "../../src/hooks/handlers/post-tool-use
 import { createSessionInitHandler } from "../../src/hooks/handlers/session-init";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
 import { recallMemory } from "../../src/mcp/recall";
-import { rememberTool } from "../../src/mcp/remember";
+import { noteTool } from "../../src/mcp/note";
 
 function writeTranscript(lines: unknown[]): { directory: string; path: string } {
   const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-e2e-"));
@@ -176,45 +176,52 @@ describe("claude-mnemo smoke test", () => {
     const firstTurnId = getTurn(db, session.id, 1)!.id;
     const secondTurnId = getTurn(db, session.id, 2)!.id;
 
-    rememberTool(db, {
-      id: `T${firstTurnId}`,
-      title: "Diagnose auth",
-      content: "Captured the race condition in auth refresh",
-      insight: "- refresh races under parallel load",
-      type: ["research"],
-      grade: 2,
-      tags: ["gotcha"],
-    });
-    rememberTool(db, {
-      id: "O1",
-      title: "Race confirmed",
-      content: "Parallel refresh collides",
-      status: "extracted",
-    });
-    rememberTool(db, {
-      id: `T${secondTurnId}`,
-      title: "Fix auth race",
-      content: "Implemented mutex and regression coverage",
-      insight: "- mutex stabilizes refresh flow",
-      type: ["fix"],
-      grade: 2,
-      tags: ["problem-solution"],
-    });
-    rememberTool(db, {
-      id: "O2",
-      title: "Mutex added",
-      content: "Refresh is serialized",
-      status: "extracted",
-    });
-    rememberTool(db, {
-      id: `S${session.id}`,
+    // eraCutoffEpoch: 1 puts every turn (real epochs from Date.now()) on the
+    // current, promoted path — the shape production writes through today.
+    noteTool(
+      db,
+      {
+        turn: `S${session.id}/T1`,
+        title: "Diagnose auth",
+        content: "Captured the race condition in auth refresh",
+        insight: "- refresh races under parallel load",
+        type: ["research"],
+        grade: 2,
+        tags: ["gotcha"],
+      },
+      { eraCutoffEpoch: 1 },
+    );
+    // Observation writing is not part of the merged write tool (ticket 03: one
+    // tool writes turns and sessions) — the two observations this scenario
+    // wants findable via recall get their title/status set directly, the way
+    // any fixture sets up state a tool call does not itself produce.
+    db.query(
+      "UPDATE observations SET title = ?, content = ?, status = 'extracted' WHERE id = 1",
+    ).run("Race confirmed", "Parallel refresh collides");
+    noteTool(
+      db,
+      {
+        turn: `S${session.id}/T2`,
+        title: "Fix auth race",
+        content: "Implemented mutex and regression coverage",
+        insight: "- mutex stabilizes refresh flow",
+        type: ["fix"],
+        grade: 2,
+        tags: ["problem-solution"],
+      },
+      { eraCutoffEpoch: 1 },
+    );
+    db.query(
+      "UPDATE observations SET title = ?, content = ?, status = 'extracted' WHERE id = 2",
+    ).run("Mutex added", "Refresh is serialized");
+    noteTool(db, {
+      session: `S${session.id}`,
       title: "Auth race fix",
       content: "Diagnosed and fixed the refresh race",
       decision: "Chose a mutex over a retry queue [T2]",
       done: "Serialized refresh with a mutex [T2]",
       current: "Fix landed; regression green",
       next_steps: "Backport to the release branch",
-      reference: "",
     });
 
     expect(getTurnById(db, firstTurnId)?.status).toBe("extracted");

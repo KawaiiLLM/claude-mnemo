@@ -6,9 +6,12 @@ import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { getNoteDebt, listOwedNoteTurns, recordNoteIdExposure } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { getShadowNote } from "../../src/db/shadow-notes";
-import { upsertSession } from "../../src/db/sessions";
+import { getSession, upsertSession } from "../../src/db/sessions";
+import { getTurnById } from "../../src/db/turns";
 import { noteInputSchema } from "../../src/mcp/definitions";
+import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
 import { isNoteSuccess, noteTool } from "../../src/mcp/note";
+import { registerMainMcpTools } from "../../src/mcp/server";
 
 function resultText(result: { content: Array<{ text: string }> }): string {
   return result.content[0]!.text;
@@ -130,16 +133,26 @@ describe("note tool", () => {
     // Neither writer_model nor ride_turn is a tool parameter — the caller
     // cannot supply or forge it. type/tags ARE parameters (ticket 02, spec
     // B1/B2): the caller states them directly, no mechanical derivation.
+    // ticket 03 merged `remember`'s addressing and fields (`session`, `grade`)
+    // and the `mode` vocabulary in; `replace`/`regrade`/`status`/`cites` are
+    // gone (spec D5a, E1).
     expect(Object.keys(noteInputSchema.shape)).toEqual([
       "turn",
+      "session",
       "title",
       "content",
       "insight",
       "type",
       "tags",
+      "grade",
       "skip",
-      "replace",
       "crossSession",
+      "decision",
+      "done",
+      "current",
+      "next_steps",
+      "reference",
+      "mode",
     ]);
     expect(note.rideTurnId).toBe(rideTurnId);
     expect(note.writerModel).toBeNull();
@@ -147,7 +160,7 @@ describe("note tool", () => {
     expect(resultText(result)).toContain("writer_model: not recorded");
   });
 
-  test("rejects a repeat write that does not declare replace (spec D3)", () => {
+  test("rejects a repeat write that does not declare a mode (spec D5/D5a)", () => {
     noteTool(
       db,
       { turn: `S${sessionId}/T332`, title: "first", content: "c" },
@@ -161,8 +174,8 @@ describe("note tool", () => {
     );
 
     expect(resultText(second)).toStartWith("Parameter error:");
-    expect(resultText(second)).toContain("already has a note");
-    expect(resultText(second)).toContain("replace: true");
+    expect(resultText(second)).toContain("title is not empty");
+    expect(resultText(second)).toContain('mode.title');
     expect(isNoteSuccess(second)).toBe(false);
     // Untouched — the rejected call must not have clobbered the first note.
     expect(getShadowNote(db, targetTurnId)?.title).toBe("first");
@@ -228,7 +241,7 @@ describe("note tool", () => {
     expect(resultText(result)).not.toContain("budget:");
   });
 
-  test("a repeat write for the same turn overwrites, keeping only the latest", () => {
+  test("a repeat write for the same turn overwrites the fields it names, leaving the rest alone", () => {
     noteTool(
       db,
       {
@@ -246,7 +259,7 @@ describe("note tool", () => {
         turn: `S${sessionId}/T332`,
         title: "second title",
         content: "second content",
-        replace: true,
+        mode: { title: "overwrite", content: "overwrite" },
       },
       { now: () => 1200, env: {} },
     );
@@ -265,8 +278,9 @@ describe("note tool", () => {
     const note = getShadowNote(db, targetTurnId)!;
     expect(note.title).toBe("second title");
     expect(note.content).toBe("second content");
-    // Cleared, not left stale — a rewrite replaces the whole note.
-    expect(note.insight).toBeNull();
+    // Omitted, not cleared (spec D5a: omission is never a claim) — the
+    // second call never named insight, so the first call's value survives.
+    expect(note.insight).toBe("first insight");
     // First-noted time survives; the rewrite time moves.
     expect(note.createdAtEpoch).toBe(900);
     expect(note.updatedAtEpoch).toBe(1200);
@@ -292,7 +306,7 @@ describe("note tool", () => {
         turn: `S${sessionId}/T332`,
         title: "implement+note: rewritten",
         content: "Still never touch turns.",
-        replace: true,
+        mode: { title: "overwrite", content: "overwrite" },
       },
       { now: () => 1200, env: {} },
     );
@@ -525,7 +539,7 @@ describe("note tool", () => {
         turn: `S${sessionId}/T332`,
         title: "corrected",
         content: "c",
-        replace: true,
+        mode: { title: "overwrite", content: "overwrite" },
       },
       { now: () => 1000, env: {} },
     );
@@ -1017,7 +1031,7 @@ describe("note tool citations (spec C6)", () => {
     ]);
   });
 
-  test("a rewrite (replace: true) that drops a reference drops its pair and any relation it carried", () => {
+  test("a rewrite (mode: overwrite) that drops a reference drops its pair and any relation it carried", () => {
     expose(targetTurnId, [citedTurnId]);
     noteTool(
       db,
@@ -1047,11 +1061,251 @@ describe("note tool citations (spec C6)", () => {
         turn: `S${sessionId}/T2`,
         title: "design+routing: revised, no longer citing T1",
         content: "Stands on its own now.",
-        replace: true,
+        mode: { title: "overwrite", content: "overwrite" },
       },
       { now: () => 1000, env: {}, eraCutoffEpoch: 1 },
     );
 
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+});
+
+// ticket 03 (spec E1): `note` and the retired `remember` are one tool. These
+// tests cover the acceptance criteria that neither the pre-existing note.test
+// suite nor era-cutover.test.ts happen to exercise: that the old entry point
+// is actually gone (not merely unused), the mode requirement on a NON-empty
+// field for both a turn and a session, append accumulating versus overwrite
+// replacing (with the stored value checked after each), the receipt reporting
+// a post-write total rather than a delta, and content carrying tool-call
+// syntax being rejected outright.
+describe("the merged write tool (ticket 03)", () => {
+  let db: Database;
+  let sessionId: number;
+  let turnId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    sessionId = upsertSession(db, {
+      contentSessionId: "merge-session",
+      project: "claude-mnemo",
+      title: "Before",
+      content: "Initial",
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+
+    turnId = db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, 1, 'active', 'Do the thing', ?) RETURNING id`,
+      )
+      .get(sessionId, 100)!.id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // Acceptance criterion 1: the old entry point is gone, and nothing routes
+  // to it any more.
+  describe("the retired remember entry point", () => {
+    test("the module no longer exists", async () => {
+      await expect(import("../../src/mcp/remember")).rejects.toThrow();
+    });
+
+    test("the database-backed handlers expose no remember key", () => {
+      const handlers = createDatabaseBackedHandlers(db);
+      expect(Object.keys(handlers).sort()).toEqual(["note", "recall", "timeline"]);
+      expect((handlers as Record<string, unknown>).remember).toBeUndefined();
+    });
+
+    test("the main MCP server registers only recall, timeline and note", () => {
+      const registered: string[] = [];
+      registerMainMcpTools(
+        { registerTool: (name) => registered.push(name) },
+        {
+          recall: () => ({ content: [] }),
+          timeline: () => ({ content: [] }),
+          note: () => ({ content: [] }),
+        } as never,
+      );
+      expect(registered).toEqual(["recall", "timeline", "note"]);
+      expect(registered).not.toContain("remember");
+    });
+  });
+
+  // Acceptance criteria 2 and 3: a non-empty field (turn or session) needs a
+  // declared mode; the same write to an empty field needs none.
+  describe("the mode requirement", () => {
+    test("a non-empty turn field errors naming the field; the same write to an empty field succeeds", () => {
+      noteTool(db, { turn: `S${sessionId}/T1`, title: "t", content: "c" });
+
+      const blocked = noteTool(db, {
+        turn: `S${sessionId}/T1`,
+        content: "c2",
+      });
+      expect(resultText(blocked)).toStartWith("Parameter error:");
+      expect(resultText(blocked)).toContain("content is not empty");
+      expect(resultText(blocked)).toContain("mode.content");
+      expect(getShadowNote(db, turnId)?.content).toBe("c"); // untouched by the rejected call
+
+      // `insight` is still empty (never written) — the identical shape of
+      // write needs no mode at all.
+      const allowed = noteTool(db, {
+        turn: `S${sessionId}/T1`,
+        insight: "first insight",
+      });
+      expect(isNoteSuccess(allowed)).toBe(true);
+      expect(getShadowNote(db, turnId)?.insight).toBe("first insight");
+    });
+
+    test("a non-empty session field errors naming the field; the same write to an empty field succeeds", () => {
+      noteTool(db, { session: `S${sessionId}`, decision: "chose X" });
+
+      const blocked = noteTool(db, {
+        session: `S${sessionId}`,
+        decision: "chose Y",
+      });
+      expect(resultText(blocked)).toStartWith("Parameter error:");
+      expect(resultText(blocked)).toContain("decision is not empty");
+      expect(resultText(blocked)).toContain("mode.decision");
+      expect(getSession(db, sessionId)?.decision).toBe("chose X");
+
+      // `done` is still empty — the identical shape of write needs no mode.
+      const allowed = noteTool(db, {
+        session: `S${sessionId}`,
+        done: "shipped it",
+      });
+      expect(isNoteSuccess(allowed)).toBe(true);
+      expect(getSession(db, sessionId)?.done).toBe("shipped it");
+    });
+  });
+
+  // Acceptance criterion 4: append accumulates, overwrite replaces — the
+  // stored value checked after each, on one field of each shape (string,
+  // array).
+  describe("append accumulates, overwrite replaces", () => {
+    test("a string field (turn content): append concatenates, overwrite replaces", () => {
+      noteTool(db, { turn: `S${sessionId}/T1`, title: "t", content: "first" });
+      expect(getShadowNote(db, turnId)?.content).toBe("first");
+
+      noteTool(db, {
+        turn: `S${sessionId}/T1`,
+        content: "second",
+        mode: { content: "append" },
+      });
+      expect(getShadowNote(db, turnId)?.content).toBe("first\nsecond");
+
+      noteTool(db, {
+        turn: `S${sessionId}/T1`,
+        content: "third",
+        mode: { content: "overwrite" },
+      });
+      expect(getShadowNote(db, turnId)?.content).toBe("third");
+    });
+
+    test("an array field (turn tags): append unions, overwrite replaces whole", () => {
+      noteTool(db, {
+        turn: `S${sessionId}/T1`,
+        title: "t",
+        content: "c",
+        tags: ["auth"],
+      });
+      expect(getTurnById(db, turnId)!.tags).toEqual(["auth"]);
+
+      noteTool(db, {
+        turn: `S${sessionId}/T1`,
+        tags: ["concurrency"],
+        mode: { tags: "append" },
+      });
+      expect(getTurnById(db, turnId)!.tags).toEqual(["auth", "concurrency"]);
+
+      noteTool(db, {
+        turn: `S${sessionId}/T1`,
+        tags: ["delivery"],
+        mode: { tags: "overwrite" },
+      });
+      expect(getTurnById(db, turnId)!.tags).toEqual(["delivery"]);
+    });
+  });
+
+  // Acceptance criterion 5: omission still leaves a stored value alone —
+  // ticket 02's rule, unchanged by the merge, checked here across a field
+  // from each surface.
+  test("omission leaves a stored value alone, turn and session alike", () => {
+    noteTool(db, {
+      turn: `S${sessionId}/T1`,
+      title: "t",
+      content: "c",
+      type: ["implement"],
+      grade: 2,
+    });
+    noteTool(db, { turn: `S${sessionId}/T1`, grade: 3, mode: { grade: "overwrite" } });
+    const turn = getTurnById(db, turnId)!;
+    // Omitted from the second call, on the shadow row the merged tool always
+    // maintains regardless of era (turns.title/content stay untouched here
+    // with no era cutoff configured — see note's own P1-isolation tests).
+    expect(getShadowNote(db, turnId)?.title).toBe("t");
+    expect(getShadowNote(db, turnId)?.content).toBe("c");
+    expect(turn.type).toEqual(["implement"]);
+    expect(turn.significanceGrade).toBe(3);
+
+    noteTool(db, { session: `S${sessionId}`, decision: "d" });
+    noteTool(db, { session: `S${sessionId}`, done: "done thing" });
+    const session = getSession(db, sessionId)!;
+    expect(session.decision).toBe("d");
+    expect(session.done).toBe("done thing");
+  });
+
+  // Acceptance criterion 6: the receipt reports an accumulating field's total
+  // after the write, not the delta.
+  test("the receipt reports the post-write total of an appended field, not the delta", () => {
+    noteTool(db, { turn: `S${sessionId}/T1`, title: "t", content: "a".repeat(40) });
+    const result = noteTool(db, {
+      turn: `S${sessionId}/T1`,
+      content: "b".repeat(40),
+      mode: { content: "append" },
+    });
+
+    const stored = getShadowNote(db, turnId)!.content;
+    expect(stored.replace(/\n/g, "").length).toBe(80); // both halves survive
+    // The receipt's content count reflects the full 80+1(newline) characters
+    // now stored (~21 tok at 4 chars/tok), not merely the 40 just appended
+    // (~10 tok) — a writer appending in small increments must see the total
+    // it has reached, not the size of its own last call.
+    expect(resultText(result)).toContain("content 21/100");
+  });
+
+  // Acceptance criterion 7: content carrying tool-call syntax is rejected
+  // with a readable error, and nothing is stored (spec E2).
+  describe("tool-call syntax in a field is rejected (spec E2)", () => {
+    test("a first note whose content carries a raw parameter tag is refused, and nothing lands", () => {
+      const result = noteTool(db, {
+        turn: `S${sessionId}/T1`,
+        title: "t",
+        content: 'Kept text.</content>\n<parameter name="insight">leaked',
+      });
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("content");
+      expect(resultText(result)).toContain("tool-call");
+      expect(getShadowNote(db, turnId)).toBeNull();
+      expect(getTurnById(db, turnId)!.title).toBeNull();
+    });
+
+    test("an `<invoke` fragment in a session field is refused the same way", () => {
+      const result = noteTool(db, {
+        session: `S${sessionId}`,
+        decision: 'Chose X.\n<invoke name="note">',
+      });
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("decision");
+      expect(getSession(db, sessionId)?.decision).toBeNull();
+    });
   });
 });
