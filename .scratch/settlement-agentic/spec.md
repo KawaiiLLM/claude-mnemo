@@ -162,11 +162,15 @@ The rule this replaces the earlier one with: settlement may not mint a **free-st
 
 **C12.** Edge provenance must distinguish its three sources — the main agent's own assertion, a bare textual reference, and a settlement attribution. The current provenance column conflates the first and third.
 
-**C13. The dual edge graph must be resolved before C6 can be implemented, and it is already leaking.** Two tables hold edges and they disagree about deletion. `turn_citations` is a genuine replace-set: the main agent's `cites` path deletes a turn's rows before rewriting them. `memory_edges` — which the settlement pass writes, and which the timeline's correction graph and the segment ranking key actually read — is an additive upsert with no delete path anywhere. A one-way insert-only migration copies citations into edges and runs both at schema init and at worker start.
+**C13. The dual edge graph must be resolved before C6 can be implemented.** Two tables hold edges, two consumers read different ones, and they disagree about deletion.
 
-The consequence is live today, not merely a hazard for this work: **a citation the main agent retracts vanishes from one graph and persists in the other**, where it goes on driving the correction rendering. Current row counts are 1182 against 2019.
+- `turn_citations` is a genuine replace-set: the main agent's `cites` path deletes a turn's rows before rewriting them. The timeline's correction graph reads **this** one — victim demotion, corrector promotion and pull-through all consume the map built from it.
+- `memory_edges` is an additive upsert with no delete path anywhere. The segment ranking key reads **this** one, for both its corrector flag and its cited-by count. The settlement pass writes only here.
+- The migration between them is one-way and insert-only, and runs at schema init and at worker start.
 
-So C6's recompute-and-delete cannot be implemented by reaching for the existing edge writer — it would inherit the additive semantics and quietly maintain the divergence. Either the two layers collapse to one truth table or the older one is explicitly retired. Keeping both alive on an insert-only migration is not an option this design can carry.
+Measured pair-level in both directions rather than by bare row totals: 1182 citation pairs; 1506 turn-to-turn edge pairs; **324 present only in the edge table, all of provenance `judged`**, consistent with settlement writing edges directly; and **0 present only in the citation table**. So there is no measured instance of a retraction leaking. The shipped divergence today runs the other way: a settlement-written `supersedes` moves segment ranking but is invisible to the timeline's victim demotion, and the same relation therefore yields two different facts depending on which consumer asks. That inconsistency deserves its own decision independent of this spec.
+
+The constraint on C6 stands regardless of the direction: its recompute-and-delete cannot be built by reaching for the existing edge writer, which would inherit the additive semantics and create precisely the leak the current counts do not show. Either the two layers collapse to one truth table or the older one is explicitly retired; both alive on an insert-only migration is not carryable.
 
 ### D. The session summary
 
