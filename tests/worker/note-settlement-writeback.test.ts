@@ -13,7 +13,10 @@ import { upsertSession } from "../../src/db/sessions";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
 import { isNoteSuccess, noteTool } from "../../src/mcp/note";
-import { applyNoteSettlementWriteBack } from "../../src/worker/note-settlement-writeback";
+import {
+  applyNoteSettlementWriteBack,
+  parseAddressToken,
+} from "../../src/worker/note-settlement-writeback";
 import type { NoteSettlementResponse } from "../../src/worker/note-settlement-response";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
@@ -113,6 +116,45 @@ function emptyResponse(
     sessionSummary: null,
   };
 }
+
+/**
+ * Ticket 01, the half its acceptance criterion left ambiguous. "The address
+ * token must match whole" can mean one whole legal citation — which would
+ * admit the annotated form — or the four forms this function's own doc comment
+ * names. It means the four.
+ *
+ * An annotation exists so a human reading PROSE can see why a turn is cited.
+ * An address field has no prose and no reader: `members` and the `citing`/
+ * `cited` keys carry one address and nothing else, so words there are a model
+ * that misread the schema, and reading past them would silently accept the
+ * misreading. Rejecting costs one dropped reference and a log line, because
+ * these fields drop bad tokens rather than failing the batch.
+ */
+describe("parseAddressToken", () => {
+  test("accepts exactly the four documented forms, bracketed or bare", () => {
+    for (const token of ["S12/T30", "[S12/T30]", "E47", "[E47]"]) {
+      expect(parseAddressToken(token)).not.toBeNull();
+    }
+  });
+
+  test("tolerates surrounding and interior whitespace — a wrapped field is a typography accident", () => {
+    expect(parseAddressToken("  [S15069/T332]  ")).not.toBeNull();
+    expect(parseAddressToken("[ S15069 / T332 ]")).not.toBeNull();
+  });
+
+  test("rejects an annotation: an address field has no reader to annotate for", () => {
+    expect(parseAddressToken("S1/T2 annotation")).toBeNull();
+    expect(parseAddressToken("[S1/T2 the retry arc]")).toBeNull();
+    expect(parseAddressToken("[E47 approval]")).toBeNull();
+  });
+
+  test("rejects a token that merely contains an address", () => {
+    expect(parseAddressToken("[S1/T2] junk")).toBeNull();
+    expect(parseAddressToken("see [S1/T2]")).toBeNull();
+    expect(parseAddressToken("[[S1/T2]]")).toBeNull();
+    expect(parseAddressToken("[S1/T2] [S1/T3]")).toBeNull();
+  });
+});
 
 test("a mechanical reconstruction drafts its turn's type and tag exactly as an agent-written note does", () => {
   const sessionDbId = seedSession();

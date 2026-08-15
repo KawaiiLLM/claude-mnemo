@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msu9xw9c" : "dev";
+var BUILD_ID = true ? "0.10.0-msua4jpp" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -5652,6 +5652,10 @@ function estimateDiaryTokens(text) {
 
 // src/db/references.ts
 var REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
+var ADDRESS_TOKEN_PATTERN = /^\[[ \t]*(?:S\d+[ \t]*\/[ \t]*T\d+|E\d+)[ \t]*\]$/;
+function isBareAddressToken(bracketed) {
+  return ADDRESS_TOKEN_PATTERN.test(bracketed);
+}
 function topLevelBracketGroups(content) {
   const groups = [];
   for (let index = 0; index < content.length; index += 1) {
@@ -11473,9 +11477,11 @@ var EMPTY_COUNTS = {
 function parseAddressToken(token) {
   const trimmed = token.trim();
   const bracketed = trimmed.startsWith("[") ? trimmed : `[${trimmed}]`;
+  if (!isBareAddressToken(bracketed)) {
+    return null;
+  }
   const parsed = parseQualifiedReferences(bracketed);
-  const only = parsed.length === 1 ? parsed[0] : null;
-  return only && only.raw === bracketed ? only : null;
+  return parsed.length === 1 ? parsed[0] : null;
 }
 function resolveTokens(db, tokens, options) {
   const nodes = /* @__PURE__ */ new Map();

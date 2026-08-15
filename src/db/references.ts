@@ -63,6 +63,25 @@ const REFERENCE_PATTERN =
   /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
 
 /**
+ * The address-token grammar: the same shapes as a body citation, MINUS the
+ * annotation.
+ *
+ * The two strictnesses are deliberate rather than a duplicated grammar. An
+ * annotation exists so a human reading PROSE can see why a turn is cited —
+ * `[S15069/T332 approval]` reads better than a bare id in a sentence. An
+ * address FIELD has no prose and no reader: it carries one address and
+ * nothing else, so words inside it are a writer that misread the schema, and
+ * parsing past them would accept the misreading silently.
+ */
+const ADDRESS_TOKEN_PATTERN =
+  /^\[[ \t]*(?:S\d+[ \t]*\/[ \t]*T\d+|E\d+)[ \t]*\]$/;
+
+/** True when `bracketed` is one bare address and nothing else. */
+export function isBareAddressToken(bracketed: string): boolean {
+  return ADDRESS_TOKEN_PATTERN.test(bracketed);
+}
+
+/**
  * The top-level bracket groups of a body, each returned with its offset.
  *
  * A group that contains a nested `[` is dropped ENTIRELY rather than descended

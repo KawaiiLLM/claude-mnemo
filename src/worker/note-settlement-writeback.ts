@@ -15,6 +15,7 @@ import {
   type NoteSettlementJob,
 } from "../db/note-settlement";
 import {
+  isBareAddressToken,
   parseQualifiedReferences,
   validateReferences,
   type ParsedReference,
@@ -198,13 +199,16 @@ const EMPTY_COUNTS: NoteSettlementWriteBackCounts = {
 export function parseAddressToken(token: string): ParsedReference | null {
   const trimmed = token.trim();
   const bracketed = trimmed.startsWith("[") ? trimmed : `[${trimmed}]`;
+  // Validate against the strict address grammar BEFORE parsing, then parse
+  // only to read the ids out. Whole-token, and bare: `[S1/T2] and some more`
+  // must not read as `S1/T2` with the remainder discarded, and neither must
+  // `[S1/T2 the retry arc]` — the annotation is a prose affordance and this is
+  // not prose. See `isBareAddressToken` for why the two strictnesses differ.
+  if (!isBareAddressToken(bracketed)) {
+    return null;
+  }
   const parsed = parseQualifiedReferences(bracketed);
-  const only = parsed.length === 1 ? parsed[0]! : null;
-  // Whole-token, not "contains one". An address FIELD is not prose: it names
-  // one turn and nothing else, so `[S1/T2] and some more` must be rejected
-  // rather than read as `S1/T2` with the rest discarded. Comparing against the
-  // raw match is what makes this an anchored parse without a second grammar.
-  return only && only.raw === bracketed ? only : null;
+  return parsed.length === 1 ? parsed[0]! : null;
 }
 
 interface ResolveResult {
