@@ -598,7 +598,11 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
     expect(surviving[0]?.relation).toBe("evidence-for");
   });
 
-  test("a reference to a turn this session was never shown is dropped, not written", () => {
+  // The exposure gate is gone: a citation is legal iff its address resolves.
+  // The ledger only recorded the addresses the note machinery handed over,
+  // so gating on it dropped anything a writer found through recall or
+  // timeline — and "did this agent see it" is not an auditable fact anyway.
+  test("a reference to a turn this session was never handed is written, because it resolves", () => {
     // turns[0] deliberately NOT exposed.
     const result = recomputeTurnCitedPairs(
       db,
@@ -608,8 +612,22 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
       sessionId,
     );
 
-    expect(result.rejected).toHaveLength(1);
-    expect(result.rejected[0]?.reason).toBe("unexposed");
+    expect(result.rejected).toHaveLength(0);
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).map((e) => e.cited),
+    ).toEqual([{ kind: "turn", id: turns[0]! }]);
+  });
+
+  test("an address that resolves to nothing is still dropped", () => {
+    const result = recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `[S${sessionId}/T4242].`, insight: null },
+      500,
+      sessionId,
+    );
+
+    expect(result.rejected.map((entry) => entry.reason)).toEqual(["unresolved"]);
     expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
   });
 

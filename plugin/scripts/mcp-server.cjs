@@ -6980,66 +6980,6 @@ var init_memory_edges = __esm({
   }
 });
 
-// src/db/note-debt.ts
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = 'noted', reason = NULL,
-             closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ?
-           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
-  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
-}
-function recordDeclinedNoteDebt(db, turn, nowEpoch) {
-  return db.query(
-    `INSERT OR IGNORE INTO note_debt (
-           turn_id, session_id, prompt_number, status, reason,
-           opened_at_epoch, closed_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
-}
-function getExposedTurnIds(db, sessionId, source) {
-  const rows = source ? db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ? AND source = ?`
-  ).all(sessionId, source) : db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ?`
-  ).all(sessionId);
-  return new Set(rows.map((row) => row.exposedTurnId));
-}
-var NOTE_DEBT_COLUMNS;
-var init_note_debt = __esm({
-  "src/db/note-debt.ts"() {
-    "use strict";
-    NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-  }
-});
-
 // src/db/references.ts
 function topLevelBracketGroups(content) {
   const groups = [];
@@ -7116,13 +7056,12 @@ function parseQualifiedReferences(content) {
   }
   return references;
 }
-function validateReferences(db, references, options) {
+function validateReferences(db, references, options = {}) {
   const accepted = [];
   const rejected = [];
   if (references.length === 0) {
     return { accepted, rejected };
   }
-  const exposedTurnIds = getExposedTurnIds(db, options.writerSessionId);
   const turnLookup = db.query(
     "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
   );
@@ -7136,10 +7075,6 @@ function validateReferences(db, references, options) {
         rejected.push({ reference, reason: "unresolved" });
         continue;
       }
-      if (!exposedTurnIds.has(row2.id)) {
-        rejected.push({ reference, reason: "unexposed" });
-        continue;
-      }
       accepted.push({ reference, node: { kind: "turn", id: row2.id } });
       continue;
     }
@@ -7148,16 +7083,12 @@ function validateReferences(db, references, options) {
       rejected.push({ reference, reason: "unresolved" });
       continue;
     }
-    if (options.exposedSegmentIds !== void 0 && !options.exposedSegmentIds.has(reference.segmentId)) {
-      rejected.push({ reference, reason: "unexposed" });
-      continue;
-    }
     accepted.push({ reference, node: { kind: "segment", id: row.id } });
   }
   if (rejected.length > 0) {
     const logger = options.logger ?? console;
     logger.warn?.(
-      `[claude-mnemo] S${options.writerSessionId}: dropped ${rejected.length} illegal reference(s): ${rejected.map((entry) => `${entry.reference.raw} (${entry.reason})`).join(", ")}`
+      `[claude-mnemo] S${options.writerSessionId ?? "?"}: dropped ${rejected.length} illegal reference(s): ${rejected.map((entry) => `${entry.reference.raw} (${entry.reason})`).join(", ")}`
     );
   }
   return { accepted, rejected };
@@ -7166,7 +7097,6 @@ var REFERENCE_PATTERN;
 var init_references = __esm({
   "src/db/references.ts"() {
     "use strict";
-    init_note_debt();
     REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
   }
 });
@@ -33544,7 +33474,50 @@ var noteInputSchema = external_exports3.object(noteInputShape).strict();
 // src/mcp/note.ts
 init_citations();
 init_database();
-init_note_debt();
+
+// src/db/note-debt.ts
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = 'noted', reason = NULL,
+             closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ?
+           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
+  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
+}
+function recordDeclinedNoteDebt(db, turn, nowEpoch) {
+  return db.query(
+    `INSERT OR IGNORE INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
+}
 
 // src/db/shadow-notes.ts
 var SHADOW_NOTE_COLUMNS = `

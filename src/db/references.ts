@@ -1,6 +1,5 @@
 import type { Database } from "bun:sqlite";
 
-import { getExposedTurnIds } from "./note-debt";
 import type { EdgeNode } from "./memory-edges";
 
 /**
@@ -194,14 +193,8 @@ export interface RejectedReference {
 }
 
 export interface ValidateReferencesOptions {
-  /** The session whose exposure ledger governs — the WRITER's session. */
-  writerSessionId: number;
-  /**
-   * Segment ids the writer was shown. The exposure ledger (note_id_exposures)
-   * only records turns, so a segment reference is existence-checked unless the
-   * caller supplies this set — passing one turns the same gate on for segments.
-   */
-  exposedSegmentIds?: ReadonlySet<number>;
+  /** Optional, for the drop log's session prefix. */
+  writerSessionId?: number;
   logger?: Pick<Console, "warn">;
 }
 
@@ -211,28 +204,36 @@ export interface ValidateReferencesResult {
 }
 
 /**
- * Resolve references to database nodes, dropping anything the writer could not
- * legitimately have cited.
+ * Resolve references to database nodes, dropping any address that names
+ * nothing.
  *
- * Two gates, both required (spec D7, the inverse design of the 0.2.34 bug where
- * a model invented plausible-looking ids):
+ * ONE gate: the address must resolve to a row. An id naming nothing is not a
+ * citation, and that is the whole question a pair's existence turns on
+ * (spec C6).
  *
- *   1. the address must resolve to a row — an id naming nothing is not a
- *      citation;
- *   2. the id must appear in the writer's EXPOSURE LEDGER — the record of what
- *      this session actually rendered into the model's context. A turn the
- *      writer was never shown cannot be something it built on; at best it is a
- *      lucky guess, and a citation graph built out of lucky guesses is worse
- *      than one with holes.
+ * There used to be a second gate — the id had to appear in the writer's
+ * exposure ledger. It is removed, for two reasons that arrived together. The
+ * ledger records only the addresses the note machinery hands over (the owed
+ * turn, the backlog-relief block), never what a session actually read, so once
+ * ticket 06 made prose citations the only way to create an edge it rejected a
+ * citation of anything found through recall or timeline — 55% of this
+ * project's own turns at time of writing. And the deeper reason, the user's:
+ * whether an agent saw something is not auditable. Attention inside a large
+ * context is not observable, so any ledger of it approximates in both
+ * directions, while existence is a fact storage answers exactly.
  *
- * Illegal references go to the log and NOWHERE else. They are never written to
- * the edge table, and they never abort the write they came with: a hallucinated
- * citation must not cost the note it was attached to.
+ * The anti-hallucination job the second gate was doing now rests where it can
+ * actually be checked: the address grammar (ticket 01) refuses a bare or
+ * annotated form, so a guess must be a fully qualified address that resolves.
+ *
+ * Illegal references go to the log and NOWHERE else. They never reach the edge
+ * table and they never abort the write they came with: a hallucinated citation
+ * must not cost the note it was attached to.
  */
 export function validateReferences(
   db: Database,
   references: readonly ParsedReference[],
-  options: ValidateReferencesOptions,
+  options: ValidateReferencesOptions = {},
 ): ValidateReferencesResult {
   const accepted: ResolvedReference[] = [];
   const rejected: RejectedReference[] = [];
@@ -241,7 +242,6 @@ export function validateReferences(
     return { accepted, rejected };
   }
 
-  const exposedTurnIds = getExposedTurnIds(db, options.writerSessionId);
   const turnLookup = db.query<{ id: number }, [number, number]>(
     "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
   );
@@ -256,10 +256,6 @@ export function validateReferences(
         rejected.push({ reference, reason: "unresolved" });
         continue;
       }
-      if (!exposedTurnIds.has(row.id)) {
-        rejected.push({ reference, reason: "unexposed" });
-        continue;
-      }
       accepted.push({ reference, node: { kind: "turn", id: row.id } });
       continue;
     }
@@ -269,20 +265,13 @@ export function validateReferences(
       rejected.push({ reference, reason: "unresolved" });
       continue;
     }
-    if (
-      options.exposedSegmentIds !== undefined &&
-      !options.exposedSegmentIds.has(reference.segmentId)
-    ) {
-      rejected.push({ reference, reason: "unexposed" });
-      continue;
-    }
     accepted.push({ reference, node: { kind: "segment", id: row.id } });
   }
 
   if (rejected.length > 0) {
     const logger = options.logger ?? console;
     logger.warn?.(
-      `[claude-mnemo] S${options.writerSessionId}: dropped ${rejected.length} illegal reference(s): ${rejected
+      `[claude-mnemo] S${options.writerSessionId ?? "?"}: dropped ${rejected.length} illegal reference(s): ${rejected
         .map((entry) => `${entry.reference.raw} (${entry.reason})`)
         .join(", ")}`,
     );
@@ -291,59 +280,12 @@ export function validateReferences(
   return { accepted, rejected };
 }
 
-/**
- * Existence-only resolution — the first of `validateReferences`' two gates,
- * without the second. Exists for exactly one caller class: a storage-layer
- * write (segments.ts's segment body, spec C6) that has no WRITER SESSION to
- * gate against in the first place. A segment is not authored by one session —
- * settlement composes its body from a window that spans a session's turns,
- * and the module that stores it (segments.ts) is documented storage
- * mechanics, not a judgement layer, so it is never handed the context
- * `getExposedTurnIds` needs. "Does this address name a real row" is still
- * answerable without that context, and per spec C6 that is the whole
- * question a pair's EXISTENCE turns on — whether the writer was licensed to
- * know about the target is a different question, already asked (by
- * `validateReferences`) wherever a caller both writes prose AND has a writer
- * session, e.g. `note`/`remember`'s turn and session routes.
- */
-export function resolveExistingReferences(
-  db: Database,
-  references: readonly ParsedReference[],
-): ResolvedReference[] {
-  const resolved: ResolvedReference[] = [];
-  if (references.length === 0) {
-    return resolved;
-  }
-
-  const turnLookup = db.query<{ id: number }, [number, number]>(
-    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
-  );
-  const segmentLookup = db.query<{ id: number }, [number]>(
-    "SELECT id FROM segments WHERE id = ?",
-  );
-
-  for (const reference of references) {
-    if (reference.kind === "turn") {
-      const row = turnLookup.get(reference.sessionId, reference.promptNumber);
-      if (row) {
-        resolved.push({ reference, node: { kind: "turn", id: row.id } });
-      }
-      continue;
-    }
-    const row = segmentLookup.get(reference.segmentId);
-    if (row) {
-      resolved.push({ reference, node: { kind: "segment", id: row.id } });
-    }
-  }
-
-  return resolved;
-}
 
 /** Parse + validate in one step, the shape every write path wants. */
 export function resolveContentReferences(
   db: Database,
   content: string | null | undefined,
-  options: ValidateReferencesOptions,
+  options: ValidateReferencesOptions = {},
 ): ValidateReferencesResult {
   return validateReferences(db, parseQualifiedReferences(content), options);
 }

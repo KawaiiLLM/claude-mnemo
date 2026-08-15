@@ -242,7 +242,6 @@ function resolveTokens(
 
   const result = validateReferences(db, references, {
     writerSessionId: options.job.sessionId,
-    exposedSegmentIds: options.exposedSegmentIds,
     logger: options.logger,
   });
   rejected += result.rejected.length;
@@ -268,7 +267,6 @@ function writeAnchorEdges(
   }
   const { accepted, rejected } = validateReferences(db, references, {
     writerSessionId: options.job.sessionId,
-    exposedSegmentIds: options.exposedSegmentIds,
     logger: options.logger,
   });
   const { written } = writeMemoryEdges(

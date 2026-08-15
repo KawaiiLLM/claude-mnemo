@@ -401,57 +401,6 @@ function rankEdgeProvenance(provenance) {
   return PROVENANCE_RANK[provenance];
 }
 
-// src/db/note-debt.ts
-function realPromptPredicate(alias = "t") {
-  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(${alias}.type) WHERE value = 'compact'))`;
-}
-var NOTE_DEBT_AGING_TURNS = 50;
-function listOwedNoteTurns(db, sessionId, currentPromptNumber, options = {}) {
-  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-  return db.query(
-    `SELECT
-         t.id AS turnId,
-         t.session_id AS sessionId,
-         t.prompt_number AS promptNumber,
-         t.user_prompt AS userPrompt
-       FROM turns t
-       WHERE t.session_id = ?
-         AND t.prompt_number < ?
-         AND t.prompt_number >= ?
-         AND ${realPromptPredicate("t")}
-         AND NOT EXISTS (
-           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM note_debt d
-           WHERE d.turn_id = t.id AND d.status = 'skipped'
-         )
-       ORDER BY t.prompt_number ASC`
-  ).all(sessionId, currentPromptNumber, currentPromptNumber - agingTurns).map((row) => ({
-    ...row,
-    pendingTurns: currentPromptNumber - row.promptNumber
-  }));
-}
-function recordNoteIdExposure(db, input) {
-  const statement = db.query(
-    `INSERT OR IGNORE INTO note_id_exposures (
-       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-     ) VALUES (?, ?, ?, ?, ?)`
-  );
-  let written = 0;
-  for (const exposedTurnId of input.exposedTurnIds) {
-    statement.run(
-      input.sessionId,
-      input.rideTurnId,
-      exposedTurnId,
-      input.source,
-      input.nowEpoch
-    );
-    written += 1;
-  }
-  return written;
-}
-
 // src/db/citations.ts
 var CITATION_RELATIONS = [
   "evidence-for",
@@ -3743,7 +3692,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msur1up9" : "dev";
+var BUILD_ID = true ? "0.10.0-msurjw0x" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -20252,6 +20201,57 @@ function captureConsultedMemories(db, turnId, call) {
     return 0;
   }
   return recordConsultedMemories(db, turnId, addresses).length;
+}
+
+// src/db/note-debt.ts
+function realPromptPredicate(alias = "t") {
+  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(${alias}.type) WHERE value = 'compact'))`;
+}
+var NOTE_DEBT_AGING_TURNS = 50;
+function listOwedNoteTurns(db, sessionId, currentPromptNumber, options = {}) {
+  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  return db.query(
+    `SELECT
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber,
+         t.user_prompt AS userPrompt
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.prompt_number < ?
+         AND t.prompt_number >= ?
+         AND ${realPromptPredicate("t")}
+         AND NOT EXISTS (
+           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM note_debt d
+           WHERE d.turn_id = t.id AND d.status = 'skipped'
+         )
+       ORDER BY t.prompt_number ASC`
+  ).all(sessionId, currentPromptNumber, currentPromptNumber - agingTurns).map((row) => ({
+    ...row,
+    pendingTurns: currentPromptNumber - row.promptNumber
+  }));
+}
+function recordNoteIdExposure(db, input) {
+  const statement = db.query(
+    `INSERT OR IGNORE INTO note_id_exposures (
+       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?)`
+  );
+  let written = 0;
+  for (const exposedTurnId of input.exposedTurnIds) {
+    statement.run(
+      input.sessionId,
+      input.rideTurnId,
+      exposedTurnId,
+      input.source,
+      input.nowEpoch
+    );
+    written += 1;
+  }
+  return written;
 }
 
 // src/db/observations.ts

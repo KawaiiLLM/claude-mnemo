@@ -1157,8 +1157,8 @@ describe("remember citations (spec C6: body-derived, not a structured input)", (
     expect(edges[0]?.relation).toBe("evidence-for");
   });
 
-  test("a reference to a turn this session was never shown is dropped, not written", () => {
-    // turnIds[0] deliberately NOT exposed.
+  test("a reference to a turn this session was never handed is written, because it resolves", () => {
+    // turnIds[0] deliberately NOT exposed — which no longer decides anything.
     const result = rememberTool(db, {
       id: `T${turnIds[2]!}`,
       title: "Cites a stranger",
@@ -1166,7 +1166,7 @@ describe("remember citations (spec C6: body-derived, not a structured input)", (
       grade: 3,
     });
 
-    expect(citedIds(turnIds[2]!)).toEqual([]);
-    expect(result.content[0]?.text).toContain("unresolvable reference");
+    expect(citedIds(turnIds[2]!)).toEqual([turnIds[0]!]);
+    expect(result.content[0]?.text).not.toContain("unresolvable reference");
   });
 });

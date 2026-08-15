@@ -161,7 +161,14 @@ describe("qualified reference parsing and validation", () => {
       expect(String(logged[0])).toContain("unresolved");
     });
 
-    test("rejects an existing turn the writer was never shown", () => {
+    // Replaces "rejects an existing turn the writer was never shown". The
+    // exposure gate is removed: the ledger only ever recorded the addresses
+    // the note machinery handed over, never what a session read, so once
+    // prose citations became the only way to create an edge it dropped any
+    // citation of a turn found through recall or timeline — 55% of this
+    // project's own turns. And whether an agent saw something is not
+    // auditable in the first place; existence is.
+    test("accepts an existing turn the writer was never handed, since existence is the only gate", () => {
       const rideTurn = addTurn(sessionId, 10);
       expose(rideTurn, rideTurn);
       addTurn(otherSessionId, 4);
@@ -172,9 +179,9 @@ describe("qualified reference parsing and validation", () => {
         logger: { warn: (...args: unknown[]) => logged.push(args) },
       });
 
-      expect(result.accepted).toHaveLength(0);
-      expect(result.rejected[0]?.reason).toBe("unexposed");
-      expect(String(logged[0])).toContain("unexposed");
+      expect(result.accepted.map((entry) => entry.node.kind)).toEqual(["turn"]);
+      expect(result.rejected).toHaveLength(0);
+      expect(logged).toHaveLength(0);
     });
 
     test("a cross-session reference passes once it IS in the ledger", () => {
@@ -190,29 +197,21 @@ describe("qualified reference parsing and validation", () => {
       expect(result.accepted[0]?.node).toEqual({ kind: "turn", id: foreign });
     });
 
-    test("segment references are existence-checked, and gated only when a caller supplies exposures", () => {
+    test("a segment reference is accepted when it resolves and dropped when it does not", () => {
       const segment = createSegment(db, { title: "实现 段引用", nowEpoch: 100 });
       const references = parseQualifiedReferences(`[E${segment.id}] [E9999]`);
 
-      const ungated = validateReferences(db, references, {
+      const result = validateReferences(db, references, {
         writerSessionId: sessionId,
         logger: { warn: () => {} },
       });
-      expect(ungated.accepted.map((entry) => entry.node)).toEqual([
+
+      // One rule for both reference kinds now. The caller-supplied
+      // `exposedSegmentIds` escape hatch is gone with the gate it fed.
+      expect(result.accepted.map((entry) => entry.node)).toEqual([
         { kind: "segment", id: segment.id },
       ]);
-      expect(ungated.rejected[0]?.reason).toBe("unresolved");
-
-      const gated = validateReferences(db, references, {
-        writerSessionId: sessionId,
-        exposedSegmentIds: new Set<number>(),
-        logger: { warn: () => {} },
-      });
-      expect(gated.accepted).toHaveLength(0);
-      expect(gated.rejected.map((entry) => entry.reason)).toEqual([
-        "unexposed",
-        "unresolved",
-      ]);
+      expect(result.rejected.map((entry) => entry.reason)).toEqual(["unresolved"]);
     });
   });
 });

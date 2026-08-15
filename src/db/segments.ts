@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { reconcileCitedPairs } from "./memory-edges";
-import { parseQualifiedReferences, resolveExistingReferences } from "./references";
+import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
 import { normalizeTypeValues, type MemoryType } from "../shared/type-vocabulary";
 
@@ -289,13 +289,13 @@ export function createSegment(
  * alike — calls this so a bare `[S<session>/T<n>]`/`[E<n>]` in either field
  * is a real, storable citation and a rewrite that drops one drops the pair.
  *
- * Existence-only resolution (references.ts's `resolveExistingReferences`),
- * NOT the full exposure-ledger gate `validateReferences` applies to a
- * turn/session write: this module is documented storage mechanics with no
- * writer-session context of its own — a segment is not authored by one
- * session, settlement composes its body from a whole window — so "was the
- * writer shown this" is not a question this layer can ask. It answers the
- * narrower one spec C6 actually turns on: does the address name a real row.
+ * The same resolver every other citation-bearing write uses, asking the one
+ * question a pair's existence turns on: does the address name a real row.
+ * This layer used to be the odd one out — it had no writer-session context to
+ * gate against, so it skipped an exposure check the turn and session paths
+ * applied, which left one reference kind licensed differently depending on
+ * which body carried it. The gate is gone everywhere now, so there is nothing
+ * left to be inconsistent about.
  */
 function reconcileSegmentCitedPairs(
   db: Database,
@@ -306,7 +306,7 @@ function reconcileSegmentCitedPairs(
     ...parseQualifiedReferences(segment.title),
     ...parseQualifiedReferences(segment.content),
   ];
-  const resolved = resolveExistingReferences(db, references);
+  const resolved = validateReferences(db, references).accepted;
   reconcileCitedPairs(
     db,
     { kind: "segment", id: segment.id },

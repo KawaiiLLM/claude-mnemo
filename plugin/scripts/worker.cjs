@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msur1up9" : "dev";
+var BUILD_ID = true ? "0.10.0-msurjw0x" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -755,112 +755,6 @@ function createDiaryStateStore(db) {
   };
 }
 
-// src/db/note-debt.ts
-var NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = 'noted', reason = NULL,
-             closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ?
-           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
-  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
-}
-function recordDeclinedNoteDebt(db, turn, nowEpoch) {
-  return db.query(
-    `INSERT OR IGNORE INTO note_debt (
-           turn_id, session_id, prompt_number, status, reason,
-           opened_at_epoch, closed_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
-}
-function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-       SET status = 'skipped', reason = 'closed',
-           closed_at_epoch = ?, updated_at_epoch = ?
-       WHERE session_id = ? AND status = 'pending'`
-  ).run(nowEpoch, nowEpoch, sessionId).changes;
-}
-function realPromptPredicate(alias = "t") {
-  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(${alias}.type) WHERE value = 'compact'))`;
-}
-function listOwedNoteTurnsInRange(db, sessionId, rangeStart, rangeEnd) {
-  return db.query(
-    `SELECT
-         t.id AS turnId,
-         t.session_id AS sessionId,
-         t.prompt_number AS promptNumber
-       FROM turns t
-       WHERE t.session_id = ?
-         AND t.prompt_number BETWEEN ? AND ?
-         AND ${realPromptPredicate("t")}
-         AND NOT EXISTS (
-           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM note_debt d
-           WHERE d.turn_id = t.id
-             AND d.status = 'skipped'
-             AND d.reason = 'declined'
-         )
-       ORDER BY t.prompt_number ASC`
-  ).all(sessionId, rangeStart, rangeEnd);
-}
-function recordNoteIdExposure(db, input) {
-  const statement = db.query(
-    `INSERT OR IGNORE INTO note_id_exposures (
-       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-     ) VALUES (?, ?, ?, ?, ?)`
-  );
-  let written = 0;
-  for (const exposedTurnId of input.exposedTurnIds) {
-    statement.run(
-      input.sessionId,
-      input.rideTurnId,
-      exposedTurnId,
-      input.source,
-      input.nowEpoch
-    );
-    written += 1;
-  }
-  return written;
-}
-function getExposedTurnIds(db, sessionId, source) {
-  const rows = source ? db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ? AND source = ?`
-  ).all(sessionId, source) : db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ?`
-  ).all(sessionId);
-  return new Set(rows.map((row) => row.exposedTurnId));
-}
-
 // src/db/references.ts
 var REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
 var ADDRESS_TOKEN_PATTERN = /^\[[ \t]*(?:S\d+[ \t]*\/[ \t]*T\d+|E\d+)[ \t]*\]$/;
@@ -942,13 +836,12 @@ function parseQualifiedReferences(content) {
   }
   return references;
 }
-function validateReferences(db, references, options) {
+function validateReferences(db, references, options = {}) {
   const accepted = [];
   const rejected = [];
   if (references.length === 0) {
     return { accepted, rejected };
   }
-  const exposedTurnIds = getExposedTurnIds(db, options.writerSessionId);
   const turnLookup = db.query(
     "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
   );
@@ -962,10 +855,6 @@ function validateReferences(db, references, options) {
         rejected.push({ reference, reason: "unresolved" });
         continue;
       }
-      if (!exposedTurnIds.has(row2.id)) {
-        rejected.push({ reference, reason: "unexposed" });
-        continue;
-      }
       accepted.push({ reference, node: { kind: "turn", id: row2.id } });
       continue;
     }
@@ -974,45 +863,15 @@ function validateReferences(db, references, options) {
       rejected.push({ reference, reason: "unresolved" });
       continue;
     }
-    if (options.exposedSegmentIds !== void 0 && !options.exposedSegmentIds.has(reference.segmentId)) {
-      rejected.push({ reference, reason: "unexposed" });
-      continue;
-    }
     accepted.push({ reference, node: { kind: "segment", id: row.id } });
   }
   if (rejected.length > 0) {
     const logger = options.logger ?? console;
     logger.warn?.(
-      `[claude-mnemo] S${options.writerSessionId}: dropped ${rejected.length} illegal reference(s): ${rejected.map((entry) => `${entry.reference.raw} (${entry.reason})`).join(", ")}`
+      `[claude-mnemo] S${options.writerSessionId ?? "?"}: dropped ${rejected.length} illegal reference(s): ${rejected.map((entry) => `${entry.reference.raw} (${entry.reason})`).join(", ")}`
     );
   }
   return { accepted, rejected };
-}
-function resolveExistingReferences(db, references) {
-  const resolved = [];
-  if (references.length === 0) {
-    return resolved;
-  }
-  const turnLookup = db.query(
-    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
-  );
-  const segmentLookup = db.query(
-    "SELECT id FROM segments WHERE id = ?"
-  );
-  for (const reference of references) {
-    if (reference.kind === "turn") {
-      const row2 = turnLookup.get(reference.sessionId, reference.promptNumber);
-      if (row2) {
-        resolved.push({ reference, node: { kind: "turn", id: row2.id } });
-      }
-      continue;
-    }
-    const row = segmentLookup.get(reference.segmentId);
-    if (row) {
-      resolved.push({ reference, node: { kind: "segment", id: row.id } });
-    }
-  }
-  return resolved;
 }
 
 // src/db/citations.ts
@@ -2232,6 +2091,102 @@ function updateCompactAnchor(db, sessionId) {
      )
      WHERE id = ?`
   ).run(sessionId, sessionId);
+}
+
+// src/db/note-debt.ts
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = 'noted', reason = NULL,
+             closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ?
+           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
+  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
+}
+function recordDeclinedNoteDebt(db, turn, nowEpoch) {
+  return db.query(
+    `INSERT OR IGNORE INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
+}
+function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+       SET status = 'skipped', reason = 'closed',
+           closed_at_epoch = ?, updated_at_epoch = ?
+       WHERE session_id = ? AND status = 'pending'`
+  ).run(nowEpoch, nowEpoch, sessionId).changes;
+}
+function realPromptPredicate(alias = "t") {
+  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(${alias}.type) WHERE value = 'compact'))`;
+}
+function listOwedNoteTurnsInRange(db, sessionId, rangeStart, rangeEnd) {
+  return db.query(
+    `SELECT
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.prompt_number BETWEEN ? AND ?
+         AND ${realPromptPredicate("t")}
+         AND NOT EXISTS (
+           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM note_debt d
+           WHERE d.turn_id = t.id
+             AND d.status = 'skipped'
+             AND d.reason = 'declined'
+         )
+       ORDER BY t.prompt_number ASC`
+  ).all(sessionId, rangeStart, rangeEnd);
+}
+function recordNoteIdExposure(db, input) {
+  const statement = db.query(
+    `INSERT OR IGNORE INTO note_id_exposures (
+       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?)`
+  );
+  let written = 0;
+  for (const exposedTurnId of input.exposedTurnIds) {
+    statement.run(
+      input.sessionId,
+      input.rideTurnId,
+      exposedTurnId,
+      input.source,
+      input.nowEpoch
+    );
+    written += 1;
+  }
+  return written;
 }
 
 // src/db/observations.ts
@@ -5604,7 +5559,7 @@ function reconcileSegmentCitedPairs(db, segment, nowEpoch) {
     ...parseQualifiedReferences(segment.title),
     ...parseQualifiedReferences(segment.content)
   ];
-  const resolved = resolveExistingReferences(db, references);
+  const resolved = validateReferences(db, references).accepted;
   reconcileCitedPairs(
     db,
     { kind: "segment", id: segment.id },
@@ -11585,7 +11540,6 @@ function resolveTokens(db, tokens, options) {
   }
   const result = validateReferences(db, references, {
     writerSessionId: options.job.sessionId,
-    exposedSegmentIds: options.exposedSegmentIds,
     logger: options.logger
   });
   rejected += result.rejected.length;
@@ -11604,7 +11558,6 @@ function writeAnchorEdges(db, segment, options) {
   }
   const { accepted, rejected } = validateReferences(db, references, {
     writerSessionId: options.job.sessionId,
-    exposedSegmentIds: options.exposedSegmentIds,
     logger: options.logger
   });
   const { written } = writeMemoryEdges(
