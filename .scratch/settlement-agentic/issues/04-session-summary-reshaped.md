@@ -11,5 +11,8 @@ Seven fields split by reader: `title`/`content`/`insight` are a compressed globa
 - [ ] `current` is gone from the write path, the injection and the renderers
 - [ ] Each field carries a guidance value, reported in the receipt, never enforced by truncation (spec D9 has the numbers)
 - [ ] Going over budget is a signal to the writer, not a loss to the reader
+- [ ] An accumulating field's receipt reports its total AFTER the write, not the delta
+- [ ] The receipt also reports how many turns have passed since the summary was last updated — the one figure of the two that names an action
+- [ ] That figure travels WITHOUT its healthy band: a field's guidance value ships with its usage because meeting it is the goal, but the cadence target stays operator-side, because a writer that knows the number updates to reset the counter and the diagnostic reads healthy by construction (spec D8a)
 - [ ] The injected block no longer silently drops its tail
 - [ ] Full suite green

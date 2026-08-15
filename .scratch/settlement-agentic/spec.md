@@ -199,7 +199,13 @@ The constraint on C6 stands regardless of the direction: its recompute-and-delet
 
 **D7.** Budgets are **guidance values reported in the receipt, never truncation**. Two concerns that are currently one constant must separate: a write-side signal to the author, and an injection-side cap that becomes a rarely-hit backstop once the signal exists.
 
-**D8.** An accumulating field's receipt reports the field's **total after the write**, not the delta. A writer adding 50 tokens at a time otherwise reaches 1000 without noticing.
+**D8.** A session write's receipt is the only feedback its author ever gets, and today it is one sentence naming the session — no usage, no sizes, no history. It must carry two things.
+
+First, **per-field usage against the guidance value**, and for an accumulating field the **total after the write** rather than the delta: a writer adding 50 tokens at a time otherwise reaches 1000 without noticing.
+
+Second, **how long it has been since the summary was last updated**, counted in turns. Of the two, only this one names an action. A ratio says "you wrote too much", whose implied action is vague; "47 turns since the last update" says what to do, and its absence is checkable. That the ratio alone does not bind is measured rather than assumed: in the session that produced this spec, 23 of some 24 notes ran 1.6–2.3× over budget with no convergence between the first and the last, every one of them having been shown its number.
+
+**D8a. Report the fact; withhold the target.** A field's guidance value travels with its usage, because meeting it is the goal. The cadence band does **not** travel with the elapsed count. The realised frequency is a measurement of something the writer is not supposed to be optimising — whether content sits at the right level of abstraction (D10) — and publishing its target pins the number: the writer updates to reset the counter, and the diagnostic then reads healthy by construction. This is G9's failure shape at a smaller scale, and the rule behind both is one rule: **give a writer a target when meeting it is the goal, and withhold it when the realised value measures something else.**
 
 **D9.** Guidance values, derived from corpus measurement (mean/max chars: content 369/1473, decision 508/1371, done 392/864, reference 309/746, insight 198/282, next_steps 148/611):
 
@@ -214,6 +220,8 @@ The constraint on C6 stands regardless of the direction: its recompute-and-delet
 | `title` | 30 |
 
 **D10.** Update cadence is a **diagnostic, not a quota**: roughly once per ten turns is the healthy band. Updating far more often means content is being written at too low a level; far less often means too high. The existing summary timestamp makes this measurable without new instrumentation.
+
+That band is **operator-side only**. Per D8a the writer is told how many turns have passed and is never told what number is good — the moment it knows, the count stops measuring the thing it exists to measure.
 
 ### E. One write tool
 
