@@ -162,6 +162,20 @@ The rule this replaces the earlier one with: settlement may not mint a **free-st
 
 **C12.** Edge provenance must distinguish its three sources — the main agent's own assertion, a bare textual reference, and a settlement attribution. The current provenance column conflates the first and third.
 
+**C14. No source hierarchy decides whether a relation may be corrected.** A first implementation ranked provenance and let the rank gate the relation column, so a relation written by the main agent became permanently immune to settlement's correction — which makes C7 unimplementable, since C7 exists precisely to let settlement correct with hindsight. It also inverted C6: the structured citation path labels every entry as the main agent's own assertion regardless of whether any body cites the target, so a bodyless relation-only call acquired the highest authority of all.
+
+The rule instead:
+
+- **Eligibility lives in each write path, not in a global ordering.** A main-agent relation requires its target to be cited in that call's body post-state; a settlement relation requires the pair to be present in the transaction's pre-state. Those are C7's two conditions and they are sufficient on their own.
+- **An authorised relation write replaces the current relation and the provenance recording where that relation came from.** No rank test stands between them.
+- **A bare textual pair never clears or relabels an existing relation.** A citation appearing in prose says the pair exists; it says nothing about the relation, so it must not overwrite one.
+
+Provenance remains what C12 asks of it — a record of which source stated the current relation, with the bare-text value reserved for a pair that has none. It is evidence for a reader, not an authority for a writer.
+
+**C15. Endpoint deletion must not leave edges behind.** The retired citation table carried a foreign key with `ON DELETE CASCADE`; the surviving edge table cannot, because one integer column spans three id spaces. Retiring the first therefore made this load-bearing rather than merely untidy, and it is observable, not hygiene: the segment ranking key counts distinct citers of a turn without joining endpoint existence, so a deleted citing turn leaves a ghost that inflates a surviving target's cited-by count, and a deleted cited turn leaves readers pointed at nothing.
+
+The fix belongs at the storage layer, as kind-aware delete triggers covering both directions for turns and segments and the outgoing direction for sessions. It must not live only in the deletion APIs: cascades and direct SQL bypass those. This is ticket 05's to close, not a gap for ticket 06 to inherit — 06 reconciles a body against its pairs, which is a different question from how long an endpoint lives.
+
 **C13. The dual edge graph must be resolved before C6 can be implemented.** Two tables hold edges, two consumers read different ones, and they disagree about deletion.
 
 - `turn_citations` is a genuine replace-set: the main agent's `cites` path deletes a turn's rows before rewriting them. The timeline's correction graph reads **this** one — victim demotion, corrector promotion and pull-through all consume the map built from it.

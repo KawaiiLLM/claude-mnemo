@@ -15,3 +15,12 @@ Today `relation` is NOT NULL, sits inside both the primary key and the upsert co
 - [ ] Existing rows survive the change with their meaning intact, or their loss is a stated decision
 - [ ] Both consumers — the timeline's correction graph and the segment ranking key — read the same table afterwards
 - [ ] Full suite green
+
+## Reopened after cross-review
+
+The first pass landed as `b7cba25` and two findings sent it back. Both are consequences of this ticket rather than gaps for a later one — retiring the foreign-key-backed table is what made the first load-bearing, and the second was introduced here.
+
+- [ ] **No provenance ordering gates the relation column.** The first pass ranked sources and let the rank decide whether a relation could be overwritten, which made a main-agent relation permanently immune to settlement's correction and so made C7 unimplementable. An authorised write replaces the relation and the provenance recording its source, with no rank test between them; eligibility belongs to the write paths (ticket 07), not to a global ordering.
+- [ ] **A write carrying no relation never clears or relabels an existing one.** A citation in prose says the pair exists and says nothing about its relation.
+- [ ] **Deleting an endpoint deletes its edges**, by kind-aware delete triggers covering both directions for turns and segments and the outgoing direction for sessions — at the storage layer, because cascades and direct SQL bypass the deletion APIs. Not tests that pin orphaning as accepted; the two that currently do must go.
+- [ ] A test shows the segment ranking key's cited-by count is unaffected by a deleted citer, since that is where the orphan was observable rather than merely untidy
