@@ -501,11 +501,20 @@ describe("turn_citations edge table", () => {
   test("a session-sourced edge goes when its session does (spec C15)", () => {
     // The only trigger with a single direction: nothing cites a session, so it
     // prunes outgoing edges only.
+    //
+    // The cited endpoint MUST be a turn of the OTHER session. An earlier
+    // version of this test cited a turn of sessionB itself, and deleting
+    // sessionB cascaded into that turn, so the TURN trigger removed the edge
+    // through its cited endpoint — the row disappeared and the session
+    // trigger was never the cause. That test stayed green with the session
+    // trigger deleted outright, which is the same false-positive shape the
+    // id-collision test above exists to rule out: it asserted disappearance
+    // without pinning what caused it.
     db.query<unknown, [number, number]>(
       `INSERT INTO memory_edges
          (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
        VALUES ('session', ?, 'turn', ?, 'depends-on', 'asserted', 500)`,
-    ).run(sessionB, foreignTurn);
+    ).run(sessionB, turns[0]!);
     expect(
       db.query<{ count: number }, []>(
         "SELECT COUNT(*) AS count FROM memory_edges WHERE citing_kind = 'session'",
@@ -514,6 +523,14 @@ describe("turn_citations edge table", () => {
 
     db.query("DELETE FROM sessions WHERE id = ?").run(sessionB);
 
+    // The cited endpoint outlived the deletion, so no turn trigger can have
+    // fired for it — the only thing that could remove this row is the session
+    // trigger. Without this assertion the test proves nothing.
+    expect(
+      db.query<{ count: number }, [number]>(
+        "SELECT COUNT(*) AS count FROM turns WHERE id = ?",
+      ).get(turns[0]!)!.count,
+    ).toBe(1);
     expect(
       db.query<{ count: number }, []>(
         "SELECT COUNT(*) AS count FROM memory_edges WHERE citing_kind = 'session'",
