@@ -137,17 +137,30 @@ no flow             (no relation)      I merely mention it
 
 **C4.** Question 3's counterfactual wording is normative and must be carried into the prompt verbatim. It must not be softened to "used" or "built on": the predecessor vocabulary collapsed to 61% precision at exactly that point, because "built on top of" feels like "depended on". A direct continuation whose predecessor could be entirely wrong without changing what the later turn did is **no relation**.
 
-**C5.** **Every edge originates from a citation in some body.** A bare `[S/T]` reference in a note, segment or session field creates an **unattributed** edge. Relations are attributes added to those edges, carried on named fields of the write call — not a generic `{turn, relation}` list, because with four values a named field makes an illegal relation unrepresentable.
+**C5. Edge identity is the pair; relation is a nullable attribute of it.** An edge is identified by `(citing node, cited node)` and carries at most one current relation. **This is a schema change, not a convention, and it blocks implementation until made.** Today `relation` is `NOT NULL`, sits inside both the primary key and the upsert conflict key, and is CHECK-constrained to the retired four values — so an unattributed edge cannot be stored at all, and correcting a relation inserts a second row instead of replacing an attribute. A write naming the same target under more than one relation field is rejected.
 
-**C6.** **A relation field may only name a turn the body also cites.** The field says which kind; the prose says why. A relation asserted without an argument in the body is rejected. This is what structurally kills the spurious-edge class: those edges are minted from outside any body, so there is no prose to check them against.
+**C6. A pair exists if and only if the body's post-state cites it.** Citation-bearing fields are the source of truth for which pairs exist:
 
-**C7.** Settlement **may attribute or correct an existing edge; it may never mint one.** Evidence: the audited spurious edge is settlement-only, and settlement mints `supersedes` at 11.6% of its edges against the main agent's 7.2% — over-reaching on the most consequential relation from the weakest vantage, having never seen the work happen.
+- Writing a node re-reads **all** its citation-bearing fields after the write, recomputes that node's cited-pair set, and **deletes pairs no longer supported by any field**, together with their relations. Edges are additive-only today with no delete path anywhere, so a segment whose content is overwritten leaves its old edges behind forever. A per-field ledger would also work; a whole-node rescan is simpler, and turn, segment and session field counts are all bounded.
+- The generic body-free structured edge write is **removed**, not inherited by the merged tool. It currently accepts a relation list with no prose at all, and any merged tool that keeps it makes the rest of this section bypassable in one call.
 
-**C8.** `citing_kind` gains `session`, so session fields can carry citations.
+**C7. Who may attach a relation, and when.**
 
-**C9.** Mechanically created segment-anchor edges carry **no relation**. Stamping `builds-on` on them was tautology: a segment is definitionally an aggregation of its members.
+- The **main agent** may attach a relation to a pair its own write is creating — it authored the prose in the same call, so the argument and the claim arrive together.
+- **Settlement** may attach or correct a relation **only on a pair that already existed in its transaction's pre-state**. It may not attach one to a pair the same call is creating.
+- Settlement **does** write bodies containing citations — it authors segment bodies, and before a segment is created there is no citing node at all — so those mechanically derived bare pairs are legitimate. The earlier draft said settlement may never mint an edge, which contradicted C6 for exactly this case.
 
-**C10.** Edge provenance must distinguish its three sources — the main agent's own assertion, a bare textual reference, and a settlement attribution. The current provenance column conflates the first and third.
+The rule this replaces the earlier one with: settlement may not mint a **free-standing or relation-only** edge. Evidence for the restriction: the audited spurious edge is settlement-only, and settlement attaches `supersedes` at 11.6% of its edges against the main agent's 7.2% — over-reaching on the most consequential relation from the weakest vantage, having never watched the work happen.
+
+**C8. What is structurally eliminated, stated honestly.** These rules eliminate **bodyless and free-standing edges**. They do **not** eliminate spurious edges, and the earlier draft claimed they did. A body reading `Related: [S1/T2]` alongside a `supersedes` field naming T2 passes every structural check while containing no overturning argument; a session write can lean on a pointer parked in `reference` to license a relation asserted from `decision`. Co-occurrence proves the target is named in the canonical body — nothing more. Semantic truth remains the model's responsibility and the auditor's, and the spurious-edge rate remains a thing to measure rather than a thing this design has closed.
+
+**C9. The reference parser must match whole tokens.** Executed against the current implementation, `[[S1/T2]]` and `[foo [S1/T2]]` both yield a citation to T2, contradicting the parser's own comment that a malformed bracket is skipped whole. C6's guard is only as strong as this parser: text a reader would never see as a citation currently satisfies "the body cites this turn". Fixing it is an acceptance criterion of this work, not a follow-up.
+
+**C10.** `citing_kind` gains `session`, so session fields can carry citations.
+
+**C11.** Mechanically created segment-anchor edges carry **no relation**. Stamping `builds-on` on them was tautology: a segment is definitionally an aggregation of its members.
+
+**C12.** Edge provenance must distinguish its three sources — the main agent's own assertion, a bare textual reference, and a settlement attribution. The current provenance column conflates the first and third.
 
 ### D. The session summary
 
@@ -299,7 +312,7 @@ A good test here asserts a behaviour a caller can observe, and can go red on the
 
 - **Memory reading and rendering.** The recall and timeline redesign is a separate effort. In particular: whether relations should be surfaced in any view, how a skipped turn should appear, and how a turn with no note but real raw material should render.
 - **Migration of existing rows.** Existing `topic:`-prefixed tags, retired-vocabulary type values, and the four-value relations already stored are left as they are. New writes follow this spec; a re-labelling pass over history is a later decision.
-- **The spurious-edge problem beyond moving edge creation.** Measured at 1.5-7.7% depending on the pool, its cause is a judge misled by temporal adjacency in a multi-threaded session. C5-C7 remove the mechanism that lets it happen; a scoping fix at context-construction time is not attempted here.
+- **The spurious-edge problem.** Measured at 1.5-7.7% depending on the pool, its cause is a judge misled by temporal adjacency in a multi-threaded session. C5-C9 close the *bodyless* path into it and nothing more — C8 is explicit that this design does not eliminate spurious edges. Their rate stays a thing to measure; a scoping fix at context-construction time is not attempted here.
 - **Collapsing the effective-grade layer into the stored grade.** Only the edge terms come out (H1). The layer still answers for the 67% of turns with no stored grade, and pre-cutoff turns are scored through a type→grade map rather than their stored value; a collapse must define both contracts first, and bundling that with the edge decoupling would mix a behaviour change into a structural one.
 - **A `duplicates` relation.** Real but measured at 0.8%, below the bar.
 - **A twelfth type word for capability removal.** Absorbed into `refactor` by B3's arithmetic framing.
