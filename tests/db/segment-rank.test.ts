@@ -245,6 +245,48 @@ describe("segment member derived rank (spec D8)", () => {
     expect(rankSegmentMembers(db, segment.id)[0]?.citedBy).toBe(2);
   });
 
+  test("deleting a citer removes it from the cited-by count instead of leaving a ghost (spec C15)", () => {
+    const cited = makeTurn({ promptNumber: 1 });
+    const citerA = makeTurn({ promptNumber: 2 });
+    const citerB = makeTurn({ promptNumber: 3 });
+
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citerA },
+          cited: { kind: "turn", id: cited },
+          relation: "depends-on",
+          provenance: "judged",
+        },
+        {
+          citing: { kind: "turn", id: citerB },
+          cited: { kind: "turn", id: cited },
+          relation: "depends-on",
+          provenance: "judged",
+        },
+      ],
+      ERA,
+    );
+
+    const segment = createSegment(db, {
+      title: "check the delete trigger cleans up",
+      nowEpoch: ERA,
+    });
+    addSegmentMembers(db, segment.id, [cited], ERA);
+
+    expect(rankSegmentMembers(db, segment.id)[0]?.citedBy).toBe(2);
+
+    // The retired turn_citations table cascaded this away for free;
+    // memory_edges cannot carry the FK (spec C15: one INTEGER column spans
+    // three id spaces), so the kind-aware AFTER DELETE trigger is what has to
+    // catch it instead — this is the exact surface the deleted citer used to
+    // inflate.
+    db.query("DELETE FROM turns WHERE id = ?").run(citerA);
+
+    expect(rankSegmentMembers(db, segment.id)[0]?.citedBy).toBe(1);
+  });
+
   test("anchors take their slots before the derived order is consulted", () => {
     const { segmentId, ids } = buildRankFixture();
     const segment = getSegment(db, segmentId)!;

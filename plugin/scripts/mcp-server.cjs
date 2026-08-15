@@ -8303,6 +8303,7 @@ function ensureMemoryEdgesSchema(db) {
     ensureMemoryEdgesPairIdentity(db);
   }
   db.exec(MEMORY_EDGES_DDL);
+  db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
   if (isFirstCreation) {
     migrateTurnCitationsToEdges(db);
   }
@@ -8800,7 +8801,7 @@ function initializeDatabase(db) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_DDL, EXPECTED_FTS_COLUMNS;
+var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, EXPECTED_FTS_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -9502,6 +9503,30 @@ var init_schema = __esm({
 
   CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
     ON memory_edges(cited_kind, cited_id, relation);
+`;
+    MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
+    AFTER DELETE ON turns
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
+         OR (cited_kind = 'turn' AND cited_id = OLD.id);
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_segment
+    AFTER DELETE ON segments
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE (citing_kind = 'segment' AND citing_id = OLD.id)
+         OR (cited_kind = 'segment' AND cited_id = OLD.id);
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_session
+    AFTER DELETE ON sessions
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE citing_kind = 'session' AND citing_id = OLD.id;
+    END;
 `;
     EXPECTED_FTS_COLUMNS = [
       "layer",

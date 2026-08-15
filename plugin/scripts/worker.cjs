@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msua4jpp" : "dev";
+var BUILD_ID = true ? "0.10.0-msuaz1w8" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -2473,10 +2473,6 @@ var PROVENANCE_RANK = {
   judged: 3,
   asserted: 4
 };
-function rankExpression(column) {
-  const branches = Object.entries(PROVENANCE_RANK).map(([value, rank]) => `WHEN '${value}' THEN ${rank}`).join(" ");
-  return `(CASE ${column} ${branches} ELSE -1 END)`;
-}
 function rankEdgeProvenance(provenance) {
   return PROVENANCE_RANK[provenance];
 }
@@ -2540,17 +2536,17 @@ function writeMemoryEdges(db, edges, nowEpoch) {
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id)
         DO UPDATE SET
+          -- Spec C14: no rank test between an authorised write and the
+          -- relation it sets. A relation-bearing write replaces relation AND
+          -- provenance together, unconditionally; a bare write (relation
+          -- NULL) touches neither \u2014 it can create a pair but never modify a
+          -- relation one already carries.
           relation = CASE
-            WHEN excluded.relation IS NOT NULL
-             AND ${rankExpression("excluded.provenance")}
-                 >= ${rankExpression("memory_edges.provenance")}
-            THEN excluded.relation
+            WHEN excluded.relation IS NOT NULL THEN excluded.relation
             ELSE memory_edges.relation
           END,
           provenance = CASE
-            WHEN ${rankExpression("excluded.provenance")}
-                 > ${rankExpression("memory_edges.provenance")}
-            THEN excluded.provenance
+            WHEN excluded.relation IS NOT NULL THEN excluded.provenance
             ELSE memory_edges.provenance
           END
       RETURNING ${EDGE_COLUMNS}
@@ -3289,6 +3285,30 @@ var MEMORY_EDGES_DDL = `
   CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
     ON memory_edges(cited_kind, cited_id, relation);
 `;
+var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
+    AFTER DELETE ON turns
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
+         OR (cited_kind = 'turn' AND cited_id = OLD.id);
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_segment
+    AFTER DELETE ON segments
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE (citing_kind = 'segment' AND citing_id = OLD.id)
+         OR (cited_kind = 'segment' AND cited_id = OLD.id);
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_session
+    AFTER DELETE ON sessions
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE citing_kind = 'session' AND citing_id = OLD.id;
+    END;
+`;
 function hasTable(db, table) {
   return db.query(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
@@ -3402,6 +3422,7 @@ function ensureMemoryEdgesSchema(db) {
     ensureMemoryEdgesPairIdentity(db);
   }
   db.exec(MEMORY_EDGES_DDL);
+  db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
   if (isFirstCreation) {
     migrateTurnCitationsToEdges(db);
   }

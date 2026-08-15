@@ -116,7 +116,7 @@ describe("universal memory edges", () => {
     expect(result.rejected.map((entry) => entry.reason)).toEqual(["invalid-node"]);
   });
 
-  test("re-writing a pair is idempotent and upgrades provenance only upward", () => {
+  test("re-writing a pair is idempotent, and a later relation-bearing write replaces provenance outright (spec C14: no rank test)", () => {
     const citing = addTurn(1);
     const cited = addTurn(2);
     const edge = {
@@ -131,7 +131,10 @@ describe("universal memory edges", () => {
 
     const stored = getOutgoingEdges(db, edge.citing);
     expect(stored).toHaveLength(1);
-    expect(stored[0]?.provenance).toBe("judged");
+    // The LAST relation-bearing write's provenance wins outright — no
+    // upward-only ratchet, because no rank test stands between an authorised
+    // write and the relation/provenance it sets.
+    expect(stored[0]?.provenance).toBe("retrieval");
     // First-sighting epoch survives: "when did this edge appear" stays answerable.
     expect(stored[0]?.createdAtEpoch).toBe(300);
   });
@@ -219,7 +222,7 @@ describe("universal memory edges", () => {
     expect(stored[0]?.relation).toBe("supersedes");
   });
 
-  test("a weaker source cannot overwrite a stronger source's relation", () => {
+  test("settlement corrects a relation the main agent asserted — no rank stands in the way (spec C7/C14)", () => {
     const citing = addTurn(1);
     const cited = addTurn(2);
     const pair = {
@@ -227,13 +230,17 @@ describe("universal memory edges", () => {
       cited: { kind: "turn" as const, id: cited },
     };
 
-    // `asserted` (main agent's own claim) outranks `judged` (settlement
-    // hindsight) — spec C7's "settlement over-reaches" finding is exactly why.
+    // The main agent's own write, `asserted` — the highest-ranked provenance
+    // under the OLD (removed) ordering.
     writeMemoryEdges(
       db,
       [{ ...pair, relation: "depends-on", provenance: "asserted" }],
       300,
     );
+    // Settlement later corrects it with hindsight. This is exactly the
+    // operation spec C7 exists to permit — a rank gate that made an
+    // `asserted` relation permanently immune to correction made C7
+    // unimplementable, which is why C14 removes it.
     writeMemoryEdges(
       db,
       [{ ...pair, relation: "supersedes", provenance: "judged" }],
@@ -241,8 +248,8 @@ describe("universal memory edges", () => {
     );
 
     const stored = getOutgoingEdges(db, pair.citing);
-    expect(stored[0]?.relation).toBe("depends-on");
-    expect(stored[0]?.provenance).toBe("asserted");
+    expect(stored[0]?.relation).toBe("supersedes");
+    expect(stored[0]?.provenance).toBe("judged");
   });
 
   test("naming the same target under two different relations in one call rejects both", () => {

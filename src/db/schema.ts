@@ -712,9 +712,19 @@ const SCHEMA_SQL = `
 // telling you how the edge was learned, spanning five sources (spec C12: it
 // must tell apart the main agent's own assertion `asserted`, a bare textual
 // reference `text-ref`, and a settlement attribution `judged`, which the
-// pre-ticket-05 column conflated). Conflicting writes upgrade the relation
-// and/or provenance rather than duplicating the edge — see
-// writeMemoryEdges in db/memory-edges.ts.
+// pre-ticket-05 column conflated). A conflicting write on an existing pair is
+// resolved by writeMemoryEdges (db/memory-edges.ts, spec C14): a
+// relation-bearing write replaces relation and provenance together,
+// unconditionally — no source ranking gates the correction — while a bare
+// write leaves both untouched.
+//
+// No FOREIGN KEY on citing_id/cited_id: one INTEGER column spans the turn,
+// segment and session id spaces, so a single REFERENCES clause can never be
+// correct for all three. Endpoint deletion is instead covered by kind-aware
+// `AFTER DELETE` triggers (spec C15, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL below)
+// that remove an edge naming a deleted turn, segment or (outgoing-only)
+// session — at the storage layer, so a cascade or a direct SQL delete cannot
+// bypass it the way the deletion APIs alone could.
 //
 // Kept out of SCHEMA_SQL on purpose: `turn_citations` is retired by ticket 05
 // (both alive on an insert-only migration was ruled out — spec C13), and its
@@ -741,6 +751,49 @@ const MEMORY_EDGES_DDL = `
 
   CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
     ON memory_edges(cited_kind, cited_id, relation);
+`;
+
+// Spec C15: the retired `turn_citations` table carried `ON DELETE CASCADE`;
+// `memory_edges` cannot, because citing_id/cited_id are shared across three
+// id spaces and a single REFERENCES clause would validate against the wrong
+// table for two of them. These triggers are the storage-layer replacement —
+// deliberately triggers rather than a check in the deletion APIs, because a
+// cascade (turns.session_id → sessions) or a direct SQL DELETE bypasses any
+// API-layer guard. Each is kind-aware in BOTH the citing and cited column: a
+// turn id and a segment id can collide numerically, so a trigger keyed on id
+// alone would delete the wrong node's edges.
+//
+// A session is never a citation TARGET (spec C10: `cited_kind` stays
+// turn/segment), so its trigger only needs the outgoing direction. Turns and
+// segments can be either endpoint, so both get both directions.
+//
+// SQLite fires AFTER DELETE triggers for rows removed by an ON DELETE CASCADE
+// action, not only for a direct DELETE — verified against this project's own
+// engine, not assumed — so deleting a session cascades to its turns (existing
+// FK) and each cascaded turn still fires memory_edges_prune_deleted_turn.
+const MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
+    AFTER DELETE ON turns
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
+         OR (cited_kind = 'turn' AND cited_id = OLD.id);
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_segment
+    AFTER DELETE ON segments
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE (citing_kind = 'segment' AND citing_id = OLD.id)
+         OR (cited_kind = 'segment' AND cited_id = OLD.id);
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_session
+    AFTER DELETE ON sessions
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE citing_kind = 'session' AND citing_id = OLD.id;
+    END;
 `;
 
 function hasTable(db: Database, table: string): boolean {
@@ -788,8 +841,11 @@ interface LegacyRelationCandidate {
  * candidate that remaps to a real relation always beats one that remaps to
  * null (losing a classification a stronger source assigned is worse than
  * discarding a weaker source's redundant bare mention); among relation-
- * bearing candidates the higher-authority provenance wins (the same lattice
- * `writeMemoryEdges` uses for a live conflict); ties fall back to a stable,
+ * bearing candidates the higher-authority provenance wins by
+ * `PROVENANCE_RANK` — this one-time historical collapse is that ranking's
+ * ONLY remaining use (spec C14 removed it from `writeMemoryEdges`'s live
+ * conflict resolution, which now replaces relation and provenance together
+ * unconditionally rather than ranking them); ties fall back to a stable,
  * arbitrary total order so the choice is deterministic. The returned
  * timestamp is the EARLIEST across every candidate, preserving "when did
  * this edge first appear" through the collapse.
@@ -942,6 +998,10 @@ function ensureMemoryEdgesSchema(db: Database): void {
     ensureMemoryEdgesPairIdentity(db);
   }
   db.exec(MEMORY_EDGES_DDL);
+  // Idempotent (CREATE TRIGGER IF NOT EXISTS) and safe to (re-)run on every
+  // process start, including on a database whose triggers already exist from
+  // an earlier version of this same function.
+  db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
 
   if (isFirstCreation) {
     migrateTurnCitationsToEdges(db);

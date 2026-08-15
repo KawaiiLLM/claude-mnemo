@@ -1456,6 +1456,30 @@ var MEMORY_EDGES_DDL = `
   CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
     ON memory_edges(cited_kind, cited_id, relation);
 `;
+var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
+    AFTER DELETE ON turns
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
+         OR (cited_kind = 'turn' AND cited_id = OLD.id);
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_segment
+    AFTER DELETE ON segments
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE (citing_kind = 'segment' AND citing_id = OLD.id)
+         OR (cited_kind = 'segment' AND cited_id = OLD.id);
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_session
+    AFTER DELETE ON sessions
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE citing_kind = 'session' AND citing_id = OLD.id;
+    END;
+`;
 function hasTable(db, table) {
   return db.query(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
@@ -1569,6 +1593,7 @@ function ensureMemoryEdgesSchema(db) {
     ensureMemoryEdgesPairIdentity(db);
   }
   db.exec(MEMORY_EDGES_DDL);
+  db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
   if (isFirstCreation) {
     migrateTurnCitationsToEdges(db);
   }
@@ -3468,7 +3493,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msua4jpp" : "dev";
+var BUILD_ID = true ? "0.10.0-msuaz1w8" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [

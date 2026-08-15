@@ -84,22 +84,21 @@ export interface WriteEdgeInput {
 }
 
 /**
- * Authority order, used only to settle a conflict on a PAIR that already
- * exists. Re-reading a cited turn ('retrieval') is the weakest signal; a
- * mechanical rollback pairing is a notch stronger; a bare textual reference
- * ('text-ref') is stronger still because a human named the pair; a
- * settlement judgement ('judged') outranks all three because it is a
- * considered classification, not a byproduct of some other action.
- * `asserted` — the main agent naming a relation in the SAME call that writes
- * the citing prose (spec C7/C12) — outranks even that: the argument and the
- * claim arrive together, the strongest evidence this system ever has for a
- * relation. This is also why C7 lets settlement CORRECT a relation but never
- * MINT one on a pair it did not watch get created — hindsight outranks
- * nothing here, it only gets to act where authorship left a gap.
+ * A relative ordering over `EdgeProvenance`, used ONLY by the one-time legacy
+ * `turn_citations` collapse in schema.ts (`pickWinningLegacyRelation`) to pick
+ * a deterministic winner among several rows the OLD five-column-key schema
+ * let the same pair hold at once. It plays NO role in `writeMemoryEdges`'s
+ * live upsert below.
  *
- * An edge's provenance can therefore only ever move UP: re-reading a cited
- * turn must not demote an edge the settlement pass (or the main agent)
- * already classified.
+ * It used to: a first implementation gated the live upsert on this order, so
+ * a relation an `asserted` write set could never be corrected by a `judged`
+ * settlement pass — which made spec C7 (settlement corrects with hindsight)
+ * unimplementable, and inverted C6 besides, since the bodyless structured
+ * write stamps every entry `asserted` regardless of whether any prose cites
+ * the target. Spec C14 removes the rank test from the write path entirely:
+ * eligibility belongs to each write path (ticket 07), not to a global
+ * ordering — a source ranking has no say in whether a relation may be
+ * corrected.
  */
 const PROVENANCE_RANK: Record<EdgeProvenance, number> = {
   retrieval: 0,
@@ -108,14 +107,6 @@ const PROVENANCE_RANK: Record<EdgeProvenance, number> = {
   judged: 3,
   asserted: 4,
 };
-
-/** `PROVENANCE_RANK` as a SQL expression, so the upgrade rule lives once. */
-function rankExpression(column: string): string {
-  const branches = Object.entries(PROVENANCE_RANK)
-    .map(([value, rank]) => `WHEN '${value}' THEN ${rank}`)
-    .join(" ");
-  return `(CASE ${column} ${branches} ELSE -1 END)`;
-}
 
 /** `PROVENANCE_RANK`, exposed for the one-time legacy collapse in schema.ts — kept in one place so the two never drift. */
 export function rankEdgeProvenance(provenance: EdgeProvenance): number {
@@ -218,15 +209,20 @@ function pairKey(edge: Pick<WriteEdgeInput, "citing" | "cited">): string {
 
 /**
  * Idempotent edge write. A repeat of the same (citing, cited) pair is not a
- * second row (spec C5): it upgrades the stored provenance when the new
- * source has more authority, and — independently — it lets a non-null
- * incoming relation REPLACE the stored one whenever the incoming provenance's
- * authority is at least the stored provenance's, which is what makes
- * "correcting a relation" a same-row update rather than a new insert. A
- * relation of `null` (a bare reference) never clears an existing relation:
- * weaker or merely-repeated information cannot retract a classification.
- * `created_at_epoch` stays at the first sighting so "when did this edge
- * appear" stays answerable.
+ * second row (spec C5): a non-null incoming relation REPLACES the stored
+ * relation AND the provenance recording where it came from, unconditionally —
+ * no source ranking stands between an authorised write and the relation it
+ * sets (spec C14). Eligibility — whether THIS call is entitled to set or
+ * correct a relation on THIS pair — is not this function's job; it belongs to
+ * each write path (ticket 07: a main-agent write needs the target cited in
+ * its own body's post-state, a settlement write needs the pair already
+ * present in its transaction's pre-state). A relation of `null` (a bare
+ * reference) never clears or relabels an existing relation, and never touches
+ * its provenance either — a citation in prose says the pair exists and says
+ * nothing about its relation, so relation and provenance move as one unit,
+ * driven only by a write that actually carries a relation. `created_at_epoch`
+ * stays at the first sighting so "when did this edge appear" stays
+ * answerable.
  *
  * Self-loops are rejected — a node confirming itself would inflate its own
  * in-degree, the one mechanical confirmation signal the ranking has.
@@ -237,7 +233,11 @@ function pairKey(edge: Pick<WriteEdgeInput, "citing" | "cited">): string {
  * letting array order silently pick a winner. Existence of the endpoints is
  * NOT checked here: callers that take model-supplied ids validate through
  * db/references.ts first, while mechanical callers (rollback pairing,
- * membership derivation) already hold rows.
+ * membership derivation) already hold rows. Endpoint DELETION is handled
+ * downstream of this function: spec C15's kind-aware `AFTER DELETE` triggers
+ * on `turns`/`segments`/`sessions` (schema.ts) remove an edge the moment
+ * either endpoint disappears, so this function never has to reason about
+ * dangling ids.
  */
 export function writeMemoryEdges(
   db: Database,
@@ -278,17 +278,17 @@ export function writeMemoryEdges(
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id)
         DO UPDATE SET
+          -- Spec C14: no rank test between an authorised write and the
+          -- relation it sets. A relation-bearing write replaces relation AND
+          -- provenance together, unconditionally; a bare write (relation
+          -- NULL) touches neither — it can create a pair but never modify a
+          -- relation one already carries.
           relation = CASE
-            WHEN excluded.relation IS NOT NULL
-             AND ${rankExpression("excluded.provenance")}
-                 >= ${rankExpression("memory_edges.provenance")}
-            THEN excluded.relation
+            WHEN excluded.relation IS NOT NULL THEN excluded.relation
             ELSE memory_edges.relation
           END,
           provenance = CASE
-            WHEN ${rankExpression("excluded.provenance")}
-                 > ${rankExpression("memory_edges.provenance")}
-            THEN excluded.provenance
+            WHEN excluded.relation IS NOT NULL THEN excluded.provenance
             ELSE memory_edges.provenance
           END
       RETURNING ${EDGE_COLUMNS}

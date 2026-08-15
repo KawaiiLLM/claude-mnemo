@@ -417,15 +417,15 @@ describe("turn_citations edge table", () => {
 
   // `memory_edges.citing_id`/`cited_id` carry no FOREIGN KEY at all (they
   // cannot: one INTEGER column is shared across turn, segment and session id
-  // spaces, so a single REFERENCES clause can never be correct). This is not
-  // new to ticket 05 — the table has always lacked it — but retiring
-  // `turn_citations` (which DID cascade via `ON DELETE CASCADE`) means this
-  // gap now applies to turn↔turn citations too. Deleting a turn or session
-  // ORPHANS its edges rather than removing them. This is deliberately left
-  // for the ticket that owns memory_edges's delete semantics (recompute-and-
-  // delete on a rewritten body) to account for — these two tests PIN the
-  // current gap so it is not silently reintroduced as "already handled".
-  test("deleting the cited endpoint's session orphans the edge rather than cascading (known gap, not this ticket's to close)", () => {
+  // spaces, so a single REFERENCES clause can never be correct). Retiring
+  // `turn_citations` (which DID cascade via `ON DELETE CASCADE`) made this
+  // load-bearing rather than merely untidy (spec C15): the segment ranking
+  // key's cited-by count reads memory_edges directly, so an orphaned edge
+  // inflates a surviving target's in-degree with a citer that no longer
+  // exists. The fix is schema.ts's kind-aware `AFTER DELETE` triggers on
+  // turns/segments/sessions; these two tests prove the endpoint's edges are
+  // actually gone afterward, not merely dangling.
+  test("deleting the cited endpoint's session removes its edges via the kind-aware delete trigger (spec C15)", () => {
     replaceTurnCitations(
       db,
       turns[1]!,
@@ -446,20 +446,22 @@ describe("turn_citations edge table", () => {
 
     db.query("DELETE FROM sessions WHERE id = ?").run(sessionA);
 
-    // The turns are gone (CASCADE on turns.session_id is intact), but the
-    // edges that named them survive, dangling.
+    // The turns are gone (CASCADE on turns.session_id is intact) …
     expect(
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM turns").get()!
         .count,
     ).toBe(1); // only foreignTurn (session B) remains
+    // … and the AFTER DELETE trigger fired for every cascaded turn row,
+    // removing both the edge that CITED turns[0] and the one turns[1] (also
+    // deleted) had CITING. Nothing dangles.
     expect(
       db.query<{ count: number }, []>(
         "SELECT COUNT(*) AS count FROM memory_edges WHERE citing_kind = 'turn' AND cited_kind = 'turn'",
       ).get()!.count,
-    ).toBe(2);
+    ).toBe(0);
   });
 
-  test("deleting the citing endpoint's session orphans the edge rather than cascading (known gap, not this ticket's to close)", () => {
+  test("deleting the citing endpoint's session removes only that endpoint's edges (spec C15)", () => {
     replaceTurnCitations(
       db,
       turns[1]!,
@@ -475,8 +477,8 @@ describe("turn_citations edge table", () => {
 
     db.query("DELETE FROM sessions WHERE id = ?").run(sessionB);
 
-    // Both edges are still there; the foreign one now names a citing_id that
-    // resolves to no live turn.
+    // foreignTurn is gone, so its outgoing edge is gone with it; turns[1]'s
+    // edge to turns[0] — neither endpoint deleted — survives untouched.
     expect(
       db
         .query<{ citingTurnId: number }, []>(
@@ -485,7 +487,7 @@ describe("turn_citations edge table", () => {
            ORDER BY citing_id`,
         )
         .all(),
-    ).toEqual([{ citingTurnId: turns[1]! }, { citingTurnId: foreignTurn }]);
+    ).toEqual([{ citingTurnId: turns[1]! }]);
   });
 
   test("rejects a duplicate (citing, cited) pair at the composite key (spec C5: relation is not part of identity)", () => {
