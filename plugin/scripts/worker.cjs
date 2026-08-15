@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msuaz1w8" : "dev";
+var BUILD_ID = true ? "0.10.0-msuck0qd" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");

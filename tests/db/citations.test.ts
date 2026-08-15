@@ -461,6 +461,66 @@ describe("turn_citations edge table", () => {
     ).toBe(0);
   });
 
+  // The two tests above reach the TURN trigger, and only that one — a session
+  // deletion gets there by cascading into `turns`. The segment and session
+  // triggers are separate SQL programs, and kind qualification exists in all
+  // three precisely because a turn id and a segment id are numbers drawn from
+  // independent sequences and will collide. An untested collision is the one
+  // failure this design was built to prevent.
+  test("a segment sharing a turn's id takes only its own edges when deleted (spec C15)", () => {
+    // Force the collision rather than hoping for it: the segment is given the
+    // id of a live turn, so every edge below is ambiguous on id alone and can
+    // only be resolved by kind.
+    const collidingId = turns[0]!;
+    db.query(
+      `INSERT INTO segments (id, title, content, created_at_epoch, updated_at_epoch)
+       VALUES (?, 'colliding segment', NULL, 500, 500)`,
+    ).run(collidingId);
+
+    const edge = db.query<unknown, [string, number, string, number]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES (?, ?, ?, ?, NULL, 'text-ref', 500)`,
+    );
+    edge.run("segment", collidingId, "turn", turns[1]!); // segment's outgoing
+    edge.run("turn", foreignTurn, "segment", collidingId); // segment's incoming
+    edge.run("turn", collidingId, "turn", foreignTurn); // the TURN of the same id
+
+    db.query("DELETE FROM segments WHERE id = ?").run(collidingId);
+
+    const survivors = db
+      .query<{ citingKind: string; citedKind: string }, []>(
+        "SELECT citing_kind AS citingKind, cited_kind AS citedKind FROM memory_edges",
+      )
+      .all();
+    // Both segment-touching edges are gone in BOTH directions, and the
+    // same-numbered turn's edge is untouched.
+    expect(survivors).toEqual([{ citingKind: "turn", citedKind: "turn" }]);
+  });
+
+  test("a session-sourced edge goes when its session does (spec C15)", () => {
+    // The only trigger with a single direction: nothing cites a session, so it
+    // prunes outgoing edges only.
+    db.query<unknown, [number, number]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('session', ?, 'turn', ?, 'depends-on', 'asserted', 500)`,
+    ).run(sessionB, foreignTurn);
+    expect(
+      db.query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM memory_edges WHERE citing_kind = 'session'",
+      ).get()!.count,
+    ).toBe(1);
+
+    db.query("DELETE FROM sessions WHERE id = ?").run(sessionB);
+
+    expect(
+      db.query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM memory_edges WHERE citing_kind = 'session'",
+      ).get()!.count,
+    ).toBe(0);
+  });
+
   test("deleting the citing endpoint's session removes only that endpoint's edges (spec C15)", () => {
     replaceTurnCitations(
       db,
