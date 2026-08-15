@@ -568,6 +568,61 @@ describe("universal memory edges", () => {
         expect(after).toEqual(before);
         expect(countMemoryEdges(db)).toBe(1);
       });
+
+      // C16's win is conditional on the citation SAYING something. `builds-on`
+      // remaps to NULL (spec C2) — the absence of a statement about the
+      // relation, not a statement that there is none. Unconditional, the
+      // fold-in would carry that NULL over a relation settlement had
+      // corrected, in one irreversible pass that then drops the source table.
+      test("a citation whose relation remapped to NULL contributes the pair, never a cleared relation", () => {
+        createLegacyTurnCitationsTable();
+        const citing = addTurn(1);
+        const cited = addTurn(2);
+        db.query(
+          `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
+           VALUES (?, ?, 'builds-on', 1000)`,
+        ).run(citing, cited);
+        // The edge side carries a real relation — the exact shape an
+        // unconditional citation win would erase.
+        db.query(
+          `INSERT INTO memory_edges
+             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, 'supersedes', 'judged', 2000)`,
+        ).run(citing, cited);
+
+        const migrated = migrateTurnCitationsToEdges(db);
+
+        const edge = readEdge({ citing, cited });
+        expect(edge?.relation).toBe("supersedes");
+        expect(edge?.provenance).toBe("judged");
+        // The age still corrects: the timestamp is pooled independently of the
+        // relation, so a relationless citation that predates the edge moves it
+        // earlier — which is also the change this call reports.
+        expect(edge?.createdAtEpoch).toBe(1000);
+        expect(migrated).toBe(1);
+      });
+
+      test("a relationless citation with nothing new to say changes nothing at all", () => {
+        createLegacyTurnCitationsTable();
+        const citing = addTurn(1);
+        const cited = addTurn(2);
+        db.query(
+          `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
+           VALUES (?, ?, 'builds-on', 3000)`,
+        ).run(citing, cited);
+        db.query(
+          `INSERT INTO memory_edges
+             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, 'supersedes', 'judged', 2000)`,
+        ).run(citing, cited);
+
+        expect(migrateTurnCitationsToEdges(db)).toBe(0);
+        expect(readEdge({ citing, cited })).toEqual({
+          relation: "supersedes",
+          provenance: "judged",
+          createdAtEpoch: 2000,
+        });
+      });
     });
   });
 });

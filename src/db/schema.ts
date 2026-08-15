@@ -1015,20 +1015,30 @@ function ensureMemoryEdgesSchema(db: Database): void {
  * one-way migration; now it is a step on the way to dropping that table
  * outright, see `retireLegacyTurnCitationsTable`).
  *
- * Spec C16: on an OVERLAPPING pair the citation side wins outright — its
- * relation and provenance overwrite whatever `memory_edges` already holds for
- * that pair, unconditionally. This is deliberately NOT the live upsert's C14
- * rule (`writeMemoryEdges`: a bare/relation-less write never clears an
- * existing relation) — this is a one-time historical fold-in with its own
- * rule, because the two graphs overlap almost entirely in production (every
- * citation pair already exists in the edge table) and `turn_citations` was
- * the timeline correction graph's replace-set truth right up to its
- * retirement, i.e. the side that was actually being read. Only
- * `created_at_epoch` is pooled rather than replaced: the EARLIER of the two
- * timestamps survives, so the fold-in can only move "when did this edge first
- * appear" earlier, never later. A pair present only in `memory_edges` is left
- * untouched — this function only ever iterates `turn_citations` rows, so it
- * has nothing to say about a pair that isn't one of them.
+ * Spec C16: on an OVERLAPPING pair the citation side wins — its relation and
+ * provenance overwrite whatever `memory_edges` already holds for that pair,
+ * with no rank test between them, because `turn_citations` was the timeline
+ * correction graph's replace-set truth right up to its retirement, i.e. the
+ * side that was actually being read.
+ *
+ * That win is conditional on the citation SAYING something. A `builds-on`
+ * citation remaps to NULL (`remapLegacyRelation`, spec C2), which is the
+ * absence of a statement about the relation and not a statement that there is
+ * none — so it contributes only the pair, exactly as the live upsert's C14
+ * rule already has it (`writeMemoryEdges` uses this same CASE). Without that
+ * condition the fold-in would carry a NULL over a relation settlement had
+ * corrected, in one irreversible pass that then drops the source table.
+ * Measured before landing: 0 of the 1182 overlapping pairs are in that shape
+ * today, so this closes an empty path — but an empty path in a one-shot
+ * migration is the cheapest kind to close.
+ *
+ * Only `created_at_epoch` is pooled rather than replaced: the EARLIER of the
+ * two timestamps survives, so the fold-in can only move "when did this edge
+ * first appear" earlier, never later — and it moves independently of the
+ * relation, so a relationless citation that predates the edge still corrects
+ * the age. A pair present only in `memory_edges` is left untouched — this
+ * function only ever iterates `turn_citations` rows, so it has nothing to say
+ * about a pair that isn't one of them.
  *
  * A pair the legacy table held under two relations (its wider key allowed
  * that) is collapsed to the single relation `pickWinningLegacyRelation`
@@ -1096,15 +1106,25 @@ export function migrateTurnCitationsToEdges(db: Database): number {
        relation, provenance, created_at_epoch
      ) VALUES ('turn', ?, 'turn', ?, ?, ?, ?)
      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id) DO UPDATE SET
-       -- Spec C16: the citation side wins outright on an overlap — no rank
-       -- test, unlike the live upsert's C14 rule (memory-edges.ts). Only the
-       -- timestamp is pooled rather than replaced: the earlier of the two
-       -- survives.
-       relation = excluded.relation,
-       provenance = excluded.provenance,
+       -- Spec C16: a citation that STATES a relation wins outright on an
+       -- overlap — no rank test. A citation whose relation remapped to NULL
+       -- ('builds-on') states nothing about the relation, so it contributes
+       -- only the pair and never clears one the edge already carries: the
+       -- same CASE the live upsert uses for C14 (memory-edges.ts), because
+       -- the reason is the same one. Only the timestamp is pooled rather
+       -- than replaced, and it can only move earlier.
+       relation = CASE
+         WHEN excluded.relation IS NOT NULL THEN excluded.relation
+         ELSE memory_edges.relation
+       END,
+       provenance = CASE
+         WHEN excluded.relation IS NOT NULL THEN excluded.provenance
+         ELSE memory_edges.provenance
+       END,
        created_at_epoch = MIN(memory_edges.created_at_epoch, excluded.created_at_epoch)
-     WHERE memory_edges.relation IS NOT excluded.relation
-        OR memory_edges.provenance IS NOT excluded.provenance
+     WHERE (excluded.relation IS NOT NULL
+            AND (memory_edges.relation IS NOT excluded.relation
+                 OR memory_edges.provenance IS NOT excluded.provenance))
         OR memory_edges.created_at_epoch > excluded.created_at_epoch
      RETURNING 1 AS inserted`,
   );

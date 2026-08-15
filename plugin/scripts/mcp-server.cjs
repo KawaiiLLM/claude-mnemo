@@ -8335,15 +8335,25 @@ function migrateTurnCitationsToEdges(db) {
        relation, provenance, created_at_epoch
      ) VALUES ('turn', ?, 'turn', ?, ?, ?, ?)
      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id) DO UPDATE SET
-       -- Spec C16: the citation side wins outright on an overlap \u2014 no rank
-       -- test, unlike the live upsert's C14 rule (memory-edges.ts). Only the
-       -- timestamp is pooled rather than replaced: the earlier of the two
-       -- survives.
-       relation = excluded.relation,
-       provenance = excluded.provenance,
+       -- Spec C16: a citation that STATES a relation wins outright on an
+       -- overlap \u2014 no rank test. A citation whose relation remapped to NULL
+       -- ('builds-on') states nothing about the relation, so it contributes
+       -- only the pair and never clears one the edge already carries: the
+       -- same CASE the live upsert uses for C14 (memory-edges.ts), because
+       -- the reason is the same one. Only the timestamp is pooled rather
+       -- than replaced, and it can only move earlier.
+       relation = CASE
+         WHEN excluded.relation IS NOT NULL THEN excluded.relation
+         ELSE memory_edges.relation
+       END,
+       provenance = CASE
+         WHEN excluded.relation IS NOT NULL THEN excluded.provenance
+         ELSE memory_edges.provenance
+       END,
        created_at_epoch = MIN(memory_edges.created_at_epoch, excluded.created_at_epoch)
-     WHERE memory_edges.relation IS NOT excluded.relation
-        OR memory_edges.provenance IS NOT excluded.provenance
+     WHERE (excluded.relation IS NOT NULL
+            AND (memory_edges.relation IS NOT excluded.relation
+                 OR memory_edges.provenance IS NOT excluded.provenance))
         OR memory_edges.created_at_epoch > excluded.created_at_epoch
      RETURNING 1 AS inserted`
   );
