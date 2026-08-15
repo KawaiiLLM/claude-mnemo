@@ -3,15 +3,22 @@ import type { Database } from "bun:sqlite";
 import type { TurnRecord } from "./turns";
 
 /**
- * Structured causal edges between turns (spec §B). The edge table is the machine
- * source of truth; the inline `[T<n>]` forms stay in prose for human readers and
- * remain the only signal for turns extracted before the edge table existed.
+ * Structured causal edges between turns (spec §B; identity/storage narrowed
+ * by ticket 05/spec C5, C13). `memory_edges` (db/memory-edges.ts) is the sole
+ * physical table — the legacy `turn_citations` table is retired outright
+ * (spec C13: two tables holding edges, with two consumers disagreeing about
+ * which one is current, was the bug). This module is the turn-scoped
+ * convenience API over it: every function here filters `memory_edges` to
+ * `turn`↔`turn` pairs and speaks in bare turn ids, the shape the rest of the
+ * codebase (remember.ts, timeline.ts) already expects. The inline `[T<n>]`
+ * forms stay in prose for human readers and remain the only signal for turns
+ * extracted before the edge table existed.
  */
 export const CITATION_RELATIONS = [
-  "builds-on",
-  "implements",
-  "supersedes",
   "evidence-for",
+  "evidence-against",
+  "supersedes",
+  "depends-on",
 ] as const;
 
 export type CitationRelation = (typeof CITATION_RELATIONS)[number];
@@ -218,16 +225,24 @@ export interface ReplaceTurnCitationsResult {
 const REPLACE_SAVEPOINT = "mnemo_replace_turn_citations";
 
 /**
- * Replace-set write (spec §B): the supplied array becomes the citing turn's
- * ENTIRE edge set, so a re-sent turn converges instead of accumulating. An
+ * Replace-set write (spec §B; storage narrowed by ticket 05/spec C5): the
+ * supplied array becomes the citing turn's ENTIRE turn→turn edge set in
+ * `memory_edges`, so a re-sent turn converges instead of accumulating. An
  * omitted `cites` field must never reach here (that means "no change"); an
- * explicit empty array clears the edges and still records the flag.
+ * explicit empty array clears the edges and still records the flag. Writes
+ * land with `provenance = 'asserted'` (spec C12) — the main agent authored
+ * the citing prose in the SAME call, so the argument and the claim arrive
+ * together, the strongest evidence this system has for a relation.
  *
  * Ids that are not positive integers, that do not resolve to an existing turn
  * (typo, not-yet-created "future" id), or that name the citing turn itself are
  * dropped PER EDGE with a log line and the rest is written — a whole-batch
  * rejection would throw away good edges over one bad id, and a self-loop would
- * let a turn confirm its own in-degree.
+ * let a turn confirm its own in-degree. The same target named twice under TWO
+ * DIFFERENT relations is also dropped on its second occurrence (spec C5: a
+ * pair carries at most one current relation, and a single batch cannot say
+ * which of two claims about the same pair is the correction) — the first
+ * relation seen for that target wins, exactly like an unresolvable id.
  *
  * Cross-session ids ARE written: they are provenance. Session-local consumers
  * (confirmation in-degree, victim demotion, ↳ rendering) exclude them at read
@@ -250,7 +265,7 @@ export function replaceTurnCitations(
 
   const written: TurnCitationEdge[] = [];
   const droppedIds: number[] = [];
-  const seen = new Set<string>();
+  const relationByTarget = new Map<number, CitationRelation>();
 
   for (const cite of cites) {
     const citedTurnId = cite?.id;
@@ -265,11 +280,17 @@ export function replaceTurnCitations(
       continue;
     }
 
-    const key = `${citedTurnId}:${cite.relation}`;
-    if (seen.has(key)) {
+    const existingRelation = relationByTarget.get(citedTurnId);
+    if (existingRelation !== undefined) {
+      // Same target seen again: a repeat of the SAME relation is a harmless
+      // dedupe (silently absorbed); a DIFFERENT relation is the "more than
+      // one relation field" case spec C5 requires rejecting.
+      if (existingRelation !== cite.relation) {
+        droppedIds.push(citedTurnId);
+      }
       continue;
     }
-    seen.add(key);
+    relationByTarget.set(citedTurnId, cite.relation);
     written.push({
       citingTurnId,
       citedTurnId,
@@ -287,13 +308,14 @@ export function replaceTurnCitations(
   db.exec(`SAVEPOINT ${REPLACE_SAVEPOINT}`);
   try {
     db.query<unknown, [number]>(
-      "DELETE FROM turn_citations WHERE citing_turn_id = ?",
+      `DELETE FROM memory_edges
+       WHERE citing_kind = 'turn' AND citing_id = ? AND cited_kind = 'turn'`,
     ).run(citingTurnId);
 
     const insert = db.query<unknown, [number, number, string, number]>(
-      `INSERT INTO turn_citations
-         (citing_turn_id, cited_turn_id, relation, created_at_epoch)
-       VALUES (?, ?, ?, ?)`,
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?)`,
     );
     for (const edge of written) {
       insert.run(
@@ -328,13 +350,14 @@ export function getTurnCitations(
   return db
     .query<TurnCitationEdge, [number]>(
       `SELECT
-         citing_turn_id AS citingTurnId,
-         cited_turn_id AS citedTurnId,
+         citing_id AS citingTurnId,
+         cited_id AS citedTurnId,
          relation,
          created_at_epoch AS createdAtEpoch
-       FROM turn_citations
-       WHERE citing_turn_id = ?
-       ORDER BY cited_turn_id ASC, relation ASC`,
+       FROM memory_edges
+       WHERE citing_kind = 'turn' AND citing_id = ?
+         AND cited_kind = 'turn' AND relation IS NOT NULL
+       ORDER BY cited_id ASC, relation ASC`,
     )
     .all(citingTurnId);
 }
@@ -442,15 +465,16 @@ export function getSessionEffectiveCitations(
   const edgeRows = db
     .query<TurnCitationEdge, [number, number]>(
       `SELECT
-         c.citing_turn_id AS citingTurnId,
-         c.cited_turn_id AS citedTurnId,
-         c.relation,
-         c.created_at_epoch AS createdAtEpoch
-       FROM turn_citations c
-       JOIN turns citing ON citing.id = c.citing_turn_id
-       JOIN turns cited ON cited.id = c.cited_turn_id
+         e.citing_id AS citingTurnId,
+         e.cited_id AS citedTurnId,
+         e.relation,
+         e.created_at_epoch AS createdAtEpoch
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
+       JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
        WHERE citing.session_id = ? AND cited.session_id = ?
-       ORDER BY c.citing_turn_id ASC, c.cited_turn_id ASC, c.relation ASC`,
+         AND e.relation IS NOT NULL
+       ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`,
     )
     .all(sessionId, sessionId);
   for (const edge of edgeRows) {
@@ -491,9 +515,10 @@ export function getSessionEffectiveCitations(
 
 /**
  * Session-local in-degree: for each cited turn in this session, how many turns
- * OF THE SAME SESSION cite it. Multiple relations between the same pair count
- * once — in-degree answers "how many turns consumed this", not "how many claims
- * were filed".
+ * OF THE SAME SESSION cite it. Multiple relations between the same pair cannot
+ * exist any more (spec C5), but the same pair discovered through two sources
+ * still counts once — in-degree answers "how many turns consumed this", not
+ * "how many claims were filed".
  *
  * Derived from the effective citations, NOT from the edge table alone: a legacy
  * turn (`cites_recorded = 0`) cites through its inline `[T<n>]` prose, and a

@@ -425,7 +425,7 @@ describe("settlement write-back", () => {
         },
       ],
       edges: [
-        { citing: "S1/T3", cited: "S1/T1", relation: "builds-on" },
+        { citing: "S1/T3", cited: "S1/T1", relation: "depends-on" },
         { citing: `E${existing.id}`, cited: "S1/T9999", relation: "supersedes" },
       ],
       reconstructed_notes: [
@@ -501,7 +501,7 @@ describe("settlement write-back", () => {
     });
     expect(judged).toHaveLength(1);
     expect(judged[0]!.provenance).toBe("judged");
-    expect(judged[0]!.relation).toBe("builds-on");
+    expect(judged[0]!.relation).toBe("depends-on");
 
     // BOTH holes reconstructed with settlement provenance now (spec D7, ticket
     // 05 — the old interior/trailing split, and the trailing refusal, are gone).

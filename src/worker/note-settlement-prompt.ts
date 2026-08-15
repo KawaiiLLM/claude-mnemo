@@ -48,7 +48,7 @@ const RESPONSE_SCHEMA = `{
     }
   ],
   "edges": [
-    { "citing": "S12/T33", "cited": "S12/T30", "relation": "builds-on" },
+    { "citing": "S12/T33", "cited": "S12/T30", "relation": "depends-on" },
     { "citing": "E47", "cited": "E31", "relation": "supersedes" }
   ],
   "reconstructed_notes": [
@@ -207,10 +207,11 @@ export function renderNoteSettlementPrompt(
     "   conclusion, not every member. Only ids shown in this prompt are legal.",
     "",
     "5. EDGES. Classify the dependencies you can see between turns and segments:",
-    `   relations are ${CITATION_RELATIONS.join(" / ")}. The four sources of an`,
-    "   edge are a retrieval hit, a citation in a note body, a rollback and",
-    "   retry pair, and your own reading of the window's sequence. Record what",
-    "   the sequence shows and the note bodies claim; a retry that replaces an",
+    `   relations are ${CITATION_RELATIONS.join(" / ")}. An edge can also arrive`,
+    "   from a retrieval hit, a citation in a note body, a rollback and retry",
+    "   pair, or the main agent naming a relation itself — you are adding one",
+    "   from your own reading of the window's sequence. Record what the",
+    "   sequence shows and the note bodies claim; a retry that replaces an",
     "   abandoned attempt is `supersedes`.",
     "",
     `6. SEGMENT TYPE AND TAG. Now that step 1 settled every member's own`,

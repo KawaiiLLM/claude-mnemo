@@ -970,13 +970,13 @@ describe("remember cites (structured citation edges)", () => {
       id: `T${turnIds[2]!}`,
       title: "First pass",
       grade: 3,
-      cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+      cites: [{ id: turnIds[0]!, relation: "evidence-for" }],
     });
     rememberTool(db, {
       id: `T${turnIds[2]!}`,
       title: "Second pass",
       grade: 3,
-      cites: [{ id: turnIds[1]!, relation: "implements" }],
+      cites: [{ id: turnIds[1]!, relation: "depends-on" }],
     });
 
     expect(
@@ -989,7 +989,7 @@ describe("remember cites (structured citation edges)", () => {
       id: `T${turnIds[2]!}`,
       title: "First pass",
       grade: 3,
-      cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+      cites: [{ id: turnIds[0]!, relation: "evidence-for" }],
     });
     const result = rememberTool(db, {
       id: `T${turnIds[2]!}`,
@@ -1009,7 +1009,7 @@ describe("remember cites (structured citation edges)", () => {
       id: `T${turnIds[2]!}`,
       title: "First pass",
       grade: 3,
-      cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+      cites: [{ id: turnIds[0]!, relation: "evidence-for" }],
     });
     const result = rememberTool(db, {
       id: `T${turnIds[2]!}`,
@@ -1031,7 +1031,7 @@ describe("remember cites (structured citation edges)", () => {
         title: "Cites a typo",
         grade: 3,
         cites: [
-          { id: turnIds[0]!, relation: "builds-on" },
+          { id: turnIds[0]!, relation: "evidence-for" },
           { id: 987_654, relation: "supersedes" },
         ],
       });
@@ -1053,8 +1053,8 @@ describe("remember cites (structured citation edges)", () => {
       title: "Says it twice",
       grade: 3,
       cites: [
-        { id: turnIds[0]!, relation: "builds-on" },
-        { id: turnIds[0]!, relation: "builds-on" },
+        { id: turnIds[0]!, relation: "evidence-for" },
+        { id: turnIds[0]!, relation: "evidence-for" },
       ],
     });
 
@@ -1072,10 +1072,10 @@ describe("remember cites (structured citation edges)", () => {
         title: "One good cite among the bad",
         grade: 3,
         cites: [
-          { id: 0, relation: "builds-on" },
+          { id: 0, relation: "evidence-for" },
           { id: 987_654, relation: "evidence-for" },
           { id: turnIds[2]!, relation: "supersedes" },
-          { id: turnIds[0]!, relation: "implements" },
+          { id: turnIds[0]!, relation: "depends-on" },
         ],
       });
 
@@ -1088,7 +1088,7 @@ describe("remember cites (structured citation edges)", () => {
           edge.citedTurnId,
           edge.relation,
         ]),
-      ).toEqual([[turnIds[0]!, "implements"]]);
+      ).toEqual([[turnIds[0]!, "depends-on"]]);
       expect(getTurnById(db, turnIds[2]!)?.citesRecorded).toBe(true);
     } finally {
       warn.mockRestore();
@@ -1100,7 +1100,7 @@ describe("remember cites (structured citation edges)", () => {
       id: `T${turnIds[2]!}`,
       title: "First pass",
       grade: 3,
-      cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+      cites: [{ id: turnIds[0]!, relation: "evidence-for" }],
     });
     const before = getTurnById(db, turnIds[2]!)!;
     const victimBefore = getTurnById(db, turnIds[0]!)!;
@@ -1109,8 +1109,8 @@ describe("remember cites (structured citation edges)", () => {
     // regrade that would follow, and the DELETE half of the replace-set must all
     // disappear — a cleared edge set is as wrong as a half-written one.
     db.exec(`
-      CREATE TRIGGER block_citation BEFORE INSERT ON turn_citations
-      WHEN NEW.cited_turn_id = ${turnIds[1]!}
+      CREATE TRIGGER block_citation BEFORE INSERT ON memory_edges
+      WHEN NEW.cited_kind = 'turn' AND NEW.cited_id = ${turnIds[1]!}
       BEGIN SELECT RAISE(ABORT, 'citation write blocked'); END;
     `);
 
@@ -1120,7 +1120,7 @@ describe("remember cites (structured citation edges)", () => {
         title: "Never lands",
         content: "Never lands either.",
         grade: 4,
-        cites: [{ id: turnIds[1]!, relation: "builds-on" }],
+        cites: [{ id: turnIds[1]!, relation: "evidence-for" }],
         regrade: { id: `T${turnIds[0]!}`, grade: 0 },
       }),
     ).toThrow();
@@ -1137,7 +1137,7 @@ describe("remember cites (structured citation edges)", () => {
       id: `T${turnIds[2]!}`,
       title: "First pass",
       grade: 3,
-      cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+      cites: [{ id: turnIds[0]!, relation: "evidence-for" }],
     });
     const before = getTurnById(db, turnIds[2]!)!;
     const victimBefore = getTurnById(db, turnIds[0]!)!;
@@ -1156,7 +1156,7 @@ describe("remember cites (structured citation edges)", () => {
         id: `T${turnIds[2]!}`,
         title: "Never lands",
         grade: 4,
-        cites: [{ id: turnIds[1]!, relation: "implements" }],
+        cites: [{ id: turnIds[1]!, relation: "depends-on" }],
         regrade: { id: `T${turnIds[0]!}`, grade: 0 },
       }),
     ).toThrow();
@@ -1183,7 +1183,7 @@ describe("remember cites (structured citation edges)", () => {
       id: `T${turnIds[2]!}`,
       title: "Races a delete",
       grade: 3,
-      cites: [{ id: turnIds[1]!, relation: "builds-on" }],
+      cites: [{ id: turnIds[1]!, relation: "evidence-for" }],
       regrade: { id: `T${turnIds[0]!}`, grade: 1 },
     });
 
@@ -1241,7 +1241,7 @@ describe("remember cites (structured citation edges)", () => {
         id: "T1",
         cites: [
           { id: 0, relation: "supersedes" },
-          { id: -3, relation: "builds-on" },
+          { id: -3, relation: "evidence-for" },
         ],
       }),
     ).not.toThrow();
@@ -1258,7 +1258,7 @@ describe("remember cites (structured citation edges)", () => {
     expect(
       rememberTool(db, {
         id: `O${observationId}`,
-        cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+        cites: [{ id: turnIds[0]!, relation: "evidence-for" }],
       }).content[0]?.text,
     ).toContain("Parameter error");
     expect(
@@ -1271,7 +1271,7 @@ describe("remember cites (structured citation edges)", () => {
         current: "c",
         next_steps: "n",
         reference: "r",
-        cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+        cites: [{ id: turnIds[0]!, relation: "evidence-for" }],
       }).content[0]?.text,
     ).toContain("does not accept grade, regrade, or cites");
   });

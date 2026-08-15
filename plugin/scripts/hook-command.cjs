@@ -389,6 +389,195 @@ function loadConfigEraCutoff() {
   }
 }
 
+// src/db/citations.ts
+var CITATION_RELATIONS = [
+  "evidence-for",
+  "evidence-against",
+  "supersedes",
+  "depends-on"
+];
+function isCitationRelation(value) {
+  return typeof value === "string" && CITATION_RELATIONS.includes(value);
+}
+var INLINE_RANGE_EXPANSION_CAP = 8;
+var RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
+var LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
+var LIST_ELEMENT_PATTERN = /T(\d+)/g;
+var SINGLE_PATTERN = /^T(\d+)$/;
+var ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
+function parsePositiveId(digits) {
+  const id = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+function* citationBracketBodies(content) {
+  let index = 0;
+  while (index < content.length) {
+    const open2 = content.indexOf("[", index);
+    if (open2 === -1) {
+      return;
+    }
+    const close = content.indexOf("]", open2 + 1);
+    if (close === -1) {
+      return;
+    }
+    const body = content.slice(open2 + 1, close);
+    index = close + 1;
+    if (body.includes("[")) {
+      continue;
+    }
+    yield body;
+  }
+}
+function expandBracketBody(body) {
+  if (/[\n\r]/.test(body)) {
+    return [];
+  }
+  const inner = body.trim();
+  const range = RANGE_PATTERN.exec(inner);
+  if (range) {
+    const start = parsePositiveId(range[1]);
+    const end = parsePositiveId(range[2]);
+    if (start === null || end === null || end < start) {
+      return [];
+    }
+    const span = end - start + 1;
+    if (span > INLINE_RANGE_EXPANSION_CAP) {
+      return [start, end];
+    }
+    const ids = [];
+    for (let id = start; id <= end; id += 1) {
+      ids.push(id);
+    }
+    return ids;
+  }
+  if (LIST_PATTERN.test(inner)) {
+    const ids = [];
+    LIST_ELEMENT_PATTERN.lastIndex = 0;
+    let element;
+    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
+      const id = parsePositiveId(element[1]);
+      if (id === null) {
+        return [];
+      }
+      ids.push(id);
+    }
+    return ids;
+  }
+  const single = SINGLE_PATTERN.exec(inner);
+  if (single) {
+    const id = parsePositiveId(single[1]);
+    return id === null ? [] : [id];
+  }
+  const annotated = ANNOTATED_PATTERN.exec(inner);
+  if (annotated) {
+    const id = parsePositiveId(annotated[1]);
+    return id === null ? [] : [id];
+  }
+  return [];
+}
+function parseInlineCitations(content, maxRefs) {
+  if (!content) {
+    return [];
+  }
+  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
+  if (cap <= 0) {
+    return [];
+  }
+  const ids = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const body of citationBracketBodies(content)) {
+    for (const id of expandBracketBody(body)) {
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      ids.push(id);
+      if (ids.length >= cap) {
+        return ids;
+      }
+    }
+  }
+  return ids;
+}
+function dedupeCitedIds(edges) {
+  const citedTurnIds = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (seen.has(edge.citedTurnId)) {
+      continue;
+    }
+    seen.add(edge.citedTurnId);
+    citedTurnIds.push(edge.citedTurnId);
+  }
+  return citedTurnIds;
+}
+function getSessionEffectiveCitations(db, sessionId) {
+  const turns = db.query(
+    `SELECT id, content, cites_recorded AS citesRecorded
+       FROM turns
+       WHERE session_id = ?
+       ORDER BY prompt_number ASC, id ASC`
+  ).all(sessionId);
+  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
+  const edgesByCiter = /* @__PURE__ */ new Map();
+  const edgeRows = db.query(
+    `SELECT
+         e.citing_id AS citingTurnId,
+         e.cited_id AS citedTurnId,
+         e.relation,
+         e.created_at_epoch AS createdAtEpoch
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
+       JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
+       WHERE citing.session_id = ? AND cited.session_id = ?
+         AND e.relation IS NOT NULL
+       ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
+  ).all(sessionId, sessionId);
+  for (const edge of edgeRows) {
+    if (edge.citedTurnId === edge.citingTurnId) {
+      continue;
+    }
+    const bucket = edgesByCiter.get(edge.citingTurnId);
+    if (bucket) {
+      bucket.push(edge);
+    } else {
+      edgesByCiter.set(edge.citingTurnId, [edge]);
+    }
+  }
+  const effective = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    if (turn.citesRecorded === 1) {
+      const edges = edgesByCiter.get(turn.id) ?? [];
+      effective.set(turn.id, {
+        source: "structured",
+        citedTurnIds: dedupeCitedIds(edges),
+        edges
+      });
+      continue;
+    }
+    effective.set(turn.id, {
+      source: "inline",
+      citedTurnIds: parseInlineCitations(turn.content).filter(
+        (id) => id !== turn.id && sessionTurnIds.has(id)
+      ),
+      edges: []
+    });
+  }
+  return effective;
+}
+
+// src/db/memory-edges.ts
+var PROVENANCE_RANK = {
+  retrieval: 0,
+  rollback: 1,
+  "text-ref": 2,
+  judged: 3,
+  asserted: 4
+};
+function rankEdgeProvenance(provenance) {
+  return PROVENANCE_RANK[provenance];
+}
+
 // src/db/search.ts
 var OBSERVATION_ORIGINAL_INDEX_CHARS = 500;
 function truncateOriginal(value) {
@@ -720,19 +909,6 @@ var SCHEMA_SQL = `
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     updated_at_epoch INTEGER NOT NULL
   );
-
-  CREATE TABLE IF NOT EXISTS turn_citations (
-    citing_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-    cited_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-    relation TEXT NOT NULL CHECK (
-      relation IN ('builds-on', 'implements', 'supersedes', 'evidence-for')
-    ),
-    created_at_epoch INTEGER NOT NULL,
-    PRIMARY KEY (citing_turn_id, cited_turn_id, relation)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_turn_citations_cited
-    ON turn_citations(cited_turn_id);
 
   CREATE TABLE IF NOT EXISTS settlement_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1262,18 +1438,19 @@ var SCHEMA_SQL = `
 `;
 var MEMORY_EDGES_DDL = `
   CREATE TABLE IF NOT EXISTS memory_edges (
-    citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment')),
+    citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
     citing_id INTEGER NOT NULL,
     cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
     cited_id INTEGER NOT NULL,
-    relation TEXT NOT NULL CHECK (
-      relation IN ('builds-on', 'implements', 'supersedes', 'evidence-for')
+    relation TEXT CHECK (
+      relation IS NULL OR
+      relation IN ('evidence-for', 'evidence-against', 'supersedes', 'depends-on')
     ),
     provenance TEXT NOT NULL CHECK (
-      provenance IN ('retrieval', 'text-ref', 'rollback', 'judged')
+      provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
     ),
     created_at_epoch INTEGER NOT NULL,
-    PRIMARY KEY (citing_kind, citing_id, cited_kind, cited_id, relation)
+    PRIMARY KEY (citing_kind, citing_id, cited_kind, cited_id)
   );
 
   CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
@@ -1284,8 +1461,113 @@ function hasTable(db, table) {
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
   ).get(table) !== null;
 }
+function remapLegacyRelation(relation) {
+  if (relation === "implements") {
+    return "depends-on";
+  }
+  if (relation === "builds-on") {
+    return null;
+  }
+  return isCitationRelation(relation) ? relation : null;
+}
+function pickWinningLegacyRelation(candidates) {
+  const remapped = candidates.map((candidate) => ({
+    relation: remapLegacyRelation(candidate.relation),
+    provenance: candidate.provenance,
+    createdAtEpoch: candidate.createdAtEpoch
+  }));
+  const winner = [...remapped].sort((left, right) => {
+    const leftHasRelation = left.relation !== null ? 1 : 0;
+    const rightHasRelation = right.relation !== null ? 1 : 0;
+    if (leftHasRelation !== rightHasRelation) {
+      return rightHasRelation - leftHasRelation;
+    }
+    const rankDiff = rankEdgeProvenance(right.provenance) - rankEdgeProvenance(left.provenance);
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+    if (left.relation !== right.relation) {
+      return (left.relation ?? "").localeCompare(right.relation ?? "");
+    }
+    return left.createdAtEpoch - right.createdAtEpoch;
+  })[0];
+  return {
+    relation: winner.relation,
+    // The winning candidate's OWN provenance travels with its relation — the
+    // same discipline a live upsert keeps (relation and provenance never come
+    // from two different rows). Only the timestamp is pooled across the whole
+    // group, preserving "when did this edge first appear" through the collapse.
+    provenance: winner.provenance,
+    createdAtEpoch: Math.min(...remapped.map((candidate) => candidate.createdAtEpoch))
+  };
+}
+function memoryEdgesSchemaIsStale(db) {
+  const storedDdl = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'depends-on'");
+}
+function collapseAndRebuildMemoryEdges(db) {
+  db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_pair_identity");
+  db.exec(MEMORY_EDGES_DDL);
+  const legacyRows = db.query(
+    `SELECT
+         citing_kind AS citingKind, citing_id AS citingId,
+         cited_kind AS citedKind, cited_id AS citedId,
+         relation, provenance, created_at_epoch AS createdAtEpoch
+       FROM memory_edges_pre_pair_identity`
+  ).all();
+  const groups = /* @__PURE__ */ new Map();
+  for (const row of legacyRows) {
+    const key = `${row.citingKind} ${row.citingId} ${row.citedKind} ${row.citedId}`;
+    const bucket = groups.get(key);
+    if (bucket) {
+      bucket.push(row);
+    } else {
+      groups.set(key, [row]);
+    }
+  }
+  const insert = db.query(
+    `INSERT INTO memory_edges (
+       citing_kind, citing_id, cited_kind, cited_id,
+       relation, provenance, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  for (const bucket of groups.values()) {
+    const sample = bucket[0];
+    const winner = pickWinningLegacyRelation(bucket);
+    insert.run(
+      sample.citingKind,
+      sample.citingId,
+      sample.citedKind,
+      sample.citedId,
+      winner.relation,
+      winner.provenance,
+      winner.createdAtEpoch
+    );
+  }
+  db.exec("DROP TABLE memory_edges_pre_pair_identity");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
+      ON memory_edges(cited_kind, cited_id, relation);
+  `);
+}
+function ensureMemoryEdgesPairIdentity(db) {
+  if (!memoryEdgesSchemaIsStale(db)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (!memoryEdgesSchemaIsStale(db)) {
+      return;
+    }
+    collapseAndRebuildMemoryEdges(db);
+  });
+}
 function ensureMemoryEdgesSchema(db) {
   const isFirstCreation = !hasTable(db, "memory_edges");
+  if (!isFirstCreation) {
+    ensureMemoryEdgesPairIdentity(db);
+  }
   db.exec(MEMORY_EDGES_DDL);
   if (isFirstCreation) {
     migrateTurnCitationsToEdges(db);
@@ -1295,22 +1577,60 @@ function migrateTurnCitationsToEdges(db) {
   if (!hasTable(db, "turn_citations") || !hasTable(db, "memory_edges")) {
     return 0;
   }
-  const result = db.query(
-    `
-        INSERT INTO memory_edges (
-          citing_kind, citing_id, cited_kind, cited_id,
-          relation, provenance, created_at_epoch
-        )
-        SELECT 'turn', citing_turn_id, 'turn', cited_turn_id,
-               relation, 'judged', created_at_epoch
-        FROM turn_citations
-        WHERE true
-        ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation)
-          DO NOTHING
-        RETURNING 1 AS migrated
-      `
-  ).all().length;
-  return result;
+  const rows = db.query(
+    `SELECT citing_turn_id AS citingTurnId, cited_turn_id AS citedTurnId,
+              relation, created_at_epoch AS createdAtEpoch
+       FROM turn_citations`
+  ).all();
+  if (rows.length === 0) {
+    return 0;
+  }
+  const groups = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const key = `${row.citingTurnId}:${row.citedTurnId}`;
+    const bucket = groups.get(key);
+    if (bucket) {
+      bucket.push(row);
+    } else {
+      groups.set(key, [row]);
+    }
+  }
+  const insert = db.query(
+    `INSERT INTO memory_edges (
+       citing_kind, citing_id, cited_kind, cited_id,
+       relation, provenance, created_at_epoch
+     ) VALUES ('turn', ?, 'turn', ?, ?, ?, ?)
+     ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id) DO NOTHING
+     RETURNING 1 AS inserted`
+  );
+  let migrated = 0;
+  for (const bucket of groups.values()) {
+    const sample = bucket[0];
+    const winner = pickWinningLegacyRelation(
+      bucket.map((row) => ({
+        relation: row.relation,
+        provenance: "judged",
+        createdAtEpoch: row.createdAtEpoch
+      }))
+    );
+    if (insert.get(
+      sample.citingTurnId,
+      sample.citedTurnId,
+      winner.relation,
+      winner.provenance,
+      winner.createdAtEpoch
+    )) {
+      migrated += 1;
+    }
+  }
+  return migrated;
+}
+function retireLegacyTurnCitationsTable(db) {
+  if (!hasTable(db, "turn_citations")) {
+    return;
+  }
+  migrateTurnCitationsToEdges(db);
+  db.exec("DROP TABLE turn_citations");
 }
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
@@ -1326,6 +1646,7 @@ function initializeSchema(db) {
   ensureTurnCitationsSchema(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
+  retireLegacyTurnCitationsTable(db);
   ensureSessionScanCursorColumns(db);
   ensureTurnCompactBoundarySchema(db);
   dropRetiredMaintenanceState(db);
@@ -3147,7 +3468,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-mstfnhib" : "dev";
+var BUILD_ID = true ? "0.10.0-msu9xw9c" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -20021,173 +20342,6 @@ function createPostToolUseHandler(dependencies) {
   };
 }
 
-// src/db/citations.ts
-var INLINE_RANGE_EXPANSION_CAP = 8;
-var RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
-var LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
-var LIST_ELEMENT_PATTERN = /T(\d+)/g;
-var SINGLE_PATTERN = /^T(\d+)$/;
-var ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
-function parsePositiveId(digits) {
-  const id = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
-}
-function* citationBracketBodies(content) {
-  let index = 0;
-  while (index < content.length) {
-    const open2 = content.indexOf("[", index);
-    if (open2 === -1) {
-      return;
-    }
-    const close = content.indexOf("]", open2 + 1);
-    if (close === -1) {
-      return;
-    }
-    const body = content.slice(open2 + 1, close);
-    index = close + 1;
-    if (body.includes("[")) {
-      continue;
-    }
-    yield body;
-  }
-}
-function expandBracketBody(body) {
-  if (/[\n\r]/.test(body)) {
-    return [];
-  }
-  const inner = body.trim();
-  const range = RANGE_PATTERN.exec(inner);
-  if (range) {
-    const start = parsePositiveId(range[1]);
-    const end = parsePositiveId(range[2]);
-    if (start === null || end === null || end < start) {
-      return [];
-    }
-    const span = end - start + 1;
-    if (span > INLINE_RANGE_EXPANSION_CAP) {
-      return [start, end];
-    }
-    const ids = [];
-    for (let id = start; id <= end; id += 1) {
-      ids.push(id);
-    }
-    return ids;
-  }
-  if (LIST_PATTERN.test(inner)) {
-    const ids = [];
-    LIST_ELEMENT_PATTERN.lastIndex = 0;
-    let element;
-    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
-      const id = parsePositiveId(element[1]);
-      if (id === null) {
-        return [];
-      }
-      ids.push(id);
-    }
-    return ids;
-  }
-  const single = SINGLE_PATTERN.exec(inner);
-  if (single) {
-    const id = parsePositiveId(single[1]);
-    return id === null ? [] : [id];
-  }
-  const annotated = ANNOTATED_PATTERN.exec(inner);
-  if (annotated) {
-    const id = parsePositiveId(annotated[1]);
-    return id === null ? [] : [id];
-  }
-  return [];
-}
-function parseInlineCitations(content, maxRefs) {
-  if (!content) {
-    return [];
-  }
-  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
-  if (cap <= 0) {
-    return [];
-  }
-  const ids = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const body of citationBracketBodies(content)) {
-    for (const id of expandBracketBody(body)) {
-      if (seen.has(id)) {
-        continue;
-      }
-      seen.add(id);
-      ids.push(id);
-      if (ids.length >= cap) {
-        return ids;
-      }
-    }
-  }
-  return ids;
-}
-function dedupeCitedIds(edges) {
-  const citedTurnIds = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (seen.has(edge.citedTurnId)) {
-      continue;
-    }
-    seen.add(edge.citedTurnId);
-    citedTurnIds.push(edge.citedTurnId);
-  }
-  return citedTurnIds;
-}
-function getSessionEffectiveCitations(db, sessionId) {
-  const turns = db.query(
-    `SELECT id, content, cites_recorded AS citesRecorded
-       FROM turns
-       WHERE session_id = ?
-       ORDER BY prompt_number ASC, id ASC`
-  ).all(sessionId);
-  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
-  const edgesByCiter = /* @__PURE__ */ new Map();
-  const edgeRows = db.query(
-    `SELECT
-         c.citing_turn_id AS citingTurnId,
-         c.cited_turn_id AS citedTurnId,
-         c.relation,
-         c.created_at_epoch AS createdAtEpoch
-       FROM turn_citations c
-       JOIN turns citing ON citing.id = c.citing_turn_id
-       JOIN turns cited ON cited.id = c.cited_turn_id
-       WHERE citing.session_id = ? AND cited.session_id = ?
-       ORDER BY c.citing_turn_id ASC, c.cited_turn_id ASC, c.relation ASC`
-  ).all(sessionId, sessionId);
-  for (const edge of edgeRows) {
-    if (edge.citedTurnId === edge.citingTurnId) {
-      continue;
-    }
-    const bucket = edgesByCiter.get(edge.citingTurnId);
-    if (bucket) {
-      bucket.push(edge);
-    } else {
-      edgesByCiter.set(edge.citingTurnId, [edge]);
-    }
-  }
-  const effective = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    if (turn.citesRecorded === 1) {
-      const edges = edgesByCiter.get(turn.id) ?? [];
-      effective.set(turn.id, {
-        source: "structured",
-        citedTurnIds: dedupeCitedIds(edges),
-        edges
-      });
-      continue;
-    }
-    effective.set(turn.id, {
-      source: "inline",
-      citedTurnIds: parseInlineCitations(turn.content).filter(
-        (id) => id !== turn.id && sessionTurnIds.has(id)
-      ),
-      edges: []
-    });
-  }
-  return effective;
-}
-
 // src/shared/type-vocabulary.ts
 var MEMORY_TYPES = [
   "research",
@@ -24028,7 +24182,7 @@ function convertOccupiedTurnToMarker(db, turnId, claim, nowEpoch) {
     turnId
   );
   db.query(
-    "DELETE FROM turn_citations WHERE citing_turn_id = ?"
+    "DELETE FROM memory_edges WHERE citing_kind = 'turn' AND citing_id = ?"
   ).run(turnId);
   reindexTurnFromDb(db, turnId);
   db.query(

@@ -66,7 +66,7 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: turnId },
           cited: { kind: "segment", id: segment.id },
-          relation: "builds-on",
+          relation: "depends-on",
           provenance: "retrieval",
         },
       ],
@@ -80,11 +80,40 @@ describe("universal memory edges", () => {
       {
         citing: { kind: "turn", id: turnId },
         cited: { kind: "segment", id: segment.id },
-        relation: "builds-on",
+        relation: "depends-on",
         provenance: "retrieval",
         createdAtEpoch: 300,
       },
     ]);
+  });
+
+  test("a session may cite (citing_kind admits session, spec C10) but never be cited", () => {
+    const segment = createSegment(db, { title: "Session-cited chapter", nowEpoch: 200 });
+
+    const result = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "session", id: sessionId },
+          cited: { kind: "segment", id: segment.id },
+          relation: "depends-on",
+          provenance: "asserted",
+        },
+        {
+          // A session can never be the TARGET of a relation — nothing "flows
+          // trust" toward a container the way it does toward a conclusion.
+          citing: { kind: "segment", id: segment.id },
+          cited: { kind: "session", id: sessionId } as never,
+          relation: null,
+          provenance: "text-ref",
+        },
+      ],
+      300,
+    );
+
+    expect(result.written).toHaveLength(1);
+    expect(result.written[0]?.citing).toEqual({ kind: "session", id: sessionId });
+    expect(result.rejected.map((entry) => entry.reason)).toEqual(["invalid-node"]);
   });
 
   test("re-writing a pair is idempotent and upgrades provenance only upward", () => {
@@ -93,7 +122,7 @@ describe("universal memory edges", () => {
     const edge = {
       citing: { kind: "turn" as const, id: citing },
       cited: { kind: "turn" as const, id: cited },
-      relation: "builds-on" as const,
+      relation: "depends-on" as const,
     };
 
     writeMemoryEdges(db, [{ ...edge, provenance: "retrieval" }], 300);
@@ -107,6 +136,146 @@ describe("universal memory edges", () => {
     expect(stored[0]?.createdAtEpoch).toBe(300);
   });
 
+  test("a bare (relation-less) write can be stored, and never clears an existing relation", () => {
+    const citing = addTurn(1);
+    const cited = addTurn(2);
+
+    // An unattributed citation — spec C5's whole point — must be storable.
+    const bare = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: cited },
+          relation: null,
+          provenance: "text-ref",
+        },
+      ],
+      300,
+    );
+    expect(bare.written).toHaveLength(1);
+    expect(bare.written[0]?.relation).toBeNull();
+
+    // A judged classification attaches to the same pair (spec C6/C7 territory,
+    // but the DB layer must support it): a correction updates the row.
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: cited },
+          relation: "supersedes",
+          provenance: "judged",
+        },
+      ],
+      400,
+    );
+
+    // A later bare re-mention (weaker signal) must NOT retract the relation.
+    const remention = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: cited },
+          relation: null,
+          provenance: "text-ref",
+        },
+      ],
+      500,
+    );
+
+    expect(remention.written[0]?.relation).toBe("supersedes");
+    const stored = getOutgoingEdges(db, { kind: "turn", id: citing });
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.relation).toBe("supersedes");
+    expect(stored[0]?.createdAtEpoch).toBe(300);
+  });
+
+  test("correcting a relation replaces the attribute rather than inserting a second row", () => {
+    const citing = addTurn(1);
+    const cited = addTurn(2);
+    const pair = {
+      citing: { kind: "turn" as const, id: citing },
+      cited: { kind: "turn" as const, id: cited },
+    };
+
+    writeMemoryEdges(
+      db,
+      [{ ...pair, relation: "depends-on", provenance: "judged" }],
+      300,
+    );
+    // Same-rank correction (another `judged` pass revising the earlier one) —
+    // must land as an UPDATE of the one row, not a second edge.
+    writeMemoryEdges(
+      db,
+      [{ ...pair, relation: "supersedes", provenance: "judged" }],
+      400,
+    );
+
+    expect(countMemoryEdges(db)).toBe(1);
+    const stored = getOutgoingEdges(db, pair.citing);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.relation).toBe("supersedes");
+  });
+
+  test("a weaker source cannot overwrite a stronger source's relation", () => {
+    const citing = addTurn(1);
+    const cited = addTurn(2);
+    const pair = {
+      citing: { kind: "turn" as const, id: citing },
+      cited: { kind: "turn" as const, id: cited },
+    };
+
+    // `asserted` (main agent's own claim) outranks `judged` (settlement
+    // hindsight) — spec C7's "settlement over-reaches" finding is exactly why.
+    writeMemoryEdges(
+      db,
+      [{ ...pair, relation: "depends-on", provenance: "asserted" }],
+      300,
+    );
+    writeMemoryEdges(
+      db,
+      [{ ...pair, relation: "supersedes", provenance: "judged" }],
+      400,
+    );
+
+    const stored = getOutgoingEdges(db, pair.citing);
+    expect(stored[0]?.relation).toBe("depends-on");
+    expect(stored[0]?.provenance).toBe("asserted");
+  });
+
+  test("naming the same target under two different relations in one call rejects both", () => {
+    const citing = addTurn(1);
+    const cited = addTurn(2);
+
+    const result = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: cited },
+          relation: "evidence-for",
+          provenance: "judged",
+        },
+        {
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: cited },
+          relation: "depends-on",
+          provenance: "judged",
+        },
+      ],
+      300,
+    );
+
+    expect(result.written).toHaveLength(0);
+    expect(result.rejected.map((entry) => entry.reason)).toEqual([
+      "conflicting-relation",
+      "conflicting-relation",
+    ]);
+    expect(countMemoryEdges(db)).toBe(0);
+  });
+
   test("rejects self-loops and malformed nodes without writing them", () => {
     const turnId = addTurn(1);
 
@@ -116,13 +285,13 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: turnId },
           cited: { kind: "turn", id: turnId },
-          relation: "builds-on",
+          relation: "depends-on",
           provenance: "text-ref",
         },
         {
           citing: { kind: "turn", id: turnId },
           cited: { kind: "turn", id: 0 },
-          relation: "builds-on",
+          relation: "depends-on",
           provenance: "text-ref",
         },
         {
@@ -155,19 +324,13 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: citerA },
           cited: { kind: "turn", id: cited },
-          relation: "builds-on",
+          relation: "depends-on",
           provenance: "retrieval",
-        },
-        {
-          citing: { kind: "turn", id: citerA },
-          cited: { kind: "turn", id: cited },
-          relation: "evidence-for",
-          provenance: "text-ref",
         },
         {
           citing: { kind: "turn", id: citerB },
           cited: { kind: "turn", id: cited },
-          relation: "builds-on",
+          relation: "evidence-for",
           provenance: "judged",
         },
       ],
@@ -177,7 +340,24 @@ describe("universal memory edges", () => {
     expect(getEdgeInDegree(db, { kind: "turn", id: cited })).toBe(2);
   });
 
-  describe("turn_citations migration", () => {
+  describe("legacy turn_citations retirement (spec C13)", () => {
+    // The legacy table no longer ships in fresh schema (ticket 05 retires it),
+    // so a fixture that wants one recreates its exact pre-ticket-05 shape —
+    // the same discipline schema.test.ts's migration fixtures use.
+    function createLegacyTurnCitationsTable(): void {
+      db.exec(`
+        CREATE TABLE turn_citations (
+          citing_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+          cited_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+          relation TEXT NOT NULL CHECK (
+            relation IN ('builds-on', 'implements', 'supersedes', 'evidence-for')
+          ),
+          created_at_epoch INTEGER NOT NULL,
+          PRIMARY KEY (citing_turn_id, cited_turn_id, relation)
+        );
+      `);
+    }
+
     function seedLegacyEdges(count: number): Array<{
       citing: number;
       cited: number;
@@ -217,14 +397,9 @@ describe("universal memory edges", () => {
       return rows;
     }
 
-    test("carries every legacy edge over with no loss of rows or content", () => {
+    test("carries every legacy pair over, remapping the retired vocabulary", () => {
+      createLegacyTurnCitationsTable();
       const legacy = seedLegacyEdges(12);
-      // Same pair under two relations: the migration must keep BOTH, since the
-      // edge key includes the relation.
-      db.query(
-        `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
-         VALUES (?, ?, 'supersedes', 1500)`,
-      ).run(legacy[0]!.citing, legacy[0]!.cited);
 
       db.query("DELETE FROM memory_edges").run();
       const migrated = migrateTurnCitationsToEdges(db);
@@ -234,28 +409,69 @@ describe("universal memory edges", () => {
           "SELECT COUNT(*) AS count FROM turn_citations",
         )
         .get()!.count;
-      expect(sourceCount).toBe(13);
-      expect(migrated).toBe(13);
-      expect(countMemoryEdges(db)).toBe(13);
+      expect(sourceCount).toBe(12);
+      // One row per PAIR (spec C5) — the legacy table's wider key is gone, so
+      // migrating 12 distinct pairs yields 12 rows, not 12 relations.
+      expect(migrated).toBe(12);
+      expect(countMemoryEdges(db)).toBe(12);
 
-      const missing = db
-        .query<{ count: number }, []>(
-          `SELECT COUNT(*) AS count
-           FROM turn_citations c
-           WHERE NOT EXISTS (
-             SELECT 1 FROM memory_edges e
-             WHERE e.citing_kind = 'turn' AND e.citing_id = c.citing_turn_id
-               AND e.cited_kind = 'turn' AND e.cited_id = c.cited_turn_id
-               AND e.relation = c.relation
-               AND e.created_at_epoch = c.created_at_epoch
-               AND e.provenance = 'judged'
-           )`,
+      // Spot-check the remap: `implements` (index 1, 5, 9) → `depends-on`;
+      // `builds-on` (index 0, 4, 8) → no relation, pair preserved;
+      // `supersedes`/`evidence-for` pass through unchanged.
+      const relationFor = (pairIndex: number): string | null =>
+        db
+          .query<{ relation: string | null }, [number, number]>(
+            `SELECT relation FROM memory_edges
+             WHERE citing_kind = 'turn' AND citing_id = ?
+               AND cited_kind = 'turn' AND cited_id = ?`,
+          )
+          .get(legacy[pairIndex]!.citing, legacy[pairIndex]!.cited)?.relation ?? null;
+
+      expect(relationFor(0)).toBeNull();
+      expect(relationFor(1)).toBe("depends-on");
+      expect(relationFor(2)).toBe("supersedes");
+      expect(relationFor(3)).toBe("evidence-for");
+
+      const provenances = db
+        .query<{ provenance: string }, []>(
+          "SELECT DISTINCT provenance FROM memory_edges",
         )
-        .get()!.count;
-      expect(missing).toBe(0);
+        .all()
+        .map((row) => row.provenance);
+      expect(provenances).toEqual(["judged"]);
+    });
+
+    test("collapses a pair the legacy table held under two relations to one row", () => {
+      createLegacyTurnCitationsTable();
+      const legacy = seedLegacyEdges(1);
+      // Same pair under a second, distinct legacy relation — legal there
+      // because relation was part of the old key.
+      db.query(
+        `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
+         VALUES (?, ?, 'supersedes', 1500)`,
+      ).run(legacy[0]!.citing, legacy[0]!.cited);
+
+      db.query("DELETE FROM memory_edges").run();
+      const migrated = migrateTurnCitationsToEdges(db);
+
+      expect(migrated).toBe(1);
+      expect(countMemoryEdges(db)).toBe(1);
+      // `supersedes` beats the `builds-on` row's remap-to-null under the
+      // "a real relation beats no relation" collapse rule.
+      const edge = db
+        .query<{ relation: string | null; createdAtEpoch: number }, [number, number]>(
+          `SELECT relation, created_at_epoch AS createdAtEpoch FROM memory_edges
+           WHERE citing_kind = 'turn' AND citing_id = ?
+             AND cited_kind = 'turn' AND cited_id = ?`,
+        )
+        .get(legacy[0]!.citing, legacy[0]!.cited);
+      expect(edge?.relation).toBe("supersedes");
+      // The earliest timestamp across the group survives the collapse.
+      expect(edge?.createdAtEpoch).toBe(1000);
     });
 
     test("is idempotent and never resurrects nor duplicates on a re-run", () => {
+      createLegacyTurnCitationsTable();
       seedLegacyEdges(5);
       db.query("DELETE FROM memory_edges").run();
 
@@ -266,14 +482,8 @@ describe("universal memory edges", () => {
       expect(countMemoryEdges(db)).toBe(5);
     });
 
-    test("runs once when the edge table is created, not on every open", () => {
-      seedLegacyEdges(3);
-      // Fresh open of the same database: the table already exists, so the
-      // one-time gate must not fire again.
-      const before = countMemoryEdges(db);
-      initializeSchema(db);
-
-      expect(before).toBe(0);
+    test("does nothing when the legacy table does not exist", () => {
+      expect(migrateTurnCitationsToEdges(db)).toBe(0);
       expect(countMemoryEdges(db)).toBe(0);
     });
   });

@@ -1049,7 +1049,7 @@ describe("initializeSchema", () => {
     expect(ftsCount.n).toBe(1);
   });
 
-  test("creates the citation edge table with its cited-id index", () => {
+  test("creates the universal edge table with its cited-id index, and never creates the retired turn_citations table (spec C13)", () => {
     initializeSchema(db);
 
     const tableNames = db
@@ -1058,15 +1058,16 @@ describe("initializeSchema", () => {
       )
       .all()
       .map((row) => row.name);
-    expect(tableNames).toContain("turn_citations");
+    expect(tableNames).toContain("memory_edges");
+    expect(tableNames).not.toContain("turn_citations");
 
     const indexNames = db
       .query<{ name: string }, []>(
-        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'turn_citations'",
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'memory_edges'",
       )
       .all()
       .map((row) => row.name);
-    expect(indexNames).toContain("idx_turn_citations_cited");
+    expect(indexNames).toContain("idx_memory_edges_cited");
 
     const columns = db
       .query<{ name: string }, []>("PRAGMA table_info(turns)")
@@ -1075,18 +1076,27 @@ describe("initializeSchema", () => {
     expect(columns).toContain("cites_recorded");
   });
 
-  test("reopening a pre-citations database adds the edge table and flag without touching rows", () => {
-    // A REAL pre-ticket database, not a toy schema: the current schema minus
-    // exactly the two things this ticket adds, written to a file, closed, then
-    // reopened through the production open path (initializeDatabase).
-    const directory = mkdtempSync(join(tmpdir(), "mnemo-cites-migration-"));
+  test("reopening a pre-ticket-05 database retires turn_citations and its rows land in memory_edges (spec C13)", () => {
+    // A REAL pre-ticket-05 database: turn_citations still exists under its
+    // old four-value CHECK (the shape SCHEMA_SQL no longer creates), written
+    // to a file, closed, then reopened through the production open path.
+    const directory = mkdtempSync(join(tmpdir(), "mnemo-turn-citations-retire-"));
     const path = join(directory, "memory.db");
 
     try {
       const before = createDatabase(path);
       initializeSchema(before);
-      before.exec("DROP TABLE turn_citations");
-      before.exec("ALTER TABLE turns DROP COLUMN cites_recorded");
+      before.exec(`
+        CREATE TABLE turn_citations (
+          citing_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+          cited_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+          relation TEXT NOT NULL CHECK (
+            relation IN ('builds-on', 'implements', 'supersedes', 'evidence-for')
+          ),
+          created_at_epoch INTEGER NOT NULL,
+          PRIMARY KEY (citing_turn_id, cited_turn_id, relation)
+        );
+      `);
       const sessionId = upsertSession(before, {
         contentSessionId: "cites-migration",
         project: "claude-mnemo",
@@ -1108,13 +1118,28 @@ describe("initializeSchema", () => {
            VALUES (?, 2, 'extracted', 'legacy turn', ?, 3) RETURNING id`,
         )
         .get(sessionId, `reverses [T${citedId}]`)!.id;
+      before
+        .query<unknown, [number, number]>(
+          `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
+           VALUES (?, ?, 'supersedes', 4)`,
+        )
+        .run(citerId, citedId);
       before.close();
 
       const migrated = createDatabase(path);
       try {
         initializeDatabase(migrated);
-        // Idempotent: a second open must not re-migrate or throw.
+        // Idempotent: a second open must not re-migrate, re-throw, or
+        // resurrect the legacy table.
         initializeDatabase(migrated);
+
+        const tableNames = migrated
+          .query<{ name: string }, []>(
+            "SELECT name FROM sqlite_master WHERE type = 'table'",
+          )
+          .all()
+          .map((row) => row.name);
+        expect(tableNames).not.toContain("turn_citations");
 
         // Old rows land on 0, never NULL — the legacy inline fallback stays on —
         // and no extraction field is rewritten.
@@ -1123,30 +1148,24 @@ describe("initializeSchema", () => {
         expect(row?.title).toBe("legacy turn");
         expect(row?.content).toBe(`reverses [T${citedId}]`);
 
-        // The predicate works end to end on the migrated database …
+        // The legacy row survived the retirement, relation intact — it was
+        // already legal in the new four-value vocabulary.
+        const edge = migrated
+          .query<{ relation: string | null }, [number, number]>(
+            `SELECT relation FROM memory_edges
+             WHERE citing_kind = 'turn' AND citing_id = ?
+               AND cited_kind = 'turn' AND cited_id = ?`,
+          )
+          .get(citerId, citedId);
+        expect(edge?.relation).toBe("supersedes");
+
+        // The inline predicate still works end to end for a turn whose flag
+        // was never set — the retirement did not touch that column.
         expect(getEffectiveCitations(migrated, row!)).toEqual({
           source: "inline",
           citedTurnIds: [citedId],
           edges: [],
         });
-
-        // … and the edge table is usable, with its foreign keys live.
-        expect(() =>
-          migrated
-            .query(
-              `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
-               VALUES (?, ?, 'supersedes', 4)`,
-            )
-            .run(citerId, citedId),
-        ).not.toThrow();
-        expect(() =>
-          migrated
-            .query(
-              `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
-               VALUES (?, 999999, 'supersedes', 4)`,
-            )
-            .run(citerId),
-        ).toThrow();
       } finally {
         migrated.close();
       }

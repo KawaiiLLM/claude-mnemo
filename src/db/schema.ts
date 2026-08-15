@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
 
+import { isCitationRelation, type CitationRelation } from "./citations";
 import { runWriteTransaction } from "./database";
+import { rankEdgeProvenance, type EdgeProvenance } from "./memory-edges";
 import { rebuildSearchIndex } from "./search";
 
 const MEMORY_FTS_DDL = `
@@ -166,19 +168,6 @@ const SCHEMA_SQL = `
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     updated_at_epoch INTEGER NOT NULL
   );
-
-  CREATE TABLE IF NOT EXISTS turn_citations (
-    citing_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-    cited_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-    relation TEXT NOT NULL CHECK (
-      relation IN ('builds-on', 'implements', 'supersedes', 'evidence-for')
-    ),
-    created_at_epoch INTEGER NOT NULL,
-    PRIMARY KEY (citing_turn_id, cited_turn_id, relation)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_turn_citations_cited
-    ON turn_citations(cited_turn_id);
 
   CREATE TABLE IF NOT EXISTS settlement_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -707,35 +696,47 @@ const SCHEMA_SQL = `
   ${MEMORY_FTS_DDL}
 `;
 
-// The universal edge table (spec D7). Nodes are (kind, id) pairs — `turn` or
-// `segment` — because the 0.8.4 turn_citations table cannot express a segment
-// endpoint at all, and a citation graph split across two tables would need every
-// reader to union them.
+// The universal edge table (spec D7; identity narrowed by ticket 05/spec C5,
+// C13). Nodes are (kind, id) pairs — `turn`, `segment`, or (citing side only,
+// C10) `session` — because the retired `turn_citations` table could not
+// express a segment endpoint at all, and a citation graph split across two
+// tables needed every reader to union them (spec C13's dual-graph bug: the
+// timeline's correction graph and the segment ranking key disagreed about the
+// same relation because they read different tables).
 //
-// PRIMARY KEY (citing, cited, relation) with `provenance` OUTSIDE the key: the
-// same pair discovered by retrieval and again by a text reference is ONE edge
-// (spec D8's de-duplication), and provenance is the audit layer telling you how
-// it was learned. Conflicting writes upgrade the provenance rather than
-// duplicating the edge — see db/memory-edges.ts.
+// PRIMARY KEY (citing, cited) — the PAIR is the identity. `relation` sits
+// OUTSIDE the key as a nullable ATTRIBUTE of the pair (spec C5): an
+// unattributed citation (a bare textual reference) is a real storable state,
+// and correcting a relation UPDATES the row instead of inserting a second one
+// under the same pair. `provenance` is also outside the key — the audit layer
+// telling you how the edge was learned, spanning five sources (spec C12: it
+// must tell apart the main agent's own assertion `asserted`, a bare textual
+// reference `text-ref`, and a settlement attribution `judged`, which the
+// pre-ticket-05 column conflated). Conflicting writes upgrade the relation
+// and/or provenance rather than duplicating the edge — see
+// writeMemoryEdges in db/memory-edges.ts.
 //
-// Kept out of SCHEMA_SQL on purpose: the turn_citations migration must run
-// exactly once, and "the table did not exist before this open" is the only
-// gate that survives a crash without a second bookkeeping row. The same idiom
-// as ensureForkLineageColumns' one-time backfill.
+// Kept out of SCHEMA_SQL on purpose: `turn_citations` is retired by ticket 05
+// (both alive on an insert-only migration was ruled out — spec C13), and its
+// rows are folded in exactly once by `retireLegacyTurnCitationsTable` before
+// the legacy table is dropped. "The table did not exist before this open" is
+// still the gate a fresh install uses to skip that fold — the same idiom as
+// ensureForkLineageColumns' one-time backfill.
 const MEMORY_EDGES_DDL = `
   CREATE TABLE IF NOT EXISTS memory_edges (
-    citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment')),
+    citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
     citing_id INTEGER NOT NULL,
     cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
     cited_id INTEGER NOT NULL,
-    relation TEXT NOT NULL CHECK (
-      relation IN ('builds-on', 'implements', 'supersedes', 'evidence-for')
+    relation TEXT CHECK (
+      relation IS NULL OR
+      relation IN ('evidence-for', 'evidence-against', 'supersedes', 'depends-on')
     ),
     provenance TEXT NOT NULL CHECK (
-      provenance IN ('retrieval', 'text-ref', 'rollback', 'judged')
+      provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
     ),
     created_at_epoch INTEGER NOT NULL,
-    PRIMARY KEY (citing_kind, citing_id, cited_kind, cited_id, relation)
+    PRIMARY KEY (citing_kind, citing_id, cited_kind, cited_id)
   );
 
   CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
@@ -752,8 +753,194 @@ function hasTable(db: Database, table: string): boolean {
   );
 }
 
+/**
+ * Legacy relation remap (spec C2, applied here because ticket 05's schema
+ * rebuild and the `turn_citations` fold are the only two places old
+ * four-value rows are ever read again). `implements` was measured at 96%
+ * `depends-on` — always a special case of dependency — so it remaps outright.
+ * `builds-on` split three ways under blind re-labelling (62% depends-on / 18%
+ * no relation / 16% evidence-for) with no per-row way to tell which is which;
+ * remapping it to any single new value would silently reinterpret roughly a
+ * third of it, which the ticket forbids ("builds-on is not depends-on at the
+ * row level, even though 62% of it measured that way"). It keeps its PAIR (a
+ * citation genuinely existed) and loses its RELATION — becomes bare/
+ * unattributed — rather than either being dropped or guessed at.
+ */
+function remapLegacyRelation(relation: string): CitationRelation | null {
+  if (relation === "implements") {
+    return "depends-on";
+  }
+  if (relation === "builds-on") {
+    return null;
+  }
+  return isCitationRelation(relation) ? relation : null;
+}
+
+interface LegacyRelationCandidate {
+  relation: string;
+  provenance: EdgeProvenance;
+  createdAtEpoch: number;
+}
+
+/**
+ * Collapses every candidate row a legacy (pre-ticket-05) schema allowed for
+ * ONE pair into the single row the new pair-identity schema can hold. A
+ * candidate that remaps to a real relation always beats one that remaps to
+ * null (losing a classification a stronger source assigned is worse than
+ * discarding a weaker source's redundant bare mention); among relation-
+ * bearing candidates the higher-authority provenance wins (the same lattice
+ * `writeMemoryEdges` uses for a live conflict); ties fall back to a stable,
+ * arbitrary total order so the choice is deterministic. The returned
+ * timestamp is the EARLIEST across every candidate, preserving "when did
+ * this edge first appear" through the collapse.
+ */
+function pickWinningLegacyRelation(
+  candidates: readonly LegacyRelationCandidate[],
+): { relation: CitationRelation | null; provenance: EdgeProvenance; createdAtEpoch: number } {
+  const remapped = candidates.map((candidate) => ({
+    relation: remapLegacyRelation(candidate.relation),
+    provenance: candidate.provenance,
+    createdAtEpoch: candidate.createdAtEpoch,
+  }));
+
+  const winner = [...remapped].sort((left, right) => {
+    const leftHasRelation = left.relation !== null ? 1 : 0;
+    const rightHasRelation = right.relation !== null ? 1 : 0;
+    if (leftHasRelation !== rightHasRelation) {
+      return rightHasRelation - leftHasRelation;
+    }
+    const rankDiff =
+      rankEdgeProvenance(right.provenance) - rankEdgeProvenance(left.provenance);
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+    if (left.relation !== right.relation) {
+      return (left.relation ?? "").localeCompare(right.relation ?? "");
+    }
+    return left.createdAtEpoch - right.createdAtEpoch;
+  })[0]!;
+
+  return {
+    relation: winner.relation,
+    // The winning candidate's OWN provenance travels with its relation — the
+    // same discipline a live upsert keeps (relation and provenance never come
+    // from two different rows). Only the timestamp is pooled across the whole
+    // group, preserving "when did this edge first appear" through the collapse.
+    provenance: winner.provenance,
+    createdAtEpoch: Math.min(...remapped.map((candidate) => candidate.createdAtEpoch)),
+  };
+}
+
+/**
+ * Ticket 05 (spec C5): identity narrows from (citing, cited, relation) to
+ * (citing, cited) — relation becomes a nullable ATTRIBUTE, so an unattributed
+ * citation can be stored and correcting a relation updates the row instead of
+ * inserting a second one. A CHECK constraint / PRIMARY KEY cannot be ALTERed,
+ * so a database still carrying the old five-column key needs a rebuild — and
+ * the rebuild must also COLLAPSE whatever that wider key allowed: a pair that
+ * carried two rows under two different relations now fits in one.
+ *
+ * Detection reads the stored DDL rather than a version counter, so a fresh
+ * database (created straight from the current MEMORY_EDGES_DDL) skips this —
+ * same idiom as `noteDebtReasonVocabularyIsStale`.
+ */
+function memoryEdgesSchemaIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'depends-on'");
+}
+
+function collapseAndRebuildMemoryEdges(db: Database): void {
+  db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_pair_identity");
+  db.exec(MEMORY_EDGES_DDL);
+
+  const legacyRows = db
+    .query<
+      {
+        citingKind: string;
+        citingId: number;
+        citedKind: string;
+        citedId: number;
+        relation: string;
+        provenance: EdgeProvenance;
+        createdAtEpoch: number;
+      },
+      []
+    >(
+      `SELECT
+         citing_kind AS citingKind, citing_id AS citingId,
+         cited_kind AS citedKind, cited_id AS citedId,
+         relation, provenance, created_at_epoch AS createdAtEpoch
+       FROM memory_edges_pre_pair_identity`,
+    )
+    .all();
+
+  const groups = new Map<string, typeof legacyRows>();
+  for (const row of legacyRows) {
+    const key = `${row.citingKind} ${row.citingId} ${row.citedKind} ${row.citedId}`;
+    const bucket = groups.get(key);
+    if (bucket) {
+      bucket.push(row);
+    } else {
+      groups.set(key, [row]);
+    }
+  }
+
+  const insert = db.query<
+    unknown,
+    [string, number, string, number, string | null, string, number]
+  >(
+    `INSERT INTO memory_edges (
+       citing_kind, citing_id, cited_kind, cited_id,
+       relation, provenance, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  for (const bucket of groups.values()) {
+    const sample = bucket[0]!;
+    const winner = pickWinningLegacyRelation(bucket);
+    insert.run(
+      sample.citingKind,
+      sample.citingId,
+      sample.citedKind,
+      sample.citedId,
+      winner.relation,
+      winner.provenance,
+      winner.createdAtEpoch,
+    );
+  }
+
+  db.exec("DROP TABLE memory_edges_pre_pair_identity");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
+      ON memory_edges(cited_kind, cited_id, relation);
+  `);
+}
+
+function ensureMemoryEdgesPairIdentity(db: Database): void {
+  // A read, not a decision: it only says whether taking the write lock is
+  // worth it — the same double-check idiom as ensureNoteDebtReasonVocabulary.
+  if (!memoryEdgesSchemaIsStale(db)) {
+    return;
+  }
+
+  runWriteTransaction(db, () => {
+    if (!memoryEdgesSchemaIsStale(db)) {
+      return;
+    }
+    collapseAndRebuildMemoryEdges(db);
+  });
+}
+
 function ensureMemoryEdgesSchema(db: Database): void {
   const isFirstCreation = !hasTable(db, "memory_edges");
+  if (!isFirstCreation) {
+    ensureMemoryEdgesPairIdentity(db);
+  }
   db.exec(MEMORY_EDGES_DDL);
 
   if (isFirstCreation) {
@@ -762,43 +949,119 @@ function ensureMemoryEdgesSchema(db: Database): void {
 }
 
 /**
- * Fold every turn↔turn citation edge into the universal table (spec D13:
- * "收编重造"). Idempotent — the edge primary key absorbs a re-run — so it is
- * safe to call again at the P2 switch to sweep up edges the legacy remember
- * path wrote after the one-time migration.
+ * Fold every turn↔turn citation edge the legacy `turn_citations` table still
+ * holds into the universal table (spec D13's original "收编重造", narrowed by
+ * ticket 05/spec C13 — the table this fed used to stay alive forever on a
+ * one-way migration; now it is a step on the way to dropping that table
+ * outright, see `retireLegacyTurnCitationsTable`). Idempotent — a pair
+ * already present in `memory_edges` is left untouched by `ON CONFLICT DO
+ * NOTHING`, so it is safe to call again.
  *
- * Legacy rows land on `judged` provenance: `turn_citations` was only ever
- * written from an extraction agent's explicit `cites` array, i.e. a model
- * assigned that relation. Calling them `text-ref` would claim the writer typed
- * the reference in prose, which the edge table cannot know.
+ * A pair the legacy table held under two relations (its wider key allowed
+ * that) is collapsed to the single relation `pickWinningLegacyRelation`
+ * selects, with the same builds-on/implements remap the schema rebuild uses
+ * (spec C2). Legacy rows land on `judged` provenance: `turn_citations` was
+ * only ever written from an explicit `cites` array, i.e. a writer assigned
+ * that relation directly, and `judged` is the closest of the new vocabulary's
+ * five values to "a model assigned this relation" without claiming it was
+ * `asserted` by the SAME call that wrote the citing prose, which the
+ * migration cannot know for certain rows this old.
  *
- * Returns the number of edges present for the migrated pairs, so a caller (and
- * the migration test) can assert zero loss against the source table.
+ * Returns the number of pairs newly inserted, so a caller (and the migration
+ * test) can assert zero loss against the source table and idempotency on a
+ * re-run.
  */
 export function migrateTurnCitationsToEdges(db: Database): number {
   if (!hasTable(db, "turn_citations") || !hasTable(db, "memory_edges")) {
     return 0;
   }
 
-  const result = db
-    .query<{ migrated: number }, []>(
-      `
-        INSERT INTO memory_edges (
-          citing_kind, citing_id, cited_kind, cited_id,
-          relation, provenance, created_at_epoch
-        )
-        SELECT 'turn', citing_turn_id, 'turn', cited_turn_id,
-               relation, 'judged', created_at_epoch
-        FROM turn_citations
-        WHERE true
-        ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation)
-          DO NOTHING
-        RETURNING 1 AS migrated
-      `,
+  const rows = db
+    .query<
+      {
+        citingTurnId: number;
+        citedTurnId: number;
+        relation: string;
+        createdAtEpoch: number;
+      },
+      []
+    >(
+      `SELECT citing_turn_id AS citingTurnId, cited_turn_id AS citedTurnId,
+              relation, created_at_epoch AS createdAtEpoch
+       FROM turn_citations`,
     )
-    .all().length;
+    .all();
+  if (rows.length === 0) {
+    return 0;
+  }
 
-  return result;
+  const groups = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const key = `${row.citingTurnId}:${row.citedTurnId}`;
+    const bucket = groups.get(key);
+    if (bucket) {
+      bucket.push(row);
+    } else {
+      groups.set(key, [row]);
+    }
+  }
+
+  const insert = db.query<
+    { inserted: number },
+    [number, number, string | null, string, number]
+  >(
+    `INSERT INTO memory_edges (
+       citing_kind, citing_id, cited_kind, cited_id,
+       relation, provenance, created_at_epoch
+     ) VALUES ('turn', ?, 'turn', ?, ?, ?, ?)
+     ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id) DO NOTHING
+     RETURNING 1 AS inserted`,
+  );
+
+  let migrated = 0;
+  for (const bucket of groups.values()) {
+    const sample = bucket[0]!;
+    // Every candidate here carries `judged` provenance (turn_citations was
+    // only ever written from an explicit `cites` array), so the picker's
+    // provenance rank comparison is always a tie and the relation choice
+    // falls to "has one" then lexicographic order — deterministic, and the
+    // returned provenance is always `judged` in practice.
+    const winner = pickWinningLegacyRelation(
+      bucket.map((row) => ({
+        relation: row.relation,
+        provenance: "judged" as const,
+        createdAtEpoch: row.createdAtEpoch,
+      })),
+    );
+    if (
+      insert.get(
+        sample.citingTurnId,
+        sample.citedTurnId,
+        winner.relation,
+        winner.provenance,
+        winner.createdAtEpoch,
+      )
+    ) {
+      migrated += 1;
+    }
+  }
+
+  return migrated;
+}
+
+// Ticket 05 (spec C13): the dual edge graph is resolved by collapsing to
+// `memory_edges` and retiring `turn_citations` outright — "both alive on an
+// insert-only migration is not an outcome" is the spec's own words. Every row
+// the legacy table could still hold is folded in first (idempotent, safe to
+// repeat), then the table is dropped so nothing can ever write it again or
+// resurrect the two-table disagreement between the timeline's correction
+// graph and the segment ranking key.
+function retireLegacyTurnCitationsTable(db: Database): void {
+  if (!hasTable(db, "turn_citations")) {
+    return;
+  }
+  migrateTurnCitationsToEdges(db);
+  db.exec("DROP TABLE turn_citations");
 }
 
 export function initializeSchema(db: Database): void {
@@ -815,6 +1078,7 @@ export function initializeSchema(db: Database): void {
   ensureTurnCitationsSchema(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
+  retireLegacyTurnCitationsTable(db);
   ensureSessionScanCursorColumns(db);
   ensureTurnCompactBoundarySchema(db);
   dropRetiredMaintenanceState(db);
@@ -1191,13 +1455,14 @@ function ensureTurnSignificanceGradeColumn(db: Database): void {
   );
 }
 
-// Structured citation edges (spec §B). The table itself comes from SCHEMA_SQL
-// (`CREATE TABLE IF NOT EXISTS`), so an old database gets it on open; only the
-// `turns.cites_recorded` flag needs an ALTER. The flag — not a created-at epoch
-// — is the "from-absent vs recorded-empty" predicate: a turn created before this
-// deployment but extracted after it must still count as recorded, and a turn
-// that genuinely cites nothing must be distinguishable from one that predates
-// the edge table. Old rows land on 0 (never NULL) → legacy inline fallback.
+// Structured citation edges (spec §B). The edge table itself is
+// `memory_edges` (ensureMemoryEdgesSchema); this function only carries the
+// `turns.cites_recorded` flag forward by ALTER on a database that predates
+// it. The flag — not a created-at epoch — is the "from-absent vs
+// recorded-empty" predicate: a turn created before this deployment but
+// extracted after it must still count as recorded, and a turn that genuinely
+// cites nothing must be distinguishable from one that predates the edge
+// table. Old rows land on 0 (never NULL) → legacy inline fallback.
 function ensureTurnCitationsSchema(db: Database): void {
   addColumnIfMissing(db, "turns", "cites_recorded", "INTEGER NOT NULL DEFAULT 0");
 }

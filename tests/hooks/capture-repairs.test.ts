@@ -322,17 +322,20 @@ describe("capture repairs", () => {
 
     function seedCitations(turnId: number, neighbourId: number): void {
       db.query(
-        `INSERT INTO turn_citations
-           (citing_turn_id, cited_turn_id, relation, created_at_epoch)
-         VALUES (?, ?, 'builds-on', 700), (?, ?, 'evidence-for', 701)`,
+        `INSERT INTO memory_edges
+           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, 'depends-on', 'judged', 700),
+                ('turn', ?, 'turn', ?, 'evidence-for', 'judged', 701)`,
       ).run(turnId, neighbourId, neighbourId, turnId);
     }
 
     function citationPairs(): Array<[number, number]> {
       return db
         .query<{ citing: number; cited: number }, []>(
-          `SELECT citing_turn_id AS citing, cited_turn_id AS cited
-           FROM turn_citations ORDER BY citing, cited`,
+          `SELECT citing_id AS citing, cited_id AS cited
+           FROM memory_edges
+           WHERE citing_kind = 'turn' AND cited_kind = 'turn'
+           ORDER BY citing, cited`,
         )
         .all()
         .map((row) => [row.citing, row.cited] as [number, number]);

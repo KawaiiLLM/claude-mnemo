@@ -124,7 +124,7 @@ function seedEraFixture(
       {
         citing: { kind: "turn", id: ids.citer! },
         cited: { kind: "turn", id: ids.orphan! },
-        relation: "builds-on",
+        relation: "depends-on",
         provenance: "judged",
       },
     ],

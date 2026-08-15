@@ -1408,12 +1408,15 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     Math.floor(Date.now() / 1000),
   );
   const eraCutoffEpoch = config.eraCutoffEpoch ?? recordedEraCutoff;
-  // The cutover catch-up (spec D13, "收编重造"). `turn_citations` was folded into
-  // `memory_edges` once, when the edge table was created, and the legacy
-  // `remember` route kept appending to the source table afterwards — an
-  // increment the one-time migration cannot see. Re-running it here is idempotent
-  // (the edge primary key absorbs it) and belongs to the worker rather than to
-  // `initializeDatabase`, which every hook process runs on its critical path.
+  // The cutover catch-up (spec D13, "收编重造"; table retired outright by
+  // ticket 05). `initializeDatabase` already folds any surviving legacy
+  // `turn_citations` rows into `memory_edges` and drops the table on the FIRST
+  // process to open a pre-ticket-05 database — but that runs on every hook
+  // process's critical path, so it cannot be where a slow, best-effort sweep
+  // lives. This call is now a safety net for whatever window exists between a
+  // hook process finishing that drop and this worker tick observing it: once
+  // the table is gone, `migrateTurnCitationsToEdges` is a guarded no-op
+  // (idempotent either way — the pair primary key absorbs a re-run).
   try {
     migrateTurnCitationsToEdges(db);
   } catch (error) {

@@ -64,14 +64,15 @@ import type {
  * rolled back for it (裁决 14).
  */
 
-/** Relation an anchor citation in a segment body records. */
-const ANCHOR_RELATION: CitationRelation = "builds-on";
-
 /**
- * Anchors come from the segment's own text, so they are `text-ref`; the edges
- * the model classified explicitly are `judged` and outrank them on the
+ * Anchor citations in a segment body carry NO relation (spec C11): a segment
+ * is definitionally an aggregation of its members, so stamping a relation
+ * word on the edge that merely records membership was tautology. Anchors are
+ * `text-ref` provenance — they come from the segment's own text — and the
+ * edges the model classified explicitly are `judged` and outrank them on the
  * provenance lattice when both name the same pair.
  */
+const ANCHOR_RELATION: CitationRelation | null = null;
 const ANCHOR_PROVENANCE: EdgeProvenance = "text-ref";
 const JUDGED_PROVENANCE: EdgeProvenance = "judged";
 

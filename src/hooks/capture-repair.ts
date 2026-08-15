@@ -171,11 +171,13 @@ function compactMetadataTags(claim: CompactBoundaryClaim): string[] {
  * Citations get an asymmetric treatment on purpose. The outgoing edges were
  * produced by the phantom extraction that is being erased, so leaving them would
  * feed in-degree confirmation with citations no surviving text makes; they are
- * deleted. Incoming edges are a different thing entirely — provenance written by
- * OTHER turns about this one — and survive. `cites_recorded = 1` makes the now-
- * empty outgoing set authoritative instead of "unknown, go parse inline [T<n>]
- * out of content" (content is NULL after this, so the fallback would find none
- * anyway, but the predicate must state the fact rather than imply it).
+ * deleted from `memory_edges` (the sole edge table since ticket 05 retired
+ * `turn_citations`). Incoming edges are a different thing entirely — provenance
+ * written by OTHER turns about this one — and survive. `cites_recorded = 1`
+ * makes the now-empty outgoing set authoritative instead of "unknown, go parse
+ * inline [T<n>] out of content" (content is NULL after this, so the fallback
+ * would find none anyway, but the predicate must state the fact rather than
+ * imply it).
  */
 function convertOccupiedTurnToMarker(
   db: Database,
@@ -210,9 +212,10 @@ function convertOccupiedTurnToMarker(
     turnId,
   );
 
-  // Outgoing only. `cited_turn_id = ?` rows are other turns' provenance.
+  // Outgoing only. Rows citing this turn (`cited_id = ?`) are other turns'
+  // provenance, not this row's, and survive.
   db.query<unknown, [number]>(
-    "DELETE FROM turn_citations WHERE citing_turn_id = ?",
+    "DELETE FROM memory_edges WHERE citing_kind = 'turn' AND citing_id = ?",
   ).run(turnId);
 
   // The cleared row must not keep answering recall with its old extraction, so

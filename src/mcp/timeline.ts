@@ -1055,7 +1055,7 @@ export interface CorrectionGraph {
  *
  * BOTH gates are load-bearing. Era alone is not enough: a structured edge is
  * authoritative wherever it exists (spec §B), including on a turn created before
- * the cutoff and extracted after it. Such a turn's `builds-on` / `evidence-for`
+ * the cutoff and extracted after it. Such a turn's `depends-on` / `evidence-for`
  * edge states a relation, and that relation is not `supersedes`; reading the
  * victim's tag over it would invent a correction the extractor declined to
  * record, demoting the target and promoting a mere consumer.

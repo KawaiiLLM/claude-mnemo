@@ -196,13 +196,13 @@ describe("turn_citations edge table", () => {
     replaceTurnCitations(
       db,
       turns[2]!,
-      [{ id: turns[0]!, relation: "builds-on" }],
+      [{ id: turns[0]!, relation: "evidence-for" }],
       500,
     );
     replaceTurnCitations(
       db,
       turns[2]!,
-      [{ id: turns[1]!, relation: "implements" }],
+      [{ id: turns[1]!, relation: "depends-on" }],
       600,
     );
 
@@ -210,7 +210,7 @@ describe("turn_citations edge table", () => {
       {
         citingTurnId: turns[2]!,
         citedTurnId: turns[1]!,
-        relation: "implements",
+        relation: "depends-on",
         createdAtEpoch: 600,
       },
     ]);
@@ -220,7 +220,7 @@ describe("turn_citations edge table", () => {
     replaceTurnCitations(
       db,
       turns[2]!,
-      [{ id: turns[0]!, relation: "builds-on" }],
+      [{ id: turns[0]!, relation: "evidence-for" }],
       500,
     );
     replaceTurnCitations(db, turns[2]!, [], 600);
@@ -229,22 +229,27 @@ describe("turn_citations edge table", () => {
     expect(getTurnById(db, turns[2]!)?.citesRecorded).toBe(true);
   });
 
-  test("de-duplicates repeated edges but keeps distinct relations", () => {
+  test("de-duplicates a repeated identical edge but rejects a conflicting relation on the same target (spec C5)", () => {
     const result = replaceTurnCitations(
       db,
       turns[2]!,
       [
-        { id: turns[0]!, relation: "builds-on" },
-        { id: turns[0]!, relation: "builds-on" },
+        { id: turns[0]!, relation: "evidence-for" },
+        { id: turns[0]!, relation: "evidence-for" },
         { id: turns[0]!, relation: "supersedes" },
       ],
       500,
     );
 
-    expect(result.written).toHaveLength(2);
+    // The identical repeat collapses silently; the same target under a
+    // SECOND, different relation is dropped — a pair carries at most one
+    // current relation, and a single batch cannot say which of two claims
+    // about the same pair is the correction.
+    expect(result.written).toHaveLength(1);
+    expect(result.droppedIds).toEqual([turns[0]!]);
     expect(
       getTurnCitations(db, turns[2]!).map((edge) => edge.relation),
-    ).toEqual(["builds-on", "supersedes"]);
+    ).toEqual(["evidence-for"]);
   });
 
   test("drops unresolvable and self ids with a log line and writes the rest", () => {
@@ -254,8 +259,8 @@ describe("turn_citations edge table", () => {
         db,
         turns[2]!,
         [
-          { id: turns[0]!, relation: "builds-on" },
-          { id: 999_999, relation: "builds-on" },
+          { id: turns[0]!, relation: "evidence-for" },
+          { id: 999_999, relation: "evidence-for" },
           { id: turns[2]!, relation: "supersedes" },
         ],
         500,
@@ -278,11 +283,11 @@ describe("turn_citations edge table", () => {
         db,
         turns[2]!,
         [
-          { id: 0, relation: "builds-on" },
-          { id: -3, relation: "builds-on" },
+          { id: 0, relation: "evidence-for" },
+          { id: -3, relation: "evidence-for" },
           { id: 999_999, relation: "evidence-for" },
           { id: turns[2]!, relation: "supersedes" },
-          { id: turns[0]!, relation: "implements" },
+          { id: turns[0]!, relation: "depends-on" },
         ],
         500,
       );
@@ -293,7 +298,7 @@ describe("turn_citations edge table", () => {
         {
           citingTurnId: turns[2]!,
           citedTurnId: turns[0]!,
-          relation: "implements",
+          relation: "depends-on",
           createdAtEpoch: 500,
         },
       ]);
@@ -307,12 +312,12 @@ describe("turn_citations edge table", () => {
     replaceTurnCitations(
       db,
       turns[2]!,
-      [{ id: turns[0]!, relation: "builds-on" }],
+      [{ id: turns[0]!, relation: "evidence-for" }],
       500,
     );
     db.exec(`
-      CREATE TRIGGER block_citation BEFORE INSERT ON turn_citations
-      WHEN NEW.cited_turn_id = ${turns[1]!}
+      CREATE TRIGGER block_citation BEFORE INSERT ON memory_edges
+      WHEN NEW.cited_kind = 'turn' AND NEW.cited_id = ${turns[1]!}
       BEGIN SELECT RAISE(ABORT, 'citation write blocked'); END;
     `);
 
@@ -324,7 +329,7 @@ describe("turn_citations edge table", () => {
         turns[2]!,
         [
           { id: turns[0]!, relation: "supersedes" },
-          { id: turns[1]!, relation: "builds-on" },
+          { id: turns[1]!, relation: "evidence-for" },
         ],
         600,
       ),
@@ -334,7 +339,7 @@ describe("turn_citations edge table", () => {
       {
         citingTurnId: turns[2]!,
         citedTurnId: turns[0]!,
-        relation: "builds-on",
+        relation: "evidence-for",
         createdAtEpoch: 500,
       },
     ]);
@@ -344,7 +349,7 @@ describe("turn_citations edge table", () => {
       replaceTurnCitations(
         db,
         turns[3]!,
-        [{ id: turns[1]!, relation: "builds-on" }],
+        [{ id: turns[1]!, relation: "evidence-for" }],
         600,
       ),
     ).toThrow();
@@ -358,7 +363,7 @@ describe("turn_citations edge table", () => {
     replaceTurnCitations(
       db,
       turns[1]!,
-      [{ id: turns[0]!, relation: "builds-on" }],
+      [{ id: turns[0]!, relation: "depends-on" }],
       500,
     );
     replaceTurnCitations(
@@ -373,7 +378,7 @@ describe("turn_citations edge table", () => {
     replaceTurnCitations(
       db,
       foreignTurn,
-      [{ id: turns[0]!, relation: "builds-on" }],
+      [{ id: turns[0]!, relation: "depends-on" }],
       500,
     );
 
@@ -391,25 +396,40 @@ describe("turn_citations edge table", () => {
     expect(getSessionCitationInDegree(db, sessionB).size).toBe(0);
   });
 
-  test("counts a citer once even when it files several relations", () => {
+  test("a rejected second relation on the same pair does not inflate in-degree", () => {
+    // Under spec C5 a pair carries at most one relation, so "files several
+    // relations" for the SAME target can no longer happen — the second is
+    // dropped (covered above). What must still hold is that in-degree counts
+    // the one surviving relation once, not zero and not twice.
     replaceTurnCitations(
       db,
       turns[1]!,
       [
-        { id: turns[0]!, relation: "builds-on" },
+        { id: turns[0]!, relation: "evidence-for" },
         { id: turns[0]!, relation: "supersedes" },
       ],
       500,
     );
 
+    expect(getTurnCitations(db, turns[1]!)).toHaveLength(1);
     expect(getSessionCitationInDegree(db, sessionA).get(turns[0]!)).toBe(1);
   });
 
-  test("cascades edge deletion from the cited endpoint's session", () => {
+  // `memory_edges.citing_id`/`cited_id` carry no FOREIGN KEY at all (they
+  // cannot: one INTEGER column is shared across turn, segment and session id
+  // spaces, so a single REFERENCES clause can never be correct). This is not
+  // new to ticket 05 — the table has always lacked it — but retiring
+  // `turn_citations` (which DID cascade via `ON DELETE CASCADE`) means this
+  // gap now applies to turn↔turn citations too. Deleting a turn or session
+  // ORPHANS its edges rather than removing them. This is deliberately left
+  // for the ticket that owns memory_edges's delete semantics (recompute-and-
+  // delete on a rewritten body) to account for — these two tests PIN the
+  // current gap so it is not silently reintroduced as "already handled".
+  test("deleting the cited endpoint's session orphans the edge rather than cascading (known gap, not this ticket's to close)", () => {
     replaceTurnCitations(
       db,
       turns[1]!,
-      [{ id: turns[0]!, relation: "builds-on" }],
+      [{ id: turns[0]!, relation: "depends-on" }],
       500,
     );
     replaceTurnCitations(
@@ -420,28 +440,32 @@ describe("turn_citations edge table", () => {
     );
     expect(
       db.query<{ count: number }, []>(
-        "SELECT COUNT(*) AS count FROM turn_citations",
+        "SELECT COUNT(*) AS count FROM memory_edges WHERE citing_kind = 'turn' AND cited_kind = 'turn'",
       ).get()!.count,
     ).toBe(2);
 
-    // Deleting the CITED end's session takes the inbound cross-session edge too.
     db.query("DELETE FROM sessions WHERE id = ?").run(sessionA);
 
+    // The turns are gone (CASCADE on turns.session_id is intact), but the
+    // edges that named them survive, dangling.
+    expect(
+      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM turns").get()!
+        .count,
+    ).toBe(1); // only foreignTurn (session B) remains
     expect(
       db.query<{ count: number }, []>(
-        "SELECT COUNT(*) AS count FROM turn_citations",
+        "SELECT COUNT(*) AS count FROM memory_edges WHERE citing_kind = 'turn' AND cited_kind = 'turn'",
       ).get()!.count,
-    ).toBe(0);
+    ).toBe(2);
   });
 
-  test("cascades edge deletion from the citing endpoint's session", () => {
+  test("deleting the citing endpoint's session orphans the edge rather than cascading (known gap, not this ticket's to close)", () => {
     replaceTurnCitations(
       db,
       turns[1]!,
-      [{ id: turns[0]!, relation: "builds-on" }],
+      [{ id: turns[0]!, relation: "depends-on" }],
       500,
     );
-    // Cross-session edge whose CITING end lives in the session about to go.
     replaceTurnCitations(
       db,
       foreignTurn,
@@ -451,39 +475,55 @@ describe("turn_citations edge table", () => {
 
     db.query("DELETE FROM sessions WHERE id = ?").run(sessionB);
 
-    // Only the outbound edge of the deleted session's turn is gone; the
-    // intra-session edge is untouched.
+    // Both edges are still there; the foreign one now names a citing_id that
+    // resolves to no live turn.
     expect(
       db
         .query<{ citingTurnId: number }, []>(
-          "SELECT citing_turn_id AS citingTurnId FROM turn_citations",
+          `SELECT citing_id AS citingTurnId FROM memory_edges
+           WHERE citing_kind = 'turn' AND cited_kind = 'turn'
+           ORDER BY citing_id`,
         )
         .all(),
-    ).toEqual([{ citingTurnId: turns[1]! }]);
+    ).toEqual([{ citingTurnId: turns[1]! }, { citingTurnId: foreignTurn }]);
   });
 
-  test("rejects a duplicate (citing, cited, relation) triple at the composite key", () => {
-    const insert = db.query<unknown, [number, number, string]>(
-      `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
-       VALUES (?, ?, ?, 1)`,
+  test("rejects a duplicate (citing, cited) pair at the composite key (spec C5: relation is not part of identity)", () => {
+    const insert = db.query<unknown, [number, number, string | null]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, 'judged', 1)`,
     );
-    insert.run(turns[1]!, turns[0]!, "builds-on");
+    insert.run(turns[1]!, turns[0]!, "evidence-for");
 
-    expect(() => insert.run(turns[1]!, turns[0]!, "builds-on")).toThrow();
-    // The same pair under a different relation is a different fact.
-    expect(() => insert.run(turns[1]!, turns[0]!, "supersedes")).not.toThrow();
-    expect(getTurnCitations(db, turns[1]!)).toHaveLength(2);
+    // A raw second insert of the SAME pair — even under a different relation
+    // — hits the primary key: the pair is the identity now, not the triple.
+    expect(() => insert.run(turns[1]!, turns[0]!, "supersedes")).toThrow();
+    expect(getTurnCitations(db, turns[1]!)).toHaveLength(1);
   });
 
   test("rejects an unknown relation at the schema level", () => {
     expect(() =>
       db
         .query(
-          `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
-           VALUES (?, ?, 'mentions', 1)`,
+          `INSERT INTO memory_edges
+             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, 'mentions', 'judged', 1)`,
         )
         .run(turns[1]!, turns[0]!),
     ).toThrow();
+  });
+
+  test("accepts a NULL relation at the schema level (spec C5: an unattributed citation is storable)", () => {
+    expect(() =>
+      db
+        .query(
+          `INSERT INTO memory_edges
+             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', 1)`,
+        )
+        .run(turns[1]!, turns[0]!),
+    ).not.toThrow();
   });
 });
 
