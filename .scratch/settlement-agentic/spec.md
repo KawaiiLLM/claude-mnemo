@@ -216,7 +216,11 @@ no flow             (no relation)      I merely mention it
 
 **H1.** An edge is an annotation and **must not move a grade automatically**. The victim demotion (flooring a superseded turn's effective grade to 1) and the corrector promotion (raising a citer's to 3) are removed, along with the two selection branches that made a victim ineligible to anchor.
 
-**H2.** The derived effective-grade layer collapses back into the stored grade. The change is local — every reference lives in the timeline module with no consumer outside it.
+**H2.** The derived effective-grade layer **survives**, minus its edge terms. Removing the edge coupling is the decision; collapsing the layer into the stored grade is a separate change that is **out of scope here**, because the layer has a second job nobody has replaced.
+
+That second job is supplying a grade to rows that have none. Only 3809 of 11406 turns carry a stored grade — 67% are NULL — and the layer answers for them in two different ways: a post-cutoff turn with no grade reads as 0, while a pre-cutoff turn does not consult the stored grade at all and is scored through a type→grade map that is the last surviving use of the retired type vocabulary. Collapsing the layer would silently re-grade the majority of the corpus. Any later ticket that wants the collapse must first state the contract for both cases; this one does not.
+
+**H2a.** The claim that the change is local needs qualifying. The *derivation and its wiring* live in the timeline module. The *observable surface* does not: the derived grade is rendered as `G<n>` through the timeline query's MCP text contract, and the same view and renderer are reused by the SessionStart milestone injection — which the settlement context in turn consumes, so the settlement agent reads grades this layer produced. Twenty-two test references import the derivation directly, and three tracked bundles rebuild. Removing the edge terms changes rendered output, so it is a behaviour change with a wide surface, not a refactor.
 
 **H3.** The `supersededBy` back-link rendering survives: edges drive display, not score.
 
@@ -248,6 +252,7 @@ A good test here asserts a behaviour a caller can observe, and can go red on the
 - **Memory reading and rendering.** The recall and timeline redesign is a separate effort. In particular: whether relations should be surfaced in any view, how a skipped turn should appear, and how a turn with no note but real raw material should render.
 - **Migration of existing rows.** Existing `topic:`-prefixed tags, retired-vocabulary type values, and the four-value relations already stored are left as they are. New writes follow this spec; a re-labelling pass over history is a later decision.
 - **The spurious-edge problem beyond moving edge creation.** Measured at 1.5-7.7% depending on the pool, its cause is a judge misled by temporal adjacency in a multi-threaded session. C5-C7 remove the mechanism that lets it happen; a scoping fix at context-construction time is not attempted here.
+- **Collapsing the effective-grade layer into the stored grade.** Only the edge terms come out (H1). The layer still answers for the 67% of turns with no stored grade, and pre-cutoff turns are scored through a type→grade map rather than their stored value; a collapse must define both contracts first, and bundling that with the edge decoupling would mix a behaviour change into a structural one.
 - **A `duplicates` relation.** Real but measured at 0.8%, below the bar.
 - **A twelfth type word for capability removal.** Absorbed into `refactor` by B3's arithmetic framing.
 - **Making the budget signal effective.** Advisory budgets demonstrably do not bind — 23 of ~24 notes in the originating session ran 1.6-2.3× over, with no convergence. Whether the receipt should report a *consequence* rather than a ratio is deferred.
