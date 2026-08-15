@@ -198,7 +198,12 @@ export function parseAddressToken(token: string): ParsedReference | null {
   const trimmed = token.trim();
   const bracketed = trimmed.startsWith("[") ? trimmed : `[${trimmed}]`;
   const parsed = parseQualifiedReferences(bracketed);
-  return parsed.length === 1 ? parsed[0]! : null;
+  const only = parsed.length === 1 ? parsed[0]! : null;
+  // Whole-token, not "contains one". An address FIELD is not prose: it names
+  // one turn and nothing else, so `[S1/T2] and some more` must be rejected
+  // rather than read as `S1/T2` with the rest discarded. Comparing against the
+  // raw match is what makes this an anchored parse without a second grammar.
+  return only && only.raw === bracketed ? only : null;
 }
 
 interface ResolveResult {

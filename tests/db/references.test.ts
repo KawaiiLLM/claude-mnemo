@@ -101,6 +101,28 @@ describe("qualified reference parsing and validation", () => {
       ).toEqual([]);
     });
 
+    test("a nested or padded bracket yields nothing — the malformed bracket is skipped whole", () => {
+      // Each of these is a construct a reader would never take as a citation,
+      // and the doc comment already promised they are skipped whole rather
+      // than salvaged down to the id they happen to contain. Listed one per
+      // case, not folded into an array, so a regex change names which shape
+      // it broke.
+      expect(parseQualifiedReferences("[[S1/T2]]")).toEqual([]);
+      expect(parseQualifiedReferences("[foo [S1/T2]]")).toEqual([]);
+      expect(parseQualifiedReferences("[[S1/T2] ]")).toEqual([]);
+      expect(parseQualifiedReferences("[[E47]]")).toEqual([]);
+      expect(parseQualifiedReferences("[see [S1/T2] and [S1/T3]]")).toEqual([]);
+    });
+
+    test("an ordinary bracket beside other punctuation still parses", () => {
+      // The guard above must not swallow the legitimate neighbours: a citation
+      // in parentheses, at a string boundary, or adjacent to a second one.
+      expect(parseQualifiedReferences("([S1/T2])")).toHaveLength(1);
+      expect(parseQualifiedReferences("[S1/T2]")).toHaveLength(1);
+      expect(parseQualifiedReferences("[S1/T2] [S1/T3]")).toHaveLength(2);
+      expect(parseQualifiedReferences("done [E47].")).toHaveLength(1);
+    });
+
     test("tolerates whitespace around the slash", () => {
       expect(parseQualifiedReferences("[ S15069 / T332 ]")).toEqual([
         { kind: "turn", raw: "[ S15069 / T332 ]", sessionId: 15069, promptNumber: 332 },

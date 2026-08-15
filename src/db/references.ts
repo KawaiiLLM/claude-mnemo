@@ -52,8 +52,59 @@ export type ParsedReference = TurnReference | SegmentReference;
 // Horizontal whitespace only ([ \t], never \s): a bracket that wraps a line
 // break is prose that happens to sit inside brackets, not a reference — the
 // same call the legacy inline grammar makes.
+//
+// Anchored, and NOT global: it is applied to one already-isolated bracket
+// group rather than scanned across prose. Scanning was what made "skipped
+// WHOLE" a comment rather than a behaviour — a global scan starts at ANY `[`,
+// so `[[S1/T2]]` matched at the inner bracket and `[see [S1/T2] and [S1/T3]]`
+// matched in the middle, salvaging citations out of exactly the constructs the
+// doc comment above says must not yield one.
 const REFERENCE_PATTERN =
-  /\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]/g;
+  /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
+
+/**
+ * The top-level bracket groups of a body, each returned with its offset.
+ *
+ * A group that contains a nested `[` is dropped ENTIRELY rather than descended
+ * into — that is what "a malformed bracket is skipped whole" means, and it
+ * cannot be expressed by a pattern that scans, because the inner bracket looks
+ * innocent from the inside. An unterminated `[` yields no group at all.
+ */
+function topLevelBracketGroups(content: string): string[] {
+  const groups: string[] = [];
+  for (let index = 0; index < content.length; index += 1) {
+    if (content[index] !== "[") {
+      continue;
+    }
+    const start = index;
+    let depth = 0;
+    let nested = false;
+    let cursor = index;
+    for (; cursor < content.length; cursor += 1) {
+      const char = content[cursor];
+      if (char === "[") {
+        depth += 1;
+        if (depth > 1) {
+          nested = true;
+        }
+      } else if (char === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          break;
+        }
+      }
+    }
+    if (depth !== 0) {
+      // Unterminated: nothing from here on is a well-formed group.
+      break;
+    }
+    if (!nested) {
+      groups.push(content.slice(start, cursor + 1));
+    }
+    index = cursor;
+  }
+  return groups;
+}
 
 function parsePositiveId(digits: string | undefined): number | null {
   if (digits === undefined) {
@@ -80,9 +131,11 @@ export function parseQualifiedReferences(
   const references: ParsedReference[] = [];
   const seen = new Set<string>();
 
-  REFERENCE_PATTERN.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = REFERENCE_PATTERN.exec(content)) !== null) {
+  for (const group of topLevelBracketGroups(content)) {
+    const match = REFERENCE_PATTERN.exec(group);
+    if (match === null) {
+      continue;
+    }
     const raw = match[0];
     const segmentId = parsePositiveId(match[3]);
     if (segmentId !== null) {
