@@ -6803,506 +6803,167 @@ var require_dist = __commonJS({
   }
 });
 
-// src/db/memory-edges.ts
-function rankEdgeProvenance(provenance) {
-  return PROVENANCE_RANK[provenance];
+// src/segment-era.ts
+function isSegmentEra(createdAtEpoch, cutoffEpoch) {
+  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
 }
-function isEdgeNodeKind(value) {
-  return typeof value === "string" && EDGE_NODE_KINDS.includes(value);
+function normalizeEraCutoffEpoch(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
-function isCitingNodeKind(value) {
-  return typeof value === "string" && CITING_NODE_KINDS.includes(value);
+var init_segment_era = __esm({
+  "src/segment-era.ts"() {
+    "use strict";
+  }
+});
+
+// src/shared/config.ts
+function resolveConfigPath(homePath = (0, import_node_os.homedir)()) {
+  return (0, import_node_path.join)(homePath, ".claude-mnemo", "config.json");
 }
-function isEdgeProvenance(value) {
-  return typeof value === "string" && EDGE_PROVENANCES.includes(value);
+function resolveDreamAgentModel(value, logger) {
+  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
+    return value;
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
+  );
+  return DEFAULT_DREAM_AGENT_MODEL;
 }
-function mapEdgeRow(row) {
+function resolveDreamAgentTimeZone(value, logger) {
+  if (typeof value === "string") {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
+      return value;
+    } catch {
+    }
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
+  );
+  return DEFAULT_DREAM_AGENT_TIME_ZONE;
+}
+function resolveBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
+}
+function clampInteger(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
   return {
-    citing: { kind: row.citingKind, id: row.citingId },
-    cited: { kind: row.citedKind, id: row.citedId },
-    relation: row.relation,
-    provenance: row.provenance,
-    createdAtEpoch: row.createdAtEpoch
+    hardExitTimeoutMs: clampInteger(
+      config2.hardExitTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.hardExitTimeoutMs
+    ),
+    settlementEnabled: resolveBoolean(
+      config2.settlementEnabled,
+      DEFAULT_CONFIG.settlementEnabled
+    ),
+    // Anything that is not a positive whole epoch reads as "no era yet" rather
+    // than as an epoch of 0, which would put every turn on the new path.
+    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
+    dreamAgentEnabled: resolveBoolean(
+      config2.dreamAgentEnabled,
+      DEFAULT_CONFIG.dreamAgentEnabled
+    ),
+    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
+    dreamAgentTimeoutMs: clampInteger(
+      config2.dreamAgentTimeoutMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.dreamAgentTimeoutMs
+    ),
+    dreamAgentIdleWatchdogMs: clampInteger(
+      config2.dreamAgentIdleWatchdogMs,
+      3e4,
+      36e5,
+      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
+    ),
+    dreamAgentHour: clampInteger(
+      config2.dreamAgentHour,
+      0,
+      23,
+      DEFAULT_CONFIG.dreamAgentHour
+    ),
+    dreamAgentTimeZone: resolveDreamAgentTimeZone(
+      rawDreamAgentTimeZone,
+      logger
+    ),
+    dreamAgentBacklogLimit: clampInteger(
+      config2.dreamAgentBacklogLimit,
+      1,
+      366,
+      DEFAULT_CONFIG.dreamAgentBacklogLimit
+    )
   };
 }
-function isValidCitingNode(node) {
-  return node !== void 0 && isCitingNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
-}
-function isValidCitedNode(node) {
-  return node !== void 0 && isEdgeNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
-}
-function pairKey(edge) {
-  return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
-}
-function writeMemoryEdges(db, edges, nowEpoch) {
-  const written = [];
-  const rejected = [];
-  const relationsByPair = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited) || !isCitationRelation(edge.relation)) {
-      continue;
-    }
-    const key = pairKey(edge);
-    const relations = relationsByPair.get(key) ?? /* @__PURE__ */ new Set();
-    relations.add(edge.relation);
-    relationsByPair.set(key, relations);
+function loadConfig(homePath = (0, import_node_os.homedir)(), logger = { warn: (message) => console.warn(message) }) {
+  const path2 = resolveConfigPath(homePath);
+  if (!(0, import_node_fs.existsSync)(path2)) {
+    return DEFAULT_CONFIG;
   }
-  const conflictingPairs = new Set(
-    [...relationsByPair.entries()].filter(([, relations]) => relations.size > 1).map(([key]) => key)
-  );
-  const upsert = db.query(
-    `
-      INSERT INTO memory_edges (
-        citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id)
-        DO UPDATE SET
-          -- Spec C14: no rank test between an authorised write and the
-          -- relation it sets. A relation-bearing write replaces relation AND
-          -- provenance together, unconditionally; a bare write (relation
-          -- NULL) touches neither \u2014 it can create a pair but never modify a
-          -- relation one already carries.
-          relation = CASE
-            WHEN excluded.relation IS NOT NULL THEN excluded.relation
-            ELSE memory_edges.relation
-          END,
-          provenance = CASE
-            WHEN excluded.relation IS NOT NULL THEN excluded.provenance
-            ELSE memory_edges.provenance
-          END
-      RETURNING ${EDGE_COLUMNS}
-    `
-  );
-  for (const edge of edges) {
-    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
-      rejected.push({ input: edge, reason: "invalid-node" });
-      continue;
-    }
-    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
-      rejected.push({ input: edge, reason: "self-loop" });
-      continue;
-    }
-    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
-      rejected.push({ input: edge, reason: "invalid-relation" });
-      continue;
-    }
-    if (!isEdgeProvenance(edge.provenance)) {
-      rejected.push({ input: edge, reason: "invalid-provenance" });
-      continue;
-    }
-    if (edge.relation !== null && conflictingPairs.has(pairKey(edge))) {
-      rejected.push({ input: edge, reason: "conflicting-relation" });
-      continue;
-    }
-    const row = upsert.get(
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id,
-      edge.relation,
-      edge.provenance,
-      edge.createdAtEpoch ?? nowEpoch
-    );
-    if (row) {
-      written.push(mapEdgeRow(row));
-    }
+  try {
+    const raw = JSON.parse((0, import_node_fs.readFileSync)(path2, "utf8"));
+    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentModel"
+    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
+    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentTimeZone"
+    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
+    return clampConfig({
+      ...DEFAULT_CONFIG,
+      ...raw
+    }, configuredDreamModel, configuredDreamTimeZone, logger);
+  } catch {
+    return DEFAULT_CONFIG;
   }
-  return { written, rejected };
 }
-function getOutgoingEdges(db, citing) {
-  return db.query(
-    `SELECT ${EDGE_COLUMNS} FROM memory_edges
-       WHERE citing_kind = ? AND citing_id = ?
-       ORDER BY cited_kind ASC, cited_id ASC, relation ASC`
-  ).all(citing.kind, citing.id).map(mapEdgeRow);
-}
-function reconcileCitedPairs(db, citing, citedNodes, nowEpoch, provenance) {
-  const desired = /* @__PURE__ */ new Map();
-  for (const node of citedNodes) {
-    if (isValidCitedNode(node)) {
-      desired.set(`${node.kind}:${node.id}`, node);
-    }
-  }
-  const existing = getOutgoingEdges(db, citing);
-  const stale = existing.filter(
-    (edge) => !desired.has(`${edge.cited.kind}:${edge.cited.id}`)
-  );
-  const del = db.query(
-    `DELETE FROM memory_edges
-     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?`
-  );
-  for (const edge of stale) {
-    del.run(citing.kind, citing.id, edge.cited.kind, edge.cited.id);
-  }
-  const { written } = writeMemoryEdges(
-    db,
-    [...desired.values()].map((cited) => ({
-      citing,
-      cited,
-      relation: null,
-      provenance
-    })),
-    nowEpoch
-  );
-  return { written, deleted: stale };
-}
-var EDGE_NODE_KINDS, CITING_NODE_KINDS, EDGE_PROVENANCES, PROVENANCE_RANK, EDGE_COLUMNS;
-var init_memory_edges = __esm({
-  "src/db/memory-edges.ts"() {
+var import_node_fs, import_node_os, import_node_path, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_HARD_EXIT_TIMEOUT_MS, DEFAULT_CONFIG;
+var init_config = __esm({
+  "src/shared/config.ts"() {
     "use strict";
-    init_citations();
-    EDGE_NODE_KINDS = ["turn", "segment"];
-    CITING_NODE_KINDS = ["turn", "segment", "session"];
-    EDGE_PROVENANCES = [
-      "retrieval",
-      "text-ref",
-      "rollback",
-      "judged",
-      "asserted"
+    import_node_fs = require("node:fs");
+    import_node_os = require("node:os");
+    import_node_path = require("node:path");
+    init_segment_era();
+    KNOWN_DREAM_AGENT_MODELS = [
+      "opus",
+      "sonnet",
+      "haiku",
+      "claude-opus-4-8",
+      "claude-opus-4-6",
+      "claude-opus-4-5",
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+      "claude-sonnet-4-5",
+      "claude-haiku-4-5"
     ];
-    PROVENANCE_RANK = {
-      retrieval: 0,
-      rollback: 1,
-      "text-ref": 2,
-      judged: 3,
-      asserted: 4
+    DEFAULT_DREAM_AGENT_MODEL = "opus";
+    DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
+    DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_HOUR = 4;
+    DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
+    DEFAULT_CONFIG = {
+      hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
+      // On by default because it is a kill switch, not the cutover switch: with no
+      // era cutoff configured this changes nothing at all.
+      settlementEnabled: true,
+      eraCutoffEpoch: null,
+      dreamAgentEnabled: false,
+      dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
+      dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+      dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
+      dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
+      dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
+      dreamAgentBacklogLimit: 1
     };
-    EDGE_COLUMNS = `
-  citing_kind AS citingKind,
-  citing_id AS citingId,
-  cited_kind AS citedKind,
-  cited_id AS citedId,
-  relation,
-  provenance,
-  created_at_epoch AS createdAtEpoch
-`;
-  }
-});
-
-// src/db/references.ts
-function topLevelBracketGroups(content) {
-  const groups = [];
-  for (let index = 0; index < content.length; index += 1) {
-    if (content[index] !== "[") {
-      continue;
-    }
-    const start = index;
-    let depth = 0;
-    let nested = false;
-    let cursor = index;
-    for (; cursor < content.length; cursor += 1) {
-      const char = content[cursor];
-      if (char === "[") {
-        depth += 1;
-        if (depth > 1) {
-          nested = true;
-        }
-      } else if (char === "]") {
-        depth -= 1;
-        if (depth === 0) {
-          break;
-        }
-      }
-    }
-    if (depth !== 0) {
-      break;
-    }
-    if (!nested) {
-      groups.push(content.slice(start, cursor + 1));
-    }
-    index = cursor;
-  }
-  return groups;
-}
-function parsePositiveId(digits) {
-  if (digits === void 0) {
-    return null;
-  }
-  const value = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-function parseQualifiedReferences(content) {
-  if (!content) {
-    return [];
-  }
-  const references = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const group of topLevelBracketGroups(content)) {
-    const match = REFERENCE_PATTERN.exec(group);
-    if (match === null) {
-      continue;
-    }
-    const raw = match[0];
-    const segmentId = parsePositiveId(match[3]);
-    if (segmentId !== null) {
-      const key2 = `E${segmentId}`;
-      if (!seen.has(key2)) {
-        seen.add(key2);
-        references.push({ kind: "segment", raw, segmentId });
-      }
-      continue;
-    }
-    const sessionId = parsePositiveId(match[1]);
-    const promptNumber = parsePositiveId(match[2]);
-    if (sessionId === null || promptNumber === null) {
-      continue;
-    }
-    const key = `S${sessionId}/T${promptNumber}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      references.push({ kind: "turn", raw, sessionId, promptNumber });
-    }
-  }
-  return references;
-}
-function validateReferences(db, references, options = {}) {
-  const accepted = [];
-  const rejected = [];
-  if (references.length === 0) {
-    return { accepted, rejected };
-  }
-  const turnLookup = db.query(
-    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
-  );
-  const segmentLookup = db.query(
-    "SELECT id FROM segments WHERE id = ?"
-  );
-  for (const reference of references) {
-    if (reference.kind === "turn") {
-      const row2 = turnLookup.get(reference.sessionId, reference.promptNumber);
-      if (!row2) {
-        rejected.push({ reference, reason: "unresolved" });
-        continue;
-      }
-      accepted.push({ reference, node: { kind: "turn", id: row2.id } });
-      continue;
-    }
-    const row = segmentLookup.get(reference.segmentId);
-    if (!row) {
-      rejected.push({ reference, reason: "unresolved" });
-      continue;
-    }
-    accepted.push({ reference, node: { kind: "segment", id: row.id } });
-  }
-  if (rejected.length > 0) {
-    const logger = options.logger ?? console;
-    logger.warn?.(
-      `[claude-mnemo] S${options.writerSessionId ?? "?"}: dropped ${rejected.length} illegal reference(s): ${rejected.map((entry) => `${entry.reference.raw} (${entry.reason})`).join(", ")}`
-    );
-  }
-  return { accepted, rejected };
-}
-var REFERENCE_PATTERN;
-var init_references = __esm({
-  "src/db/references.ts"() {
-    "use strict";
-    REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
-  }
-});
-
-// src/db/citations.ts
-function isCitationRelation(value) {
-  return typeof value === "string" && CITATION_RELATIONS.includes(value);
-}
-function parsePositiveId2(digits) {
-  const id = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
-}
-function* citationBracketBodies(content) {
-  let index = 0;
-  while (index < content.length) {
-    const open = content.indexOf("[", index);
-    if (open === -1) {
-      return;
-    }
-    const close = content.indexOf("]", open + 1);
-    if (close === -1) {
-      return;
-    }
-    const body = content.slice(open + 1, close);
-    index = close + 1;
-    if (body.includes("[")) {
-      continue;
-    }
-    yield body;
-  }
-}
-function expandBracketBody(body) {
-  if (/[\n\r]/.test(body)) {
-    return [];
-  }
-  const inner = body.trim();
-  const range = RANGE_PATTERN.exec(inner);
-  if (range) {
-    const start = parsePositiveId2(range[1]);
-    const end = parsePositiveId2(range[2]);
-    if (start === null || end === null || end < start) {
-      return [];
-    }
-    const span = end - start + 1;
-    if (span > INLINE_RANGE_EXPANSION_CAP) {
-      return [start, end];
-    }
-    const ids = [];
-    for (let id = start; id <= end; id += 1) {
-      ids.push(id);
-    }
-    return ids;
-  }
-  if (LIST_PATTERN.test(inner)) {
-    const ids = [];
-    LIST_ELEMENT_PATTERN.lastIndex = 0;
-    let element;
-    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
-      const id = parsePositiveId2(element[1]);
-      if (id === null) {
-        return [];
-      }
-      ids.push(id);
-    }
-    return ids;
-  }
-  const single = SINGLE_PATTERN.exec(inner);
-  if (single) {
-    const id = parsePositiveId2(single[1]);
-    return id === null ? [] : [id];
-  }
-  const annotated = ANNOTATED_PATTERN.exec(inner);
-  if (annotated) {
-    const id = parsePositiveId2(annotated[1]);
-    return id === null ? [] : [id];
-  }
-  return [];
-}
-function parseInlineCitations(content, maxRefs) {
-  if (!content) {
-    return [];
-  }
-  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
-  if (cap <= 0) {
-    return [];
-  }
-  const ids = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const body of citationBracketBodies(content)) {
-    for (const id of expandBracketBody(body)) {
-      if (seen.has(id)) {
-        continue;
-      }
-      seen.add(id);
-      ids.push(id);
-      if (ids.length >= cap) {
-        return ids;
-      }
-    }
-  }
-  return ids;
-}
-function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, logger) {
-  const references = [
-    ...parseQualifiedReferences(fields.title),
-    ...parseQualifiedReferences(fields.content),
-    ...parseQualifiedReferences(fields.insight)
-  ];
-  const { accepted, rejected } = validateReferences(db, references, {
-    writerSessionId,
-    logger
-  });
-  const { written, deleted } = reconcileCitedPairs(
-    db,
-    { kind: "turn", id: turnId },
-    accepted.map((entry) => entry.node),
-    nowEpoch,
-    "text-ref"
-  );
-  return { written, deleted, rejected };
-}
-function appendUnseen(into, ids) {
-  const seen = new Set(into);
-  for (const id of ids) {
-    if (!seen.has(id)) {
-      seen.add(id);
-      into.push(id);
-    }
-  }
-}
-function dedupeCitedIds(edges) {
-  const citedTurnIds = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (seen.has(edge.citedTurnId)) {
-      continue;
-    }
-    seen.add(edge.citedTurnId);
-    citedTurnIds.push(edge.citedTurnId);
-  }
-  return citedTurnIds;
-}
-function getSessionEffectiveCitations(db, sessionId) {
-  const turns = db.query(
-    `SELECT id, content
-       FROM turns
-       WHERE session_id = ?
-       ORDER BY prompt_number ASC, id ASC`
-  ).all(sessionId);
-  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
-  const edgesByCiter = /* @__PURE__ */ new Map();
-  const edgeRows = db.query(
-    `SELECT
-         e.citing_id AS citingTurnId,
-         e.cited_id AS citedTurnId,
-         e.relation,
-         e.created_at_epoch AS createdAtEpoch
-       FROM memory_edges e
-       JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
-       JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
-       WHERE citing.session_id = ? AND cited.session_id = ?
-       ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
-  ).all(sessionId, sessionId);
-  for (const edge of edgeRows) {
-    if (edge.citedTurnId === edge.citingTurnId) {
-      continue;
-    }
-    const bucket = edgesByCiter.get(edge.citingTurnId);
-    if (bucket) {
-      bucket.push(edge);
-    } else {
-      edgesByCiter.set(edge.citingTurnId, [edge]);
-    }
-  }
-  const effective = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    const edges = edgesByCiter.get(turn.id) ?? [];
-    const citedTurnIds = dedupeCitedIds(edges);
-    appendUnseen(
-      citedTurnIds,
-      parseInlineCitations(turn.content).filter(
-        (id) => id !== turn.id && sessionTurnIds.has(id)
-      )
-    );
-    effective.set(turn.id, { citedTurnIds, edges });
-  }
-  return effective;
-}
-var CITATION_RELATIONS, INLINE_RANGE_EXPANSION_CAP, RANGE_PATTERN, LIST_PATTERN, LIST_ELEMENT_PATTERN, SINGLE_PATTERN, ANNOTATED_PATTERN;
-var init_citations = __esm({
-  "src/db/citations.ts"() {
-    "use strict";
-    init_memory_edges();
-    init_references();
-    CITATION_RELATIONS = [
-      "evidence-for",
-      "evidence-against",
-      "supersedes",
-      "depends-on"
-    ];
-    INLINE_RANGE_EXPANSION_CAP = 8;
-    RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
-    LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
-    LIST_ELEMENT_PATTERN = /T(\d+)/g;
-    SINGLE_PATTERN = /^T(\d+)$/;
-    ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
   }
 });
 
@@ -7310,7 +6971,7 @@ var init_citations = __esm({
 function resolveDatabasePath(explicitPath) {
   const candidatePath = explicitPath || process.env.CLAUDE_MNEMO_DB_PATH || DEFAULT_DB_PATH;
   if (candidatePath.startsWith("~/")) {
-    return (0, import_node_path.join)((0, import_node_os.homedir)(), candidatePath.slice(2));
+    return (0, import_node_path2.join)((0, import_node_os2.homedir)(), candidatePath.slice(2));
   }
   return candidatePath;
 }
@@ -7318,10 +6979,10 @@ function encodeProjectPath(projectPath) {
   return projectPath.replace(/[/:\\.]/g, "-");
 }
 function transcriptRootPath() {
-  return (0, import_node_path.join)((0, import_node_os.homedir)(), ".claude", "projects");
+  return (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude", "projects");
 }
 function resolveTranscriptPath(projectPath, sessionId) {
-  return (0, import_node_path.join)(
+  return (0, import_node_path2.join)(
     transcriptRootPath(),
     encodeProjectPath(projectPath),
     `${sessionId}.jsonl`
@@ -7330,16 +6991,16 @@ function resolveTranscriptPath(projectPath, sessionId) {
 function resolveSessionTranscriptPath(session) {
   return session.transcriptPath ?? resolveTranscriptPath(session.project, session.contentSessionId);
 }
-var import_node_os, import_node_path, DATA_DIR, DEFAULT_DB_PATH, WORKER_PID_PATH, WORKER_STARTING_PATH;
+var import_node_os2, import_node_path2, DATA_DIR, DEFAULT_DB_PATH, WORKER_PID_PATH, WORKER_STARTING_PATH;
 var init_paths = __esm({
   "src/shared/paths.ts"() {
     "use strict";
-    import_node_os = require("node:os");
-    import_node_path = require("node:path");
-    DATA_DIR = (0, import_node_path.join)((0, import_node_os.homedir)(), ".claude-mnemo");
-    DEFAULT_DB_PATH = (0, import_node_path.join)(DATA_DIR, "claude-mnemo.db");
-    WORKER_PID_PATH = (0, import_node_path.join)(DATA_DIR, "worker.pid");
-    WORKER_STARTING_PATH = (0, import_node_path.join)(DATA_DIR, "worker.starting");
+    import_node_os2 = require("node:os");
+    import_node_path2 = require("node:path");
+    DATA_DIR = (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude-mnemo");
+    DEFAULT_DB_PATH = (0, import_node_path2.join)(DATA_DIR, "claude-mnemo.db");
+    WORKER_PID_PATH = (0, import_node_path2.join)(DATA_DIR, "worker.pid");
+    WORKER_STARTING_PATH = (0, import_node_path2.join)(DATA_DIR, "worker.starting");
   }
 });
 
@@ -7361,9 +7022,9 @@ function ensureParentDirectory(databasePath) {
   if (databasePath === ":memory:") {
     return;
   }
-  const parentDirectory = (0, import_node_path2.dirname)(databasePath);
-  if (!(0, import_node_fs.existsSync)(parentDirectory)) {
-    (0, import_node_fs.mkdirSync)(parentDirectory, { recursive: true });
+  const parentDirectory = (0, import_node_path3.dirname)(databasePath);
+  if (!(0, import_node_fs2.existsSync)(parentDirectory)) {
+    (0, import_node_fs2.mkdirSync)(parentDirectory, { recursive: true });
   }
 }
 function normalizeNonNegativeMilliseconds(value, name) {
@@ -7459,12 +7120,12 @@ function runHookWriteTransaction(db, fn, options = {}) {
     }
   }
 }
-var import_node_fs, import_node_path2, import_bun_sqlite, DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_HOOK_TRANSACTION_BUDGET_MS;
+var import_node_fs2, import_node_path3, import_bun_sqlite, DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_HOOK_TRANSACTION_BUDGET_MS;
 var init_database = __esm({
   "src/db/database.ts"() {
     "use strict";
-    import_node_fs = require("node:fs");
-    import_node_path2 = require("node:path");
+    import_node_fs2 = require("node:fs");
+    import_node_path3 = require("node:path");
     import_bun_sqlite = require("bun:sqlite");
     init_paths();
     DEFAULT_BUSY_TIMEOUT_MS = 5e3;
@@ -8198,167 +7859,506 @@ var init_search = __esm({
   }
 });
 
-// src/segment-era.ts
-function isSegmentEra(createdAtEpoch, cutoffEpoch) {
-  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
+// src/db/memory-edges.ts
+function rankEdgeProvenance(provenance) {
+  return PROVENANCE_RANK[provenance];
 }
-function normalizeEraCutoffEpoch(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+function isEdgeNodeKind(value) {
+  return typeof value === "string" && EDGE_NODE_KINDS.includes(value);
 }
-var init_segment_era = __esm({
-  "src/segment-era.ts"() {
+function isCitingNodeKind(value) {
+  return typeof value === "string" && CITING_NODE_KINDS.includes(value);
+}
+function isEdgeProvenance(value) {
+  return typeof value === "string" && EDGE_PROVENANCES.includes(value);
+}
+function mapEdgeRow(row) {
+  return {
+    citing: { kind: row.citingKind, id: row.citingId },
+    cited: { kind: row.citedKind, id: row.citedId },
+    relation: row.relation,
+    provenance: row.provenance,
+    createdAtEpoch: row.createdAtEpoch
+  };
+}
+function isValidCitingNode(node) {
+  return node !== void 0 && isCitingNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
+}
+function isValidCitedNode(node) {
+  return node !== void 0 && isEdgeNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
+}
+function pairKey(edge) {
+  return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
+}
+function writeMemoryEdges(db, edges, nowEpoch) {
+  const written = [];
+  const rejected = [];
+  const relationsByPair = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited) || !isCitationRelation(edge.relation)) {
+      continue;
+    }
+    const key = pairKey(edge);
+    const relations = relationsByPair.get(key) ?? /* @__PURE__ */ new Set();
+    relations.add(edge.relation);
+    relationsByPair.set(key, relations);
+  }
+  const conflictingPairs = new Set(
+    [...relationsByPair.entries()].filter(([, relations]) => relations.size > 1).map(([key]) => key)
+  );
+  const upsert = db.query(
+    `
+      INSERT INTO memory_edges (
+        citing_kind, citing_id, cited_kind, cited_id,
+        relation, provenance, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id)
+        DO UPDATE SET
+          -- Spec C14: no rank test between an authorised write and the
+          -- relation it sets. A relation-bearing write replaces relation AND
+          -- provenance together, unconditionally; a bare write (relation
+          -- NULL) touches neither \u2014 it can create a pair but never modify a
+          -- relation one already carries.
+          relation = CASE
+            WHEN excluded.relation IS NOT NULL THEN excluded.relation
+            ELSE memory_edges.relation
+          END,
+          provenance = CASE
+            WHEN excluded.relation IS NOT NULL THEN excluded.provenance
+            ELSE memory_edges.provenance
+          END
+      RETURNING ${EDGE_COLUMNS}
+    `
+  );
+  for (const edge of edges) {
+    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
+      rejected.push({ input: edge, reason: "invalid-node" });
+      continue;
+    }
+    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
+      rejected.push({ input: edge, reason: "self-loop" });
+      continue;
+    }
+    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
+      rejected.push({ input: edge, reason: "invalid-relation" });
+      continue;
+    }
+    if (!isEdgeProvenance(edge.provenance)) {
+      rejected.push({ input: edge, reason: "invalid-provenance" });
+      continue;
+    }
+    if (edge.relation !== null && conflictingPairs.has(pairKey(edge))) {
+      rejected.push({ input: edge, reason: "conflicting-relation" });
+      continue;
+    }
+    const row = upsert.get(
+      edge.citing.kind,
+      edge.citing.id,
+      edge.cited.kind,
+      edge.cited.id,
+      edge.relation,
+      edge.provenance,
+      edge.createdAtEpoch ?? nowEpoch
+    );
+    if (row) {
+      written.push(mapEdgeRow(row));
+    }
+  }
+  return { written, rejected };
+}
+function getOutgoingEdges(db, citing) {
+  return db.query(
+    `SELECT ${EDGE_COLUMNS} FROM memory_edges
+       WHERE citing_kind = ? AND citing_id = ?
+       ORDER BY cited_kind ASC, cited_id ASC, relation ASC`
+  ).all(citing.kind, citing.id).map(mapEdgeRow);
+}
+function reconcileCitedPairs(db, citing, citedNodes, nowEpoch, provenance) {
+  const desired = /* @__PURE__ */ new Map();
+  for (const node of citedNodes) {
+    if (isValidCitedNode(node)) {
+      desired.set(`${node.kind}:${node.id}`, node);
+    }
+  }
+  const existing = getOutgoingEdges(db, citing);
+  const stale = existing.filter(
+    (edge) => !desired.has(`${edge.cited.kind}:${edge.cited.id}`)
+  );
+  const del = db.query(
+    `DELETE FROM memory_edges
+     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?`
+  );
+  for (const edge of stale) {
+    del.run(citing.kind, citing.id, edge.cited.kind, edge.cited.id);
+  }
+  const { written } = writeMemoryEdges(
+    db,
+    [...desired.values()].map((cited) => ({
+      citing,
+      cited,
+      relation: null,
+      provenance
+    })),
+    nowEpoch
+  );
+  return { written, deleted: stale };
+}
+var EDGE_NODE_KINDS, CITING_NODE_KINDS, EDGE_PROVENANCES, PROVENANCE_RANK, EDGE_COLUMNS;
+var init_memory_edges = __esm({
+  "src/db/memory-edges.ts"() {
     "use strict";
+    init_citations();
+    EDGE_NODE_KINDS = ["turn", "segment"];
+    CITING_NODE_KINDS = ["turn", "segment", "session"];
+    EDGE_PROVENANCES = [
+      "retrieval",
+      "text-ref",
+      "rollback",
+      "judged",
+      "asserted"
+    ];
+    PROVENANCE_RANK = {
+      retrieval: 0,
+      rollback: 1,
+      "text-ref": 2,
+      judged: 3,
+      asserted: 4
+    };
+    EDGE_COLUMNS = `
+  citing_kind AS citingKind,
+  citing_id AS citingId,
+  cited_kind AS citedKind,
+  cited_id AS citedId,
+  relation,
+  provenance,
+  created_at_epoch AS createdAtEpoch
+`;
   }
 });
 
-// src/shared/config.ts
-function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
-  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
-}
-function resolveDreamAgentModel(value, logger) {
-  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
-    return value;
+// src/db/references.ts
+function topLevelBracketGroups(content) {
+  const groups = [];
+  for (let index = 0; index < content.length; index += 1) {
+    if (content[index] !== "[") {
+      continue;
+    }
+    const start = index;
+    let depth = 0;
+    let nested = false;
+    let cursor = index;
+    for (; cursor < content.length; cursor += 1) {
+      const char = content[cursor];
+      if (char === "[") {
+        depth += 1;
+        if (depth > 1) {
+          nested = true;
+        }
+      } else if (char === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          break;
+        }
+      }
+    }
+    if (depth !== 0) {
+      break;
+    }
+    if (!nested) {
+      groups.push(content.slice(start, cursor + 1));
+    }
+    index = cursor;
   }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
-  );
-  return DEFAULT_DREAM_AGENT_MODEL;
+  return groups;
 }
-function resolveDreamAgentTimeZone(value, logger) {
-  if (typeof value === "string") {
-    try {
-      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
-      return value;
-    } catch {
+function parsePositiveId(digits) {
+  if (digits === void 0) {
+    return null;
+  }
+  const value = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+function parseQualifiedReferences(content) {
+  if (!content) {
+    return [];
+  }
+  const references = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const group of topLevelBracketGroups(content)) {
+    const match = REFERENCE_PATTERN.exec(group);
+    if (match === null) {
+      continue;
+    }
+    const raw = match[0];
+    const segmentId = parsePositiveId(match[3]);
+    if (segmentId !== null) {
+      const key2 = `E${segmentId}`;
+      if (!seen.has(key2)) {
+        seen.add(key2);
+        references.push({ kind: "segment", raw, segmentId });
+      }
+      continue;
+    }
+    const sessionId = parsePositiveId(match[1]);
+    const promptNumber = parsePositiveId(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    const key = `S${sessionId}/T${promptNumber}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      references.push({ kind: "turn", raw, sessionId, promptNumber });
     }
   }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
+  return references;
+}
+function validateReferences(db, references, options = {}) {
+  const accepted = [];
+  const rejected = [];
+  if (references.length === 0) {
+    return { accepted, rejected };
+  }
+  const turnLookup = db.query(
+    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
   );
-  return DEFAULT_DREAM_AGENT_TIME_ZONE;
-}
-function resolveBoolean(value, fallback) {
-  return typeof value === "boolean" ? value : fallback;
-}
-function clampInteger(value, min, max, fallback) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-    return fallback;
+  const segmentLookup = db.query(
+    "SELECT id FROM segments WHERE id = ?"
+  );
+  for (const reference of references) {
+    if (reference.kind === "turn") {
+      const row2 = turnLookup.get(reference.sessionId, reference.promptNumber);
+      if (!row2) {
+        rejected.push({ reference, reason: "unresolved" });
+        continue;
+      }
+      accepted.push({ reference, node: { kind: "turn", id: row2.id } });
+      continue;
+    }
+    const row = segmentLookup.get(reference.segmentId);
+    if (!row) {
+      rejected.push({ reference, reason: "unresolved" });
+      continue;
+    }
+    accepted.push({ reference, node: { kind: "segment", id: row.id } });
   }
-  return Math.min(Math.max(value, min), max);
-}
-function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
-  return {
-    hardExitTimeoutMs: clampInteger(
-      config2.hardExitTimeoutMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.hardExitTimeoutMs
-    ),
-    settlementEnabled: resolveBoolean(
-      config2.settlementEnabled,
-      DEFAULT_CONFIG.settlementEnabled
-    ),
-    // Anything that is not a positive whole epoch reads as "no era yet" rather
-    // than as an epoch of 0, which would put every turn on the new path.
-    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
-    dreamAgentEnabled: resolveBoolean(
-      config2.dreamAgentEnabled,
-      DEFAULT_CONFIG.dreamAgentEnabled
-    ),
-    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
-    dreamAgentTimeoutMs: clampInteger(
-      config2.dreamAgentTimeoutMs,
-      6e4,
-      864e5,
-      DEFAULT_CONFIG.dreamAgentTimeoutMs
-    ),
-    dreamAgentIdleWatchdogMs: clampInteger(
-      config2.dreamAgentIdleWatchdogMs,
-      3e4,
-      36e5,
-      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
-    ),
-    dreamAgentHour: clampInteger(
-      config2.dreamAgentHour,
-      0,
-      23,
-      DEFAULT_CONFIG.dreamAgentHour
-    ),
-    dreamAgentTimeZone: resolveDreamAgentTimeZone(
-      rawDreamAgentTimeZone,
-      logger
-    ),
-    dreamAgentBacklogLimit: clampInteger(
-      config2.dreamAgentBacklogLimit,
-      1,
-      366,
-      DEFAULT_CONFIG.dreamAgentBacklogLimit
-    )
-  };
-}
-function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
-  const path2 = resolveConfigPath(homePath);
-  if (!(0, import_node_fs2.existsSync)(path2)) {
-    return DEFAULT_CONFIG;
+  if (rejected.length > 0) {
+    const logger = options.logger ?? console;
+    logger.warn?.(
+      `[claude-mnemo] S${options.writerSessionId ?? "?"}: dropped ${rejected.length} illegal reference(s): ${rejected.map((entry) => `${entry.reference.raw} (${entry.reason})`).join(", ")}`
+    );
   }
-  try {
-    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
-    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentModel"
-    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
-    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentTimeZone"
-    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
-    return clampConfig({
-      ...DEFAULT_CONFIG,
-      ...raw
-    }, configuredDreamModel, configuredDreamTimeZone, logger);
-  } catch {
-    return DEFAULT_CONFIG;
-  }
+  return { accepted, rejected };
 }
-var import_node_fs2, import_node_os2, import_node_path3, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_HARD_EXIT_TIMEOUT_MS, DEFAULT_CONFIG;
-var init_config = __esm({
-  "src/shared/config.ts"() {
+var REFERENCE_PATTERN;
+var init_references = __esm({
+  "src/db/references.ts"() {
     "use strict";
-    import_node_fs2 = require("node:fs");
-    import_node_os2 = require("node:os");
-    import_node_path3 = require("node:path");
-    init_segment_era();
-    KNOWN_DREAM_AGENT_MODELS = [
-      "opus",
-      "sonnet",
-      "haiku",
-      "claude-opus-4-8",
-      "claude-opus-4-6",
-      "claude-opus-4-5",
-      "claude-sonnet-5",
-      "claude-sonnet-4-6",
-      "claude-sonnet-4-5",
-      "claude-haiku-4-5"
+    REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
+  }
+});
+
+// src/db/citations.ts
+function isCitationRelation(value) {
+  return typeof value === "string" && CITATION_RELATIONS.includes(value);
+}
+function parsePositiveId2(digits) {
+  const id = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+function* citationBracketBodies(content) {
+  let index = 0;
+  while (index < content.length) {
+    const open = content.indexOf("[", index);
+    if (open === -1) {
+      return;
+    }
+    const close = content.indexOf("]", open + 1);
+    if (close === -1) {
+      return;
+    }
+    const body = content.slice(open + 1, close);
+    index = close + 1;
+    if (body.includes("[")) {
+      continue;
+    }
+    yield body;
+  }
+}
+function expandBracketBody(body) {
+  if (/[\n\r]/.test(body)) {
+    return [];
+  }
+  const inner = body.trim();
+  const range = RANGE_PATTERN.exec(inner);
+  if (range) {
+    const start = parsePositiveId2(range[1]);
+    const end = parsePositiveId2(range[2]);
+    if (start === null || end === null || end < start) {
+      return [];
+    }
+    const span = end - start + 1;
+    if (span > INLINE_RANGE_EXPANSION_CAP) {
+      return [start, end];
+    }
+    const ids = [];
+    for (let id = start; id <= end; id += 1) {
+      ids.push(id);
+    }
+    return ids;
+  }
+  if (LIST_PATTERN.test(inner)) {
+    const ids = [];
+    LIST_ELEMENT_PATTERN.lastIndex = 0;
+    let element;
+    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
+      const id = parsePositiveId2(element[1]);
+      if (id === null) {
+        return [];
+      }
+      ids.push(id);
+    }
+    return ids;
+  }
+  const single = SINGLE_PATTERN.exec(inner);
+  if (single) {
+    const id = parsePositiveId2(single[1]);
+    return id === null ? [] : [id];
+  }
+  const annotated = ANNOTATED_PATTERN.exec(inner);
+  if (annotated) {
+    const id = parsePositiveId2(annotated[1]);
+    return id === null ? [] : [id];
+  }
+  return [];
+}
+function parseInlineCitations(content, maxRefs) {
+  if (!content) {
+    return [];
+  }
+  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
+  if (cap <= 0) {
+    return [];
+  }
+  const ids = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const body of citationBracketBodies(content)) {
+    for (const id of expandBracketBody(body)) {
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      ids.push(id);
+      if (ids.length >= cap) {
+        return ids;
+      }
+    }
+  }
+  return ids;
+}
+function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, logger) {
+  const references = [
+    ...parseQualifiedReferences(fields.title),
+    ...parseQualifiedReferences(fields.content),
+    ...parseQualifiedReferences(fields.insight)
+  ];
+  const { accepted, rejected } = validateReferences(db, references, {
+    writerSessionId,
+    logger
+  });
+  const { written, deleted } = reconcileCitedPairs(
+    db,
+    { kind: "turn", id: turnId },
+    accepted.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref"
+  );
+  return { written, deleted, rejected };
+}
+function appendUnseen(into, ids) {
+  const seen = new Set(into);
+  for (const id of ids) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      into.push(id);
+    }
+  }
+}
+function dedupeCitedIds(edges) {
+  const citedTurnIds = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (seen.has(edge.citedTurnId)) {
+      continue;
+    }
+    seen.add(edge.citedTurnId);
+    citedTurnIds.push(edge.citedTurnId);
+  }
+  return citedTurnIds;
+}
+function getSessionEffectiveCitations(db, sessionId) {
+  const turns = db.query(
+    `SELECT id, content
+       FROM turns
+       WHERE session_id = ?
+       ORDER BY prompt_number ASC, id ASC`
+  ).all(sessionId);
+  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
+  const edgesByCiter = /* @__PURE__ */ new Map();
+  const edgeRows = db.query(
+    `SELECT
+         e.citing_id AS citingTurnId,
+         e.cited_id AS citedTurnId,
+         e.relation,
+         e.created_at_epoch AS createdAtEpoch
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
+       JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
+       WHERE citing.session_id = ? AND cited.session_id = ?
+       ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
+  ).all(sessionId, sessionId);
+  for (const edge of edgeRows) {
+    if (edge.citedTurnId === edge.citingTurnId) {
+      continue;
+    }
+    const bucket = edgesByCiter.get(edge.citingTurnId);
+    if (bucket) {
+      bucket.push(edge);
+    } else {
+      edgesByCiter.set(edge.citingTurnId, [edge]);
+    }
+  }
+  const effective = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    const edges = edgesByCiter.get(turn.id) ?? [];
+    const citedTurnIds = dedupeCitedIds(edges);
+    appendUnseen(
+      citedTurnIds,
+      parseInlineCitations(turn.content).filter(
+        (id) => id !== turn.id && sessionTurnIds.has(id)
+      )
+    );
+    effective.set(turn.id, { citedTurnIds, edges });
+  }
+  return effective;
+}
+var CITATION_RELATIONS, INLINE_RANGE_EXPANSION_CAP, RANGE_PATTERN, LIST_PATTERN, LIST_ELEMENT_PATTERN, SINGLE_PATTERN, ANNOTATED_PATTERN;
+var init_citations = __esm({
+  "src/db/citations.ts"() {
+    "use strict";
+    init_memory_edges();
+    init_references();
+    CITATION_RELATIONS = [
+      "evidence-for",
+      "evidence-against",
+      "supersedes",
+      "depends-on"
     ];
-    DEFAULT_DREAM_AGENT_MODEL = "opus";
-    DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
-    DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
-    DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
-    DEFAULT_DREAM_AGENT_HOUR = 4;
-    DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
-    DEFAULT_CONFIG = {
-      hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
-      // On by default because it is a kill switch, not the cutover switch: with no
-      // era cutoff configured this changes nothing at all.
-      settlementEnabled: true,
-      eraCutoffEpoch: null,
-      dreamAgentEnabled: false,
-      dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
-      dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
-      dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
-      dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
-      dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
-      dreamAgentBacklogLimit: 1
-    };
+    INLINE_RANGE_EXPANSION_CAP = 8;
+    RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
+    LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
+    LIST_ELEMENT_PATTERN = /T(\d+)/g;
+    SINGLE_PATTERN = /^T(\d+)$/;
+    ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
   }
 });
 
@@ -33383,7 +33383,13 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // field just writes; present on a NON-empty field requires `mode.<field>` —
   // `"overwrite"` (replace whole) or `"append"` (add to it) — named once for
   // the caller, not spelled out per field below.
-  note: 'Write or correct a turn\'s note, or a session\'s summary. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief \u2014 never recalled or invented) or `session` (`S<session>`). Timing: the SessionStart block\'s three rules. A non-empty field needs `mode.<field>`: `"overwrite"` replaces it whole, `"append"` adds (text: newline-joined; type/tags: unioned). Empty needs no mode; omitted stays untouched. Clearing (insight/grade/session fields) needs `null` + overwrite mode. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored.\nTurn \u2014 title (~' + NOTE_TOKEN_BUDGET.title + " tok): `<activity>+<topic>: <what this turn covered>`, the real stage. content (~" + NOTE_TOKEN_BUDGET.content + " tok): the conclusion, then the evidence chain \u2014 rejected alternatives with reasons; never restate the title, never narrate looking. A first note needs both title and content. insight (~" + NOTE_TOKEN_BUDGET.insight + " tok, default none): long-term knowledge orthogonal to the conclusion, claim first. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction \u2014 omit or [] when none fit, never guess. tags: bare topic words, no prefix. grade: 0-4. Receipt reports token counts and each touched field's post-write total; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson. `crossSession: true` only for another session's turn. Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content. Goes last in its batch.\nSession \u2014 title/content: a compressed view for another session browsing this one. decision/done/current/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations."
+  note: 'Write or correct a turn\'s note, or a session\'s summary. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief \u2014 never recalled or invented) or `session` (`S<session>`). Timing: the SessionStart block\'s three rules. A non-empty field needs `mode.<field>`: `"overwrite"` replaces it whole, `"append"` adds (text: newline-joined; type/tags: unioned). Empty needs no mode; omitted stays untouched. Clearing (insight/grade/session fields) needs `null` + overwrite mode. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored.\nTurn \u2014 title (~' + NOTE_TOKEN_BUDGET.title + " tok): `<activity>+<topic>: <what this turn covered>`, the real stage. content (~" + NOTE_TOKEN_BUDGET.content + " tok): the conclusion, then the evidence chain \u2014 rejected alternatives with reasons; never restate the title, never narrate looking. A first note needs both title and content. insight (~" + NOTE_TOKEN_BUDGET.insight + " tok, default none): long-term knowledge orthogonal to the conclusion, claim first. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction \u2014 omit or [] when none fit, never guess. tags: bare topic words, no prefix. grade: 0-4. Receipt reports token counts and each touched field's post-write total; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson. `crossSession: true` only for another session's turn. Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content. Goes last in its batch.\nSession \u2014 title/content: a compressed view for another session browsing this one. decision/done/current/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations.",
+  // ticket 08 (spec G8): the coverage predicate pulled by the agent, not the
+  // Stop hook (ticket 11) or the completion gate (ticket 09) — those call the
+  // same underlying predicate (db/coverage.ts's `computeCoverageGaps`)
+  // directly rather than through this tool. Own budget, own test in
+  // definitions.test.ts — independent of note's 500-token cap.
+  check: "Ask what a session still owes before you believe you are finished \u2014 the same predicate the Stop hook and the completion gate check, so a clean answer here does not reopen later. Input: `id` (`S<session>`). Reports missing turns as bare addresses, never why \u2014 you already know why. An eligible turn is owed when it carries no stated `type`, unless it was skipped: skip is itself a verdict and counts as covered. Eligible excludes a compact marker and a slash command the harness answered with no model reply; a sidechain turn is included."
 };
 var recallInputShape = {
   id: external_exports3.string().optional(),
@@ -33441,241 +33447,13 @@ var timelineInputShape = {
   pageSize: external_exports3.number().int().positive().optional(),
   view: external_exports3.enum(["turns", "milestones", "phases"]).optional()
 };
+var checkInputShape = {
+  id: external_exports3.string().min(1)
+};
 var recallInputSchema = external_exports3.object(recallInputShape).strict();
 var timelineInputSchema = external_exports3.object(timelineInputShape).strict();
 var noteInputSchema = external_exports3.object(noteInputShape).strict();
-
-// src/mcp/note.ts
-init_citations();
-init_database();
-
-// src/db/note-debt.ts
-var NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = 'noted', reason = NULL,
-             closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ?
-           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
-  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
-}
-function recordDeclinedNoteDebt(db, turn, nowEpoch) {
-  return db.query(
-    `INSERT OR IGNORE INTO note_debt (
-           turn_id, session_id, prompt_number, status, reason,
-           opened_at_epoch, closed_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
-}
-
-// src/db/sessions.ts
-init_memory_edges();
-init_references();
-init_search();
-var SESSION_SELECT = `
-  SELECT
-    id,
-    content_session_id AS contentSessionId,
-    project,
-    transcript_path AS transcriptPath,
-    title,
-    content,
-    insight,
-    next_steps AS nextSteps,
-    decision,
-    done,
-    "current" AS current,
-    "reference" AS reference,
-    last_compact_turn AS lastCompactTurn,
-    summary_updated_at_epoch AS summaryUpdatedAtEpoch,
-    scan_cursor_byte_offset AS scanCursorByteOffset,
-    scan_cursor_line AS scanCursorLine,
-    parent_session_id AS parentSessionId,
-    lineage_status AS lineageStatus,
-    created_at_epoch AS createdAtEpoch,
-    updated_at_epoch AS updatedAtEpoch,
-    completed_at_epoch AS completedAtEpoch
-  FROM sessions
-`;
-function updateSessionFields(db, sessionId, input, nowEpoch) {
-  const existing = getSession(db, sessionId);
-  if (!existing) {
-    return null;
-  }
-  const resolve = (value, current2) => {
-    if (value === void 0) {
-      return current2;
-    }
-    if (value === null) {
-      return null;
-    }
-    return value.trim() === "" ? null : value;
-  };
-  const title = resolve(input.title, existing.title);
-  const content = resolve(input.content, existing.content);
-  const decision = resolve(input.decision, existing.decision);
-  const done = resolve(input.done, existing.done);
-  const current = resolve(input.current, existing.current);
-  const nextSteps = resolve(input.nextSteps, existing.nextSteps);
-  const reference = resolve(input.reference, existing.reference);
-  const session = db.query(`
-      UPDATE sessions SET
-        title = ?,
-        content = ?,
-        decision = ?,
-        done = ?,
-        "current" = ?,
-        next_steps = ?,
-        "reference" = ?,
-        insight = NULL,
-        summary_updated_at_epoch = ?,
-        updated_at_epoch = ?
-      WHERE id = ?
-      RETURNING
-        id,
-        content_session_id AS contentSessionId,
-        project,
-        transcript_path AS transcriptPath,
-        title,
-        content,
-        insight,
-        next_steps AS nextSteps,
-        decision,
-        done,
-        "current" AS current,
-        "reference" AS reference,
-        last_compact_turn AS lastCompactTurn,
-            summary_updated_at_epoch AS summaryUpdatedAtEpoch,
-        scan_cursor_byte_offset AS scanCursorByteOffset,
-        scan_cursor_line AS scanCursorLine,
-        parent_session_id AS parentSessionId,
-        lineage_status AS lineageStatus,
-        created_at_epoch AS createdAtEpoch,
-        updated_at_epoch AS updatedAtEpoch,
-        completed_at_epoch AS completedAtEpoch
-    `).get(
-    title,
-    content,
-    decision,
-    done,
-    current,
-    nextSteps,
-    reference,
-    nowEpoch,
-    nowEpoch,
-    sessionId
-  );
-  if (!session) {
-    return null;
-  }
-  indexSessionToFTS(db, session);
-  const references = [
-    ...parseQualifiedReferences(session.title),
-    ...parseQualifiedReferences(session.content),
-    ...parseQualifiedReferences(session.decision),
-    ...parseQualifiedReferences(session.done),
-    ...parseQualifiedReferences(session.current),
-    ...parseQualifiedReferences(session.nextSteps),
-    ...parseQualifiedReferences(session.reference)
-  ];
-  const { accepted } = validateReferences(db, references, {
-    writerSessionId: sessionId
-  });
-  reconcileCitedPairs(
-    db,
-    { kind: "session", id: sessionId },
-    accepted.map((entry) => entry.node),
-    nowEpoch,
-    "text-ref"
-  );
-  return session;
-}
-function getSession(db, id) {
-  return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
-}
-
-// src/db/shadow-notes.ts
-var SHADOW_NOTE_COLUMNS = `
-  turn_id AS turnId,
-  title,
-  content,
-  insight,
-  writer_model AS writerModel,
-  writer_origin AS writerOrigin,
-  ride_turn_id AS rideTurnId,
-  created_at_epoch AS createdAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function upsertShadowNote(db, input) {
-  const written = db.query(
-    `
-        INSERT INTO shadow_notes (
-          turn_id,
-          title,
-          content,
-          insight,
-          writer_model,
-          writer_origin,
-          ride_turn_id,
-          created_at_epoch,
-          updated_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(turn_id) DO UPDATE SET
-          title = excluded.title,
-          content = excluded.content,
-          insight = excluded.insight,
-          writer_model = excluded.writer_model,
-          writer_origin = excluded.writer_origin,
-          ride_turn_id = excluded.ride_turn_id,
-          updated_at_epoch = excluded.updated_at_epoch
-        RETURNING ${SHADOW_NOTE_COLUMNS}
-      `
-  ).get(
-    input.turnId,
-    input.title,
-    input.content,
-    input.insight ?? null,
-    input.writerModel ?? null,
-    input.writerOrigin ?? "agent",
-    input.rideTurnId ?? null,
-    input.nowEpoch,
-    input.nowEpoch
-  );
-  if (!written) {
-    throw new Error(`Failed to write shadow note for turn ${input.turnId}.`);
-  }
-  return written;
-}
-function getShadowNote(db, turnId) {
-  return db.query(
-    `SELECT ${SHADOW_NOTE_COLUMNS} FROM shadow_notes WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
+var checkInputSchema = external_exports3.object(checkInputShape).strict();
 
 // src/diary/calendar.ts
 var dateFormatters = /* @__PURE__ */ new Map();
@@ -33955,6 +33733,334 @@ function getFirstTurn(db, sessionId) {
   );
 }
 
+// src/db/coverage.ts
+var NO_REPLY_COMMAND_ENVELOPE_PREFIXES = [
+  "<local-command-",
+  "<command-name>",
+  "<command-args>",
+  "<command-message>"
+];
+function isNoReplySlashCommandPrompt(userPrompt) {
+  if (userPrompt === null) {
+    return false;
+  }
+  const trimmed = userPrompt.trimStart();
+  const isCommandEnvelope = NO_REPLY_COMMAND_ENVELOPE_PREFIXES.some(
+    (prefix) => trimmed.startsWith(prefix)
+  );
+  if (!isCommandEnvelope) {
+    return false;
+  }
+  return !trimmed.includes("<command-name>");
+}
+function isCompactMarkerTurn(turn) {
+  return turn.type.includes("compact");
+}
+function isEligibleCoverageTurn(turn) {
+  return !isCompactMarkerTurn(turn) && !isNoReplySlashCommandPrompt(turn.userPrompt);
+}
+function declinedSkipTurnIds(db, turnIds) {
+  if (turnIds.length === 0) {
+    return /* @__PURE__ */ new Set();
+  }
+  const placeholders = turnIds.map(() => "?").join(", ");
+  const rows = db.query(
+    `SELECT turn_id AS turnId FROM note_debt
+       WHERE status = 'skipped' AND reason = 'declined'
+         AND turn_id IN (${placeholders})`
+  ).all(...turnIds);
+  return new Set(rows.map((row) => row.turnId));
+}
+function isCoveredCoverageTurn(turn, hasDeclinedSkip) {
+  return turn.type.length > 0 || turn.status === "skipped" || hasDeclinedSkip;
+}
+function computeCoverageGaps(db, turnIds) {
+  const declined = declinedSkipTurnIds(db, turnIds);
+  const gaps = [];
+  for (const turnId of turnIds) {
+    const turn = getTurnById(db, turnId);
+    if (!turn) {
+      continue;
+    }
+    if (!isEligibleCoverageTurn(turn)) {
+      continue;
+    }
+    if (isCoveredCoverageTurn(turn, declined.has(turnId))) {
+      continue;
+    }
+    gaps.push({
+      turnId: turn.id,
+      sessionId: turn.sessionId,
+      promptNumber: turn.promptNumber
+    });
+  }
+  return gaps;
+}
+
+// src/mcp/check.ts
+function textResult(text) {
+  return { content: [{ type: "text", text }] };
+}
+function parameterError(message) {
+  return textResult(`Parameter error: ${message}`);
+}
+var SESSION_ADDRESS_PATTERN = /^S(\d+)$/i;
+function checkTool(db, rawInput) {
+  if (typeof rawInput.id !== "string") {
+    return parameterError('id is required, e.g. "S15069".');
+  }
+  const match = SESSION_ADDRESS_PATTERN.exec(rawInput.id.trim());
+  if (!match) {
+    return parameterError(`id must be a "S<session>" address; got "${rawInput.id}".`);
+  }
+  const sessionId = Number.parseInt(match[1], 10);
+  const turnIds = db.query(
+    "SELECT id FROM turns WHERE session_id = ? ORDER BY prompt_number ASC"
+  ).all(sessionId).map((row) => row.id);
+  const gaps = computeCoverageGaps(db, turnIds);
+  if (gaps.length === 0) {
+    return textResult(
+      `S${sessionId}: nothing owed \u2014 every eligible turn is typed or skipped.`
+    );
+  }
+  const addresses = gaps.map((gap) => `S${gap.sessionId}/T${gap.promptNumber}`).join(", ");
+  return textResult(
+    `S${sessionId}: ${gaps.length} turn(s) still owe review: ${addresses}.`
+  );
+}
+
+// src/mcp/note.ts
+init_citations();
+init_database();
+
+// src/db/note-debt.ts
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = 'noted', reason = NULL,
+             closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ?
+           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
+  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
+}
+function recordDeclinedNoteDebt(db, turn, nowEpoch) {
+  return db.query(
+    `INSERT OR IGNORE INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
+}
+
+// src/db/sessions.ts
+init_memory_edges();
+init_references();
+init_search();
+var SESSION_SELECT = `
+  SELECT
+    id,
+    content_session_id AS contentSessionId,
+    project,
+    transcript_path AS transcriptPath,
+    title,
+    content,
+    insight,
+    next_steps AS nextSteps,
+    decision,
+    done,
+    "current" AS current,
+    "reference" AS reference,
+    last_compact_turn AS lastCompactTurn,
+    summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+    scan_cursor_byte_offset AS scanCursorByteOffset,
+    scan_cursor_line AS scanCursorLine,
+    parent_session_id AS parentSessionId,
+    lineage_status AS lineageStatus,
+    created_at_epoch AS createdAtEpoch,
+    updated_at_epoch AS updatedAtEpoch,
+    completed_at_epoch AS completedAtEpoch
+  FROM sessions
+`;
+function updateSessionFields(db, sessionId, input, nowEpoch) {
+  const existing = getSession(db, sessionId);
+  if (!existing) {
+    return null;
+  }
+  const resolve = (value, current2) => {
+    if (value === void 0) {
+      return current2;
+    }
+    if (value === null) {
+      return null;
+    }
+    return value.trim() === "" ? null : value;
+  };
+  const title = resolve(input.title, existing.title);
+  const content = resolve(input.content, existing.content);
+  const decision = resolve(input.decision, existing.decision);
+  const done = resolve(input.done, existing.done);
+  const current = resolve(input.current, existing.current);
+  const nextSteps = resolve(input.nextSteps, existing.nextSteps);
+  const reference = resolve(input.reference, existing.reference);
+  const session = db.query(`
+      UPDATE sessions SET
+        title = ?,
+        content = ?,
+        decision = ?,
+        done = ?,
+        "current" = ?,
+        next_steps = ?,
+        "reference" = ?,
+        insight = NULL,
+        summary_updated_at_epoch = ?,
+        updated_at_epoch = ?
+      WHERE id = ?
+      RETURNING
+        id,
+        content_session_id AS contentSessionId,
+        project,
+        transcript_path AS transcriptPath,
+        title,
+        content,
+        insight,
+        next_steps AS nextSteps,
+        decision,
+        done,
+        "current" AS current,
+        "reference" AS reference,
+        last_compact_turn AS lastCompactTurn,
+            summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+        scan_cursor_byte_offset AS scanCursorByteOffset,
+        scan_cursor_line AS scanCursorLine,
+        parent_session_id AS parentSessionId,
+        lineage_status AS lineageStatus,
+        created_at_epoch AS createdAtEpoch,
+        updated_at_epoch AS updatedAtEpoch,
+        completed_at_epoch AS completedAtEpoch
+    `).get(
+    title,
+    content,
+    decision,
+    done,
+    current,
+    nextSteps,
+    reference,
+    nowEpoch,
+    nowEpoch,
+    sessionId
+  );
+  if (!session) {
+    return null;
+  }
+  indexSessionToFTS(db, session);
+  const references = [
+    ...parseQualifiedReferences(session.title),
+    ...parseQualifiedReferences(session.content),
+    ...parseQualifiedReferences(session.decision),
+    ...parseQualifiedReferences(session.done),
+    ...parseQualifiedReferences(session.current),
+    ...parseQualifiedReferences(session.nextSteps),
+    ...parseQualifiedReferences(session.reference)
+  ];
+  const { accepted } = validateReferences(db, references, {
+    writerSessionId: sessionId
+  });
+  reconcileCitedPairs(
+    db,
+    { kind: "session", id: sessionId },
+    accepted.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref"
+  );
+  return session;
+}
+function getSession(db, id) {
+  return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
+}
+
+// src/db/shadow-notes.ts
+var SHADOW_NOTE_COLUMNS = `
+  turn_id AS turnId,
+  title,
+  content,
+  insight,
+  writer_model AS writerModel,
+  writer_origin AS writerOrigin,
+  ride_turn_id AS rideTurnId,
+  created_at_epoch AS createdAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function upsertShadowNote(db, input) {
+  const written = db.query(
+    `
+        INSERT INTO shadow_notes (
+          turn_id,
+          title,
+          content,
+          insight,
+          writer_model,
+          writer_origin,
+          ride_turn_id,
+          created_at_epoch,
+          updated_at_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(turn_id) DO UPDATE SET
+          title = excluded.title,
+          content = excluded.content,
+          insight = excluded.insight,
+          writer_model = excluded.writer_model,
+          writer_origin = excluded.writer_origin,
+          ride_turn_id = excluded.ride_turn_id,
+          updated_at_epoch = excluded.updated_at_epoch
+        RETURNING ${SHADOW_NOTE_COLUMNS}
+      `
+  ).get(
+    input.turnId,
+    input.title,
+    input.content,
+    input.insight ?? null,
+    input.writerModel ?? null,
+    input.writerOrigin ?? "agent",
+    input.rideTurnId ?? null,
+    input.nowEpoch,
+    input.nowEpoch
+  );
+  if (!written) {
+    throw new Error(`Failed to write shadow note for turn ${input.turnId}.`);
+  }
+  return written;
+}
+function getShadowNote(db, turnId) {
+  return db.query(
+    `SELECT ${SHADOW_NOTE_COLUMNS} FROM shadow_notes WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+
 // src/mcp/note.ts
 init_segment_era();
 
@@ -34086,14 +34192,14 @@ var SESSION_MODE_FIELDS = [
   "next_steps",
   "reference"
 ];
-function textResult(text) {
+function textResult2(text) {
   return { content: [{ type: "text", text }] };
 }
-function parameterError(message) {
-  return textResult(`Parameter error: ${message}`);
+function parameterError2(message) {
+  return textResult2(`Parameter error: ${message}`);
 }
 var TURN_ADDRESS_PATTERN = /^S(\d+)\/T(\d+)$/i;
-var SESSION_ADDRESS_PATTERN = /^S(\d+)$/i;
+var SESSION_ADDRESS_PATTERN2 = /^S(\d+)$/i;
 function parseTurnAddress(value) {
   const match = TURN_ADDRESS_PATTERN.exec(value.trim());
   if (!match) {
@@ -34107,7 +34213,7 @@ function parseTurnAddress(value) {
   return { sessionId, promptNumber };
 }
 function parseSessionAddress(value) {
-  const match = SESSION_ADDRESS_PATTERN.exec(value.trim());
+  const match = SESSION_ADDRESS_PATTERN2.exec(value.trim());
   if (!match) {
     return null;
   }
@@ -34337,15 +34443,15 @@ function parseModeMap(raw, allowed) {
 function declineTurn(db, address, options, crossSession) {
   const turn = getTurn(db, address.sessionId, address.promptNumber);
   if (!turn) {
-    return parameterError(
+    return parameterError2(
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
   }
   if (turn.type.includes("compact")) {
-    return parameterError(compactMarkerMessage(address));
+    return parameterError2(compactMarkerMessage(address));
   }
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
-    return parameterError(
+    return parameterError2(
       crossSessionRequiredMessage(address, options.callerSessionId)
     );
   }
@@ -34369,13 +34475,13 @@ function declineTurn(db, address, options, crossSession) {
   });
   switch (outcome.kind) {
     case "declined":
-      return textResult(
+      return textResult2(
         `Skipped ${ref}. Its debt is closed as declined and it will not be listed again; send a real note for this turn if the material comes back.`
       );
     case "already-noted":
-      return textResult(`Skipped ${ref} ignored: it already has a note.`);
+      return textResult2(`Skipped ${ref} ignored: it already has a note.`);
     case "already-settled":
-      return textResult(
+      return textResult2(
         `Skipped ${ref} ignored: its debt already closed as ${outcome.settledAs}.`
       );
   }
@@ -34391,10 +34497,10 @@ function isValidPredecessorFor(db, turn) {
 }
 function handleTurnWrite(db, address, input, options) {
   if (input.skip !== void 0 && typeof input.skip !== "boolean") {
-    return parameterError("skip must be a boolean when present.");
+    return parameterError2("skip must be a boolean when present.");
   }
   if (input.crossSession !== void 0 && typeof input.crossSession !== "boolean") {
-    return parameterError("crossSession must be a boolean when present.");
+    return parameterError2("crossSession must be a boolean when present.");
   }
   const crossSession = input.crossSession === true;
   if (input.skip === true) {
@@ -34405,20 +34511,20 @@ function handleTurnWrite(db, address, input, options) {
       continue;
     }
     if (input[key] !== void 0) {
-      return parameterError(`${key} is a session field; this call addresses a turn.`);
+      return parameterError2(`${key} is a session field; this call addresses a turn.`);
     }
   }
   const turn = getTurn(db, address.sessionId, address.promptNumber);
   if (!turn) {
-    return parameterError(
+    return parameterError2(
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
   }
   if (turn.type.includes("compact")) {
-    return parameterError(compactMarkerMessage(address));
+    return parameterError2(compactMarkerMessage(address));
   }
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
-    return parameterError(
+    return parameterError2(
       crossSessionRequiredMessage(address, options.callerSessionId)
     );
   }
@@ -34426,7 +34532,7 @@ function handleTurnWrite(db, address, input, options) {
     (key) => input[key] !== void 0
   );
   if (providedFields.length === 0) {
-    return parameterError(
+    return parameterError2(
       "at least one of title, content, insight, type, tags, grade is required."
     );
   }
@@ -34435,7 +34541,7 @@ function handleTurnWrite(db, address, input, options) {
     modeMap = parseModeMap(input.mode, TURN_MODE_FIELDS);
   } catch (error48) {
     if (error48 instanceof NoteValidationError) {
-      return parameterError(error48.message);
+      return parameterError2(error48.message);
     }
     throw error48;
   }
@@ -34447,7 +34553,7 @@ function handleTurnWrite(db, address, input, options) {
   const promotesTurnRecord = isSegmentEra(turn.createdAtEpoch, options.eraCutoffEpoch);
   const eraConfigured = options.eraCutoffEpoch !== void 0 && options.eraCutoffEpoch !== null;
   if (eraConfigured && !promotesTurnRecord && (input.title !== void 0 || input.content !== void 0 || input.insight !== void 0)) {
-    return parameterError(
+    return parameterError2(
       `S${address.sessionId}/T${address.promptNumber} is a pre-cutoff turn, whose prose has no reader \u2014 title, content and insight cannot be written to it. Its grade, type and tags are still writable.`
     );
   }
@@ -34586,7 +34692,7 @@ function handleTurnWrite(db, address, input, options) {
     });
   } catch (error48) {
     if (error48 instanceof NoteValidationError) {
-      return parameterError(error48.message);
+      return parameterError2(error48.message);
     }
     throw error48;
   }
@@ -34636,19 +34742,19 @@ function handleTurnWrite(db, address, input, options) {
       );
     }
   }
-  return textResult(parts.join(" "));
+  return textResult2(parts.join(" "));
 }
 function handleSessionWrite(db, sessionId, input, options) {
   for (const key of ["insight", "type", "tags", "grade", "skip", "crossSession"]) {
     if (input[key] !== void 0) {
-      return parameterError(`${key} is a turn field; this call addresses a session.`);
+      return parameterError2(`${key} is a turn field; this call addresses a session.`);
     }
   }
   const providedFields = SESSION_MODE_FIELDS.filter(
     (key) => input[key] !== void 0
   );
   if (providedFields.length === 0) {
-    return parameterError(
+    return parameterError2(
       "at least one of title, content, decision, done, current, next_steps, reference is required."
     );
   }
@@ -34657,13 +34763,13 @@ function handleSessionWrite(db, sessionId, input, options) {
     modeMap = parseModeMap(input.mode, SESSION_MODE_FIELDS);
   } catch (error48) {
     if (error48 instanceof NoteValidationError) {
-      return parameterError(error48.message);
+      return parameterError2(error48.message);
     }
     throw error48;
   }
   const session = getSession(db, sessionId);
   if (!session) {
-    return textResult(`Session S${sessionId} not found.`);
+    return textResult2(`Session S${sessionId} not found.`);
   }
   const fieldMap = [
     ["title", session.title],
@@ -34692,7 +34798,7 @@ function handleSessionWrite(db, sessionId, input, options) {
     }
   } catch (error48) {
     if (error48 instanceof NoteValidationError) {
-      return parameterError(error48.message);
+      return parameterError2(error48.message);
     }
     throw error48;
   }
@@ -34703,7 +34809,7 @@ function handleSessionWrite(db, sessionId, input, options) {
     () => updateSessionFields(db, sessionId, resolvedInput, nowEpoch)
   );
   if (!updated) {
-    return textResult(`Session S${sessionId} not found.`);
+    return textResult2(`Session S${sessionId} not found.`);
   }
   const verb = "Updated";
   const parts = [`${verb} S${sessionId}.`];
@@ -34711,26 +34817,26 @@ function handleSessionWrite(db, sessionId, input, options) {
   if (sizeParts.length > 0) {
     parts.push(`sizes (after write): ${sizeParts.join(", ")}.`);
   }
-  return textResult(parts.join(" "));
+  return textResult2(parts.join(" "));
 }
 function noteTool(db, rawInput, options = {}) {
   const hasTurn = typeof rawInput.turn === "string";
   const hasSession = typeof rawInput.session === "string";
   if (rawInput.turn !== void 0 && !hasTurn) {
-    return parameterError("turn must be a string when present.");
+    return parameterError2("turn must be a string when present.");
   }
   if (rawInput.session !== void 0 && !hasSession) {
-    return parameterError("session must be a string when present.");
+    return parameterError2("session must be a string when present.");
   }
   if (hasTurn === hasSession) {
-    return parameterError(
+    return parameterError2(
       hasTurn ? "exactly one of turn or session is required, not both." : 'exactly one of turn ("S<session>/T<prompt>") or session ("S<session>") is required.'
     );
   }
   if (hasSession) {
     const sessionId = parseSessionAddress(rawInput.session);
     if (sessionId === null) {
-      return parameterError(
+      return parameterError2(
         `session must be a "S<session>" address, e.g. "S15069"; got "${rawInput.session}".`
       );
     }
@@ -34738,7 +34844,7 @@ function noteTool(db, rawInput, options = {}) {
   }
   const address = parseTurnAddress(rawInput.turn);
   if (!address) {
-    return parameterError(
+    return parameterError2(
       `turn must be a fully qualified "S<session>/T<prompt>" address, e.g. "S15069/T332"; got "${rawInput.turn}".`
     );
   }
@@ -39477,7 +39583,7 @@ function timelineQuery(db, input) {
 init_era();
 var WORKER_TOOL_RESULT_MAX_CHARS = 1e5;
 var WORKER_TOOL_RESULT_TRUNCATION_HINT = "\n\n[\u5DE5\u5177\u8FD4\u56DE\u5DF2\u8FBE\u4E0A\u9650\uFF1B\u8BF7\u7528\u5206\u9875\u6216\u6536\u7A84\u9009\u62E9\u5668\u7EE7\u7EED\u3002]";
-function textResult2(text) {
+function textResult3(text) {
   return {
     content: [
       {
@@ -39488,7 +39594,7 @@ function textResult2(text) {
   };
 }
 function createStubHandler(toolName) {
-  return async () => textResult2(`${toolName} not implemented`);
+  return async () => textResult3(`${toolName} not implemented`);
 }
 function toTimelineQueryInput(args) {
   const input = {
@@ -39513,17 +39619,17 @@ function createDatabaseBackedHandlers(database, options = {}) {
   const eraCutoff = () => options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveEraCutoff(database);
   const workerTextResult = (text) => {
     if (!includeDbTurnIds) {
-      return textResult2(text);
+      return textResult3(text);
     }
     const stripped = stripPrivateTags(text);
     if (stripped.length <= WORKER_TOOL_RESULT_MAX_CHARS) {
-      return textResult2(stripped);
+      return textResult3(stripped);
     }
     const contentLimit = Math.max(
       0,
       WORKER_TOOL_RESULT_MAX_CHARS - WORKER_TOOL_RESULT_TRUNCATION_HINT.length
     );
-    return textResult2(
+    return textResult3(
       stripped.slice(0, contentLimit) + WORKER_TOOL_RESULT_TRUNCATION_HINT
     );
   };
@@ -39554,7 +39660,9 @@ function createDatabaseBackedHandlers(database, options = {}) {
     note: (args) => noteTool(database, args, {
       eraCutoffEpoch: eraCutoff(),
       callerSessionId: options.resolveCallerSessionId?.() ?? null
-    })
+    }),
+    // Same shape as `note`: a short mechanical report, nothing to truncate.
+    check: (args) => checkTool(database, args)
   };
 }
 
@@ -39603,6 +39711,14 @@ function registerMainMcpTools(server, toolHandlers) {
     },
     (args) => toolHandlers.note(args)
   );
+  server.registerTool(
+    "check",
+    {
+      description: MNEMO_TOOL_DESCRIPTIONS.check,
+      inputSchema: checkInputSchema
+    },
+    (args) => toolHandlers.check(args)
+  );
 }
 function createMcpServer(options = {}) {
   const server = new McpServer(
@@ -39626,7 +39742,8 @@ function createMcpServer(options = {}) {
   const toolHandlers = {
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
     timeline: mergedHandlers.timeline ?? createStubHandler("timeline"),
-    note: mergedHandlers.note ?? createStubHandler("note")
+    note: mergedHandlers.note ?? createStubHandler("note"),
+    check: mergedHandlers.check ?? createStubHandler("check")
   };
   registerMainMcpTools(server, toolHandlers);
   return server;

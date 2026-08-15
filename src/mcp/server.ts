@@ -9,6 +9,7 @@ import {
   getMnemoSessionIdForProcessSession,
 } from "../db/process-session-map";
 import {
+  checkInputSchema,
   MNEMO_TOOL_DESCRIPTIONS,
   noteInputSchema,
   recallInputSchema,
@@ -72,7 +73,7 @@ export function resolveCallerSessionIdFromEnv(
   return null;
 }
 
-type MainMcpToolName = "recall" | "timeline" | "note";
+type MainMcpToolName = "recall" | "timeline" | "note" | "check";
 type MainMcpToolHandlers = Pick<MnemoToolHandlers, MainMcpToolName>;
 type ToolRegistrationTarget = Pick<McpServer, "registerTool">;
 
@@ -116,6 +117,14 @@ export function registerMainMcpTools(
     },
     (args) => toolHandlers.note(args as Record<string, unknown>),
   );
+  server.registerTool(
+    "check",
+    {
+      description: MNEMO_TOOL_DESCRIPTIONS.check,
+      inputSchema: checkInputSchema,
+    },
+    (args) => toolHandlers.check(args as Record<string, unknown>),
+  );
 }
 
 export function createMcpServer(
@@ -145,6 +154,7 @@ export function createMcpServer(
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
     timeline: mergedHandlers.timeline ?? createStubHandler("timeline"),
     note: mergedHandlers.note ?? createStubHandler("note"),
+    check: mergedHandlers.check ?? createStubHandler("check"),
   };
 
   registerMainMcpTools(server, toolHandlers);

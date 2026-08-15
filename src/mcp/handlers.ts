@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { checkTool } from "./check";
 import { noteTool } from "./note";
 import { recallMemory } from "./recall";
 import { timelineQuery } from "./timeline";
@@ -24,6 +25,7 @@ export interface MnemoToolHandlers {
   recall: ToolHandler;
   timeline: ToolHandler;
   note: ToolHandler;
+  check: ToolHandler;
 }
 
 export type TimelineToolView = "turns" | "milestones" | "phases";
@@ -165,5 +167,7 @@ export function createDatabaseBackedHandlers(
         eraCutoffEpoch: eraCutoff(),
         callerSessionId: options.resolveCallerSessionId?.() ?? null,
       }),
+    // Same shape as `note`: a short mechanical report, nothing to truncate.
+    check: (args) => checkTool(database, args as Parameters<typeof checkTool>[1]),
   };
 }

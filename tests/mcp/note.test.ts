@@ -1119,11 +1119,16 @@ describe("the merged write tool (ticket 03)", () => {
 
     test("the database-backed handlers expose no remember key", () => {
       const handlers = createDatabaseBackedHandlers(db);
-      expect(Object.keys(handlers).sort()).toEqual(["note", "recall", "timeline"]);
+      expect(Object.keys(handlers).sort()).toEqual([
+        "check",
+        "note",
+        "recall",
+        "timeline",
+      ]);
       expect((handlers as Record<string, unknown>).remember).toBeUndefined();
     });
 
-    test("the main MCP server registers only recall, timeline and note", () => {
+    test("the main MCP server registers recall, timeline, note and check — never remember", () => {
       const registered: string[] = [];
       registerMainMcpTools(
         { registerTool: (name) => registered.push(name) },
@@ -1131,9 +1136,10 @@ describe("the merged write tool (ticket 03)", () => {
           recall: () => ({ content: [] }),
           timeline: () => ({ content: [] }),
           note: () => ({ content: [] }),
+          check: () => ({ content: [] }),
         } as never,
       );
-      expect(registered).toEqual(["recall", "timeline", "note"]);
+      expect(registered).toEqual(["recall", "timeline", "note", "check"]);
       expect(registered).not.toContain("remember");
     });
   });

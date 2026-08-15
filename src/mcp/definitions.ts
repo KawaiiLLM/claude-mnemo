@@ -32,6 +32,13 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
     NOTE_TOKEN_BUDGET.insight +
     " tok, default none): long-term knowledge orthogonal to the conclusion, claim first. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction — omit or [] when none fit, never guess. tags: bare topic words, no prefix. grade: 0-4. Receipt reports token counts and each touched field's post-write total; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson. `crossSession: true` only for another session's turn. Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content. Goes last in its batch.\n" +
     "Session — title/content: a compressed view for another session browsing this one. decision/done/current/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations.",
+  // ticket 08 (spec G8): the coverage predicate pulled by the agent, not the
+  // Stop hook (ticket 11) or the completion gate (ticket 09) — those call the
+  // same underlying predicate (db/coverage.ts's `computeCoverageGaps`)
+  // directly rather than through this tool. Own budget, own test in
+  // definitions.test.ts — independent of note's 500-token cap.
+  check:
+    "Ask what a session still owes before you believe you are finished — the same predicate the Stop hook and the completion gate check, so a clean answer here does not reopen later. Input: `id` (`S<session>`). Reports missing turns as bare addresses, never why — you already know why. An eligible turn is owed when it carries no stated `type`, unless it was skipped: skip is itself a verdict and counts as covered. Eligible excludes a compact marker and a slash command the harness answered with no model reply; a sidechain turn is included.",
 } as const;
 
 export const recallInputShape = {
@@ -124,6 +131,16 @@ export const timelineInputShape = {
   view: z.enum(["turns", "milestones", "phases"]).optional(),
 };
 
+// ticket 08 (spec G8): `id` addresses a whole session (`S<session>`) — the
+// predicate itself (db/coverage.ts) takes a bare turn-id list and does not
+// care how a caller assembled it; this tool's own choice is "the caller's
+// whole session", the shape a live agent asking about its own work has on
+// hand without a range to compute.
+export const checkInputShape = {
+  id: z.string().min(1),
+};
+
 export const recallInputSchema = z.object(recallInputShape).strict();
 export const timelineInputSchema = z.object(timelineInputShape).strict();
 export const noteInputSchema = z.object(noteInputShape).strict();
+export const checkInputSchema = z.object(checkInputShape).strict();

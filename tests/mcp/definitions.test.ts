@@ -5,6 +5,7 @@ import {
   timelineInputSchema,
   recallInputSchema,
   noteInputSchema,
+  checkInputSchema,
   workerRecallInputShape,
 } from "../../src/mcp/definitions";
 import { estimateTokens } from "../../src/utils/token-estimate";
@@ -58,7 +59,11 @@ describe("tool surface", () => {
     // (spec D1). Handing it to the extraction worker would let the pipeline
     // write the notes the P1 trial exists to compare it against. ticket 03
     // (spec E1) merged `remember` into `note` — there is no second name left.
+    // `check` (ticket 08, spec G8) is likewise absent from the worker
+    // allowlist here: it is the main agent's own pull, not a channel this
+    // worker's extraction pipeline uses.
     expect(Object.keys(MNEMO_TOOL_DESCRIPTIONS).sort()).toEqual([
+      "check",
       "note",
       "recall",
       "timeline",
@@ -159,6 +164,32 @@ describe("tool surface", () => {
         content: "c",
         mode: { content: "merge" },
       }),
+    ).toThrow();
+  });
+
+  // ticket 08 (spec G8/G9): `check` gets its own description and its own
+  // budget, independent of note's 500-token cap — the two are unrelated
+  // tools whose descriptions happen to share this object.
+  it("the check description states what it reports, and G9's histogram never appears in it", () => {
+    const check = MNEMO_TOOL_DESCRIPTIONS.check;
+    expect(check).toContain("never why");
+    expect(check).toContain("skip is itself a verdict");
+    expect(check).toContain("compact marker");
+    expect(check).toContain("sidechain");
+    // G9: the per-grade histogram must not be visible to the grading agent
+    // at any point in its run — including in the tool's own description.
+    expect(check.toLowerCase()).not.toContain("histogram");
+    expect(check).not.toMatch(/\bG[0-4]\s*:/);
+    expect(estimateTokens(check)).toBeLessThanOrEqual(200);
+  });
+});
+
+describe("checkInputSchema", () => {
+  it("accepts a session address and rejects extra fields", () => {
+    expect(checkInputSchema.parse({ id: "S42" })).toEqual({ id: "S42" });
+    expect(() => checkInputSchema.parse({})).toThrow();
+    expect(() =>
+      checkInputSchema.parse({ id: "S42", page: 2 }),
     ).toThrow();
   });
 });
