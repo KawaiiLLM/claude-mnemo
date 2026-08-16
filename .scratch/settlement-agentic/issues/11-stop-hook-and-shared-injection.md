@@ -2,7 +2,7 @@
 
 **What to build:** An agent that tries to stop with gaps is handed the list and continues; and changing the main agent's injected context no longer requires a second, divergent edit for the subagent.
 
-**Blocked by:** 10
+**Blocked by:** 10a
 
 **Status:** ready-for-agent
 

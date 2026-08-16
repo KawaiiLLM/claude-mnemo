@@ -269,6 +269,12 @@ That band is **operator-side only**. Per D8a the writer is told how many turns h
 
 **G1.** The Stop hook checks **empty fields only**. Per F4 that is also the skip check, so no separate "does every turn have a note" or "is every turn in a segment" check is needed.
 
+**G1a. That reasoning covers the Stop hook and does not cover the completion gate.** It is true of the *fields a turn carries* and false of the *notes settlement was supposed to backfill*: a turn can carry a stated type — duty 1 done — while the hole duty 2 existed to fill is still open. Found by a cross-session review of ticket 09, against the source rather than against this text.
+
+The only runtime check that every reconstructable hole now carries a shadow note lives in the retiring write-back, which throws and rolls the whole reply back when one is left open. Ticket 10 deletes it, and nothing in G7 replaces it. The sequence that then commits: a hole gets its type written and a segment membership; its note call fails or is simply omitted; the gate, checking type coverage and segmentation only, marks the job done with the turn permanently unnoted and the window's cursor advanced past it.
+
+So the completion gate carries a **third clause** — no turn in the frozen window is still owed a note — computed inside the same transaction as the anti-join and the compare-and-set, and therefore under G6's generation fence. G1 stands for the Stop hook, which trusts the agent and hands it a list; it does not stand for the gate, which trusts nobody. That asymmetry is G2's own, restated where it had been left out.
+
 **G2.** Two layers with different trust: the **Stop hook blocks and lists the gaps** — at most twice, to avoid a loop — because it trusts the agent to fill them; the **job-completion gate re-checks independently** and leaves the job claimed when it fails, because it trusts nobody.
 
 **G3.** A skipped turn needs no review verdict; skip is itself a verdict and counts as covered.
