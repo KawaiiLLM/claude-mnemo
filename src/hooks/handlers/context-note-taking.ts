@@ -9,28 +9,29 @@ import type { HookResult, NormalizedHookInput } from "../types";
  * (arXiv 2602.11988). English by 裁决 16, matching the library's existing
  * title/content corpus.
  *
- * Single-home split (user ruling, S15069 T586): this block carries ONLY the
- * batch-timing rules — the ones that must fire while composing a batch of
- * OTHER tools, before the note tool is even in mind. Everything an agent
- * needs at note-composition time (fields, budgets, the skip test, replace)
- * lives in the note tool's description, stated exactly once. The injection
- * formats themselves (owed suffix, relief block) are not documented anywhere:
- * they explain themselves on sight, and the relief block carries its own
- * authorization text. What cannot be read off the format is the norm — the
- * injected lines are the only legitimate address source — so that is the one
- * sentence spent on them here.
+ * Single home, completed (user ruling, S15069 T781; the split began at T586).
+ * The timing rules used to live HERE and everything else in the note tool's
+ * description, on the reasoning that timing must fire while composing a batch
+ * of OTHER tools, before the note tool is in mind. That split is what broke:
+ * this block said "first tool batch" while the description ended with "goes
+ * last in its batch", and the two read as opposites at a glance — the agent
+ * repeatedly settled owed turns in a batch of their own, after answering,
+ * which is the one thing rule 3 forbids. A tool description is in context
+ * whenever the tool is, so the premise that timing needed a second home was
+ * wrong; timing now lives with the fields, stated once.
+ *
+ * What stays is the only thing the description cannot carry: the address
+ * NORM. The injection formats (owed suffix, relief block) are documented
+ * nowhere on purpose — they explain themselves on sight — but "these lines are
+ * the only legitimate source" cannot be read off a format, so it is stated
+ * here, where the formats appear.
  */
 export const NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
 You keep notes on your own turns. The injected "mnemo current turn" line,
 its owed suffix, and the backlog-relief block are the ONLY sources of a
 note address — never recall one from memory, never invent one.
-1. Each turn's first tool batch also settles owed turns — a note or a
-   skip per address.
-2. A turn's own note is written by a later turn, never by itself.
-3. Never open a batch just for notes, except while the relief block is
-   present or to correct a note already written.
-Fields, budgets, the skip test, and replace live in the note tool's
-description.
+Timing, fields, budgets, the skip test and replace live in the note
+tool's description.
 </mnemo-note-taking>`;
 
 /**

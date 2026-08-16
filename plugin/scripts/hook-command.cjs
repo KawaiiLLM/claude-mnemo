@@ -4177,7 +4177,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.11.0-msw5rvcq" : "dev";
+var BUILD_ID = true ? "0.11.1-msw7mnas" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -23915,13 +23915,8 @@ var NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
 You keep notes on your own turns. The injected "mnemo current turn" line,
 its owed suffix, and the backlog-relief block are the ONLY sources of a
 note address \u2014 never recall one from memory, never invent one.
-1. Each turn's first tool batch also settles owed turns \u2014 a note or a
-   skip per address.
-2. A turn's own note is written by a later turn, never by itself.
-3. Never open a batch just for notes, except while the relief block is
-   present or to correct a note already written.
-Fields, budgets, the skip test, and replace live in the note tool's
-description.
+Timing, fields, budgets, the skip test and replace live in the note
+tool's description.
 </mnemo-note-taking>`;
 function createNoteTakingContextHandler() {
   return async function handleNoteTakingContextHook(input) {

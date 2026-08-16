@@ -100,9 +100,18 @@ describe("tool surface", () => {
     // sight (the formats themselves are undocumented by design: they explain
     // themselves when they appear).
     expect(note).toContain("never recalled or invented");
-    // Timing lives in the SessionStart block; the description defers, never
-    // restates — a second copy is how the two surfaces diverged before.
-    expect(note).toContain("Timing: the SessionStart block's three rules.");
+    // Timing moved HERE (user ruling, S15069 T781). It used to live in the
+    // SessionStart block while this text ended with "goes last in its batch",
+    // and the two read as opposites at a glance — the agent kept settling
+    // owed turns in a batch of their own, after answering. Each of the three
+    // rules is pinned independently, and the phrase that caused the
+    // misreading is asserted gone.
+    expect(note).toContain("note only FINISHED turns");
+    expect(note).toContain("FIRST tool batch");
+    expect(note).toContain("you cannot know which batch will be last");
+    expect(note).toContain("a turn with no tool calls settles nothing");
+    expect(note).toContain("a batch for notes alone only at 5+ owed");
+    expect(note).not.toContain("Goes last in its batch");
     // The skip contract: single criterion, its deletion-test check, the
     // no-invention red line, the user-decision hard line (S15069 T577–T581).
     expect(note).toContain("a future retriever would find nothing unique");
@@ -126,7 +135,11 @@ describe("tool surface", () => {
     expect(note).toContain('"append"');
     expect(note).toContain("session's summary");
     expect(note).toContain("`crossSession: true` only for another session's turn");
-    expect(note).toContain("Goes last in its batch");
+    // "Goes last in its batch" used to be pinned here. It is now asserted
+    // ABSENT above: read next to the SessionStart block's "first tool batch"
+    // it said the opposite thing, and "last" is undecidable at write time.
+    // Rule (2) carries what it was trying to say — last among the FIRST
+    // batch's calls.
     expect(note).toContain("never include <private> content");
     // spec E2: tool-call syntax is rejected, not silently stored.
     expect(note).toContain("Tool-call markup");
@@ -147,11 +160,16 @@ describe("tool surface", () => {
     );
     expect(note).toContain("decision/done/next_steps/reference");
     expect(note).not.toMatch(/\bdone\/current\b|\bcurrent\/next_steps\b/);
-    // 600 tokens by user decree (S15069 T717), raised from 500 (T586) to pay
-    // for that procedure. The description is in the cached prefix of every
-    // request, so the cap is a real per-turn cost and not a style rule; the
-    // number is the measured floor for carrying C3/C4 whole, not a round one.
-    expect(estimateTokens(note)).toBeLessThanOrEqual(600);
+    // 500 (T586) → 600 (T717, to carry C3/C4's procedure whole) → 660 (T781,
+    // to take the three timing rules over from the SessionStart block). Every
+    // number is a measurement, never a round figure: the description sits in
+    // the cached prefix of every request, so the cap is a real per-turn cost.
+    //
+    // The move was cheaper than it looks, and the pair of caps says so: this
+    // grew 599 → 660 while the block fell 152 → 85 (its own cap, in
+    // tests/hooks/context-note-taking.test.ts), so the total injected cost
+    // dropped by 6 tokens and the rules are now stated once instead of twice.
+    expect(estimateTokens(note)).toBeLessThanOrEqual(660);
   });
 
   // ticket 03 (spec E1): the merged input shape covers both addressing

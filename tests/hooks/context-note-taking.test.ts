@@ -34,14 +34,21 @@ describe("note-taking instructions injection", () => {
     }
   });
 
-  test("the block is the timing digest and defers the contract (T586 split)", () => {
-    // Single-home split (user ruling, S15069 T586): this block carries ONLY
-    // what must fire while composing a batch of OTHER tools — the address
-    // norm and the three timing rules — and points at the note tool's
-    // description for everything else. The contract clauses themselves are
-    // pinned in tests/mcp/definitions.test.ts; the two pin sets are disjoint
-    // on purpose, because a clause stated on both surfaces is how they
-    // diverged before.
+  test("the block is the address norm and nothing else (T781: single home completed)", () => {
+    // The T586 split left timing HERE and the contract in the note tool's
+    // description. T781 moved timing across too, because the split is what
+    // broke: this block said "first tool batch" while the description ended
+    // with "goes last in its batch", and read together at a glance they are
+    // opposites — the agent repeatedly settled owed turns in a batch of their
+    // own, after answering, which rule 3 forbids. A tool description is in
+    // context whenever the tool is, so timing never needed a second home.
+    //
+    // What cannot move is the address NORM: the injected formats (owed
+    // suffix, relief block) teach themselves on sight, but "these lines are
+    // the only legitimate source" cannot be read off a format, and it belongs
+    // where the formats appear. The contract clauses are pinned in
+    // tests/mcp/definitions.test.ts; the two pin sets stay disjoint, because
+    // a clause stated on both surfaces is how they diverged before.
     expect(NOTE_TAKING_INSTRUCTIONS).toStartWith("<mnemo-note-taking>");
     expect(NOTE_TAKING_INSTRUCTIONS).toEndWith("</mnemo-note-taking>");
     // Asserted against a whitespace-collapsed copy: the block is hard-wrapped
@@ -57,22 +64,16 @@ describe("note-taking instructions injection", () => {
     expect(flat).toContain("the ONLY sources of a note address");
     expect(flat).toContain("never recall one from memory, never invent one");
 
-    // The three timing rules, each independently locatable.
+    // The pointer at the single home, timing now included.
     expect(flat).toContain(
-      "Each turn's first tool batch also settles owed turns — a note or a skip per address",
-    );
-    expect(flat).toContain(
-      "A turn's own note is written by a later turn, never by itself",
-    );
-    expect(flat).toContain("Never open a batch just for notes");
-    expect(flat).toContain(
-      "except while the relief block is present or to correct a note already written",
+      "Timing, fields, budgets, the skip test and replace live in the note tool's description",
     );
 
-    // The pointer at the single home.
-    expect(flat).toContain(
-      "Fields, budgets, the skip test, and replace live in the note tool's description",
-    );
+    // Timing must NOT be restated here. These are the exact phrases that
+    // contradicted the description; a re-added copy of either fails.
+    expect(flat).not.toContain("first tool batch");
+    expect(flat).not.toContain("goes last");
+    expect(flat).not.toContain("Never open a batch just for notes");
 
     // The 0.9.11 heuristic and the pre-T586 duplicated contract must both be
     // gone: no batch-picking advice, no field or skip prose here.
@@ -80,11 +81,10 @@ describe("note-taking instructions injection", () => {
     expect(flat).not.toContain("title (~");
     expect(flat).not.toContain("skip:true");
 
-    // 908 → 152 measured after the T586 split: the block stopped restating
-    // the contract and stopped documenting injection formats that teach
-    // themselves. Capped with headroom; the description's own 500-token cap
-    // (user decree) lives in tests/mcp/definitions.test.ts.
-    expect(estimateTokens(NOTE_TAKING_INSTRUCTIONS)).toBeLessThanOrEqual(170);
+    // 908 → 152 (T586) → measured again here after timing moved out. Capped
+    // with headroom; the description's own token cap lives in
+    // tests/mcp/definitions.test.ts.
+    expect(estimateTokens(NOTE_TAKING_INSTRUCTIONS)).toBeLessThanOrEqual(110);
   });
 
   test("it stays out of other events", async () => {
