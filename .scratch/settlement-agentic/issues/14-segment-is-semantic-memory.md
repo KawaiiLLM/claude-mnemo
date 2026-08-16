@@ -16,9 +16,22 @@ This is an **MVP to be run and looked at**, not a finished mechanism (user rulin
 - [ ] A segment whose task is still live is **not closed at window end**. Today 32 of 42 segments are `delivered` and only 1 of 42 spans a session boundary, which is why nothing accumulates across sessions
 - [ ] The prompt distinguishes the two roles a segment plays by lifecycle: an open segment is the task's working state, a delivered one is its impression
 - [ ] The prompt states that members are exhaustive attention allocation while body citations are the load-bearing few — the existing "cite the turns that carry the conclusion, not every member" rule, kept and made explicit
+- [ ] The settlement context shows the **50 most recently active segments with their topics**, and renders the topic registry **ordered by frequency** — how many segments carry each — so an established name is visibly established and a one-off is visibly a one-off. This is the anti-fragmentation surface D9's `noCandidateReason` gate has always assumed and never actually provided
+- [ ] **`recall` can query segments.** Design is the implementer's to make: no selector grammar, output shape or ranking is prescribed here beyond the one requirement below
 - [ ] Full suite green
 
+## The only thing `recall`'s segment query must satisfy
+
+It is judged by the acceptance test at the bottom of this file, not by a
+selector grammar. Recalling one task must not drag another task's memory
+along. Everything else — how a segment is addressed, what a collapsed segment
+row looks like, whether members are previewed, how results rank — is yours to
+decide, and worth deciding against how `recall` already renders sessions and
+turns rather than inventing a third shape.
+
 ## Not in this ticket, and why
+
+**Segment-asserted relations** (spec K7a, user ruling): the segment tool gets no relation fields. A segment still gains bare pairs from its own body citations, and the link between two arcs is carried by the turn edges crossing their boundary — derived from members rather than restated a level up.
 
 Splitting, merging and member removal are unnecessary while membership is many-to-many — a mis-cut segment is abandoned and re-created, and its turns belong to both. A segment-level `continues` relation, and a mechanical coupling check over shared files and turn-to-turn citations, are both deferred with their reopening conditions written into K8.
 
