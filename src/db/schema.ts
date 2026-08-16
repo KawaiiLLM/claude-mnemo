@@ -417,6 +417,40 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_segment_members_turn
     ON segment_members(turn_id);
 
+  -- Segmentation exclusions (spec G7, ticket 09): the completion gate's
+  -- anti-join needs a NEGATIVE fact — "this turn was reviewed under this
+  -- job and deliberately assigned to no segment" — which segment_members
+  -- cannot express (it is add-only and records membership, never its
+  -- absence). Recording only the exceptions rather than an assigned/
+  -- unassigned row per turn is deliberate: the window's non-excluded,
+  -- non-member turns are simply gaps by default, which is what "absence is
+  -- not a statement of absence" requires of the predicate that reads this
+  -- table (db/note-settlement-completion.ts).
+  --
+  -- job_id, not a column on turns: a window is a frozen work unit (spec A2a),
+  -- so the verdict has to say WHICH window issued it. A turn-level column
+  -- would collapse that provenance and block a later repair job from
+  -- re-adjudicating a turn a failed window never finished — a repair job's
+  -- exclusion must be able to coexist with (and eventually supersede, by
+  -- simply being the row a NEWER job's anti-join actually reads) an earlier
+  -- job's verdict rather than overwrite a single shared cell.
+  --
+  -- PRIMARY KEY (job_id, turn_id): one verdict per turn per job, and
+  -- re-declaring it (a retry replaying the same judgement) is idempotent by
+  -- construction rather than by an application-level check.
+  CREATE TABLE IF NOT EXISTS note_settlement_segment_exclusions (
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (job_id, turn_id)
+  );
+
+  -- Same rationale as idx_segment_members_turn: a turn deletion's ON DELETE
+  -- CASCADE still benefits from an index on the child's FK column, and
+  -- job_id alone is already the leading column of the primary key above.
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_segment_exclusions_turn
+    ON note_settlement_segment_exclusions(turn_id);
+
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
 
@@ -2181,6 +2215,7 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS shadow_notes");
   db.exec("DROP TABLE IF EXISTS note_id_exposures");
+  db.exec("DROP TABLE IF EXISTS note_settlement_segment_exclusions");
   db.exec("DROP TABLE IF EXISTS note_settlement_jobs");
   db.exec("DROP TABLE IF EXISTS note_settlement_cursors");
   db.exec("DROP TABLE IF EXISTS note_debt_cursor");
