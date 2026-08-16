@@ -43,39 +43,47 @@ export const TASK_CAUSALITY_GRADE_RUBRIC = `   - grade: REQUIRED integer 0-4 mea
      - Worked example, generalized shape of a design arc: the opening ask that framed the problem = Grade 4; the spec finalized and the core mechanism locked = Grade 3; the turn that discovered the key problem, and an important correction to the spec = Grade 2 (a discovery rises to Grade 3 only when it invalidates the arc's own conclusions, as the evaluation-validity defect above does); dispatching a worker, running a query, updating a doc = Grade 1; a repeated attempt and an inconclusive poll = Grade 0; the release or commit itself = Grade 2.`;
 
 /**
- * The regrade/correction duties that travel with the rubric above — the
+ * The grade-correction duties that travel with the rubric above — the
  * misleading-turn downgrade, the Grade-4 re-foundation rule, and the
- * bridge-Grade-4 rule for cutoff-straddling sessions. Byte-identical to the
- * same commit's "Grade correction" section (then lines 421-427). The rubric
- * rewrite ticket (`43951e1`'s 02-task-causality-rubric) scoped these duties
- * together with the five definitions as one rewrite, because a regrade
- * changes what a stored grade CLAIMS — its rules are part of the standard,
- * not a separate feature, so they live beside the definitions rather than
- * off in whatever module happens to call `regrade`.
+ * bridge-Grade-4 rule for cutoff-straddling sessions. Originally recovered
+ * byte-identical from `586bc4e^`'s "Grade correction" section (then lines
+ * 421-427). The rubric rewrite ticket (`43951e1`'s 02-task-causality-rubric)
+ * scoped these duties together with the five definitions as one rewrite,
+ * because a correction changes what a stored grade CLAIMS — its rules are
+ * part of the standard, not a separate feature, so they live beside the
+ * definitions rather than off in whatever module happens to apply one.
  *
- * No longer byte-identical in one place: the misleading-turn clause used to
- * order the grader to tag the casualty `rolled-back`. Ticket 02 removed that
- * word from the type vocabulary, but the instruction named the TAG field,
- * which `asTagOrNull` accepts without any vocabulary check — so the order was
- * still followed, still stored, and still read as a reversal role by
- * `REVERSED_ROLE_TAGS` in the timeline. That is a silent write of a retired
- * concept, not the visible rejection ticket 02's closing note claimed, and it
- * was live: 532 turns carry the tag, written continuously until the
- * extraction pipeline stopped on 2026-08-11. The clause now prohibits the tag
- * instead of requiring it.
+ * No longer byte-identical, twice over — both times to stop ordering a
+ * mechanism that did not exist:
  *
- * This closes the hazard; it does not finish ticket 12. The positive half —
- * telling the grader to write a `supersedes` edge to the overturned turn
- * (spec section I) — needs the edge write path tickets 06/07/10 build, so
- * until then reversal is expressed by the `regrade` and the citation alone.
+ * 1. The misleading-turn clause used to order the grader to tag the casualty
+ *    `rolled-back`. A prior ticket retired that word from the type
+ *    vocabulary, but the instruction named the TAG field, which
+ *    `asTagOrNull` accepts without any vocabulary check — so the order kept
+ *    being followed, kept being stored, and kept being read as a reversal
+ *    role by `REVERSED_ROLE_TAGS` in the timeline: a silent write of a
+ *    retired concept, live on 532 turns until the extraction pipeline
+ *    stopped on 2026-08-11. That fix made the clause prohibit the tag
+ *    instead of requiring it.
+ * 2. Ticket 12 retired the `regrade` verb the same way: the settlement
+ *    schema carries no separate correction verb (`note-settlement-prompt.ts`
+ *    grades a first assignment and a correction alike through one ordinary
+ *    grade statement addressed to the turn's id), so a clause built around
+ *    `regrade: { id, grade }` call syntax ordered something impossible. The
+ *    replacement — write a `supersedes` edge to the overturned turn (the
+ *    edge write path tickets 06/07/10 built) and grade that turn by its
+ *    surviving task-causal consequence — matches ticket 13's H1 change: the
+ *    edge is display annotation only (the back-link and always-keep
+ *    eligibility, main row or ↳ row alike) and never moves a grade by
+ *    itself, so the correction states the grade directly instead.
  */
 export const TASK_CAUSALITY_GRADE_CORRECTION_RUBRIC = `Grade correction has two narrowly-scoped duties:
 
-- Misleading-turn downgrade: whenever THIS turn overturns a cited earlier turn, lower the casualty's grade via \`regrade\` to what its surviving task-causal consequence warrants. Do this only with witnessed disproof or rollback evidence in the current turn; never rewrite history from a guess. Keep the causal citation so the timeline can retain the casualty as a ↳ row. Do NOT tag the casualty \`rolled-back\`, or any other reversal word: \`rolled-back\` left the vocabulary, a turn does not state its own reversal, and reversal is carried by the citation that overturns it.
+- Misleading-turn downgrade: whenever THIS turn overturns a cited earlier turn, write a \`supersedes\` edge to it and grade that turn by its surviving task-causal consequence. Do this only with witnessed disproof or rollback evidence in the current turn; never rewrite history from a guess. The edge only annotates the reversal for display — main row or ↳ row alike — and never moves a grade by itself, so the grade you state here is what decides the casualty's fate. Do NOT tag the casualty \`rolled-back\`, or any other reversal word: a turn does not state its own reversal, reversal is carried by the edge alone, and the tag field has no vocabulary check to catch you — the timeline still reads that word as a reversal role.
 - Grade-4 re-foundation: a radical redefinition may create a second Grade 4 in the same arc, but the new Grade 4 must cite the Grade 4 it re-founds. Do not demote the earlier foundation merely because the motive evolved; only witnessed disproof triggers the separate downgrade above.
-- Bridge Grade 4 for cutoff-straddling sessions: legacy Grade 3/4 rows are historical context, never trusted anchors, and \`regrade\` cannot change their creation era. Grade the first post-cutoff turn that can summarize the existing arc's motive and success criteria as a bridge Grade 4. Never try to turn a legacy row into the trusted foundation via \`regrade\`.
+- Bridge Grade 4 for cutoff-straddling sessions: legacy Grade 3/4 rows are historical context, never trusted anchors, and grading them cannot change their creation era. Grade the first post-cutoff turn that can summarize the existing arc's motive and success criteria as a bridge Grade 4. Never try to turn a legacy row into the trusted foundation by grading it as one.
 
-Express one grade correction inside the current turn's call as \`regrade: { id: "T<n>", grade: 0|1|2|3|4 }\`. The target must be an earlier turn in this session. This is the only grade-only exception to the rule against updating a record not named by the current block.`;
+There is no separate correction verb: express a grade correction inside the current turn's call by stating that earlier turn's new grade directly, addressed to its id. This is the only grade-only exception to the rule against updating a record not named by the current block.`;
 
 // ---------------------------------------------------------------------------
 // Calibration targets (from `d5a32f4`), recovered from the same commit

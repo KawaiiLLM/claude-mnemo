@@ -695,7 +695,7 @@ function indexSegmentToFTS(db, segment) {
     segment.id,
     segment.title,
     segment.content,
-    facets,
+    [segment.insight ?? "", facets].filter((part) => part.trim() !== "").join("\n"),
     null,
     null
   );
@@ -750,7 +750,7 @@ function rebuildSearchIndex(db) {
     indexObservationToFTS(db, observation);
   }
   const segmentRows = db.query(
-    "SELECT id, title, content, type, tags FROM segments ORDER BY id"
+    "SELECT id, title, content, insight, type, tags FROM segments ORDER BY id"
   ).all();
   for (const segment of segmentRows) {
     indexSegmentToFTS(db, segment);
@@ -1125,6 +1125,11 @@ var SCHEMA_SQL = `
     topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
     title TEXT NOT NULL,
     content TEXT,
+    -- Ticket 14 (spec K5): the segment's most reusable conclusion, including
+    -- the routes ruled out and why. Same column as a turn's insight and the
+    -- inverse default: a turn's is empty unless something durable was learned,
+    -- a segment's is the point of the row.
+    insight TEXT,
     type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
     tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
     -- open = still accepting members and rewrites; delivered = closed by a
@@ -1739,6 +1744,7 @@ function initializeSchema(db) {
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureTurnSignificanceGradeColumn(db);
+  ensureSegmentInsightColumn(db);
   ensureTurnCitationsSchema(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
@@ -1975,6 +1981,9 @@ function ensureTurnAssistantTranscriptColumn(db) {
 function ensureTurnInvalidationColumns(db) {
   addColumnIfMissing(db, "turns", "was_interrupted", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "turns", "was_rolled_back", "INTEGER NOT NULL DEFAULT 0");
+}
+function ensureSegmentInsightColumn(db) {
+  addColumnIfMissing(db, "segments", "insight", "TEXT");
 }
 function ensureTurnSignificanceGradeColumn(db) {
   addColumnIfMissing(
@@ -3727,7 +3736,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msvwrhq4" : "dev";
+var BUILD_ID = true ? "0.10.0-msvyskne" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -20628,6 +20637,7 @@ var SEGMENT_COLUMNS = `
   topic_id AS topicId,
   title,
   content,
+  insight,
   type,
   tags,
   status,
