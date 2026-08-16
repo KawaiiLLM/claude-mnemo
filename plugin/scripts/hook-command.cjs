@@ -3727,7 +3727,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msve360f" : "dev";
+var BUILD_ID = true ? "0.10.0-msvgp7tg" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -5019,18 +5019,6 @@ function mapTurnRow(row) {
     citesRecorded: row.citesRecorded === 1
   };
 }
-function mergeTags(existingTags, nextTags) {
-  if (!nextTags) {
-    return existingTags;
-  }
-  const merged = [...existingTags];
-  for (const tag of nextTags) {
-    if (!merged.includes(tag)) {
-      merged.push(tag);
-    }
-  }
-  return merged;
-}
 function getTurnById(db, turnId) {
   return mapTurnRow(
     db.query(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null
@@ -5054,7 +5042,7 @@ function updateTurnById(db, turnId, input) {
   );
   const hasSubstance = mergedTitle !== null || mergedContent !== null;
   const nextStatus = input.status ?? (existing.status === "active" && hasSubstance ? "extracted" : existing.status);
-  const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
+  const nextTags = input.tags === void 0 ? existing.tags : input.tags;
   const updated = mapTurnRow(
     db.query(
       `
@@ -24993,7 +24981,7 @@ function applyInvalidationSets(db, sessionDbId, invalidationSets, epoch) {
       status: turn.status,
       wasInterrupted: nextWasInterrupted,
       wasRolledBack: nextWasRolledBack,
-      replaceTags: nextTags,
+      tags: nextTags,
       updatedAtEpoch: epoch
     });
   }
@@ -25110,7 +25098,7 @@ function cleanSubagentTurns(db, sessionDbId, matchedTurns, updatedAtEpoch) {
   for (const turn of matchedTurns) {
     updateTurnById(db, turn.id, {
       status: "undone",
-      replaceTags: addSubagentPendingTag(turn.tags),
+      tags: addSubagentPendingTag(turn.tags),
       updatedAtEpoch
     });
   }

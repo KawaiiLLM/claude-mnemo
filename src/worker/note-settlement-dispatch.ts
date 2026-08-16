@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { getExistingEdgePairKeys } from "../db/memory-edges";
 import type { NoteSettlementJob } from "../db/note-settlement";
 import type { MnemoConfig } from "../shared/config";
 import { DEFAULT_CONFIG } from "../shared/config";
@@ -48,6 +49,26 @@ export interface NoteSettlementQueryRequest {
   systemPrompt: string;
   model: string;
   signal?: AbortSignal;
+  /**
+   * Job identity and the turn-write facade's per-dispatch scope (ticket 10a,
+   * spec G6). Carried on the REQUEST rather than closed over at
+   * `createNoteSettlementDispatch` construction time, because a job (and its
+   * reconstructable/reviewable scope) exists only per call — one dispatch
+   * instance serves every window a session ever produces. The SDK query
+   * layer (note-settlement-sdk-query.ts) is what actually keeps these out of
+   * the model's reach, by injecting them into a tool closure the model's own
+   * input schema has no field for.
+   */
+  jobId: number;
+  claimGeneration: number;
+  sessionId: number;
+  reconstructableTurnIds: ReadonlySet<number>;
+  reviewableTurnIds: ReadonlySet<number>;
+  contextBuiltAtEpoch: number;
+  rideTurnId: number | null;
+  writerModel: string | null;
+  /** Relation eligibility, snapshotted ONCE before this call's model run starts (spec C7, requirement 4). */
+  eligibleRelationPairKeys: ReadonlySet<string>;
 }
 
 /**
@@ -212,6 +233,24 @@ export function createNoteSettlementDispatch(
           prompt: renderReplayPrompt(context, conflict),
           systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
           model,
+          jobId: context.job.id,
+          claimGeneration: context.job.claimGeneration,
+          sessionId: context.job.sessionId,
+          // A replay's prompt asks for exactly one `segments` entry — never
+          // turn writes — but the facade context is populated honestly
+          // rather than omitted: empty scope sets mean any attempt to touch
+          // prose or review is refused by the facade's own checks, the same
+          // "honest values, not a borrowed context's" rule
+          // `applyNoteSettlementSegmentReplay`'s own writeBackOptions already
+          // applies to `reviewableTurnIds`/`reconstructableTurnIds`.
+          reconstructableTurnIds: new Set(),
+          reviewableTurnIds: new Set(),
+          contextBuiltAtEpoch: nowEpoch,
+          rideTurnId: null,
+          writerModel: options.writerModel ?? model,
+          // A fresh snapshot for this standalone replay run — it is its own
+          // model run, distinct from the window's main dispatch call.
+          eligibleRelationPairKeys: getExistingEdgePairKeys(db),
         });
       } catch (error) {
         logger.warn?.(
@@ -275,12 +314,32 @@ export function createNoteSettlementDispatch(
       return { ok: true };
     }
 
+    const rideTurnId =
+      context.windowTurns[context.windowTurns.length - 1]?.turnId ?? null;
+    // Requirement 4 (spec C7/C14): taken ONCE, here, before the model run
+    // starts — not inside each tool call's own transaction. A pair this
+    // dispatch's own tool calls mint during the run must stay ineligible for
+    // a relation for the REST of the run, which only holds if every call
+    // shares one frozen snapshot rather than each re-reading the table fresh.
+    const eligibleRelationPairKeys = getExistingEdgePairKeys(db);
+
     let raw: string;
     try {
       raw = await options.runQuery({
         prompt: renderNoteSettlementPrompt(context),
         systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
         model,
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: job.sessionId,
+        reconstructableTurnIds: new Set(
+          context.interiorHoles.map((turn) => turn.turnId),
+        ),
+        reviewableTurnIds: context.reviewableTurnIds,
+        contextBuiltAtEpoch: context.builtAtEpoch,
+        rideTurnId,
+        writerModel: options.writerModel ?? model,
+        eligibleRelationPairKeys,
       });
     } catch (error) {
       return {
@@ -296,8 +355,6 @@ export function createNoteSettlementDispatch(
       return { ok: false, reason: parsed.reason };
     }
 
-    const rideTurnId =
-      context.windowTurns[context.windowTurns.length - 1]?.turnId ?? null;
     const result = applyNoteSettlementWriteBack(db, {
       job,
       response: parsed.response,

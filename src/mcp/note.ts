@@ -971,7 +971,7 @@ function handleTurnWrite(
       if (wantsFieldsWrite) {
         const written = updateTurnById(db, turn.id, {
           type: typeResolution?.value,
-          replaceTags: tagsResolution?.value,
+          tags: tagsResolution?.value,
           significanceGrade: gradeResolution?.value,
           updatedAtEpoch: nowEpoch,
         });

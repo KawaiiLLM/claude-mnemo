@@ -147,23 +147,6 @@ function mapTurnRow(row: TurnRow | null): TurnRecord | null {
   };
 }
 
-function mergeTags(
-  existingTags: string[],
-  nextTags: string[] | undefined,
-): string[] {
-  if (!nextTags) {
-    return existingTags;
-  }
-
-  const merged = [...existingTags];
-  for (const tag of nextTags) {
-    if (!merged.includes(tag)) {
-      merged.push(tag);
-    }
-  }
-  return merged;
-}
-
 export function getTurn(
   db: Database,
   sessionId: number,
@@ -203,8 +186,18 @@ export interface UpdateTurnByIdInput {
   type?: string[];
   significanceGrade?: number | null;
   transcriptLineStart?: number | null;
+  /**
+   * Undefined = leave the stored list alone; a defined array (including `[]`)
+   * WHOLESALE REPLACES it — same rule as `type` immediately above, and for
+   * the same reason (spec D5a/B7): there is no separate "clear" state, `[]`
+   * already means that. Ticket 10a deleted the additive form this field used
+   * to carry (`mergeTags`, above) plus the `replaceTags` alias that used to be
+   * the only whole-replace path — settlement's own review directive was the
+   * last caller that needed the additive one, and it now states its own full
+   * tag list instead (worker/note-settlement-writeback.ts). A caller that
+   * wants to keep an existing tag must restate it.
+   */
   tags?: string[];
-  replaceTags?: string[];
   filesRead?: string[];
   filesModified?: string[];
   toolCallCount?: number | null;
@@ -256,7 +249,7 @@ export function updateTurnById(
     (existing.status === "active" && hasSubstance
       ? "extracted"
       : existing.status);
-  const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
+  const nextTags = input.tags === undefined ? existing.tags : input.tags;
 
   const updated = mapTurnRow(
     db

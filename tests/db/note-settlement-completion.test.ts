@@ -27,6 +27,7 @@ import {
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { updateTurnById } from "../../src/db/turns";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
@@ -107,6 +108,18 @@ function claimWindow(
 function markTyped(turnIds: readonly number[]): void {
   for (const turnId of turnIds) {
     updateTurnById(db, turnId, { type: ["discuss"] });
+  }
+}
+
+/** Give every turn in `turnIds` a note, so `computeNoteSettlementNoteGaps` (duty 2) is clean. */
+function markNoted(turnIds: readonly number[]): void {
+  for (const turnId of turnIds) {
+    upsertShadowNote(db, {
+      turnId,
+      title: "fixture title",
+      content: "fixture content",
+      nowEpoch: NOW,
+    });
   }
 }
 
@@ -363,18 +376,105 @@ describe("completeNoteSettlementJobIfSegmented — the completion gate", () => {
       completed: false,
       reason: "generation-mismatch",
       segmentationGaps: [],
+      noteGaps: [],
       coverageGaps: [],
     });
     expect(getNoteSettlementJob(db, job.id)?.status).toBe("claimed");
   });
 
-  test("refuses with coverage-incomplete when segmentation is done but a turn still has no stated type", () => {
+  test("refuses with note-incomplete when segmentation and type coverage are done but a turn still owes a note (spec G1a, duty 2)", () => {
+    // The scenario G1a exists for: a turn can carry a stated type (duty 1,
+    // `computeCoverageGaps`, done) and a segment membership (duty 3, done)
+    // while the hole duty 2 existed to fill — a note — is still open. Before
+    // this clause, the gate's only two checks would both read this window as
+    // finished and mark it `done`, permanently unnoted.
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    markTyped([t1]);
+    const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
+    addSegmentMembers(db, segment.id, [t1], NOW);
+    // Deliberately no `markNoted([t1])`.
+
+    const result = completeNoteSettlementJobIfSegmented(
+      db,
+      job.id,
+      job.claimGeneration,
+      NOW,
+    );
+
+    expect(result).toEqual({
+      completed: false,
+      reason: "note-incomplete",
+      segmentationGaps: [],
+      noteGaps: [{ turnId: t1, sessionId: sessionDbId, promptNumber: 1 }],
+      coverageGaps: [],
+    });
+    // G2: a refusal for ANY reason leaves the job exactly as it was.
+    expect(getNoteSettlementJob(db, job.id)?.status).toBe("claimed");
+    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
+
+    // Writing the note (what ticket 10a's `note` tool does) closes duty 2,
+    // and a retry then completes the window.
+    markNoted([t1]);
+    const retried = completeNoteSettlementJobIfSegmented(
+      db,
+      job.id,
+      job.claimGeneration,
+      NOW + 1,
+    );
+    expect(retried.completed).toBe(true);
+    expect(getNoteSettlementJob(db, job.id)?.status).toBe("done");
+  });
+
+  test("a declined turn (agent's own real-time skip) owes no note under duty 2, but a system write-off still does", () => {
+    // db/note-debt.ts's `listOwedNoteTurnsInRange`, the predicate this duty
+    // adopts as-is: ONLY `note_debt.status='skipped', reason='declined'`
+    // excludes a turn — a `closed`/`aged`/`rolled-back` reason (the SYSTEM
+    // abandoning a dead session's ledger) does not, because settlement's own
+    // reconstruction duty must still be able to backfill it. This mirrors
+    // the runtime guard being replaced, which drew the identical line.
+    const sessionDbId = seedSession();
+    const declined = seedTurn(sessionDbId, 1);
+    const writtenOff = seedTurn(sessionDbId, 2);
+    const job = claimWindow(sessionDbId, 1, 2);
+    markTyped([declined, writtenOff]);
+    const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
+    addSegmentMembers(db, segment.id, [declined, writtenOff], NOW);
+
+    db.query<unknown, [number, number, number, string, string, number, number, number]>(
+      `INSERT INTO note_debt (
+         turn_id, session_id, prompt_number, status, reason,
+         opened_at_epoch, closed_at_epoch, updated_at_epoch
+       ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`,
+    ).run(declined, sessionDbId, 1, NOW, NOW, NOW);
+    db.query<unknown, [number, number, number, string, string, number, number, number]>(
+      `INSERT INTO note_debt (
+         turn_id, session_id, prompt_number, status, reason,
+         opened_at_epoch, closed_at_epoch, updated_at_epoch
+       ) VALUES (?, ?, ?, 'skipped', 'closed', ?, ?, ?)`,
+    ).run(writtenOff, sessionDbId, 2, NOW, NOW, NOW);
+
+    const result = completeNoteSettlementJobIfSegmented(
+      db,
+      job.id,
+      job.claimGeneration,
+      NOW,
+    );
+
+    expect(result.reason).toBe("note-incomplete");
+    expect(result.noteGaps.map((gap) => gap.turnId)).toEqual([writtenOff]);
+  });
+
+  test("refuses with coverage-incomplete when segmentation and duty 2 are done but a turn still has no stated type", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
     const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
     addSegmentMembers(db, segment.id, [t1], NOW);
-    // Deliberately no `markTyped([t1])`: segmentation is satisfied, coverage is not.
+    markNoted([t1]);
+    // Deliberately no `markTyped([t1])`: segmentation and duty 2 (the note)
+    // are satisfied, duty 1 (type) coverage is not.
 
     const result = completeNoteSettlementJobIfSegmented(
       db,
@@ -396,6 +496,7 @@ describe("completeNoteSettlementJobIfSegmented — the completion gate", () => {
     const t3 = seedTurn(sessionDbId, 3);
     const job = claimWindow(sessionDbId, 1, 3);
     markTyped([t1, t2, t3]);
+    markNoted([t1, t2, t3]);
 
     // The agent wrote segment membership for t1 and then crashed — t2/t3
     // never got their exclusion (or membership) recorded.
@@ -434,6 +535,7 @@ describe("completeNoteSettlementJobIfSegmented — the completion gate", () => {
       completed: true,
       reason: null,
       segmentationGaps: [],
+      noteGaps: [],
       coverageGaps: [],
     });
     expect(getNoteSettlementJob(db, job.id)?.status).toBe("done");
@@ -484,6 +586,7 @@ describe("the completion gate holds its window while it decides (spec G7)", () =
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
     markTyped([t1]);
+    markNoted([t1]);
     const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
     addSegmentMembers(db, segment.id, [t1], NOW);
 

@@ -260,8 +260,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const result = applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T1`, grade: 2, type: ["design"], tag: "widgets" },
-        { turn: `S${sessionDbId}/T2`, grade: 0, type: [], tag: null },
+        { turn: `S${sessionDbId}/T1`, grade: 2, type: ["design"], tags: ["widgets"] },
+        { turn: `S${sessionDbId}/T2`, grade: 0, type: [], tags: [] },
       ]),
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
@@ -288,19 +288,15 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     expect(turn2.tags).toEqual([]);
   });
 
-  test("additively merges the bare tag with whatever tags already exist", () => {
-    // spec B6: bare topic words, additive — a `topic:`-prefixed row from
-    // before this ticket is left exactly as it is (never migrated), and a
-    // new bare tag is merged in beside it, not swapped for it.
-    //
-    // spec D5a / ticket 03: this is the ONE surviving caller of `mergeTags`
-    // (db/turns.ts) and `UpdateTurnByIdInput.tags`. Every public write tool
-    // (the merged `note`) now overwrites tags whole via `replaceTags`, mode-
-    // gated — but this write-back's directive still carries a single `tag`,
-    // so an overwrite here would delete every tag the directive did not
-    // happen to mention. The merge survives deliberately, not by omission;
-    // ticket 10 deletes it once settlement's directive grows to a full list
-    // and moves onto the public tools.
+  test("overwrites the turn's tag set whole, per the directive's full list (ticket 10a: mergeTags retired)", () => {
+    // spec D5a / ticket 10a: `mergeTags` (db/turns.ts) and the turn update
+    // input's additive `tags` parameter are gone. The review directive grew
+    // from a single additive `tag` to a full `tags` list in the SAME change,
+    // which is what makes overwriting whole possible here — a writer that
+    // could only ever state one value could not be asked to state a set. A
+    // stray `topic:`-prefixed row from before this ticket is stripped like
+    // any other tag the directive does not restate: it is dropped, not kept
+    // by omission.
     const sessionDbId = seedSession();
     const t1 = seedHoleTurn(sessionDbId, 1);
     db.query<unknown, [number]>(
@@ -311,7 +307,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T1`, grade: 1, type: [], tag: "fresh-topic" },
+        { turn: `S${sessionDbId}/T1`, grade: 1, type: [], tags: ["fresh-topic"] },
       ]),
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
@@ -322,9 +318,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     });
 
     const turn = getTurnById(db, t1)!;
-    expect(turn.tags).toContain("deferred");
-    expect(turn.tags).toContain("topic:stale");
-    expect(turn.tags).toContain("fresh-topic");
+    expect(turn.tags).toEqual(["fresh-topic"]);
   });
 
   test("an unexposed or nonexistent turn address fails the whole window, committing nothing", () => {
@@ -335,9 +329,9 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const result = applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tag: "widgets" },
+        { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tags: ["widgets"] },
         // Never shown to this writer — no address at prompt_number 999.
-        { turn: `S${sessionDbId}/T999`, grade: 1, type: [], tag: null },
+        { turn: `S${sessionDbId}/T999`, grade: 1, type: [], tags: [] },
       ]),
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
@@ -361,7 +355,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const t1 = seedHoleTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
     const response = emptyResponse([], [
-      { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tag: "widgets" },
+      { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tags: ["widgets"] },
     ]);
 
     const first = applyNoteSettlementWriteBack(db, {
@@ -396,10 +390,11 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const turn = getTurnById(db, t1)!;
     expect(turn.significanceGrade).toBe(3);
     expect(turn.type).toEqual(["fix"]);
-    // Not duplicated — the additive merge dedupes (spec G5's tags-replay
-    // concern: a stable request key would be needed to make this true for a
-    // GENUINELY revised judgement, but a byte-identical retry of the same
-    // directive converges here because the word is already present).
+    // Whole-replace converges for free on a byte-identical retry (ticket
+    // 10a): writing the same list twice yields the same list. G5's
+    // tags-replay concern is about a GENUINELY revised judgement instead —
+    // that would still need a stable request key, which this test does not
+    // exercise.
     expect(turn.tags).toEqual(["widgets"]);
   });
 
@@ -443,7 +438,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const result = applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tag: "settlement" },
+        { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tags: ["settlement"] },
       ]),
       nowEpoch: NOW + 6,
       reconstructableTurnIds: new Set(),
@@ -496,7 +491,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const result = applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tag: "settlement" },
+        { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tags: ["settlement"] },
       ]),
       nowEpoch: NOW + 1,
       reconstructableTurnIds: new Set(),
@@ -510,10 +505,10 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     expect(result.reviewsYieldedToLateNote).toBe(0);
     const turn = getTurnById(db, t1)!;
     expect(turn.type).toEqual(["fix"]);
-    expect(turn.tags).toContain("settlement");
-    // The review OVERRODE type (design → fix); tags are additive, so the
-    // writer's own "scheduling" survives alongside the review's "settlement".
-    expect(turn.tags).toContain("scheduling");
+    // The review OVERRODE both type (design → fix) and tags whole (ticket
+    // 10a: mergeTags retired) — the writer's own "scheduling" is dropped
+    // since the review's directive did not restate it.
+    expect(turn.tags).toEqual(["settlement"]);
   });
 
   test("an exposed turn this prompt did not show is refused, not silently revised", () => {
@@ -529,7 +524,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const result = applyNoteSettlementWriteBack(db, {
       job,
       response: emptyResponse([], [
-        { turn: `S${sessionDbId}/T2`, grade: 4, type: ["fix"], tag: "hallucinated" },
+        { turn: `S${sessionDbId}/T2`, grade: 4, type: ["fix"], tags: ["hallucinated"] },
       ]),
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
@@ -563,7 +558,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
             insight: null,
           },
         ],
-        [{ turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tag: "settlement" }],
+        [{ turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tags: ["settlement"] }],
       ),
       nowEpoch: NOW + 6,
       reconstructableTurnIds: new Set([t1]),
@@ -578,7 +573,7 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     expect(result.reviewsYieldedToLateNote).toBe(0);
     const turn = getTurnById(db, t1)!;
     expect(turn.type).toEqual(["fix"]);
-    expect(turn.tags).toContain("settlement");
+    expect(turn.tags).toEqual(["settlement"]);
   });
 });
 

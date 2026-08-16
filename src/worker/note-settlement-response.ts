@@ -56,15 +56,21 @@ export interface SettlementNoteDirective {
  * it reviews, confirming or correcting, never leaving the field ambiguous
  * between "unchanged" and "omitted". `type` is multi-valued (spec B5); `[]`
  * is an explicit "none fit" (spec B7), never "leave alone" — this schema has
- * no way to say "leave alone" for a field it is reviewing, by design. `tag`
- * keeps its own nullable single-value shape: `null` is an explicit clear.
+ * no way to say "leave alone" for a field it is reviewing, by design.
+ *
+ * `tags` (ticket 10a): grown from a single nullable `tag` to a full list, in
+ * the same change that deletes `mergeTags` (db/turns.ts) and the turn update
+ * input's additive `tags` parameter. A writer that can only state one value
+ * cannot be asked to state a set (spec D5a) — this directive now can, so the
+ * write-back's consumption of it overwrites whole, same rule as every other
+ * public write's `tags`. `[]` clears, same convention as `type`.
  */
 export interface SettlementTurnReviewDirective {
   turn: string;
   grade: number;
   type: string[];
-  /** Bare topic word — no `topic:` prefix is applied (spec B6). */
-  tag: string | null;
+  /** Bare topic words — no `topic:` prefix is applied (spec B6); `[]` clears. */
+  tags: string[];
 }
 
 export interface SettlementSessionSummary {
@@ -171,15 +177,6 @@ function asGrade(value: unknown, what: string): number {
     fail(`${what} is not an integer 0-4`);
   }
   return value;
-}
-
-/** Explicit `null` or empty is a clear — the tag facet has no "leave alone". */
-function asTagOrNull(value: unknown, what: string): string | null {
-  if (value === null) {
-    return null;
-  }
-  const text = asString(value, what).trim();
-  return text.length === 0 ? null : text;
 }
 
 function asPositiveInteger(value: unknown, what: string): number {
@@ -316,25 +313,24 @@ function parseTurnReview(
 ): SettlementTurnReviewDirective {
   const what = `turn_review[${index}]`;
   const record = asRecord(value, what);
-  // An OMITTED field is a schema violation; only an explicit `null`/`[]`
-  // clears. The two used to be the same, which meant a model that answered
+  // An OMITTED field is a schema violation; only an explicit `[]` clears. The
+  // two used to be the same, which meant a model that answered
   // `{"turn": …, "grade": 2}` — lazily, or because its output was truncated
-  // mid-array — silently wiped the type and topic tag off every turn it
+  // mid-array — silently wiped the type and topic tags off every turn it
   // touched, up to a whole window plus its lookback. Failing loudly costs a
-  // retry; the alternative cost real facts, invisibly. `null`/`[]` still mean
+  // retry; the alternative cost real facts, invisibly. `[]` still means
   // clear, so the expressiveness this schema was built for survives.
-  for (const field of ["type", "tag"] as const) {
+  for (const field of ["type", "tags"] as const) {
     if (!(field in record)) {
-      fail(`${what}.${field} is missing (use null/[] to clear it)`);
+      fail(`${what}.${field} is missing (use [] to clear it)`);
     }
   }
   return {
     turn: asNonEmptyString(record.turn, `${what}.turn`),
     grade: asGrade(record.grade, `${what}.grade`),
-    // `asTypeArray` reads a bare `null` the same as an omitted value — `[]`
-    // (spec B7's "none fit"), which is exactly the clear this field needs.
+    // `[]` clears both — spec B7's "none fit"/"no tags", never a guess.
     type: asTypeArray(record.type, `${what}.type`),
-    tag: asTagOrNull(record.tag, `${what}.tag`),
+    tags: asStringArray(record.tags, `${what}.tags`),
   };
 }
 

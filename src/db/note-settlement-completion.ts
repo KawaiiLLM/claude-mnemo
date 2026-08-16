@@ -6,6 +6,7 @@ import {
   type CoverageGap,
 } from "./coverage";
 import { runWriteTransaction } from "./database";
+import { listOwedNoteTurnsInRange } from "./note-debt";
 import {
   advanceNoteSettlementCursor,
   completeNoteSettlementJob,
@@ -289,9 +290,73 @@ export function computeNoteSettlementSegmentationGaps(
     }));
 }
 
+export interface NoteSettlementNoteGap {
+  turnId: number;
+  sessionId: number;
+  promptNumber: number;
+}
+
+/**
+ * Duty 2's own anti-join (spec G1a, ticket 10a): no turn in the frozen window
+ * may still owe a note when the job completes.
+ *
+ * G1's "empty fields only" reasoning covers the Stop hook and the type-only
+ * `computeCoverageGaps` above — and is FALSE for this duty. A turn can carry
+ * a stated `type` (duty 1 done, `isCoveredCoverageTurn` reads it as covered)
+ * while the hole duty 2 existed to fill is still open: `type` is a fact about
+ * the TURN, a note is a separate row (`shadow_notes`) nothing here requires
+ * to exist for `type` to be writable. The only runtime check that used to
+ * prove every reconstructable hole got a shadow note lived in the retiring
+ * write-back (`UnfilledGapError`, worker/note-settlement-writeback.ts),
+ * which threw and rolled back the WHOLE reply when one was left open. Ticket
+ * 10a moves settlement's turn writes onto a live tool with no such
+ * end-of-batch checkpoint to hook a throw into, so the guard's job moves here
+ * instead — the persistent, transaction-safe replacement, checked at
+ * completion time rather than at the end of one reply.
+ *
+ * `listOwedNoteTurnsInRange` (db/note-debt.ts) is the SAME predicate that
+ * decided which window turns were reconstructable holes in the first place
+ * (`worker/note-settlement-context.ts`'s `interiorHoles`, read at dispatch
+ * time) — adopted as-is rather than re-derived, so this duty is diffed
+ * against the guard it replaces rather than reinvented. It is deliberately
+ * NOT narrowed further by G4's coverage-eligible set (no-reply slash
+ * commands, sidechain rows): the retiring guard checked EVERY id in
+ * `reconstructableTurnIds` with no such narrowing, so narrowing here would
+ * be a behaviour change relative to the guard being replaced, not a diff
+ * against it — see the G4 caveat inside `isNoReplySlashCommandPrompt`'s own
+ * doc comment, which notes that branch has no production row today anyway.
+ *
+ * A mechanically-floored `status = 'skipped'` turn (no note, no `note_debt`
+ * row — `db/coverage.ts`'s own doc comment measures this as the common case)
+ * is NOT treated as covered here, even though `isCoveredCoverageTurn` treats
+ * `status = 'skipped'` as covering duty 1. The two duties read "skipped"
+ * differently on purpose: G3's "skip is itself a verdict" is about duty 1
+ * (a turn nobody will ever type does not need one), not about duty 2 — and
+ * the retiring guard drew the identical distinction, since `interiorHoles`
+ * was never filtered by turn status either. Absence of a note is a gap here
+ * regardless of what `status` says; the two predicates are independent by
+ * design, not by oversight (this project's own discipline: "the absence of a
+ * statement is not a statement of absence").
+ */
+export function computeNoteSettlementNoteGaps(
+  db: Database,
+  sessionId: number,
+  windowStart: number,
+  windowEnd: number,
+): NoteSettlementNoteGap[] {
+  return listOwedNoteTurnsInRange(db, sessionId, windowStart, windowEnd).map(
+    (turn) => ({
+      turnId: turn.turnId,
+      sessionId: turn.sessionId,
+      promptNumber: turn.promptNumber,
+    }),
+  );
+}
+
 export type NoteSettlementCompletionReason =
   | NoteSettlementJobFenceReason
   | "segmentation-incomplete"
+  | "note-incomplete"
   | "coverage-incomplete";
 
 export interface NoteSettlementCompletionResult {
@@ -299,6 +364,8 @@ export interface NoteSettlementCompletionResult {
   reason: NoteSettlementCompletionReason | null;
   /** Populated only when `reason === "segmentation-incomplete"`. */
   segmentationGaps: NoteSettlementSegmentationGap[];
+  /** Populated only when `reason === "note-incomplete"` (spec G1a, duty 2). */
+  noteGaps: NoteSettlementNoteGap[];
   /** Populated only when `reason === "coverage-incomplete"`. */
   coverageGaps: CoverageGap[];
 }
@@ -345,6 +412,27 @@ export function completeNoteSettlementJobIfSegmented(
           completed: false,
           reason: "segmentation-incomplete" as const,
           segmentationGaps,
+          noteGaps: [],
+          coverageGaps: [],
+        };
+      }
+
+      // Duty 2 (spec G1a): computed inside this SAME transaction, so nothing
+      // else can commit a note or a decline between this read and the CAS
+      // below — the identical guarantee the segmentation/coverage checks
+      // above already rely on this transaction's write lock for.
+      const noteGaps = computeNoteSettlementNoteGaps(
+        db,
+        job.sessionId,
+        job.windowStart,
+        job.windowEnd,
+      );
+      if (noteGaps.length > 0) {
+        return {
+          completed: false,
+          reason: "note-incomplete" as const,
+          segmentationGaps: [],
+          noteGaps,
           coverageGaps: [],
         };
       }
@@ -361,6 +449,7 @@ export function completeNoteSettlementJobIfSegmented(
           completed: false,
           reason: "coverage-incomplete" as const,
           segmentationGaps: [],
+          noteGaps: [],
           coverageGaps,
         };
       }
@@ -384,6 +473,7 @@ export function completeNoteSettlementJobIfSegmented(
           completed: false,
           reason: "generation-mismatch" as const,
           segmentationGaps: [],
+          noteGaps: [],
           coverageGaps: [],
         };
       }
@@ -399,6 +489,7 @@ export function completeNoteSettlementJobIfSegmented(
         completed: true,
         reason: null,
         segmentationGaps: [],
+        noteGaps: [],
         coverageGaps: [],
       };
     });
@@ -408,6 +499,7 @@ export function completeNoteSettlementJobIfSegmented(
         completed: false,
         reason: error.fenceReason,
         segmentationGaps: [],
+        noteGaps: [],
         coverageGaps: [],
       };
     }

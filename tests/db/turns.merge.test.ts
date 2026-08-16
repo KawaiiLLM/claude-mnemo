@@ -68,7 +68,7 @@ describe("turn merge semantics", () => {
     );
   });
 
-  test("tag updates append rather than replace on extracted turns", () => {
+  test("tag updates overwrite the stored set whole, not additively (ticket 10a: mergeTags retired)", () => {
     const turn = saveTurn(db, {
       sessionId,
       promptNumber: 2,
@@ -92,14 +92,13 @@ describe("turn merge semantics", () => {
     });
 
     expect(updated?.status).toBe("extracted");
-    expect(updated?.tags).toEqual([
-      "existing",
-      "subagent:pending",
-      "invalidated",
-    ]);
+    // Whole-replace (spec D5a): a caller that wants to keep "subagent:pending"
+    // must restate it — `updateTurnById` no longer merges anything into the
+    // stored set, matching every other public write's `tags` field.
+    expect(updated?.tags).toEqual(["existing", "invalidated"]);
   });
 
-  test("replaceTags overwrites the stored tag set instead of unioning with existing tags", () => {
+  test("a defined tags array overwrites the stored set whole", () => {
     const turn = saveTurn(db, {
       sessionId,
       promptNumber: 2,
@@ -118,7 +117,7 @@ describe("turn merge semantics", () => {
     });
 
     const updated = updateTurnById(db, turn.id, {
-      replaceTags: ["existing", "subagent:notified"],
+      tags: ["existing", "subagent:notified"],
       updatedAtEpoch: 22,
     });
 
@@ -154,7 +153,8 @@ describe("turn merge semantics", () => {
     });
 
     expect(updated?.status).toBe("extracted");
-    expect(updated?.tags).toEqual(["old", "invalidated"]);
+    // Whole-replace: "old" is dropped since this call did not restate it.
+    expect(updated?.tags).toEqual(["invalidated"]);
     expect(updated?.content).toBe("Content");
   });
 

@@ -179,7 +179,7 @@ function cleanSubagentTurns(
   for (const turn of matchedTurns) {
     updateTurnById(db, turn.id, {
       status: "undone",
-      replaceTags: addSubagentPendingTag(turn.tags),
+      tags: addSubagentPendingTag(turn.tags),
       updatedAtEpoch,
     });
   }

@@ -26,11 +26,6 @@ export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
   "Answer with one JSON object and nothing else.";
 
 const RESPONSE_SCHEMA = `{
-  "turn_review": [
-    { "turn": "S12/T30", "grade": 0, "type": ["fix"], "tag": "extraction-redesign" },
-    { "turn": "S12/T31", "grade": 2, "type": ["review", "ops"], "tag": null },
-    { "turn": "S12/T32", "grade": 1, "type": [], "tag": null }
-  ],
   "segments": [
     {
       "action": "extend" | "create",
@@ -51,9 +46,6 @@ const RESPONSE_SCHEMA = `{
   "edges": [
     { "citing": "S12/T33", "cited": "S12/T30", "relation": "depends-on" },
     { "citing": "E47", "cited": "E31", "relation": "supersedes" }
-  ],
-  "reconstructed_notes": [
-    { "turn": "S12/T31", "title": "...", "content": "...", "insight": "" }
   ],
   "session_summary": {
     "title": "...", "content": "...", "decision": "...", "done": "...",
@@ -140,26 +132,27 @@ export function renderNoteSettlementPrompt(
     "",
     "## Duties",
     "",
-    "Three ordered steps. First review and label every window turn — grade,",
-    "type, tags — stating what it actually did, from the raw material and any",
-    "note already on it. Second, backfill a note for every turn that still",
-    "owes one. Only THEN, third, assign segment membership —",
-    "segmentation is LAST because it consumes the facts the first two steps",
-    "just settled: a segment's type is the union of its members' real",
-    "activities, which is only meaningful once those members have activities.",
+    "Two channels. Write each turn's grade/type/tags, and any reconstruction",
+    "note, through the `note` tool AS YOU DECIDE THEM — one call per turn, at",
+    "any point during this run, never batched into the final reply below.",
+    "Everything else (segment membership and body, edges, the session summary)",
+    "goes into the JSON reply, once, at the end. Do the turn-by-turn `note`",
+    "calls FIRST: segmentation is LAST because it consumes the facts they",
+    "settle — a segment's type is the union of its members' real activities,",
+    "which is only meaningful once those members have activities.",
     "",
-    "1. TURN REVIEW. For EVERY turn in the window below — including one that",
-    "   already carries a note — write one entry into turn_review: {turn,",
-    "   grade, type, tag}. `type` is a LIST — a turn may state more than one",
-    "   activity — drawn from",
-    `   ${MEMORY_TYPES.join(", ")}; \`[]\` means none fit, never a guess. \`tag\``,
-    "   is one bare topic word (no namespace prefix — none is applied). Both",
-    "   keys must be PRESENT on every entry: omitting one is not the same as",
-    "   writing `null`/`[]`, and rejects the whole batch. You may ALSO revise a",
-    "   turn from the preceding-turns section below if you can see it needs",
-    "   correcting — grade a Grade 4 down once the arc's real scale is visible,",
-    "   fix a type a later window shows was wrong. That is not a loophole, it is",
-    "   what the grading rubric below expects.",
+    "1. TURN REVIEW, via the `note` tool. For EVERY turn in the window below —",
+    "   including one that already carries a note — call `note` with `turn`,",
+    "   `grade`, `type` and `tags`. `type` is a LIST — a turn may state more",
+    "   than one activity — drawn from",
+    `   ${MEMORY_TYPES.join(", ")}; \`[]\` means none fit, never a guess. \`tags\``,
+    "   are bare topic words (no namespace prefix — none is applied); omit a",
+    "   field to leave it alone, state `[]` to clear it — there is no append,",
+    "   each call overwrites whole. You may ALSO revise a turn from the",
+    "   preceding-turns section below if you can see it needs correcting —",
+    "   grade a Grade 4 down once the arc's real scale is visible, fix a type a",
+    "   later window shows was wrong. That is not a loophole, it is what the",
+    "   grading rubric below expects.",
     "",
     "   Grade every reviewed turn against this rubric — the exact standard",
     "   historical grades were assigned under:",
@@ -170,16 +163,18 @@ export function renderNoteSettlementPrompt(
     "",
     "   This schema has no separate `regrade` verb: express any grade —",
     "   first assignment or correction of an earlier window's verdict — as one",
-    "   turn_review entry naming that turn's address.",
+    "   `note` tool call naming that turn's address.",
     "",
     holes.length > 0
-      ? `2. RECONSTRUCTION. These turns still owe a note: ${holes.join(", ")}. ` +
-        `Their raw material is in the window below (marked raw>). Write one ` +
-        `reconstruction note each into reconstructed_notes, same discipline as ` +
-        `a turn note: title names the activity and topic, content leads with ` +
-        `the conclusion. Do not write notes for any other turn.`
-      : "2. RECONSTRUCTION. No turn in this window needs one; leave " +
-        "reconstructed_notes empty.",
+      ? `2. RECONSTRUCTION, via the SAME \`note\` tool. These turns still owe a ` +
+        `note: ${holes.join(", ")}. Their raw material is in the window below ` +
+        `(marked raw>). Call \`note\` once per turn with \`turn\`, \`title\`, ` +
+        `\`content\` and \`insight\` all named TOGETHER in one call (insight ` +
+        `may be null, but must be named — an omitted field is refused, not ` +
+        `left blank): title names the activity and topic, content leads with ` +
+        `the conclusion. Do not call it for any other turn — a turn this ` +
+        `window does not list here is not this dispatch's to reconstruct.`
+      : "2. RECONSTRUCTION. No turn in this window needs one.",
     "",
     "3. SEGMENT ATTACHMENT. For each window turn decide which segment it joins:",
     "   - same topic as an open segment, work continuous with it → EXTEND that",
@@ -251,8 +246,8 @@ export function renderNoteSettlementPrompt(
     context.milestoneRendering || "(no milestones)",
     "",
     "## Preceding turns (context — segment membership is settled window turns",
-    "   only, but turn_review MAY revise one of these if you can see it needs",
-    "   correcting; see duty 1)",
+    "   only, but a `note` tool call MAY revise one of these if you can see it",
+    "   needs correcting; see duty 1)",
     "",
     context.priorTurnsRendering || "(none)",
     "",
@@ -262,8 +257,11 @@ export function renderNoteSettlementPrompt(
     "",
     "## Output",
     "",
-    "Reply with exactly one JSON object matching this shape and nothing else — " +
-      "no prose, no code fence:",
+    "Make your `note` tool calls (duties 1-2) as you decide them, throughout " +
+      "this run. Once they are done, reply with exactly one JSON object " +
+      "matching this shape and nothing else — no prose, no code fence. Neither " +
+      "a successful tool call nor this reply is itself what marks the window " +
+      "settled; that is decided independently, after you are done:",
     "",
     RESPONSE_SCHEMA,
     "",

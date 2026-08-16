@@ -338,15 +338,18 @@ describe("settlement context assembly", () => {
 
     // The three duties appear in this order, and duty 1 is the turn review
     // while segmentation (duty 3, "SEGMENT ATTACHMENT") comes after both duty
-    // 1 (review) and duty 2 (reconstruction).
+    // 1 (review) and duty 2 (reconstruction). Ticket 10a moved duties 1-2
+    // onto the `note` tool (no longer emitted in the final JSON reply), so
+    // this now checks for the tool-call instruction, not a `turn_review` key.
     const reviewIndex = prompt.indexOf("1. TURN REVIEW");
-    const reconstructionIndex = prompt.indexOf("RECONSTRUCTION.");
+    const reconstructionIndex = prompt.indexOf("RECONSTRUCTION,");
     const segmentIndex = prompt.indexOf("SEGMENT ATTACHMENT");
     expect(reviewIndex).toBeGreaterThan(-1);
     expect(reconstructionIndex).toBeGreaterThan(reviewIndex);
     expect(segmentIndex).toBeGreaterThan(reconstructionIndex);
     expect(prompt).toContain("segmentation is LAST because it");
-    expect(prompt).toContain("turn_review");
+    expect(prompt).toContain("via the `note` tool");
+    expect(prompt).not.toContain("turn_review");
   });
 
   // Requirement 7 (ticket 07, spec C3/C4): the four ordered questions,
@@ -865,10 +868,10 @@ describe("settlement write-back", () => {
         { turn: "S1/T4", title: "research+lease: trailing hole reconstructed", content: "Filled in." },
       ],
       turn_review: [
-        { turn: "S1/T1", grade: 4, type: ["design"], tag: "settlement" },
-        { turn: "S1/T2", grade: 1, type: ["research"], tag: "lease" },
-        { turn: "S1/T3", grade: 2, type: ["implement"], tag: "settlement" },
-        { turn: "S1/T4", grade: 1, type: ["research"], tag: "lease" },
+        { turn: "S1/T1", grade: 4, type: ["design"], tags: ["settlement"] },
+        { turn: "S1/T2", grade: 1, type: ["research"], tags: ["lease"] },
+        { turn: "S1/T3", grade: 2, type: ["implement"], tags: ["settlement"] },
+        { turn: "S1/T4", grade: 1, type: ["research"], tags: ["lease"] },
       ],
     });
     const firstOutcome = await dispatchWith(stubQuery(firstReply))({
@@ -895,7 +898,7 @@ describe("settlement write-back", () => {
     const secondReply = JSON.stringify({
       // T1's arc turned out short-lived — demoted now that its real scale is
       // visible, exactly what the rubric's own Grade-4 language expects.
-      turn_review: [{ turn: "S1/T1", grade: 0, type: ["design"], tag: "settlement" }],
+      turn_review: [{ turn: "S1/T1", grade: 0, type: ["design"], tags: ["settlement"] }],
     });
 
     const metricsSeen: NoteSettlementWindowMetrics[] = [];
@@ -1085,22 +1088,22 @@ describe("settlement response schema", () => {
     expect(parseNoteSettlementResponse(badRelation).ok).toBe(false);
   });
 
-  test("turn_review: accepts a full verdict and rejects an out-of-range grade or an unknown type whole (ticket 05)", () => {
+  test("turn_review: accepts a full verdict and rejects an out-of-range grade or an unknown type whole (ticket 05; tags grown from a single tag, ticket 10a)", () => {
     const good = JSON.stringify({
       turn_review: [
-        { turn: "S1/T1", grade: 4, type: ["design"], tag: "widgets" },
-        { turn: "S1/T2", grade: 0, type: [], tag: null },
+        { turn: "S1/T1", grade: 4, type: ["design"], tags: ["widgets"] },
+        { turn: "S1/T2", grade: 0, type: [], tags: [] },
       ],
     });
     const parsed = parseNoteSettlementResponse(good);
     expect(parsed.ok).toBe(true);
     expect(parsed.ok && parsed.response.turnReview).toEqual([
-      { turn: "S1/T1", grade: 4, type: ["design"], tag: "widgets" },
-      { turn: "S1/T2", grade: 0, type: [], tag: null },
+      { turn: "S1/T1", grade: 4, type: ["design"], tags: ["widgets"] },
+      { turn: "S1/T2", grade: 0, type: [], tags: [] },
     ]);
 
     const outOfRangeHigh = JSON.stringify({
-      turn_review: [{ turn: "S1/T1", grade: 5, type: [], tag: null }],
+      turn_review: [{ turn: "S1/T1", grade: 5, type: [], tags: [] }],
     });
     const rejectedHigh = parseNoteSettlementResponse(outOfRangeHigh);
     expect(rejectedHigh.ok).toBe(false);
@@ -1109,18 +1112,29 @@ describe("settlement response schema", () => {
     );
 
     const outOfRangeLow = JSON.stringify({
-      turn_review: [{ turn: "S1/T1", grade: -1, type: [], tag: null }],
+      turn_review: [{ turn: "S1/T1", grade: -1, type: [], tags: [] }],
     });
     expect(parseNoteSettlementResponse(outOfRangeLow).ok).toBe(false);
 
     const missingGrade = JSON.stringify({
-      turn_review: [{ turn: "S1/T1", type: [], tag: null }],
+      turn_review: [{ turn: "S1/T1", type: [], tags: [] }],
     });
     expect(parseNoteSettlementResponse(missingGrade).ok).toBe(false);
 
+    // Requirement 6 (ticket 10a): `tags` is now REQUIRED-present, same as
+    // `type` — an omitted key is a schema violation, not a synonym for `[]`.
+    const missingTags = JSON.stringify({
+      turn_review: [{ turn: "S1/T1", grade: 2, type: [] }],
+    });
+    const rejectedMissingTags = parseNoteSettlementResponse(missingTags);
+    expect(rejectedMissingTags.ok).toBe(false);
+    expect(rejectedMissingTags.ok === false && rejectedMissingTags.reason).toContain(
+      "tags",
+    );
+
     const badVocabWord = JSON.stringify({
       // A retired legacy word — never in the current vocabulary (spec B2).
-      turn_review: [{ turn: "S1/T1", grade: 2, type: ["bugfix"], tag: null }],
+      turn_review: [{ turn: "S1/T1", grade: 2, type: ["bugfix"], tags: [] }],
     });
     const rejectedType = parseNoteSettlementResponse(badVocabWord);
     expect(rejectedType.ok).toBe(false);

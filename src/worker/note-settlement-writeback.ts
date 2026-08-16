@@ -694,18 +694,21 @@ function applyNoteSettlementWriteBackTransaction(
           updateTurnById(db, turnId, { significanceGrade: directive.grade });
           counts.reviewsYieldedToLateNote += 1;
         } else {
-          // spec B6: bare topic words, additive — same convention every other
-          // tags write in this codebase uses (note.ts, remember.ts). A stray
-          // `topic:` prefix the model writes anyway is stripped rather than
-          // trusted, since new writes never mint that namespace.
-          const bareTag = directive.tag?.startsWith("topic:")
-            ? directive.tag.slice("topic:".length)
-            : directive.tag;
+          // spec B6: bare topic words. Ticket 10a grew the directive from a
+          // single additive `tag` to a full `tags` list and deleted
+          // `mergeTags` (db/turns.ts) — this now overwrites the stored set
+          // whole, same rule every other tags write in this codebase applies
+          // (note.ts). A stray `topic:` prefix the model writes anyway is
+          // stripped rather than trusted, since new writes never mint that
+          // namespace.
+          const bareTags = directive.tags.map((tag) =>
+            tag.startsWith("topic:") ? tag.slice("topic:".length) : tag,
+          );
 
           updateTurnById(db, turnId, {
             significanceGrade: directive.grade,
             type: directive.type,
-            tags: bareTag ? [bareTag] : [],
+            tags: bareTags,
           });
         }
 

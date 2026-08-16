@@ -33703,18 +33703,6 @@ function mapTurnRow(row) {
     citesRecorded: row.citesRecorded === 1
   };
 }
-function mergeTags(existingTags, nextTags) {
-  if (!nextTags) {
-    return existingTags;
-  }
-  const merged = [...existingTags];
-  for (const tag of nextTags) {
-    if (!merged.includes(tag)) {
-      merged.push(tag);
-    }
-  }
-  return merged;
-}
 function getTurn(db, sessionId, promptNumber) {
   return mapTurnRow(
     db.query(
@@ -33745,7 +33733,7 @@ function updateTurnById(db, turnId, input) {
   );
   const hasSubstance = mergedTitle !== null || mergedContent !== null;
   const nextStatus = input.status ?? (existing.status === "active" && hasSubstance ? "extracted" : existing.status);
-  const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
+  const nextTags = input.tags === void 0 ? existing.tags : input.tags;
   const updated = mapTurnRow(
     db.query(
       `
@@ -34836,7 +34824,7 @@ function handleTurnWrite(db, address, input, options) {
       if (wantsFieldsWrite) {
         const written = updateTurnById(db, turn.id, {
           type: typeResolution?.value,
-          replaceTags: tagsResolution?.value,
+          tags: tagsResolution?.value,
           significanceGrade: gradeResolution?.value,
           updatedAtEpoch: nowEpoch
         });

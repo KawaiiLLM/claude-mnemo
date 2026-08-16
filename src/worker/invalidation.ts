@@ -229,7 +229,7 @@ export function applyInvalidationSets(
       status: turn.status,
       wasInterrupted: nextWasInterrupted,
       wasRolledBack: nextWasRolledBack,
-      replaceTags: nextTags,
+      tags: nextTags,
       updatedAtEpoch: epoch,
     });
   }

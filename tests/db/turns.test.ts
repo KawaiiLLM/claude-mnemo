@@ -443,7 +443,7 @@ describe("turn queries", () => {
       .get(sessionId)!.id;
 
     // Set tags: one freeform + one colon-namespaced internal tag
-    updateTurnById(db, turnId, { replaceTags: ["auth", "delivery:dropped:notify-pending"] });
+    updateTurnById(db, turnId, { tags: ["auth", "delivery:dropped:notify-pending"] });
 
     // Seed an FTS row directly to simulate the turn having been indexed
     db.query(
