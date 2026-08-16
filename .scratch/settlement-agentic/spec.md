@@ -63,9 +63,15 @@ The result a user sees: a timeline whose rows carry real activity words again; a
 
 **A1.** Settlement changes from *one structured envelope parsed into a batch of instructions and applied in one atomic write-back transaction* to *an agent that writes through tools as it works*. It already runs as an SDK query with an in-process MCP server exposing `recall` and `timeline`; it gains write tools and a Stop hook.
 
+**A2. Superseded by A7** — window atomicity comes back, without the parser. Kept because the reasoning it records is what A7 had to answer.
+
 **A2.** **Window-level** atomicity is given up deliberately. A crashed or abandoned window may leave a partially reviewed batch. Per-call atomicity is **not** given up: each individual tool call stays one transaction over its body, its derived edges and its status. The rule that replaces window atomicity: **a partially reviewed window must not be marked complete.** Job completion gates on a coverage check, not on the agent stopping.
 
+**A2a. Mooted by A7** — under staged commit there are no partial windows to audit.
+
 **A2a.** The current failure policy is not eventual convergence and the spec must not imply it is. After three attempts the cursor steps past a terminally failed window, which is "keep the partial result and abandon the remainder". If that remains policy under incremental writes it becomes more consequential, because the partial result is now durable rather than rolled back — so a partial window needs a named audit surface: which windows ended partial, and what a repair pass would have to redo.
+
+**A3. Amended by A7** — the write tools are three (note, segment, `commit`), and settlement gets no `check`.
 
 **A3.** The write tools are two: the unified note tool (a turn's note and facts) and a segment tool (create or extend, members, type, tags, body). There is **no edge tool** — an edge is always asserted by some turn, segment or session, so it exists as a field on those calls rather than as a free-standing write. There is **no session-summary tool for settlement** — see D1. Alongside them the agent keeps its existing read tools and gains one more, `check`, specified in G8.
 
@@ -74,6 +80,28 @@ The result a user sees: a timeline whose rows carry real activity words again; a
 **A5.** The settlement context renders window turns through recall's collapsed view rather than a private renderer, so that a later redesign of recall does not need mirroring here.
 
 **A6.** Duties remain in three ordered steps — review every turn's grade, type and tags; backfill notes for turns that have none; then assign segment membership. The order is load-bearing: a segment's type is the union of its members' activities, which is vacuous while the members have none.
+
+**A7. Settlement's writes stage, and one `commit` call is the only writer. This supersedes A2 and moots A2a** (user decision, S15069/T723).
+
+A2 gave up window atomicity because incremental tool writes seemed to require it. They do not. The envelope was safe not because its parser was good but because **one reply was one transaction** — a crash landed nothing. A1 replaced the parser to fix a real defect, three data-destructive bugs from re-implementing in a payload parser the authorization the tool layer already performs; it should not also have surrendered the transaction, and G5's unsolved replay contracts are the bill for that.
+
+Under staged writes the two properties separate cleanly. **Authorization stays live and per-call**: every tool call runs the real validation immediately and returns a real receipt, so the agent still learns of an error while it can still act on it — A1's actual benefit, unchanged. **Durability moves to `commit`**: nothing reaches the live tables until the agent asks, and the whole window lands in one transaction or not at all.
+
+What this retires, rather than solves:
+
+- **G5's three unsafe rows disappear.** Segment create is a bare insert with no natural key, segment extend is a revision compare-and-set whose conflict path cannot tell a caller's own lost-receipt replay from a real interleaving write, and session `append` replays to `A+B+B`. All three are lost-receipt problems, and a lost receipt on a staged write costs nothing because nothing landed. No job-scoped operation key is needed for either segment write.
+- **G7's motivating crash becomes impossible.** "A window whose per-turn fields are all written but which crashed before the segment tool" cannot occur when the fields and the membership commit together. The exclusion table and the anti-join **survive** — they are now `commit`'s precondition rather than a repair for partial state.
+- **A2a's partial-window audit surface is unnecessary.** There are no partial windows to audit. The three-strike abandonment policy is unchanged and is now clean: a retry starts from nothing rather than reconciling against its own residue.
+
+Three things this costs, stated rather than discovered later:
+
+1. **Forward references need run-scoped handles.** A staged segment has no id, and members and anchor edges must name it, so the agent addresses it as `E#1` within the run and `commit` resolves handles to real ids as it creates them, in staging order. This is a small interpreter, and it is **not** the parser A1 removed: that one carried authorization, this one replays intents authorization has already passed and re-checks against real ids inside the commit transaction.
+2. **An agent that never calls `commit` yields nothing** — no partial result survives, where incremental writes left one. Accepted: the retry cap is three and a window is at most fifty turns, and a clean re-run beats reconciling against a half-state. Ticket 11's Stop hook becomes "you have not committed, and here is what is still missing", which is a better shape than a standalone gap list.
+3. **Validation runs twice, and the two are not the same check.** At stage time it is *feedback* — the agent's chance to correct. Inside the commit transaction it is *truth*, because the world moves between them: a note the main agent lands late, another window, a lease reclaimed. This is G2's own "layers with decreasing trust" applied one level down, not a new concept.
+
+**Staging lives in the per-request server closure**, in memory — not an open SQLite transaction, which would hold the write lock for the model's entire run while every hook process sits on the critical path of a user prompt, and not a staging table, which buys durability nobody wants here and costs a crash-residue lifecycle. A crash losing staged writes is the correct semantics: the job stays claimed and retries.
+
+**A3's tool list becomes three**: the turn note tool, the segment tool, and `commit`. **G8's `check` folds into `commit` for settlement** — a `commit` that refuses reports what is missing and leaves the staging intact, so the agent fills the gaps and commits again. That is strictly better than a separate tool, because the check cannot drift from the gate: it *is* the gate, and passing it is what performs the write. The main agent's own `check` tool is untouched.
 
 ### B. The `type` vocabulary
 
@@ -281,6 +309,8 @@ So the completion gate carries a **third clause** — no turn in the frozen wind
 
 **G4.** The eligible set is the window's turns minus compact markers and minus slash commands that need no model reply. **Sidechain rows are eligible** — they are legitimate turns.
 
+**G5. Dissolved by A7.** All three unsafe rows below are lost-receipt problems, and a lost receipt on a staged write costs nothing. The table is kept because it is the analysis that showed staging was the answer, and because the *reasoning* about each write's semantics still holds — only the retry hazard is gone.
+
 **G5.** Retry safety is a **per-tool replay contract**, not a blanket property. An earlier draft of this spec claimed the writes were idempotent by construction; a cross-session review disproved it against the source. Each tool states its own contract, and three of them do not have one yet:
 
 | write | replay behaviour |
@@ -316,6 +346,8 @@ Completion becomes an anti-join recomputed over the frozen window, run inside th
 Crash semantics then fall out rather than being designed: membership written but the exclusion not yet leaves the anti-join short, so the window stays incomplete until a retry fills it.
 
 The exclusion is **job-scoped and must not become a column on the turn.** The window is a frozen work unit, and A2a requires a partial-window audit surface; a turn-level column would lose which window issued the negative verdict and would stop a later repair job from re-adjudicating it.
+
+**G8. Amended by A7** — for settlement the predicate is `commit`'s own precondition, not a separate tool; a refused commit reports the gaps and keeps the staging. The main agent's `check` is unchanged.
 
 **G8.** The coverage predicate is exposed to the agent as a **`check` tool**, so it can pull the answer instead of only meeting it at Stop.
 
