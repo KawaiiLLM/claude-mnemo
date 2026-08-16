@@ -2,7 +2,7 @@
 
 **What to build:** The structured envelope and everything that existed to interpret it are gone, and the settlement job log reports the work that actually happened.
 
-**Blocked by:** 10b
+**Blocked by:** 10d
 
 **Status:** ready-for-agent
 

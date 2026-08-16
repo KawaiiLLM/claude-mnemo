@@ -89,7 +89,9 @@ Under staged writes the two properties separate cleanly. **Authorization stays l
 
 What this retires, rather than solves:
 
-- **G5's three unsafe rows disappear.** Segment create is a bare insert with no natural key, segment extend is a revision compare-and-set whose conflict path cannot tell a caller's own lost-receipt replay from a real interleaving write, and session `append` replays to `A+B+B`. All three are lost-receipt problems, and a lost receipt on a staged write costs nothing because nothing landed. No job-scoped operation key is needed for either segment write.
+- **G5's three unsafe rows disappear.** Segment create is a bare insert with no natural key, segment extend is a revision compare-and-set whose conflict path cannot tell a caller's own lost-receipt replay from a real interleaving write, and session `append` replays to `A+B+B`. All three are *commit*-receipt problems, and a lost commit receipt costs nothing because nothing landed.
+
+  **The first draft of this clause said "no job-scoped operation key is needed" and was wrong**, because it reasoned only about the commit receipt. A lost *stage* receipt is a different animal: the model retries the tool call, staging appends a second intent, and `commit` lands both. A cross-session review found it. What the correction needs is not an operation key but **keys on the staged entries themselves** — see A7a.
 - **G7's motivating crash becomes impossible.** "A window whose per-turn fields are all written but which crashed before the segment tool" cannot occur when the fields and the membership commit together. The exclusion table and the anti-join **survive** — they are now `commit`'s precondition rather than a repair for partial state.
 - **A2a's partial-window audit surface is unnecessary.** There are no partial windows to audit. The three-strike abandonment policy is unchanged and is now clean: a retry starts from nothing rather than reconciling against its own residue.
 
@@ -98,8 +100,27 @@ Three things this costs, stated rather than discovered later:
 1. **Forward references need run-scoped handles.** A staged segment has no id, and members and anchor edges must name it, so the agent addresses it as `E#1` within the run and `commit` resolves handles to real ids as it creates them, in staging order. This is a small interpreter, and it is **not** the parser A1 removed: that one carried authorization, this one replays intents authorization has already passed and re-checks against real ids inside the commit transaction.
 2. **An agent that never calls `commit` yields nothing** — no partial result survives, where incremental writes left one. Accepted: the retry cap is three and a window is at most fifty turns, and a clean re-run beats reconciling against a half-state. Ticket 11's Stop hook becomes "you have not committed, and here is what is still missing", which is a better shape than a standalone gap list.
 
-   **A staged write cannot be un-staged, and that makes "fill the gap and commit again" only half true.** A *gate* gap is additive — the agent stages what was missing and commits again, in the same run. A *replay conflict* on a call already staged is not: the stale entry replays on every retry and fails on every retry, and the run must be abandoned for a fresh dispatch. Found while implementing 10b, by a same-run recovery test that could not be made to pass. No un-stage operation is added: it would be a second write vocabulary whose only purpose is undoing the first, and the fresh-dispatch path already exists and is the clean-re-run policy this clause accepts. What must not happen is the wording implying same-run recovery always works.
+   **Superseded by A7a.** The reasoning it records — that an un-stage verb would be a second vocabulary whose only purpose is undoing the first — is right about the verb and wrong about the need. See below.
 3. **Validation runs twice, and the two are not the same check.** At stage time it is *feedback* — the agent's chance to correct. Inside the commit transaction it is *truth*, because the world moves between them: a note the main agent lands late, another window, a lease reclaimed. This is G2's own "layers with decreasing trust" applied one level down, not a new concept.
+
+**A7a. Staged entries are keyed, and re-staging a key replaces it** (user decision, S15069/T730).
+
+A7's first draft left staged intents identityless, and two findings fell out of that one omission: a retried stage call appends a duplicate that `commit` then lands twice, and a model that notices its own mistake cannot replace the stale entry — the bad intent replays on every commit and fails on every commit, forcing a fresh dispatch for what should be a one-call correction.
+
+The fix is not an un-stage verb. It is the **same "present overwrites" rule D5a already applies to every field**, applied one level up to the staged call:
+
+| staged call | key |
+|---|---|
+| a turn note | the turn address — automatic, the model states nothing extra |
+| `segment` create | a **handle the model names**, so a retry reproduces it by construction |
+| `segment` extend | the segment id |
+| `segment` exclude | the turn address |
+
+Re-staging a key replaces its entry rather than appending. That makes staging idempotent against a lost receipt, and makes same-run correction a one-call operation rather than an abandoned window.
+
+The cost is that create handles become model-named rather than server-issued. That is what makes the retry safe: a server-issued handle differs on every call, so a retry can never be recognised as one.
+
+**A3's segment tool takes a third action, `exclude`** (user decision, same turn). G7 requires a job-scoped record that a turn was reviewed and belongs to no segment, and the completion gate *requires* one of membership, exclusion or skipped — but 10b shipped with no model-facing path to write it, so a window holding one legitimately unsegmented turn could not complete at all: the agent had to fabricate a segment or abandon the window. A segmentation verdict belongs to the segmentation tool, so A3 stays three tools.
 
 **Staging lives in the per-request server closure**, in memory — not an open SQLite transaction, which would hold the write lock for the model's entire run while every hook process sits on the critical path of a user prompt, and not a staging table, which buys durability nobody wants here and costs a crash-residue lifecycle. A crash losing staged writes is the correct semantics: the job stays claimed and retries.
 
