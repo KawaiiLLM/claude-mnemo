@@ -19,8 +19,12 @@ import type {
   NoteSettlementQueryRequest,
 } from "./note-settlement-dispatch";
 import {
+  settlementSegmentWriteInputShape,
+  type SettlementSegmentWriteInput,
+} from "./note-settlement-segment-facade";
+import { createSettlementStagingEngine } from "./note-settlement-staging";
+import {
   settlementTurnWriteInputShape,
-  settlementTurnWriteTool,
   type SettlementTurnFacadeContext,
   type SettlementTurnWriteInput,
 } from "./note-settlement-turn-facade";
@@ -40,29 +44,66 @@ const SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__recall",
   "mcp__mnemo__timeline",
   "mcp__mnemo__note",
+  "mcp__mnemo__segment",
+  "mcp__mnemo__commit",
 ] as const;
 
 /**
- * Ticket 10a: the restricted write facade's own description, separate from
- * `MNEMO_TOOL_DESCRIPTIONS.note` (mcp/definitions.ts) because the surface
- * really is smaller — no `skip`, no session addressing, no `crossSession`,
- * no append mode, and prose/review are each gated to a scope this dispatch
- * alone defines. The duty-level instructions (which turns are holes, which
- * are reviewable, the grading rubric) live in the settlement prompt, not
- * here — this text states the CALL contract only.
+ * Ticket 10a/10b: the restricted write facade's own description, separate
+ * from `MNEMO_TOOL_DESCRIPTIONS.note` (mcp/definitions.ts) because the
+ * surface really is smaller — no `skip`, no session addressing, no
+ * `crossSession`, no append mode, and prose/review are each gated to a scope
+ * this dispatch alone defines. The duty-level instructions (which turns are
+ * holes, which are reviewable, the grading rubric) live in the settlement
+ * prompt, not here — this text states the CALL contract only.
+ *
+ * "Staged" (spec A7): this call validates fully right now and tells you
+ * exactly what it found, but nothing reaches a stored row until you call
+ * `commit`.
  */
 const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
-  "Write one turn's reconstruction note and/or its grade/type/tags/relations, " +
-  "as you decide them — one call per turn, any time during this run. `turn`: " +
-  "\"S<session>/T<prompt>\", from the window or preceding-turns section below. " +
-  "title/content/insight: all three together, only for a turn this window " +
-  "lists as owing a note (insight may be null, but must be named). grade " +
-  "(0-4, against the rubric)/type/tags: only for a turn shown in this prompt " +
-  "(window or preceding turns); each overwrites whole when present, omit to " +
-  "leave alone — there is no append. evidenceFor/evidenceAgainst/supersedes/" +
-  "dependsOn: address lists; a target must already be a pair that existed " +
-  "before this run started — you cannot license a relation on a pair a call " +
-  "earlier in this SAME run just created.";
+  "STAGE one turn's reconstruction note and/or its grade/type/tags/relations " +
+  "— validated now, written only when you call `commit`. One call per turn, " +
+  "any time during this run. `turn`: \"S<session>/T<prompt>\", from the " +
+  "window or preceding-turns section below. title/content/insight: all three " +
+  "together, only for a turn this window lists as owing a note (insight may " +
+  "be null, but must be named). grade (0-4, against the rubric)/type/tags: " +
+  "only for a turn shown in this prompt (window or preceding turns); each " +
+  "overwrites whole when present, omit to leave alone — there is no append. " +
+  "evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target " +
+  "must already be a pair that existed before this run started — you cannot " +
+  "license a relation on a pair a call earlier in this SAME run just created.";
+
+/** Ticket 10b (spec A7/A3-amended): the new segment tool's call contract. */
+const SETTLEMENT_SEGMENT_TOOL_DESCRIPTION =
+  "STAGE a segment write (create a new chapter, or extend an open one) — " +
+  "validated now, written only when you call `commit`. action: \"create\" or " +
+  "\"extend\". create: title (required), no_candidate_reason (required — " +
+  "what you searched in the topic registry and open segments, and why " +
+  "nothing fit), topic/topicAliases (optional), content/type/tags/members " +
+  "(optional). extend: segmentId + expectedRevision naming an ALREADY-" +
+  "EXISTING segment shown to you as open (never a segment this same run " +
+  "just created — see the E#n handle below); every other field overwrites " +
+  "whole when present, omit to leave alone. members: \"S<session>/T<prompt>\" " +
+  "turn addresses; an address that does not resolve is dropped, not a " +
+  "failure of the call. Cite member turns inline in content as " +
+  "[S<session>/T<prompt>] and other segments as [E<n>] — those citations " +
+  "become the segment's anchors automatically, no separate step. A " +
+  "successful create's receipt states a handle, \"E#<n>\", scoped to THIS " +
+  "run only — use it (in a later segment's members or content) to refer to " +
+  "the segment you just created, before it has a real id; `commit` resolves " +
+  "every handle to a real id, in the order you staged them.";
+
+/** Ticket 10b (spec A7): the completion gate exposed as commit's own precondition — settlement gets no separate `check` tool (spec G8 amended). */
+const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
+  "Land every staged `note`/`segment` write in one transaction, THEN check " +
+  "this window is complete (every eligible turn typed or skipped, every one " +
+  "segmented or explicitly excluded, no turn still owing a note). Call this " +
+  "once you believe the window is done — it is the only way any of your " +
+  "work becomes durable. If the window is not actually complete, or the " +
+  "world moved under a staged write, NOTHING lands and this tells you " +
+  "exactly what is still missing; every staged write is kept, so you fill " +
+  "the gap with more `note`/`segment` calls and call `commit` again.";
 
 export interface CreateNoteSettlementSdkQueryOptions {
   db: Database;
@@ -108,28 +149,35 @@ export function createNoteSettlementSdkQuery(
 
     // Job identity (spec G6, ticket 10a): built HERE, inside the per-request
     // closure, from the dispatch's own job record — never from anything the
-    // model supplied. `settlementTurnWriteInputShape` (note-settlement-
-    // turn-facade.ts) declares no `jobId`/`claimGeneration` field at all, so
-    // the SDK's own arg-parsing (built from that same shape, ahead of the
-    // handler) never delivers one even if a model tried to state one; and
-    // `settlementTurnWriteTool` itself never reads a job identity off its
-    // input regardless — see that file's own comment for both halves. This
-    // closure is the only place these values exist for this request, and
-    // they never travel through the model's own input or output. It is also
-    // why the handlers above are built ONCE at module-call time while THIS
-    // context must be built per request: a job's identity does not exist
-    // until a request names one.
+    // model supplied. `settlementTurnWriteInputShape`/`settlementSegmentWriteInputShape`
+    // declare no `jobId`/`claimGeneration` field at all, so the SDK's own
+    // arg-parsing (built from that same shape, ahead of the handler) never
+    // delivers one even if a model tried to state one; and neither facade's
+    // own evaluator ever reads a job identity off its input regardless —
+    // see those files' own comments. This closure is the only place these
+    // values exist for this request, and they never travel through the
+    // model's own input or output. It is also why the handlers above are
+    // built ONCE at module-call time while THIS context (and the staging
+    // engine built from it, ticket 10b) must be built per request: a job's
+    // identity — and its own staged-write list — does not exist until a
+    // request names one.
     const turnFacadeContext: SettlementTurnFacadeContext = {
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
       sessionId: request.sessionId,
       reconstructableTurnIds: request.reconstructableTurnIds,
       reviewableTurnIds: request.reviewableTurnIds,
+      exposedSegmentIds: request.exposedSegmentIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
       rideTurnId: request.rideTurnId,
       writerModel: request.writerModel,
       eligibleRelationPairKeys: request.eligibleRelationPairKeys,
     };
+    const staging = createSettlementStagingEngine({
+      db: options.db,
+      context: turnFacadeContext,
+      now: options.now,
+    });
 
     const server = createSdkMcpServerImpl({
       name: "mnemo",
@@ -159,13 +207,19 @@ export function createNoteSettlementSdkQuery(
           "note",
           SETTLEMENT_NOTE_TOOL_DESCRIPTION,
           settlementTurnWriteInputShape,
-          async (args: SettlementTurnWriteInput) =>
-            settlementTurnWriteTool(
-              options.db,
-              turnFacadeContext,
-              args,
-              options.now?.() ?? Math.floor(Date.now() / 1000),
-            ),
+          async (args: SettlementTurnWriteInput) => staging.stageNoteWrite(args),
+        ),
+        toolImpl(
+          "segment",
+          SETTLEMENT_SEGMENT_TOOL_DESCRIPTION,
+          settlementSegmentWriteInputShape,
+          async (args: SettlementSegmentWriteInput) => staging.stageSegmentWrite(args),
+        ),
+        toolImpl(
+          "commit",
+          SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
+          {},
+          async () => staging.commit(),
         ),
       ],
     });

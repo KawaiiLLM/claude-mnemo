@@ -2,23 +2,24 @@ import { z } from "zod";
 import type { Database } from "bun:sqlite";
 
 import { isCitationRelation, type CitationRelation } from "../db/citations";
-import { runWriteTransaction } from "../db/database";
 import {
+  pairKey,
   writeMemoryEdges,
   type CitingNode,
+  type EdgeNode,
   type WriteEdgeInput,
 } from "../db/memory-edges";
-import { assertNoteSettlementJobClaimed } from "../db/note-settlement-completion";
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import { getShadowNote, upsertReconstructedShadowNote } from "../db/shadow-notes";
-import { getTurn, getTurnById, updateTurnById } from "../db/turns";
+import { getTurn, updateTurnById } from "../db/turns";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
 import { parseTurnAddress } from "../mcp/note";
 
 /**
- * The settlement write server (ticket 10a, spec G6/G7/D5/D5a).
+ * The settlement turn-write facade (ticket 10a, spec G6/G7/D5/D5a; staged by
+ * ticket 10b, spec A7).
  *
- * This is "the restricted facade over the shared primitive" the ticket asks
+ * This is "the restricted facade over the shared primitive" 10a's ticket asked
  * for, not the main-agent schema (`mcp/note.ts`) reused raw. Handing
  * settlement that schema would silently grant it `skip`, session fields,
  * `crossSession`, append modes and the main agent's own relation authority —
@@ -47,6 +48,24 @@ import { parseTurnAddress } from "../mcp/note";
  * one live agentic run is exactly the G5 replay hazard segment `extend` and
  * session `append` already carry, and this facade does not need to invent a
  * third case of it.
+ *
+ * TICKET 10B'S CHANGE: this module used to open its own `runWriteTransaction`
+ * per call and write immediately. It no longer does. `evaluateSettlementTurnWrite`
+ * below is now a plain decision function — every READ it needs (turn lookup,
+ * shadow-note freshness, reference resolution) still runs live against the
+ * database, because spec A7 requires a staged call to "still validate fully
+ * and return a real receipt"; only the WRITES (`updateTurnById`,
+ * `upsertReconstructedShadowNote`, `writeMemoryEdges`) are now conditional on
+ * `apply: true`. The staging engine (`note-settlement-staging.ts`) calls this
+ * function twice for the same intent: once at stage time with `apply: false`
+ * (a dry run, for the immediate receipt — A1's actual benefit, preserved),
+ * and once inside `commit`'s own transaction with `apply: true` (the write
+ * that actually lands, re-evaluated fresh against whatever the database says
+ * at that later moment — spec A7's "stage-time validation is feedback,
+ * commit-time validation is truth"). There is deliberately no third,
+ * separate "apply-only" code path: replaying the SAME evaluation function
+ * rather than a cached stage-time decision is what makes commit-time
+ * re-validation real rather than cosmetic.
  */
 
 // ---------------------------------------------------------------------------
@@ -62,6 +81,16 @@ export interface SettlementTurnFacadeContext {
   reconstructableTurnIds: ReadonlySet<number>;
   /** The write-back's own review-scope check (window plus rendered lookback). */
   reviewableTurnIds: ReadonlySet<number>;
+  /**
+   * Open segment ids this dispatch's prompt actually showed (ticket 10b) —
+   * the same scoping discipline `reviewableTurnIds` already applies to a
+   * turn review, extended to `extend`'s segment address for the identical
+   * reason: an id that merely happens to resolve is not the same thing as an
+   * id this run was shown, and `extend` is a destructive rewrite the way a
+   * turn review is. Segment `create` needs no such gate — it mints, it does
+   * not address.
+   */
+  exposedSegmentIds: ReadonlySet<number>;
   /** When this dispatch's context was read — the note-timestamp fence's boundary. */
   contextBuiltAtEpoch: number;
   /** Recorded on a reconstruction note, same as the write-back's own `rideTurnId`. */
@@ -75,26 +104,22 @@ export interface SettlementTurnFacadeContext {
    * let an EARLIER call in the same run mint a pair and a LATER call in the
    * same run treat that freshly-minted pair as "pre-existing" and self-license
    * a relation on it — precisely the violation this snapshot exists to close.
+   * Unaffected by staging: nothing lands before `commit`, so the run's own
+   * writes never enter this set either way.
    */
   eligibleRelationPairKeys: ReadonlySet<string>;
   logger?: Pick<Console, "warn">;
 }
 
-class SettlementFacadeError extends Error {}
-
-function fail(message: string): never {
-  throw new SettlementFacadeError(message);
-}
-
-type ToolTextResult = {
+export type ToolTextResult = {
   content: Array<{ type: "text"; text: string }>;
 };
 
-function textResult(text: string): ToolTextResult {
+export function textResult(text: string): ToolTextResult {
   return { content: [{ type: "text", text }] };
 }
 
-function parameterError(message: string): ToolTextResult {
+export function parameterError(message: string): ToolTextResult {
   return textResult(`Parameter error: ${message}`);
 }
 
@@ -109,17 +134,17 @@ function parameterError(message: string): ToolTextResult {
 //      `.strict()` schema) with the SDK's `tool()`, which builds its own
 //      zod object from it and parses every call's `arguments` through THAT
 //      before the handler runs — an unknown key such as a model-invented
-//      `jobId` is therefore never part of what `settlementTurnWriteTool`
+//      `jobId` is therefore never part of what the staging engine
 //      receives as `rawInput`, whether the SDK strips it or rejects the
 //      call outright.
-//   2. Even if it were, `settlementTurnWriteTool` never reads a job identity
-//      off `rawInput` — the only value it ever fences against is
-//      `context.jobId`/`context.claimGeneration`, closed over from
-//      `SettlementTurnFacadeContext`, which the per-request server factory
-//      builds from the dispatch's own job record (worker/note-settlement-
-//      dispatch.ts). There is no code path from model output into that
-//      closure at all — the two live in variables with different names,
-//      not the same field gated by a filter that could be forgotten.
+//   2. Even the staging engine never reads a job identity off `rawInput` —
+//      the only value it ever fences against is `context.jobId`/
+//      `context.claimGeneration`, closed over from `SettlementTurnFacadeContext`,
+//      which the per-request server factory builds from the dispatch's own
+//      job record (worker/note-settlement-dispatch.ts). There is no code
+//      path from model output into that closure at all — the two live in
+//      variables with different names, not the same field gated by a filter
+//      that could be forgotten.
 export const settlementTurnWriteInputShape = {
   turn: z.string().min(1),
   title: z.string().optional(),
@@ -154,45 +179,128 @@ const RELATION_FIELD_ENTRIES: ReadonlyArray<
   ["dependsOn", "depends-on"],
 ];
 
-interface ReviewOutcome {
+export interface ProseOutcome {
+  kind: "written" | "yielded";
+}
+
+export interface ReviewOutcome {
   kind: "written" | "yielded";
   grade?: number;
   type?: string[];
   tags?: string[];
 }
 
-interface ProseOutcome {
-  kind: "written" | "yielded";
-}
-
-interface RelationOutcome {
+export interface RelationOutcome {
   written: number;
 }
 
-interface FacadeTransactionResult {
+export interface SettlementTurnWriteOutcome {
   ref: string;
+  turnId: number;
   prose: ProseOutcome | null;
   review: ReviewOutcome | null;
   relations: RelationOutcome | null;
 }
 
+export type SettlementTurnWriteEvaluation =
+  | { ok: true; outcome: SettlementTurnWriteOutcome }
+  | { ok: false; message: string };
+
+export interface EvaluateSettlementTurnWriteOptions {
+  /**
+   * `false` (the default, stage time): every READ still runs, but no
+   * mutating statement does — the caller gets the same receipt a real write
+   * would produce without anything reaching a live table (spec A7
+   * requirement 1/2). `true` (commit time): the identical decision logic
+   * runs again, fresh, and this time its mutations land for real.
+   */
+  apply: boolean;
+}
+
 /**
- * The settlement write server's one tool call (ticket 10a). One
- * `runWriteTransaction` — the fence, the write it guards, its derived edges
- * and its status all share it (spec A2's per-call atomicity, unchanged by
- * A2's window-level surrender).
+ * Mirrors `writeMemoryEdges`'s own pre-write checks (self-loop, conflicting-
+ * relation-on-one-pair, eligibility) WITHOUT writing, so a stage-time dry run
+ * can report the identical verdict a real write would produce. Small,
+ * deliberate duplication: modifying the shared `writeMemoryEdges` primitive
+ * to grow a dry-run mode would touch every other caller (note.ts,
+ * segments.ts) for one caller's benefit. Both stage (`apply: false`) and
+ * commit (`apply: true`, immediately followed by the real `writeMemoryEdges`
+ * call with the same accepted list) run this same function first, so the two
+ * can never disagree about WHICH inputs are legal — only about whether they
+ * are actually written.
  */
-export function settlementTurnWriteTool(
+function evaluateRelationCandidates(
+  citing: CitingNode,
+  candidates: ReadonlyArray<{ key: string; relation: CitationRelation; node: EdgeNode }>,
+  eligiblePairKeys: ReadonlySet<string>,
+): { accepted: WriteEdgeInput[]; rejections: string[] } {
+  const relationsByPair = new Map<string, Set<CitationRelation>>();
+  for (const candidate of candidates) {
+    const key = pairKey({ citing, cited: candidate.node });
+    const set = relationsByPair.get(key) ?? new Set<CitationRelation>();
+    set.add(candidate.relation);
+    relationsByPair.set(key, set);
+  }
+  const conflictingPairs = new Set(
+    [...relationsByPair.entries()]
+      .filter(([, relations]) => relations.size > 1)
+      .map(([key]) => key),
+  );
+
+  const accepted: WriteEdgeInput[] = [];
+  const rejections: string[] = [];
+  for (const candidate of candidates) {
+    if (citing.kind === candidate.node.kind && citing.id === candidate.node.id) {
+      rejections.push(`${candidate.key} names this turn itself (self-loop)`);
+      continue;
+    }
+    const key = pairKey({ citing, cited: candidate.node });
+    if (conflictingPairs.has(key)) {
+      rejections.push(
+        `${candidate.key} names a pair another relation field in this same ` +
+          "call already claims a different relation for",
+      );
+      continue;
+    }
+    if (!eligiblePairKeys.has(key)) {
+      rejections.push(
+        `${candidate.key} names a pair not eligible for a relation — settlement ` +
+          "may only attach a relation to a pair that already existed before " +
+          "this dispatch's model run began (spec C7)",
+      );
+      continue;
+    }
+    accepted.push({
+      citing,
+      cited: candidate.node,
+      relation: candidate.relation,
+      provenance: "judged",
+    });
+  }
+  return { accepted, rejections };
+}
+
+/**
+ * The settlement turn-write facade's whole decision (spec A7's staged split).
+ * Every read below runs unconditionally; every write is gated on
+ * `options.apply`. Returns a structured `{ ok, ... }` rather than throwing —
+ * the caller (staging engine) decides what a failure means at its own layer
+ * (a parameter error at stage time, a thrown commit-replay refusal at commit
+ * time), which is not this function's business.
+ */
+export function evaluateSettlementTurnWrite(
   db: Database,
   context: SettlementTurnFacadeContext,
   rawInput: SettlementTurnWriteInput,
   nowEpoch: number,
-): ToolTextResult {
+  options: EvaluateSettlementTurnWriteOptions,
+): SettlementTurnWriteEvaluation {
   const address = parseTurnAddress(rawInput.turn);
   if (!address) {
-    return parameterError(
-      `turn must be a fully qualified "S<session>/T<prompt>" address; got "${rawInput.turn}".`,
-    );
+    return {
+      ok: false,
+      message: `turn must be a fully qualified "S<session>/T<prompt>" address; got "${rawInput.turn}".`,
+    };
   }
   const ref = `S${address.sessionId}/T${address.promptNumber}`;
 
@@ -209,37 +317,38 @@ export function settlementTurnWriteTool(
   );
 
   if (!touchesProse && !touchesReview && relationFields.length === 0) {
-    return parameterError(
-      "at least one of title/content/insight, grade/type/tags, or a relation field is required.",
-    );
+    return {
+      ok: false,
+      message:
+        "at least one of title/content/insight, grade/type/tags, or a relation field is required.",
+    };
   }
 
-  // Requirement 7: a reconstruction is a WHOLE-REWRITE write — this dispatch
-  // is filling a hole that has no prior note for the caller to leave alone —
-  // so there is no "omitted means leave alone" reading available the way
-  // `mcp/note.ts`'s own per-field update has for an EXISTING row. The
-  // retiring write-back defaulted an absent `insight` to `""` (survivable
-  // only because a reconstruction always targets an empty hole, so there was
-  // nothing to accidentally clear); this replacement refuses the call
-  // instead of guessing what "absent" means for a field with nothing behind
-  // it. `insight` must still be NAMED, even as `null`, to state "no insight".
+  // Requirement 7 (ticket 10a): a reconstruction is a WHOLE-REWRITE write —
+  // this dispatch is filling a hole that has no prior note for the caller to
+  // leave alone — so there is no "omitted means leave alone" reading
+  // available the way `mcp/note.ts`'s own per-field update has for an
+  // EXISTING row. `insight` must still be NAMED, even as `null`, to state
+  // "no insight".
   if (touchesProse) {
     if (
       rawInput.title === undefined ||
       rawInput.content === undefined ||
       rawInput.insight === undefined
     ) {
-      return parameterError(
-        "a reconstruction note requires title, content and insight all named " +
+      return {
+        ok: false,
+        message:
+          "a reconstruction note requires title, content and insight all named " +
           "together in one call (insight may be null) — an omitted field is " +
           "refused, never defaulted to empty.",
-      );
+      };
     }
     if (rawInput.title.trim() === "") {
-      return parameterError("title must not be empty.");
+      return { ok: false, message: "title must not be empty." };
     }
     if (rawInput.content.trim() === "") {
-      return parameterError("content must not be empty.");
+      return { ok: false, message: "content must not be empty." };
     }
   }
 
@@ -248,199 +357,209 @@ export function settlementTurnWriteTool(
     try {
       normalizedType = normalizeTypeValues(rawInput.type);
     } catch (error) {
-      return parameterError(
-        `${error instanceof Error ? error.message : String(error)}. Allowed: ${MEMORY_TYPES.join(", ")}.`,
-      );
+      return {
+        ok: false,
+        message: `${error instanceof Error ? error.message : String(error)}. Allowed: ${MEMORY_TYPES.join(", ")}.`,
+      };
     }
   }
 
-  let result: FacadeTransactionResult;
-  try {
-    result = runWriteTransaction(db, (): FacadeTransactionResult => {
-      // The fence: the FIRST statement of this transaction (spec G6/G7). A
-      // dispatch whose lease was reclaimed under a new generation throws
-      // here, rolling back everything below — nothing this call would have
-      // written can ever land once ownership has moved.
-      assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
-
-      const turn = getTurn(db, address.sessionId, address.promptNumber);
-      if (!turn) {
-        fail(`no turn at ${ref}.`);
-      }
-      if (turn.type.includes("compact")) {
-        fail(`${ref} is a compact marker, not a turn.`);
-      }
-
-      let prose: ProseOutcome | null = null;
-      if (touchesProse) {
-        if (!context.reconstructableTurnIds.has(turn.id)) {
-          fail(
-            `${ref} is not a reconstructable hole of this dispatch — prose may ` +
-              "only be written for a turn this window's own backfill scope names.",
-          );
-        }
-        const written = upsertReconstructedShadowNote(db, {
-          turnId: turn.id,
-          title: rawInput.title!,
-          content: rawInput.content!,
-          insight: rawInput.insight ?? null,
-          writerModel: context.writerModel,
-          writerOrigin: "settlement",
-          rideTurnId: context.rideTurnId,
-          nowEpoch,
-        });
-        // `upsertReconstructedShadowNote`'s own `WHERE writer_origin != 'agent'`
-        // is the yield: the main agent's own note can land between this job
-        // being claimed and this call landing, and that note wins — a
-        // hindsight reconstruction of the same turn never outranks it.
-        prose = { kind: written ? "written" : "yielded" };
-      }
-
-      let review: ReviewOutcome | null = null;
-      if (touchesReview) {
-        if (!context.reviewableTurnIds.has(turn.id)) {
-          fail(
-            `${ref} is outside this dispatch's reviewable window (the window ` +
-              "plus its rendered lookback) — grade/type/tags may only be " +
-              "written for a turn this prompt actually showed.",
-          );
-        }
-        // Re-read fresh, right here, right before the write it guards (the
-        // write-back's own two-half fence, ported verbatim):
-        //   1. freshness — a value merged into a write must come from a read
-        //      taken now, never from context-build time;
-        //   2. yield-when-the-document-changed — `type`/`tags` are facts
-        //      ABOUT the note, so a review of a turn whose note arrived
-        //      during the async gap between claim and this call is a review
-        //      of a document the model never saw. Grade still lands: it
-        //      judges what the turn DID, read off raw material no later note
-        //      can change; only the note-derived half stands down.
-        const currentNote = getShadowNote(db, turn.id);
-        const noteSupersedesReview =
-          currentNote !== null &&
-          currentNote.writerOrigin === "agent" &&
-          currentNote.updatedAtEpoch >= context.contextBuiltAtEpoch;
-
-        if (noteSupersedesReview) {
-          if (rawInput.grade !== undefined) {
-            updateTurnById(db, turn.id, {
-              significanceGrade: rawInput.grade,
-              updatedAtEpoch: nowEpoch,
-            });
-          }
-          review = { kind: "yielded", grade: rawInput.grade };
-        } else {
-          updateTurnById(db, turn.id, {
-            significanceGrade: rawInput.grade,
-            type: normalizedType,
-            tags: rawInput.tags,
-            updatedAtEpoch: nowEpoch,
-          });
-          review = {
-            kind: "written",
-            grade: rawInput.grade,
-            type: normalizedType,
-            tags: rawInput.tags,
-          };
-        }
-      }
-
-      let relations: RelationOutcome | null = null;
-      if (relationFields.length > 0) {
-        const citing: CitingNode = { kind: "turn", id: turn.id };
-        const inputs: WriteEdgeInput[] = [];
-        const rejections: string[] = [];
-        for (const [key, relation] of relationFields) {
-          for (const raw of rawInput[key] ?? []) {
-            const reference = parseBareAddressReference(raw);
-            if (!reference) {
-              rejections.push(`${key} "${raw}" is not a valid address`);
-              continue;
-            }
-            const { accepted } = validateReferences(db, [reference], {
-              writerSessionId: context.sessionId,
-              logger: context.logger,
-            });
-            const node = accepted[0]?.node;
-            if (!node) {
-              rejections.push(`${key} "${raw}" does not resolve to a turn or segment`);
-              continue;
-            }
-            inputs.push({ citing, cited: node, relation, provenance: "judged" });
-          }
-        }
-        if (rejections.length > 0) {
-          fail(`relation field rejected: ${rejections.join("; ")}.`);
-        }
-        // Ticket 07/10a (spec C7/C14): eligibility is the PRE-RUN snapshot,
-        // not this call's own citations — settlement has no body of its own
-        // here to cite anything into, and even if it did, a pair this same
-        // run just minted must not license its own relation.
-        const { written, rejected } = writeMemoryEdges(db, inputs, nowEpoch, {
-          eligibleForRelation: context.eligibleRelationPairKeys,
-        });
-        if (rejected.length > 0) {
-          fail(
-            "relation field rejected: a target pair is not eligible — settlement " +
-              "may only attach a relation to a pair that already existed before " +
-              "this dispatch's model run began (spec C7).",
-          );
-        }
-        relations = { written: written.length };
-      }
-
-      return { ref, prose, review, relations };
-    });
-  } catch (error) {
-    if (error instanceof SettlementFacadeError) {
-      return parameterError(error.message);
-    }
-    // A lost lease (NoteSettlementJobFenceError) is not a parameter mistake —
-    // it means every remaining call in this dispatch would also fail the
-    // fence, so surfacing it as a firm text answer (rather than throwing
-    // through the tool boundary) lets the agent stop rather than retry
-    // pointlessly against a window it no longer owns.
-    if (error instanceof Error && error.name === "NoteSettlementJobFenceError") {
-      return textResult(
-        `${ref}: this dispatch's job lease was reclaimed; no further writes ` +
-          "will land. Stop making tool calls.",
-      );
-    }
-    throw error;
+  const turn = getTurn(db, address.sessionId, address.promptNumber);
+  if (!turn) {
+    return { ok: false, message: `no turn at ${ref}.` };
+  }
+  if (turn.type.includes("compact")) {
+    return { ok: false, message: `${ref} is a compact marker, not a turn.` };
   }
 
+  let prose: ProseOutcome | null = null;
+  if (touchesProse) {
+    if (!context.reconstructableTurnIds.has(turn.id)) {
+      return {
+        ok: false,
+        message:
+          `${ref} is not a reconstructable hole of this dispatch — prose may ` +
+          "only be written for a turn this window's own backfill scope names.",
+      };
+    }
+    if (options.apply) {
+      const written = upsertReconstructedShadowNote(db, {
+        turnId: turn.id,
+        title: rawInput.title!,
+        content: rawInput.content!,
+        insight: rawInput.insight ?? null,
+        writerModel: context.writerModel,
+        writerOrigin: "settlement",
+        rideTurnId: context.rideTurnId,
+        nowEpoch,
+      });
+      // `upsertReconstructedShadowNote`'s own `WHERE writer_origin != 'agent'`
+      // is the yield: the main agent's own note can land between this job
+      // being claimed and this call landing, and that note wins — a
+      // hindsight reconstruction of the same turn never outranks it.
+      prose = { kind: written ? "written" : "yielded" };
+    } else {
+      // Dry run: mirror the upsert's own WHERE clause by reading the row it
+      // guards against, rather than writing and rolling the effect back.
+      const current = getShadowNote(db, turn.id);
+      prose = { kind: current !== null && current.writerOrigin === "agent" ? "yielded" : "written" };
+    }
+  }
+
+  let review: ReviewOutcome | null = null;
+  if (touchesReview) {
+    if (!context.reviewableTurnIds.has(turn.id)) {
+      return {
+        ok: false,
+        message:
+          `${ref} is outside this dispatch's reviewable window (the window ` +
+          "plus its rendered lookback) — grade/type/tags may only be " +
+          "written for a turn this prompt actually showed.",
+      };
+    }
+    // Re-read fresh, right here, right before the write it guards (the
+    // write-back's own two-half fence, ported verbatim):
+    //   1. freshness — a value merged into a write must come from a read
+    //      taken now, never from context-build time;
+    //   2. yield-when-the-document-changed — `type`/`tags` are facts
+    //      ABOUT the note, so a review of a turn whose note arrived
+    //      during the async gap between claim and this call is a review
+    //      of a document the model never saw. Grade still lands: it
+    //      judges what the turn DID, read off raw material no later note
+    //      can change; only the note-derived half stands down.
+    const currentNote = getShadowNote(db, turn.id);
+    const noteSupersedesReview =
+      currentNote !== null &&
+      currentNote.writerOrigin === "agent" &&
+      currentNote.updatedAtEpoch >= context.contextBuiltAtEpoch;
+
+    if (noteSupersedesReview) {
+      if (options.apply && rawInput.grade !== undefined) {
+        updateTurnById(db, turn.id, {
+          significanceGrade: rawInput.grade,
+          updatedAtEpoch: nowEpoch,
+        });
+      }
+      review = { kind: "yielded", grade: rawInput.grade };
+    } else {
+      if (options.apply) {
+        updateTurnById(db, turn.id, {
+          significanceGrade: rawInput.grade,
+          type: normalizedType,
+          tags: rawInput.tags,
+          updatedAtEpoch: nowEpoch,
+        });
+      }
+      review = {
+        kind: "written",
+        grade: rawInput.grade,
+        type: normalizedType,
+        tags: rawInput.tags,
+      };
+    }
+  }
+
+  let relations: RelationOutcome | null = null;
+  if (relationFields.length > 0) {
+    const citing: CitingNode = { kind: "turn", id: turn.id };
+    const candidates: Array<{ key: string; relation: CitationRelation; node: EdgeNode }> = [];
+    const rejections: string[] = [];
+    for (const [key, relation] of relationFields) {
+      for (const raw of rawInput[key] ?? []) {
+        const reference = parseBareAddressReference(raw);
+        if (!reference) {
+          rejections.push(`${key} "${raw}" is not a valid address`);
+          continue;
+        }
+        const { accepted } = validateReferences(db, [reference], {
+          writerSessionId: context.sessionId,
+          logger: context.logger,
+        });
+        const node = accepted[0]?.node;
+        if (!node) {
+          rejections.push(`${key} "${raw}" does not resolve to a turn or segment`);
+          continue;
+        }
+        candidates.push({ key, relation, node });
+      }
+    }
+    if (rejections.length > 0) {
+      return { ok: false, message: `relation field rejected: ${rejections.join("; ")}.` };
+    }
+    // Ticket 07/10a (spec C7/C14): eligibility is the PRE-RUN snapshot,
+    // not this call's own citations — settlement has no body of its own
+    // here to cite anything into, and even if it did, a pair this same
+    // run just minted must not license its own relation.
+    const evaluated = evaluateRelationCandidates(
+      citing,
+      candidates,
+      context.eligibleRelationPairKeys,
+    );
+    if (evaluated.rejections.length > 0) {
+      return {
+        ok: false,
+        message: `relation field rejected: ${evaluated.rejections.join("; ")}.`,
+      };
+    }
+    if (options.apply) {
+      const { written } = writeMemoryEdges(db, evaluated.accepted, nowEpoch, {
+        eligibleForRelation: context.eligibleRelationPairKeys,
+      });
+      relations = { written: written.length };
+    } else {
+      relations = { written: evaluated.accepted.length };
+    }
+  }
+
+  return { ok: true, outcome: { ref, turnId: turn.id, prose, review, relations } };
+}
+
+/**
+ * Render one turn-write outcome as tool-result text. `staged: true` is spec
+ * A7 requirement 2's "the receipt says the write is staged, not written" —
+ * used at stage time; `staged: false` is commit-time replay's internal
+ * bookkeeping text (never shown on its own — `commit`'s own receipt
+ * summarises the whole run).
+ */
+export function renderSettlementTurnWriteReceipt(
+  outcome: SettlementTurnWriteOutcome,
+  options: { staged: boolean },
+): string {
+  const verb = options.staged ? "Staged" : "Landed";
   const parts: string[] = [];
-  if (result.prose) {
+  if (outcome.prose) {
     parts.push(
-      result.prose.kind === "written"
-        ? `Reconstructed ${ref}.`
-        : `${ref} reconstruction yielded: an agent note landed first.`,
+      outcome.prose.kind === "written"
+        ? `${verb} reconstruction for ${outcome.ref}${options.staged ? " (pending commit)" : ""}.`
+        : `${outcome.ref} reconstruction ${options.staged ? "would yield" : "yielded"}: an agent note has landed first.`,
     );
   }
-  if (result.review) {
-    if (result.review.kind === "yielded") {
+  if (outcome.review) {
+    if (outcome.review.kind === "yielded") {
       parts.push(
-        result.review.grade !== undefined
-          ? `${ref} review yielded (an agent note landed after this dispatch's ` +
+        outcome.review.grade !== undefined
+          ? `${outcome.ref} review ${options.staged ? "would yield" : "yielded"} (an agent note landed after this dispatch's ` +
               "context was read) — grade recorded, type/tags left as the agent's own."
-          : `${ref} review yielded (an agent note landed after this dispatch's ` +
-              "context was read) — nothing written.",
+          : `${outcome.ref} review ${options.staged ? "would yield" : "yielded"} (an agent note landed after this dispatch's ` +
+              "context was read) — nothing to write.",
       );
     } else {
       const bits: string[] = [];
-      if (result.review.grade !== undefined) bits.push(`grade ${result.review.grade}`);
-      if (result.review.type !== undefined)
-        bits.push(`type ${result.review.type.length > 0 ? result.review.type.join(",") : "(none)"}`);
-      if (result.review.tags !== undefined)
-        bits.push(`tags ${result.review.tags.length > 0 ? result.review.tags.join(",") : "(none)"}`);
-      parts.push(`Reviewed ${ref}: ${bits.join(", ")}.`);
+      if (outcome.review.grade !== undefined) bits.push(`grade ${outcome.review.grade}`);
+      if (outcome.review.type !== undefined)
+        bits.push(`type ${outcome.review.type.length > 0 ? outcome.review.type.join(",") : "(none)"}`);
+      if (outcome.review.tags !== undefined)
+        bits.push(`tags ${outcome.review.tags.length > 0 ? outcome.review.tags.join(",") : "(none)"}`);
+      parts.push(`${verb} review for ${outcome.ref}: ${bits.join(", ")}${options.staged ? " (pending commit)" : ""}.`);
     }
   }
-  if (result.relations) {
-    parts.push(`Attached ${result.relations.written} relation(s).`);
+  if (outcome.relations) {
+    parts.push(
+      `${verb} ${outcome.relations.written} relation(s)${options.staged ? " (pending commit)" : ""}.`,
+    );
   }
   if (parts.length === 0) {
-    parts.push(`No-op for ${ref}.`);
+    parts.push(`No-op for ${outcome.ref}.`);
   }
-  return textResult(parts.join(" "));
+  return parts.join(" ");
 }

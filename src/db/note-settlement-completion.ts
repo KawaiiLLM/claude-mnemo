@@ -375,10 +375,21 @@ export interface CompleteNoteSettlementJobIfSegmentedOptions {
 }
 
 /**
- * The completion gate (spec G2/G7). See the module doc comment for why the
- * fence, the anti-join, the coverage recheck and the CAS all have to share
- * one transaction rather than being composed from separately-transacted
- * pieces.
+ * The completion gate's core (spec G2/G7) — the fence, the anti-join, the
+ * coverage recheck and the CAS, as a plain function with NO transaction of
+ * its own. See the module doc comment for why those four have to share one
+ * transaction rather than being composed from separately-transacted pieces;
+ * this function is that shared body, factored out so ticket 10b's `commit`
+ * can run it as the LAST step of the SAME transaction that replays a
+ * settlement run's staged writes (spec A7 requirement 6: "the gate runs
+ * inside the commit transaction, under the fence") — nesting
+ * `runWriteTransaction` inside another write transaction is not how
+ * bun:sqlite's `.immediate()` composes, so the transaction boundary has to
+ * live at the call site, not in here.
+ *
+ * `completeNoteSettlementJobIfSegmented` below is the pre-existing entry
+ * point (ticket 09) that wraps this in its OWN transaction, unchanged, for
+ * every caller that is not already inside one.
  *
  * A refusal for ANY reason — lost ownership, a segmentation gap, a coverage
  * gap — leaves the job exactly as it was: `completeNoteSettlementJob`'s own
@@ -389,6 +400,111 @@ export interface CompleteNoteSettlementJobIfSegmentedOptions {
  * nobody, and leaving the job claimed is what makes that trust-nobody stance
  * survive a retry rather than requiring one).
  */
+export function completeNoteSettlementJobIfSegmentedCore(
+  db: Database,
+  jobId: number,
+  claimGeneration: number,
+  nowEpoch: number,
+  options: CompleteNoteSettlementJobIfSegmentedOptions = {},
+): NoteSettlementCompletionResult {
+  const job = assertNoteSettlementJobClaimed(db, jobId, claimGeneration);
+
+  const segmentationGaps = computeNoteSettlementSegmentationGaps(
+    db,
+    job.id,
+    job.sessionId,
+    job.windowStart,
+    job.windowEnd,
+  );
+  if (segmentationGaps.length > 0) {
+    return {
+      completed: false,
+      reason: "segmentation-incomplete" as const,
+      segmentationGaps,
+      noteGaps: [],
+      coverageGaps: [],
+    };
+  }
+
+  // Duty 2 (spec G1a): computed inside this SAME transaction, so nothing
+  // else can commit a note or a decline between this read and the CAS
+  // below — the identical guarantee the segmentation/coverage checks
+  // above already rely on this transaction's write lock for.
+  const noteGaps = computeNoteSettlementNoteGaps(
+    db,
+    job.sessionId,
+    job.windowStart,
+    job.windowEnd,
+  );
+  if (noteGaps.length > 0) {
+    return {
+      completed: false,
+      reason: "note-incomplete" as const,
+      segmentationGaps: [],
+      noteGaps,
+      coverageGaps: [],
+    };
+  }
+
+  const windowTurnIds = getWindowTurnIds(
+    db,
+    job.sessionId,
+    job.windowStart,
+    job.windowEnd,
+  );
+  const coverageGaps = computeCoverageGaps(db, windowTurnIds);
+  if (coverageGaps.length > 0) {
+    return {
+      completed: false,
+      reason: "coverage-incomplete" as const,
+      segmentationGaps: [],
+      noteGaps: [],
+      coverageGaps,
+    };
+  }
+
+  // The CAS re-verifies `claim_generation` on its own, independently of
+  // the fence check above — that redundancy is deliberate, not
+  // belt-and-suspenders filler. The fence lets a caller that has already
+  // lost its lease fail fast, cheaply, before paying for the anti-join
+  // and coverage reads; the actual safety guarantee comes from THIS
+  // statement re-checking generation at the instant of the write, inside
+  // the same `BEGIN IMMEDIATE` block the reads above ran in, so nothing
+  // else could have moved it in between on a real connection.
+  const done = completeNoteSettlementJob(db, job.id, nowEpoch, claimGeneration);
+  if (!done) {
+    return {
+      completed: false,
+      reason: "generation-mismatch" as const,
+      segmentationGaps: [],
+      noteGaps: [],
+      coverageGaps: [],
+    };
+  }
+
+  advanceNoteSettlementCursor(
+    db,
+    job.sessionId,
+    nowEpoch,
+    options.maxAttempts ?? NOTE_SETTLEMENT_MAX_ATTEMPTS,
+  );
+
+  return {
+    completed: true,
+    reason: null,
+    segmentationGaps: [],
+    noteGaps: [],
+    coverageGaps: [],
+  };
+}
+
+/**
+ * The pre-existing entry point (ticket 09): `completeNoteSettlementJobIfSegmentedCore`
+ * wrapped in its own transaction, for every caller that is not already
+ * inside one — the completion gate's only production caller until ticket
+ * 10b, and every test in `tests/db/note-settlement-completion.test.ts`.
+ * Behaviour is unchanged; only the body moved.
+ */
 export function completeNoteSettlementJobIfSegmented(
   db: Database,
   jobId: number,
@@ -397,102 +513,15 @@ export function completeNoteSettlementJobIfSegmented(
   options: CompleteNoteSettlementJobIfSegmentedOptions = {},
 ): NoteSettlementCompletionResult {
   try {
-    return runWriteTransaction(db, () => {
-      const job = assertNoteSettlementJobClaimed(db, jobId, claimGeneration);
-
-      const segmentationGaps = computeNoteSettlementSegmentationGaps(
+    return runWriteTransaction(db, () =>
+      completeNoteSettlementJobIfSegmentedCore(
         db,
-        job.id,
-        job.sessionId,
-        job.windowStart,
-        job.windowEnd,
-      );
-      if (segmentationGaps.length > 0) {
-        return {
-          completed: false,
-          reason: "segmentation-incomplete" as const,
-          segmentationGaps,
-          noteGaps: [],
-          coverageGaps: [],
-        };
-      }
-
-      // Duty 2 (spec G1a): computed inside this SAME transaction, so nothing
-      // else can commit a note or a decline between this read and the CAS
-      // below — the identical guarantee the segmentation/coverage checks
-      // above already rely on this transaction's write lock for.
-      const noteGaps = computeNoteSettlementNoteGaps(
-        db,
-        job.sessionId,
-        job.windowStart,
-        job.windowEnd,
-      );
-      if (noteGaps.length > 0) {
-        return {
-          completed: false,
-          reason: "note-incomplete" as const,
-          segmentationGaps: [],
-          noteGaps,
-          coverageGaps: [],
-        };
-      }
-
-      const windowTurnIds = getWindowTurnIds(
-        db,
-        job.sessionId,
-        job.windowStart,
-        job.windowEnd,
-      );
-      const coverageGaps = computeCoverageGaps(db, windowTurnIds);
-      if (coverageGaps.length > 0) {
-        return {
-          completed: false,
-          reason: "coverage-incomplete" as const,
-          segmentationGaps: [],
-          noteGaps: [],
-          coverageGaps,
-        };
-      }
-
-      // The CAS re-verifies `claim_generation` on its own, independently of
-      // the fence check above — that redundancy is deliberate, not
-      // belt-and-suspenders filler. The fence lets a caller that has already
-      // lost its lease fail fast, cheaply, before paying for the anti-join
-      // and coverage reads; the actual safety guarantee comes from THIS
-      // statement re-checking generation at the instant of the write, inside
-      // the same `BEGIN IMMEDIATE` block the reads above ran in, so nothing
-      // else could have moved it in between on a real connection.
-      const done = completeNoteSettlementJob(
-        db,
-        job.id,
-        nowEpoch,
+        jobId,
         claimGeneration,
-      );
-      if (!done) {
-        return {
-          completed: false,
-          reason: "generation-mismatch" as const,
-          segmentationGaps: [],
-          noteGaps: [],
-          coverageGaps: [],
-        };
-      }
-
-      advanceNoteSettlementCursor(
-        db,
-        job.sessionId,
         nowEpoch,
-        options.maxAttempts ?? NOTE_SETTLEMENT_MAX_ATTEMPTS,
-      );
-
-      return {
-        completed: true,
-        reason: null,
-        segmentationGaps: [],
-        noteGaps: [],
-        coverageGaps: [],
-      };
-    });
+        options,
+      ),
+    );
   } catch (error) {
     if (error instanceof NoteSettlementJobFenceError) {
       return {

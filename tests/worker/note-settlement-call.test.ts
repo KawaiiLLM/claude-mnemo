@@ -5,7 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession, getSession } from "../../src/db/sessions";
 import { upsertShadowNote, getShadowNote } from "../../src/db/shadow-notes";
-import { getTurnById } from "../../src/db/turns";
+import { getTurnById, updateTurnById } from "../../src/db/turns";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -13,6 +13,7 @@ import {
   getNoteSettlementJob,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
+import { recordNoteSettlementSegmentExclusion } from "../../src/db/note-settlement-completion";
 import {
   createSegment,
   getSegment,
@@ -20,11 +21,7 @@ import {
   listOpenSegments,
   listTopics,
 } from "../../src/db/segments";
-import {
-  countMemoryEdges,
-  getOutgoingEdges,
-  writeMemoryEdges,
-} from "../../src/db/memory-edges";
+import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   buildNoteSettlementContext,
   NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET,
@@ -35,9 +32,15 @@ import {
   createNoteSettlementDispatch,
   NOTE_SETTLEMENT_METRICS_PREFIX,
   type NoteSettlementQuery,
+  type NoteSettlementQueryRequest,
   type NoteSettlementWindowMetrics,
 } from "../../src/worker/note-settlement-dispatch";
 import { createNoteSettlementScheduler } from "../../src/worker/note-settlement";
+import {
+  createSettlementStagingEngine,
+  type SettlementStagingEngine,
+} from "../../src/worker/note-settlement-staging";
+import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import {
   SETTLEMENT_ENABLED_CONFIG,
   SETTLEMENT_ERA_CUTOFF_EPOCH,
@@ -209,16 +212,35 @@ function seedInteriorHoleWindow(): Fixture {
   return { sessionDbId, turnIds: [t1, t2, t3, t4], job: claimWindow(sessionDbId, 1, 4) };
 }
 
-function stubQuery(...replies: string[]): NoteSettlementQuery & { calls: number } {
-  let index = 0;
-  const query = (async () => {
-    const reply = replies[Math.min(index, replies.length - 1)] ?? "{}";
-    index += 1;
-    query.calls = index;
-    return reply;
-  }) as NoteSettlementQuery & { calls: number };
-  query.calls = 0;
-  return query;
+/**
+ * A stub `runQuery` that stages and (optionally) commits through the REAL
+ * staging engine, standing in for what the SDK subprocess's tool calls would
+ * do (ticket 10b, spec A7). `build` receives the engine and the request the
+ * dispatch actually sent — everything a real `note-settlement-sdk-query.ts`
+ * would have used to build its own `SettlementTurnFacadeContext` — so a test
+ * can stage/commit against the SAME job identity and scoping the dispatch
+ * computed, without a network or a subprocess.
+ */
+function queryThatStages(
+  build: (engine: SettlementStagingEngine, request: NoteSettlementQueryRequest) => void,
+): NoteSettlementQuery {
+  return async (request) => {
+    const context: SettlementTurnFacadeContext = {
+      jobId: request.jobId,
+      claimGeneration: request.claimGeneration,
+      sessionId: request.sessionId,
+      reconstructableTurnIds: request.reconstructableTurnIds,
+      reviewableTurnIds: request.reviewableTurnIds,
+      exposedSegmentIds: request.exposedSegmentIds,
+      contextBuiltAtEpoch: request.contextBuiltAtEpoch,
+      rideTurnId: request.rideTurnId,
+      writerModel: request.writerModel,
+      eligibleRelationPairKeys: request.eligibleRelationPairKeys,
+    };
+    const engine = createSettlementStagingEngine({ db, context });
+    build(engine, request);
+    return "settlement run finished.";
+  };
 }
 
 function dispatchWith(
@@ -380,12 +402,12 @@ describe("settlement context assembly", () => {
     // The pre-state eligibility rule (spec C7) is also stated, so the model
     // is told the constraint rather than only discovering it by rejection.
     expect(prompt).toContain("already existed before this");
-    expect(prompt).toContain("you may not invent a relation for a pair a segment");
+    expect(prompt).toContain("you cannot invent a relation for a pair a call earlier");
   });
 });
 
-describe("settlement write-back", () => {
-  test("lands segments, members, edges, type/tag, summary and holes in one pass", async () => {
+describe("settlement dispatch — staged writes and commit (ticket 10b, spec A7)", () => {
+  test("a full run (review, reconstruction, segmentation, a relation) lands atomically once the agent calls commit", async () => {
     const fixture = seedInteriorHoleWindow();
     const existing = createSegment(db, {
       title: "implement+lease: fencing the claim",
@@ -394,11 +416,10 @@ describe("settlement write-back", () => {
       tags: ["note-settlement"],
       nowEpoch: NOW - 5_000,
     });
-
     // Ticket 07 (spec C7): a judged relation is legal only on a pair present
-    // BEFORE this window's write-back transaction — seed the T3->T1 pair
-    // here (a prior bare citation, in production) so the `depends-on` edge
-    // in the reply below is attaching to an existing pair, not minting one.
+    // BEFORE this window's run — seed the T3->T1 pair here (a prior bare
+    // citation, in production) so the `dependsOn` relation below is
+    // attaching to an existing pair, not minting one.
     writeMemoryEdges(
       db,
       [
@@ -413,79 +434,66 @@ describe("settlement write-back", () => {
       { eligibleForRelation: "unrestricted" },
     );
 
-    const reply = JSON.stringify({
-      segments: [
-        {
+    const metricsSeen: NoteSettlementWindowMetrics[] = [];
+    const outcome = await dispatchWith(
+      queryThatStages((engine, request) => {
+        // Duty 1: review every window turn.
+        engine.stageNoteWrite({ turn: "S1/T1", grade: 2, type: ["design"], tags: ["lease"] });
+        engine.stageNoteWrite({
+          turn: "S1/T3",
+          grade: 3,
+          type: ["implement", "correction"],
+          tags: ["lease"],
+          dependsOn: ["S1/T1"],
+        });
+        // Duty 2: reconstruct the two owed holes (T2, T4), through the SAME
+        // note tool the review calls above used.
+        engine.stageNoteWrite({
+          turn: "S1/T2",
+          title: "research+lease: what the hole covered",
+          content: "Reconstructed from the raw material.",
+          insight: null,
+          grade: 1,
+          type: ["research"],
+          tags: ["lease"],
+        });
+        engine.stageNoteWrite({
+          turn: "S1/T4",
+          title: "research+lease: what the trailing gap covered",
+          content: "The old refusal is gone (spec D7).",
+          insight: null,
+          grade: 1,
+          type: ["research"],
+          tags: ["lease"],
+        });
+        // Duty 3/4/6: extend the existing open segment, and create a new one
+        // for the reconstructed hole.
+        engine.stageSegmentWrite({
           action: "extend",
-          segment_id: existing.id,
-          expected_revision: existing.revision,
+          segmentId: existing.id,
+          expectedRevision: existing.revision,
           title: "implement+lease: fencing the claim",
           content:
             "Lease fencing landed. The generation check in [S1/T3] is what " +
             "makes a late dispatch harmless; the shape came from [S1/T1].",
           type: ["implement", "correction"],
           tags: ["note-settlement", "lease"],
-          status: "open",
           members: ["S1/T1", "S1/T3"],
-        },
-        {
+        });
+        engine.stageSegmentWrite({
           action: "create",
           topic: "hole reconstruction",
-          topic_aliases: ["interior holes"],
-          no_candidate_reason:
-            "No open segment and no registered topic covers hole reconstruction.",
+          topicAliases: ["interior holes"],
+          noCandidateReason: "No open segment and no registered topic covers hole reconstruction.",
           title: "design+holes: reconstructing written-off turns",
           content: "Every gap in this window gets a note now. [S1/T2]",
           type: ["design"],
           tags: ["hole reconstruction"],
-          status: "open",
-          members: ["S1/T2"],
-        },
-      ],
-      edges: [
-        { citing: "S1/T3", cited: "S1/T1", relation: "depends-on" },
-        // Ticket 07 (spec C7): the T1->T3 direction has never been paired —
-        // no anchor, no bare mention, nothing — before this window runs.
-        // Settlement naming it is minting a free-standing relation-only
-        // edge, which the pre-state gate must drop even though both
-        // endpoints are real turns this writer was shown.
-        { citing: "S1/T1", cited: "S1/T3", relation: "evidence-for" },
-        { citing: `E${existing.id}`, cited: "S1/T9999", relation: "supersedes" },
-      ],
-      reconstructed_notes: [
-        {
-          turn: "S1/T2",
-          title: "research+lease: what the hole covered",
-          content: "Reconstructed from the raw material.",
-          insight: "",
-        },
-        {
-          turn: "S1/T4",
-          title: "research+lease: what the trailing gap covered",
-          content: "The old refusal is gone (spec D7, ticket 05): position no",
-        },
-        {
-          // T1 already has an agent note — reconstruction is refused for any
-          // turn that is not a `hole` of this window, noted or otherwise.
-          turn: "S1/T1",
-          title: "should be refused",
-          content: "T1 is already noted, not a hole.",
-        },
-      ],
-      session_summary: {
-        title: "settlement fixture",
-        content: "Settled one window.",
-        decision: "Every gap gets reconstructed.",
-        done: "window 1-4",
-        current: "waiting for the next window",
-        next_steps: "settle 5-8",
-        reference: "",
-      },
-    });
-
-    const metricsSeen: NoteSettlementWindowMetrics[] = [];
-    const outcome = await dispatchWith(stubQuery(reply), (value) =>
-      metricsSeen.push(value),
+          members: ["S1/T2", "S1/T4"],
+        });
+        engine.commit();
+      }),
+      (value) => metricsSeen.push(value),
     )({ job: fixture.job });
     expect(outcome).toEqual({ ok: true });
 
@@ -495,170 +503,155 @@ describe("settlement write-back", () => {
     expect(extended.revision).toBe(existing.revision + 1);
     expect(extended.type).toEqual(["implement", "correction"]);
     expect(extended.tags).toEqual(["note-settlement", "lease"]);
-    const created = listOpenSegments(db).find(
-      (segment) => segment.id !== existing.id,
-    )!;
+    const created = listOpenSegments(db).find((segment) => segment.id !== existing.id)!;
     expect(created.title).toContain("reconstructing written-off turns");
-    expect(listTopics(db, "active").map((topic) => topic.name)).toEqual([
-      "hole reconstruction",
-    ]);
+    expect(listTopics(db, "active").map((topic) => topic.name)).toEqual(["hole reconstruction"]);
 
-    // Membership.
+    // Membership, and anchors landed automatically by db/segments.ts.
     expect(getSegmentMemberTurnIds(db, existing.id)).toEqual([
       fixture.turnIds[0]!,
       fixture.turnIds[2]!,
     ]);
-    expect(getSegmentMemberTurnIds(db, created.id)).toEqual([
-      fixture.turnIds[1]!,
-    ]);
-
-    // Anchors parsed out of the bodies, plus the judged edge. The edge naming a
-    // turn that does not exist (S1/T9999) is dropped, never stored.
-    const anchors = getOutgoingEdges(db, { kind: "segment", id: existing.id });
-    expect(anchors.map((edge) => edge.cited.id).sort()).toEqual(
-      [fixture.turnIds[0]!, fixture.turnIds[2]!].sort(),
+    expect(getSegmentMemberTurnIds(db, created.id).sort()).toEqual(
+      [fixture.turnIds[1]!, fixture.turnIds[3]!].sort(),
     );
-    expect(anchors.every((edge) => edge.provenance === "text-ref")).toBe(true);
-    const judged = getOutgoingEdges(db, {
-      kind: "turn",
-      id: fixture.turnIds[2]!,
-    });
-    expect(judged).toHaveLength(1);
-    expect(judged[0]!.provenance).toBe("judged");
-    expect(judged[0]!.relation).toBe("depends-on");
-    // The ineligible T1->T3 edge never landed (ticket 07, spec C7): T1's own
-    // outgoing set stays empty, and it carries no segment-membership anchor
-    // either (anchors are segment->turn, never turn->turn).
-    expect(getOutgoingEdges(db, { kind: "turn", id: fixture.turnIds[0]! })).toEqual([]);
 
-    // BOTH holes reconstructed with settlement provenance now (spec D7, ticket
-    // 05 — the old interior/trailing split, and the trailing refusal, are gone).
+    // The judged relation (spec C7's pre-state gate).
+    const judged = getOutgoingEdges(db, { kind: "turn", id: fixture.turnIds[2]! });
+    expect(judged.some((edge) => edge.relation === "depends-on" && edge.provenance === "judged")).toBe(true);
+
+    // Both holes reconstructed with settlement provenance.
     const holeNote = getShadowNote(db, fixture.turnIds[1]!)!;
     expect(holeNote.writerOrigin).toBe("settlement");
     expect(holeNote.title).toContain("what the hole covered");
     const trailingNote = getShadowNote(db, fixture.turnIds[3]!)!;
     expect(trailingNote.writerOrigin).toBe("settlement");
-    expect(trailingNote.title).toContain("what the trailing gap covered");
-    // The agent's own notes keep their origin — and reconstruction is refused
-    // for a turn that is not a `hole` of this window, T1 included.
-    expect(getShadowNote(db, fixture.turnIds[0]!)!.writerOrigin).toBe("agent");
-    expect(getShadowNote(db, fixture.turnIds[0]!)!.title).not.toContain(
-      "should be refused",
-    );
 
-    // Session summary and job/cursor resolution.
-    const session = getSession(db, fixture.sessionDbId)!;
-    expect(session.current).toBe("waiting for the next window");
-    expect(session.decision).toBe("Every gap gets reconstructed.");
+    // The agent's own note on T1 keeps its origin.
+    expect(getShadowNote(db, fixture.turnIds[0]!)!.writerOrigin).toBe("agent");
+
+    // Job/cursor resolution: `commit` is what did this, not the dispatch.
     expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("done");
     expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(4);
-
-    // Minting-rate counter reaches monitoring.
     expect(metricsSeen).toHaveLength(1);
-    expect(metricsSeen[0]!.topicsMinted).toBe(1);
-    expect(metricsSeen[0]!.topicsReused).toBe(0);
-    expect(metricsSeen[0]!.segmentsCreated).toBe(1);
-    expect(metricsSeen[0]!.segmentsExtended).toBe(1);
-    expect(metricsSeen[0]!.notesReconstructed).toBe(2);
-    expect(metricsSeen[0]!.notesYielded).toBe(0);
-    expect(metricsSeen[0]!.notesRejected).toBe(1);
-    expect(metricsSeen[0]!.rejectedReferences).toBeGreaterThan(0);
+    expect(metricsSeen[0]!.committed).toBe(true);
   });
 
-  test("discards the whole write-back when the job generation expired", async () => {
+  test("commit is the only path that completes a job — a run that stages everything but never calls commit lands nothing (requirement 9)", async () => {
     const fixture = seedInteriorHoleWindow();
-    const reply = JSON.stringify({
-      segments: [
-        {
+
+    const outcome = await dispatchWith(
+      queryThatStages((engine) => {
+        engine.stageNoteWrite({
+          turn: "S1/T2",
+          title: "research+lease: staged but never committed",
+          content: "Reconstructed from raw material.",
+          insight: null,
+          grade: 1,
+          type: ["research"],
+          tags: [],
+        });
+        // Deliberately no engine.commit() call.
+      }),
+    )({ job: fixture.job });
+
+    expect(outcome.ok).toBe(false);
+    // Nothing landed — staging without commit is exactly as durable as never
+    // having called a tool at all.
+    expect(getShadowNote(db, fixture.turnIds[1]!)).toBeNull();
+    expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
+    expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
+  });
+
+  test("discards the whole run when the job generation expired before commit's own fence", async () => {
+    const fixture = seedInteriorHoleWindow();
+
+    const outcome = await dispatchWith(
+      queryThatStages((engine) => {
+        engine.stageSegmentWrite({
           action: "create",
           topic: "late window",
-          no_candidate_reason: "nothing open",
+          noCandidateReason: "nothing open",
           title: "implement+late: should not land",
           content: "Never committed. [S1/T1]",
           type: ["implement"],
           tags: ["late window"],
           members: ["S1/T1"],
-        },
-      ],
-      session_summary: {
-        title: "should not land",
-        content: "",
-        decision: "",
-        done: "",
-        current: "should not land",
-        next_steps: "",
-        reference: "",
-      },
-    });
+        });
+        // Another worker reclaimed the window while this dispatch was "thinking" —
+        // simulated here, inside the query, exactly where the race would land.
+        db.query<unknown, [number]>(
+          "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
+        ).run(fixture.job.id);
+        engine.commit();
+      }),
+    )({ job: fixture.job });
 
-    // Another worker reclaimed the window while this dispatch was thinking.
-    db.query<unknown, [number]>(
-      "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
-    ).run(fixture.job.id);
-
-    const outcome = await dispatchWith(stubQuery(reply))({ job: fixture.job });
     expect(outcome.ok).toBe(false);
     expect(listOpenSegments(db)).toHaveLength(0);
     expect(listTopics(db)).toHaveLength(0);
-    expect(countMemoryEdges(db)).toBe(0);
-    expect(getSession(db, fixture.sessionDbId)!.current).toBeNull();
     expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
   });
 
   /**
-   * Spec D7 (ticket 05), the race a mechanical backfill must lose on purpose:
-   * the main agent can write a hole's real note WHILE the model call is in
-   * flight — after `buildNoteSettlementContext` already classified the turn
-   * as a hole, before this write-back ever runs. The agent's own account of
-   * its turn wins, `writer_origin` stays `agent`, and the yield is counted
-   * separately from a genuine rejection.
+   * Spec D7, the race a mechanical backfill must lose on purpose: the main
+   * agent can write a hole's real note WHILE the model call is in flight —
+   * after the window's context was read, before this run's own reconstruction
+   * call lands. The agent's own account of its turn wins.
    */
   test("a mid-flight agent note wins over settlement's own reconstruction of the same turn", async () => {
     const fixture = seedInteriorHoleWindow();
-    const reply = JSON.stringify({
-      segments: [],
-      reconstructed_notes: [
-        {
+
+    const outcome = await dispatchWith(
+      queryThatStages((engine, request) => {
+        // The agent's own note lands mid-run, before this reconstruction call.
+        upsertShadowNote(db, {
+          turnId: fixture.turnIds[1]!,
+          title: "agent+lease: the turn's own account",
+          content: "Written by the agent while settlement was thinking.",
+          nowEpoch: NOW,
+        });
+        engine.stageNoteWrite({
           turn: "S1/T2",
           title: "settlement's reconstruction",
           content: "Written from the raw material.",
-        },
-        // The fixture's OTHER hole (T4) — covered here so the write-back's
-        // gap-coverage guard (P1-2) sees this window fully backfilled; this
-        // test's own subject is the T2 race, not gap coverage.
-        {
+          insight: null,
+        });
+        engine.stageNoteWrite({
           turn: "S1/T4",
           title: "settlement's reconstruction of the trailing hole",
           content: "Written from the raw material.",
-        },
-      ],
-    });
-    const racingQuery: NoteSettlementQuery = async () => {
-      upsertShadowNote(db, {
-        turnId: fixture.turnIds[1]!,
-        title: "agent+lease: the turn's own account",
-        content: "Written by the agent while settlement was thinking.",
-        nowEpoch: NOW,
-      });
-      return reply;
-    };
-
-    const metricsSeen: NoteSettlementWindowMetrics[] = [];
-    const outcome = await dispatchWith(racingQuery, (value) =>
-      metricsSeen.push(value),
+          insight: null,
+        });
+        // This test's subject is the note-race, not coverage/segmentation —
+        // satisfy commit's gate directly for every window turn.
+        for (const turnId of fixture.turnIds) {
+          updateTurnById(db, turnId, { type: ["research"] });
+          recordNoteSettlementSegmentExclusion(db, request.jobId, turnId, NOW);
+        }
+        engine.commit();
+      }),
     )({ job: fixture.job });
 
     expect(outcome).toEqual({ ok: true });
     const note = getShadowNote(db, fixture.turnIds[1]!)!;
     expect(note.writerOrigin).toBe("agent");
     expect(note.title).toBe("agent+lease: the turn's own account");
-    // T2 yields to the agent's own note; T4 has no racing write and lands.
-    expect(metricsSeen[0]!.notesReconstructed).toBe(1);
-    expect(metricsSeen[0]!.notesYielded).toBe(1);
-    expect(metricsSeen[0]!.notesRejected).toBe(0);
+    // T4 has no racing write and lands as settlement's own reconstruction.
+    expect(getShadowNote(db, fixture.turnIds[3]!)!.writerOrigin).toBe("settlement");
   });
 
-  test("replays a CAS-conflicted segment without rolling back the committed writes", async () => {
+  /**
+   * A staged extend cannot be UN-staged — there is no operation for it (spec
+   * A7's G5 dissolution: no per-write replay contract is needed precisely
+   * because nothing landed, so the intended recovery from a replay conflict
+   * is a CLEAN re-run, not patching around a now-permanently-stale entry
+   * still sitting in this run's own staged list). This test therefore models
+   * TWO separate dispatch attempts — a fresh `runQuery` call, a fresh
+   * staging engine, exactly what the job's own attempt/retry mechanism
+   * already provides — rather than trying to recover inside one run.
+   */
+  test("a segment revision conflict refuses the whole commit; a fresh dispatch attempt (a clean re-run) succeeds", async () => {
     const fixture = seedInteriorHoleWindow();
     const contested = createSegment(db, {
       title: "implement+lease: contested",
@@ -673,210 +666,119 @@ describe("settlement write-back", () => {
       "UPDATE segments SET revision = revision + 1, content = 'body written by the other pass' WHERE id = ?",
     ).run(contested.id);
 
-    const mainReply = JSON.stringify({
-      segments: [
-        {
-          action: "extend",
-          segment_id: contested.id,
-          expected_revision: staleRevision,
-          title: "implement+lease: contested",
-          content: "This body was composed against the stale revision. [S1/T1]",
-          type: ["implement"],
-          tags: ["lease"],
-          members: ["S1/T1"],
-        },
-        {
-          action: "create",
-          topic: "committed alongside",
-          no_candidate_reason: "no candidate covers this",
-          title: "design+alongside: committed anyway",
-          content: "Must survive the conflict. [S1/T3]",
-          type: ["design"],
-          tags: ["committed alongside"],
-          members: ["S1/T3"],
-        },
-      ],
-      // The fixture's two holes — covered here so the write-back's
-      // gap-coverage guard (P1-2) sees this window fully backfilled; this
-      // test's own subject is the CAS replay, not gap coverage.
-      reconstructed_notes: [
-        { turn: "S1/T2", title: "hole T2 reconstructed", content: "Filled in." },
-        { turn: "S1/T4", title: "hole T4 reconstructed", content: "Filled in." },
-      ],
-    });
-    const replayReply = JSON.stringify({
-      segments: [
-        {
-          action: "extend",
-          segment_id: contested.id,
-          expected_revision: staleRevision + 1,
-          title: "implement+lease: contested",
-          content: "Merged body over the other pass. [S1/T3]",
-          type: ["implement"],
-          tags: ["lease"],
-          members: ["S1/T3"],
-        },
-      ],
-    });
+    function stageAgainstCurrentRevision(engine: SettlementStagingEngine): void {
+      // Every window turn needs to be accounted for before commit's gate
+      // will pass — T2/T4 are holes, T1/T3 already have notes. Type
+      // coverage is set directly; this test's subject is the CAS conflict,
+      // not review.
+      for (const turnId of fixture.turnIds) {
+        updateTurnById(db, turnId, { type: ["research"] });
+      }
+      engine.stageNoteWrite({
+        turn: "S1/T2",
+        title: "hole T2 reconstructed",
+        content: "Filled in.",
+        insight: null,
+      });
+      engine.stageNoteWrite({
+        turn: "S1/T4",
+        title: "hole T4 reconstructed",
+        content: "Filled in.",
+        insight: null,
+      });
+      engine.stageSegmentWrite({
+        action: "extend",
+        segmentId: contested.id,
+        expectedRevision: getSegment(db, contested.id)!.revision,
+        content: "Merged body over the other pass. [S1/T1]",
+        members: ["S1/T1", "S1/T2", "S1/T3", "S1/T4"],
+      });
+    }
 
-    const query = stubQuery(mainReply, replayReply);
-    const metricsSeen: NoteSettlementWindowMetrics[] = [];
-    const outcome = await dispatchWith(query, (value) =>
-      metricsSeen.push(value),
-    )({ job: fixture.job });
-    expect(outcome).toEqual({ ok: true });
-    expect(query.calls).toBe(2);
-
-    // The unrelated create committed and stayed committed.
-    const alongside = listOpenSegments(db).find(
-      (segment) => segment.id !== contested.id,
-    )!;
-    expect(alongside.title).toContain("committed anyway");
-
-    // The contested segment carries the replayed body at the newer revision.
-    const settled = getSegment(db, contested.id)!;
-    expect(settled.content).toBe("Merged body over the other pass. [S1/T3]");
-    expect(settled.revision).toBe(staleRevision + 2);
-    expect(getSegmentMemberTurnIds(db, contested.id)).toEqual([
-      fixture.turnIds[2]!,
-    ]);
-    expect(metricsSeen[0]!.casConflicts).toBe(1);
-    expect(metricsSeen[0]!.casReplaysApplied).toBe(1);
-  });
-
-  /**
-   * P1-2 (spec D7): the mechanical backfill's contract is coverage, not just a
-   * parseable reply. `{"reconstructed_notes":[]}` parses fine — it is not
-   * malformed — but the window's two genuine holes (T2, T4) still have no
-   * note after it runs, and the old code committed the window as `done`
-   * anyway, permanently walking the cursor past the gap.
-   */
-  test("an empty reconstruction batch against a real gap fails the job and writes nothing", async () => {
-    const fixture = seedInteriorHoleWindow();
-    const reply = JSON.stringify({ segments: [], reconstructed_notes: [] });
-
-    const outcome = await dispatchWith(stubQuery(reply))({ job: fixture.job });
-
-    expect(outcome.ok).toBe(false);
-    // Nothing committed — not even the fact that the job was attempted.
-    expect(listOpenSegments(db)).toHaveLength(0);
-    expect(getShadowNote(db, fixture.turnIds[1]!)).toBeNull();
-    expect(getShadowNote(db, fixture.turnIds[3]!)).toBeNull();
-    expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
-    expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
-  });
-
-  /**
-   * The counterpart: a batch that covers every hole EXCEPT one still fails
-   * whole and rolls back the segments it also produced — half a judgement is
-   * not a smaller correct one (note-settlement-response.ts's own rule).
-   */
-  test("a reconstruction batch that misses one of two holes fails the whole window", async () => {
-    const fixture = seedInteriorHoleWindow();
-    const reply = JSON.stringify({
-      segments: [
-        {
-          action: "create",
-          topic: "partial gap coverage",
-          no_candidate_reason: "no open segment covers this",
-          title: "design+partial: should not survive",
-          content: "Committed alongside a partial reconstruction. [S1/T1]",
-          type: ["design"],
-          tags: ["partial gap coverage"],
-          members: ["S1/T1"],
-        },
-      ],
-      reconstructed_notes: [
-        {
+    // Attempt 1: composed against the STALE revision it read before the
+    // window was claimed — refuses whole.
+    const firstOutcome = await dispatchWith(
+      queryThatStages((engine) => {
+        for (const turnId of fixture.turnIds) {
+          updateTurnById(db, turnId, { type: ["research"] });
+        }
+        engine.stageNoteWrite({
           turn: "S1/T2",
-          title: "research+partial: only the interior hole covered",
-          content: "T4 (the trailing hole) is left open on purpose.",
-        },
-      ],
-    });
-
-    const outcome = await dispatchWith(stubQuery(reply))({ job: fixture.job });
-
-    expect(outcome.ok).toBe(false);
-    expect(listOpenSegments(db)).toHaveLength(0);
-    expect(getShadowNote(db, fixture.turnIds[1]!)).toBeNull();
-    expect(getShadowNote(db, fixture.turnIds[3]!)).toBeNull();
-    expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
-  });
-
-  test("rejects malformed output whole and writes nothing", async () => {
-    const fixture = seedInteriorHoleWindow();
-    const outcome = await dispatchWith(
-      stubQuery("I settled the window, trust me."),
+          title: "hole T2 reconstructed",
+          content: "Filled in.",
+          insight: null,
+        });
+        engine.stageNoteWrite({
+          turn: "S1/T4",
+          title: "hole T4 reconstructed",
+          content: "Filled in.",
+          insight: null,
+        });
+        engine.stageSegmentWrite({
+          action: "extend",
+          segmentId: contested.id,
+          expectedRevision: staleRevision,
+          content: "This body was composed against the stale revision. [S1/T1]",
+          members: ["S1/T1", "S1/T2", "S1/T3", "S1/T4"],
+        });
+        const refused = engine.commit();
+        expect(refused.content[0]!.text).toContain("Commit refused");
+      }),
     )({ job: fixture.job });
-    expect(outcome.ok).toBe(false);
-    expect(listOpenSegments(db)).toHaveLength(0);
-    expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
-    expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
-  });
+    expect(firstOutcome.ok).toBe(false);
+    expect(getSegment(db, contested.id)!.content).toBe("body written by the other pass");
 
-  test("reuses a registered topic instead of minting a second one", async () => {
-    const fixture = seedInteriorHoleWindow();
-    const reply = JSON.stringify({
-      segments: [
-        {
-          action: "create",
-          topic: "Note Settlement",
-          no_candidate_reason: "the open segments cover other topics",
-          title: "implement+note-settlement: window two",
-          content: "Second chapter on the same topic. [S1/T1]",
-          type: ["implement"],
-          tags: ["note settlement"],
-          members: ["S1/T1"],
-        },
-      ],
-      // The fixture's two holes — covered here so the write-back's
-      // gap-coverage guard (P1-2) sees this window fully backfilled; this
-      // test's own subject is topic reuse, not gap coverage.
-      reconstructed_notes: [
-        { turn: "S1/T2", title: "hole T2 reconstructed", content: "Filled in." },
-        { turn: "S1/T4", title: "hole T4 reconstructed", content: "Filled in." },
-      ],
-    });
-    db.query<unknown, [number, number]>(
-      `INSERT INTO topics (name, aliases, status, created_at_epoch, updated_at_epoch)
-       VALUES ('note settlement', '[]', 'active', ?, ?)`,
-    ).run(NOW - 9_000, NOW - 9_000);
+    // Attempt 2: a genuinely fresh dispatch call — new `runQuery` invocation,
+    // new staging engine, reads the CURRENT revision fresh. The job is still
+    // `claimed` under the same generation (nothing moved it), so this models
+    // the job's own next attempt rather than a same-run patch.
+    const outcome = await dispatchWith(
+      queryThatStages((engine) => {
+        stageAgainstCurrentRevision(engine);
+        engine.commit();
+      }),
+    )({ job: fixture.job });
 
-    const metricsSeen: NoteSettlementWindowMetrics[] = [];
-    await dispatchWith(stubQuery(reply), (value) => metricsSeen.push(value))({
-      job: fixture.job,
-    });
-
-    expect(listTopics(db)).toHaveLength(1);
-    expect(metricsSeen[0]!.topicsMinted).toBe(0);
-    expect(metricsSeen[0]!.topicsReused).toBe(1);
+    expect(outcome).toEqual({ ok: true });
+    const settled = getSegment(db, contested.id)!;
+    expect(settled.content).toBe("Merged body over the other pass. [S1/T1]");
+    expect(settled.revision).toBe(staleRevision + 2);
+    expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("done");
   });
 
   /**
-   * Spec D4/D6, ticket 05: the subagent may revise a turn from an earlier
-   * window that is still in its context — not a loophole, the mechanism the
-   * rubric's own Grade-4 "provisional, confirmed or demoted later" language
-   * assumes. T1's Grade 4 from window one is demoted in window two, once T1
-   * is a PRECEDING turn rather than a window turn.
+   * Spec D4/D6: the subagent may revise a turn from an earlier window that is
+   * still in its context — not a loophole, the mechanism the rubric's own
+   * Grade-4 "provisional, confirmed or demoted later" language assumes. T1's
+   * Grade 4 from window one is demoted in window two, once T1 is a PRECEDING
+   * turn rather than a window turn.
    */
-  test("turn_review revises a turn settled by an earlier window once it is only in the preceding-turns context", async () => {
+  test("a note call revises a turn settled by an earlier window once it is only in the preceding-turns context", async () => {
     const fixture = seedInteriorHoleWindow();
-    const firstReply = JSON.stringify({
-      reconstructed_notes: [
-        { turn: "S1/T2", title: "research+lease: hole reconstructed", content: "Filled in." },
-        { turn: "S1/T4", title: "research+lease: trailing hole reconstructed", content: "Filled in." },
-      ],
-      turn_review: [
-        { turn: "S1/T1", grade: 4, type: ["design"], tags: ["settlement"] },
-        { turn: "S1/T2", grade: 1, type: ["research"], tags: ["lease"] },
-        { turn: "S1/T3", grade: 2, type: ["implement"], tags: ["settlement"] },
-        { turn: "S1/T4", grade: 1, type: ["research"], tags: ["lease"] },
-      ],
-    });
-    const firstOutcome = await dispatchWith(stubQuery(firstReply))({
-      job: fixture.job,
-    });
+    const firstOutcome = await dispatchWith(
+      queryThatStages((engine) => {
+        engine.stageNoteWrite({
+          turn: "S1/T2",
+          title: "research+lease: hole reconstructed",
+          content: "Filled in.",
+          insight: null,
+        });
+        engine.stageNoteWrite({
+          turn: "S1/T4",
+          title: "research+lease: trailing hole reconstructed",
+          content: "Filled in.",
+          insight: null,
+        });
+        engine.stageNoteWrite({ turn: "S1/T1", grade: 4, type: ["design"], tags: ["settlement"] });
+        engine.stageNoteWrite({ turn: "S1/T2", grade: 1, type: ["research"], tags: ["lease"] });
+        engine.stageNoteWrite({ turn: "S1/T3", grade: 2, type: ["implement"], tags: ["settlement"] });
+        engine.stageNoteWrite({ turn: "S1/T4", grade: 1, type: ["research"], tags: ["lease"] });
+        for (const turnId of fixture.turnIds) {
+          recordNoteSettlementSegmentExclusion(db, fixture.job.id, turnId, NOW);
+        }
+        engine.commit();
+      }),
+    )({ job: fixture.job });
     expect(firstOutcome).toEqual({ ok: true });
     expect(getTurnById(db, fixture.turnIds[0]!)!.significanceGrade).toBe(4);
 
@@ -885,33 +787,47 @@ describe("settlement write-back", () => {
     // previous-50 lookback), which is what makes citing S1/T1 legal here.
     for (let promptNumber = 5; promptNumber <= 8; promptNumber += 1) {
       const turnId = seedTurn(fixture.sessionDbId, promptNumber, {
-        note: {
-          title: `implement+seam: turn ${promptNumber}`,
-          content: "Noted.",
-        },
+        note: { title: `implement+seam: turn ${promptNumber}`, content: "Noted." },
       });
       seedDebt(turnId, fixture.sessionDbId, promptNumber, "noted", null);
     }
     classifyThrough(fixture.sessionDbId, 8);
     const secondJob = claimWindow(fixture.sessionDbId, 5, 8);
 
-    const secondReply = JSON.stringify({
-      // T1's arc turned out short-lived — demoted now that its real scale is
-      // visible, exactly what the rubric's own Grade-4 language expects.
-      turn_review: [{ turn: "S1/T1", grade: 0, type: ["design"], tags: ["settlement"] }],
-    });
-
-    const metricsSeen: NoteSettlementWindowMetrics[] = [];
     const secondOutcome = await dispatchWith(
-      stubQuery(secondReply),
-      (value) => metricsSeen.push(value),
+      queryThatStages((engine, request) => {
+        // T1's arc turned out short-lived — demoted now that its real scale
+        // is visible, exactly what the rubric's own Grade-4 language expects.
+        engine.stageNoteWrite({ turn: "S1/T1", grade: 0, type: ["design"], tags: ["settlement"] });
+        for (let promptNumber = 5; promptNumber <= 8; promptNumber += 1) {
+          engine.stageNoteWrite({
+            turn: `S1/T${promptNumber}`,
+            grade: 1,
+            type: ["implement"],
+            tags: ["seam"],
+          });
+          // The second window's OWN turns still need segmentation coverage
+          // for commit's gate to pass — recorded directly (an explicit
+          // no-segment verdict), since this test's subject is the cross-
+          // window revision, not segmentation.
+        }
+        for (const turnId of [5, 6, 7, 8]) {
+          const row = db
+            .query<{ id: number }, [number, number]>(
+              "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
+            )
+            .get(request.sessionId, turnId);
+          if (row) {
+            recordNoteSettlementSegmentExclusion(db, request.jobId, row.id, NOW);
+          }
+        }
+        engine.commit();
+      }),
     )({ job: secondJob });
 
     expect(secondOutcome).toEqual({ ok: true });
     expect(getTurnById(db, fixture.turnIds[0]!)!.significanceGrade).toBe(0);
-    expect(metricsSeen[0]!.turnsReviewed).toBe(1);
-    expect(metricsSeen[0]!.gradeHistogram).toEqual([1, 0, 0, 0, 0]);
-    expect(metricsSeen[0]!.gradeTargets).toBeDefined();
+    expect(getNoteSettlementJob(db, secondJob.id)!.status).toBe("done");
   });
 });
 
@@ -923,10 +839,7 @@ describe("settlement payload at the scheduler seam", () => {
     }
     for (let promptNumber = 1; promptNumber <= 4; promptNumber += 1) {
       const turnId = seedTurn(sessionDbId, promptNumber, {
-        note: {
-          title: `implement+seam: turn ${promptNumber}`,
-          content: "Noted.",
-        },
+        note: { title: `implement+seam: turn ${promptNumber}`, content: "Noted." },
       });
       seedDebt(turnId, sessionDbId, promptNumber, "noted", null);
     }
@@ -935,28 +848,38 @@ describe("settlement payload at the scheduler seam", () => {
     seedTurn(sessionDbId, 5, { userPrompt: "still open" });
     classifyThrough(sessionDbId, 4);
 
-    const reply = JSON.stringify({
-      segments: [
-        {
-          action: "create",
-          topic: "scheduler seam",
-          no_candidate_reason: "first window of this topic",
-          title: "implement+seam: the payload plugs in unchanged",
-          content: "Landed through the scheduler. [S1/T4]",
-          type: ["implement"],
-          tags: ["scheduler seam"],
-          members: ["S1/T1", "S1/T4"],
-        },
-      ],
-    });
-
     const scheduler = createNoteSettlementScheduler({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: () => NOW,
       nowMs: () => NOW * 1000,
       consecutiveTurns: 4,
-      dispatch: dispatchWith(stubQuery(reply)),
+      dispatch: dispatchWith(
+        queryThatStages((engine) => {
+          // Type coverage (duty 1), for every window turn — segmentation
+          // membership below covers duty 3, and each turn already carries a
+          // note from the fixture (duty 2).
+          for (let promptNumber = 1; promptNumber <= 4; promptNumber += 1) {
+            engine.stageNoteWrite({
+              turn: `S1/T${promptNumber}`,
+              grade: 1,
+              type: ["implement"],
+              tags: ["scheduler seam"],
+            });
+          }
+          engine.stageSegmentWrite({
+            action: "create",
+            topic: "scheduler seam",
+            noCandidateReason: "first window of this topic",
+            title: "implement+seam: the payload plugs in unchanged",
+            content: "Landed through the scheduler. [S1/T4]",
+            type: ["implement"],
+            tags: ["scheduler seam"],
+            members: ["S1/T1", "S1/T2", "S1/T3", "S1/T4"],
+          });
+          engine.commit();
+        }),
+      ),
       logger: { warn: () => {}, error: () => {} },
     });
 
@@ -966,20 +889,14 @@ describe("settlement payload at the scheduler seam", () => {
 
     const segment = listOpenSegments(db)[0]!;
     expect(segment.title).toContain("plugs in unchanged");
-    expect(getSegmentMemberTurnIds(db, segment.id)).toHaveLength(2);
-    // The write-back already completed the job and moved the cursor inside its
-    // own transaction; the scheduler's completion re-asserts the same facts.
+    expect(getSegmentMemberTurnIds(db, segment.id)).toHaveLength(4);
+    // commit already completed the job and moved the cursor inside its own
+    // transaction; the scheduler's completion re-asserts the same facts.
     expect(getNoteSettlementJob(db, pass.created[0]!.id)!.status).toBe("done");
     expect(getNoteSettlementCursor(db, sessionDbId)).toBe(4);
   });
 
-  /**
-   * Acceptance criterion (spec D7, ticket 05): a genuine gap scenario run all
-   * the way from the scheduler trigger through the real payload seam to the
-   * write-back must produce a `notesReconstructed > 0` LOG LINE — the
-   * observability the ticket requires, not just a row in the database.
-   */
-  test("a genuine gap end to end produces a notesReconstructed > 0 log line", async () => {
+  test("a genuine gap end to end lands a settlement-authored note through the scheduler", async () => {
     const sessionDbId = seedSession();
     if (sessionDbId !== 1) {
       throw new Error("fixture expected session id 1");
@@ -999,28 +916,27 @@ describe("settlement payload at the scheduler seam", () => {
     seedTurn(sessionDbId, 3, { userPrompt: "still open" });
     classifyThrough(sessionDbId, 2);
 
-    const reply = JSON.stringify({
-      segments: [],
-      reconstructed_notes: [
-        {
-          turn: "S1/T2",
-          title: "research+seam: reconstructed end to end",
-          content: "Filled in from raw material.",
-        },
-      ],
-    });
-
-    const lines: string[] = [];
+    const metricsSeen: NoteSettlementWindowMetrics[] = [];
     const dispatch = createNoteSettlementDispatch({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: () => NOW,
-      runQuery: stubQuery(reply),
-      logger: {
-        warn: () => {},
-        error: () => {},
-        log: (line: string) => lines.push(line),
-      },
+      runQuery: queryThatStages((engine, request) => {
+        engine.stageNoteWrite({
+          turn: "S1/T2",
+          title: "research+seam: reconstructed end to end",
+          content: "Filled in from raw material.",
+          insight: null,
+        });
+        for (const turnId of [t1, t2]) {
+          recordNoteSettlementSegmentExclusion(db, request.jobId, turnId, NOW);
+        }
+        updateTurnById(db, t1, { type: ["design"] });
+        updateTurnById(db, t2, { type: ["research"] });
+        engine.commit();
+      }),
+      metrics: (value) => metricsSeen.push(value),
+      logger: { warn: () => {}, error: () => {} },
     });
     const scheduler = createNoteSettlementScheduler({
       db,
@@ -1038,18 +954,15 @@ describe("settlement payload at the scheduler seam", () => {
     const note = getShadowNote(db, t2)!;
     expect(note.writerOrigin).toBe("settlement");
     expect(note.title).toContain("reconstructed end to end");
-
-    const metricsLine = lines.find((line) =>
-      line.startsWith(NOTE_SETTLEMENT_METRICS_PREFIX),
-    );
-    expect(metricsLine).toBeDefined();
-    const parsedMetrics = JSON.parse(
-      metricsLine!.slice(NOTE_SETTLEMENT_METRICS_PREFIX.length + 1),
-    );
-    expect(parsedMetrics.notesReconstructed).toBeGreaterThan(0);
+    expect(getNoteSettlementJob(db, pass.created[0]!.id)!.status).toBe("done");
+    // Requirement 9's observable end to end: the metrics sink (the same
+    // seam the ticket's own log line used to prove `notesReconstructed`
+    // through) now reports the run's committed status, sourced from the job
+    // row `commit` moved — never from a parsed envelope.
+    expect(metricsSeen).toHaveLength(1);
+    expect(metricsSeen[0]!.committed).toBe(true);
   });
 });
-
 describe("settlement response schema", () => {
   test("accepts a fenced object and rejects schema violations whole", () => {
     const fenced = "```json\n" + JSON.stringify({ segments: [] }) + "\n```";

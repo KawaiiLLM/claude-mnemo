@@ -1,10 +1,9 @@
 import type { Database } from "bun:sqlite";
 
 import { getExistingEdgePairKeys } from "../db/memory-edges";
-import type { NoteSettlementJob } from "../db/note-settlement";
+import { getNoteSettlementJob, type NoteSettlementJob } from "../db/note-settlement";
 import type { MnemoConfig } from "../shared/config";
 import { DEFAULT_CONFIG } from "../shared/config";
-import { SIGNIFICANCE_TARGET_SHARES } from "../task-causality-rubric";
 import {
   buildNoteSettlementContext,
   type NoteSettlementContext,
@@ -13,25 +12,17 @@ import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
 } from "./note-settlement-prompt";
-import {
-  parseNoteSettlementResponse,
-  type SettlementSegmentDirective,
-} from "./note-settlement-response";
-import {
-  applyNoteSettlementSegmentReplay,
-  applyNoteSettlementWriteBack,
-  type NoteSettlementSegmentConflict,
-  type NoteSettlementWriteBackCounts,
-} from "./note-settlement-writeback";
 import type {
   NoteSettlementDispatch,
   NoteSettlementDispatchOutcome,
 } from "./note-settlement";
 
 /**
- * The real settlement payload (spec D9, ticket 07): assemble the window's
- * context, run ONE stateless Sonnet call in a subprocess, and land the result in
- * a single transaction.
+ * The real settlement payload (spec D9, ticket 07; staged by ticket 10b,
+ * spec A7): assemble the window's context, run ONE stateless Sonnet call in
+ * a subprocess against the staged write tools (`note`/`segment`/`commit`,
+ * note-settlement-sdk-query.ts), and read back whatever the run actually
+ * landed.
  *
  * It plugs into ticket 05's dispatch seam unchanged — `(job) => verdict` — so
  * every scheduling property (lease, generation fence, backoff, cursor) stays
@@ -39,6 +30,22 @@ import type {
  * only contract with the machine is the verdict it returns: `ok:false` means the
  * window is unsettled and may be retried, `ok:true` means the window's effects
  * are already durable.
+ *
+ * TICKET 10B'S CHANGE (spec A7 requirement 9 — "the dispatch stops routing
+ * through the write-back"): this module used to parse the model's final
+ * reply as a structured envelope and apply it in one write-back transaction
+ * (`note-settlement-response.ts`/`note-settlement-writeback.ts`). Neither is
+ * called here any more, and this module reads no envelope of any kind — the
+ * settlement agent's WORK now lands as it happens, one staged tool call at a
+ * time, and durability is decided entirely by whether the agent's own
+ * `commit` call succeeded (note-settlement-staging.ts), inside the
+ * subprocess. This function's whole job after `runQuery` returns is to look:
+ * `commit`'s completion gate is the ONLY path that can move a job to `done`
+ * (requirement 9), so re-reading the job row is a complete answer to "did
+ * this run settle its window" — no parsing, no reconciliation, no replay.
+ * `note-settlement-writeback.ts`/`note-settlement-response.ts` are left in
+ * place, unreached (ticket 10c deletes them, deliberately, in its own
+ * change, on expand-contract) — nothing in this file imports them any more.
  */
 
 /** Spec D9: settlement runs on Sonnet, by user decision (裁决 10). */
@@ -50,20 +57,22 @@ export interface NoteSettlementQueryRequest {
   model: string;
   signal?: AbortSignal;
   /**
-   * Job identity and the turn-write facade's per-dispatch scope (ticket 10a,
+   * Job identity and the write facades' per-dispatch scope (ticket 10a/10b,
    * spec G6). Carried on the REQUEST rather than closed over at
    * `createNoteSettlementDispatch` construction time, because a job (and its
-   * reconstructable/reviewable scope) exists only per call — one dispatch
-   * instance serves every window a session ever produces. The SDK query
-   * layer (note-settlement-sdk-query.ts) is what actually keeps these out of
-   * the model's reach, by injecting them into a tool closure the model's own
-   * input schema has no field for.
+   * reconstructable/reviewable/exposed scope) exists only per call — one
+   * dispatch instance serves every window a session ever produces. The SDK
+   * query layer (note-settlement-sdk-query.ts) is what actually keeps these
+   * out of the model's reach, by injecting them into a staging-engine
+   * closure the model's own tool input schemas have no field for.
    */
   jobId: number;
   claimGeneration: number;
   sessionId: number;
   reconstructableTurnIds: ReadonlySet<number>;
   reviewableTurnIds: ReadonlySet<number>;
+  /** Open segment ids this dispatch's prompt shows — the scope `segment`'s `extend` may address (ticket 10b). */
+  exposedSegmentIds: ReadonlySet<number>;
   contextBuiltAtEpoch: number;
   rideTurnId: number | null;
   writerModel: string | null;
@@ -75,13 +84,17 @@ export interface NoteSettlementQueryRequest {
  * The subprocess boundary. The worker hosts no model in-process (D10), so this
  * is always a spawned child; it is injectable so tests stub it and never reach
  * a network.
+ *
+ * The returned string is whatever final text the model produced after its
+ * tool calls — no longer a structured envelope this module parses (ticket
+ * 10b). It is not inspected for correctness; `commit`'s own effect on the
+ * job row is.
  */
 export type NoteSettlementQuery = (
   request: NoteSettlementQueryRequest,
 ) => Promise<string>;
 
-export interface NoteSettlementWindowMetrics
-  extends NoteSettlementWriteBackCounts {
+export interface NoteSettlementWindowMetrics {
   jobId: number;
   sessionId: number;
   windowStart: number;
@@ -89,17 +102,8 @@ export interface NoteSettlementWindowMetrics
   triggerType: NoteSettlementJob["triggerType"];
   windowTurns: number;
   interiorHoles: number;
-  /** Segments whose write lost the revision CAS and were replayed. */
-  casConflicts: number;
-  casReplaysApplied: number;
-  /**
-   * D13's drift-is-a-comparison-not-an-investigation ask: the standing
-   * calibration targets ride every line beside the actual histogram
-   * (`gradeHistogram`, inherited from `NoteSettlementWriteBackCounts`), so a
-   * reader scanning the log does not have to open `task-causality-rubric.ts`
-   * to know what "too many 3s" means. Imported, never restated.
-   */
-  gradeTargets: typeof SIGNIFICANCE_TARGET_SHARES;
+  /** Did the run's own `commit` call land the window (job status read back `done`)? */
+  committed: boolean;
 }
 
 export type NoteSettlementMetricsSink = (
@@ -115,8 +119,6 @@ export interface CreateNoteSettlementDispatchOptions {
   model?: string;
   writerModel?: string | null;
   metrics?: NoteSettlementMetricsSink;
-  /** Replay rounds per conflicted segment. One is enough in practice. */
-  maxReplayRounds?: number;
   logger?: NoteSettlementDispatchLogger;
 }
 
@@ -127,12 +129,6 @@ export interface CreateNoteSettlementDispatchOptions {
 export type NoteSettlementDispatchLogger = Pick<Console, "warn" | "error"> &
   Partial<Pick<Console, "log" | "info">>;
 
-/**
- * Spec D9's naming-drift alarm: how many topics a window MINTED rather than
- * reused. Emitted as one structured line so the metrics side can read it
- * without a schema, and so a run that mints on every window is visible in the
- * log before it is visible in the topic table.
- */
 export const NOTE_SETTLEMENT_METRICS_PREFIX = "[claude-mnemo] note-settlement";
 
 export function defaultNoteSettlementMetricsSink(
@@ -148,56 +144,6 @@ export function defaultNoteSettlementMetricsSink(
   };
 }
 
-function renderReplayPrompt(
-  context: NoteSettlementContext,
-  conflict: NoteSettlementSegmentConflict,
-): string {
-  const latest = conflict.excluded.latest;
-  return [
-    `# Segment [E${conflict.directive.segmentId}] changed while you were settling S${context.job.sessionId}/T${context.job.windowStart}-T${context.job.windowEnd}`,
-    "",
-    "Another settlement rewrote this open segment. Your version was not " +
-      "applied. Re-decide the segment body against the version that is stored " +
-      "now, keeping whatever the other pass added and folding in what this " +
-      "window contributes. Same writing discipline: conclusion first, cite " +
-      "member turns as [S<session>/T<prompt>].",
-    "",
-    "## Stored now",
-    "",
-    latest
-      ? [
-          `revision: ${latest.revision}`,
-          `title: ${latest.title}`,
-          `content: ${latest.content ?? ""}`,
-          `type: ${latest.type.join(",")}`,
-          `tags: ${latest.tags.join(",")}`,
-          `status: ${latest.status}`,
-        ].join("\n")
-      : `(the segment no longer exists: ${conflict.excluded.reason})`,
-    "",
-    "## What this window wanted to write",
-    "",
-    [
-      `title: ${conflict.directive.title}`,
-      `content: ${conflict.directive.content}`,
-      `type: ${conflict.directive.type.join(",")}`,
-      `tags: ${conflict.directive.tags.join(",")}`,
-      `status: ${conflict.directive.status}`,
-      `members: ${conflict.directive.members.join(", ")}`,
-    ].join("\n"),
-    "",
-    "## Output",
-    "",
-    "Reply with one JSON object and nothing else, containing a single " +
-      "`segments` entry for this segment:",
-    "",
-    `{"segments":[{"action":"extend","segment_id":${conflict.directive.segmentId},` +
-      `"expected_revision":${latest?.revision ?? conflict.directive.expectedRevision},` +
-      `"title":"...","content":"...","type":["..."],"tags":["..."],` +
-      `"status":"open","members":["S1/T2"]}]}`,
-  ].join("\n");
-}
-
 export function createNoteSettlementDispatch(
   options: CreateNoteSettlementDispatchOptions,
 ): NoteSettlementDispatch {
@@ -207,93 +153,6 @@ export function createNoteSettlementDispatch(
   const model = options.model ?? NOTE_SETTLEMENT_MODEL;
   const logger = options.logger ?? console;
   const metrics = options.metrics ?? defaultNoteSettlementMetricsSink(logger);
-  const maxReplayRounds = options.maxReplayRounds ?? 1;
-
-  async function replayConflicts(
-    context: NoteSettlementContext,
-    conflicts: readonly NoteSettlementSegmentConflict[],
-    nowEpoch: number,
-  ): Promise<number> {
-    let applied = 0;
-    for (const conflict of conflicts) {
-      const latest = conflict.excluded.latest;
-      if (!latest || latest.status !== "open" || maxReplayRounds < 1) {
-        // A frozen or deleted segment is not a conflict to replay: D6 overturns
-        // a closed segment with an edge, never by rewriting it.
-        logger.warn?.(
-          `${NOTE_SETTLEMENT_METRICS_PREFIX}: segment ${conflict.directive.segmentId} not replayable (${conflict.excluded.reason})`,
-        );
-        continue;
-      }
-
-      let directive: SettlementSegmentDirective = conflict.directive;
-      let raw: string;
-      try {
-        raw = await options.runQuery({
-          prompt: renderReplayPrompt(context, conflict),
-          systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
-          model,
-          jobId: context.job.id,
-          claimGeneration: context.job.claimGeneration,
-          sessionId: context.job.sessionId,
-          // A replay's prompt asks for exactly one `segments` entry — never
-          // turn writes — but the facade context is populated honestly
-          // rather than omitted: empty scope sets mean any attempt to touch
-          // prose or review is refused by the facade's own checks, the same
-          // "honest values, not a borrowed context's" rule
-          // `applyNoteSettlementSegmentReplay`'s own writeBackOptions already
-          // applies to `reviewableTurnIds`/`reconstructableTurnIds`.
-          reconstructableTurnIds: new Set(),
-          reviewableTurnIds: new Set(),
-          contextBuiltAtEpoch: nowEpoch,
-          rideTurnId: null,
-          writerModel: options.writerModel ?? model,
-          // A fresh snapshot for this standalone replay run — it is its own
-          // model run, distinct from the window's main dispatch call.
-          eligibleRelationPairKeys: getExistingEdgePairKeys(db),
-        });
-      } catch (error) {
-        logger.warn?.(
-          `${NOTE_SETTLEMENT_METRICS_PREFIX}: segment replay call failed for ${conflict.directive.segmentId}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        continue;
-      }
-
-      const parsed = parseNoteSettlementResponse(raw);
-      if (!parsed.ok || parsed.response.segments.length === 0) {
-        logger.warn?.(
-          `${NOTE_SETTLEMENT_METRICS_PREFIX}: segment replay output rejected for ${conflict.directive.segmentId}`,
-        );
-        continue;
-      }
-      directive = parsed.response.segments[0]!;
-
-      const result = applyNoteSettlementSegmentReplay(db, {
-        job: context.job,
-        segmentId: conflict.directive.segmentId!,
-        expectedRevision: directive.expectedRevision ?? latest.revision,
-        title: directive.title,
-        content: directive.content,
-        type: directive.type,
-        tags: directive.tags,
-        status: directive.status,
-        memberTokens: directive.members,
-        exposedSegmentIds: context.exposedSegmentIds,
-        nowEpoch,
-        logger,
-      });
-      if (result.applied) {
-        applied += 1;
-      } else {
-        logger.warn?.(
-          `${NOTE_SETTLEMENT_METRICS_PREFIX}: segment replay not applied for ${conflict.directive.segmentId} (${result.reason})`,
-        );
-      }
-    }
-    return applied;
-  }
 
   return async ({ job }): Promise<NoteSettlementDispatchOutcome> => {
     if (!config.settlementEnabled) {
@@ -301,7 +160,9 @@ export function createNoteSettlementDispatch(
     }
 
     const nowEpoch = now();
-    const context = buildNoteSettlementContext(db, job, { nowEpoch });
+    const context: NoteSettlementContext | null = buildNoteSettlementContext(db, job, {
+      nowEpoch,
+    });
     if (!context) {
       return {
         ok: false,
@@ -323,9 +184,8 @@ export function createNoteSettlementDispatch(
     // shares one frozen snapshot rather than each re-reading the table fresh.
     const eligibleRelationPairKeys = getExistingEdgePairKeys(db);
 
-    let raw: string;
     try {
-      raw = await options.runQuery({
+      await options.runQuery({
         prompt: renderNoteSettlementPrompt(context),
         systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
         model,
@@ -336,6 +196,7 @@ export function createNoteSettlementDispatch(
           context.interiorHoles.map((turn) => turn.turnId),
         ),
         reviewableTurnIds: context.reviewableTurnIds,
+        exposedSegmentIds: context.exposedSegmentIds,
         contextBuiltAtEpoch: context.builtAtEpoch,
         rideTurnId,
         writerModel: options.writerModel ?? model,
@@ -350,38 +211,18 @@ export function createNoteSettlementDispatch(
       };
     }
 
-    const parsed = parseNoteSettlementResponse(raw);
-    if (!parsed.ok) {
-      return { ok: false, reason: parsed.reason };
-    }
-
-    const result = applyNoteSettlementWriteBack(db, {
-      job,
-      response: parsed.response,
-      nowEpoch,
-      reconstructableTurnIds: new Set(
-        context.interiorHoles.map((turn) => turn.turnId),
-      ),
-      exposedSegmentIds: context.exposedSegmentIds,
-      reviewableTurnIds: context.reviewableTurnIds,
-      contextBuiltAtEpoch: context.builtAtEpoch,
-      rideTurnId,
-      writerModel: options.writerModel ?? model,
-      logger,
-    });
-
-    if (!result.committed) {
-      return {
-        ok: false,
-        reason: result.reason ?? "note settlement write-back was discarded",
-      };
-    }
-
-    const casReplaysApplied = await replayConflicts(
-      context,
-      result.conflicts,
-      nowEpoch,
-    );
+    // Requirement 9: `commit` (inside the subprocess, note-settlement-
+    // staging.ts) is the ONLY path that can move this job to `done` — there
+    // is no envelope here to parse and no write-back transaction to apply.
+    // Re-reading the row is a COMPLETE answer to "did this run settle its
+    // window": `commit`'s completion gate runs under the same ownership
+    // fence a stale attempt would fail, so a `done` read here can only be
+    // this run's own doing or a strictly newer one's — either way the
+    // scheduler's own post-hoc reconciliation (worker/note-settlement.ts)
+    // is what tells those two apart, exactly as it already does for the
+    // "payload settles its own window" case that predates this ticket.
+    const settled = getNoteSettlementJob(db, job.id);
+    const committed = settled?.status === "done";
 
     metrics({
       jobId: job.id,
@@ -391,26 +232,15 @@ export function createNoteSettlementDispatch(
       triggerType: job.triggerType,
       windowTurns: context.windowTurns.length,
       interiorHoles: context.interiorHoles.length,
-      casConflicts: result.conflicts.length,
-      casReplaysApplied,
-      gradeTargets: SIGNIFICANCE_TARGET_SHARES,
-      turnsReviewed: result.turnsReviewed,
-      gradeHistogram: result.gradeHistogram,
-      reviewsYieldedToLateNote: result.reviewsYieldedToLateNote,
-      segmentsCreated: result.segmentsCreated,
-      segmentsExtended: result.segmentsExtended,
-      topicsMinted: result.topicsMinted,
-      topicsReused: result.topicsReused,
-      membersAdded: result.membersAdded,
-      anchorEdges: result.anchorEdges,
-      judgedEdges: result.judgedEdges,
-      rejectedReferences: result.rejectedReferences,
-      notesReconstructed: result.notesReconstructed,
-      notesRejected: result.notesRejected,
-      notesYielded: result.notesYielded,
-      summaryUpdated: result.summaryUpdated,
+      committed,
     });
 
+    if (!committed) {
+      return {
+        ok: false,
+        reason: `note settlement run ended without a successful commit (job status: ${settled?.status ?? "missing"})`,
+      };
+    }
     return { ok: true };
   };
 }

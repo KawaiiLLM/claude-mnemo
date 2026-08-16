@@ -1,10 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
-import { createDatabase, isSqliteBusy } from "../../src/db/database";
+import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, pairKey, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
@@ -16,21 +13,30 @@ import { upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
 import {
+  evaluateSettlementTurnWrite,
+  renderSettlementTurnWriteReceipt,
   settlementTurnWriteInputShape,
-  settlementTurnWriteTool,
   type SettlementTurnFacadeContext,
+  type SettlementTurnWriteEvaluation,
+  type SettlementTurnWriteInput,
 } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
- * Ticket 10a (spec G6/G7, D5/D5a, C7/C14) — the settlement write server's
- * turn facade. See src/worker/note-settlement-turn-facade.ts for the design;
- * this file proves the acceptance criteria the ticket names: the fence
- * shares a transaction with the write it guards (shown by an interleave, not
- * a code reading), the facade's scope gates (reconstructable/reviewable),
- * the late-note yield on both halves, whole-replace tags, the pre-run
- * relation snapshot's immunity to a call earlier in the SAME run, and the
- * omitted-whole-rewrite-field refusal.
+ * Ticket 10a (spec G6/G7, D5/D5a, C7/C14), staged by ticket 10b (spec A7) —
+ * the settlement turn-write facade's DECISION function,
+ * `evaluateSettlementTurnWrite`. This file used to drive the facade's own
+ * write tool directly, which wrote immediately; ticket 10b removed that tool
+ * (staging now owns the actual write, in `note-settlement-staging.ts`) and
+ * split the facade into a pure decision function called twice — once with
+ * `apply: false` (a dry run, exercised by the "stage vs apply" describe
+ * block below) and once with `apply: true` (everywhere else in this file,
+ * which is the direct descendant of what the old immediate-write tool did).
+ *
+ * The ownership-fence test that used to live here moved to
+ * `note-settlement-staging.test.ts`: the fence is no longer this function's
+ * own concern (it never opens a transaction any more) — it is `commit`'s,
+ * shared with the staged replay it guards.
  */
 
 const NOW = 1_800_000_000;
@@ -105,6 +111,7 @@ function baseContext(
     sessionId: job.sessionId,
     reconstructableTurnIds: new Set(),
     reviewableTurnIds: new Set(),
+    exposedSegmentIds: new Set(),
     contextBuiltAtEpoch: NOW,
     rideTurnId: null,
     writerModel: "claude-sonnet-5",
@@ -113,8 +120,19 @@ function baseContext(
   };
 }
 
-function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
-  return result.content?.[0]?.text ?? "";
+/** The direct descendant of the old immediate-write tool: evaluate and apply in one call. */
+function write(
+  context: SettlementTurnFacadeContext,
+  input: SettlementTurnWriteInput,
+  nowEpoch: number,
+): SettlementTurnWriteEvaluation {
+  return evaluateSettlementTurnWrite(db, context, input, nowEpoch, { apply: true });
+}
+
+function resultText(evaluation: SettlementTurnWriteEvaluation): string {
+  return evaluation.ok
+    ? renderSettlementTurnWriteReceipt(evaluation.outcome, { staged: false })
+    : `Parameter error: ${evaluation.message}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,20 +164,10 @@ describe("tags overwrite whole, never append (requirement 3)", () => {
     const job = claimWindow(sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
 
-    settlementTurnWriteTool(
-      db,
-      context,
-      { turn: `S${sessionDbId}/T1`, tags: ["first", "second"] },
-      NOW,
-    );
+    write(context, { turn: `S${sessionDbId}/T1`, tags: ["first", "second"] }, NOW);
     expect(getTurnById(db, t1)!.tags).toEqual(["first", "second"]);
 
-    settlementTurnWriteTool(
-      db,
-      context,
-      { turn: `S${sessionDbId}/T1`, tags: ["third"] },
-      NOW + 1,
-    );
+    write(context, { turn: `S${sessionDbId}/T1`, tags: ["third"] }, NOW + 1);
     // Whole replace: "first"/"second" are gone, not merged with "third" —
     // there is no `mode`/append this facade could even be asked for.
     expect(getTurnById(db, t1)!.tags).toEqual(["third"]);
@@ -167,129 +175,97 @@ describe("tags overwrite whole, never append (requirement 3)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Requirement 2 / acceptance criterion 2: the fence's own transaction
+// Stage vs apply (ticket 10b, spec A7 requirements 1/2): a dry run performs
+// no write and still reports the same decision a real write would.
 // ---------------------------------------------------------------------------
 
-/**
- * Run `fire` the instant after the next `SELECT … FROM note_settlement_jobs`
- * reads its row, then get out of the way — the fence's own read
- * (`assertNoteSettlementJobClaimed` → `getNoteSettlementJob`). Same nested-
- * savepoint mechanism as `tests/worker/note-settlement-writeback.test.ts`'s
- * `fireAfterNextTurnRead` and `tests/db/note-settlement-completion.test.ts`'s
- * `fireAfterNextTurnsRead`, targeted at a different table because THIS
- * fence's own read is what the interleave needs to catch mid-flight.
- */
-function fireAfterNextJobsRead(target: Database, fire: () => void): void {
-  const originalQuery = target.query.bind(target);
-  let armed = true;
-  (target as unknown as { query: (sql: string) => unknown }).query = (
-    sql: string,
-  ) => {
-    const statement = originalQuery(sql) as unknown as {
-      get: (...args: unknown[]) => unknown;
-    };
-    if (!armed || !/^\s*SELECT/i.test(sql) || !/FROM note_settlement_jobs/i.test(sql)) {
-      return statement;
-    }
-    const originalGet = statement.get.bind(statement);
-    statement.get = (...args: unknown[]) => {
-      const row = originalGet(...args);
-      if (armed) {
-        armed = false;
-        statement.get = originalGet;
-        (target as unknown as { query: unknown }).query = originalQuery;
-        fire();
-      }
-      return row;
-    };
-    return statement;
-  };
-}
-
-describe("the ownership fence shares a transaction with the write it guards (spec G6/G7, requirement 2)", () => {
-  let directory: string;
-  let other: Database;
-
-  beforeEach(() => {
-    // The outer hook made a `:memory:` database; two connections need a file
-    // — a same-connection fixture cannot test transaction isolation at all,
-    // since an injected write would land INSIDE the transaction under test.
-    db.close();
-    directory = mkdtempSync(join(tmpdir(), "mnemo-turn-facade-txn-"));
-    db = createDatabase(join(directory, "mnemo.sqlite"));
-    initializeSchema(db);
-    // `busyTimeoutMs: 0` so the competing write fails immediately instead of
-    // blocking on the lock for the default timeout.
-    other = createDatabase(join(directory, "mnemo.sqlite"), { busyTimeoutMs: 0 });
-  });
-
-  afterEach(() => {
-    other.close();
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  test("a competing connection cannot bump the claim generation between the fence's read and the business write", () => {
+describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A7 requirement 1/2)", () => {
+  test("a review dry run reports the write it would make without touching the row", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
 
-    let competingBumpLanded = false;
-    fireAfterNextJobsRead(db, () => {
-      try {
-        other
-          .query<unknown, [number]>(
-            "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
-          )
-          .run(job.id);
-        competingBumpLanded = true;
-      } catch (error) {
-        if (!isSqliteBusy(error)) {
-          throw error;
-        }
-      }
+    const evaluation = evaluateSettlementTurnWrite(
+      db,
+      context,
+      { turn: `S${sessionDbId}/T1`, grade: 3, type: ["design"], tags: ["widgets"] },
+      NOW,
+      { apply: false },
+    );
+
+    expect(evaluation.ok).toBe(true);
+    expect(evaluation.ok && evaluation.outcome.review).toEqual({
+      kind: "written",
+      grade: 3,
+      type: ["design"],
+      tags: ["widgets"],
     });
-
-    const result = settlementTurnWriteTool(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { turn: `S${sessionDbId}/T1`, grade: 3 },
-      NOW,
-    );
-
-    // The load-bearing assertion: the bump was locked out. If the fence ran
-    // as its own transaction ahead of a SEPARATE write transaction (the
-    // "assert(); write()" TOCTOU the ticket names), nothing would hold the
-    // lock in between, the bump would land, and this write would still
-    // commit against a generation that had already moved.
-    expect(competingBumpLanded).toBe(false);
-    expect(resultText(result)).toContain("Reviewed");
-    expect(getTurnById(db, t1)!.significanceGrade).toBe(3);
+    // The load-bearing assertion: nothing landed.
+    const turn = getTurnById(db, t1)!;
+    expect(turn.significanceGrade).toBeNull();
+    expect(turn.type).toEqual([]);
+    expect(turn.tags).toEqual([]);
   });
 
-  test("a claim generation already stale BEFORE the call starts refuses the write outright", () => {
+  test("a reconstruction dry run reports it would write without creating a shadow note", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    const staleGeneration = job.claimGeneration;
+    const context = baseContext(job, { reconstructableTurnIds: new Set([t1]) });
 
-    other
-      .query<unknown, [number]>(
-        "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
-      )
-      .run(job.id);
-
-    const result = settlementTurnWriteTool(
+    const evaluation = evaluateSettlementTurnWrite(
       db,
-      baseContext(
-        { ...job, claimGeneration: staleGeneration },
-        { reviewableTurnIds: new Set([t1]) },
-      ),
-      { turn: `S${sessionDbId}/T1`, grade: 3 },
+      context,
+      { turn: `S${sessionDbId}/T1`, title: "a title", content: "some content", insight: null },
       NOW,
+      { apply: false },
     );
 
-    expect(resultText(result)).toContain("lease was reclaimed");
-    expect(getTurnById(db, t1)!.significanceGrade).toBeNull();
+    expect(evaluation.ok).toBe(true);
+    expect(evaluation.ok && evaluation.outcome.prose).toEqual({ kind: "written" });
+    expect(getShadowNote(db, t1)).toBeNull();
+  });
+
+  test("a relation dry run reports what would be attached without writing an edge", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const job = claimWindow(sessionDbId, 1, 2);
+    const snapshot = new Set([
+      pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } }),
+    ]);
+    const context = baseContext(job, { eligibleRelationPairKeys: snapshot });
+
+    const evaluation = evaluateSettlementTurnWrite(
+      db,
+      context,
+      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      NOW,
+      { apply: false },
+    );
+
+    expect(evaluation.ok).toBe(true);
+    expect(evaluation.ok && evaluation.outcome.relations).toEqual({ written: 1 });
+    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+  });
+
+  test("a dry run rejects exactly what a real write would reject — full validation, not a shape check", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set() });
+
+    const evaluation = evaluateSettlementTurnWrite(
+      db,
+      context,
+      { turn: `S${sessionDbId}/T1`, grade: 4 },
+      NOW,
+      { apply: false },
+    );
+
+    expect(evaluation.ok).toBe(false);
+    expect(!evaluation.ok && evaluation.message).toContain("reviewable window");
   });
 });
 
@@ -303,8 +279,7 @@ describe("prose is writable only for this dispatch's reconstructable holes (requ
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { reconstructableTurnIds: new Set() }),
       {
         turn: `S${sessionDbId}/T1`,
@@ -325,8 +300,7 @@ describe("prose is writable only for this dispatch's reconstructable holes (requ
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { reconstructableTurnIds: new Set([t1]) }),
       {
         turn: `S${sessionDbId}/T1`,
@@ -337,7 +311,7 @@ describe("prose is writable only for this dispatch's reconstructable holes (requ
       NOW,
     );
 
-    expect(resultText(result)).toContain("Reconstructed");
+    expect(resultText(result)).toContain("reconstruction");
     const note = getShadowNote(db, t1)!;
     expect(note.writerOrigin).toBe("settlement");
     expect(note.title).toContain("reconstructed from raw material");
@@ -356,8 +330,7 @@ describe("prose is writable only for this dispatch's reconstructable holes (requ
       nowEpoch: NOW,
     });
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { reconstructableTurnIds: new Set([t1]) }),
       {
         turn: `S${sessionDbId}/T1`,
@@ -386,8 +359,7 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { reviewableTurnIds: new Set() }),
       { turn: `S${sessionDbId}/T1`, grade: 4, type: ["design"], tags: ["x"] },
       NOW,
@@ -403,14 +375,13 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       { turn: `S${sessionDbId}/T1`, grade: 2, type: ["design"], tags: ["widgets"] },
       NOW,
     );
 
-    expect(resultText(result)).toContain("Reviewed");
+    expect(resultText(result)).not.toContain("Parameter error");
     const turn = getTurnById(db, t1)!;
     expect(turn.significanceGrade).toBe(2);
     expect(turn.type).toEqual(["design"]);
@@ -430,8 +401,7 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
       nowEpoch: NOW + 5,
     });
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW }),
       { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tags: ["settlement"] },
       NOW + 6,
@@ -458,8 +428,7 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
     });
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW }),
       { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tags: ["settlement"] },
       NOW + 1,
@@ -473,7 +442,9 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
 });
 
 // ---------------------------------------------------------------------------
-// Requirement 4 (relation half): pre-run snapshot, not per-call
+// Requirement 4 (relation half): pre-run snapshot, not per-call — and spec
+// A7 requirement 5: commit-time re-validation is a genuinely different check
+// from stage time, proven here by re-evaluating with a snapshot that moved.
 // ---------------------------------------------------------------------------
 
 describe("relation eligibility comes from a pre-run snapshot, not per tool call (requirement 4/6, spec C7/C14)", () => {
@@ -491,29 +462,19 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
     const job = claimWindow(sessionDbId, 1, 2);
     const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { eligibleRelationPairKeys: snapshot }),
       { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
-    expect(resultText(result)).toContain("Attached 1 relation");
+    expect(resultText(result)).toContain("1 relation");
     const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
     expect(edges).toHaveLength(1);
     expect(edges[0]!.relation).toBe("depends-on");
     expect(edges[0]!.provenance).toBe("judged");
   });
 
-  /**
-   * The load-bearing case (requirement 4's own wording): an EARLIER call in
-   * this same dispatch run mints a pair (by reconstructing a note that
-   * cites... no — this facade has no body of its own to cite through, so the
-   * pair is minted here directly, standing in for whatever mechanism landed
-   * it mid-run) and a LATER call must not be able to treat that freshly-
-   * minted pair as eligible, because the snapshot was taken before either
-   * call ran.
-   */
   test("a pair created during THIS run (after the snapshot was taken) cannot license a later call's relation", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
@@ -532,8 +493,7 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
       { eligibleForRelation: "unrestricted" },
     );
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { eligibleRelationPairKeys: snapshot }),
       { turn: `S${sessionDbId}/T2`, supersedes: [`S${sessionDbId}/T1`] },
       NOW + 1,
@@ -555,14 +515,47 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
     const t2 = seedTurn(sessionDbId, 2);
     const job = claimWindow(sessionDbId, 1, 2);
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { eligibleRelationPairKeys: new Set() }),
       { turn: `S${sessionDbId}/T2`, evidenceFor: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
     expect(resultText(result)).toContain("Parameter error");
+    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+  });
+
+  test("commit-time re-evaluation is truth: a pair present at stage time can be gone by commit time, and the outcome differs (spec A7 requirement 5)", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const job = claimWindow(sessionDbId, 1, 2);
+    const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
+    const context = baseContext(job, { eligibleRelationPairKeys: snapshot });
+    const input: SettlementTurnWriteInput = {
+      turn: `S${sessionDbId}/T2`,
+      dependsOn: [`S${sessionDbId}/T1`],
+    };
+
+    // Stage time: the caller's own snapshot says this pair is eligible —
+    // evaluate() alone cannot see anything that would refuse it.
+    const staged = evaluateSettlementTurnWrite(db, context, input, NOW, { apply: false });
+    expect(staged.ok).toBe(true);
+    expect(staged.ok && staged.outcome.relations).toEqual({ written: 1 });
+
+    // The world moves: the SAME context object is reused for the commit-time
+    // call (as the staging engine does — one context per request), but here
+    // a fresh context with an emptied snapshot stands in for "the pre-run
+    // eligibility this run was handed no longer covers this pair" — the
+    // shape a real commit sees when the pair it staged against was itself
+    // struck from eligibility upstream. Re-evaluating with `apply: true`
+    // against that changed input is exactly what `commit`'s replay does.
+    const movedContext = baseContext(job, { eligibleRelationPairKeys: new Set() });
+    const atCommit = evaluateSettlementTurnWrite(db, movedContext, input, NOW + 10, {
+      apply: true,
+    });
+    expect(atCommit.ok).toBe(false);
+    expect(!atCommit.ok && atCommit.message).toContain("not eligible");
     expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
   });
 });
@@ -577,8 +570,7 @@ describe("an omitted whole-rewrite field is refused, never defaulted to empty (r
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { reconstructableTurnIds: new Set([t1]) }),
       { turn: `S${sessionDbId}/T1`, title: "a title", content: "some content" },
       NOW,
@@ -594,8 +586,7 @@ describe("an omitted whole-rewrite field is refused, never defaulted to empty (r
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { reconstructableTurnIds: new Set([t1]) }),
       { turn: `S${sessionDbId}/T1`, title: "a title", insight: null },
       NOW,
@@ -610,14 +601,13 @@ describe("an omitted whole-rewrite field is refused, never defaulted to empty (r
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = settlementTurnWriteTool(
-      db,
+    const result = write(
       baseContext(job, { reconstructableTurnIds: new Set([t1]) }),
       { turn: `S${sessionDbId}/T1`, title: "a title", content: "some content", insight: null },
       NOW,
     );
 
-    expect(resultText(result)).toContain("Reconstructed");
+    expect(resultText(result)).not.toContain("Parameter error");
     expect(getShadowNote(db, t1)!.insight).toBeNull();
   });
 });
@@ -632,12 +622,7 @@ describe("call shape", () => {
     seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = settlementTurnWriteTool(
-      db,
-      baseContext(job),
-      { turn: `S${sessionDbId}/T1` },
-      NOW,
-    );
+    const result = write(baseContext(job), { turn: `S${sessionDbId}/T1` }, NOW);
 
     expect(resultText(result)).toContain("Parameter error");
   });
@@ -646,12 +631,7 @@ describe("call shape", () => {
     const sessionDbId = seedSession();
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = settlementTurnWriteTool(
-      db,
-      baseContext(job),
-      { turn: `S${sessionDbId}/T999`, grade: 1 },
-      NOW,
-    );
+    const result = write(baseContext(job), { turn: `S${sessionDbId}/T999`, grade: 1 }, NOW);
 
     expect(resultText(result)).toContain("Parameter error");
   });
