@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 
+import { parseTurnAddress } from "../mcp/note";
+
 import { runWriteTransaction } from "../db/database";
 import {
   assertNoteSettlementJobClaimed,
@@ -92,6 +94,30 @@ type StagedEntry =
 // the SAME shape naming the SAME address/handle/id always do.
 // ---------------------------------------------------------------------------
 
+/**
+ * The staging key of a segment call, from the RAW input — no validation, so a
+ * partial correction can find the entry it is correcting. `null` when the
+ * call is malformed enough that no key exists; evaluation refuses it a moment
+ * later, and the key is never used.
+ */
+function segmentStagingKeyOf(
+  rawInput: SettlementSegmentWriteInput,
+): string | null {
+  if (rawInput.action === "create") {
+    const handle = rawInput.handle?.trim();
+    return handle ? segmentCreateStagingKey(`E#${handle}`) : null;
+  }
+  if (rawInput.action === "extend") {
+    return rawInput.segmentId === undefined
+      ? null
+      : segmentExtendStagingKey(rawInput.segmentId);
+  }
+  const address = parseTurnAddress(rawInput.turn ?? "");
+  return address
+    ? segmentExcludeStagingKey(`S${address.sessionId}/T${address.promptNumber}`)
+    : null;
+}
+
 function noteStagingKey(ref: string): string {
   return `note:${ref}`;
 }
@@ -177,7 +203,22 @@ export function createSettlementStagingEngine(
 
   function stageNoteWrite(rawInput: SettlementTurnWriteInput): ToolTextResult {
     const nowEpoch = now();
-    const evaluation = evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch, {
+    // Merge BEFORE validating, not after (spec A7a, field-level). Two things
+    // ride on the order. The receipt must describe what is actually staged,
+    // and after a merge that is the combination, not this call's own fields.
+    // And a combination neither call would have passed alone — prose for a
+    // turn this dispatch may not write prose for, arriving in a second call
+    // that only names a grade — has to be refused here rather than at commit,
+    // which is A7's whole "the agent learns while it can still act" rule.
+    const address = parseTurnAddress(rawInput.turn);
+    const priorKey = noteStagingKey(
+      address ? `S${address.sessionId}/T${address.promptNumber}` : rawInput.turn,
+    );
+    const prior = staged.get(priorKey);
+    const merged: SettlementTurnWriteInput =
+      prior?.kind === "note" ? { ...prior.input, ...rawInput } : rawInput;
+
+    const evaluation = evaluateSettlementTurnWrite(db, context, merged, nowEpoch, {
       apply: false,
     });
     if (!evaluation.ok) {
@@ -185,7 +226,7 @@ export function createSettlementStagingEngine(
     }
     const key = noteStagingKey(evaluation.outcome.ref);
     const replaced = staged.has(key);
-    staged.set(key, { kind: "note", input: rawInput });
+    staged.set(key, { kind: "note", input: merged });
     return textResult(
       renderSettlementTurnWriteReceipt(evaluation.outcome, { staged: true, replaced }),
     );
@@ -193,7 +234,21 @@ export function createSettlementStagingEngine(
 
   function stageSegmentWrite(rawInput: SettlementSegmentWriteInput): ToolTextResult {
     const nowEpoch = now();
-    const evaluation = evaluateSettlementSegmentWrite(db, context, rawInput, nowEpoch, {
+    // Same field-level merge as `stageNoteWrite`, and merged before
+    // validation for the same two reasons. The key has to be derivable from
+    // the raw input alone — `action` plus the handle, the segment id or the
+    // turn address — because a partial correction (a title alone, say) is
+    // exactly what a merge exists to allow, and would not survive being
+    // validated on its own first.
+    const priorSegmentKey = segmentStagingKeyOf(rawInput);
+    const priorSegment =
+      priorSegmentKey === null ? undefined : staged.get(priorSegmentKey);
+    const mergedInput: SettlementSegmentWriteInput =
+      priorSegment?.kind === "segment"
+        ? { ...priorSegment.input, ...rawInput }
+        : rawInput;
+
+    const evaluation = evaluateSettlementSegmentWrite(db, context, mergedInput, nowEpoch, {
       apply: false,
       handleMap: knownHandles,
     });
@@ -222,7 +277,7 @@ export function createSettlementStagingEngine(
     }
 
     const replaced = staged.has(key);
-    staged.set(key, { kind: "segment", handle, input: rawInput });
+    staged.set(key, { kind: "segment", handle, input: mergedInput });
     return textResult(
       renderSettlementSegmentWriteReceipt(evaluation.outcome, { staged: true, handle, replaced }),
     );

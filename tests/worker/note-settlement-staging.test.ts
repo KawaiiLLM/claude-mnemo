@@ -754,6 +754,43 @@ describe("ticket 10d finding 3 — a window holding one legitimately unsegmented
 // ---------------------------------------------------------------------------
 
 describe("spec A7a — re-staging a key replaces its entry rather than appending", () => {
+  // The merge is field-LEVEL (spec A7a, user ruling S15069/T735): a second
+  // call overwrites only the fields it states. Whole-entry replacement would
+  // also satisfy every other test in this block, which is why this one exists
+  // — it is the only case that tells the two apart, and under whole-entry
+  // replacement the prose staged first is silently destroyed by a later call
+  // that only names a grade.
+  test("a second call naming only the review fields keeps the prose the first call staged", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      reconstructableTurnIds: new Set([t1]),
+    });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    engine.stageNoteWrite({
+      turn: `S${sessionDbId}/T1`,
+      title: "fix+staging: the merge is field-level",
+      content: "Prose staged by the first call.",
+      insight: null,
+    });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tags: [] });
+    expect(engine.pendingCount()).toBe(1);
+
+    engine.stageSegmentWrite({ action: "exclude", turn: `S${sessionDbId}/T1` });
+    expect(engine.commit().content[0]!.text).toContain("Committed");
+
+    const turn = getTurnById(db, t1)!;
+    expect(turn.significanceGrade).toBe(3);
+    expect(turn.type).toEqual(["fix"]);
+    // The load-bearing assertion: the first call's prose survived a second
+    // call that never mentioned it.
+    expect(getShadowNote(db, t1)?.title).toBe("fix+staging: the merge is field-level");
+    expect(getShadowNote(db, t1)?.content).toBe("Prose staged by the first call.");
+  });
+
   test("restaging the same turn's note does not grow pendingCount, and only the LATEST content lands", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);

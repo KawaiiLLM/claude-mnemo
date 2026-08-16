@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msvmaose" : "dev";
+var BUILD_ID = true ? "0.10.0-msvmj8y1" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -47951,6 +47951,17 @@ function renderSettlementTurnWriteReceipt(outcome, options) {
 }
 
 // src/worker/note-settlement-staging.ts
+function segmentStagingKeyOf(rawInput) {
+  if (rawInput.action === "create") {
+    const handle = rawInput.handle?.trim();
+    return handle ? segmentCreateStagingKey(`E#${handle}`) : null;
+  }
+  if (rawInput.action === "extend") {
+    return rawInput.segmentId === void 0 ? null : segmentExtendStagingKey(rawInput.segmentId);
+  }
+  const address = parseTurnAddress(rawInput.turn ?? "");
+  return address ? segmentExcludeStagingKey(`S${address.sessionId}/T${address.promptNumber}`) : null;
+}
 function noteStagingKey(ref) {
   return `note:${ref}`;
 }
@@ -48000,7 +48011,13 @@ function createSettlementStagingEngine(options) {
   let knownHandles = /* @__PURE__ */ new Map();
   function stageNoteWrite(rawInput) {
     const nowEpoch = now();
-    const evaluation = evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch, {
+    const address = parseTurnAddress(rawInput.turn);
+    const priorKey = noteStagingKey(
+      address ? `S${address.sessionId}/T${address.promptNumber}` : rawInput.turn
+    );
+    const prior = staged.get(priorKey);
+    const merged = prior?.kind === "note" ? { ...prior.input, ...rawInput } : rawInput;
+    const evaluation = evaluateSettlementTurnWrite(db, context, merged, nowEpoch, {
       apply: false
     });
     if (!evaluation.ok) {
@@ -48008,14 +48025,17 @@ function createSettlementStagingEngine(options) {
     }
     const key = noteStagingKey(evaluation.outcome.ref);
     const replaced = staged.has(key);
-    staged.set(key, { kind: "note", input: rawInput });
+    staged.set(key, { kind: "note", input: merged });
     return textResult4(
       renderSettlementTurnWriteReceipt(evaluation.outcome, { staged: true, replaced })
     );
   }
   function stageSegmentWrite(rawInput) {
     const nowEpoch = now();
-    const evaluation = evaluateSettlementSegmentWrite(db, context, rawInput, nowEpoch, {
+    const priorSegmentKey = segmentStagingKeyOf(rawInput);
+    const priorSegment = priorSegmentKey === null ? void 0 : staged.get(priorSegmentKey);
+    const mergedInput = priorSegment?.kind === "segment" ? { ...priorSegment.input, ...rawInput } : rawInput;
+    const evaluation = evaluateSettlementSegmentWrite(db, context, mergedInput, nowEpoch, {
       apply: false,
       handleMap: knownHandles
     });
@@ -48038,7 +48058,7 @@ function createSettlementStagingEngine(options) {
       key = segmentExcludeStagingKey(evaluation.outcome.excludedTurnRef);
     }
     const replaced = staged.has(key);
-    staged.set(key, { kind: "segment", handle, input: rawInput });
+    staged.set(key, { kind: "segment", handle, input: mergedInput });
     return textResult4(
       renderSettlementSegmentWriteReceipt(evaluation.outcome, { staged: true, handle, replaced })
     );

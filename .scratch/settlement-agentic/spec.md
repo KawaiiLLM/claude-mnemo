@@ -116,7 +116,11 @@ The fix is not an un-stage verb. It is the **same "present overwrites" rule D5a 
 | `segment` extend | the segment id |
 | `segment` exclude | the turn address |
 
-Re-staging a key replaces its entry rather than appending. That makes staging idempotent against a lost receipt, and makes same-run correction a one-call operation rather than an abandoned window.
+Re-staging a key merges into its entry rather than appending, **at field level** (user ruling, S15069/T735): a second call overwrites only the fields it states, an omitted field keeps what an earlier call staged, and clearing takes an explicit `null`. That is D5a's own rule, unchanged, one level up. Whole-entry replacement was implemented first and is the seventh unstated default this spec exists to prevent — under it, a model that staged prose and then staged a grade would silently destroy the prose.
+
+The merge happens **before** validation, not after. Two things ride on that order: the receipt must describe what is actually staged, which after a merge is the combination rather than this call's own fields; and a combination neither call would have passed alone has to be refused while the agent can still act on it, which is A7's whole reason for validating at stage time.
+
+This also settles what A7's own accepted-cost clause could not: a replay conflict on an already-staged call **is** recoverable in the same run, by re-staging its key with a corrected value. Only a lost lease is unrecoverable, and that is a fence refusal rather than a replay one. The earlier wording — abandon the run — predated keyed staging by one paragraph.
 
 The cost is that create handles become model-named rather than server-issued. That is what makes the retry safe: a server-issued handle differs on every call, so a retry can never be recognised as one.
 
