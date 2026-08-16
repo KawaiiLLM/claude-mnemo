@@ -21,8 +21,8 @@ import type { HookResult, NormalizedHookInput } from "../types";
 import { recoverStrandedTurns } from "../../db/recover-stranded";
 import type { DiaryFileStore } from "../../diary/file-store";
 import type { DreamMemoryStore } from "../../diary/memory-store";
+import { estimateDiaryTokens } from "../../diary/domain";
 import {
-  renderPersonaDocumentInjection,
   renderSessionStartPersonaInjection,
   renderSessionStartRecentSessionsInjection,
   SESSION_INJECTION_TOKEN_BUDGET,
@@ -206,7 +206,6 @@ export function buildSessionView(
     nextSteps: session.nextSteps,
     decision: resolveTurnPointers(db, session.id, session.decision),
     done: resolveTurnPointers(db, session.id, session.done),
-    current: session.current,
     reference: session.reference,
     turnCount: metrics?.turnCount ?? 0,
     observationCount: metrics?.observationCount ?? 0,
@@ -425,30 +424,36 @@ function buildContextOutput(
     db,
     input.sessionId ? primarySessionRecord.id : undefined,
   );
-  const sessionDocument = [
-    ...(includeCurrentSession
-      ? [
-          "## Current Session",
-          "",
-          renderCurrentSessionStateOutput(
-            primarySession,
-            primarySessionRecord,
-          ),
-          "",
-        ]
-      : []),
-  ].join("\n");
-  const boundedSessionDocument = sessionDocument
-    ? renderPersonaDocumentInjection(
-        sessionDocument,
-        SESSION_INJECTION_TOKEN_BUDGET,
-        `recall(id="S${primarySessionRecord.id}")`,
-      )
+  // ticket 04: one budget, one cut, and the cut says so.
+  //
+  // This block used to be bounded TWICE. The state renderer bounds itself to
+  // 2,000 tokens and marks its own truncation with a `… state truncated; full
+  // summary: recall(id="S<n>")` pointer; the result was then handed to
+  // `renderPersonaDocumentInjection` against the same 2,000, which re-cut the
+  // very same lines — the heading it added pushed the block over — and
+  // replaced the state renderer's pointer with `（其余 N 行省略…）`, whose N
+  // counts only the lines the SECOND pass dropped. A reader with half a
+  // summary missing was told two lines were. The heading's tokens were the
+  // only real work the second pass did, so they are reserved here instead.
+  const headingLines = ["## Current Session", ""];
+  const stateTokenBudget = Math.max(
+    0,
+    SESSION_INJECTION_TOKEN_BUDGET -
+      estimateDiaryTokens([...headingLines, ""].join("\n")),
+  );
+  const sessionDocument = includeCurrentSession
+    ? [
+        ...headingLines,
+        renderCurrentSessionStateOutput(
+          primarySession,
+          primarySessionRecord,
+          stateTokenBudget,
+        ),
+        "",
+      ].join("\n")
     : "";
 
-  return boundedSessionDocument
-    ? [header, "", boundedSessionDocument].join("\n")
-    : header;
+  return sessionDocument ? [header, "", sessionDocument].join("\n") : header;
 }
 
 export function createReadOnlyContextHandler(

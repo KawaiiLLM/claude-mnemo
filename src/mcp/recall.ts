@@ -99,15 +99,17 @@ function splitInsight(insight: string | null): string[] {
     .map((line) => line.replace(/^-+\s*/, ""));
 }
 
-// D4: the redesigned summary fields, with [T<n>] markers resolved to current
-// turn titles. `insight` is carried for the legacy read-side fallback (old
-// sessions whose `decision` is empty). decision/done hold the inline pointers.
+// D2: the seven summary fields, with [T<n>] markers resolved to current turn
+// titles. decision/done hold the inline pointers. `insight` is one of the
+// seven now (ticket 04), not a legacy fallback for an empty `decision`;
+// `current` is deleted and is not read here even though the column survives as
+// dead storage.
 function buildSessionSummaryFields(
   db: Database,
   session: NonNullable<ReturnType<typeof getSession>>,
 ): Pick<
   FormattedSession,
-  "content" | "insight" | "nextSteps" | "decision" | "done" | "current" | "reference"
+  "content" | "insight" | "nextSteps" | "decision" | "done" | "reference"
 > {
   return {
     content: session.content,
@@ -115,7 +117,6 @@ function buildSessionSummaryFields(
     nextSteps: session.nextSteps,
     decision: resolveTurnPointers(db, session.id, session.decision),
     done: resolveTurnPointers(db, session.id, session.done),
-    current: session.current,
     reference: session.reference,
   };
 }

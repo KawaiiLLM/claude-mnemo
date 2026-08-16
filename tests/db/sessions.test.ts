@@ -327,12 +327,14 @@ describe("session queries", () => {
       return { sessionId: session.id, turnId };
     }
 
+    // ticket 04 (spec D2): the seven fields are title/content/insight and
+    // next_steps/decision/done/reference — `current` is deleted.
     const emptySummary = {
       title: "",
       content: "",
+      insight: "",
       decision: "",
       done: "",
-      current: "",
       nextSteps: "",
       reference: "",
     };

@@ -426,6 +426,65 @@ describe("handleContextHook", () => {
     );
   });
 
+  // ticket 04, requirement 6: the injected block no longer silently drops its
+  // tail. It used to be bounded TWICE — the state renderer cut to 2,000 tokens
+  // and marked the cut, then the persona document renderer cut the same block
+  // again (the heading it added pushed it over), deleted that marker and
+  // replaced it with `（其余 N 行省略…）`, whose N counts only the lines the
+  // SECOND pass dropped. A reader missing most of a summary was told two lines
+  // were missing. One budget, one cut, one marker — and the marker is last, so
+  // nothing is lost after it silently.
+  test("an overflowing session block is cut exactly once, and the cut announces itself last", async () => {
+    insertTurn(db, {
+      sessionId: currentSessionId,
+      promptNumber: 1,
+      title: "Oversized session",
+      content: "Create an oversized current-session view.",
+      userPrompt: "Render the session context.",
+      assistantResponse: "Rendered.",
+      toolCallCount: 1,
+      createdAtEpoch: 310,
+    });
+    // Many SHORT bullets on purpose. The state renderer packs whole lines up
+    // to its budget, so coarse lines leave slack under the ceiling and the old
+    // double-bound never fired; fine ones land the state within a few tokens
+    // of the cap, which is where the heading tipped the block over and the
+    // second pass ate the first pass's marker. A fixture that cannot reach
+    // that state is a test that passes either way.
+    const bullets = (word: string): string =>
+      Array.from({ length: 200 }, (_, index) => `- ${word}${index} 简短一行`).join("\n");
+    db.query(
+      `UPDATE sessions
+       SET content = ?, next_steps = ?, decision = ?, done = ?, "reference" = ?
+       WHERE id = ?`,
+    ).run(
+      "会话内容".repeat(60),
+      "下一步".repeat(40),
+      bullets("决策"),
+      bullets("完成"),
+      bullets("参考"),
+      currentSessionId,
+    );
+
+    const result = await createContextHandler({ db })(
+      createInput({ source: "resume", sessionId: "session-context" }),
+    );
+    const output = result.hookSpecificOutput ?? "";
+    const sessionDocument = output.slice(output.indexOf("## Current Session"));
+    const pointer = `  … state truncated; full summary: recall(id="S${currentSessionId}")`;
+
+    expect(estimateDiaryTokens(sessionDocument)).toBeLessThanOrEqual(
+      SESSION_INJECTION_TOKEN_BUDGET,
+    );
+    // The one cut, and it is the last thing in the block.
+    expect(sessionDocument).toContain(pointer);
+    expect(sessionDocument.trimEnd().split("\n").at(-1)).toBe(pointer);
+    // The second cut's marker — its presence means the block was re-cut after
+    // it had already been trimmed and marked.
+    expect(sessionDocument).not.toContain("行省略");
+    expect(sessionDocument).not.toContain("完整见");
+  });
+
   test("compact keeps state isolated while the recent hook stays collapsed", async () => {
     insertTurn(db, {
       sessionId: currentSessionId,
@@ -749,8 +808,11 @@ describe("handleContextHook", () => {
     expect(output).not.toContain(`"Pick mutex"`);
     expect(output).toContain("  reference:");
     expect(output).toContain("    - docs/plans/redesign.md");
-    // decision present → legacy insight fallback is NOT used.
-    expect(output).not.toContain("Primary insight bullet");
+    // ticket 04 (spec D2): `insight` is one of the seven fields, so a session
+    // carrying both a decision and an insight renders both. It used to be a
+    // fallback that a non-empty `decision` suppressed.
+    expect(output).toContain("  insight:");
+    expect(output).toContain("Primary insight bullet");
   });
 
   test("startup suppresses the sessions output even when the current session exists", async () => {

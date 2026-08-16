@@ -18,6 +18,7 @@ import {
   recordDeclinedNoteDebt,
 } from "../db/note-debt";
 import {
+  countTurnsSince,
   getSession,
   updateSessionFields,
   type SessionRecord,
@@ -32,6 +33,14 @@ import {
   type TurnRecord,
 } from "../db/turns";
 import { isSegmentEra } from "../segment-era";
+import {
+  formatSessionFieldUsage,
+  formatSummaryCadence,
+  RETIRED_SESSION_FIELD,
+  retiredSessionFieldMessage,
+  SESSION_SUMMARY_FIELDS,
+  type SessionSummaryField,
+} from "./session-summary";
 import { formatNoteBudget } from "../shared/note-budget";
 import {
   findRetiredTopicTag,
@@ -43,7 +52,6 @@ import {
   toolCallSyntaxMessage,
 } from "../shared/tool-call-syntax";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
-import { estimateTokens } from "../utils/token-estimate";
 
 type ToolTextResult = {
   content: Array<{
@@ -65,15 +73,16 @@ const TURN_MODE_FIELDS = [
   "tags",
   "grade",
 ] as const;
-const SESSION_MODE_FIELDS = [
-  "title",
-  "content",
-  "decision",
-  "done",
-  "current",
-  "next_steps",
-  "reference",
-] as const;
+// ticket 04 (spec D2): the seven session fields, `current` deleted and
+// `insight` promoted out of its legacy read-only corner. One list, imported
+// rather than restated, so the tool surface and the receipt's guidance values
+// cannot describe different sets of fields.
+const SESSION_MODE_FIELDS = SESSION_SUMMARY_FIELDS;
+
+/** Session fields that are NOT also turn fields — the ones a turn call must refuse. */
+const SESSION_ONLY_FIELDS = SESSION_MODE_FIELDS.filter(
+  (key) => key !== "title" && key !== "content" && key !== "insight",
+);
 
 export interface NoteToolInput {
   // Exactly one of `turn` / `session` addresses the write (D5/E1: one tool,
@@ -101,11 +110,11 @@ export interface NoteToolInput {
   supersedes?: unknown;
   dependsOn?: unknown;
 
-  // Session fields (D2/D4: seven fields, `current` included — ticket 04 trims
-  // the set, this ticket only adds the modes).
+  // Session fields (D2/D4). `title`, `content` and `insight` are declared
+  // above — one name each, shared by both addressing surfaces. `current` is
+  // deleted (ticket 04) and is refused by name, not silently dropped.
   decision?: unknown;
   done?: unknown;
-  current?: unknown;
   next_steps?: unknown;
   reference?: unknown;
 
@@ -594,6 +603,12 @@ function parseModeMap(
   }
   const result: Partial<Record<string, FieldMode>> = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key === RETIRED_SESSION_FIELD) {
+      // Named, not lumped into the generic "unknown field" answer: a caller
+      // still sending `mode.current` is working from the retired contract and
+      // needs to be told which field replaced it (ticket 04, spec D2).
+      fail(retiredSessionFieldMessage("mode"));
+    }
     if (!allowed.includes(key)) {
       fail(`mode.${key} names a field this call does not accept a mode for.`);
     }
@@ -739,10 +754,7 @@ function handleTurnWrite(
     return declineTurn(db, address, options, crossSession);
   }
 
-  for (const key of SESSION_MODE_FIELDS) {
-    if (key === "title" || key === "content") {
-      continue;
-    }
+  for (const key of SESSION_ONLY_FIELDS) {
     if ((input as Record<string, unknown>)[key] !== undefined) {
       return parameterError(`${key} is a session field; this call addresses a turn.`);
     }
@@ -1096,7 +1108,6 @@ function handleSessionWrite(
   options: NoteToolOptions,
 ): ToolTextResult {
   for (const key of [
-    "insight",
     "type",
     "tags",
     "grade",
@@ -1117,7 +1128,7 @@ function handleSessionWrite(
   );
   if (providedFields.length === 0) {
     return parameterError(
-      "at least one of title, content, decision, done, current, next_steps, reference is required.",
+      `at least one of ${SESSION_MODE_FIELDS.join(", ")} is required.`,
     );
   }
 
@@ -1136,20 +1147,18 @@ function handleSessionWrite(
     return textResult(`Session S${sessionId} not found.`);
   }
 
-  const fieldMap: ReadonlyArray<
-    [key: (typeof SESSION_MODE_FIELDS)[number], existing: string | null]
-  > = [
+  const fieldMap: ReadonlyArray<[key: SessionSummaryField, existing: string | null]> = [
     ["title", session.title],
     ["content", session.content],
+    ["insight", session.insight],
+    ["next_steps", session.nextSteps],
     ["decision", session.decision],
     ["done", session.done],
-    ["current", session.current],
-    ["next_steps", session.nextSteps],
     ["reference", session.reference],
   ];
 
   let resolvedInput: UpdateSessionFieldsInput;
-  const finals: Partial<Record<string, string | null>> = {};
+  const finals: Array<[SessionSummaryField, string | null]> = [];
   try {
     resolvedInput = {};
     for (const [key, existing] of fieldMap) {
@@ -1160,7 +1169,7 @@ function handleSessionWrite(
       const resolution = resolveStringField(key, provided, existing, modeMap[key], {
         nullable: true,
       });
-      finals[key] = resolution.value;
+      finals.push([key, resolution.value]);
       const inputKey = key === "next_steps" ? "nextSteps" : key;
       (resolvedInput as Record<string, string | null>)[inputKey] = resolution.value;
     }
@@ -1170,6 +1179,12 @@ function handleSessionWrite(
     }
     throw error;
   }
+
+  // Read BEFORE the write: `updateSessionFields` advances the summary epoch
+  // unconditionally, so the staleness this write is answering is only
+  // measurable from the row as it stood on the way in (spec D8).
+  const priorSummaryEpoch = session.summaryUpdatedAtEpoch;
+  const turnsSinceUpdate = countTurnsSince(db, sessionId, priorSummaryEpoch);
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
@@ -1181,14 +1196,23 @@ function handleSessionWrite(
     return textResult(`Session S${sessionId} not found.`);
   }
 
-  const verb = "Updated";
-  const parts = [`${verb} S${sessionId}.`];
-  const sizeParts = Object.entries(finals)
-    .filter(([, value]) => value !== null && value !== undefined)
-    .map(([key, value]) => `${key} ${estimateTokens(value as string)}tok`);
-  if (sizeParts.length > 0) {
-    parts.push(`sizes (after write): ${sizeParts.join(", ")}.`);
-  }
+  // The receipt is the only feedback a session write's author ever gets (spec
+  // D8), and it carries exactly two things: per-field usage against the
+  // guidance value — post-write totals, so an appending writer sees where the
+  // field now STANDS rather than what it just added — and how many turns have
+  // passed since the last update. Nothing here truncates: over budget is a
+  // signal to the writer, never a loss to the reader.
+  //
+  // The cadence figure travels without its healthy band, deliberately (D8a).
+  // Do not "helpfully" add one: a writer that knows the target updates to
+  // reset the counter, and the diagnostic then reads healthy by construction.
+  const parts = [`Updated S${sessionId}.`];
+  parts.push(
+    `after write: ${finals
+      .map(([key, value]) => formatSessionFieldUsage(key, value))
+      .join(", ")}.`,
+  );
+  parts.push(formatSummaryCadence(turnsSinceUpdate, priorSummaryEpoch !== null));
 
   return textResult(parts.join(" "));
 }
@@ -1209,6 +1233,15 @@ export function noteTool(
   rawInput: NoteToolInput,
   options: NoteToolOptions = {},
 ): ToolTextResult {
+  // ticket 04 (spec D2): `current` is deleted, and a caller still sending it
+  // is REFUSED rather than having the field quietly dropped — a writer whose
+  // update vanishes without a word keeps writing into the same hole. Checked
+  // at the entry point so it answers the same way on both addressing surfaces
+  // and for callers that reach `noteTool` without the zod schema in front.
+  if ((rawInput as Record<string, unknown>)[RETIRED_SESSION_FIELD] !== undefined) {
+    return parameterError(retiredSessionFieldMessage("field"));
+  }
+
   const hasTurn = typeof rawInput.turn === "string";
   const hasSession = typeof rawInput.session === "string";
 

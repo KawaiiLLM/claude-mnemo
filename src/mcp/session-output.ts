@@ -13,16 +13,24 @@ export interface SessionStateRenderInput {
   content: string | null;
   decision: string | null;
   done: string | null;
-  current: string | null;
   nextSteps: string | null;
   reference: string | null;
-  legacyInsight?: string[];
+  insight?: string[];
+  /**
+   * @deprecated ticket 04 (spec D2): `current` is deleted and nothing below
+   * reads this. It is accepted-and-ignored for exactly one reason — the P2
+   * settlement context builder (src/worker/note-settlement-context.ts) still
+   * passes it and lies outside this ticket's fence, so removing the key here
+   * would break that file's compile rather than its behaviour. Delete both in
+   * one change.
+   */
+  current?: string | null;
 }
 
 export interface SessionStateTokenReport {
   title: number;
   content: number;
-  current: number;
+  insight: number;
   nextSteps: number;
   decision: number;
   done: number;
@@ -75,10 +83,12 @@ function buildSessionStateLines(
     }
   };
 
-  // State first: bounded legacy rendering drops trailing historical fields
-  // before it can lose the current working position.
+  // State first: bounded rendering drops trailing historical fields before it
+  // can lose the working position. `current` used to sit between content and
+  // next; ticket 04 deleted it (spec D2) — it restated `content` at a
+  // different compression, so a writer had to guess which of the two to keep
+  // fresh and a reader got the same material twice.
   pushField("content", input.content, 400);
-  pushField("current", input.current, 400);
   pushField("next", input.nextSteps, 200);
 
   if (!includeHistoricalFields) {
@@ -87,9 +97,14 @@ function buildSessionStateLines(
 
   if (input.decision) {
     pushBulletField("decision", input.decision);
-  } else if ((input.legacyInsight?.length ?? 0) > 0) {
+  }
+  // `insight` renders in its own right now, not only as a stand-in for an
+  // empty `decision`: it is one of the seven fields (D2), the one a DIFFERENT
+  // session browsing this one reads. A legacy row (insight set, decision
+  // NULL) renders exactly as it did before.
+  if ((input.insight?.length ?? 0) > 0) {
     lines.push("  insight:");
-    for (const item of input.legacyInsight ?? []) {
+    for (const item of input.insight ?? []) {
       lines.push(`    - ${item}`);
     }
   }
@@ -119,12 +134,18 @@ export function measureSessionStateTokens(
     return estimateDiaryTokens(rendered);
   };
   const full = renderSessionStateOutput(input);
+  const insightLines = input.insight ?? [];
   return {
     title: estimateDiaryTokens(
       `[S${input.id}] ${input.title ?? "(untitled session)"}`,
     ),
     content: fieldTokens("content", input.content),
-    current: fieldTokens("current", input.current),
+    insight:
+      insightLines.length > 0
+        ? estimateDiaryTokens(
+            ["  insight:", ...insightLines.map((item) => `    - ${item}`)].join("\n"),
+          )
+        : 0,
     nextSteps: fieldTokens("next", input.nextSteps),
     decision: fieldTokens("decision", input.decision, true),
     done: fieldTokens("done", input.done, true),
@@ -133,11 +154,26 @@ export function measureSessionStateTokens(
   };
 }
 
+/**
+ * The ONE place the injected state is cut, and every cut it makes is stated in
+ * the output (ticket 04).
+ *
+ * The `tokenBudget` is a parameter rather than the constant because the caller
+ * knows what else shares its block: SessionStart wraps this in a `## Current
+ * Session` heading, and that heading's tokens have to come out of the same
+ * ceiling. Before, they did not — the hook bounded this renderer's already
+ * bounded output a SECOND time through the persona document renderer, and the
+ * second cut deleted the first cut's "state truncated" pointer and replaced it
+ * with a count of only the lines the second cut had itself dropped. The reader
+ * was told two lines were missing when most of the summary was gone. One
+ * budget, one owner, one marker.
+ */
 function renderBoundedSessionStateOutput(
   input: SessionStateRenderInput,
+  tokenBudget: number = CURRENT_SESSION_STATE_TOKEN_BUDGET,
 ): string {
   const full = renderSessionStateOutput(input);
-  if (estimateDiaryTokens(full) <= CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+  if (estimateDiaryTokens(full) <= tokenBudget) {
     return full;
   }
 
@@ -145,7 +181,7 @@ function renderBoundedSessionStateOutput(
   const uncappedStateLines = buildSessionStateLines(input, false, false);
   const stateFitsUncapped =
     estimateDiaryTokens([...uncappedStateLines, pointer].join("\n")) <=
-    CURRENT_SESSION_STATE_TOKEN_BUDGET;
+    tokenBudget;
   const lines = buildSessionStateLines(input, !stateFitsUncapped);
   const included: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
@@ -154,17 +190,18 @@ function renderBoundedSessionStateOutput(
       lines[index]!,
       pointer,
     ].join("\n");
-    if (estimateDiaryTokens(candidate) > CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+    if (estimateDiaryTokens(candidate) > tokenBudget) {
       break;
     }
     included.push(lines[index]!);
   }
 
-  const withPointer = [...included, pointer].join("\n");
-  if (estimateDiaryTokens(withPointer) <= CURRENT_SESSION_STATE_TOKEN_BUDGET) {
-    return withPointer;
-  }
-  return included.join("\n");
+  // The pointer is never the line that gets dropped to make room: content is
+  // cut first, and a cut that says nothing is the defect this whole path
+  // exists to avoid. `included` is built with the pointer already counted, so
+  // reaching a state where it does not fit means even the pointer alone
+  // overruns the budget — and then the pointer alone is still the right answer.
+  return [...included, pointer].join("\n");
 }
 
 /**
@@ -176,25 +213,29 @@ function renderBoundedSessionStateOutput(
  */
 export function renderSessionStateInjection(
   input: SessionStateRenderInput,
+  tokenBudget?: number,
 ): string {
-  return renderBoundedSessionStateOutput(input);
+  return renderBoundedSessionStateOutput(input, tokenBudget);
 }
 
 export function renderCurrentSessionStateOutput(
   session: FormattedSession,
   sessionRecord: SessionRecord,
+  tokenBudget?: number,
 ): string {
-  return renderBoundedSessionStateOutput({
-    id: sessionRecord.id,
-    title: session.title ?? null,
-    content: session.content ?? null,
-    // context.ts currently resolves pointers on FormattedSession. Read raw
-    // storage here so state injection keeps compact [T<n>] coordinates.
-    decision: sessionRecord.decision ?? session.decision ?? null,
-    done: sessionRecord.done ?? session.done ?? null,
-    current: session.current ?? null,
-    nextSteps: session.nextSteps ?? null,
-    reference: session.reference ?? null,
-    legacyInsight: session.insight,
-  });
+  return renderBoundedSessionStateOutput(
+    {
+      id: sessionRecord.id,
+      title: session.title ?? null,
+      content: session.content ?? null,
+      // context.ts currently resolves pointers on FormattedSession. Read raw
+      // storage here so state injection keeps compact [T<n>] coordinates.
+      decision: sessionRecord.decision ?? session.decision ?? null,
+      done: sessionRecord.done ?? session.done ?? null,
+      nextSteps: session.nextSteps ?? null,
+      reference: session.reference ?? null,
+      insight: session.insight,
+    },
+    tokenBudget,
+  );
 }

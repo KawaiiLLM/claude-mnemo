@@ -236,13 +236,15 @@ describe("MCP format renderer", () => {
       project: "claude-mnemo",
       createdAtEpoch,
       content: "Reworking the session summary schema",
-      // decision/done/reference are markdown bullet lists; [T<n>] markers
-      // arrive already resolved from the recall layer. current/next stay inline.
+      // decision/insight/done/reference are markdown bullet lists; [T<n>]
+      // markers arrive already resolved from the recall layer. `next` stays
+      // inline. ticket 04 (spec D2): `current` is deleted, and `insight`
+      // renders in its own right rather than only when `decision` is empty.
       decision:
         '- Whole-rewrite over field-merge [S200/T3] "Pick rewrite"\n- DB id for [T<n>] markers [S200/T4] "Pointer semantics"',
+      insight: ["A summary field is addressed to a reader, not to a schema"],
       done:
         '- Shipped migration [S200/T1] "Add columns"\n- Wired read side [S200/T5] "Render fields"',
-      current: "Running the test suite",
       nextSteps: "Release 0.2.16",
       reference: "- docs/plans/redesign.md\n- github.com/anthropics/claude-code",
       turnCount: 5,
@@ -256,10 +258,11 @@ describe("MCP format renderer", () => {
         "  - decision:",
         '    - Whole-rewrite over field-merge [S200/T3] "Pick rewrite"',
         '    - DB id for [T<n>] markers [S200/T4] "Pointer semantics"',
+        "  - insight:",
+        "    - A summary field is addressed to a reader, not to a schema",
         "  - done:",
         '    - Shipped migration [S200/T1] "Add columns"',
         '    - Wired read side [S200/T5] "Render fields"',
-        "  - current: Running the test suite",
         "  - next: Release 0.2.16",
         "  - reference:",
         "    - docs/plans/redesign.md",

@@ -53,7 +53,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
     NOTE_TOKEN_BUDGET.insight +
     " tok, default none): long-term knowledge orthogonal to the conclusion, claim first. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction — omit or [] when none fit, never guess. tags: bare topic words, no prefix. grade: 0-4. Receipt reports token counts and each touched field's post-write total; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson. `crossSession: true` only for another session's turn. Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content. Goes last in its batch.\n" +
     "Relations — evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target this write does not cite rejects the call. Four ordered questions, first yes wins: (1) Did the citing turn overturn it? → supersedes. (2) Did it test the claim, for or against? → evidenceFor/Against. (3) If the cited turn were wrong, would the citing turn's conclusion also be wrong? → dependsOn. (4) None → no relation. Never soften (3) to \"used\"/\"built on\".\n" +
-    "Session — title/content: a compressed view for another session browsing this one. decision/done/current/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations.",
+    "Session — title/content/insight: a compressed view for another session browsing this one. decision/done/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations.",
   // ticket 08 (spec G8): the coverage predicate pulled by the agent, not the
   // Stop hook (ticket 11) or the completion gate (ticket 09) — those call the
   // same underlying predicate (db/coverage.ts's `computeCoverageGaps`)
@@ -94,7 +94,6 @@ const noteModeShape = z
     grade: fieldModeEnum.optional(),
     decision: fieldModeEnum.optional(),
     done: fieldModeEnum.optional(),
-    current: fieldModeEnum.optional(),
     next_steps: fieldModeEnum.optional(),
     reference: fieldModeEnum.optional(),
   })
@@ -150,10 +149,14 @@ export const noteInputShape = {
   supersedes: z.array(z.string()).optional(),
   dependsOn: z.array(z.string()).optional(),
 
-  // Session fields (D2/D4 — seven fields; ticket 04 trims the set).
+  // Session fields (D2/D4). Seven in total: `title`/`content`/`insight` are
+  // declared above and shared with the turn surface, and these four are the
+  // session's own. `current` is DELETED (ticket 04) and deliberately absent
+  // from the schema, so the model is never offered a field that no longer
+  // exists; a call that sends it anyway is refused by name in mcp/note.ts
+  // rather than having the field dropped in silence.
   decision: z.string().nullable().optional(),
   done: z.string().nullable().optional(),
-  current: z.string().nullable().optional(),
   next_steps: z.string().nullable().optional(),
   reference: z.string().nullable().optional(),
 

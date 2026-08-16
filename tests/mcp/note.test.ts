@@ -153,7 +153,6 @@ describe("note tool", () => {
       "dependsOn",
       "decision",
       "done",
-      "current",
       "next_steps",
       "reference",
       "mode",
@@ -1462,6 +1461,294 @@ describe("the merged write tool (ticket 03)", () => {
       expect(resultText(result)).toStartWith("Parameter error:");
       expect(resultText(result)).toContain("decision");
       expect(getSession(db, sessionId)?.decision).toBeNull();
+    });
+  });
+});
+
+// ticket 04 (spec D2/D7/D8/D8a/D9): the session summary describes now, and
+// says who each field is for. Seven fields split by reader, `current` deleted,
+// a guidance value reported per field and never enforced, and a cadence figure
+// that ships WITHOUT its healthy band.
+describe("the session summary (ticket 04)", () => {
+  let db: Database;
+  let sessionId: number;
+
+  function seedTurn(promptNumber: number, createdAtEpoch: number): number {
+    return db
+      .query<{ id: number }, [number, number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, ?, 'extracted', 'work', ?) RETURNING id`,
+      )
+      .get(sessionId, promptNumber, createdAtEpoch)!.id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "summary-session",
+      project: "claude-mnemo",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  describe("`current` is deleted (spec D2)", () => {
+    test("a caller that still sends it is refused by name, and nothing is written", () => {
+      const result = noteTool(db, {
+        session: `S${sessionId}`,
+        current: "still writing to the retired field",
+        content: "and to the live one",
+      } as never);
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("current");
+      expect(resultText(result)).toContain("Write `content`");
+      expect(isNoteSuccess(result)).toBe(false);
+      // Atomic: the legitimate field in the same call did NOT land.
+      const session = getSession(db, sessionId)!;
+      expect(session.content).toBeNull();
+      expect(session.current).toBeNull();
+    });
+
+    test("`mode.current` is refused the same way, on either addressing surface", () => {
+      const onSession = noteTool(db, {
+        session: `S${sessionId}`,
+        content: "c",
+        mode: { current: "overwrite" },
+      } as never);
+      expect(resultText(onSession)).toStartWith("Parameter error:");
+      expect(resultText(onSession)).toContain("mode.current");
+      // Not the generic unknown-field answer: a caller working from the
+      // retired contract is told which field replaced it.
+      expect(resultText(onSession)).toContain("Write `content`");
+      expect(getSession(db, sessionId)?.content).toBeNull();
+
+      seedTurn(1, 120);
+      const onTurn = noteTool(db, {
+        turn: `S${sessionId}/T1`,
+        title: "t",
+        content: "c",
+        mode: { current: "append" },
+      } as never);
+      expect(resultText(onTurn)).toStartWith("Parameter error:");
+      expect(resultText(onTurn)).toContain("mode.current");
+    });
+
+    test("the tool schema does not offer the field at all", () => {
+      expect(() =>
+        noteInputSchema.parse({ session: "S1", current: "x" }),
+      ).toThrow();
+      expect(() =>
+        noteInputSchema.parse({ session: "S1", content: "c", mode: { current: "overwrite" } }),
+      ).toThrow();
+    });
+
+    test("a write to the live fields leaves a legacy `current` value alone rather than clearing it", () => {
+      db.query(`UPDATE sessions SET "current" = ? WHERE id = ?`).run(
+        "written before the field was retired",
+        sessionId,
+      );
+
+      expect(
+        isNoteSuccess(noteTool(db, { session: `S${sessionId}`, content: "now" })),
+      ).toBe(true);
+
+      // Dead storage, not a destructive migration: retiring the column
+      // physically is a separate decision (ticket 04's fence).
+      expect(getSession(db, sessionId)?.current).toBe(
+        "written before the field was retired",
+      );
+    });
+  });
+
+  describe("seven fields, split by reader (spec D2)", () => {
+    test("`insight` is a session field a caller can write, not a legacy value the write path clears", () => {
+      expect(
+        isNoteSuccess(
+          noteTool(db, {
+            session: `S${sessionId}`,
+            insight: "A budget the receipt does not report is a budget nobody keeps",
+          }),
+        ),
+      ).toBe(true);
+      expect(getSession(db, sessionId)?.insight).toBe(
+        "A budget the receipt does not report is a budget nobody keeps",
+      );
+
+      // …and a later write to a different field does not silently erase it.
+      expect(
+        isNoteSuccess(noteTool(db, { session: `S${sessionId}`, done: "shipped" })),
+      ).toBe(true);
+      expect(getSession(db, sessionId)?.insight).toBe(
+        "A budget the receipt does not report is a budget nobody keeps",
+      );
+    });
+
+    test("all seven are writable in one call, and the empty-call error names exactly those seven", () => {
+      const result = noteTool(db, {
+        session: `S${sessionId}`,
+        title: "T",
+        content: "C",
+        insight: "I",
+        next_steps: "N",
+        decision: "D",
+        done: "O",
+        reference: "R",
+      });
+      expect(isNoteSuccess(result)).toBe(true);
+
+      const session = getSession(db, sessionId)!;
+      expect([
+        session.title,
+        session.content,
+        session.insight,
+        session.nextSteps,
+        session.decision,
+        session.done,
+        session.reference,
+      ]).toEqual(["T", "C", "I", "N", "D", "O", "R"]);
+
+      const empty = noteTool(db, { session: `S${sessionId}` });
+      expect(resultText(empty)).toBe(
+        "Parameter error: at least one of title, content, insight, next_steps, decision, done, reference is required.",
+      );
+    });
+  });
+
+  describe("guidance values are reported, never enforced (spec D7/D9)", () => {
+    test("a field far over its guidance value is stored whole, and the receipt says it is over", () => {
+      const oversized = "x".repeat(4_000); // ~1000 tok against a 250 guidance
+      const result = noteTool(db, { session: `S${sessionId}`, content: oversized });
+
+      // The reader loses nothing: the writer's signal is not the reader's cut.
+      expect(getSession(db, sessionId)?.content).toBe(oversized);
+      expect(getSession(db, sessionId)?.content?.length).toBe(4_000);
+      expect(resultText(result)).toContain("content 1000/250 (over guidance)");
+    });
+
+    test("each written field carries its own D9 number, and an under-budget field is not flagged", () => {
+      const result = noteTool(db, {
+        session: `S${sessionId}`,
+        title: "t".repeat(40),
+        insight: "i".repeat(40),
+        decision: "d".repeat(40),
+      });
+
+      const text = resultText(result);
+      expect(text).toContain("title 10/30");
+      expect(text).toContain("insight 10/80");
+      expect(text).toContain("decision 10/300");
+      expect(text).not.toContain("(over guidance)");
+    });
+
+    test("a cleared field says so rather than reporting a size", () => {
+      noteTool(db, { session: `S${sessionId}`, done: "shipped" });
+      const result = noteTool(db, {
+        session: `S${sessionId}`,
+        done: null,
+        mode: { done: "overwrite" },
+      });
+
+      expect(resultText(result)).toContain("done (cleared)");
+      expect(getSession(db, sessionId)?.done).toBeNull();
+    });
+
+    test("an appended field reports the total AFTER the write, not the delta", () => {
+      noteTool(db, { session: `S${sessionId}`, decision: "a".repeat(200) });
+      const result = noteTool(db, {
+        session: `S${sessionId}`,
+        decision: "b".repeat(200),
+        mode: { decision: "append" },
+      });
+
+      // 200 + newline + 200 chars ≈ 101 tok. The delta alone would read 50.
+      expect(getSession(db, sessionId)?.decision?.length).toBe(401);
+      expect(resultText(result)).toContain("decision 101/300");
+      expect(resultText(result)).not.toContain("decision 50/300");
+    });
+  });
+
+  describe("the cadence figure, and the band it must not carry (spec D8/D8a)", () => {
+    test("the receipt counts the turns that passed since the last summary update", () => {
+      seedTurn(1, 100);
+      seedTurn(2, 200);
+      seedTurn(3, 300);
+
+      const first = noteTool(
+        db,
+        { session: `S${sessionId}`, decision: "chose X" },
+        { now: () => 1_000 },
+      );
+      expect(resultText(first)).toContain("No previous summary update; 3 turns so far.");
+
+      seedTurn(4, 1_100);
+      seedTurn(5, 1_200);
+      const second = noteTool(
+        db,
+        { session: `S${sessionId}`, done: "shipped X" },
+        { now: () => 1_300 },
+      );
+      expect(resultText(second)).toContain("2 turns since the last summary update.");
+
+      // Written twice inside the same turn: nothing new has passed.
+      const third = noteTool(
+        db,
+        { session: `S${sessionId}`, reference: "/tmp/spec.md" },
+        { now: () => 1_400 },
+      );
+      expect(resultText(third)).toContain("0 turns since the last summary update.");
+    });
+
+    test("an undone turn is not a turn that passed", () => {
+      seedTurn(1, 100);
+      const undone = seedTurn(2, 200);
+      db.query(`UPDATE turns SET status = 'undone' WHERE id = ?`).run(undone);
+
+      expect(
+        resultText(
+          noteTool(db, { session: `S${sessionId}`, done: "d" }, { now: () => 1_000 }),
+        ),
+      ).toContain("1 turn so far.");
+    });
+
+    // Requirement 5, the deliberate asymmetry: a field's guidance value travels
+    // WITH its usage because meeting it is the goal; the cadence target does
+    // NOT, because a writer that knows it updates to reset the counter and the
+    // diagnostic then reads healthy by construction (D8a). The whole receipt is
+    // pinned byte for byte — any band appended anywhere in it fails here.
+    test("the receipt is exactly this, and the healthy band appears nowhere in it", () => {
+      seedTurn(1, 100);
+      seedTurn(2, 200);
+      noteTool(db, { session: `S${sessionId}`, title: "S" }, { now: () => 1_000 });
+      seedTurn(3, 1_100);
+
+      const text = resultText(
+        noteTool(
+          db,
+          { session: `S${sessionId}`, decision: "chose X" },
+          { now: () => 1_200 },
+        ),
+      );
+
+      expect(text).toBe(
+        `Updated S${sessionId}. after write: decision 2/300. 1 turn since the last summary update.`,
+      );
+      // Structural, not just this fixture's numbers: the cadence sentence is
+      // one bare count, so it can carry no target, no ratio, no verdict.
+      expect(text).toMatch(/ \d+ turns? since the last summary update\.$/);
+      expect(text).not.toMatch(
+        /healthy|band|target|ideal|aim|too (often|rarely|long)|should update|per ten|once every/i,
+      );
+      expect(text).not.toMatch(/turns? since[^.]*\//);
     });
   });
 });

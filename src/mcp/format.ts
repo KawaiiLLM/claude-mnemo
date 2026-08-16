@@ -145,7 +145,6 @@ export interface FormattedSession {
   nextSteps?: string | null;
   decision?: string | null;
   done?: string | null;
-  current?: string | null;
   reference?: string | null;
   turnCount?: number | null;
   observationCount?: number | null;
@@ -584,13 +583,18 @@ function formatSessionExpandedWithMode(
     lines.push(`  raw: ${session.jsonlPath}`);
   }
 
-  // D4: render the redesigned summary fields. `decision` falls back to the
-  // legacy `insight` bullets for old sessions (decision NULL); empty
-  // done/current/reference are skipped. decision/done/reference are bullet
-  // lists; current/next are single lines.
+  // D2: render the seven summary fields. Empty ones are skipped;
+  // decision/insight/done/reference are bullet lists, `next` is a single line.
+  //
+  // ticket 04: `current` is deleted — it duplicated `content` (rendered above
+  // as `desc`) at a different compression. `insight` is no longer a fallback
+  // shown only when `decision` is empty: it is one of the seven in its own
+  // right, so it renders whenever it holds something. A legacy row (insight
+  // set, decision NULL) therefore renders exactly as it did before.
   if (session.decision) {
     pushBulletField("decision", session.decision);
-  } else if (session.insight && session.insight.length > 0) {
+  }
+  if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
       lines,
@@ -600,7 +604,6 @@ function formatSessionExpandedWithMode(
   }
 
   pushBulletField("done", session.done);
-  pushField("current", session.current);
   pushField("next", session.nextSteps);
   pushBulletField("reference", session.reference);
 

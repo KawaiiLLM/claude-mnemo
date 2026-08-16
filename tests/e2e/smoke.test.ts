@@ -220,7 +220,11 @@ describe("claude-mnemo smoke test", () => {
       content: "Diagnosed and fixed the refresh race",
       decision: "Chose a mutex over a retry queue [T2]",
       done: "Serialized refresh with a mutex [T2]",
-      current: "Fix landed; regression green",
+      // ticket 04 (spec D2): `current` is deleted. Sending it here refused the
+      // WHOLE call, which is the intended behaviour and is why this fixture
+      // had to change — the seven fields are title/content/insight and
+      // next_steps/decision/done/reference.
+      insight: "A refresh race hides behind a retry queue",
       next_steps: "Backport to the release branch",
     });
 

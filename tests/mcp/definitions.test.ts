@@ -139,6 +139,14 @@ describe("tool surface", () => {
       "If the cited turn were wrong, would the citing turn's conclusion also be wrong?",
     );
     expect(note).toContain("(4) None → no relation");
+    // ticket 04 (spec D2): the session surface is seven fields split by
+    // reader. `current` is deleted, and this description is the contract's
+    // single home — a retired field left standing here would keep teaching it.
+    expect(note).toContain(
+      "Session — title/content/insight: a compressed view for another session browsing this one.",
+    );
+    expect(note).toContain("decision/done/next_steps/reference");
+    expect(note).not.toMatch(/\bdone\/current\b|\bcurrent\/next_steps\b/);
     // 600 tokens by user decree (S15069 T717), raised from 500 (T586) to pay
     // for that procedure. The description is in the cached prefix of every
     // request, so the cap is a real per-turn cost and not a style rule; the
@@ -168,6 +176,21 @@ describe("tool surface", () => {
     expect(() =>
       noteInputSchema.parse({ turn: "S1/T1", status: "extracted" }),
     ).toThrow();
+    // ticket 04 (spec D2): the retired session field is not offered to the
+    // model at all — neither as a value nor as a mode.
+    expect(() =>
+      noteInputSchema.parse({ session: "S1", current: "x" }),
+    ).toThrow();
+    expect(() =>
+      noteInputSchema.parse({
+        session: "S1",
+        content: "c",
+        mode: { current: "overwrite" },
+      }),
+    ).toThrow();
+    expect(
+      noteInputSchema.parse({ session: "S1", insight: "i" }),
+    ).toEqual({ session: "S1", insight: "i" });
     expect(() =>
       noteInputSchema.parse({
         turn: "S1/T1",

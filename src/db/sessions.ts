@@ -174,9 +174,9 @@ export function upsertSession(
 export interface SessionSummaryRewrite {
   title: string;
   content: string;
+  insight: string;
   decision: string;
   done: string;
-  current: string;
   nextSteps: string;
   reference: string;
 }
@@ -187,10 +187,17 @@ export interface SessionSummaryRewrite {
 // already enforced that every field is present (all-or-nothing). The epoch is
 // advanced UNCONDITIONALLY so a stale-forced refresh clears the staleness
 // reminder even when the agent echoes byte-identical fields (D5). Empty strings
-// are written as NULL so read-side fallback (decision empty → legacy insight)
-// works uniformly for new and old sessions. The legacy `insight` column is
-// cleared on every rewrite (D3): once a session is on the new model the
-// deprecated insight must not resurface through the decision-empty fallback.
+// are written as NULL, the empty state every reader already understands.
+//
+// ticket 04 (spec D2): the seven are title/content/insight and
+// next_steps/decision/done/reference. `current` is deleted — this path no
+// longer writes the column at all (it survives as dead storage; retiring it
+// physically is a separate decision), and `insight` is a first-class field
+// rather than a legacy value to clear.
+//
+// No production caller: ticket 03's per-field `updateSessionFields` replaced
+// it everywhere. Kept because the tests that pin the citation rescan address
+// it directly; a deletion is a separate, larger call than this ticket.
 export function updateSessionSummaryRewrite(
   db: Database,
   sessionId: number,
@@ -216,12 +223,11 @@ export function updateSessionSummaryRewrite(
       UPDATE sessions SET
         title = ?,
         content = ?,
+        insight = ?,
         decision = ?,
         done = ?,
-        "current" = ?,
         next_steps = ?,
         "reference" = ?,
-        insight = NULL,
         summary_updated_at_epoch = ?,
         updated_at_epoch = ?
       WHERE id = ?
@@ -251,9 +257,9 @@ export function updateSessionSummaryRewrite(
     .get(
       toNull(fields.title),
       toNull(fields.content),
+      toNull(fields.insight),
       toNull(fields.decision),
       toNull(fields.done),
-      toNull(fields.current),
       toNull(fields.nextSteps),
       toNull(fields.reference),
       nowEpoch,
@@ -269,18 +275,19 @@ export function updateSessionSummaryRewrite(
 
   // Spec C6/C10: a session field can carry a bare `[S<session>/T<n>]` /
   // `[E<n>]` citation, same grammar as a turn or segment body. The seven
-  // fields this rewrite just persisted (`insight` is not among them — D3
-  // clears it unconditionally, it is never something this call writes) are
-  // the session's whole citation-bearing surface, so re-scanning all of them
-  // and reconciling against `memory_edges` is a full rescan, not a diff. The
-  // writer session IS the session being written — a session states nothing
-  // about anyone else's exposure ledger, only its own.
+  // fields this rewrite just persisted are the session's whole
+  // citation-bearing surface, so re-scanning all of them and reconciling
+  // against `memory_edges` is a full rescan, not a diff. The writer session IS
+  // the session being written — a session states nothing about anyone else's
+  // exposure ledger, only its own. `current` is absent because it is no longer
+  // one of the seven (ticket 04): a citation left in the dead column stops
+  // producing an edge, which is the correct reading of a field nothing renders.
   const references = [
     ...parseQualifiedReferences(session.title),
     ...parseQualifiedReferences(session.content),
+    ...parseQualifiedReferences(session.insight),
     ...parseQualifiedReferences(session.decision),
     ...parseQualifiedReferences(session.done),
-    ...parseQualifiedReferences(session.current),
     ...parseQualifiedReferences(session.nextSteps),
     ...parseQualifiedReferences(session.reference),
   ];
@@ -302,9 +309,9 @@ export interface UpdateSessionFieldsInput {
   /** `undefined` = leave alone; `null` = clear; a string = the new value. */
   title?: string | null;
   content?: string | null;
+  insight?: string | null;
   decision?: string | null;
   done?: string | null;
-  current?: string | null;
   nextSteps?: string | null;
   reference?: string | null;
 }
@@ -316,10 +323,14 @@ export interface UpdateSessionFieldsInput {
  * shape `resolveNullable` already gives turns — a caller corrects one field
  * without restating the other six.
  *
- * `insight` is still cleared unconditionally on every call, same reasoning as
- * the whole-rewrite path: any write through the current model means the
- * session has moved onto it, and a stale legacy `insight` must not resurface
- * through the decision-empty read fallback.
+ * ticket 04 (spec D2): `insight` is one of the seven now — a compressed global
+ * view for another session browsing this one — so it is written like any other
+ * field instead of being cleared on every call. The clearing existed to stop a
+ * stale legacy value resurfacing through the decision-empty read fallback; the
+ * renderers no longer have that fallback (they render `insight` in its own
+ * right), so the reason is gone with it. `current` is deleted and is no longer
+ * written at all; the column survives as dead storage, and retiring it
+ * physically is a separate decision.
  *
  * The epoch advances unconditionally on every successful call (D5: even a
  * byte-identical rewrite must clear the staleness reminder), and the full
@@ -352,9 +363,9 @@ export function updateSessionFields(
 
   const title = resolve(input.title, existing.title);
   const content = resolve(input.content, existing.content);
+  const insight = resolve(input.insight, existing.insight);
   const decision = resolve(input.decision, existing.decision);
   const done = resolve(input.done, existing.done);
-  const current = resolve(input.current, existing.current);
   const nextSteps = resolve(input.nextSteps, existing.nextSteps);
   const reference = resolve(input.reference, existing.reference);
 
@@ -374,12 +385,11 @@ export function updateSessionFields(
       UPDATE sessions SET
         title = ?,
         content = ?,
+        insight = ?,
         decision = ?,
         done = ?,
-        "current" = ?,
         next_steps = ?,
         "reference" = ?,
-        insight = NULL,
         summary_updated_at_epoch = ?,
         updated_at_epoch = ?
       WHERE id = ?
@@ -409,9 +419,9 @@ export function updateSessionFields(
     .get(
       title,
       content,
+      insight,
       decision,
       done,
-      current,
       nextSteps,
       reference,
       nowEpoch,
@@ -432,9 +442,9 @@ export function updateSessionFields(
   const references = [
     ...parseQualifiedReferences(session.title),
     ...parseQualifiedReferences(session.content),
+    ...parseQualifiedReferences(session.insight),
     ...parseQualifiedReferences(session.decision),
     ...parseQualifiedReferences(session.done),
-    ...parseQualifiedReferences(session.current),
     ...parseQualifiedReferences(session.nextSteps),
     ...parseQualifiedReferences(session.reference),
   ];
@@ -450,6 +460,36 @@ export function updateSessionFields(
   );
 
   return session;
+}
+
+/**
+ * How many of this session's turns started after `sinceEpoch` — the cadence
+ * figure the `note` receipt reports (spec D8/D10), computed from the summary
+ * timestamp the row already carries rather than from new instrumentation.
+ *
+ * `null` means no summary has ever been written, and then every turn counts:
+ * "nothing has been summarised yet, and this much has happened" is the same
+ * measurement with a different starting point, not a missing value.
+ *
+ * `undone` rows are excluded — a retracted turn is not a turn that passed.
+ * Note the boundary is strict (`>`): a turn that was already open when the
+ * last summary landed is not counted again by the next write.
+ */
+export function countTurnsSince(
+  db: Database,
+  sessionId: number,
+  sinceEpoch: number | null,
+): number {
+  return (
+    db
+      .query<{ count: number }, [number, number]>(
+        `SELECT COUNT(*) AS count FROM turns
+         WHERE session_id = ?
+           AND status != 'undone'
+           AND created_at_epoch > ?`,
+      )
+      .get(sessionId, sinceEpoch ?? -1)?.count ?? 0
+  );
 }
 
 export function getSession(db: Database, id: number): SessionRecord | null {
