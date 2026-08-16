@@ -259,8 +259,8 @@ describe("acceptance criterion 2 — a staged write validates fully and returns 
 // Acceptance criterion 3: the segment tool stages every field
 // ---------------------------------------------------------------------------
 
-describe("acceptance criterion 3 — the segment tool stages create, extend, members, type, tags, body", () => {
-  test("create carries type/tags/body/members; extend changes them again, all staged and landed only at commit", () => {
+describe("acceptance criterion 3 — the segment tool stages create, extend, members, insight, body", () => {
+  test("create carries body/insight/members; extend rewrites them, all staged and landed only at commit", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
@@ -276,8 +276,7 @@ describe("acceptance criterion 3 — the segment tool stages create, extend, mem
       title: "implement+lease: chapter",
       content: "First body.",
       noCandidateReason: "nothing open covers this",
-      type: ["implement"],
-      tags: ["lease"],
+      insight: "the lease route was ruled out: a fence outlives its claim",
       members: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
     });
     expect(engine.pendingCount()).toBe(1);
@@ -288,7 +287,13 @@ describe("acceptance criterion 3 — the segment tool stages create, extend, mem
     const created = db
       .query<{ id: number }, []>("SELECT id FROM segments ORDER BY id DESC LIMIT 1")
       .get()!.id;
-    expect(getSegment(db, created)!.type).toEqual(["implement"]);
+    // Ticket 14: `insight` has to survive the stage -> replay round trip, and
+    // type is DERIVED from the members `markTyped` gave `discuss` (spec K5a) —
+    // nothing in the staged call states it.
+    expect(getSegment(db, created)!.insight).toBe(
+      "the lease route was ruled out: a fence outlives its claim",
+    );
+    expect(getSegment(db, created)!.type).toEqual(["discuss"]);
     expect(getSegmentMemberTurnIds(db, created).sort()).toEqual([t1, t2].sort());
 
     // A second staging run on the same job would find it already `done`;
@@ -307,15 +312,14 @@ describe("acceptance criterion 3 — the segment tool stages create, extend, mem
       action: "extend",
       segmentId: created,
       expectedRevision: current.revision,
-      type: ["implement", "correction"],
-      tags: ["lease", "fencing"],
+      insight: "and the fence has to be renewed, not re-taken",
       members: [`S${sessionDbId}/T2`, `S${sessionDbId}/T3`],
     });
     const extendCommit = extendEngine.commit();
     expect(extendCommit.content[0]!.text).toContain("Committed");
     const extended = getSegment(db, created)!;
-    expect(extended.type).toEqual(["implement", "correction"]);
-    expect(extended.tags).toEqual(["lease", "fencing"]);
+    expect(extended.insight).toBe("and the fence has to be renewed, not re-taken");
+    expect(extended.type).toEqual(["discuss"]);
     expect(getSegmentMemberTurnIds(db, created).sort()).toEqual([t1, t2, t3].sort());
   });
 });

@@ -112,9 +112,24 @@ function seedEraFixture(
     grade: 2,
   });
 
-  ids.research = makeTurn(10, { type: "research", title: "research the spine" });
-  ids.design = makeTurn(11, { type: "design", title: "design the spine" });
-  ids.implement = makeTurn(12, { type: "implement", title: "implement the spine" });
+  // Ticket 14 (spec K5a): a segment's tags and type are DERIVED from its
+  // members, so the row's facets have to be seeded on the turns. Frequency
+  // orders them — extraction-redesign on all three members, rendering on two.
+  ids.research = makeTurn(10, {
+    type: "research",
+    title: "research the spine",
+    tags: ["extraction-redesign"],
+  });
+  ids.design = makeTurn(11, {
+    type: "design",
+    title: "design the spine",
+    tags: ["extraction-redesign", "rendering"],
+  });
+  ids.implement = makeTurn(12, {
+    type: "implement",
+    title: "implement the spine",
+    tags: ["extraction-redesign", "rendering"],
+  });
   ids.orphan = makeTurn(13, { type: "fix", title: "fix the watchdog race" });
   ids.citer = makeTurn(14, { type: "review", title: "review the fix" });
 
@@ -134,8 +149,6 @@ function seedEraFixture(
 
   const segment = createSegment(db, {
     title: "implement the segment spine",
-    type: ["implement"],
-    tags: ["extraction-redesign", "rendering"],
     nowEpoch: CUTOFF,
   });
   ids.segment = segment.id;
@@ -154,8 +167,6 @@ function seedEraFixture(
 
   const delivered = createSegment(db, {
     title: "review pass",
-    type: ["review"],
-    tags: ["rendering"],
     status: "delivered",
     nowEpoch: CUTOFF,
   });
@@ -240,8 +251,13 @@ describe("timeline dual-path rendering across the era boundary", () => {
       .split("\n")
       .find((line) => line.includes(`[E${ids.segment}]`))!;
 
+    // The glyph is 🔍 (research), not 🔧: the three members carry one activity
+    // each, so there is no member mode, and `deriveDominantType` falls back to
+    // the segment's own first type word — which since ticket 14 is the DERIVED
+    // union's first entry (frequency, then vocabulary order), not a type the
+    // settlement pass stated over its members' heads (spec K5a).
     expect(row).toBe(
-      "   [E1] 🔧 #extraction-redesign #rendering implement the segment spine [open] · 3 turns · T10–T12 · 🔍→⚖️→🔧",
+      "   [E1] 🔍 #extraction-redesign #rendering implement the segment spine [open] · 3 turns · T10–T12 · 🔍→⚖️→🔧",
     );
   });
 
@@ -263,7 +279,7 @@ describe("timeline dual-path rendering across the era boundary", () => {
     const output = renderArc(CUTOFF);
 
     expect(output.split("\n").find((line) => line.includes(`[E${ids.segment}]`))).toBe(
-      "   [E1] 🔧 #extraction-redesign #rendering implement the segment spine [open] · 3 turns · T10–T12 · 🔍→⚖️→🔧",
+      "   [E1] 🔍 #extraction-redesign #rendering implement the segment spine [open] · 3 turns · T10–T12 · 🔍→⚖️→🔧",
     );
     expect(output.split("── legacy era")[1]).toContain("legacy feature two");
   });

@@ -242,6 +242,16 @@ export function renderSegmentHeaderLines(input: SegmentHeaderInput): string[] {
       `  - desc: ${truncateText(segment.content, { limit: input.truncate })}`,
     );
   }
+  // Ticket 14 (spec K5): a segment's `insight` is the most reusable thing it
+  // holds — the routes ruled out and why — so it is the one field a reader
+  // checking "did we already try this" most needs. A stored field no read
+  // surface renders is this effort's recurring defect, and it would be
+  // arriving here for the third time.
+  if (segment.insight) {
+    lines.push(
+      `  - insight: ${truncateText(segment.insight, { limit: input.truncate })}`,
+    );
+  }
   const trace = formatPhaseTrace(input.phaseTrace);
   if (trace !== "") {
     lines.push(`  - phases: ${trace}`);

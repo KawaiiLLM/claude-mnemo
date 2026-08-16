@@ -3,7 +3,11 @@ import type { Database } from "bun:sqlite";
 import { reconcileCitedPairs } from "./memory-edges";
 import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
-import { normalizeTypeValues, type MemoryType } from "../shared/type-vocabulary";
+import {
+  MEMORY_TYPES,
+  normalizeTypeValues,
+  type MemoryType,
+} from "../shared/type-vocabulary";
 
 /**
  * Segments and the topic registry (spec D6).
@@ -39,7 +43,16 @@ export interface SegmentRecord {
   topicId: number | null;
   title: string;
   content: string | null;
+  /**
+   * Ticket 14 (spec K5): the most reusable conclusion this semantic memory
+   * holds, including the routes ruled out and why. The inverse default of a
+   * turn's own `insight` — a turn's is empty unless something durable was
+   * learned; a segment's is the point of the row.
+   */
+  insight: string | null;
+  /** DERIVED from the members (spec K5a) — see `recomputeSegmentFacets`. */
   type: MemoryType[];
+  /** DERIVED from the members, most frequent first (spec K5a). */
   tags: string[];
   status: SegmentStatus;
   revision: number;
@@ -61,6 +74,7 @@ interface SegmentRow {
   topicId: number | null;
   title: string;
   content: string | null;
+  insight: string | null;
   type: string;
   tags: string;
   status: SegmentStatus;
@@ -83,6 +97,7 @@ const SEGMENT_COLUMNS = `
   topic_id AS topicId,
   title,
   content,
+  insight,
   type,
   tags,
   status,
@@ -237,7 +252,15 @@ export interface CreateSegmentInput {
   title: string;
   topicId?: number | null;
   content?: string | null;
-  /** Omitted → `[]` (ticket 02: no mechanical title-prefix draft any more). */
+  /** Ticket 14 (spec K5). */
+  insight?: string | null;
+  /**
+   * Storage mechanics only. The settlement tool no longer states either of
+   * these (spec K5a) — `recomputeSegmentFacets` derives both from the members
+   * the moment membership exists — so in production this arrives `[]` and is
+   * overwritten by the first `addSegmentMembers` call. It stays on the INSERT
+   * for a caller that has no members to derive from (a fixture, a repair).
+   */
   type?: string[];
   tags?: string[];
   status?: SegmentStatus;
@@ -254,18 +277,29 @@ export function createSegment(
     db
       .query<
         SegmentRow,
-        [number | null, string, string | null, string, string, SegmentStatus, number, number]
+        [
+          number | null,
+          string,
+          string | null,
+          string | null,
+          string,
+          string,
+          SegmentStatus,
+          number,
+          number,
+        ]
       >(
         `INSERT INTO segments (
-           topic_id, title, content, type, tags, status,
+           topic_id, title, content, insight, type, tags, status,
            created_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING ${SEGMENT_COLUMNS}`,
       )
       .get(
         input.topicId ?? null,
         input.title,
         input.content ?? null,
+        input.insight ?? null,
         JSON.stringify(type),
         JSON.stringify(input.tags ?? []),
         input.status ?? "open",
@@ -283,11 +317,18 @@ export function createSegment(
 }
 
 /**
- * Spec C6: a segment's title/content is its whole citation-bearing surface
- * (type/tags/status are structured, not prose). Every write that lands a
- * segment row — creation and `applySegmentWrites`' compare-and-set rewrite
- * alike — calls this so a bare `[S<session>/T<n>]`/`[E<n>]` in either field
- * is a real, storable citation and a rewrite that drops one drops the pair.
+ * Spec C6: a segment's title/content/insight is its whole citation-bearing
+ * surface (type/tags/status are structured, not prose). Every write that lands
+ * a segment row — creation and `applySegmentWrites`' compare-and-set rewrite
+ * alike — calls this so a bare `[S<session>/T<n>]`/`[E<n>]` in any of those
+ * fields is a real, storable citation and a rewrite that drops one drops the
+ * pair.
+ *
+ * TICKET 14 (spec K7) ADMITTED `insight`. It is scanned in the SAME change
+ * that gave the segment the field, deliberately: a prose field that carries
+ * citations but is not scanned here produces the worst possible reading — the
+ * author sees a citation, the graph has no edge, and nothing reports the
+ * difference.
  *
  * The same resolver every other citation-bearing write uses, asking the one
  * question a pair's existence turns on: does the address name a real row.
@@ -305,6 +346,7 @@ function reconcileSegmentCitedPairs(
   const references = [
     ...parseQualifiedReferences(segment.title),
     ...parseQualifiedReferences(segment.content),
+    ...parseQualifiedReferences(segment.insight),
   ];
   const resolved = validateReferences(db, references).accepted;
   reconcileCitedPairs(
@@ -322,9 +364,116 @@ function indexSegment(db: Database, segment: SegmentRecord): void {
     id: segment.id,
     title: segment.title,
     content: segment.content,
+    insight: segment.insight,
     type: JSON.stringify(segment.type),
     tags: JSON.stringify(segment.tags),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Derived facets (spec K5a, ticket 14)
+// ---------------------------------------------------------------------------
+
+/**
+ * How a tie in tag frequency is broken: ascending code-point order of the tag
+ * itself. Deterministic and independent of member order, which insertion order
+ * is not — two settlements that add the same members in a different sequence
+ * must produce the same stored row, or the FTS facet and the rendered order
+ * would depend on scheduling.
+ */
+function compareDerivedTags(
+  left: { tag: string; count: number },
+  right: { tag: string; count: number },
+): number {
+  return right.count - left.count || (left.tag < right.tag ? -1 : left.tag > right.tag ? 1 : 0);
+}
+
+/**
+ * A segment's `type` and `tags` computed from its members (spec K5a: "a value
+ * the system can compute is a value the model can only get wrong"). A6 has
+ * asserted the type union since it was written and nothing ever checked it —
+ * this is the check.
+ *
+ *   - `type` is the UNION of the members' stated activities, ordered by the
+ *     same frequency rule as the tags (most member turns first), with ties
+ *     broken by the vocabulary's own canonical order (`MEMORY_TYPES`) so the
+ *     value never depends on which member happened to be added first. The
+ *     ordering is load-bearing, not cosmetic: `deriveDominantType`
+ *     (db/segment-rank.ts) falls back to a segment's FIRST type word when the
+ *     member mode is tied, and its whole contract is that the fallback is a
+ *     judgement rather than arrival order — a frequency-ordered union keeps
+ *     that true now that no one states the list. A legacy word a
+ *     pre-vocabulary member still carries is dropped rather than propagated
+ *     upward: `normalizeTypeValues` would refuse it on the next write, so
+ *     storing it would make the segment unwritable.
+ *   - `tags` are the members' tags ordered by FREQUENCY, most frequent first
+ *     (ties by `compareDerivedTags`), which is also the natural truncation
+ *     under a budget. Colon-namespaced tags are bookkeeping, not subject
+ *     matter (`compact:`, `invalidated:`, `delivery:` — see db/turns.ts, which
+ *     keeps exactly those on an invalidation and drops the freeform ones), so
+ *     they never become what a segment is "about".
+ *
+ * Returns the recomputed row, or `null` if the segment is gone. Does NOT bump
+ * `revision`: the revision fence exists for the model's body writes (whose CAS
+ * would otherwise be invalidated by a facet recomputation it never made), and
+ * a facet is no longer something a caller can state, so nothing can conflict.
+ */
+export function recomputeSegmentFacets(
+  db: Database,
+  segmentId: number,
+): SegmentRecord | null {
+  const members = db
+    .query<{ type: string | null; tags: string | null }, [number]>(
+      `SELECT t.type AS type, t.tags AS tags
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id = ?`,
+    )
+    .all(segmentId);
+
+  const typeCounts = new Map<string, number>();
+  const tagCounts = new Map<string, number>();
+  for (const member of members) {
+    for (const word of new Set(parseStringArray(member.type))) {
+      typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
+    }
+    // Per MEMBER, deduplicated: a turn that repeats a tag is still one turn
+    // carrying it, so frequency counts turns and not array entries.
+    for (const tag of new Set(parseStringArray(member.tags))) {
+      if (tag.includes(":") || tag.trim() === "") {
+        continue;
+      }
+      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+    }
+  }
+
+  const type = MEMORY_TYPES.filter((word) => typeCounts.has(word)).sort(
+    (left, right) =>
+      (typeCounts.get(right) ?? 0) - (typeCounts.get(left) ?? 0) ||
+      MEMORY_TYPES.indexOf(left) - MEMORY_TYPES.indexOf(right),
+  );
+  const tags = [...tagCounts.entries()]
+    .map(([tag, count]) => ({ tag, count }))
+    .sort(compareDerivedTags)
+    .map((entry) => entry.tag);
+
+  const updated = mapSegmentRow(
+    db
+      .query<SegmentRow, [string, string, number]>(
+        `UPDATE segments SET type = ?, tags = ? WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`,
+      )
+      .get(JSON.stringify(type), JSON.stringify(tags), segmentId) ?? null,
+  );
+
+  if (updated) {
+    // The whole reason the derived value is STORED rather than resolved at
+    // read time (spec K5a): a segment is FTS-indexed with its tags, so an
+    // un-reindexed recomputation leaves the search facet describing a
+    // membership that no longer exists.
+    indexSegment(db, updated);
+  }
+  return updated;
 }
 
 export function getSegment(db: Database, segmentId: number): SegmentRecord | null {
@@ -348,7 +497,107 @@ export function listOpenSegments(db: Database): SegmentRecord[] {
     .filter((segment): segment is SegmentRecord => segment !== null);
 }
 
-/** Idempotent membership assertion; returns the turn ids newly linked. */
+/** The same columns as `SEGMENT_COLUMNS`, qualified for a join. */
+const JOINED_SEGMENT_COLUMNS = `
+  s.id,
+  s.topic_id AS topicId,
+  s.title,
+  s.content,
+  s.insight,
+  s.type,
+  s.tags,
+  s.status,
+  s.revision,
+  s.created_at_epoch AS createdAtEpoch,
+  s.updated_at_epoch AS updatedAtEpoch
+`;
+
+export interface SegmentWithTopic {
+  segment: SegmentRecord;
+  /** The registry name, resolved here so a reader does not re-query per row. */
+  topicName: string | null;
+}
+
+/**
+ * The most recently active segments, whatever their status (ticket 14, spec
+ * D9's anti-fragmentation surface). Deliberately NOT open-only: a DELIVERED
+ * segment is the evidence that a topic name is established, which is exactly
+ * what the caller has to see before it decides it needs a new one.
+ */
+export function listRecentSegments(
+  db: Database,
+  limit: number,
+): SegmentWithTopic[] {
+  if (limit <= 0) {
+    return [];
+  }
+  return db
+    .query<SegmentRow & { topicName: string | null }, [number]>(
+      `SELECT ${JOINED_SEGMENT_COLUMNS}, tp.name AS topicName
+       FROM segments s
+       LEFT JOIN topics tp ON tp.id = s.topic_id
+       ORDER BY s.updated_at_epoch DESC, s.id DESC
+       LIMIT ?`,
+    )
+    .all(limit)
+    .flatMap((row) => {
+      const segment = mapSegmentRow(row);
+      return segment ? [{ segment, topicName: row.topicName }] : [];
+    });
+}
+
+export interface TopicFrequency {
+  topic: TopicRecord;
+  /** How many segments carry this topic — an established name vs. a one-off. */
+  segmentCount: number;
+}
+
+/**
+ * The topic registry ordered by how many segments carry each name (ticket 14).
+ * A bare alphabetical list makes a name minted once look exactly like the name
+ * five segments share, which is the reading that lets a near-duplicate get
+ * minted next to an established word. Ties break on name, ascending, so the
+ * rendering is stable between two calls that see the same counts.
+ */
+export function listTopicsByFrequency(
+  db: Database,
+  status?: TopicStatus,
+): TopicFrequency[] {
+  const columns = `
+    t.id,
+    t.name,
+    t.aliases,
+    t.status,
+    t.created_at_epoch AS createdAtEpoch,
+    t.updated_at_epoch AS updatedAtEpoch,
+    COUNT(s.id) AS segmentCount
+  `;
+  const sql = `SELECT ${columns}
+     FROM topics t
+     LEFT JOIN segments s ON s.topic_id = t.id
+     ${status ? "WHERE t.status = ?" : ""}
+     GROUP BY t.id
+     ORDER BY segmentCount DESC, t.name ASC`;
+  const rows = status
+    ? db.query<TopicRow & { segmentCount: number }, [TopicStatus]>(sql).all(status)
+    : db.query<TopicRow & { segmentCount: number }, []>(sql).all();
+
+  return rows.flatMap((row) => {
+    const topic = mapTopicRow(row);
+    return topic ? [{ topic, segmentCount: row.segmentCount }] : [];
+  });
+}
+
+/**
+ * Idempotent membership assertion; returns the turn ids newly linked.
+ *
+ * Membership is the ONLY input to `type` and `tags` (spec K5a), so this is
+ * also where they are recomputed — one place, so a caller cannot land members
+ * and forget the derivation, and so the FTS facet can never describe a
+ * membership the row no longer has. Recomputation runs only when this call
+ * actually linked something new: an idempotent re-assertion changes no input
+ * and therefore needs no recomputation.
+ */
 export function addSegmentMembers(
   db: Database,
   segmentId: number,
@@ -368,6 +617,9 @@ export function addSegmentMembers(
     if (row) {
       added.push(row.turnId);
     }
+  }
+  if (added.length > 0) {
+    recomputeSegmentFacets(db, segmentId);
   }
   return added;
 }
@@ -396,6 +648,7 @@ export function getSegmentsForTurn(db: Database, turnId: number): SegmentRecord[
          s.topic_id AS topicId,
          s.title,
          s.content,
+         s.insight,
          s.type,
          s.tags,
          s.status,
@@ -418,6 +671,9 @@ export interface SegmentWrite {
   expectedRevision: number;
   title?: string;
   content?: string | null;
+  /** Ticket 14 (spec K5). `null` clears; omitted leaves the stored value alone. */
+  insight?: string | null;
+  /** See `CreateSegmentInput` — storage mechanics only; the settlement tool states neither (spec K5a). */
   type?: string[];
   tags?: string[];
   status?: SegmentStatus;
@@ -504,6 +760,7 @@ export function applySegmentWrites(
             [
               string,
               string | null,
+              string | null,
               string,
               string,
               SegmentStatus,
@@ -515,6 +772,7 @@ export function applySegmentWrites(
             `UPDATE segments
                SET title = ?,
                    content = ?,
+                   insight = ?,
                    type = ?,
                    tags = ?,
                    status = ?,
@@ -526,6 +784,7 @@ export function applySegmentWrites(
           .get(
             write.title ?? current.title,
             write.content === undefined ? current.content : write.content,
+            write.insight === undefined ? current.insight : write.insight,
             JSON.stringify(type),
             JSON.stringify(write.tags ?? current.tags),
             write.status ?? current.status,

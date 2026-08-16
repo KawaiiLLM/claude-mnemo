@@ -70,24 +70,28 @@ describe("recall segment selector and cross-granularity filters", () => {
     turnIds.research = makeTurn(1, {
       type: "research",
       title: "research the ledger",
-      tags: ["topic:note-ledger"],
+      tags: ["note-ledger"],
     });
     turnIds.design = makeTurn(2, {
       type: "design",
       title: "design the ledger",
-      tags: ["topic:note-ledger"],
+      tags: ["note-ledger"],
     });
     turnIds.implement = makeTurn(3, {
       type: "implement",
       title: "implement the ledger",
-      tags: ["topic:note-ledger"],
+      tags: ["note-ledger"],
     });
-    turnIds.unrelated = makeTurn(4, { type: "ops", title: "release 1.2.3" });
+    turnIds.unrelated = makeTurn(4, {
+      type: "ops",
+      title: "release 1.2.3",
+      tags: ["release"],
+    });
 
     const segment = createSegment(db, {
       title: "implement the note ledger",
       type: ["implement", "design"],
-      tags: ["topic:note-ledger"],
+      tags: ["note-ledger"],
       nowEpoch: CUTOFF,
     });
     segmentId = segment.id;
@@ -112,7 +116,7 @@ describe("recall segment selector and cross-granularity filters", () => {
     const delivered = createSegment(db, {
       title: "ops release 1.2.3",
       type: ["ops"],
-      tags: ["topic:release"],
+      tags: ["release"],
       status: "delivered",
       nowEpoch: CUTOFF,
     });
@@ -131,7 +135,25 @@ describe("recall segment selector and cross-granularity filters", () => {
     expect(output).toContain("implement the note ledger");
     expect(output).toContain("[open]");
     expect(output).toContain("3 turns");
-    expect(output).toContain("#topic:note-ledger");
+    expect(output).toContain("#note-ledger");
+  });
+
+  test("a segment's insight reaches the reader — the field exists for the agent checking \"did we already rule this out\" (ticket 14, spec K5)", () => {
+    applySegmentWrites(
+      db,
+      [
+        {
+          segmentId,
+          expectedRevision: getSegment(db, segmentId)!.revision,
+          insight: "the per-turn ledger route was ruled out: it re-reads on every write",
+        },
+      ],
+      { nowEpoch: CUTOFF },
+    );
+
+    expect(recallMemory(db, { id: `E${segmentId}` })).toContain(
+      "insight: the per-turn ledger route was ruled out",
+    );
   });
 
   test("the drill-down puts anchors first, then the derived rank", () => {
@@ -190,7 +212,7 @@ describe("recall segment selector and cross-granularity filters", () => {
   });
 
   test("tag: hits the segment AND its member turns in one query", () => {
-    const output = recallMemory(db, { query: "tag:topic:note-ledger" });
+    const output = recallMemory(db, { query: "tag:note-ledger" });
 
     expect(output).toContain(`[E${segmentId}]`);
     expect(output).toContain("implement the ledger");
@@ -230,10 +252,10 @@ describe("recall segment selector and cross-granularity filters", () => {
     }).id;
 
     expect(
-      recallMemory(db, { query: `tag:topic:note-ledger session:S${sessionId}` }),
+      recallMemory(db, { query: `tag:note-ledger session:S${sessionId}` }),
     ).toContain(`[E${segmentId}]`);
     expect(
-      recallMemory(db, { query: `tag:topic:note-ledger session:S${other}` }),
+      recallMemory(db, { query: `tag:note-ledger session:S${other}` }),
     ).not.toContain(`[E${segmentId}]`);
   });
 });

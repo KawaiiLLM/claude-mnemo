@@ -90,7 +90,7 @@ const SETTLEMENT_SEGMENT_TOOL_DESCRIPTION =
   "this call's KEY, so re-staging the same handle REPLACES this create " +
   "rather than minting a second one), noCandidateReason (required — what " +
   "you searched in the topic registry and open segments, and why nothing " +
-  "fit), topic/topicAliases/content/type/tags/status/members (optional). " +
+  "fit), topic/topicAliases/content/insight/status/members (optional). " +
   "extend: segmentId + expectedRevision naming an already-existing, OPEN " +
   "segment (this is this call's KEY — re-staging the same segmentId " +
   "replaces the earlier call; a handle from THIS run can never be an " +
@@ -101,12 +101,17 @@ const SETTLEMENT_SEGMENT_TOOL_DESCRIPTION =
   "for a turn that genuinely fits no chapter, instead of inventing one. " +
   "members: \"S<session>/T<prompt>\" turn addresses (never a handle — a " +
   "member is always a turn); an address that does not resolve is dropped, " +
-  "not a failure of the call. Cite member turns inline in content as " +
+  "not a failure of the call. This tool takes NO type and NO tags (spec " +
+  "K5a): both are derived from the members — type is the union of their " +
+  "activities, tags are their tags ordered by frequency — and a call that " +
+  "names either is refused. insight: the arc's most reusable conclusion, " +
+  "including the routes ruled out and why. Cite member turns inline in " +
+  "content or insight as " +
   "[S<session>/T<prompt>] and other segments as [E<n>] — those citations " +
   "become the segment's anchors automatically, no separate step; an address " +
   "that does not resolve is likewise dropped and reported, not a failure. A " +
   "successful create's receipt states its handle as \"E#<handle>\", scoped " +
-  "to THIS run only — cite it as [E#<handle>] in a LATER segment's content " +
+  "to THIS run only — cite it as [E#<handle>] in a LATER segment's content or insight " +
   "to refer to the segment you just created before it has a real id (never " +
   "in members, never as an extend target); `commit` resolves every handle " +
   "to a real id, in the order you staged them.";

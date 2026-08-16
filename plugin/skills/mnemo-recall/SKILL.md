@@ -33,13 +33,23 @@ Also use it proactively before answering questions that may already be covered b
 Session  [S12]   one per Claude Code conversation
   Turn     [T3]   one per user prompt (promptNumber-scoped to session)
     Observation [O87]   one per tool call
+
+Segment  [E47]   one arc of work, spanning whatever sessions it took
 ```
+
+A session is a container; a **segment** is a task. It collects the turns of one
+arc of work wherever they happened, so recalling a task does not mean replaying
+every session it touched. Its status says which of two things you are reading:
+`[open]` is that task's still-live working state, `[delivered]` is its settled
+impression — what was concluded and which routes were ruled out. Check for one
+before redoing a task.
 
 Output IDs map directly to selectors:
 
 - `[S12]` → `recall(id="S12")`
 - `[S12/T3]` → `recall(id="S12/T3")`
 - `[O87]` → `recall(id="O87")`
+- `[E47]` → `recall(id="E47")`
 
 ## Progressive Workflow
 
@@ -66,7 +76,20 @@ recall(id="S12", depth="expanded")              # session content + raw transcri
 
 At expanded session depth, the output includes a `raw:` path pointing at the source JSONL. `mnemo-replay` reads a turn's full text and tool I/O straight from the database; that `raw:` path is the handoff only when you need exact bytes the database does not mirror.
 
-### Step 3 — Turn detail and observations
+### Step 3 — Read the arc, not the session
+
+```text
+recall(id="E47")                                # one segment: body, insight, members
+recall(id="E*")                                 # every segment
+recall(id="E5..9")                              # segment range
+```
+
+A segment row leads with its title, `[open]`/`[delivered]` status and member
+count, then its conclusion and the member turns that carry it. Drill into a
+member with the ordinary `S12/T3` form. Segments also come back from `query=`
+search alongside sessions and turns, and answer `tag:` and `type:` there.
+
+### Step 4 — Turn detail and observations
 
 ```text
 recall(id="S12/T3", depth="expanded")           # one turn with prompt + response + file lists
@@ -75,7 +98,7 @@ recall(id="S12/T*/O*")                          # observations across the sessio
 recall(id="O87", depth="expanded")              # one observation with full stored fields
 ```
 
-### Step 4 — Escalate only when needed
+### Step 5 — Escalate only when needed
 
 If a field is truncated, raise `truncate` first:
 
@@ -111,6 +134,7 @@ Child collections are always shown as a fixed preview with a `+N more` hint. To 
 | `S12/T*/O*` | Observations for an entire session |
 | `O87` | Single observation (global DB id) |
 | `T418` | Single turn (global DB id) |
+| `E*` / `E47` / `E5..9` | Segments — one arc of work, not a session |
 
 In the `S12/T3` form the turn id is a session-scoped prompt number. Bare `T418` is the global DB id; prefer the `S/T` form unless you already hold a DB id.
 
@@ -118,9 +142,9 @@ In the `S12/T3` form the turn id is a session-scoped prompt number. Bare `T418` 
 
 | Prefix | Applies to | Notes |
 |---|---|---|
-| `type:fix` | turns, observations | Matches a stored activity word. A turn's type is a list, so this matches a turn that carries the word among others. |
+| `type:fix` | turns, observations, segments | Matches a stored activity word. A turn's type is a list, so this matches a turn that carries the word among others. A segment's is the union of its members'. |
 | `file:src/auth.ts` | turns, observations | Substring match against `files_read` + `files_modified`. |
-| `tag:svg-filter` | sessions, turns | Exact-match a stored turn tag. A **bare** tag is what the turn was about; a **prefixed** one (`compact:`, `invalidated:`, `delivery:`) is bookkeeping. The match is anchored to a whole tag, so `tag:svg` does NOT match `svg-filter`. |
+| `tag:svg-filter` | sessions, turns, segments | Exact-match a stored tag; a segment's tags are its members', most frequent first. A **bare** tag is what the turn was about; a **prefixed** one (`compact:`, `invalidated:`, `delivery:`) is bookkeeping. The match is anchored to a whole tag, so `tag:svg` does NOT match `svg-filter`. |
 | `project:/abs/path` | sessions, turns, observations | Exact match against `session.project`. |
 | `session:S12` | sessions, turns, observations | Restrict a full-text search to one session. Accepts `S12` or bare `12`; a malformed id is ignored. |
 
@@ -144,6 +168,14 @@ recall(query="auth race")
 recall(id="S12/T3", depth="expanded")
 ```
 
+**"Did we already try X, and why did it not work?"**
+```text
+recall(query="X")
+# → sees [E47] "..." [delivered]
+recall(id="E47")
+# → the arc's conclusion and the routes it ruled out, without replaying its sessions
+```
+
 **"Show me the exact edit to login.ts last Thursday"**
 ```text
 recall(query="file:src/login.ts", time="2026-04-03")
@@ -156,6 +188,7 @@ recall(id="S8", depth="expanded")
 ## Guidance
 
 - Prefer `recall` for search, browsing, and structured answers.
+- Before starting a task that may already have been done, look for its segment: `[delivered]` says it was finished, `[open]` says it is in flight and gives you its working state.
 - Narrow with `id`, `query`, or `time` before raising `depth`, `pageSize`, or `truncate`.
 - Use `project:<path>` when the question is project-local.
 - When `recall` shows a `raw:` path or a truncation hint, that is your signal to switch to `mnemo-replay`.

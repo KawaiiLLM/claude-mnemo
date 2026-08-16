@@ -65,6 +65,8 @@ export interface SegmentFtsRecord {
   id: number;
   title: string;
   content: string | null;
+  /** Ticket 14 (spec K5): shares the `extra` slot with the facets below, exactly as a turn's own `insight` occupies that slot. */
+  insight?: string | null;
   /** JSON arrays as stored on the row; both go into the `extra` slot. */
   type: string | null;
   tags: string | null;
@@ -508,7 +510,7 @@ export function indexSegmentToFTS(db: Database, segment: SegmentFtsRecord): void
     segment.id,
     segment.title,
     segment.content,
-    facets,
+    [segment.insight ?? "", facets].filter((part) => part.trim() !== "").join("\n"),
     null,
     null,
   );
@@ -610,7 +612,7 @@ export function rebuildSearchIndex(db: Database): void {
 
   const segmentRows = db
     .query<SegmentFtsRecord, []>(
-      "SELECT id, title, content, type, tags FROM segments ORDER BY id",
+      "SELECT id, title, content, insight, type, tags FROM segments ORDER BY id",
     )
     .all();
   for (const segment of segmentRows) {

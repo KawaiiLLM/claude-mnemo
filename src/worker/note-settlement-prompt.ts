@@ -27,6 +27,19 @@ import type {
  * Session-summary writing (the old duty 7) is gone from this prompt
  * entirely — spec D1 (amended) moves it to the main agent, and settlement
  * has no tool that could write it any more.
+ *
+ * TICKET 14'S CHANGE (spec K): the segment stops being an unbounded chapter
+ * and becomes ONE ARC, stated in the grading rubric's own vocabulary rather
+ * than a second one invented here — duty 3 reads the partition off the grades
+ * duty 1 just assigned (K2). Duty 4 gains `insight` and the no-retelling rule
+ * (K5), and says outright that membership is exhaustive while body citations
+ * are the load-bearing few (K6). Duty 6 stops asking for `type`/`tags` — both
+ * are derived from the members now (K5a) — and states the lifecycle instead:
+ * an open segment is the task's working state, a delivered one its impression,
+ * and a live task's segment is NOT closed at window end (K4). The candidate
+ * list is no longer open-only: 50 most recently active, with topics, over a
+ * frequency-ordered registry, which is the anti-fragmentation surface D9's
+ * `noCandidateReason` gate always assumed it had.
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -67,19 +80,36 @@ function renderWindowTurn(turn: NoteSettlementWindowTurn): string {
   return lines.join("\n");
 }
 
-function renderOpenSegments(context: NoteSettlementContext): string {
-  if (context.openSegments.length === 0) {
-    return "(none open)";
+/**
+ * The 50 most recently active segments (ticket 14, spec D9's anti-fragmentation
+ * surface). Not open-only: a DELIVERED segment is the evidence that a topic
+ * name is already established, which is exactly what the model has to see
+ * before deciding nothing fits and minting a near-duplicate.
+ *
+ * How much of each row is shown follows the lifecycle roles duty 6 states. An
+ * OPEN segment is a task's working state, so it is shown whole — it is what a
+ * later window resumes from and the only thing `extend` can target. A closed
+ * one is an impression: its title, its topic and its `insight` are what make it
+ * recognizable as "this was already done", and its body is one
+ * `recall(id="E<n>")` away.
+ */
+function renderRecentSegments(context: NoteSettlementContext): string {
+  if (context.recentSegments.length === 0) {
+    return "(no segments yet)";
   }
-  return context.openSegments
-    .map((segment) => {
+  return context.recentSegments
+    .map(({ segment, topicName }) => {
       const head =
-        `[E${segment.id}] rev=${segment.revision} topic_id=${segment.topicId ?? "-"} ` +
-        `type=${segment.type.join(",") || "-"} tags=${segment.tags.join(",") || "-"}`;
+        `[E${segment.id}] [${segment.status}] rev=${segment.revision} ` +
+        `topic=${topicName ?? "-"} type=${segment.type.join(",") || "-"} ` +
+        `tags=${segment.tags.join(",") || "-"}`;
       return [
         head,
         `  title: ${segment.title}`,
-        segment.content ? `  content: ${segment.content}` : null,
+        segment.status === "open" && segment.content
+          ? `  content: ${segment.content}`
+          : null,
+        segment.insight ? `  insight: ${segment.insight}` : null,
       ]
         .filter((line): line is string => line !== null)
         .join("\n");
@@ -87,16 +117,25 @@ function renderOpenSegments(context: NoteSettlementContext): string {
     .join("\n");
 }
 
+/**
+ * The topic registry ordered by how many segments carry each name (ticket 14).
+ * Alphabetical order made a name minted once look exactly like the name five
+ * segments share; frequency makes an established name visibly established and
+ * a one-off visibly a one-off, which is the reading `noCandidateReason` has
+ * always assumed the model could do and never actually could.
+ */
 function renderTopics(context: NoteSettlementContext): string {
-  if (context.activeTopics.length === 0) {
+  if (context.topicRegistry.length === 0) {
     return "(registry empty)";
   }
-  return context.activeTopics
-    .map((topic) =>
-      topic.aliases.length > 0
-        ? `- ${topic.name} (aliases: ${topic.aliases.join(", ")})`
-        : `- ${topic.name}`,
-    )
+  return context.topicRegistry
+    .map(({ topic, segmentCount }) => {
+      const aliases =
+        topic.aliases.length > 0 ? ` (aliases: ${topic.aliases.join(", ")})` : "";
+      return `- ${topic.name} — ${segmentCount} segment${
+        segmentCount === 1 ? "" : "s"
+      }${aliases}`;
+    })
     .join("\n");
 }
 
@@ -116,17 +155,18 @@ export function renderNoteSettlementPrompt(
     "## Duties",
     "",
     "Everything below is a TOOL CALL — `note` (turn review, reconstruction,",
-    "relations) and `segment` (create/extend a chapter, its members, type,",
-    "tags, body) — followed by exactly one `commit` once you believe the",
+    "relations) and `segment` (create/extend an arc, its members, body,",
+    "status) — followed by exactly one `commit` once you believe the",
     "window is done. A `note`/`segment` call VALIDATES immediately and tells",
     "you what it found, but writes nothing to a stored row by itself — only",
     "`commit` does that, landing everything you have staged in one",
     "transaction, or reporting exactly what is still missing and keeping",
     "every staged call intact so you can fill the gap and call `commit`",
-    "again. Do the turn-by-turn `note` calls FIRST: segmentation is LAST because it",
-    "consumes the facts they settle — a segment's type is the union of its",
-    "members' real activities, which is only meaningful once those members",
-    "have activities.",
+    "again. Do the turn-by-turn `note` calls FIRST: segmentation is LAST",
+    "because it consumes the facts they settle — the grade that says where an",
+    "arc begins (duty 3), and the activities and tags a segment's own type and",
+    "tags are DERIVED from (duty 6), which are only meaningful once every",
+    "member has them.",
     "",
     "1. TURN REVIEW, via the `note` tool. For EVERY turn in the window below —",
     "   including one that already carries a note — call `note` with `turn`,",
@@ -164,19 +204,30 @@ export function renderNoteSettlementPrompt(
         `window does not list here is not this dispatch's to reconstruct.`
       : "2. RECONSTRUCTION. No turn in this window needs one.",
     "",
-    "3. SEGMENT ATTACHMENT, via the `segment` tool. For each window turn decide",
-    "   which segment it joins, or that it joins none:",
+    "3. SEGMENT ATTACHMENT, via the `segment` tool. A SEGMENT IS ONE ARC — the",
+    "   same arc the rubric in duty 1 already partitions this session into, not",
+    "   a second unit judged by different rules. Read the partition off the",
+    "   grades you just assigned: a Grade 4 (a task origin or re-foundation)",
+    "   OPENS a segment, the NEXT Grade 4 closes it, and a Grade 3 belongs to",
+    "   the segment its nearest preceding Grade 4 opened — the same attachment",
+    "   the rubric already requires of a Grade 3. Grades 0-2 attach the same",
+    "   way. A re-foundation opens the next segment and cites the Grade 4 it",
+    "   re-founds, exactly as it does at turn level; one session may hold",
+    "   several arcs, and an arc may run on past this window's end.",
+    "",
+    "   With that partition in hand, for each window turn decide which segment",
+    "   it joins, or that it joins none:",
     "   - same topic as an open segment, work continuous with it → EXTEND that",
     "     segment (action=\"extend\", the real segmentId shown below, copy its",
     "     revision as expectedRevision) — an open segment's id and revision are",
-    "     always legal, whether or not this prompt's \"Open segments\" list below",
-    "     happens to show it; never a handle from this same run (see the handle",
-    "     note below — a handle has no real id yet, so it can never be an",
-    "     extend target);",
+    "     always legal, whether or not this prompt's \"Recent segments\" list",
+    "     below happens to show it; never a handle from this same run (see the",
+    "     handle note below — a handle has no real id yet, so it can never be",
+    "     an extend target);",
     "   - same topic but the segment has been silent for a long stretch, or the",
     "     work restarted from a different premise → CREATE a new segment on the",
     "     same topic (action=\"create\");",
-    "   - no topic in the registry fits → SEARCH the registry and the open",
+    "   - no topic in the registry fits → SEARCH the registry and the recent",
     "     segments first, then create. A create MUST carry noCandidateReason",
     "     naming what you looked for and why nothing matched. Minting a near-",
     "     duplicate topic is the failure this rule exists to prevent; reuse an",
@@ -194,22 +245,40 @@ export function renderNoteSettlementPrompt(
     "   \"lease-fencing\") — this is that call's own key, so re-staging the SAME",
     "   handle later in this run REPLACES that create rather than minting a",
     "   second one. The receipt states it back as \"E#<handle>\", scoped to THIS",
-    "   run only — cite it as [E#<handle>] in a LATER segment's `content` to",
+    "   run only — cite it as [E#<handle>] in a LATER segment's `content` or",
+    "   `insight` to",
     "   refer to the segment you just created before it has a real id;",
     "   `commit` resolves every handle to a real id, in the order you staged",
     "   them. A handle is a CITATION only: it is never a `members` entry (a",
     "   member is always a turn) and never an `extend` target (extend needs a",
     "   real, already-existing segment id).",
     "",
-    "4. SEGMENT BODY, the `segment` tool's `content`. Conclusion first, then how",
-    "   the work got there, including the alternatives that were rejected and",
-    "   who decided. Cite member turns inline as [S<session>/T<prompt>] and",
-    "   other segments as [E<n>] (or [E#<handle>] for one this run itself",
-    "   created) — those citations become the segment's anchors automatically,",
-    "   so cite the turns that carry the conclusion, not every member. Only ids",
-    "   shown in this prompt, or a handle this run itself assigned, are legal —",
-    "   an address that does not resolve is dropped and reported, not a",
-    "   failure of the call.",
+    "4. SEGMENT BODY, the `segment` tool's `content` and `insight`. A turn note",
+    "   records what happened in one turn; a segment carries what reading every",
+    "   one of its member turns would NOT give you.",
+    "   - `content`: the conclusion first, then how the work got there,",
+    "     including the alternatives that were rejected and who decided.",
+    "   - `insight`: the most reusable thing this arc now knows — including the",
+    "     routes ruled out and why they were ruled out. A turn's `insight` is",
+    "     empty by default; a segment's is the point of the row, because it is",
+    "     what stops the same route being tried again.",
+    "   THE NO-RETELLING RULE, and it is checkable sentence by sentence:",
+    "   anything readable from the member turns does not belong in the segment.",
+    "   Before you keep a sentence, ask whether a reader of the members would",
+    "   already have it; if yes, delete it. A segment that summarizes its",
+    "   members is pure cost — they are one `recall` away and they say it",
+    "   better.",
+    "   MEMBERS ARE EXHAUSTIVE, CITATIONS ARE THE LOAD-BEARING FEW. Membership",
+    "   is attention allocation: every window turn is a member of some segment,",
+    "   explicitly excluded, or already skipped — no turn is left unaddressed.",
+    "   The body's citations are the opposite: cite the turns that carry the",
+    "   conclusion, never every member. Cite member turns inline as",
+    "   [S<session>/T<prompt>] and other segments as [E<n>] (or [E#<handle>]",
+    "   for one this run itself created) — in `content` and in `insight`",
+    "   alike, both are scanned — and those citations become the segment's",
+    "   anchors automatically. Only ids shown in this prompt, or a handle this",
+    "   run itself assigned, are legal — an address that does not resolve is",
+    "   dropped and reported, not a failure of the call.",
     "",
     `5. RELATIONS, via the \`note\` tool's evidenceFor/evidenceAgainst/supersedes/`,
     `dependsOn fields (${CITATION_RELATIONS.join(" / ")}). Decide with four`,
@@ -229,15 +298,32 @@ export function renderNoteSettlementPrompt(
     "   in this SAME run just created. A retry that replaces an abandoned",
     "   attempt is `supersedes`.",
     "",
-    `6. SEGMENT TYPE AND TAG, the \`segment\` tool's type/tags fields. Now that`,
-    `   step 1 settled every member's own activity, a segment's type is the`,
-    `   union of those reviewed activities — multi-valued, from`,
-    `   ${MEMORY_TYPES.join(", ")} — never a fresh guess at the chapter as a`,
-    "   whole. A turn that reversed an earlier one carries `correction` on",
+    "6. SEGMENT LIFECYCLE, the `segment` tool's `status`. A segment plays two",
+    "   different roles depending on it:",
+    "   - OPEN is the task's WORKING STATE — what a later session resumes this",
+    "     task from. It is the only status `extend` can target.",
+    "   - DELIVERED is the task's IMPRESSION — the settled memory of having",
+    "     done the thing, kept so the work is not redone and the routes ruled",
+    "     out are not retried. A delivered segment is frozen: it is overturned",
+    "     by a later segment's citation, never by a rewrite.",
+    "   A SEGMENT WHOSE TASK IS STILL LIVE IS NOT CLOSED AT WINDOW END. This",
+    "   window ending is not the task ending, and neither is this session",
+    "   ending — an arc is expected to outrun both. Deliver a segment only when",
+    "   the work itself concluded: shipped, merged, answered, or abandoned",
+    "   (`abandoned`) because it was dropped. If you cannot name the outcome,",
+    "   the segment stays open; leaving it open costs one candidate line in the",
+    "   next window's prompt, while closing it early costs the accumulation",
+    "   this whole layer exists for.",
+    "",
+    `   You do NOT state a segment's type or tags: the tool takes neither, and`,
+    `   a call that names one is refused. Both are DERIVED from the members —`,
+    `   type is the union of the activities step 1 settled (from`,
+    `   ${MEMORY_TYPES.join(", ")}), tags are the members' tags ordered by how`,
+    `   many members carry each — and both are recomputed every time membership`,
+    "   changes. That is why the turn-by-turn `note` calls come first: they are",
+    "   the inputs. A turn that reversed an earlier one carries `correction` on",
     "   ITSELF (step 1) plus a `supersedes` relation (step 5) to the turn it",
-    "   overturned; there is no separate value for the casualty. tags are",
-    "   topic words drawn from the registry below; reuse the registered",
-    "   spelling.",
+    "   overturned; there is no separate value for the casualty.",
     "",
     "7. COMMIT. Once every window turn is reviewed, every owed note is",
     "   reconstructed, and every window turn has either joined a segment or",
@@ -251,11 +337,12 @@ export function renderNoteSettlementPrompt(
     "   rather than adding to it. Nothing about this window is durable until a",
     "   `commit` call succeeds.",
     "",
-    "## Open segments (candidates to extend)",
+    "## Recent segments (most recently active first; [open] ones are the",
+    "   candidates to extend, [delivered] ones are what has already been done)",
     "",
-    renderOpenSegments(context),
+    renderRecentSegments(context),
     "",
-    "## Topic registry (active)",
+    "## Topic registry (active), most-used name first",
     "",
     renderTopics(context),
     "",

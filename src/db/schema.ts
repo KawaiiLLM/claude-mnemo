@@ -383,6 +383,11 @@ const SCHEMA_SQL = `
     topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
     title TEXT NOT NULL,
     content TEXT,
+    -- Ticket 14 (spec K5): the segment's most reusable conclusion, including
+    -- the routes ruled out and why. Same column as a turn's insight and the
+    -- inverse default: a turn's is empty unless something durable was learned,
+    -- a segment's is the point of the row.
+    insight TEXT,
     type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
     tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
     -- open = still accepting members and rewrites; delivered = closed by a
@@ -1236,6 +1241,7 @@ export function initializeSchema(db: Database): void {
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureTurnSignificanceGradeColumn(db);
+  ensureSegmentInsightColumn(db);
   ensureTurnCitationsSchema(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
@@ -1691,6 +1697,13 @@ function ensureTurnAssistantTranscriptColumn(db: Database): void {
 function ensureTurnInvalidationColumns(db: Database): void {
   addColumnIfMissing(db, "turns", "was_interrupted", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "turns", "was_rolled_back", "INTEGER NOT NULL DEFAULT 0");
+}
+
+// Ticket 14 (spec K5): `segments.insight`. Forward-only — an existing segment
+// keeps NULL, which reads exactly as "this segment never stated one" rather
+// than as a lost value, so no backfill is possible or wanted.
+function ensureSegmentInsightColumn(db: Database): void {
+  addColumnIfMissing(db, "segments", "insight", "TEXT");
 }
 
 function ensureTurnSignificanceGradeColumn(db: Database): void {

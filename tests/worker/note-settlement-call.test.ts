@@ -376,7 +376,7 @@ describe("settlement context assembly", () => {
     expect(reviewIndex).toBeGreaterThan(-1);
     expect(reconstructionIndex).toBeGreaterThan(reviewIndex);
     expect(segmentIndex).toBeGreaterThan(reconstructionIndex);
-    expect(prompt).toContain("segmentation is LAST because it");
+    expect(prompt).toContain("segmentation is LAST");
     expect(prompt).toContain("via the `note` tool");
     expect(prompt).not.toContain("turn_review");
   });
@@ -419,8 +419,6 @@ describe("settlement dispatch — staged writes and commit (ticket 10b, spec A7)
     const existing = createSegment(db, {
       title: "implement+lease: fencing the claim",
       content: "Earlier chapter.",
-      type: ["implement"],
-      tags: ["note-settlement"],
       nowEpoch: NOW - 5_000,
     });
     // Ticket 07 (spec C7): a judged relation is legal only on a pair present
@@ -483,8 +481,7 @@ describe("settlement dispatch — staged writes and commit (ticket 10b, spec A7)
           content:
             "Lease fencing landed. The generation check in [S1/T3] is what " +
             "makes a late dispatch harmless; the shape came from [S1/T1].",
-          type: ["implement", "correction"],
-          tags: ["note-settlement", "lease"],
+          insight: "A generation check beats a timestamp: the claim, not the clock, is the fence.",
           members: ["S1/T1", "S1/T3"],
         });
         engine.stageSegmentWrite({
@@ -495,8 +492,6 @@ describe("settlement dispatch — staged writes and commit (ticket 10b, spec A7)
           noCandidateReason: "No open segment and no registered topic covers hole reconstruction.",
           title: "design+holes: reconstructing written-off turns",
           content: "Every gap in this window gets a note now. [S1/T2]",
-          type: ["design"],
-          tags: ["hole reconstruction"],
           members: ["S1/T2", "S1/T4"],
         });
         engine.commit();
@@ -505,12 +500,18 @@ describe("settlement dispatch — staged writes and commit (ticket 10b, spec A7)
     )({ job: fixture.job });
     expect(outcome).toEqual({ ok: true });
 
-    // Segments: one extended (multi-valued type, spec B5), one created
-    // against a freshly minted topic.
+    // Segments: one extended, one created against a freshly minted topic.
+    // Ticket 14 (spec K5a): neither staged call states type or tags — both are
+    // DERIVED from the members the same run just reviewed. T1 is design, T3 is
+    // implement+correction, each once, so the frequency tie breaks on
+    // vocabulary order; both members carry the tag `lease`.
     const extended = getSegment(db, existing.id)!;
     expect(extended.revision).toBe(existing.revision + 1);
-    expect(extended.type).toEqual(["implement", "correction"]);
-    expect(extended.tags).toEqual(["note-settlement", "lease"]);
+    expect(extended.type).toEqual(["design", "implement", "correction"]);
+    expect(extended.tags).toEqual(["lease"]);
+    expect(extended.insight).toBe(
+      "A generation check beats a timestamp: the claim, not the clock, is the fence.",
+    );
     const created = listOpenSegments(db).find((segment) => segment.id !== existing.id)!;
     expect(created.title).toContain("reconstructing written-off turns");
     expect(listTopics(db, "active").map((topic) => topic.name)).toEqual(["hole reconstruction"]);

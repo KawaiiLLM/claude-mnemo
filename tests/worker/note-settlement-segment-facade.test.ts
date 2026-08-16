@@ -20,6 +20,7 @@ import {
 import { upsertSession } from "../../src/db/sessions";
 import {
   evaluateSettlementSegmentWrite,
+  settlementSegmentWriteInputSchema,
   type SettlementHandleMap,
   type SettlementSegmentWriteInput,
 } from "../../src/worker/note-settlement-segment-facade";
@@ -60,13 +61,17 @@ function seedSession(): number {
   }).id;
 }
 
-function seedTurn(sessionDbId: number, promptNumber: number): number {
+function seedTurn(
+  sessionDbId: number,
+  promptNumber: number,
+  facets: { type?: string[]; tags?: string[] } = {},
+): number {
   return db
-    .query<{ id: number }, [number, number, string, string, number]>(
+    .query<{ id: number }, [number, number, string, string, number, string, string]>(
       `INSERT INTO turns (
          session_id, prompt_number, status, user_prompt, assistant_response,
-         tool_call_count, created_at_epoch
-       ) VALUES (?, ?, 'active', ?, ?, 3, ?)
+         tool_call_count, created_at_epoch, type, tags
+       ) VALUES (?, ?, 'active', ?, ?, 3, ?, ?, ?)
        RETURNING id`,
     )
     .get(
@@ -75,6 +80,8 @@ function seedTurn(sessionDbId: number, promptNumber: number): number {
       `prompt ${promptNumber}`,
       `response ${promptNumber}`,
       NOW - 1_000 + promptNumber,
+      JSON.stringify(facets.type ?? []),
+      JSON.stringify(facets.tags ?? []),
     )!.id;
 }
 
@@ -120,29 +127,101 @@ function createInput(overrides: Partial<SettlementSegmentWriteInput> = {}): Sett
     title: "implement+lease: a new chapter",
     content: "Conclusion first.",
     noCandidateReason: "No open segment or registered topic covers this.",
-    type: ["implement"],
-    tags: ["lease"],
     members: [],
     ...overrides,
   };
 }
 
-describe("the retired topic: tag namespace is refused, not silently revived (ticket 10d)", () => {
-  test("a create carrying a topic: prefixed tag is refused, and nothing lands", () => {
+describe("type and tags left the tool: they are derived from the members (spec K5a, ticket 14)", () => {
+  // The retired `topic:` tag guard that used to live here went with the field:
+  // a tool that takes no tags cannot be handed a retired one. The note tool
+  // still refuses it, and `note-settlement-turn-facade.test.ts` still pins that.
+
+  test("the input schema refuses a stated type or tags by name", () => {
+    const base = {
+      action: "create" as const,
+      handle: "chapter",
+      title: "implement+lease: a new chapter",
+      noCandidateReason: "nothing fits",
+    };
+
+    expect(settlementSegmentWriteInputSchema.safeParse(base).success).toBe(true);
+    expect(
+      settlementSegmentWriteInputSchema.safeParse({ ...base, type: ["implement"] }).success,
+    ).toBe(false);
+    expect(
+      settlementSegmentWriteInputSchema.safeParse({ ...base, tags: ["lease"] }).success,
+    ).toBe(false);
+  });
+
+  test("a created segment takes its type and tags from its members, most frequent first", () => {
     const sessionDbId = seedSession();
-    const job = claimWindow(sessionDbId, 1, 1);
+    const t1 = seedTurn(sessionDbId, 1, { type: ["research"], tags: ["lease", "fencing"] });
+    const t2 = seedTurn(sessionDbId, 2, { type: ["implement"], tags: ["lease"] });
+    const t3 = seedTurn(sessionDbId, 3, { type: ["implement"], tags: ["lease"] });
+    const job = claimWindow(sessionDbId, 1, 3);
 
     const result = evaluateSettlementSegmentWrite(
       db,
       baseContext(job),
-      createInput({ tags: ["topic:lease"] }),
+      createInput({
+        members: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`, `S${sessionDbId}/T3`],
+      }),
       NOW,
       { apply: true, handleMap: NO_HANDLES },
     );
 
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain("retired topic:");
-    expect(listOpenSegments(db)).toHaveLength(0);
+    expect(result.ok).toBe(true);
+    const segment = getSegment(db, result.ok ? result.outcome.segmentId! : -1)!;
+    // implement on two members, research on one — frequency, not arrival.
+    expect(segment.type).toEqual(["implement", "research"]);
+    expect(segment.tags).toEqual(["lease", "fencing"]);
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([t1, t2, t3]);
+  });
+
+  test("extending with a new member recomputes both facets and the FTS row", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1, { type: ["research"], tags: ["lease"] });
+    const t2 = seedTurn(sessionDbId, 2, { type: ["fix"], tags: ["fencing"] });
+    const job = claimWindow(sessionDbId, 1, 2);
+    const created = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      createInput({ members: [`S${sessionDbId}/T1`] }),
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+    const segmentId = created.ok ? created.outcome.segmentId! : -1;
+    expect(getSegment(db, segmentId)!.type).toEqual(["research"]);
+
+    const extended = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      {
+        action: "extend",
+        segmentId,
+        expectedRevision: getSegment(db, segmentId)!.revision,
+        members: [`S${sessionDbId}/T2`],
+      },
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+
+    expect(extended.ok).toBe(true);
+    const segment = getSegment(db, segmentId)!;
+    // One member each: the frequency tie breaks on vocabulary order for type
+    // (research precedes fix in MEMORY_TYPES) and on the tag itself for tags.
+    expect(segment.type).toEqual(["research", "fix"]);
+    expect(segment.tags).toEqual(["fencing", "lease"]);
+    expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([t1, t2]);
+    // The facet is INDEXED, so a stale index is the failure this checks for.
+    expect(
+      db
+        .query<{ extra: string | null }, [number]>(
+          "SELECT extra FROM memory_fts WHERE layer = 'segment' AND source_id = ?",
+        )
+        .get(segmentId)!.extra,
+    ).toContain("fencing");
   });
 });
 
@@ -204,23 +283,9 @@ describe("create — required fields (requirement 3)", () => {
     expect(!result.ok && result.message).toContain("handle");
   });
 
-  test("rejects an unknown type word", () => {
+  test("lands a segment with derived facets, members and an automatic anchor edge (requirement 3)", () => {
     const sessionDbId = seedSession();
-    const job = claimWindow(sessionDbId, 1, 1);
-    const result = evaluateSettlementSegmentWrite(
-      db,
-      baseContext(job),
-      createInput({ type: ["bugfix"] }),
-      NOW,
-      { apply: true, handleMap: NO_HANDLES },
-    );
-    expect(result.ok).toBe(false);
-    expect(listOpenSegments(db)).toHaveLength(0);
-  });
-
-  test("lands a segment with type/tags/members and an automatic anchor edge (requirement 3)", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
+    const t1 = seedTurn(sessionDbId, 1, { type: ["implement"], tags: ["lease"] });
     const job = claimWindow(sessionDbId, 1, 1);
 
     const result = evaluateSettlementSegmentWrite(
@@ -331,8 +396,7 @@ describe("extend — scope, freeze, and the compare-and-set (requirements 3/5)",
     const existing = createSegment(db, {
       title: "implement+lease: original",
       content: "original body",
-      type: ["implement"],
-      tags: ["lease"],
+      insight: "original insight",
       nowEpoch: NOW - 1000,
     });
 
@@ -343,7 +407,7 @@ describe("extend — scope, freeze, and the compare-and-set (requirements 3/5)",
         action: "extend",
         segmentId: existing.id,
         expectedRevision: existing.revision,
-        tags: ["lease", "fencing"],
+        insight: "the lease route was ruled out: the fence outlives the claim",
         members: [`S${sessionDbId}/T1`],
       },
       NOW,
@@ -354,7 +418,9 @@ describe("extend — scope, freeze, and the compare-and-set (requirements 3/5)",
     const updated = getSegment(db, existing.id)!;
     expect(updated.title).toBe("implement+lease: original");
     expect(updated.content).toBe("original body");
-    expect(updated.tags).toEqual(["lease", "fencing"]);
+    expect(updated.insight).toBe(
+      "the lease route was ruled out: the fence outlives the claim",
+    );
     expect(getSegmentMemberTurnIds(db, existing.id)).toEqual([t1]);
   });
 

@@ -3,10 +3,10 @@ import type { Database } from "bun:sqlite";
 import { listOwedNoteTurnsInRange } from "../db/note-debt";
 import type { NoteSettlementJob } from "../db/note-settlement";
 import {
-  listOpenSegments,
-  listTopics,
-  type SegmentRecord,
-  type TopicRecord,
+  listRecentSegments,
+  listTopicsByFrequency,
+  type SegmentWithTopic,
+  type TopicFrequency,
 } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getShadowNote, type ShadowNoteRecord } from "../db/shadow-notes";
@@ -38,6 +38,15 @@ import { stripPrivateTags } from "../shared/tag-stripping";
 
 /** Turns of context BEFORE the window, rendered as recall renders them. */
 export const NOTE_SETTLEMENT_PRIOR_TURNS = 50;
+
+/**
+ * How many segments the anti-fragmentation surface shows (ticket 14, spec D9).
+ * Most recently active first, whatever their status: `noCandidateReason` has
+ * always asked the model to say what it searched before minting a new topic,
+ * and until this ticket the only thing it could search was the OPEN list —
+ * which hides exactly the delivered segments that prove a name is established.
+ */
+export const NOTE_SETTLEMENT_RECENT_SEGMENTS = 50;
 
 /**
  * Raw-material budget for a hole (裁决 20's ~1000 token/turn). The model has to
@@ -94,8 +103,10 @@ export interface NoteSettlementContext {
   interiorHoles: NoteSettlementWindowTurn[];
   /** Collapsed rendering of the 50 turns preceding the window. */
   priorTurnsRendering: string;
-  openSegments: SegmentRecord[];
-  activeTopics: TopicRecord[];
+  /** The 50 most recently active segments with their topic names (ticket 14). */
+  recentSegments: SegmentWithTopic[];
+  /** The topic registry ordered by how many segments carry each name (ticket 14). */
+  topicRegistry: TopicFrequency[];
   milestoneRendering: string;
   sessionStateRendering: string;
   /** Segment ids shown — the exposure gate for `[E<n>]` citations. */
@@ -267,15 +278,15 @@ export function buildNoteSettlementContext(
     .filter((turn) => priorPromptNumbers.has(turn.promptNumber))
     .map((turn) => turn.id);
 
-  const openSegments = listOpenSegments(db);
+  const recentSegments = listRecentSegments(db, NOTE_SETTLEMENT_RECENT_SEGMENTS);
   const context: NoteSettlementContext = {
     job,
     session,
     windowTurns,
     interiorHoles: windowTurns.filter((turn) => turn.kind === "hole"),
     priorTurnsRendering,
-    openSegments,
-    activeTopics: listTopics(db, "active"),
+    recentSegments,
+    topicRegistry: listTopicsByFrequency(db, "active"),
     milestoneRendering: renderSessionMilestoneInjection(db, job.sessionId),
     sessionStateRendering: renderSessionStateInjection({
       id: session.id,
@@ -287,7 +298,9 @@ export function buildNoteSettlementContext(
       nextSteps: session.nextSteps,
       reference: session.reference,
     }),
-    exposedSegmentIds: new Set(openSegments.map((segment) => segment.id)),
+    exposedSegmentIds: new Set(
+      recentSegments.map((entry) => entry.segment.id),
+    ),
     reviewableTurnIds: new Set([
       ...windowTurns.map((turn) => turn.turnId),
       ...priorTurnIds,

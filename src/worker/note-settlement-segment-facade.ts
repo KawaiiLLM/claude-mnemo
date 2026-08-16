@@ -18,8 +18,6 @@ import {
   SEGMENT_STATUSES,
   type SegmentStatus,
 } from "../db/segments";
-import { findRetiredTopicTag, retiredTopicTagMessage } from "../shared/tag-stripping";
-import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
 import { getTurn } from "../db/turns";
 import { parseTurnAddress } from "../mcp/note";
 import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade";
@@ -74,6 +72,19 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  *     field already keeps. Still DROPPED, never a reason to fail the call
  *     (same discipline as `members`), just no longer SILENT.
  *   - `create`'s handle is now MODEL-NAMED, not server-issued (spec A7a) —
+ *
+ * TICKET 14'S CHANGE (spec K5/K5a/K7):
+ *
+ *   - the tool gains `insight` — the segment's most reusable conclusion — and
+ *     it is a citation-bearing prose field like `title`/`content`: handle
+ *     substitution, stage-time citation validation and `reconcileSegmentCitedPairs`
+ *     all cover it, in the same change that added it (K7's explicit
+ *     requirement — a citation the author can see and the graph cannot is
+ *     worse than no field at all);
+ *   - the tool LOSES `type` and `tags` (K5a). Both are derived from the
+ *     members by `recomputeSegmentFacets` (db/segments.ts) the moment
+ *     membership lands, so the facade states neither on create or extend, and
+ *     the strict schema refuses a call that still names one.
  *     see `HANDLE_NAME_PATTERN` below — and every place that read or wrote
  *     `E#<n>` in free text now requires the bracketed `[E#<n>]` CITATION
  *     form, matching the bracket-qualified grammar `db/references.ts` already
@@ -210,8 +221,21 @@ export const settlementSegmentWriteInputShape = {
   title: z.string().optional(),
   /** Optional for both. `null` explicitly clears (extend only); omit leaves alone. */
   content: z.string().nullable().optional(),
-  type: z.array(z.string()).optional(),
-  tags: z.array(z.string()).optional(),
+  /**
+   * Ticket 14 (spec K5): the most reusable conclusion this segment holds,
+   * including the routes ruled out and why. Same null/omit rule as `content`,
+   * and the same citation grammar — an `[S<n>/T<m>]`/`[E<n>]` written here is
+   * a real anchor (spec K7, `reconcileSegmentCitedPairs`).
+   */
+  insight: z.string().nullable().optional(),
+  // NO `type`, NO `tags` (spec K5a, ticket 14). Both are DERIVED from the
+  // members by `recomputeSegmentFacets` (db/segments.ts) — type is the union
+  // of the members' reviewed activities, tags are the members' tags ordered by
+  // frequency. The schema is `.strict()`, so a call that still states either
+  // is REFUSED by name rather than silently ignored: A6 asserted the union as
+  // fact from the day it was written while the tool went on accepting a stated
+  // type that could contradict every member, and an ignored field would leave
+  // exactly that gap open one more layer down.
   /** create: honoured, defaults to "open" same as a bare insert would. extend: the compare-and-set's own status change (spec D6). */
   status: z.enum(SEGMENT_STATUSES).optional(),
   /** `S<session>/T<prompt>` turn addresses, or `E#<n>` handles naming a segment this SAME run creates — but see the module doc comment: a handle here is always rejected, because a member is always a turn. */
@@ -307,6 +331,7 @@ export function evaluateSettlementSegmentWrite(
   const handleIssues = [
     ...scanUnknownHandles(rawInput.title ?? "", options.handleMap),
     ...scanUnknownHandles(rawInput.content ?? "", options.handleMap),
+    ...scanUnknownHandles(rawInput.insight ?? "", options.handleMap),
   ];
   for (const member of rawInput.members ?? []) {
     if (isSettlementHandleToken(member)) {
@@ -323,27 +348,6 @@ export function evaluateSettlementSegmentWrite(
     };
   }
 
-  let normalizedType: string[] | undefined;
-  if (rawInput.type !== undefined) {
-    try {
-      normalizedType = normalizeTypeValues(rawInput.type);
-    } catch (error) {
-      return {
-        ok: false,
-        message: `${error instanceof Error ? error.message : String(error)}. Allowed: ${MEMORY_TYPES.join(", ")}.`,
-      };
-    }
-  }
-
-  // Ticket 10d: same retired-namespace refusal as the turn facade — see its
-  // own comment for why this rejects rather than silently strips.
-  if (rawInput.tags !== undefined) {
-    const retiredTag = findRetiredTopicTag(rawInput.tags);
-    if (retiredTag) {
-      return { ok: false, message: retiredTopicTagMessage(retiredTag) };
-    }
-  }
-
   const resolvedTitle = substituteHandles(rawInput.title ?? "", options.handleMap);
   const resolvedContent =
     rawInput.content === undefined
@@ -351,6 +355,12 @@ export function evaluateSettlementSegmentWrite(
       : rawInput.content === null
         ? null
         : substituteHandles(rawInput.content, options.handleMap);
+  const resolvedInsight =
+    rawInput.insight === undefined
+      ? undefined
+      : rawInput.insight === null
+        ? null
+        : substituteHandles(rawInput.insight, options.handleMap);
 
   if (rawInput.action === "exclude") {
     if (!rawInput.turn || rawInput.turn.trim() === "") {
@@ -442,7 +452,11 @@ export function evaluateSettlementSegmentWrite(
       rawInput.members ?? [],
       context,
     );
-    const citationsDropped = scanBodyCitationIssues(db, [resolvedTitle, resolvedContent]);
+    const citationsDropped = scanBodyCitationIssues(db, [
+      resolvedTitle,
+      resolvedContent,
+      resolvedInsight,
+    ]);
 
     let segmentId: number | null = null;
     if (options.apply) {
@@ -450,8 +464,10 @@ export function evaluateSettlementSegmentWrite(
         title: resolvedTitle,
         topicId,
         content: resolvedContent ?? null,
-        type: normalizedType ?? [],
-        tags: rawInput.tags ?? [],
+        insight: resolvedInsight ?? null,
+        // type/tags are not passed and cannot be: `addSegmentMembers` below
+        // derives both from the members (spec K5a), and a segment with no
+        // members yet has no activity and no subject matter to state.
         // Ticket 10d: honoured, not silently dropped. `createSegment` already
         // accepted a `status` param and defaulted it to "open" when absent —
         // this facade simply never passed the model's value through, so a
@@ -515,6 +531,7 @@ export function evaluateSettlementSegmentWrite(
   const citationsDropped = scanBodyCitationIssues(db, [
     rawInput.title !== undefined ? resolvedTitle : undefined,
     rawInput.content !== undefined ? resolvedContent : undefined,
+    rawInput.insight !== undefined ? resolvedInsight : undefined,
   ]);
 
   if (!options.apply) {
@@ -546,8 +563,8 @@ export function evaluateSettlementSegmentWrite(
         expectedRevision: rawInput.expectedRevision,
         title: rawInput.title === undefined ? undefined : resolvedTitle,
         content: resolvedContent,
-        type: normalizedType,
-        tags: rawInput.tags,
+        insight: resolvedInsight,
+        // No type/tags, for the same reason as the create above (spec K5a).
         status: rawInput.status as SegmentStatus | undefined,
       },
     ],

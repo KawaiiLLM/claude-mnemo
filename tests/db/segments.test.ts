@@ -13,7 +13,10 @@ import {
   getSegmentMemberTurnIds,
   getSegmentsForTurn,
   listOpenSegments,
+  listRecentSegments,
   listTopics,
+  listTopicsByFrequency,
+  recomputeSegmentFacets,
   upsertTopic,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -23,14 +26,24 @@ describe("segments, topics and membership", () => {
   let db: Database;
   let sessionId: number;
 
-  function addTurn(promptNumber: number, createdAtEpoch = 100): number {
+  function addTurn(
+    promptNumber: number,
+    createdAtEpoch = 100,
+    facets: { type?: string[]; tags?: string[] } = {},
+  ): number {
     return db
-      .query<{ id: number }, [number, number, number]>(
-        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
-         VALUES (?, ?, 'extracted', ?)
+      .query<{ id: number }, [number, number, number, string, string]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch, type, tags)
+         VALUES (?, ?, 'extracted', ?, ?, ?)
          RETURNING id`,
       )
-      .get(sessionId, promptNumber, createdAtEpoch)!.id;
+      .get(
+        sessionId,
+        promptNumber,
+        createdAtEpoch,
+        JSON.stringify(facets.type ?? []),
+        JSON.stringify(facets.tags ?? []),
+      )!.id;
   }
 
   beforeEach(() => {
@@ -104,6 +117,11 @@ describe("segments, topics and membership", () => {
     });
   });
 
+  // Ticket 14 (spec K5a) narrowed what this describe covers: `type` is still
+  // exactly what a DIRECT caller of these storage functions states (a fixture,
+  // a repair), but no production writer states it any more — the settlement
+  // tool cannot, and `addSegmentMembers` overwrites it from the members. The
+  // derivation has its own describe below.
   describe("a segment's type is exactly what the caller states", () => {
     test("an explicit multi-valued type lands as given", () => {
       const segment = createSegment(db, {
@@ -307,6 +325,268 @@ describe("segments, topics and membership", () => {
   // Creation and `applySegmentWrites`' rewrite both reconcile `memory_edges`
   // against it — a bare `[S<session>/T<n>]`/`[E<n>]` creates the pair, and a
   // rewrite that stops naming it drops the pair.
+  describe("insight is a segment field with its own citation surface (spec K5/K7, ticket 14)", () => {
+    test("a create stores it, and an extend rewrites it under the same present/omitted rule", () => {
+      const segment = createSegment(db, {
+        title: "lease fencing",
+        content: "the working state",
+        insight: "a generation check beats a timestamp",
+        nowEpoch: 100,
+      });
+      expect(segment.insight).toBe("a generation check beats a timestamp");
+      expect(getSegment(db, segment.id)?.insight).toBe(
+        "a generation check beats a timestamp",
+      );
+
+      // Omitted leaves it alone...
+      const untouched = applySegmentWrites(
+        db,
+        [{ segmentId: segment.id, expectedRevision: segment.revision, title: "renamed" }],
+        { nowEpoch: 200 },
+      );
+      expect(untouched.applied[0]?.insight).toBe("a generation check beats a timestamp");
+
+      // ...present overwrites whole, and null clears.
+      const rewritten = applySegmentWrites(
+        db,
+        [
+          {
+            segmentId: segment.id,
+            expectedRevision: untouched.applied[0]!.revision,
+            insight: "the timestamp route was ruled out: clocks are not fences",
+          },
+        ],
+        { nowEpoch: 300 },
+      );
+      expect(rewritten.applied[0]?.insight).toBe(
+        "the timestamp route was ruled out: clocks are not fences",
+      );
+      const cleared = applySegmentWrites(
+        db,
+        [
+          {
+            segmentId: segment.id,
+            expectedRevision: rewritten.applied[0]!.revision,
+            insight: null,
+          },
+        ],
+        { nowEpoch: 400 },
+      );
+      expect(cleared.applied[0]?.insight).toBeNull();
+    });
+
+    test("a citation written in insight becomes a real pair — the whole point of admitting it to the scan in the same change (spec K7)", () => {
+      const cited = addTurn(7);
+
+      const segment = createSegment(db, {
+        title: "lease fencing",
+        content: "no citation here",
+        insight: `The retry route was ruled out by [S${sessionId}/T7].`,
+        nowEpoch: 100,
+      });
+
+      const edges = getOutgoingEdges(db, { kind: "segment", id: segment.id });
+      expect(edges).toHaveLength(1);
+      expect(edges[0]?.cited).toEqual({ kind: "turn", id: cited });
+      expect(edges[0]?.relation).toBeNull();
+      expect(edges[0]?.provenance).toBe("text-ref");
+    });
+
+    test("a rewrite that drops the insight citation drops its pair, same as title/content", () => {
+      const cited = addTurn(7);
+      const segment = createSegment(db, {
+        title: "lease fencing",
+        insight: `Ruled out by [S${sessionId}/T7].`,
+        nowEpoch: 100,
+      });
+      expect(getOutgoingEdges(db, { kind: "segment", id: segment.id })).toHaveLength(1);
+
+      applySegmentWrites(
+        db,
+        [
+          {
+            segmentId: segment.id,
+            expectedRevision: segment.revision,
+            insight: "Ruled out, and the reason no longer names a turn.",
+          },
+        ],
+        { nowEpoch: 200 },
+      );
+
+      expect(getOutgoingEdges(db, { kind: "segment", id: segment.id })).toHaveLength(0);
+      expect(cited).toBeGreaterThan(0);
+    });
+
+    test("insight is indexed, so a segment is findable by what it concluded", () => {
+      const segment = createSegment(db, {
+        title: "lease fencing",
+        insight: "clocks are not fences",
+        nowEpoch: 100,
+      });
+
+      const extra = db
+        .query<{ extra: string | null }, [number]>(
+          "SELECT extra FROM memory_fts WHERE layer = 'segment' AND source_id = ?",
+        )
+        .get(segment.id)!.extra;
+      expect(extra).toContain("clocks are not fences");
+    });
+  });
+
+  describe("type and tags are DERIVED from the members (spec K5a, ticket 14)", () => {
+    test("type is the members' union, tags are frequency-ordered, both recomputed on membership change", () => {
+      const first = addTurn(1, 100, { type: ["design"], tags: ["lease", "fencing"] });
+      const second = addTurn(2, 200, { type: ["implement"], tags: ["lease"] });
+      const third = addTurn(3, 300, { type: ["implement"], tags: ["lease"] });
+      const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
+
+      // No members yet: nothing to derive from, and nothing invented.
+      expect(getSegment(db, segment.id)?.type).toEqual([]);
+      expect(getSegment(db, segment.id)?.tags).toEqual([]);
+
+      addSegmentMembers(db, segment.id, [first, second], 100);
+      expect(getSegment(db, segment.id)?.type).toEqual(["design", "implement"]);
+      // lease on both members, fencing on one.
+      expect(getSegment(db, segment.id)?.tags).toEqual(["lease", "fencing"]);
+
+      // A third member moves implement ahead of design by frequency — the
+      // recomputation is what makes this a fact about membership rather than
+      // about the order the members happened to arrive in.
+      addSegmentMembers(db, segment.id, [third], 200);
+      expect(getSegment(db, segment.id)?.type).toEqual(["implement", "design"]);
+    });
+
+    test("ties break deterministically: vocabulary order for type, the tag itself for tags", () => {
+      const only = addTurn(1, 100, {
+        type: ["fix", "research"],
+        tags: ["zulu", "alpha"],
+      });
+      const segment = createSegment(db, { title: "tie", nowEpoch: 100 });
+      addSegmentMembers(db, segment.id, [only], 100);
+
+      // research precedes fix in MEMORY_TYPES; alpha precedes zulu.
+      expect(getSegment(db, segment.id)?.type).toEqual(["research", "fix"]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["alpha", "zulu"]);
+    });
+
+    test("a colon-namespaced tag is bookkeeping and never becomes what a segment is about", () => {
+      const turnId = addTurn(1, 100, {
+        type: ["ops"],
+        tags: ["release", "compact:boundary", "topic:retired"],
+      });
+      const segment = createSegment(db, { title: "release", nowEpoch: 100 });
+      addSegmentMembers(db, segment.id, [turnId], 100);
+
+      expect(getSegment(db, segment.id)?.tags).toEqual(["release"]);
+    });
+
+    test("a legacy type word a pre-vocabulary member still carries does not propagate upward", () => {
+      const legacy = addTurn(1, 100, { type: ["bugfix"] });
+      const current = addTurn(2, 200, { type: ["fix"] });
+      const segment = createSegment(db, { title: "legacy", nowEpoch: 100 });
+      addSegmentMembers(db, segment.id, [legacy, current], 100);
+
+      // `normalizeTypeValues` would refuse `bugfix` on the next write, so a
+      // segment that stored it would be unwritable.
+      expect(getSegment(db, segment.id)?.type).toEqual(["fix"]);
+    });
+
+    test("the FTS facet is rewritten with the derived tags, never left describing the old membership", () => {
+      const first = addTurn(1, 100, { tags: ["lease"] });
+      const second = addTurn(2, 200, { tags: ["fencing"] });
+      const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
+      addSegmentMembers(db, segment.id, [first], 100);
+
+      const readFacet = () =>
+        db
+          .query<{ extra: string | null }, [number]>(
+            "SELECT extra FROM memory_fts WHERE layer = 'segment' AND source_id = ?",
+          )
+          .get(segment.id)!.extra ?? "";
+
+      expect(readFacet()).toContain("lease");
+      expect(readFacet()).not.toContain("fencing");
+
+      addSegmentMembers(db, segment.id, [second], 200);
+      expect(readFacet()).toContain("fencing");
+    });
+
+    test("recomputation follows a member LEAVING too — a deleted turn is a membership change", () => {
+      const kept = addTurn(1, 100, { type: ["design"], tags: ["lease"] });
+      const removed = addTurn(2, 200, { type: ["ops"], tags: ["release"] });
+      const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
+      addSegmentMembers(db, segment.id, [kept, removed], 100);
+      expect(getSegment(db, segment.id)?.type).toEqual(["design", "ops"]);
+
+      db.query("PRAGMA foreign_keys = ON").run();
+      db.query("DELETE FROM turns WHERE id = ?").run(removed);
+      // The cascade removes the row; the facets are stale until something
+      // recomputes them, which is what this function is for.
+      expect(recomputeSegmentFacets(db, segment.id)?.type).toEqual(["design"]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["lease"]);
+    });
+  });
+
+  describe("the anti-fragmentation surface (ticket 14)", () => {
+    test("listRecentSegments returns the most recently active first, whatever their status, with the topic name", () => {
+      const topic = upsertTopic(db, { name: "lease-fencing", nowEpoch: 100 });
+      const oldest = createSegment(db, { title: "oldest", nowEpoch: 100 });
+      const middle = createSegment(db, {
+        title: "middle",
+        status: "delivered",
+        topicId: topic.id,
+        nowEpoch: 200,
+      });
+      const newest = createSegment(db, { title: "newest", nowEpoch: 300 });
+
+      const recent = listRecentSegments(db, 2);
+      expect(recent.map((entry) => entry.segment.id)).toEqual([newest.id, middle.id]);
+      expect(recent[1]?.topicName).toBe("lease-fencing");
+      expect(recent[0]?.topicName).toBeNull();
+      expect(listRecentSegments(db, 10).map((entry) => entry.segment.id)).toEqual([
+        newest.id,
+        middle.id,
+        oldest.id,
+      ]);
+    });
+
+    test("listTopicsByFrequency orders by how many segments carry each name, ties by name", () => {
+      const established = upsertTopic(db, { name: "observation-pipeline", nowEpoch: 100 });
+      const beta = upsertTopic(db, { name: "beta", nowEpoch: 100 });
+      const alpha = upsertTopic(db, { name: "alpha", nowEpoch: 100 });
+      upsertTopic(db, { name: "never-used", nowEpoch: 100 });
+      for (let index = 0; index < 3; index += 1) {
+        createSegment(db, {
+          title: `pipeline ${index}`,
+          topicId: established.id,
+          nowEpoch: 100,
+        });
+      }
+      createSegment(db, { title: "beta chapter", topicId: beta.id, nowEpoch: 100 });
+      createSegment(db, { title: "alpha chapter", topicId: alpha.id, nowEpoch: 100 });
+
+      expect(
+        listTopicsByFrequency(db, "active").map((entry) => [
+          entry.topic.name,
+          entry.segmentCount,
+        ]),
+      ).toEqual([
+        ["observation-pipeline", 3],
+        ["alpha", 1],
+        ["beta", 1],
+        ["never-used", 0],
+      ]);
+    });
+
+    test("a retired topic stays out of the active registry", () => {
+      const retired = upsertTopic(db, { name: "gone", status: "retired", nowEpoch: 100 });
+      createSegment(db, { title: "chapter", topicId: retired.id, nowEpoch: 100 });
+
+      expect(listTopicsByFrequency(db, "active")).toHaveLength(0);
+      expect(listTopicsByFrequency(db).map((entry) => entry.topic.name)).toEqual(["gone"]);
+    });
+  });
+
   describe("cited pairs from a segment body (spec C6)", () => {
     test("a bare qualified reference in a NEW segment's content creates an unattributed pair", () => {
       const target = addTurn(1);

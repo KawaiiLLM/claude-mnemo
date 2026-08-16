@@ -10,16 +10,16 @@ Spec **section K** is the whole ticket. Read it before anything else; it also re
 
 This is an **MVP to be run and looked at**, not a finished mechanism (user ruling). Granularity cannot be tuned yet: 699 of 11,673 turns carry a segment, and the project whose interleaved threads motivated the partition question has none at all.
 
-- [ ] The partition is stated as the arc: a Grade 4 opens a segment, the next Grade 4 closes it, a Grade 3 attaches to its nearest preceding Grade 4. The prompt says this in the rubric's own terms rather than inventing a second vocabulary for it
-- [ ] `insight` joins the segment's fields, with the segment semantics of K5 — the most reusable conclusion, including the routes ruled out and why — and **is added to `reconcileSegmentCitedPairs`'s scan in the same change**, or a citation written there looks real and produces no edge
-- [ ] The no-retelling rule reaches the prompt in a checkable form: anything readable from the member turns does not go in the segment
-- [ ] A segment whose task is still live is **not closed at window end**. Today 32 of 42 segments are `delivered` and only 1 of 42 spans a session boundary, which is why nothing accumulates across sessions
-- [ ] The prompt distinguishes the two roles a segment plays by lifecycle: an open segment is the task's working state, a delivered one is its impression
-- [ ] The prompt states that members are exhaustive attention allocation while body citations are the load-bearing few — the existing "cite the turns that carry the conclusion, not every member" rule, kept and made explicit
-- [ ] **`type` and `tags` are derived from the members, and the segment tool stops accepting them** (spec K5a): type is the union of member activities, tags are the member tags ordered by frequency. This finally enforces A6, which asserted the union as the reason the three duties are ordered and was never checked — the tool accepted a stated type that could contradict every member. Recomputed on membership change, because segments are FTS-indexed with their tags
-- [ ] The settlement context shows the **50 most recently active segments with their topics**, and renders the topic registry **ordered by frequency** — how many segments carry each — so an established name is visibly established and a one-off is visibly a one-off. This is the anti-fragmentation surface D9's `noCandidateReason` gate has always assumed and never actually provided
+- [x] The partition is stated as the arc: a Grade 4 opens a segment, the next Grade 4 closes it, a Grade 3 attaches to its nearest preceding Grade 4. The prompt says this in the rubric's own terms rather than inventing a second vocabulary for it
+- [x] `insight` joins the segment's fields, with the segment semantics of K5 — the most reusable conclusion, including the routes ruled out and why — and **is added to `reconcileSegmentCitedPairs`'s scan in the same change**, or a citation written there looks real and produces no edge
+- [x] The no-retelling rule reaches the prompt in a checkable form: anything readable from the member turns does not go in the segment
+- [x] A segment whose task is still live is **not closed at window end**. Today 32 of 42 segments are `delivered` and only 1 of 42 spans a session boundary, which is why nothing accumulates across sessions
+- [x] The prompt distinguishes the two roles a segment plays by lifecycle: an open segment is the task's working state, a delivered one is its impression
+- [x] The prompt states that members are exhaustive attention allocation while body citations are the load-bearing few — the existing "cite the turns that carry the conclusion, not every member" rule, kept and made explicit
+- [x] **`type` and `tags` are derived from the members, and the segment tool stops accepting them** (spec K5a): type is the union of member activities, tags are the member tags ordered by frequency. This finally enforces A6, which asserted the union as the reason the three duties are ordered and was never checked — the tool accepted a stated type that could contradict every member. Recomputed on membership change, because segments are FTS-indexed with their tags
+- [x] The settlement context shows the **50 most recently active segments with their topics**, and renders the topic registry **ordered by frequency** — how many segments carry each — so an established name is visibly established and a one-off is visibly a one-off. This is the anti-fragmentation surface D9's `noCandidateReason` gate has always assumed and never actually provided
 - [x] **`recall` can query segments.** Design is the implementer's to make: no selector grammar, output shape or ranking is prescribed here beyond the one requirement below
-- [ ] Full suite green
+- [x] Full suite green (except `tests/shared/release-artifacts.test.ts`'s stale-bundle guard — the bundles are deliberately not rebuilt here)
 
 ## The only thing `recall`'s segment query must satisfy
 
@@ -78,3 +78,43 @@ The same defect as the tool description, one surface over. Belongs with this
 ticket's remaining half.
 
 The first honest check is `action-roleplay`, whose card-extraction and harness lines run interleaved and which has zero segments today.
+
+## Closed: the remaining half (implementation notes)
+
+`plugin/skills/mnemo-recall/SKILL.md` now teaches the segment as the third
+addressable thing — a data-model entry, its own workflow step, the `E*` /
+`E47` / `E5..9` selector row, and `tag:`/`type:` marked as answering at segment
+granularity too.
+
+Three decisions the ticket left open, made here and worth knowing before the
+next change:
+
+- **Derived `type` is ordered by frequency, then by vocabulary order** — not a
+  bare set. `deriveDominantType` (db/segment-rank.ts) falls back to a segment's
+  FIRST type word when the member mode is tied, and its stated contract is that
+  the fallback is a judgement rather than arrival order. Once nobody states the
+  list, only a frequency ordering keeps that true. Visible consequence: a
+  segment whose members carry one activity each now wears its most-frequent /
+  earliest-in-vocabulary glyph instead of a stated one that could contradict
+  every member — which is the A6 violation K5a exists to end, showing up in a
+  test expectation (tests/mcp/segment-spine.test.ts).
+- **Derived `tags` exclude colon-namespaced tags** (`compact:`, `invalidated:`,
+  `delivery:`, and the retired `topic:`). Those are bookkeeping, not subject
+  matter — db/turns.ts's invalidation path keeps exactly the colon ones and
+  drops the freeform ones, i.e. the split already exists. Tie-break is the tag
+  itself, ascending, so two settlements adding the same members in a different
+  order store the same row.
+- **A legacy `type` word on a pre-vocabulary member does not propagate up.**
+  `normalizeTypeValues` refuses it, so a segment that stored one would be
+  unwritable on its next extend.
+
+Two edits landed OUTSIDE the fence this work was given, both because the fence
+named a file that does not hold the artifact:
+
+- `src/worker/note-settlement-sdk-query.ts` — the `segment` tool's DESCRIPTION
+  lives here, not in `src/mcp/definitions.ts`. Leaving it would have told the
+  model to send `type`/`tags` that the schema now refuses.
+- `src/mcp/segment-spine.ts` — `renderSegmentHeaderLines` is recall's segment
+  renderer, so this is the read path K5's `insight` needs; without the one added
+  line the field would be written and never shown, this effort's own recurring
+  defect.
