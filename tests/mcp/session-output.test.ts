@@ -337,6 +337,16 @@ describe("renderCurrentSessionStateOutput", () => {
         `  … state truncated; full summary: recall(id="S${raw.id}")`,
       );
     }
+
+    // Ticket 15 finding 9 (documented, not fixed): a budget below the
+    // pointer's own token cost is a floor this function does not go beneath
+    // — the returned text is longer than `budget` asked for. See
+    // `renderBoundedSessionStateOutput`'s own doc comment in
+    // mcp/session-output.ts. No production caller passes a budget this
+    // small (hooks/session-injection.ts's real ceilings sit near the
+    // 2,000-token default).
+    const tinyBudgetOutput = renderCurrentSessionStateOutput(formatted, raw, 5);
+    expect(estimateDiaryTokens(tinyBudgetOutput)).toBeGreaterThan(5);
   });
 
   test("renders untitled session when title is null", () => {

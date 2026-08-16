@@ -33,6 +33,20 @@ import type { SettlementStagingEngine } from "./note-settlement-staging";
  * run whose lease has been reclaimed (no `commit` from this dispatch can ever
  * succeed again, so telling it to call one would be telling it to do the
  * impossible — the same distinction `commit`'s own refusal path draws).
+ *
+ * WHEN THE CHECK ITSELF CANNOT ANSWER (ticket 15 finding 5): `previewCommit`
+ * can come back with `checkFailed: true` instead of a real verdict — a writer
+ * lock elsewhere outlasted the preview's own bounded retry budget. Of the
+ * three honest options (let the stop through, block with an "I could not
+ * check" message, or retry the check again in here), this hook BLOCKS with
+ * the honest message. Letting the stop through would hide exactly the
+ * staged-work loss this hook exists to catch — a false "you're fine" is worse
+ * than an occasional over-cautious block. Retrying again in here would just
+ * repeat the wait the preview's own bounded transaction already paid out, for
+ * no new information. Blocking costs the agent one more turn, capped by the
+ * same `blocksIssued` counter as a genuine gap, and points it at `commit`
+ * itself, which runs the ordinary, uncapped-budget write path and has a real
+ * chance to succeed where the preview could not even look.
  */
 
 /** Spec G2's "at most twice". */
@@ -65,27 +79,56 @@ export interface SettlementStopHookResult {
   reason?: string;
 }
 
+/**
+ * What is about to be lost if the agent stops now — shared by every Stop-hook
+ * message (ticket 15 finding 5 factors this out of `renderStopReason`, not
+ * new prose).
+ */
+function renderStakes(staged: number): string {
+  return staged === 0
+    ? "You are stopping without having called `commit`, and you have staged nothing. " +
+        "This run has produced NOTHING: no note, no segment, no verdict."
+    : `You are stopping without having called \`commit\`. Nothing you staged is written — ` +
+        `${staged} staged call${staged === 1 ? "" : "s"} ${staged === 1 ? "is" : "are"} ` +
+        `discarded when this run ends, and this run will have produced NOTHING. ` +
+        "`commit` is the only writer.";
+}
+
 /** The hook's own view of what is about to be lost, for the message. */
 function renderStopReason(
   staged: number,
   wouldCommit: boolean,
   refusal: string | null,
 ): string {
-  const stakes =
-    staged === 0
-      ? "You are stopping without having called `commit`, and you have staged nothing. " +
-        "This run has produced NOTHING: no note, no segment, no verdict."
-      : `You are stopping without having called \`commit\`. Nothing you staged is written — ` +
-        `${staged} staged call${staged === 1 ? "" : "s"} ${staged === 1 ? "is" : "are"} ` +
-        `discarded when this run ends, and this run will have produced NOTHING. ` +
-        "`commit` is the only writer.";
-
   const next = wouldCommit
     ? "A `commit` right now would land this window. Call it."
     : `A \`commit\` right now would refuse — ${refusal ?? "the window is not yet complete."} ` +
       "Fill that with more `note`/`segment` calls (everything you staged is kept), then call `commit`.";
 
-  return `${stakes}\n\n${next}`;
+  return `${renderStakes(staged)}\n\n${next}`;
+}
+
+/**
+ * Ticket 15 finding 5: the preview could not answer at all — a writer lock
+ * outlasted its bounded budget, `SQLITE_BUSY` never reached the model, and
+ * `previewCommit` returned `checkFailed: true` instead of a real gate
+ * verdict. Deliberately NOT `renderStopReason`'s "would refuse" branch: there
+ * is no gap to name, and telling the agent to stage more `note`/`segment`
+ * calls would be advice for a problem this is not. The honest sentence is
+ * "try `commit` yourself" — it runs the ordinary, uncapped-budget write path,
+ * not this preview's bounded one, so it has a real chance to succeed (or
+ * refuse for a real, nameable reason) where the preview could not even look.
+ */
+function renderCheckFailedStopReason(staged: number): string {
+  return (
+    `${renderStakes(staged)}\n\n` +
+    "The completion check itself could not run just now — the database was " +
+    "briefly locked by something else and the check's own bounded retry ran " +
+    "out before the lock cleared. This is NOT a statement that your work is " +
+    "incomplete; the check simply could not answer either way. Call `commit` " +
+    "directly — it has a longer retry budget and will either land your " +
+    "window or tell you exactly what is still missing."
+  );
 }
 
 /**
@@ -117,6 +160,13 @@ export function createSettlementStopHook(
     }
 
     blocksIssued += 1;
+    if (preview.checkFailed) {
+      return {
+        continue: true,
+        decision: "block",
+        reason: renderCheckFailedStopReason(preview.staged),
+      };
+    }
     return {
       continue: true,
       decision: "block",

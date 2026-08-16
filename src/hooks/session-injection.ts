@@ -82,7 +82,14 @@ export interface MainAgentSessionInjectionInput {
   currentSessionId?: number;
   /** SessionStart wants the corpus header; the settlement prompt supplies its own framing. */
   includeCorpusHeader?: boolean;
-  /** Ceiling for the heading + state block together (ticket 04's one budget, one cut). */
+  /**
+   * Ceiling for the heading + state block together (ticket 04's one budget,
+   * one cut). Keep this comfortably above the state renderer's own
+   * truncation-pointer floor (mcp/session-output.ts's
+   * `renderBoundedSessionStateOutput` doc comment, ticket 15 finding 9) — a
+   * budget that small is this field's caller's mistake to avoid, not
+   * something the renderer corrects for.
+   */
   tokenBudget?: number;
   /**
    * Which of ticket 04's two field groups to render (user ruling, S15069/T759).
@@ -137,6 +144,10 @@ export function renderMainAgentSessionInjection(
   }
 
   const budget = input.tokenBudget ?? SESSION_INJECTION_TOKEN_BUDGET;
+  // Floored at 0 rather than going negative — but 0 (or anything under the
+  // state renderer's own pointer floor) is a caller mistake this function
+  // does not otherwise guard against; see `tokenBudget`'s own doc comment
+  // (ticket 15 finding 9).
   const stateTokenBudget = Math.max(
     0,
     budget - estimateDiaryTokens([...STATE_HEADING_LINES, ""].join("\n")),

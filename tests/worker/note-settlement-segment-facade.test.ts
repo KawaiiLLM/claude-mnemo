@@ -648,7 +648,7 @@ describe("exclude — the model-facing path to the job-scoped no-segment verdict
 
     const result = evaluateSettlementSegmentWrite(
       db,
-      baseContext(job),
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       { action: "exclude", turn: `S${sessionDbId}/T1` },
       NOW,
       { apply: true, handleMap: NO_HANDLES },
@@ -661,12 +661,12 @@ describe("exclude — the model-facing path to the job-scoped no-segment verdict
 
   test("a dry run (apply: false) writes no exclusion row", () => {
     const sessionDbId = seedSession();
-    seedTurn(sessionDbId, 1);
+    const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
     const result = evaluateSettlementSegmentWrite(
       db,
-      baseContext(job),
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       { action: "exclude", turn: `S${sessionDbId}/T1` },
       NOW,
       { apply: false, handleMap: NO_HANDLES },
@@ -705,6 +705,29 @@ describe("exclude — the model-facing path to the job-scoped no-segment verdict
 
     expect(result.ok).toBe(false);
     expect(!result.ok && result.message).toContain("no turn");
+  });
+
+  test("ticket 15 finding 6: refuses an exclude naming a real turn outside this dispatch's reviewable window", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      // Default baseContext: reviewableTurnIds is empty. T1 is a perfectly
+      // real row — address syntax and row existence both pass — but this
+      // dispatch's prompt never showed it, so a verdict about it must be
+      // refused the same way a review verdict already is
+      // (note-settlement-turn-facade.ts).
+      baseContext(job),
+      { action: "exclude", turn: `S${sessionDbId}/T1` },
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("reviewable window");
+    expect(listNoteSettlementSegmentExclusions(db, job.id)).toEqual([]);
   });
 });
 

@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import {
@@ -367,4 +370,73 @@ describe("ticket 11 — the hook is registered on the run the tools stage into",
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
     expect(getTurnById(db, turnId)!.significanceGrade).toBeNull();
   });
+});
+
+describe("ticket 15 finding 5 — the Stop hook returns a bounded decision when it cannot get the lock", () => {
+  test(
+    "a real writer lock held by a second connection makes the hook block with an honest message, not throw or hang",
+    async () => {
+      // A genuine cross-connection lock: an in-memory db can't produce one
+      // (SQLite's locking is per FILE, not per Database object), and
+      // injecting the contending write from INSIDE the transaction under
+      // test would land it inside that same transaction rather than contend
+      // with it. This needs a second, real connection on a real file — the
+      // fixture `tests/db/database.test.ts` already uses for the identical
+      // reason.
+      db.close();
+      const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-stop-hook-busy-"));
+      const path = join(directory, "settlement.sqlite");
+      db = createDatabase(path); // production default busy_timeout (5s) — the whole point of this test.
+      initializeSchema(db);
+
+      const sessionDbId = seedSession();
+      const turnId = seedTurn(sessionDbId, 1);
+      markNoted([turnId]);
+      const job = claimWindow(sessionDbId, 1, 1);
+      const engine = createSettlementStagingEngine({
+        db,
+        context: baseContext(job, { reviewableTurnIds: new Set([turnId]) }),
+        now: () => NOW,
+      });
+      engine.stageNoteWrite({
+        turn: `S${sessionDbId}/T1`,
+        grade: 2,
+        type: ["discuss"],
+        tags: [],
+      });
+
+      // A second REAL connection to the SAME file holds the write lock open,
+      // uncommitted — `busyTimeoutMs: 0` so acquiring it never makes THIS
+      // connection wait; it is the engine's own connection whose busy
+      // behaviour is under test.
+      const contender = createDatabase(path, { busyTimeoutMs: 0 });
+      contender.exec("BEGIN IMMEDIATE");
+      contender
+        .query<unknown, [number]>("UPDATE sessions SET title = title WHERE id = ?")
+        .run(sessionDbId);
+
+      try {
+        const stop = createSettlementStopHook({ engine });
+        const start = Date.now();
+        const decision = await stop();
+        const elapsedMs = Date.now() - start;
+
+        // Bounded, and NOT a throw: the pre-fix code ran `previewCommit`
+        // through the ordinary `runWriteTransaction` (three attempts, no
+        // elapsed-time ceiling) against a connection opened at the
+        // production 5s busy_timeout — up to three attempts of ~5s each
+        // before propagating `SQLITE_BUSY` straight out of the hook. This
+        // must neither throw nor take anywhere near that long.
+        expect(decision.decision).toBe("block");
+        expect(decision.reason).toContain("completion check itself could not run");
+        expect(decision.reason).toContain("Call `commit` directly");
+        expect(elapsedMs).toBeLessThan(4_000);
+      } finally {
+        contender.exec("ROLLBACK");
+        contender.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
 });

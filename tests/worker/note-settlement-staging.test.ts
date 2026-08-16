@@ -1037,8 +1037,8 @@ describe("spec A7a — re-staging a key replaces its entry rather than appending
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(db, sessionDbId, 1, 1);
-    const engine = createSettlementStagingEngine({ db, context: baseContext(job) });
-    void t1;
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const engine = createSettlementStagingEngine({ db, context });
 
     engine.stageSegmentWrite({ action: "exclude", turn: `S${sessionDbId}/T1` });
     expect(engine.pendingCount()).toBe(1);

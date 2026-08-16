@@ -158,6 +158,23 @@ export function measureSessionStateTokens(
  * with a count of only the lines the second cut had itself dropped. The reader
  * was told two lines were missing when most of the summary was gone. One
  * budget, one owner, one marker.
+ *
+ * `tokenBudget` is a CEILING this function honours only down to a floor: the
+ * truncation pointer itself (ticket 15 finding 9). A `tokenBudget` smaller
+ * than the pointer's own token cost still gets the pointer back, and the
+ * result then EXCEEDS `tokenBudget` — never an empty string, because a cut
+ * that announces nothing is the defect requirement 6 exists to prevent (see
+ * "the pointer is never the line that gets dropped" below). Enforcing the
+ * ceiling all the way down to zero would mean silently dropping the one line
+ * whose whole job is to not be silent, so this function does not attempt it
+ * — keeping `tokenBudget` comfortably above the pointer's size is the
+ * CALLER's job, not this renderer's to guard. Today both production callers
+ * pass the ~2,000-token default (`renderMainAgentSessionInjection`,
+ * hooks/session-injection.ts) minus a small fixed heading, dozens of tokens
+ * above the pointer, so this floor is never actually hit in production — see
+ * `tests/mcp/session-output.test.ts`'s "every truncation announces itself,
+ * and the pointer survives an extreme budget" test, which pins the same
+ * shape down to `budget: 5`.
  */
 function renderBoundedSessionStateOutput(
   input: SessionStateRenderInput,

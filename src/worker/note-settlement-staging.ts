@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { parseTurnAddress } from "../mcp/note";
 
-import { runWriteTransaction } from "../db/database";
+import { isSqliteBusy, runHookWriteTransaction, runWriteTransaction } from "../db/database";
 import {
   assertNoteSettlementJobClaimed,
   completeNoteSettlementJobIfSegmentedCore,
@@ -100,6 +100,38 @@ import {
  * "the check cannot drift from the gate: it IS the gate", one layer up from
  * where G8 states it. Like `getLastCommitMetrics` it is NOT an MCP tool:
  * settlement has no `check` (G8 amended), and the model cannot reach this.
+ *
+ * TICKET 15 FINDING 5'S REPAIR: a preview runs against the worker's own
+ * long-lived `db` connection, opened with the production busy_timeout (5s) —
+ * right for every OTHER writer on it, wrong for a check whose whole point is
+ * to answer inside a Stop hook's short budget. Under a writer lock held
+ * elsewhere, a plain `runWriteTransaction` could burn up to three attempts'
+ * worth of that 5s each, then THROW `SQLITE_BUSY` straight out of the hook.
+ * A preview attempt therefore runs through `runHookWriteTransaction`
+ * (db/database.ts) instead — its own bounded budget (2.5s default) with
+ * backoff — AND, for the duration of that one attempt only, this
+ * connection's `busy_timeout` is turned down first (`runPreviewTransaction`
+ * below): otherwise a single blocked `BEGIN IMMEDIATE` still eats the whole
+ * 5s before `runHookWriteTransaction`'s own JS-level clock ever gets a turn,
+ * and the budget is decorative — measured (see the finding's test): with the
+ * connection left at the production default, one blocked attempt alone takes
+ * ~5.3s; with it turned down for the preview, the SAME budget of 2.5s is
+ * respected to within a few ms. If the budget still runs out — the lock
+ * genuinely outlasts it — `attemptCommit` catches `SQLITE_BUSY` and returns
+ * `{ kind: "indeterminate" }` rather than letting it escape: the one
+ * behaviour confirmed definitely wrong was an uncaught throw crossing the
+ * hook boundary, not merely a slow answer. `previewCommit` surfaces this as
+ * `checkFailed: true`, and the Stop hook (note-settlement-stop-hook.ts)
+ * chooses to BLOCK on it with an honest "the check could not run" message —
+ * not silently let the stop through (which would hide exactly the staged-
+ * work loss this hook exists to catch) and not retry again inside the hook
+ * (which would just repeat the wait `runHookWriteTransaction` already paid
+ * out). The existing block cap (spec G2, `blocksIssued`) still governs: this
+ * counts as one of the two, and the job's own multi-attempt retry policy is
+ * the eventual backstop, same as for a genuine gap. A real (non-preview)
+ * `commit` is unaffected — it keeps `runWriteTransaction` and still
+ * propagates `SQLITE_BUSY` as a tool-call error the model can see and retry,
+ * which is out of this finding's scope.
  */
 
 /**
@@ -247,7 +279,18 @@ type CommitRefusal =
 
 type CommitAttempt =
   | { kind: "landed"; counts: NoteSettlementCommitCounts }
-  | { kind: "refused"; refusal: CommitRefusal };
+  | { kind: "refused"; refusal: CommitRefusal }
+  | {
+      /**
+       * The completion check itself could not run (ticket 15 finding 5) — a
+       * writer lock outlasted the preview's own bounded budget.
+       * Preview-only: `attemptCommit(preview: false)` never produces this
+       * arm (see its own catch clause), so `commit()` treats it as
+       * unreachable defensively rather than as a real case to render.
+       */
+      kind: "indeterminate";
+      message: string;
+    };
 
 /**
  * What a `commit` called RIGHT NOW would do, without doing it (ticket 11,
@@ -268,6 +311,15 @@ export interface SettlementCommitPreview {
    * distinction `commit`'s own refusal path draws (ticket 10d).
    */
   fenceLost: boolean;
+  /**
+   * The completion check itself could not run within its bounded budget
+   * (ticket 15 finding 5) — a writer lock elsewhere outlasted it. Distinct
+   * from `wouldCommit: false`: that states a real gate answer (a genuine gap
+   * to fill); this states "unknown". `refusal` is null and `fenceLost` is
+   * false here on purpose — there is nothing to quote and the lease is not
+   * known to be lost, just unchecked.
+   */
+  checkFailed: boolean;
 }
 
 export interface SettlementStagingEngine {
@@ -291,6 +343,37 @@ export interface SettlementStagingEngine {
    * model's run has already produced its final message.
    */
   getLastCommitMetrics(): NoteSettlementCommitCounts | null;
+}
+
+/**
+ * `previewCommit`'s own connection-level busy_timeout (ticket 15 finding 5),
+ * held for the duration of one preview attempt only. See the module doc
+ * comment's "TICKET 15 FINDING 5'S REPAIR" paragraph for why this has to be
+ * lower than `runHookWriteTransaction`'s own budget: without it, a single
+ * blocked `BEGIN IMMEDIATE` can silently swallow the whole hook budget
+ * before that budget's own JS-level clock ever gets a turn.
+ */
+const PREVIEW_LOCK_POLL_TIMEOUT_MS = 200;
+
+function readBusyTimeoutMs(db: Database): number {
+  return db.query<{ timeout: number }, []>("PRAGMA busy_timeout").get()?.timeout ?? 0;
+}
+
+/**
+ * `runHookWriteTransaction`, but with this connection's own `busy_timeout`
+ * turned down for the call and restored in a `finally`. Safe to mutate a
+ * shared connection's pragma like this because bun's sqlite calls are
+ * synchronous — nothing else in this process can run between the lowering
+ * and the restore.
+ */
+function runPreviewTransaction<T>(db: Database, fn: () => T): T {
+  const priorBusyTimeoutMs = readBusyTimeoutMs(db);
+  db.exec(`PRAGMA busy_timeout = ${PREVIEW_LOCK_POLL_TIMEOUT_MS};`);
+  try {
+    return runHookWriteTransaction(db, fn);
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${priorBusyTimeoutMs};`);
+  }
 }
 
 function describeGateRefusal(result: NoteSettlementCompletionResult): string {
@@ -436,8 +519,11 @@ export function createSettlementStagingEngine(
     // to leave the closure by assignment.
     let previewCounts: NoteSettlementCommitCounts | null = null;
 
-    try {
-      const { counts } = runWriteTransaction(db, () => {
+    // A preview runs through `runHookWriteTransaction` with this connection's
+    // busy_timeout turned down (ticket 15 finding 5); a real commit stays on
+    // `runWriteTransaction` — see the module doc comment's "TICKET 15
+    // FINDING 5'S REPAIR" paragraph.
+    const transactionBody = (): { counts: NoteSettlementCommitCounts } => {
         // The fence, first statement (spec G6/G7) — guards EVERYTHING below,
         // the staged replay included. A lease reclaimed between staging and
         // commit throws here, before any staged write can land.
@@ -535,7 +621,12 @@ export function createSettlementStagingEngine(
           throw new CommitPreviewComplete();
         }
         return { counts };
-      });
+    };
+
+    try {
+      const { counts } = preview
+        ? runPreviewTransaction(db, transactionBody)
+        : runWriteTransaction(db, transactionBody);
 
       return { kind: "landed", counts };
     } catch (error) {
@@ -554,6 +645,16 @@ export function createSettlementStagingEngine(
       }
       if (error instanceof NoteSettlementJobFenceError) {
         return { kind: "refused", refusal: { kind: "fence", message: error.message } };
+      }
+      // Ticket 15 finding 5: only a PREVIEW may answer "indeterminate" — a
+      // real commit still propagates SQLITE_BUSY as before (the model sees a
+      // tool-call error and may retry `commit` itself, same as any other
+      // transient failure; out of this finding's scope).
+      if (preview && isSqliteBusy(error)) {
+        return {
+          kind: "indeterminate",
+          message: error instanceof Error ? error.message : "database busy",
+        };
       }
       throw error;
     }
@@ -590,6 +691,15 @@ export function createSettlementStagingEngine(
     // succeed — telling the model to "fill the gap and commit again" here
     // would be the exact self-contradiction the review found (saying
     // "commit again" and "stop making tool calls" in the same breath).
+    if (attempt.kind === "indeterminate") {
+      // Never actually reached: `attemptCommit`'s busy-catch only fires for
+      // `preview === true` (see its own comment), and `commit()` always
+      // calls with `false`. Handled explicitly so this stays a real
+      // exhaustiveness check rather than an unsound cast.
+      throw new Error(
+        `unreachable: commit() attempt reported indeterminate (${attempt.message})`,
+      );
+    }
     const { refusal } = attempt;
     if (refusal.kind === "gate") {
       if (refusal.result.reason === "not-claimed" || refusal.result.reason === "generation-mismatch") {
@@ -629,7 +739,27 @@ export function createSettlementStagingEngine(
     const stagedCount = staged.size;
 
     if (attempt.kind === "landed") {
-      return { staged: stagedCount, wouldCommit: true, refusal: null, fenceLost: false };
+      return {
+        staged: stagedCount,
+        wouldCommit: true,
+        refusal: null,
+        fenceLost: false,
+        checkFailed: false,
+      };
+    }
+    if (attempt.kind === "indeterminate") {
+      // Ticket 15 finding 5: the gate never ran — the lock outlasted the
+      // preview's own bounded budget. `refusal`/`fenceLost` state a real
+      // gate answer, which this is not, so both stay at their "nothing to
+      // report" values; `checkFailed` is the only signal the Stop hook acts
+      // on for this case.
+      return {
+        staged: stagedCount,
+        wouldCommit: false,
+        refusal: null,
+        fenceLost: false,
+        checkFailed: true,
+      };
     }
     const { refusal } = attempt;
     if (refusal.kind === "gate") {
@@ -641,6 +771,7 @@ export function createSettlementStagingEngine(
         wouldCommit: false,
         refusal: describeGateRefusal(refusal.result),
         fenceLost,
+        checkFailed: false,
       };
     }
     if (refusal.kind === "replay") {
@@ -649,6 +780,7 @@ export function createSettlementStagingEngine(
         wouldCommit: false,
         refusal: refusal.message,
         fenceLost: false,
+        checkFailed: false,
       };
     }
     return {
@@ -658,6 +790,7 @@ export function createSettlementStagingEngine(
         "this dispatch's job lease was reclaimed; no further work will land. " +
         "Stop making tool calls.",
       fenceLost: true,
+      checkFailed: false,
     };
   }
 

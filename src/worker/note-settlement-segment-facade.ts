@@ -64,7 +64,11 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  *     (`recordNoteSettlementSegmentExclusion`, db/note-settlement-completion.ts)
  *     had no model-facing path before this — only `create`/`extend` existed,
  *     so a window holding one legitimately unsegmented turn could not
- *     complete. `exclude` writes exactly that row and nothing else.
+ *     complete. `exclude` writes exactly that row and nothing else. Ticket 15
+ *     finding 6: gated on `context.reviewableTurnIds`, the same scope a
+ *     review verdict already is (note-settlement-turn-facade.ts) — address
+ *     syntax and row existence alone would happily accept a real turn this
+ *     dispatch never reviewed.
  *   - a body citation (`[S<session>/T<prompt>]`/`[E<n>]` in title/content) is
  *     now validated at STAGE time too, not only when `createSegment`/
  *     `applySegmentWrites` reconcile it at apply time — the same "the agent
@@ -380,6 +384,26 @@ export function evaluateSettlementSegmentWrite(
     const turn = getTurn(db, address.sessionId, address.promptNumber);
     if (!turn) {
       return { ok: false, message: `no turn at ${ref}.` };
+    }
+    // Ticket 15 finding 6: syntax and row existence alone let an exclude
+    // name a real turn outside this job's own reviewable set (the window
+    // plus its rendered lookback, `context.reviewableTurnIds`) — an
+    // unrelated turn some other window owns. The completion gate is job-
+    // scoped (`computeNoteSettlementSegmentationGaps` filters exclusions by
+    // `job_id`), so this could never make a job complete falsely; the actual
+    // problem is a false verdict landing on a turn this dispatch never
+    // reviewed. Same scoping discipline `evaluateSettlementTurnWrite` already
+    // applies to a review verdict (note-settlement-turn-facade.ts) — a
+    // destructive claim about a turn needs the same fence a destructive
+    // WRITE to it does.
+    if (!context.reviewableTurnIds.has(turn.id)) {
+      return {
+        ok: false,
+        message:
+          `${ref} is outside this dispatch's reviewable window (the window ` +
+          "plus its rendered lookback) — an exclude verdict may only be " +
+          "recorded for a turn this prompt actually showed.",
+      };
     }
     if (options.apply) {
       // The job-scoped negative verdict (spec G7) — the ONLY thing an
