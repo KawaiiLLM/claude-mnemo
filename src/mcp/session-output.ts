@@ -16,15 +16,6 @@ export interface SessionStateRenderInput {
   nextSteps: string | null;
   reference: string | null;
   insight?: string[];
-  /**
-   * @deprecated ticket 04 (spec D2): `current` is deleted and nothing below
-   * reads this. It is accepted-and-ignored for exactly one reason — the P2
-   * settlement context builder (src/worker/note-settlement-context.ts) still
-   * passes it and lies outside this ticket's fence, so removing the key here
-   * would break that file's compile rather than its behaviour. Delete both in
-   * one change.
-   */
-  current?: string | null;
 }
 
 export interface SessionStateTokenReport {
@@ -218,6 +209,15 @@ export function renderSessionStateInjection(
   return renderBoundedSessionStateOutput(input, tokenBudget);
 }
 
+/**
+ * The `FormattedSession`-shaped door into the same bounded renderer. Ticket 11
+ * moved its one production caller (the SessionStart hook) onto
+ * `hooks/session-injection.ts`, which is now the single place the injected
+ * field list is built for BOTH the main agent and the settlement subagent —
+ * so this overload survives for `tests/mcp/session-output.test.ts`, which is
+ * where the degradation ladder itself is proved. Adding a field to the
+ * injection means adding it there, not here.
+ */
 export function renderCurrentSessionStateOutput(
   session: FormattedSession,
   sessionRecord: SessionRecord,

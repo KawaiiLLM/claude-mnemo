@@ -49,32 +49,53 @@ export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
   "Work entirely through the note/segment/commit tools; do not reply with " +
   "JSON or any other structured payload.";
 
+/**
+ * A window turn: recall's collapsed view of it (ticket 11, spec A5 — built in
+ * `note-settlement-context.ts` by the same builder and renderer the preceding-
+ * turns section uses), then the facts only settlement needs.
+ *
+ * The annotation line RESTATES the address in `[S<session>/T<prompt>]` form on
+ * purpose. Recall labels a turn `[S15][T7]`, and this window's turns are the
+ * ones the model has to address in every `note`, `segment` and `exclude` call,
+ * under a schema that takes exactly one address shape. Keeping the qualified
+ * form in front of it costs one bracket pair per turn and removes the only
+ * behavioural risk of routing this section through recall's renderer.
+ *
+ * `tools=` is gone: recall's own line already carries the tool count in its
+ * stats (`🔧n`), and two counts of the same thing is what this ticket is
+ * removing, not adding. The FILE NAMES stay — the collapsed stats count files
+ * modified but never name them, and which file a turn touched is what tells a
+ * segmentation pass two turns are the same work.
+ */
 function renderWindowTurn(turn: NoteSettlementWindowTurn): string {
   const lines: string[] = [];
+  if (turn.collapsedRendering) {
+    lines.push(turn.collapsedRendering);
+  }
   const facts = [
+    `[${turn.ref}]`,
     `kind=${turn.kind}`,
-    turn.toolCallCount === null ? null : `tools=${turn.toolCallCount}`,
     turn.filesModified.length > 0
       ? `files_modified=${turn.filesModified.slice(0, 6).join(",")}`
       : null,
     turn.gapSeconds === null ? null : `gap=${turn.gapSeconds}s`,
     turn.wasRolledBack ? "rolled_back" : null,
   ].filter((fact): fact is string => fact !== null);
-  lines.push(`[${turn.ref}] ${facts.join(" ")}`);
+  lines.push(`    ${facts.join(" ")}`);
 
   if (turn.note) {
-    lines.push(`  title: ${turn.note.title}`);
-    lines.push(`  content: ${turn.note.content}`);
+    // Recall's view carries the note's title and content; `insight` and the
+    // note's ORIGIN are settlement-only facts it has no slot for.
     if (turn.note.insight) {
-      lines.push(`  insight: ${turn.note.insight}`);
+      lines.push(`    insight: ${turn.note.insight}`);
     }
     if (turn.note.writerOrigin === "settlement") {
-      lines.push("  (note reconstructed by an earlier settlement pass)");
+      lines.push("    (note reconstructed by an earlier settlement pass)");
     }
   }
   if (turn.rawMaterial) {
     for (const line of turn.rawMaterial.split("\n")) {
-      lines.push(`  raw> ${line}`);
+      lines.push(`    raw> ${line}`);
     }
   }
   return lines.join("\n");
@@ -345,6 +366,14 @@ export function renderNoteSettlementPrompt(
     "## Topic registry (active), most-used name first",
     "",
     renderTopics(context),
+    "",
+    // Ticket 11 (spec A4): the session summary as the MAIN agent is shown it
+    // at SessionStart, from the one entry point both surfaces call. Assembled
+    // in the context builder and only placed here, so a later change to what
+    // the main agent sees reaches this prompt without a second edit.
+    "## Session summary (the block the main agent is shown at SessionStart)",
+    "",
+    context.sessionStateRendering || "(no session summary yet)",
     "",
     "## Session arc so far",
     "",

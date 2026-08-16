@@ -3953,7 +3953,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msw0w6xh" : "dev";
+var BUILD_ID = true ? "0.10.0-msw28p50" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -5471,169 +5471,6 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
-// src/mcp/session-output.ts
-var CURRENT_SESSION_STATE_TOKEN_BUDGET = 2e3;
-function capCodePoints(value, max) {
-  if (!value) {
-    return value;
-  }
-  const codePoints = Array.from(value);
-  return codePoints.length <= max ? value : `${codePoints.slice(0, Math.max(0, max - 1)).join("")}\u2026`;
-}
-function buildSessionStateLines(input, capPriorityFields = false, includeHistoricalFields = true) {
-  const title = (capPriorityFields ? capCodePoints(input.title, 100) : input.title) ?? "(untitled session)";
-  const lines = [
-    `[S${input.id}] ${title}`
-  ];
-  const pushField = (label, value, cap) => {
-    const rendered = capPriorityFields && cap ? capCodePoints(value ?? null, cap) : value;
-    if (rendered) {
-      lines.push(`  ${label}: ${rendered}`);
-    }
-  };
-  const pushBulletField = (label, value) => {
-    const items = splitBulletField(value);
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  ${label}:`);
-    for (const item of items) {
-      lines.push(`    - ${item}`);
-    }
-  };
-  pushField("content", input.content, 400);
-  pushField("next", input.nextSteps, 200);
-  if (!includeHistoricalFields) {
-    return lines;
-  }
-  if (input.decision) {
-    pushBulletField("decision", input.decision);
-  }
-  if ((input.insight?.length ?? 0) > 0) {
-    lines.push("  insight:");
-    for (const item of input.insight ?? []) {
-      lines.push(`    - ${item}`);
-    }
-  }
-  pushBulletField("done", input.done);
-  pushBulletField("reference", input.reference);
-  return lines;
-}
-function renderSessionStateOutput(input) {
-  return buildSessionStateLines(input).join("\n");
-}
-function renderBoundedSessionStateOutput(input, tokenBudget = CURRENT_SESSION_STATE_TOKEN_BUDGET) {
-  const full = renderSessionStateOutput(input);
-  if (estimateDiaryTokens(full) <= tokenBudget) {
-    return full;
-  }
-  const pointer = `  \u2026 state truncated; full summary: recall(id="S${input.id}")`;
-  const uncappedStateLines = buildSessionStateLines(input, false, false);
-  const stateFitsUncapped = estimateDiaryTokens([...uncappedStateLines, pointer].join("\n")) <= tokenBudget;
-  const lines = buildSessionStateLines(input, !stateFitsUncapped);
-  const included = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const candidate = [
-      ...included,
-      lines[index],
-      pointer
-    ].join("\n");
-    if (estimateDiaryTokens(candidate) > tokenBudget) {
-      break;
-    }
-    included.push(lines[index]);
-  }
-  return [...included, pointer].join("\n");
-}
-function renderCurrentSessionStateOutput(session, sessionRecord, tokenBudget) {
-  return renderBoundedSessionStateOutput(
-    {
-      id: sessionRecord.id,
-      title: session.title ?? null,
-      content: session.content ?? null,
-      // context.ts currently resolves pointers on FormattedSession. Read raw
-      // storage here so state injection keeps compact [T<n>] coordinates.
-      decision: sessionRecord.decision ?? session.decision ?? null,
-      done: sessionRecord.done ?? session.done ?? null,
-      nextSteps: session.nextSteps ?? null,
-      reference: session.reference ?? null,
-      insight: session.insight
-    },
-    tokenBudget
-  );
-}
-
-// src/db/pending-queue.ts
-function enqueueQueueItem(db, input) {
-  const inserted = db.query(
-    `
-        INSERT INTO pending_queue (
-          kind,
-          target_id,
-          session_db_id,
-          enqueued_at_epoch
-        ) VALUES (?, ?, ?, ?)
-        RETURNING
-          seq,
-          kind,
-          target_id AS targetId,
-          session_db_id AS sessionDbId,
-          claimed_at_epoch AS claimedAtEpoch,
-          enqueued_at_epoch AS enqueuedAtEpoch
-      `
-  ).get(
-    input.kind,
-    input.targetId,
-    input.sessionDbId,
-    input.enqueuedAtEpoch
-  );
-  if (!inserted) {
-    throw new Error("Failed to enqueue pending queue item.");
-  }
-  return inserted;
-}
-function queueItemExistsForTurn(db, kind, targetId) {
-  const row = db.query(
-    "SELECT 1 AS one FROM pending_queue WHERE kind = ? AND target_id = ? LIMIT 1"
-  ).get(kind, targetId);
-  return row !== null;
-}
-
-// src/db/recover-stranded.ts
-function recoverStrandedTurns(db, sessionDbId, nowEpoch, eraCutoffEpoch = null) {
-  const stranded = getStrandedTurns(db, sessionDbId);
-  let recovered = 0;
-  for (const turn of stranded) {
-    if (queueItemExistsForTurn(db, "turn-stop", turn.id)) {
-      continue;
-    }
-    if (!isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch)) {
-      resetTurnExtractionFields(db, turn.id, nowEpoch);
-    }
-    enqueueQueueItem(db, {
-      kind: "turn-stop",
-      targetId: turn.id,
-      sessionDbId,
-      enqueuedAtEpoch: nowEpoch
-    });
-    recovered += 1;
-  }
-  return recovered;
-}
-function recoverStrandedAncestors(db, childSessionId, nowEpoch, eraCutoffEpoch = null, maxDepth = 16) {
-  let recovered = 0;
-  const visited = /* @__PURE__ */ new Set([childSessionId]);
-  let current = getSession(db, childSessionId)?.parentSessionId ?? null;
-  let depth = 0;
-  while (current != null && depth < maxDepth && !visited.has(current)) {
-    visited.add(current);
-    recovered += recoverStrandedTurns(db, current, nowEpoch, eraCutoffEpoch);
-    current = getSession(db, current)?.parentSessionId ?? null;
-    depth += 1;
-  }
-  return recovered;
-}
-
 // src/diary/persona-render.ts
 var import_node_path9 = require("node:path");
 var PROFILE_INJECTION_TOKEN_BUDGET = 2e3;
@@ -5795,6 +5632,208 @@ function renderSessionStartRecentSessionsInjection(input) {
     recentBudget -= 1;
   }
   return diaryIndex;
+}
+
+// src/mcp/session-output.ts
+var CURRENT_SESSION_STATE_TOKEN_BUDGET = 2e3;
+function capCodePoints(value, max) {
+  if (!value) {
+    return value;
+  }
+  const codePoints = Array.from(value);
+  return codePoints.length <= max ? value : `${codePoints.slice(0, Math.max(0, max - 1)).join("")}\u2026`;
+}
+function buildSessionStateLines(input, capPriorityFields = false, includeHistoricalFields = true) {
+  const title = (capPriorityFields ? capCodePoints(input.title, 100) : input.title) ?? "(untitled session)";
+  const lines = [
+    `[S${input.id}] ${title}`
+  ];
+  const pushField = (label, value, cap) => {
+    const rendered = capPriorityFields && cap ? capCodePoints(value ?? null, cap) : value;
+    if (rendered) {
+      lines.push(`  ${label}: ${rendered}`);
+    }
+  };
+  const pushBulletField = (label, value) => {
+    const items = splitBulletField(value);
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  ${label}:`);
+    for (const item of items) {
+      lines.push(`    - ${item}`);
+    }
+  };
+  pushField("content", input.content, 400);
+  pushField("next", input.nextSteps, 200);
+  if (!includeHistoricalFields) {
+    return lines;
+  }
+  if (input.decision) {
+    pushBulletField("decision", input.decision);
+  }
+  if ((input.insight?.length ?? 0) > 0) {
+    lines.push("  insight:");
+    for (const item of input.insight ?? []) {
+      lines.push(`    - ${item}`);
+    }
+  }
+  pushBulletField("done", input.done);
+  pushBulletField("reference", input.reference);
+  return lines;
+}
+function renderSessionStateOutput(input) {
+  return buildSessionStateLines(input).join("\n");
+}
+function renderBoundedSessionStateOutput(input, tokenBudget = CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+  const full = renderSessionStateOutput(input);
+  if (estimateDiaryTokens(full) <= tokenBudget) {
+    return full;
+  }
+  const pointer = `  \u2026 state truncated; full summary: recall(id="S${input.id}")`;
+  const uncappedStateLines = buildSessionStateLines(input, false, false);
+  const stateFitsUncapped = estimateDiaryTokens([...uncappedStateLines, pointer].join("\n")) <= tokenBudget;
+  const lines = buildSessionStateLines(input, !stateFitsUncapped);
+  const included = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const candidate = [
+      ...included,
+      lines[index],
+      pointer
+    ].join("\n");
+    if (estimateDiaryTokens(candidate) > tokenBudget) {
+      break;
+    }
+    included.push(lines[index]);
+  }
+  return [...included, pointer].join("\n");
+}
+function renderSessionStateInjection(input, tokenBudget) {
+  return renderBoundedSessionStateOutput(input, tokenBudget);
+}
+
+// src/hooks/session-injection.ts
+function splitInsight(insight) {
+  if (!insight) {
+    return [];
+  }
+  return insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
+}
+function buildCorpusHeader(db, primarySessionId) {
+  const sessionCount = db.query("SELECT COUNT(*) AS count FROM sessions").get()?.count ?? 0;
+  const observationCount = db.query(
+    // Excluded rows (a `note` call's observation) are captured for the raw
+    // axis only; counting them here would tell the reader a hidden call exists.
+    "SELECT COUNT(*) AS count FROM observations WHERE excluded_from_extraction = 0"
+  ).get()?.count ?? 0;
+  return [
+    `claude-mnemo: ${sessionCount} sessions, ${observationCount} observations${primarySessionId ? ` | current: S${primarySessionId}` : ""}`,
+    "Axes: recall (content) \xB7 timeline (temporal) \xB7 mnemo-replay (raw)"
+  ].join("\n");
+}
+var STATE_HEADING_LINES = ["## Current Session", ""];
+function renderMainAgentSessionInjection(db, input) {
+  const header = input.includeCorpusHeader ? buildCorpusHeader(db, input.currentSessionId) : null;
+  if (!input.session) {
+    return header ?? "";
+  }
+  const budget = input.tokenBudget ?? SESSION_INJECTION_TOKEN_BUDGET;
+  const stateTokenBudget = Math.max(
+    0,
+    budget - estimateDiaryTokens([...STATE_HEADING_LINES, ""].join("\n"))
+  );
+  const session = input.session;
+  const sessionDocument = [
+    ...STATE_HEADING_LINES,
+    renderSessionStateInjection(
+      {
+        id: session.id,
+        title: session.title,
+        content: session.content,
+        // Raw storage, not resolved pointers: state injection keeps the
+        // compact `[T<n>]` coordinates a reader can cite straight back.
+        decision: session.decision,
+        done: session.done,
+        nextSteps: session.nextSteps,
+        reference: session.reference,
+        insight: splitInsight(session.insight)
+      },
+      stateTokenBudget
+    ),
+    ""
+  ].join("\n");
+  return header ? [header, "", sessionDocument].join("\n") : sessionDocument;
+}
+
+// src/db/pending-queue.ts
+function enqueueQueueItem(db, input) {
+  const inserted = db.query(
+    `
+        INSERT INTO pending_queue (
+          kind,
+          target_id,
+          session_db_id,
+          enqueued_at_epoch
+        ) VALUES (?, ?, ?, ?)
+        RETURNING
+          seq,
+          kind,
+          target_id AS targetId,
+          session_db_id AS sessionDbId,
+          claimed_at_epoch AS claimedAtEpoch,
+          enqueued_at_epoch AS enqueuedAtEpoch
+      `
+  ).get(
+    input.kind,
+    input.targetId,
+    input.sessionDbId,
+    input.enqueuedAtEpoch
+  );
+  if (!inserted) {
+    throw new Error("Failed to enqueue pending queue item.");
+  }
+  return inserted;
+}
+function queueItemExistsForTurn(db, kind, targetId) {
+  const row = db.query(
+    "SELECT 1 AS one FROM pending_queue WHERE kind = ? AND target_id = ? LIMIT 1"
+  ).get(kind, targetId);
+  return row !== null;
+}
+
+// src/db/recover-stranded.ts
+function recoverStrandedTurns(db, sessionDbId, nowEpoch, eraCutoffEpoch = null) {
+  const stranded = getStrandedTurns(db, sessionDbId);
+  let recovered = 0;
+  for (const turn of stranded) {
+    if (queueItemExistsForTurn(db, "turn-stop", turn.id)) {
+      continue;
+    }
+    if (!isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch)) {
+      resetTurnExtractionFields(db, turn.id, nowEpoch);
+    }
+    enqueueQueueItem(db, {
+      kind: "turn-stop",
+      targetId: turn.id,
+      sessionDbId,
+      enqueuedAtEpoch: nowEpoch
+    });
+    recovered += 1;
+  }
+  return recovered;
+}
+function recoverStrandedAncestors(db, childSessionId, nowEpoch, eraCutoffEpoch = null, maxDepth = 16) {
+  let recovered = 0;
+  const visited = /* @__PURE__ */ new Set([childSessionId]);
+  let current = getSession(db, childSessionId)?.parentSessionId ?? null;
+  let depth = 0;
+  while (current != null && depth < maxDepth && !visited.has(current)) {
+    visited.add(current);
+    recovered += recoverStrandedTurns(db, current, nowEpoch, eraCutoffEpoch);
+    current = getSession(db, current)?.parentSessionId ?? null;
+    depth += 1;
+  }
+  return recovered;
 }
 
 // src/db/session-run.ts
@@ -19978,24 +20017,6 @@ async function readPersonaContext(memoryStore) {
     return void 0;
   }
 }
-function splitInsight(insight) {
-  if (!insight) {
-    return [];
-  }
-  return insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
-}
-function buildHeader(db, primarySessionId) {
-  const sessionCount = db.query("SELECT COUNT(*) AS count FROM sessions").get()?.count ?? 0;
-  const observationCount = db.query(
-    // Excluded rows (a `note` call's observation) are captured for the raw
-    // axis only; counting them here would tell the reader a hidden call exists.
-    "SELECT COUNT(*) AS count FROM observations WHERE excluded_from_extraction = 0"
-  ).get()?.count ?? 0;
-  return [
-    `claude-mnemo: ${sessionCount} sessions, ${observationCount} observations${primarySessionId ? ` | current: S${primarySessionId}` : ""}`,
-    "Axes: recall (content) \xB7 timeline (temporal) \xB7 mnemo-replay (raw)"
-  ].join("\n");
-}
 function hasSessionRunStart(db, sessionId) {
   return db.query(
     "SELECT 1 AS present FROM session_run_state WHERE session_db_id = ?"
@@ -20201,32 +20222,12 @@ function buildContextOutput(db, input, eraCutoffEpoch) {
     /* @__PURE__ */ new Set([...recentSessions.map((session) => session.id), primarySessionRecord.id])
   );
   const sessionMetrics = buildSessionMetricMap(db, sessionIds);
-  const primarySession = buildSessionView(
-    db,
-    primarySessionRecord,
-    sessionMetrics.get(primarySessionRecord.id)
-  );
   const primaryTurnCount = sessionMetrics.get(primarySessionRecord.id)?.turnCount ?? 0;
-  const includeCurrentSession = primaryTurnCount > 0;
-  const header = buildHeader(
-    db,
-    input.sessionId ? primarySessionRecord.id : void 0
-  );
-  const headingLines = ["## Current Session", ""];
-  const stateTokenBudget = Math.max(
-    0,
-    SESSION_INJECTION_TOKEN_BUDGET - estimateDiaryTokens([...headingLines, ""].join("\n"))
-  );
-  const sessionDocument = includeCurrentSession ? [
-    ...headingLines,
-    renderCurrentSessionStateOutput(
-      primarySession,
-      primarySessionRecord,
-      stateTokenBudget
-    ),
-    ""
-  ].join("\n") : "";
-  return sessionDocument ? [header, "", sessionDocument].join("\n") : header;
+  return renderMainAgentSessionInjection(db, {
+    session: primaryTurnCount > 0 ? primarySessionRecord : null,
+    currentSessionId: input.sessionId ? primarySessionRecord.id : void 0,
+    includeCorpusHeader: true
+  });
 }
 function createReadOnlyContextHandler(dependencies, section) {
   return async function handleReadOnlyContextHook(_input) {

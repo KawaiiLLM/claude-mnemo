@@ -635,16 +635,20 @@ describe("acceptance criterion 8 — the staging engine exposes no check", () =>
     const sessionDbId = seedSession();
     const job = claimWindow(db, sessionDbId, 1, 1);
     const engine = createSettlementStagingEngine({ db, context: baseContext(job) });
-    // `getLastCommitMetrics` (ticket 10c) widens this list but not the MODEL-
-    // FACING one: `note-settlement-sdk-query.ts` never registers it with the
-    // SDK's `tool()` the way `note`/`segment`/`commit` are — this assertion is
+    // `getLastCommitMetrics` (ticket 10c) and `previewCommit` (ticket 11)
+    // widen this list but not the MODEL-FACING one:
+    // `note-settlement-sdk-query.ts` never registers either with the SDK's
+    // `tool()` the way `note`/`segment`/`commit` are — this assertion is
     // about the engine's own JS surface, and a `check`-shaped tool would show
     // up in `note-settlement-sdk-query.ts`'s tool list, not here.
+    // `previewCommit` is spec G8's folded check reached from the Stop hook,
+    // which the model cannot call.
     expect(Object.keys(engine).sort()).toEqual(
       [
         "commit",
         "getLastCommitMetrics",
         "pendingCount",
+        "previewCommit",
         "stageNoteWrite",
         "stageSegmentWrite",
       ].sort(),

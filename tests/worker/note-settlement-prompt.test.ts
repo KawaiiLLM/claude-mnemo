@@ -14,6 +14,9 @@ import {
   upsertTopic,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { formatTurnCollapsed } from "../../src/mcp/format";
+import { buildCollapsedTurnsForSession } from "../../src/mcp/recall";
+import { upsertShadowNote } from "../../src/db/shadow-notes";
 import {
   buildNoteSettlementContext,
   NOTE_SETTLEMENT_RECENT_SEGMENTS,
@@ -281,5 +284,70 @@ describe("the anti-fragmentation surface the D9 gate always assumed (spec K3, ti
     expect(prompt).toContain("type=design,implement tags=lease");
     expect(prompt).toContain("  content: the working state");
     expect(prompt).toContain("  insight: a generation check beats a timestamp");
+  });
+});
+
+/**
+ * Ticket 11 (spec A5): a window turn is rendered by RECALL's collapsed view,
+ * not by a renderer only this prompt has. The assertion is deliberately an
+ * equality against what `buildCollapsedTurnsForSession` + `formatTurnCollapsed`
+ * produce for the same row — a private renderer that happened to print similar
+ * text would still fail it, which is the whole point.
+ */
+describe("ticket 11 — window turns go through recall's collapsed view (spec A5)", () => {
+  test("the window section contains recall's own rendering of the turn, byte for byte", () => {
+    const sessionDbId = seedSession();
+    const turnId = seedTurn(sessionDbId, 1, { type: ["implement"] });
+    db.query<unknown, [number]>(
+      "UPDATE turns SET title = 'implement+lease: fence the claim', content = 'Fenced it.' WHERE id = ?",
+    ).run(turnId);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const prompt = renderNoteSettlementPrompt(context);
+    const window = prompt.slice(prompt.indexOf("## Window turns"));
+
+    const recallView = buildCollapsedTurnsForSession(db, sessionDbId).find(
+      (turn) => turn.promptNumber === 1,
+    )!;
+    const recallRendering = formatTurnCollapsed(recallView, { sessionId: sessionDbId });
+    expect(recallRendering).toContain("implement+lease: fence the claim");
+    expect(window).toContain(recallRendering);
+    expect(context.windowTurns[0]!.collapsedRendering).toBe(recallRendering);
+
+    // The settlement-only facts survive as annotations under that line, and
+    // the QUALIFIED address stays in front of the model — recall labels a turn
+    // `[S<n>][T<n>]`, and every write tool takes `S<n>/T<n>`.
+    expect(window).toContain(`[S${sessionDbId}/T1] kind=`);
+    // The private renderer's own duplicate of a count recall already prints.
+    expect(window).not.toContain("tools=");
+  });
+
+  test("a note only `shadow_notes` carries still reaches the model, through the same renderer", () => {
+    const sessionDbId = seedSession();
+    const turnId = seedTurn(sessionDbId, 1);
+    // A reconstruction an earlier settlement pass wrote: never promoted onto
+    // the turn record, so recall's builder alone would render "Untitled".
+    upsertShadowNote(db, {
+      turnId,
+      title: "fix+lease: reconstructed in hindsight",
+      content: "What the earlier pass concluded.",
+      insight: "the lease is the fence",
+      writerOrigin: "settlement",
+      nowEpoch: NOW - 500,
+    });
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const window = renderNoteSettlementPrompt(context).slice(
+      renderNoteSettlementPrompt(context).indexOf("## Window turns"),
+    );
+
+    expect(window).toContain("fix+lease: reconstructed in hindsight");
+    expect(window).toContain("What the earlier pass concluded.");
+    // `insight` and the note's origin have no slot in recall's view, so they
+    // stay annotations — the two facts settlement adds, and only those.
+    expect(window).toContain("insight: the lease is the fence");
+    expect(window).toContain("(note reconstructed by an earlier settlement pass)");
   });
 });

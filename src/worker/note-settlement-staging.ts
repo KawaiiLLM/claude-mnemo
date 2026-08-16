@@ -89,6 +89,17 @@ import {
  * never appears in any `ToolTextResult` this module returns. The query
  * wrapper reads it exactly once, after the model's run has already ended,
  * for a sink the model never sees (spec G9).
+ *
+ * TICKET 11'S ADDITION: `previewCommit` — `attemptCommit(preview: true)`,
+ * which is the SAME replay and the SAME gate in a transaction whose last
+ * statement is a throw. Its only caller is the Stop hook
+ * (note-settlement-stop-hook.ts), which has to answer "what would `commit`
+ * refuse" for an agent that is stopping without having called it. Computing
+ * that against un-replayed tables would report gaps the agent has already
+ * staged the fix for, so the answer comes from the gate itself — spec G8's
+ * "the check cannot drift from the gate: it IS the gate", one layer up from
+ * where G8 states it. Like `getLastCommitMetrics` it is NOT an MCP tool:
+ * settlement has no `check` (G8 amended), and the model cannot reach this.
  */
 
 /**
@@ -217,10 +228,60 @@ class CommitGateRefused extends Error {
   }
 }
 
+/**
+ * Thrown as the LAST statement of a preview's transaction, once the replay and
+ * the gate have both passed — the throw is what rolls the whole attempt back
+ * (ticket 11). A preview is a `commit` that answers and then undoes itself:
+ * anything weaker would have to re-implement the gate against un-replayed
+ * tables and would report gaps the agent has already staged the fix for, which
+ * is precisely the drift spec G8 forbids ("the check cannot drift from the
+ * gate: it IS the gate").
+ */
+class CommitPreviewComplete extends Error {}
+
+/** Why a commit attempt refused, in the shape its caller needs to render it. */
+type CommitRefusal =
+  | { kind: "gate"; result: NoteSettlementCompletionResult }
+  | { kind: "replay"; message: string }
+  | { kind: "fence"; message: string };
+
+type CommitAttempt =
+  | { kind: "landed"; counts: NoteSettlementCommitCounts }
+  | { kind: "refused"; refusal: CommitRefusal };
+
+/**
+ * What a `commit` called RIGHT NOW would do, without doing it (ticket 11,
+ * spec G2's first layer). The Stop hook is its only caller: an agent that
+ * stops without committing has produced nothing, and this is what turns that
+ * fact into an actionable sentence.
+ */
+export interface SettlementCommitPreview {
+  /** Staged calls that would replay. Zero is not "nothing to do" — the gate still runs. */
+  staged: number;
+  /** True when a `commit` right now would land the window and complete the job. */
+  wouldCommit: boolean;
+  /** Commit's own refusal, in commit's own words; null when it would land. */
+  refusal: string | null;
+  /**
+   * The lease is gone. No `commit` from this run can ever succeed, so telling
+   * the agent to call one would be telling it to do the impossible — the same
+   * distinction `commit`'s own refusal path draws (ticket 10d).
+   */
+  fenceLost: boolean;
+}
+
 export interface SettlementStagingEngine {
   stageNoteWrite(rawInput: SettlementTurnWriteInput): ToolTextResult;
   stageSegmentWrite(rawInput: SettlementSegmentWriteInput): ToolTextResult;
   commit(): ToolTextResult;
+  /**
+   * `commit` without the commit (ticket 11) — the same replay and the same
+   * gate, inside a transaction that always rolls back. NOT an MCP tool: the
+   * settlement agent has no `check` (spec G8 amended, "the check folds into
+   * commit"), and this exists for the Stop hook alone, which the model cannot
+   * call either.
+   */
+  previewCommit(): SettlementCommitPreview;
   /** Test/inspection only — how many intents are currently staged. */
   pendingCount(): number;
   /**
@@ -356,13 +417,24 @@ export function createSettlementStagingEngine(
     );
   }
 
-  function commit(): ToolTextResult {
-    const nowEpoch = now();
+  /**
+   * One commit attempt — the replay, then the gate, in one transaction.
+   *
+   * `preview` (ticket 11) changes exactly one statement: the transaction is
+   * rolled back at the end instead of committed. Everything before that is
+   * the same code against the same tables, which is the point — a preview
+   * that computed the answer differently would be a second gate, and the two
+   * would drift toward whichever is looser.
+   */
+  function attemptCommit(nowEpoch: number, preview: boolean): CommitAttempt {
     // An empty snapshot is not special-cased: the gate still runs (an
     // earlier commit attempt may have landed everything already and only
     // failed the gate for a reason since fixed by other means), it just
     // replays nothing first. Map iteration order is insertion order.
     const snapshot = [...staged.values()];
+    // A preview's transaction throws rather than returns, so its counts have
+    // to leave the closure by assignment.
+    let previewCounts: NoteSettlementCommitCounts | null = null;
 
     try {
       const { counts } = runWriteTransaction(db, () => {
@@ -456,81 +528,144 @@ export function createSettlementStagingEngine(
         // `gate` itself is not returned: its only remaining fact,
         // `completed`, is true by construction past this point (the throw
         // above is the only other exit), so nothing after this needs it.
+        if (preview) {
+          // Everything above passed, so a real commit would land. Throwing
+          // here is the rollback (ticket 11).
+          previewCounts = counts;
+          throw new CommitPreviewComplete();
+        }
         return { counts };
       });
 
+      return { kind: "landed", counts };
+    } catch (error) {
+      if (error instanceof CommitPreviewComplete) {
+        return { kind: "landed", counts: previewCounts ?? emptyCommitCounts() };
+      }
+      // A refusal for ANY reason below leaves `staged` untouched (spec A7
+      // requirement 7): the transaction rolled back, so nothing any entry
+      // in `snapshot` would have written actually landed, and the agent's
+      // existing staged work is exactly as good as it was before this call.
+      if (error instanceof CommitGateRefused) {
+        return { kind: "refused", refusal: { kind: "gate", result: error.result } };
+      }
+      if (error instanceof CommitReplayRefused) {
+        return { kind: "refused", refusal: { kind: "replay", message: error.message } };
+      }
+      if (error instanceof NoteSettlementJobFenceError) {
+        return { kind: "refused", refusal: { kind: "fence", message: error.message } };
+      }
+      throw error;
+    }
+  }
+
+  function commit(): ToolTextResult {
+    const attempt = attemptCommit(now(), false);
+
+    if (attempt.kind === "landed") {
       // Only a transaction that actually committed clears the staging —
-      // everything the loop above did is now durable, so replaying it again
+      // everything the replay did is now durable, so replaying it again
       // on a later `commit` call would be redundant (and, for a `create`,
       // wrong: it would mint a second segment). The counts are kept, not
       // cleared: they describe what THIS commit did, for a caller that reads
       // them only after this call returns.
       staged.clear();
       knownHandles = new Map();
-      lastCommitMetrics = counts;
+      lastCommitMetrics = attempt.counts;
       return textResult(
         `Committed. S${context.sessionId} window settled — job complete.`,
       );
-    } catch (error) {
-      // A refusal for ANY reason below leaves `staged` untouched (spec A7
-      // requirement 7): the transaction rolled back, so nothing any entry
-      // in `snapshot` would have written actually landed, and the agent's
-      // existing staged work is exactly as good as it was before this call.
-      //
-      // Ticket 10d: the message must not tell the model to do the
-      // impossible. A GATE GAP (segmentation/note/coverage-incomplete) is
-      // genuinely fixable by staging MORE calls — nothing already staged was
-      // wrong, the window just does not cover itself yet. A FENCE-shaped
-      // refusal (the job's lease is gone — `not-claimed`/`generation-
-      // mismatch`, whether it reaches here as a thrown `NoteSettlementJobFenceError`
-      // or, defensively, as a `CommitGateRefused` whose OWN reason is one of
-      // those two) is different in kind: THIS dispatch's `claimGeneration`
-      // is fixed for its whole life and can never match a newer one, so no
-      // amount of re-staging or re-committing from THIS run will ever
-      // succeed — telling the model to "fill the gap and commit again" here
-      // would be the exact self-contradiction the review found (saying
-      // "commit again" and "stop making tool calls" in the same breath).
-      if (error instanceof CommitGateRefused) {
-        if (error.result.reason === "not-claimed" || error.result.reason === "generation-mismatch") {
-          return textResult(
-            `Commit refused — ${describeGateRefusal(error.result)}`,
-          );
-        }
-        return textResult(
-          `Commit refused — ${describeGateRefusal(error.result)} Staging kept: fill the gap and call commit again.`,
-        );
-      }
-      if (error instanceof CommitReplayRefused) {
-        // A REPLAY conflict is a specific staged entry disagreeing with the
-        // world as of commit time (a stale segment revision, a relation
-        // pair the main agent's own edit has since dropped, ...) — spec
-        // A7a's keyed staging (this same ticket) is what makes this
-        // genuinely fixable in-run: re-stage the SAME key (the turn address
-        // for a note, the handle for a segment create, the segment id for
-        // extend, the turn address for exclude) with corrected input — that
-        // REPLACES the stale entry rather than adding to it — then call
-        // commit again. Blindly retrying the SAME staged input would just
-        // fail again the same way.
-        return textResult(
-          `Commit refused — ${error.message} Staging kept: re-stage the SAME call ` +
-            "(same key) with corrected input, then call commit again — a stale " +
-            "staged entry is not dropped automatically.",
-        );
-      }
-      if (error instanceof NoteSettlementJobFenceError) {
-        return textResult(
-          `Commit refused — this dispatch's job lease was reclaimed (${error.message}). ` +
-            "No further commit will succeed. Stop making tool calls.",
-        );
-      }
-      throw error;
     }
+
+    // Ticket 10d: the message must not tell the model to do the
+    // impossible. A GATE GAP (segmentation/note/coverage-incomplete) is
+    // genuinely fixable by staging MORE calls — nothing already staged was
+    // wrong, the window just does not cover itself yet. A FENCE-shaped
+    // refusal (the job's lease is gone — `not-claimed`/`generation-
+    // mismatch`, whether it reaches here as a thrown `NoteSettlementJobFenceError`
+    // or, defensively, as a `CommitGateRefused` whose OWN reason is one of
+    // those two) is different in kind: THIS dispatch's `claimGeneration`
+    // is fixed for its whole life and can never match a newer one, so no
+    // amount of re-staging or re-committing from THIS run will ever
+    // succeed — telling the model to "fill the gap and commit again" here
+    // would be the exact self-contradiction the review found (saying
+    // "commit again" and "stop making tool calls" in the same breath).
+    const { refusal } = attempt;
+    if (refusal.kind === "gate") {
+      if (refusal.result.reason === "not-claimed" || refusal.result.reason === "generation-mismatch") {
+        return textResult(
+          `Commit refused — ${describeGateRefusal(refusal.result)}`,
+        );
+      }
+      return textResult(
+        `Commit refused — ${describeGateRefusal(refusal.result)} Staging kept: fill the gap and call commit again.`,
+      );
+    }
+    if (refusal.kind === "replay") {
+      // A REPLAY conflict is a specific staged entry disagreeing with the
+      // world as of commit time (a stale segment revision, a relation
+      // pair the main agent's own edit has since dropped, ...) — spec
+      // A7a's keyed staging (this same ticket) is what makes this
+      // genuinely fixable in-run: re-stage the SAME key (the turn address
+      // for a note, the handle for a segment create, the segment id for
+      // extend, the turn address for exclude) with corrected input — that
+      // REPLACES the stale entry rather than adding to it — then call
+      // commit again. Blindly retrying the SAME staged input would just
+      // fail again the same way.
+      return textResult(
+        `Commit refused — ${refusal.message} Staging kept: re-stage the SAME call ` +
+          "(same key) with corrected input, then call commit again — a stale " +
+          "staged entry is not dropped automatically.",
+      );
+    }
+    return textResult(
+      `Commit refused — this dispatch's job lease was reclaimed (${refusal.message}). ` +
+        "No further commit will succeed. Stop making tool calls.",
+    );
+  }
+
+  function previewCommit(): SettlementCommitPreview {
+    const attempt = attemptCommit(now(), true);
+    const stagedCount = staged.size;
+
+    if (attempt.kind === "landed") {
+      return { staged: stagedCount, wouldCommit: true, refusal: null, fenceLost: false };
+    }
+    const { refusal } = attempt;
+    if (refusal.kind === "gate") {
+      const fenceLost =
+        refusal.result.reason === "not-claimed" ||
+        refusal.result.reason === "generation-mismatch";
+      return {
+        staged: stagedCount,
+        wouldCommit: false,
+        refusal: describeGateRefusal(refusal.result),
+        fenceLost,
+      };
+    }
+    if (refusal.kind === "replay") {
+      return {
+        staged: stagedCount,
+        wouldCommit: false,
+        refusal: refusal.message,
+        fenceLost: false,
+      };
+    }
+    return {
+      staged: stagedCount,
+      wouldCommit: false,
+      refusal:
+        "this dispatch's job lease was reclaimed; no further work will land. " +
+        "Stop making tool calls.",
+      fenceLost: true,
+    };
   }
 
   return {
     stageNoteWrite,
     stageSegmentWrite,
     commit,
+    previewCommit,
     pendingCount: () => staged.size,
     getLastCommitMetrics: () => lastCommitMetrics,
   };

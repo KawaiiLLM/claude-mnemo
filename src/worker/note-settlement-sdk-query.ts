@@ -24,6 +24,7 @@ import {
   type SettlementSegmentWriteInput,
 } from "./note-settlement-segment-facade";
 import { createSettlementStagingEngine } from "./note-settlement-staging";
+import { createSettlementStopHook } from "./note-settlement-stop-hook";
 import {
   settlementTurnWriteInputShape,
   type SettlementTurnFacadeContext,
@@ -208,6 +209,14 @@ export function createNoteSettlementSdkQuery(
       context: turnFacadeContext,
       now: options.now,
     });
+    // Ticket 11 (spec G2's first layer): per REQUEST, like the staging engine
+    // it reads — the block count is a fact about this run's stops, and a
+    // shared one would let an earlier window's stops silence a later
+    // window's warning. Registered as an SDK hook rather than through
+    // `hooks/hook-command.ts`: that command short-circuits to success for
+    // `CLAUDE_CODE_ENTRYPOINT === "sdk-ts"`, so mnemo's file-configured hooks
+    // deliberately never fire inside a spawned SDK child.
+    const stopHook = createSettlementStopHook({ engine: staging });
 
     const server = createSdkMcpServerImpl({
       name: "mnemo",
@@ -272,6 +281,7 @@ export function createNoteSettlementSdkQuery(
           tools: [],
           allowedTools: [...SETTLEMENT_ALLOWED_TOOLS],
           mcpServers: { mnemo: server },
+          hooks: { Stop: [{ hooks: [stopHook] }] },
           abortController,
           systemPrompt: request.systemPrompt,
         },

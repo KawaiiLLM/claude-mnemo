@@ -14,9 +14,9 @@ import { getTurnsForSession, type TurnRecord } from "../db/turns";
 import { estimateDiaryTokens } from "../diary/domain";
 import { renderSessionMilestoneInjection } from "../hooks/milestone-injection";
 import { formatTurnAddress } from "../hooks/note-reminder";
+import { renderMainAgentSessionInjection } from "../hooks/session-injection";
 import { buildCollapsedTurnsForSession } from "../mcp/recall";
-import { formatTurnCollapsed } from "../mcp/format";
-import { renderSessionStateInjection } from "../mcp/session-output";
+import { formatTurnCollapsed, type FormattedTurn } from "../mcp/format";
 import { stripPrivateTags } from "../shared/tag-stripping";
 
 /**
@@ -24,16 +24,22 @@ import { stripPrivateTags } from "../shared/tag-stripping";
  *
  * Everything the settlement call reads is rendered by the SAME builders the
  * live surfaces use — `buildCollapsedTurnsForSession` + `formatTurnCollapsed`
- * for the preceding turns, `renderSessionMilestoneInjection` for the arc,
- * `renderSessionStateInjection` for the session summary under its existing
- * budget. The alternative, a settlement-only renderer, is the dual-source rot
- * the spec names: two descriptions of the same rows drift, and the one the model
- * reads is the one nobody looks at.
+ * for the preceding turns AND (ticket 11, spec A5) for the window turns,
+ * `renderSessionMilestoneInjection` for the arc,
+ * `renderMainAgentSessionInjection` for the session summary the main agent is
+ * shown at SessionStart. The alternative, a settlement-only renderer, is the
+ * dual-source rot the spec names: two descriptions of the same rows drift, and
+ * the one the model reads is the one nobody looks at.
  *
- * The one thing assembled here rather than borrowed is the WINDOW itself, which
- * has no existing reader: a window turn is presented as its note when it has
- * one, and as truncated raw material when it is a HOLE the payload must
- * mechanically backfill (spec note-prompt-clock D7, ticket 05).
+ * TICKET 11 (spec A4/A5) closed the last two private copies. The session
+ * summary went through a hand-built field list that still passed the `current`
+ * field ticket 04 deleted and never passed `insight` ticket 04 added — the
+ * subagent was reading a summary the main agent had not seen for two tickets.
+ * And the window turn had a renderer of its own; it now goes through recall's
+ * collapsed view like every other turn on this prompt, with the settlement-only
+ * facts (its backfill kind, the silence before it, the files it touched, and a
+ * hole's raw material) as annotations UNDER that line rather than a second
+ * description of the turn.
  */
 
 /** Turns of context BEFORE the window, rendered as recall renders them. */
@@ -85,6 +91,18 @@ export interface NoteSettlementWindowTurn {
   ref: string;
   kind: NoteSettlementTurnKind;
   note: ShadowNoteRecord | null;
+  /**
+   * The turn as RECALL renders it (ticket 11, spec A5) — same builder, same
+   * renderer, same one-line-plus-desc shape the preceding-turns section uses.
+   *
+   * When the turn has a note, the note's own title and content are what that
+   * view renders: for an agent-written note on an era turn they are already
+   * the turn record's title/content (`promoteTurnFromNote`), and for a note
+   * only `shadow_notes` carries — a reconstruction an earlier settlement pass
+   * wrote, which is deliberately never promoted — substituting them is what
+   * keeps that note visible without a second renderer to show it in.
+   */
+  collapsedRendering: string;
   /** Truncated prompt + response; only for a `hole`. */
   rawMaterial: string | null;
   createdAtEpoch: number;
@@ -103,12 +121,16 @@ export interface NoteSettlementContext {
   interiorHoles: NoteSettlementWindowTurn[];
   /** Collapsed rendering of the 50 turns preceding the window. */
   priorTurnsRendering: string;
+  /**
+   * The session summary as the MAIN agent is shown it at SessionStart, from
+   * the shared entry point both surfaces call (ticket 11, spec A4).
+   */
+  sessionStateRendering: string;
   /** The 50 most recently active segments with their topic names (ticket 14). */
   recentSegments: SegmentWithTopic[];
   /** The topic registry ordered by how many segments carry each name (ticket 14). */
   topicRegistry: TopicFrequency[];
   milestoneRendering: string;
-  sessionStateRendering: string;
   /** Segment ids shown — the exposure gate for `[E<n>]` citations. */
   exposedSegmentIds: Set<number>;
   /**
@@ -231,12 +253,25 @@ export function buildNoteSettlementContext(
     ).map((turn) => turn.turnId),
   );
 
+  // ONE collapsed build for the whole session (ticket 11, spec A5): recall's
+  // own builder, feeding both the window turns below and the preceding-turns
+  // rendering further down. Two calls would be two reads of the same rows at
+  // two instants — and, more to the point, the window's turns are rendered by
+  // the same function as everything else on this prompt.
+  const collapsedTurns = new Map<number, FormattedTurn>(
+    buildCollapsedTurnsForSession(db, job.sessionId).map((turn) => [
+      turn.promptNumber,
+      turn,
+    ]),
+  );
+
   const windowTurns: NoteSettlementWindowTurn[] = [];
   let previousCreatedAt: number | null = null;
   for (const turn of windowRecords) {
     const note = notes.get(turn.id) ?? null;
     const kind = classifyTurn(note !== null, owedTurnIds.has(turn.id));
     const tokenBudget = kind === "hole" ? NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET : 0;
+    const collapsedView = collapsedTurns.get(turn.promptNumber);
 
     windowTurns.push({
       turnId: turn.id,
@@ -245,6 +280,14 @@ export function buildNoteSettlementContext(
       ref: formatTurnAddress(turn),
       kind,
       note,
+      collapsedRendering: collapsedView
+        ? formatTurnCollapsed(
+            note
+              ? { ...collapsedView, title: note.title, content: note.content }
+              : collapsedView,
+            { sessionId: job.sessionId },
+          )
+        : "",
       rawMaterial: tokenBudget > 0 ? buildRawMaterial(turn, tokenBudget) : null,
       createdAtEpoch: turn.createdAtEpoch,
       toolCallCount: turn.toolCallCount,
@@ -269,7 +312,7 @@ export function buildNoteSettlementContext(
       )
       .map((turn) => turn.promptNumber),
   );
-  const priorTurnsRendering = buildCollapsedTurnsForSession(db, job.sessionId)
+  const priorTurnsRendering = [...collapsedTurns.values()]
     .filter((turn) => priorPromptNumbers.has(turn.promptNumber))
     .map((turn) => formatTurnCollapsed(turn, { sessionId: job.sessionId }))
     .join("\n");
@@ -288,16 +331,12 @@ export function buildNoteSettlementContext(
     recentSegments,
     topicRegistry: listTopicsByFrequency(db, "active"),
     milestoneRendering: renderSessionMilestoneInjection(db, job.sessionId),
-    sessionStateRendering: renderSessionStateInjection({
-      id: session.id,
-      title: session.title,
-      content: session.content,
-      decision: session.decision,
-      done: session.done,
-      current: session.current,
-      nextSteps: session.nextSteps,
-      reference: session.reference,
-    }),
+    // Spec A4, ticket 11: the SAME entry point the SessionStart hook calls,
+    // minus the corpus header — the settlement agent has recall and timeline
+    // and no skills, so the header's replay pointer would name a capability
+    // it does not have. Every other difference this call used to carry was
+    // drift, not a difference (see this module's doc comment).
+    sessionStateRendering: renderMainAgentSessionInjection(db, { session }),
     exposedSegmentIds: new Set(
       recentSegments.map((entry) => entry.segment.id),
     ),
