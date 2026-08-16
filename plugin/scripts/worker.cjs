@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msw28p50" : "dev";
+var BUILD_ID = true ? "0.10.0-msw2tvi2" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -10247,6 +10247,7 @@ function renderMainAgentSessionInjection(db, input) {
     budget - estimateDiaryTokens([...STATE_HEADING_LINES, ""].join("\n"))
   );
   const session = input.session;
+  const globalViewOnly = input.fields === "global-view";
   const sessionDocument = [
     ...STATE_HEADING_LINES,
     renderSessionStateInjection(
@@ -10254,13 +10255,17 @@ function renderMainAgentSessionInjection(db, input) {
         id: session.id,
         title: session.title,
         content: session.content,
+        insight: splitInsight(session.insight),
+        // The recent-events group, written for the session resuming itself.
+        // A `global-view` reader is a different session looking in, so these
+        // are omitted rather than truncated — see `fields` above.
+        //
         // Raw storage, not resolved pointers: state injection keeps the
         // compact `[T<n>]` coordinates a reader can cite straight back.
-        decision: session.decision,
-        done: session.done,
-        nextSteps: session.nextSteps,
-        reference: session.reference,
-        insight: splitInsight(session.insight)
+        decision: globalViewOnly ? null : session.decision,
+        done: globalViewOnly ? null : session.done,
+        nextSteps: globalViewOnly ? null : session.nextSteps,
+        reference: globalViewOnly ? null : session.reference
       },
       stateTokenBudget
     ),
@@ -11567,7 +11572,15 @@ function buildNoteSettlementContext(db, job, options) {
     // and no skills, so the header's replay pointer would name a capability
     // it does not have. Every other difference this call used to carry was
     // drift, not a difference (see this module's doc comment).
-    sessionStateRendering: renderMainAgentSessionInjection(db, { session }),
+    // The global-view group only (user ruling, S15069/T759). Settlement needs
+    // the arc — it grades by task causality and ticket 14 hangs the segment
+    // partition on the same Grade-4 boundaries — not the resuming session's
+    // event stream. Measured: 1.2K-1.9K tokens per dispatch for all seven
+    // fields against 400-600 for these three.
+    sessionStateRendering: renderMainAgentSessionInjection(db, {
+      session,
+      fields: "global-view"
+    }),
     exposedSegmentIds: new Set(
       recentSegments.map((entry) => entry.segment.id)
     ),

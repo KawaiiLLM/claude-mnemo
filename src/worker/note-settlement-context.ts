@@ -336,7 +336,15 @@ export function buildNoteSettlementContext(
     // and no skills, so the header's replay pointer would name a capability
     // it does not have. Every other difference this call used to carry was
     // drift, not a difference (see this module's doc comment).
-    sessionStateRendering: renderMainAgentSessionInjection(db, { session }),
+    // The global-view group only (user ruling, S15069/T759). Settlement needs
+    // the arc — it grades by task causality and ticket 14 hangs the segment
+    // partition on the same Grade-4 boundaries — not the resuming session's
+    // event stream. Measured: 1.2K-1.9K tokens per dispatch for all seven
+    // fields against 400-600 for these three.
+    sessionStateRendering: renderMainAgentSessionInjection(db, {
+      session,
+      fields: "global-view",
+    }),
     exposedSegmentIds: new Set(
       recentSegments.map((entry) => entry.segment.id),
     ),

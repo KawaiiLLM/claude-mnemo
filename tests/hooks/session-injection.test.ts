@@ -110,14 +110,11 @@ function hookInput(
 }
 
 describe("ticket 11 — one entry point, two surfaces (spec A4)", () => {
-  test("the SessionStart hook and the settlement prompt both carry the shared block, byte for byte", async () => {
+  test("each surface carries the shared block byte for byte, at the field group it asks for", async () => {
     const sessionDbId = seedSession();
     seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId);
-
-    const shared = renderMainAgentSessionInjection(db, {
-      session: getSession(db, sessionDbId)!,
-    });
+    const session = getSession(db, sessionDbId)!;
 
     const sessionStart =
       (await createContextHandler({ db })(hookInput())).hookSpecificOutput ?? "";
@@ -125,12 +122,26 @@ describe("ticket 11 — one entry point, two surfaces (spec A4)", () => {
       buildNoteSettlementContext(db, job, { nowEpoch: NOW })!,
     );
 
-    expect(shared).toContain("## Current Session");
-    expect(sessionStart).toContain(shared);
-    expect(settlementPrompt).toContain(shared);
+    // Equality against the shared entry point's OWN output, not a field list:
+    // a re-forked settlement renderer reproducing most of the block still
+    // fails here. The two calls differ only in the `fields` argument, which is
+    // what "the difference is a parameter, never a second implementation"
+    // means in practice.
+    const forSessionStart = renderMainAgentSessionInjection(db, { session });
+    const forSettlement = renderMainAgentSessionInjection(db, {
+      session,
+      fields: "global-view",
+    });
+
+    expect(forSessionStart).toContain("## Current Session");
+    expect(sessionStart).toContain(forSessionStart);
+    expect(settlementPrompt).toContain(forSettlement);
+    // And the parameter is load-bearing: if `global-view` silently fell back
+    // to the full field list this test would still pass without it.
+    expect(forSettlement).not.toBe(forSessionStart);
   });
 
-  test("every injected field reaches BOTH surfaces — including the one they had diverged on", async () => {
+  test("the global-view group reaches both surfaces — including the field they had diverged on", async () => {
     const sessionDbId = seedSession();
     seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId);
@@ -146,14 +157,41 @@ describe("ticket 11 — one entry point, two surfaces (spec A4)", () => {
       expect(surface).toContain(
         "content: Settlement writes stage; commit is the only writer.",
       );
-      expect(surface).toContain("next: ship ticket 11");
-      expect(surface).toContain("- staged writes replay inside commit [T3]");
       // `insight` is the field the settlement copy never passed: ticket 04
       // promoted it to a first-class injected field and only one of the two
-      // assemblies was updated.
+      // assemblies was updated. It is in the global-view group, so it must
+      // survive the narrowing that dropped the recent-events group.
       expect(surface).toContain("- a lost stage receipt is not a lost commit receipt");
-      expect(surface).toContain("- the completion gate moved into commit");
-      expect(surface).toContain("- .scratch/settlement-agentic/spec.md");
+    }
+  });
+
+  // Ticket 04 split the seven fields by reader; the settlement subagent is a
+  // third reader that wants the arc and not the resuming session's event
+  // stream (user ruling, S15069/T759). This is the reader split applied, not a
+  // budget trim that happens to drop the tail — so it is asserted as omission
+  // of specific fields, which a smaller token budget would not produce.
+  test("settlement gets the arc, not the event stream, and SessionStart still gets both", async () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId);
+
+    const sessionStart =
+      (await createContextHandler({ db })(hookInput())).hookSpecificOutput ?? "";
+    const settlementPrompt = renderNoteSettlementPrompt(
+      buildNoteSettlementContext(db, job, { nowEpoch: NOW })!,
+    );
+
+    // The recent-events group: written for the session resuming itself.
+    // One per field of the group, so a partial narrowing cannot pass:
+    // next_steps, decision, done, reference.
+    for (const recentEvent of [
+      "next: ship ticket 11",
+      "- staged writes replay inside commit [T3]",
+      "- the completion gate moved into commit",
+      "- .scratch/settlement-agentic/spec.md",
+    ]) {
+      expect(sessionStart).toContain(recentEvent);
+      expect(settlementPrompt).not.toContain(recentEvent);
     }
   });
 

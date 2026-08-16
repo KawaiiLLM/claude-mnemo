@@ -3953,7 +3953,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msw28p50" : "dev";
+var BUILD_ID = true ? "0.10.0-msw2tvi2" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -5743,6 +5743,7 @@ function renderMainAgentSessionInjection(db, input) {
     budget - estimateDiaryTokens([...STATE_HEADING_LINES, ""].join("\n"))
   );
   const session = input.session;
+  const globalViewOnly = input.fields === "global-view";
   const sessionDocument = [
     ...STATE_HEADING_LINES,
     renderSessionStateInjection(
@@ -5750,13 +5751,17 @@ function renderMainAgentSessionInjection(db, input) {
         id: session.id,
         title: session.title,
         content: session.content,
+        insight: splitInsight(session.insight),
+        // The recent-events group, written for the session resuming itself.
+        // A `global-view` reader is a different session looking in, so these
+        // are omitted rather than truncated — see `fields` above.
+        //
         // Raw storage, not resolved pointers: state injection keeps the
         // compact `[T<n>]` coordinates a reader can cite straight back.
-        decision: session.decision,
-        done: session.done,
-        nextSteps: session.nextSteps,
-        reference: session.reference,
-        insight: splitInsight(session.insight)
+        decision: globalViewOnly ? null : session.decision,
+        done: globalViewOnly ? null : session.done,
+        nextSteps: globalViewOnly ? null : session.nextSteps,
+        reference: globalViewOnly ? null : session.reference
       },
       stateTokenBudget
     ),
