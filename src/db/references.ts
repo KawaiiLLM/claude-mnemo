@@ -81,6 +81,31 @@ export function isBareAddressToken(bracketed: string): boolean {
 }
 
 /**
+ * Parse ONE caller-supplied address token — `S12/T30`, `[S12/T30]`, `E47`,
+ * `[E47]` — brackets optional, annotation never allowed (this is a
+ * structured field value, not prose). For a write path that takes a bare
+ * address as a PARAMETER rather than as an inline citation: ticket 07's
+ * relation-attach fields (db/citations.ts's `attachTurnRelations`) are the
+ * caller today.
+ *
+ * `note-settlement-writeback.ts` carries its own private copy of this exact
+ * logic (`parseAddressToken`, predating this export) for its `members`/
+ * `edges` tokens. The duplication is deliberate rather than an oversight:
+ * ticket 10 moves settlement onto these same public write paths, and that is
+ * the point where the two collapse into one — not before, when the two
+ * callers' surrounding code is still being rewritten out from under it.
+ */
+export function parseBareAddressReference(token: string): ParsedReference | null {
+  const trimmed = token.trim();
+  const bracketed = trimmed.startsWith("[") ? trimmed : `[${trimmed}]`;
+  if (!isBareAddressToken(bracketed)) {
+    return null;
+  }
+  const parsed = parseQualifiedReferences(bracketed);
+  return parsed.length === 1 ? parsed[0]! : null;
+}
+
+/**
  * The top-level bracket groups of a body, each returned with its offset.
  *
  * A group that contains a nested `[` is dropped ENTIRELY rather than descended

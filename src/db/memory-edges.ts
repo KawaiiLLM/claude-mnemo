@@ -203,8 +203,42 @@ export interface WriteEdgesResult {
   rejected: Array<{ input: WriteEdgeInput; reason: string }>;
 }
 
-function pairKey(edge: Pick<WriteEdgeInput, "citing" | "cited">): string {
+/**
+ * The pair's identity string (spec C5): `(citing kind:id)>(cited kind:id)`,
+ * independent of relation. Exported so a caller can build an ELIGIBILITY set
+ * in the same currency `writeMemoryEdges` checks it against — ticket 07's
+ * `eligibleForRelation` (below) and the settlement write-back's pre-state
+ * snapshot (`getExistingEdgePairKeys`) both key off this, rather than each
+ * inventing its own pair-identity string that could quietly drift from it.
+ */
+export function pairKey(edge: Pick<WriteEdgeInput, "citing" | "cited">): string {
   return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
+}
+
+export interface WriteMemoryEdgesOptions {
+  /**
+   * Ticket 07 (spec C7/C14): pair keys (see `pairKey`) that MAY receive a
+   * non-null relation on THIS call. Checked only against a relation-BEARING
+   * write — a bare (`relation: null`) edge never needs to appear here,
+   * because C6/C7's "settlement writing a body whose citations create bare
+   * pairs stays legal" rule is about the pair, not about who classified it;
+   * gating bare writes too would re-introduce the free-standing-edge problem
+   * C6 already closed, just from the opposite direction.
+   *
+   * Omitted (the default) means NO eligibility check runs at all — every
+   * caller that does not pass this keeps writing relations exactly as it did
+   * before ticket 07 existed. This is deliberately OPT-IN rather than a
+   * global default-deny: C14's own rule is that eligibility lives in each
+   * write path, not in a property of the primitive every caller inherits
+   * whether it asked for one or not, and a default-deny would have broken
+   * every direct caller of this function that has no C7 stake at all
+   * (schema-migration collapse, and this file's own test suite exercising
+   * the upsert itself). The two callers ticket 07 actually gates — the main
+   * agent's own relation fields (db/citations.ts's `attachTurnRelations`)
+   * and the settlement write-back's judged edges — compute and pass this
+   * explicitly.
+   */
+  eligibleForRelation?: ReadonlySet<string>;
 }
 
 /**
@@ -213,16 +247,17 @@ function pairKey(edge: Pick<WriteEdgeInput, "citing" | "cited">): string {
  * relation AND the provenance recording where it came from, unconditionally —
  * no source ranking stands between an authorised write and the relation it
  * sets (spec C14). Eligibility — whether THIS call is entitled to set or
- * correct a relation on THIS pair — is not this function's job; it belongs to
- * each write path (ticket 07: a main-agent write needs the target cited in
- * its own body's post-state, a settlement write needs the pair already
- * present in its transaction's pre-state). A relation of `null` (a bare
- * reference) never clears or relabels an existing relation, and never touches
- * its provenance either — a citation in prose says the pair exists and says
- * nothing about its relation, so relation and provenance move as one unit,
- * driven only by a write that actually carries a relation. `created_at_epoch`
- * stays at the first sighting so "when did this edge appear" stays
- * answerable.
+ * correct a relation on THIS pair — is `options.eligibleForRelation`: a
+ * main-agent write needs the target cited in its own body's post-state, a
+ * settlement write needs the pair already present in its transaction's
+ * pre-state (ticket 07). Each caller computes its own set; this function only
+ * enforces membership in whatever set it was handed. A relation of `null` (a
+ * bare reference) never clears or relabels an existing relation, and never
+ * touches its provenance either — a citation in prose says the pair exists
+ * and says nothing about its relation, so relation and provenance move as one
+ * unit, driven only by a write that actually carries a relation.
+ * `created_at_epoch` stays at the first sighting so "when did this edge
+ * appear" stays answerable.
  *
  * Self-loops are rejected — a node confirming itself would inflate its own
  * in-degree, the one mechanical confirmation signal the ranking has.
@@ -243,6 +278,7 @@ export function writeMemoryEdges(
   db: Database,
   edges: readonly WriteEdgeInput[],
   nowEpoch: number,
+  options: WriteMemoryEdgesOptions = {},
 ): WriteEdgesResult {
   const written: MemoryEdge[] = [];
   const rejected: WriteEdgesResult["rejected"] = [];
@@ -317,6 +353,19 @@ export function writeMemoryEdges(
     }
     if (edge.relation !== null && conflictingPairs.has(pairKey(edge))) {
       rejected.push({ input: edge, reason: "conflicting-relation" });
+      continue;
+    }
+    // Ticket 07 (spec C7/C14): only a relation-BEARING write is gated — a
+    // bare write always passes, whatever `eligibleForRelation` contains,
+    // which is what keeps a mechanically derived bare pair (segment anchors,
+    // `reconcileCitedPairs`'s own recompute) legal regardless of who is
+    // writing it.
+    if (
+      edge.relation !== null &&
+      options.eligibleForRelation !== undefined &&
+      !options.eligibleForRelation.has(pairKey(edge))
+    ) {
+      rejected.push({ input: edge, reason: "relation-ineligible" });
       continue;
     }
 
@@ -446,6 +495,49 @@ export function getEdgeInDegree(db: Database, cited: EdgeNode): number {
          )`,
       )
       .get(cited.kind, cited.id)?.count ?? 0
+  );
+}
+
+/**
+ * Every stored pair, as `pairKey` strings (spec C7, ticket 07). The one
+ * caller today is the settlement write-back's pre-state snapshot: a judged
+ * relation is eligible only on a pair present BEFORE that transaction's own
+ * writes land, and the snapshot has to be taken before ANY of them — a fresh
+ * segment this same reply is about to create, its anchors, or an earlier
+ * `edges` entry in the very same reply — because a snapshot taken even one
+ * write later would see the call's own work and silently admit it.
+ *
+ * The whole table, not a query targeted at the reply's candidate pairs: the
+ * candidates are only knowable after `edges`' tokens resolve, and a token
+ * naming a segment THIS reply's own step 1 is about to mint cannot be
+ * resolved before that step runs — so a targeted query would have to
+ * reproduce the write-back's own ordering to get right, and get it wrong the
+ * first time an ordering changed. Scanning the whole table sidesteps that
+ * entirely and costs nothing worth optimising away at today's row counts.
+ */
+export function getExistingEdgePairKeys(db: Database): ReadonlySet<string> {
+  return new Set(
+    db
+      .query<
+        {
+          citingKind: CitingNodeKind;
+          citingId: number;
+          citedKind: EdgeNodeKind;
+          citedId: number;
+        },
+        []
+      >(
+        `SELECT citing_kind AS citingKind, citing_id AS citingId,
+                cited_kind AS citedKind, cited_id AS citedId
+         FROM memory_edges`,
+      )
+      .all()
+      .map((row) =>
+        pairKey({
+          citing: { kind: row.citingKind, id: row.citingId },
+          cited: { kind: row.citedKind, id: row.citedId },
+        }),
+      ),
   );
 }
 

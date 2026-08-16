@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import type { CitationRelation } from "../db/citations";
 import { runWriteTransaction } from "../db/database";
 import {
+  getExistingEdgePairKeys,
   writeMemoryEdges,
   type EdgeNode,
   type EdgeProvenance,
@@ -334,6 +335,15 @@ function applyNoteSettlementWriteBackTransaction(
       };
     }
 
+    // Ticket 07 (spec C7/C14): a judged relation is eligible only on a pair
+    // present in THIS transaction's pre-state — snapshotted HERE, before
+    // this window's own segment creation, anchors or edges land, so a pair
+    // the same reply is about to mint (a fresh segment's anchor, an earlier
+    // `edges` entry in this very reply) is correctly excluded. See
+    // `getExistingEdgePairKeys`'s own doc comment for why this is the whole
+    // table rather than a query targeted at `response.edges`' candidates.
+    const preExistingRelationPairs = getExistingEdgePairKeys(db);
+
     // `gradeHistogram` is mutated in place below (per-directive `+= 1`), so it
     // must be this call's OWN array — spreading `EMPTY_COUNTS` alone would
     // share its array reference across every window this process ever
@@ -463,11 +473,14 @@ function applyNoteSettlementWriteBackTransaction(
             : null;
         })
         .filter((input): input is NonNullable<typeof input> => input !== null);
-      counts.judgedEdges += writeMemoryEdges(
-        db,
-        inputs,
-        options.nowEpoch,
-      ).written.length;
+      counts.judgedEdges += writeMemoryEdges(db, inputs, options.nowEpoch, {
+        // Ticket 07: settlement may attach or correct a relation only on a
+        // pair present before this transaction — never one it is itself
+        // minting. Anything outside the snapshot is silently dropped here,
+        // same discipline as an unresolved address above: never a reason to
+        // fail the window it arrived with.
+        eligibleForRelation: preExistingRelationPairs,
+      }).written.length;
     }
 
     // --- mechanical hole backfill (spec D7, ticket 05) ---------------------

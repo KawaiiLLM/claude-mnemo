@@ -1,8 +1,14 @@
 import type { Database } from "bun:sqlite";
 
 import {
+  attachTurnRelations,
   recomputeTurnCitedPairs,
+  type AttachTurnRelationsResult,
+  type CitationRelation,
   type RecomputeTurnCitedPairsResult,
+  type TurnRelationFieldInput,
+  type TurnRelationRejection,
+  type TurnRelationRejectionReason,
 } from "../db/citations";
 import { runWriteTransaction } from "../db/database";
 import {
@@ -86,6 +92,14 @@ export interface NoteToolInput {
   grade?: unknown;
   skip?: unknown;
   crossSession?: unknown;
+
+  // ticket 07 (spec C1/C5/C7): one named field per relation. Targets are
+  // address tokens this write's OWN title/content/insight post-state must
+  // already name — see `RELATION_FIELD_ENTRIES` / `resolveRelationFields`.
+  evidenceFor?: unknown;
+  evidenceAgainst?: unknown;
+  supersedes?: unknown;
+  dependsOn?: unknown;
 
   // Session fields (D2/D4: seven fields, `current` included — ticket 04 trims
   // the set, this ticket only adds the modes).
@@ -486,6 +500,88 @@ function resolveTagsField(
   return { value: decoded };
 }
 
+// ticket 07 (spec C1): the four named relation fields, field name -> the
+// relation it means. One list, so the field-shape loop and the "which turn
+// keys are relation fields" checks below (`handleSessionWrite`'s guard) stay
+// in sync by construction rather than by two hand-kept literals agreeing.
+const RELATION_FIELD_ENTRIES: ReadonlyArray<
+  readonly [
+    key: "evidenceFor" | "evidenceAgainst" | "supersedes" | "dependsOn",
+    relation: CitationRelation,
+  ]
+> = [
+  ["evidenceFor", "evidence-for"],
+  ["evidenceAgainst", "evidence-against"],
+  ["supersedes", "supersedes"],
+  ["dependsOn", "depends-on"],
+];
+
+const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
+  malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
+  unresolved: "does not resolve to a turn or segment",
+  "not-cited":
+    "is not cited by this write's title, content or insight — attach a relation only to a pair the body actually names (spec C7)",
+  "duplicate-target":
+    "is already claimed by a different relation field in this same call — a pair carries at most one relation (spec C5)",
+};
+
+function formatRelationRejections(
+  rejections: readonly TurnRelationRejection[],
+): string {
+  const lines = rejections.map(
+    (entry) => `${entry.relation} "${entry.raw}" ${RELATION_REJECTION_TEXT[entry.reason]}`,
+  );
+  return `relation field rejected: ${lines.join("; ")}.`;
+}
+
+/**
+ * Spec C7 (ticket 07): the main agent may attach a relation to a pair its OWN
+ * write is creating, never to one this call did not itself cite — so this
+ * only has an answer once `citations` (the same write's post-state, from
+ * `recomputeTurnCitedPairs`) is known. A relation field present on a call
+ * that never touched a citation-bearing field (title/content/insight), or
+ * whose targets the resulting post-state does not name, fails the WHOLE
+ * write rather than silently dropping the relation — a relation field is
+ * structured input, not prose a model might hallucinate a bracket into.
+ */
+function resolveRelationFields(
+  db: Database,
+  citingTurnId: number,
+  input: NoteToolInput,
+  citations: RecomputeTurnCitedPairsResult | null,
+  nowEpoch: number,
+): AttachTurnRelationsResult | null {
+  const fields: TurnRelationFieldInput[] = [];
+  for (const [key, relation] of RELATION_FIELD_ENTRIES) {
+    const provided = (input as Record<string, unknown>)[key];
+    if (provided === undefined) {
+      continue;
+    }
+    if (!Array.isArray(provided) || provided.some((value) => typeof value !== "string")) {
+      fail(`${key} must be an array of strings when present.`);
+    }
+    if (provided.length > 0) {
+      fields.push({ relation, targets: provided as string[] });
+    }
+  }
+  if (fields.length === 0) {
+    return null;
+  }
+  if (citations === null) {
+    fail(
+      "evidenceFor/evidenceAgainst/supersedes/dependsOn require this write to also touch a " +
+        "citation-bearing field (title, content or insight) whose post-state names the " +
+        "target — a relation cannot attach to a pair this call is not itself citing (spec C7).",
+    );
+  }
+
+  const result = attachTurnRelations(db, citingTurnId, fields, citations.written, nowEpoch);
+  if (result.rejected.length > 0) {
+    fail(formatRelationRejections(result.rejected));
+  }
+  return result;
+}
+
 function parseModeMap(
   raw: unknown,
   allowed: readonly string[],
@@ -601,6 +697,7 @@ interface TurnWriteTransactionResult {
   finalTags: string[] | undefined;
   finalGrade: number | null | undefined;
   citations: RecomputeTurnCitedPairsResult | null;
+  relations: AttachTurnRelationsResult | null;
   stripped: boolean;
 }
 
@@ -897,6 +994,8 @@ function handleTurnWrite(
         );
       }
 
+      const relations = resolveRelationFields(db, turn.id, input, citations, nowEpoch);
+
       return {
         turn: updatedTurn,
         noteExisted,
@@ -908,6 +1007,7 @@ function handleTurnWrite(
         finalTags: tagsResolution?.value,
         finalGrade: gradeResolution?.value,
         citations,
+        relations,
         stripped,
       };
     });
@@ -978,6 +1078,10 @@ function handleTurnWrite(
     }
   }
 
+  if (result.relations && result.relations.written.length > 0) {
+    parts.push(`Attached ${result.relations.written.length} relation(s).`);
+  }
+
   return textResult(parts.join(" "));
 }
 
@@ -991,7 +1095,18 @@ function handleSessionWrite(
   input: NoteToolInput,
   options: NoteToolOptions,
 ): ToolTextResult {
-  for (const key of ["insight", "type", "tags", "grade", "skip", "crossSession"] as const) {
+  for (const key of [
+    "insight",
+    "type",
+    "tags",
+    "grade",
+    "skip",
+    "crossSession",
+    "evidenceFor",
+    "evidenceAgainst",
+    "supersedes",
+    "dependsOn",
+  ] as const) {
     if ((input as Record<string, unknown>)[key] !== undefined) {
       return parameterError(`${key} is a turn field; this call addresses a session.`);
     }

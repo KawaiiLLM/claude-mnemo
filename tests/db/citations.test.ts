@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import {
+  attachTurnRelations,
   getEffectiveCitations,
   getSessionCitationInDegree,
   getSessionEffectiveCitations,
@@ -12,6 +13,7 @@ import {
 import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
+import { createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
 
@@ -644,6 +646,216 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
     expect(result.written).toEqual([]);
     expect(result.deleted).toEqual([]);
     expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
+  });
+});
+
+describe("attachTurnRelations (spec C7, ticket 07)", () => {
+  let db: Database;
+  let sessionId: number;
+  let turns: number[];
+
+  const insertTurn = (sessionDbId: number, promptNumber: number): number =>
+    db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, title, created_at_epoch)
+         VALUES (?, ?, 'extracted', 'fixture', 100) RETURNING id`,
+      )
+      .get(sessionDbId, promptNumber)!.id;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "attach-relations",
+      project: "claude-mnemo",
+      title: "A",
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+    turns = [1, 2, 3].map((promptNumber) => insertTurn(sessionId, promptNumber));
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("attaches a relation to a pair the body's post-state cites, provenance asserted (requirement 4)", () => {
+    const citations = recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `Overturns [S${sessionId}/T1].`, insight: null },
+      500,
+      sessionId,
+    );
+
+    const result = attachTurnRelations(
+      db,
+      turns[2]!,
+      [{ relation: "supersedes", targets: [`S${sessionId}/T1`] }],
+      citations.written,
+      500,
+    );
+
+    expect(result.rejected).toEqual([]);
+    expect(result.written).toHaveLength(1);
+    expect(result.written[0]?.relation).toBe("supersedes");
+    expect(result.written[0]?.provenance).toBe("asserted");
+    const stored = getOutgoingEdges(db, { kind: "turn", id: turns[2]! });
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.relation).toBe("supersedes");
+    expect(stored[0]?.provenance).toBe("asserted");
+  });
+
+  // Requirement 2: a relation naming a turn the body does not cite is
+  // rejected — never silently dropped the way a bare prose reference is.
+  test("rejects a target the body's post-state does not cite (requirement 2)", () => {
+    const citations = recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `Mentions [S${sessionId}/T1].`, insight: null },
+      500,
+      sessionId,
+    );
+
+    const result = attachTurnRelations(
+      db,
+      turns[2]!,
+      [{ relation: "supersedes", targets: [`S${sessionId}/T2`] }],
+      citations.written,
+      500,
+    );
+
+    expect(result.written).toEqual([]);
+    expect(result.rejected).toEqual([
+      { relation: "supersedes", raw: `S${sessionId}/T2`, reason: "not-cited" },
+    ]);
+    // The bare pair the body DID cite is untouched — still relationless.
+    expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([
+      {
+        citing: { kind: "turn", id: turns[2]! },
+        cited: { kind: "turn", id: turns[0]! },
+        relation: null,
+        provenance: "text-ref",
+        createdAtEpoch: 500,
+      },
+    ]);
+  });
+
+  // Requirement 3: the same target under two relation fields is rejected —
+  // and, being all-or-nothing, the OTHER, otherwise-legal target in the same
+  // call is held back too rather than partially applied.
+  test("rejects the same target claimed by two different relation fields (requirement 3)", () => {
+    const citations = recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      {
+        title: null,
+        content: `[S${sessionId}/T1] and [S${sessionId}/T2].`,
+        insight: null,
+      },
+      500,
+      sessionId,
+    );
+
+    const result = attachTurnRelations(
+      db,
+      turns[2]!,
+      [
+        { relation: "evidence-for", targets: [`S${sessionId}/T1`] },
+        { relation: "supersedes", targets: [`S${sessionId}/T1`, `S${sessionId}/T2`] },
+      ],
+      citations.written,
+      500,
+    );
+
+    expect(result.written).toEqual([]);
+    expect(result.rejected.map((entry) => entry.reason)).toContain("duplicate-target");
+    // All-or-nothing: T2's otherwise-legal `supersedes` claim did not land.
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).every(
+        (edge) => edge.relation === null,
+      ),
+    ).toBe(true);
+  });
+
+  test("rejects a malformed address and an unresolved one, distinctly", () => {
+    const citations = recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `[S${sessionId}/T1].`, insight: null },
+      500,
+      sessionId,
+    );
+
+    const result = attachTurnRelations(
+      db,
+      turns[2]!,
+      [
+        { relation: "supersedes", targets: ["not an address"] },
+        { relation: "depends-on", targets: [`S${sessionId}/T4242`] },
+      ],
+      citations.written,
+      500,
+    );
+
+    expect(result.written).toEqual([]);
+    expect(result.rejected).toEqual([
+      { relation: "supersedes", raw: "not an address", reason: "malformed" },
+      { relation: "depends-on", raw: `S${sessionId}/T4242`, reason: "unresolved" },
+    ]);
+  });
+
+  // depends-on's storage direction (spec C1): "cited -> citing" describes
+  // trust FLOW ("its result underwrites my conclusion"), not a reversal of
+  // which id lands in which column — pair identity stays citing=the turn
+  // being written, cited=the target, exactly like the other three relations.
+  test("depends-on stores citing=the writing turn, cited=the target — no direction reversal", () => {
+    const citations = recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `[S${sessionId}/T1].`, insight: null },
+      500,
+      sessionId,
+    );
+
+    attachTurnRelations(
+      db,
+      turns[2]!,
+      [{ relation: "depends-on", targets: [`S${sessionId}/T1`] }],
+      citations.written,
+      500,
+    );
+
+    const stored = getOutgoingEdges(db, { kind: "turn", id: turns[2]! });
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.citing).toEqual({ kind: "turn", id: turns[2]! });
+    expect(stored[0]?.cited).toEqual({ kind: "turn", id: turns[0]! });
+    expect(stored[0]?.relation).toBe("depends-on");
+  });
+
+  test("a segment target the body cites is also eligible", () => {
+    const segment = createSegment(db, { title: "Prior chapter", nowEpoch: 200 });
+    const citations = recomputeTurnCitedPairs(
+      db,
+      turns[2]!,
+      { title: null, content: `Overturns [E${segment.id}].`, insight: null },
+      500,
+      sessionId,
+    );
+
+    const result = attachTurnRelations(
+      db,
+      turns[2]!,
+      [{ relation: "supersedes", targets: [`E${segment.id}`] }],
+      citations.written,
+      500,
+    );
+
+    expect(result.rejected).toEqual([]);
+    expect(result.written).toHaveLength(1);
+    expect(result.written[0]?.cited).toEqual({ kind: "segment", id: segment.id });
   });
 });
 

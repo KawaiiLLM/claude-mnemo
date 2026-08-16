@@ -23,6 +23,7 @@ import {
 import {
   countMemoryEdges,
   getOutgoingEdges,
+  writeMemoryEdges,
 } from "../../src/db/memory-edges";
 import {
   buildNoteSettlementContext,
@@ -347,6 +348,37 @@ describe("settlement context assembly", () => {
     expect(prompt).toContain("segmentation is LAST because it");
     expect(prompt).toContain("turn_review");
   });
+
+  // Requirement 7 (ticket 07, spec C3/C4): the four ordered questions,
+  // first-yes-wins, and specifically question 3's exact counterfactual
+  // wording must reach the prompt verbatim — the note tool description
+  // cannot carry it (487/500 tokens, 13 of headroom; see mcp/definitions.ts),
+  // so this is the ONE place the decision procedure is stated in full.
+  test("C3/C4's decision procedure reaches the prompt verbatim (spec C3/C4)", () => {
+    const fixture = seedInteriorHoleWindow();
+    const context = buildNoteSettlementContext(db, fixture.job, {
+      nowEpoch: NOW,
+    })!;
+    const prompt = renderNoteSettlementPrompt(context);
+
+    expect(prompt.toLowerCase()).toContain("first yes wins");
+    expect(prompt).toContain("(1) Did the citing turn overturn it? -> supersedes.");
+    expect(prompt).toContain(
+      "(2) Did the citing turn test its claim, supporting or undermining it?",
+    );
+    // Question 3's wording, verbatim and on ONE line — C4 makes this
+    // normative and forbids softening it to "used" or "built on".
+    expect(prompt).toContain(
+      "If the cited turn were wrong, would the citing turn's conclusion also be wrong? -> depends-on.",
+    );
+    expect(prompt).toContain("(4) None of the above -> no relation");
+    expect(prompt).toContain('"used"');
+    expect(prompt).toContain('"built on"');
+    // The pre-state eligibility rule (spec C7) is also stated, so the model
+    // is told the constraint rather than only discovering it by rejection.
+    expect(prompt).toContain("already existed before this");
+    expect(prompt).toContain("you may not invent a relation for a pair a segment");
+  });
 });
 
 describe("settlement write-back", () => {
@@ -359,6 +391,23 @@ describe("settlement write-back", () => {
       tags: ["note-settlement"],
       nowEpoch: NOW - 5_000,
     });
+
+    // Ticket 07 (spec C7): a judged relation is legal only on a pair present
+    // BEFORE this window's write-back transaction — seed the T3->T1 pair
+    // here (a prior bare citation, in production) so the `depends-on` edge
+    // in the reply below is attaching to an existing pair, not minting one.
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: fixture.turnIds[2]! },
+          cited: { kind: "turn", id: fixture.turnIds[0]! },
+          relation: null,
+          provenance: "text-ref",
+        },
+      ],
+      NOW - 4_000,
+    );
 
     const reply = JSON.stringify({
       segments: [
@@ -391,6 +440,12 @@ describe("settlement write-back", () => {
       ],
       edges: [
         { citing: "S1/T3", cited: "S1/T1", relation: "depends-on" },
+        // Ticket 07 (spec C7): the T1->T3 direction has never been paired —
+        // no anchor, no bare mention, nothing — before this window runs.
+        // Settlement naming it is minting a free-standing relation-only
+        // edge, which the pre-state gate must drop even though both
+        // endpoints are real turns this writer was shown.
+        { citing: "S1/T1", cited: "S1/T3", relation: "evidence-for" },
         { citing: `E${existing.id}`, cited: "S1/T9999", relation: "supersedes" },
       ],
       reconstructed_notes: [
@@ -467,6 +522,10 @@ describe("settlement write-back", () => {
     expect(judged).toHaveLength(1);
     expect(judged[0]!.provenance).toBe("judged");
     expect(judged[0]!.relation).toBe("depends-on");
+    // The ineligible T1->T3 edge never landed (ticket 07, spec C7): T1's own
+    // outgoing set stays empty, and it carries no segment-membership anchor
+    // either (anchors are segment->turn, never turn->turn).
+    expect(getOutgoingEdges(db, { kind: "turn", id: fixture.turnIds[0]! })).toEqual([]);
 
     // BOTH holes reconstructed with settlement provenance now (spec D7, ticket
     // 05 — the old interior/trailing split, and the trailing refusal, are gone).

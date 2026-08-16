@@ -3,6 +3,11 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import {
+  countMemoryEdges,
+  getOutgoingEdges,
+  writeMemoryEdges,
+} from "../../src/db/memory-edges";
+import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
   type NoteSettlementJob,
@@ -574,6 +579,138 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const turn = getTurnById(db, t1)!;
     expect(turn.type).toEqual(["fix"]);
     expect(turn.tags).toContain("settlement");
+  });
+});
+
+describe("relation attach eligibility (spec C7/C14, ticket 07)", () => {
+  test("attaches a relation to a pair present in the transaction's pre-state", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedHoleTurn(sessionDbId, 1);
+    const t2 = seedHoleTurn(sessionDbId, 2);
+    // A prior bare citation — a prior note's `[S/T]` mention, in production —
+    // exists BEFORE this window's write-back transaction runs.
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t2 },
+          cited: { kind: "turn", id: t1 },
+          relation: null,
+          provenance: "text-ref",
+        },
+      ],
+      NOW - 500,
+    );
+    const job = claimWindow(sessionDbId, 1, 2);
+
+    const result = applyNoteSettlementWriteBack(db, {
+      job,
+      response: {
+        segments: [],
+        edges: [
+          { citing: `S${sessionDbId}/T2`, cited: `S${sessionDbId}/T1`, relation: "depends-on" },
+        ],
+        reconstructedNotes: [],
+        turnReview: [],
+        sessionSummary: null,
+      },
+      nowEpoch: NOW,
+      reconstructableTurnIds: new Set(),
+      reviewableTurnIds: allSeededTurnIds(),
+      contextBuiltAtEpoch: NOW,
+      exposedSegmentIds: new Set(),
+      rideTurnId: t2,
+    });
+
+    expect(result.committed).toBe(true);
+    expect(result.judgedEdges).toBe(1);
+    const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.relation).toBe("depends-on");
+    expect(edges[0]!.provenance).toBe("judged");
+  });
+
+  test("drops a relation-only edge naming a pair no earlier write created, without failing the window (spec C7)", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedHoleTurn(sessionDbId, 1);
+    const t2 = seedHoleTurn(sessionDbId, 2);
+    // No pre-existing pair at all — `response.edges` is the ONLY thing that
+    // would ever create this link: a free-standing relation-only edge,
+    // exactly what settlement may not mint.
+    const job = claimWindow(sessionDbId, 1, 2);
+
+    const result = applyNoteSettlementWriteBack(db, {
+      job,
+      response: {
+        segments: [],
+        edges: [
+          { citing: `S${sessionDbId}/T2`, cited: `S${sessionDbId}/T1`, relation: "supersedes" },
+        ],
+        reconstructedNotes: [],
+        turnReview: [],
+        sessionSummary: null,
+      },
+      nowEpoch: NOW,
+      reconstructableTurnIds: new Set(),
+      reviewableTurnIds: allSeededTurnIds(),
+      contextBuiltAtEpoch: NOW,
+      exposedSegmentIds: new Set(),
+      rideTurnId: t2,
+    });
+
+    // The window still completes — an ineligible relation is dropped, same
+    // discipline as an unresolved address: never a reason to fail the window
+    // it arrived with.
+    expect(result.committed).toBe(true);
+    expect(result.judgedEdges).toBe(0);
+    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+    expect(countMemoryEdges(db)).toBe(0);
+  });
+
+  test("corrects an existing relation with hindsight, on the same pre-existing pair", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedHoleTurn(sessionDbId, 1);
+    const t2 = seedHoleTurn(sessionDbId, 2);
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t2 },
+          cited: { kind: "turn", id: t1 },
+          relation: "evidence-for",
+          provenance: "asserted",
+        },
+      ],
+      NOW - 500,
+    );
+    const job = claimWindow(sessionDbId, 1, 2);
+
+    const result = applyNoteSettlementWriteBack(db, {
+      job,
+      response: {
+        segments: [],
+        edges: [
+          { citing: `S${sessionDbId}/T2`, cited: `S${sessionDbId}/T1`, relation: "supersedes" },
+        ],
+        reconstructedNotes: [],
+        turnReview: [],
+        sessionSummary: null,
+      },
+      nowEpoch: NOW,
+      reconstructableTurnIds: new Set(),
+      reviewableTurnIds: allSeededTurnIds(),
+      contextBuiltAtEpoch: NOW,
+      exposedSegmentIds: new Set(),
+      rideTurnId: t2,
+    });
+
+    expect(result.committed).toBe(true);
+    const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
+    expect(edges).toHaveLength(1);
+    // The main agent's earlier `asserted` relation is overturned by
+    // settlement's hindsight (spec C7/C14: no rank test stands in the way).
+    expect(edges[0]!.relation).toBe("supersedes");
+    expect(edges[0]!.provenance).toBe("judged");
   });
 });
 

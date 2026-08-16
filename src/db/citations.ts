@@ -1,7 +1,15 @@
 import type { Database } from "bun:sqlite";
 
-import { reconcileCitedPairs, type MemoryEdge } from "./memory-edges";
 import {
+  pairKey,
+  reconcileCitedPairs,
+  writeMemoryEdges,
+  type CitingNode,
+  type MemoryEdge,
+  type WriteEdgeInput,
+} from "./memory-edges";
+import {
+  parseBareAddressReference,
   parseQualifiedReferences,
   validateReferences,
   type RejectedReference,
@@ -292,6 +300,122 @@ export function recomputeTurnCitedPairs(
   );
 
   return { written, deleted, rejected };
+}
+
+// ---------------------------------------------------------------------------
+// Relation attach (spec C1/C5/C7, ticket 07)
+// ---------------------------------------------------------------------------
+
+export type TurnRelationRejectionReason =
+  | "malformed"
+  | "unresolved"
+  | "not-cited"
+  | "duplicate-target";
+
+export interface TurnRelationRejection {
+  relation: CitationRelation;
+  /** The token as the caller supplied it, for the message the tool layer builds. */
+  raw: string;
+  reason: TurnRelationRejectionReason;
+}
+
+/** One named relation field's raw targets — mcp/note.ts's `evidenceFor` etc. */
+export interface TurnRelationFieldInput {
+  relation: CitationRelation;
+  targets: readonly string[];
+}
+
+export interface AttachTurnRelationsResult {
+  written: MemoryEdge[];
+  /**
+   * Non-empty means the WHOLE call is invalid, and `written` is always empty
+   * alongside it. Unlike a bare `[S/T]` reference in prose — dropped and
+   * logged, never a reason to fail the note it arrived with — a relation
+   * field is structured caller input, not text a model might hallucinate a
+   * bracket into. A caller that gets back a malformed address or an uncited
+   * target gets ALL of them, to fix in one pass, rather than a write that
+   * silently applied the three relations that happened to be valid.
+   */
+  rejected: TurnRelationRejection[];
+}
+
+/**
+ * Spec C7: the main agent may attach a relation to a pair its OWN write is
+ * creating — it authored the prose in the same call, so the argument and the
+ * claim arrive together. `bodyCitedPairs` is that write's post-state, the
+ * SAME `written` result `recomputeTurnCitedPairs` just returned for this same
+ * turn — "the body cites it" and "eligible for a relation" are therefore
+ * literally the same test, with no second citation question to keep in sync
+ * with the recompute above it.
+ *
+ * Provenance is always `asserted` (spec C12): this is the main agent's own
+ * classification, stated in the same call that supplied the reasoning for
+ * it — distinct from a bare textual reference (`text-ref`, what the recompute
+ * above writes for every OTHER pair the body names) and a settlement
+ * attribution (`judged`, gated instead by the write-back's pre-state check,
+ * not this function).
+ *
+ * `writeMemoryEdges`'s own `eligibleForRelation` gate is handed the SAME
+ * `bodyCitedPairs` set as a second, independent check: every target below is
+ * already proven cited by the loop that builds `inputs`, so the shared gate
+ * should never actually fire here — but C14's rule is that eligibility lives
+ * in the shared write layer, not only in whichever caller happens to
+ * validate first, so it is asked to prove it anyway.
+ */
+export function attachTurnRelations(
+  db: Database,
+  citingTurnId: number,
+  fields: readonly TurnRelationFieldInput[],
+  bodyCitedPairs: readonly MemoryEdge[],
+  nowEpoch: number,
+): AttachTurnRelationsResult {
+  const citing: CitingNode = { kind: "turn", id: citingTurnId };
+  const eligiblePairKeys = new Set(bodyCitedPairs.map((edge) => pairKey(edge)));
+
+  const rejected: TurnRelationRejection[] = [];
+  const claimedBy = new Map<string, CitationRelation>();
+  const inputs: WriteEdgeInput[] = [];
+
+  for (const field of fields) {
+    for (const raw of field.targets) {
+      const reference = parseBareAddressReference(raw);
+      if (!reference) {
+        rejected.push({ relation: field.relation, raw, reason: "malformed" });
+        continue;
+      }
+      const { accepted } = validateReferences(db, [reference]);
+      const node = accepted[0]?.node;
+      if (!node) {
+        rejected.push({ relation: field.relation, raw, reason: "unresolved" });
+        continue;
+      }
+      const key = pairKey({ citing, cited: node });
+      if (!eligiblePairKeys.has(key)) {
+        rejected.push({ relation: field.relation, raw, reason: "not-cited" });
+        continue;
+      }
+      // Spec C5: at most one current relation per pair. A repeat of the SAME
+      // target under the SAME field (or byte-identical relation) is a
+      // harmless restatement; a DIFFERENT relation field claiming the same
+      // target is the illegal case requirement 3 names.
+      const priorClaim = claimedBy.get(key);
+      if (priorClaim !== undefined && priorClaim !== field.relation) {
+        rejected.push({ relation: field.relation, raw, reason: "duplicate-target" });
+        continue;
+      }
+      claimedBy.set(key, field.relation);
+      inputs.push({ citing, cited: node, relation: field.relation, provenance: "asserted" });
+    }
+  }
+
+  if (rejected.length > 0 || inputs.length === 0) {
+    return { written: [], rejected };
+  }
+
+  const { written } = writeMemoryEdges(db, inputs, nowEpoch, {
+    eligibleForRelation: eligiblePairKeys,
+  });
+  return { written, rejected: [] };
 }
 
 /**

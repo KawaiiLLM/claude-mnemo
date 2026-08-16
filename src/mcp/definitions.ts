@@ -22,6 +22,21 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // field just writes; present on a NON-empty field requires `mode.<field>` —
   // `"overwrite"` (replace whole) or `"append"` (add to it) — named once for
   // the caller, not spelled out per field below.
+  //
+  // ticket 07 (spec C7) added four relation fields to `noteInputShape` below
+  // — evidenceFor/evidenceAgainst/supersedes/dependsOn — with NO mention here.
+  // Measured at write time: this string sits at 487/500 tokens, 13 of
+  // headroom, and C4 (spec) makes the decision procedure's exact wording
+  // (the four ordered questions, question 3's counterfactual) NORMATIVE —
+  // not something a terser paraphrase may stand in for, because the
+  // predecessor vocabulary measured 61% precision at exactly that softening.
+  // Neither the field names alone nor any trimmed form of the procedure fit
+  // 13 tokens, and which of the cap or C4 gives is stated as a call neither
+  // ticket 07 nor this pass gets to make silently — flagged to the user
+  // rather than forced. The full procedure DOES reach the settlement
+  // prompt (worker/note-settlement-prompt.ts), which carries no such cap.
+  // The fields are fully functional here regardless (zod shape below, and
+  // mcp/note.ts's validation) — only this prose is silent about them.
   note:
     "Write or correct a turn's note, or a session's summary. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief — never recalled or invented) or `session` (`S<session>`). Timing: the SessionStart block's three rules. A non-empty field needs `mode.<field>`: `\"overwrite\"` replaces it whole, `\"append\"` adds (text: newline-joined; type/tags: unioned). Empty needs no mode; omitted stays untouched. Clearing (insight/grade/session fields) needs `null` + overwrite mode. Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored.\n" +
     "Turn — title (~" +
@@ -113,6 +128,20 @@ export const noteInputShape = {
   // session. No legitimate use exists today (every address a caller is ever
   // handed is its own session's) — this is a pure guardrail.
   crossSession: z.boolean().optional(),
+
+  // ticket 07 (spec C1/C5/C7): one named field per relation, not a generic
+  // `{turn, relation}` list — an illegal relation is structurally
+  // unrepresentable. Targets are address tokens, `S<session>/T<prompt>` or
+  // `E<segment>` (brackets optional), and each MUST already be named by
+  // this same call's title/content/insight post-state — mcp/note.ts rejects
+  // the whole call otherwise, it never silently drops one. No `mode`: unlike
+  // title/tags/type there is no PRIOR value at this layer to append to or
+  // overwrite, and `writeMemoryEdges`'s upsert (spec C14) already governs
+  // replacing a relation the pair carries from an earlier write.
+  evidenceFor: z.array(z.string()).optional(),
+  evidenceAgainst: z.array(z.string()).optional(),
+  supersedes: z.array(z.string()).optional(),
+  dependsOn: z.array(z.string()).optional(),
 
   // Session fields (D2/D4 — seven fields; ticket 04 trims the set).
   decision: z.string().nullable().optional(),

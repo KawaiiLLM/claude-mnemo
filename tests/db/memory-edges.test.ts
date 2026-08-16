@@ -7,8 +7,10 @@ import {
   reconcileCitedPairs,
   formatNodeRef,
   getEdgeInDegree,
+  getExistingEdgePairKeys,
   getIncomingEdges,
   getOutgoingEdges,
+  pairKey,
   parseNodeRef,
   writeMemoryEdges,
 } from "../../src/db/memory-edges";
@@ -397,6 +399,125 @@ describe("universal memory edges", () => {
     );
 
     expect(getEdgeInDegree(db, { kind: "turn", id: cited })).toBe(2);
+  });
+
+  // Ticket 07 (spec C7/C14): eligibility is OPT-IN at this primitive — a
+  // caller that does not pass `eligibleForRelation` keeps writing relations
+  // exactly as it did before this option existed (the whole test file above
+  // this block proves that: none of those calls pass the option, and every
+  // one still writes a relation-bearing edge). These tests exercise the gate
+  // itself, once passed.
+  describe("relation eligibility (spec C7/C14, ticket 07)", () => {
+    test("a relation-bearing write is dropped when its pair is outside the eligible set", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+
+      const result = writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation: "supersedes",
+            provenance: "judged",
+          },
+        ],
+        300,
+        { eligibleForRelation: new Set() },
+      );
+
+      expect(result.written).toHaveLength(0);
+      expect(result.rejected.map((entry) => entry.reason)).toEqual([
+        "relation-ineligible",
+      ]);
+      expect(countMemoryEdges(db)).toBe(0);
+    });
+
+    test("a relation-bearing write lands when its pair IS in the eligible set", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+      const key = pairKey({
+        citing: { kind: "turn", id: citing },
+        cited: { kind: "turn", id: cited },
+      });
+
+      const result = writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation: "supersedes",
+            provenance: "judged",
+          },
+        ],
+        300,
+        { eligibleForRelation: new Set([key]) },
+      );
+
+      expect(result.written).toHaveLength(1);
+      expect(result.written[0]?.relation).toBe("supersedes");
+    });
+
+    // Requirement 6: a bare pair stays legal regardless of eligibility — the
+    // gate only ever looks at relation-bearing writes. An EMPTY eligible set
+    // (the strictest possible value) must still let a bare write through.
+    test("a bare (relation: null) write is never gated, whatever the eligible set contains", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+
+      const result = writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation: null,
+            provenance: "text-ref",
+          },
+        ],
+        300,
+        { eligibleForRelation: new Set() },
+      );
+
+      expect(result.written).toHaveLength(1);
+      expect(result.written[0]?.relation).toBeNull();
+    });
+
+    test("getExistingEdgePairKeys reads only what is stored BEFORE the call, in pairKey's own currency", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+      const other = addTurn(3);
+
+      expect(getExistingEdgePairKeys(db).size).toBe(0);
+
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation: null,
+            provenance: "text-ref",
+          },
+        ],
+        300,
+      );
+
+      const snapshot = getExistingEdgePairKeys(db);
+      expect(snapshot.has(
+        pairKey({
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: cited },
+        }),
+      )).toBe(true);
+      expect(snapshot.has(
+        pairKey({
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: other },
+        }),
+      )).toBe(false);
+    });
   });
 
   describe("legacy turn_citations retirement (spec C13)", () => {

@@ -147,6 +147,10 @@ describe("note tool", () => {
       "grade",
       "skip",
       "crossSession",
+      "evidenceFor",
+      "evidenceAgainst",
+      "supersedes",
+      "dependsOn",
       "decision",
       "done",
       "current",
@@ -1055,6 +1059,163 @@ describe("note tool citations (spec C6)", () => {
     );
 
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+});
+
+describe("note tool relation attach (spec C1/C5/C7, ticket 07)", () => {
+  let db: Database;
+  let sessionId: number;
+  let earlierTurnId: number;
+  let anotherEarlierTurnId: number;
+  let targetTurnId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    sessionId = upsertSession(db, {
+      contentSessionId: "note-relations-session",
+      project: "claude-mnemo",
+      title: "Note relations",
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 110,
+      completedAtEpoch: null,
+    }).id;
+
+    const insertTurn = db.query<{ id: number }, [number, number, string, number]>(
+      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
+    );
+    earlierTurnId = insertTurn.get(sessionId, 1, "First earlier turn", 100)!.id;
+    anotherEarlierTurnId = insertTurn.get(sessionId, 2, "Second earlier turn", 105)!.id;
+    targetTurnId = insertTurn.get(sessionId, 3, "The turn being noted", 110)!.id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // Requirement 4: the main agent may attach a relation to a pair its own
+  // write is creating — it authored the prose in the same call.
+  test("attaches a relation to a pair this write's own body cites", () => {
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "design+routing: reverses the earlier call",
+        content: `Overturns [S${sessionId}/T1].`,
+        supersedes: [`S${sessionId}/T1`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(resultText(result)).toContain("Attached 1 relation(s).");
+    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.cited).toEqual({ kind: "turn", id: earlierTurnId });
+    expect(edges[0]?.relation).toBe("supersedes");
+    // The main agent's own classification — distinct from a bare textual
+    // reference (`text-ref`) and a settlement attribution (`judged`).
+    expect(edges[0]?.provenance).toBe("asserted");
+  });
+
+  // Requirement 1: named fields, one per relation — two different fields
+  // naming two different targets in the SAME call land two distinct
+  // relations, not a shared guess.
+  test("distinct fields for distinct targets land distinct relations in one call", () => {
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "design+routing: two claims at once",
+        content: `Tested [S${sessionId}/T1] and depends on [S${sessionId}/T2].`,
+        evidenceAgainst: [`S${sessionId}/T1`],
+        dependsOn: [`S${sessionId}/T2`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    const byTarget = new Map(edges.map((edge) => [edge.cited.id, edge.relation]));
+    expect(byTarget.get(earlierTurnId)).toBe("evidence-against");
+    expect(byTarget.get(anotherEarlierTurnId)).toBe("depends-on");
+  });
+
+  // Requirement 2: a relation naming a turn the body does not cite is
+  // rejected — the whole call fails, nothing at all is written.
+  test("rejects a relation naming a turn the body does not cite (requirement 2)", () => {
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "design+routing: mentions one, claims another",
+        content: `Mentions [S${sessionId}/T1].`,
+        supersedes: [`S${sessionId}/T2`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("not cited");
+    expect(isNoteSuccess(result)).toBe(false);
+    // The whole transaction rolled back — not even the note itself landed.
+    expect(getShadowNote(db, targetTurnId)).toBeNull();
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  // Requirement 3: the same target under two relation fields is rejected.
+  test("rejects the same target claimed by two relation fields (requirement 3)", () => {
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "design+routing: conflicting claims",
+        content: `Cites [S${sessionId}/T1].`,
+        evidenceFor: [`S${sessionId}/T1`],
+        supersedes: [`S${sessionId}/T1`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("already claimed by a different relation field");
+    expect(getShadowNote(db, targetTurnId)).toBeNull();
+  });
+
+  test("a relation field with no citation-bearing field in the same call is rejected, atomically", () => {
+    noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, title: "design+routing: first pass", content: "c" },
+      { now: () => 800, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    // This second call touches only `grade` — no title/content/insight, so
+    // there is no post-state for a relation to be eligible against.
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, grade: 2, supersedes: [`S${sessionId}/T1`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("also touch a");
+    // The grade write did not land either — the whole call rolled back.
+    expect(getTurnById(db, targetTurnId)?.significanceGrade).toBeNull();
+  });
+
+  test("a session write rejects a relation field outright", () => {
+    const result = noteTool(
+      db,
+      { session: `S${sessionId}`, decision: "x", supersedes: [`S${sessionId}/T1`] },
+      { now: () => 900, env: {} },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("supersedes is a turn field");
   });
 });
 

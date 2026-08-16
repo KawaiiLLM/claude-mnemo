@@ -7890,7 +7890,7 @@ function isValidCitedNode(node) {
 function pairKey(edge) {
   return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
 }
-function writeMemoryEdges(db, edges, nowEpoch) {
+function writeMemoryEdges(db, edges, nowEpoch, options = {}) {
   const written = [];
   const rejected = [];
   const relationsByPair = /* @__PURE__ */ new Map();
@@ -7949,6 +7949,10 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     }
     if (edge.relation !== null && conflictingPairs.has(pairKey(edge))) {
       rejected.push({ input: edge, reason: "conflicting-relation" });
+      continue;
+    }
+    if (edge.relation !== null && options.eligibleForRelation !== void 0 && !options.eligibleForRelation.has(pairKey(edge))) {
+      rejected.push({ input: edge, reason: "relation-ineligible" });
       continue;
     }
     const row = upsert.get(
@@ -8037,6 +8041,18 @@ var init_memory_edges = __esm({
 });
 
 // src/db/references.ts
+function isBareAddressToken(bracketed) {
+  return ADDRESS_TOKEN_PATTERN.test(bracketed);
+}
+function parseBareAddressReference(token) {
+  const trimmed = token.trim();
+  const bracketed = trimmed.startsWith("[") ? trimmed : `[${trimmed}]`;
+  if (!isBareAddressToken(bracketed)) {
+    return null;
+  }
+  const parsed = parseQualifiedReferences(bracketed);
+  return parsed.length === 1 ? parsed[0] : null;
+}
 function topLevelBracketGroups(content) {
   const groups = [];
   for (let index = 0; index < content.length; index += 1) {
@@ -8149,11 +8165,12 @@ function validateReferences(db, references, options = {}) {
   }
   return { accepted, rejected };
 }
-var REFERENCE_PATTERN;
+var REFERENCE_PATTERN, ADDRESS_TOKEN_PATTERN;
 var init_references = __esm({
   "src/db/references.ts"() {
     "use strict";
     REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
+    ADDRESS_TOKEN_PATTERN = /^\[[ \t]*(?:S\d+[ \t]*\/[ \t]*T\d+|E\d+)[ \t]*\]$/;
   }
 });
 
@@ -8273,6 +8290,47 @@ function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, 
     "text-ref"
   );
   return { written, deleted, rejected };
+}
+function attachTurnRelations(db, citingTurnId, fields, bodyCitedPairs, nowEpoch) {
+  const citing = { kind: "turn", id: citingTurnId };
+  const eligiblePairKeys = new Set(bodyCitedPairs.map((edge) => pairKey(edge)));
+  const rejected = [];
+  const claimedBy = /* @__PURE__ */ new Map();
+  const inputs = [];
+  for (const field of fields) {
+    for (const raw of field.targets) {
+      const reference = parseBareAddressReference(raw);
+      if (!reference) {
+        rejected.push({ relation: field.relation, raw, reason: "malformed" });
+        continue;
+      }
+      const { accepted } = validateReferences(db, [reference]);
+      const node = accepted[0]?.node;
+      if (!node) {
+        rejected.push({ relation: field.relation, raw, reason: "unresolved" });
+        continue;
+      }
+      const key = pairKey({ citing, cited: node });
+      if (!eligiblePairKeys.has(key)) {
+        rejected.push({ relation: field.relation, raw, reason: "not-cited" });
+        continue;
+      }
+      const priorClaim = claimedBy.get(key);
+      if (priorClaim !== void 0 && priorClaim !== field.relation) {
+        rejected.push({ relation: field.relation, raw, reason: "duplicate-target" });
+        continue;
+      }
+      claimedBy.set(key, field.relation);
+      inputs.push({ citing, cited: node, relation: field.relation, provenance: "asserted" });
+    }
+  }
+  if (rejected.length > 0 || inputs.length === 0) {
+    return { written: [], rejected };
+  }
+  const { written } = writeMemoryEdges(db, inputs, nowEpoch, {
+    eligibleForRelation: eligiblePairKeys
+  });
+  return { written, rejected: [] };
 }
 function appendUnseen(into, ids) {
   const seen = new Set(into);
@@ -33418,6 +33476,21 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // field just writes; present on a NON-empty field requires `mode.<field>` —
   // `"overwrite"` (replace whole) or `"append"` (add to it) — named once for
   // the caller, not spelled out per field below.
+  //
+  // ticket 07 (spec C7) added four relation fields to `noteInputShape` below
+  // — evidenceFor/evidenceAgainst/supersedes/dependsOn — with NO mention here.
+  // Measured at write time: this string sits at 487/500 tokens, 13 of
+  // headroom, and C4 (spec) makes the decision procedure's exact wording
+  // (the four ordered questions, question 3's counterfactual) NORMATIVE —
+  // not something a terser paraphrase may stand in for, because the
+  // predecessor vocabulary measured 61% precision at exactly that softening.
+  // Neither the field names alone nor any trimmed form of the procedure fit
+  // 13 tokens, and which of the cap or C4 gives is stated as a call neither
+  // ticket 07 nor this pass gets to make silently — flagged to the user
+  // rather than forced. The full procedure DOES reach the settlement
+  // prompt (worker/note-settlement-prompt.ts), which carries no such cap.
+  // The fields are fully functional here regardless (zod shape below, and
+  // mcp/note.ts's validation) — only this prose is silent about them.
   note: 'Write or correct a turn\'s note, or a session\'s summary. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief \u2014 never recalled or invented) or `session` (`S<session>`). Timing: the SessionStart block\'s three rules. A non-empty field needs `mode.<field>`: `"overwrite"` replaces it whole, `"append"` adds (text: newline-joined; type/tags: unioned). Empty needs no mode; omitted stays untouched. Clearing (insight/grade/session fields) needs `null` + overwrite mode. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored.\nTurn \u2014 title (~' + NOTE_TOKEN_BUDGET.title + " tok): `<activity>+<topic>: <what this turn covered>`, the real stage. content (~" + NOTE_TOKEN_BUDGET.content + " tok): the conclusion, then the evidence chain \u2014 rejected alternatives with reasons; never restate the title, never narrate looking. A first note needs both title and content. insight (~" + NOTE_TOKEN_BUDGET.insight + " tok, default none): long-term knowledge orthogonal to the conclusion, claim first. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction \u2014 omit or [] when none fit, never guess. tags: bare topic words, no prefix. grade: 0-4. Receipt reports token counts and each touched field's post-write total; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson. `crossSession: true` only for another session's turn. Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content. Goes last in its batch.\nSession \u2014 title/content: a compressed view for another session browsing this one. decision/done/current/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations.",
   // ticket 08 (spec G8): the coverage predicate pulled by the agent, not the
   // Stop hook (ticket 11) or the completion gate (ticket 09) — those call the
@@ -33468,6 +33541,19 @@ var noteInputShape = {
   // session. No legitimate use exists today (every address a caller is ever
   // handed is its own session's) — this is a pure guardrail.
   crossSession: external_exports3.boolean().optional(),
+  // ticket 07 (spec C1/C5/C7): one named field per relation, not a generic
+  // `{turn, relation}` list — an illegal relation is structurally
+  // unrepresentable. Targets are address tokens, `S<session>/T<prompt>` or
+  // `E<segment>` (brackets optional), and each MUST already be named by
+  // this same call's title/content/insight post-state — mcp/note.ts rejects
+  // the whole call otherwise, it never silently drops one. No `mode`: unlike
+  // title/tags/type there is no PRIOR value at this layer to append to or
+  // overwrite, and `writeMemoryEdges`'s upsert (spec C14) already governs
+  // replacing a relation the pair carries from an earlier write.
+  evidenceFor: external_exports3.array(external_exports3.string()).optional(),
+  evidenceAgainst: external_exports3.array(external_exports3.string()).optional(),
+  supersedes: external_exports3.array(external_exports3.string()).optional(),
+  dependsOn: external_exports3.array(external_exports3.string()).optional(),
   // Session fields (D2/D4 — seven fields; ticket 04 trims the set).
   decision: external_exports3.string().nullable().optional(),
   done: external_exports3.string().nullable().optional(),
@@ -34456,6 +34542,52 @@ function resolveTagsField(provided, existing, mode) {
   }
   return { value: decoded };
 }
+var RELATION_FIELD_ENTRIES = [
+  ["evidenceFor", "evidence-for"],
+  ["evidenceAgainst", "evidence-against"],
+  ["supersedes", "supersedes"],
+  ["dependsOn", "depends-on"]
+];
+var RELATION_REJECTION_TEXT = {
+  malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
+  unresolved: "does not resolve to a turn or segment",
+  "not-cited": "is not cited by this write's title, content or insight \u2014 attach a relation only to a pair the body actually names (spec C7)",
+  "duplicate-target": "is already claimed by a different relation field in this same call \u2014 a pair carries at most one relation (spec C5)"
+};
+function formatRelationRejections(rejections) {
+  const lines = rejections.map(
+    (entry) => `${entry.relation} "${entry.raw}" ${RELATION_REJECTION_TEXT[entry.reason]}`
+  );
+  return `relation field rejected: ${lines.join("; ")}.`;
+}
+function resolveRelationFields(db, citingTurnId, input, citations, nowEpoch) {
+  const fields = [];
+  for (const [key, relation] of RELATION_FIELD_ENTRIES) {
+    const provided = input[key];
+    if (provided === void 0) {
+      continue;
+    }
+    if (!Array.isArray(provided) || provided.some((value) => typeof value !== "string")) {
+      fail(`${key} must be an array of strings when present.`);
+    }
+    if (provided.length > 0) {
+      fields.push({ relation, targets: provided });
+    }
+  }
+  if (fields.length === 0) {
+    return null;
+  }
+  if (citations === null) {
+    fail(
+      "evidenceFor/evidenceAgainst/supersedes/dependsOn require this write to also touch a citation-bearing field (title, content or insight) whose post-state names the target \u2014 a relation cannot attach to a pair this call is not itself citing (spec C7)."
+    );
+  }
+  const result = attachTurnRelations(db, citingTurnId, fields, citations.written, nowEpoch);
+  if (result.rejected.length > 0) {
+    fail(formatRelationRejections(result.rejected));
+  }
+  return result;
+}
 function parseModeMap(raw, allowed) {
   if (raw === void 0) {
     return {};
@@ -34711,6 +34843,7 @@ function handleTurnWrite(db, address, input, options) {
           updatedTurn.sessionId
         );
       }
+      const relations = resolveRelationFields(db, turn.id, input, citations, nowEpoch);
       return {
         turn: updatedTurn,
         noteExisted,
@@ -34722,6 +34855,7 @@ function handleTurnWrite(db, address, input, options) {
         finalTags: tagsResolution?.value,
         finalGrade: gradeResolution?.value,
         citations,
+        relations,
         stripped
       };
     });
@@ -34777,10 +34911,24 @@ function handleTurnWrite(db, address, input, options) {
       );
     }
   }
+  if (result.relations && result.relations.written.length > 0) {
+    parts.push(`Attached ${result.relations.written.length} relation(s).`);
+  }
   return textResult2(parts.join(" "));
 }
 function handleSessionWrite(db, sessionId, input, options) {
-  for (const key of ["insight", "type", "tags", "grade", "skip", "crossSession"]) {
+  for (const key of [
+    "insight",
+    "type",
+    "tags",
+    "grade",
+    "skip",
+    "crossSession",
+    "evidenceFor",
+    "evidenceAgainst",
+    "supersedes",
+    "dependsOn"
+  ]) {
     if (input[key] !== void 0) {
       return parameterError2(`${key} is a turn field; this call addresses a session.`);
     }
