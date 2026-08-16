@@ -2222,6 +2222,174 @@ describe("retireTurnCitesRecordedColumn (ticket 10c)", () => {
 
     db.close();
   });
+
+  // Ticket 15 finding 7: the guard's own blind spot. `PRAGMA table_info` OMITS
+  // generated columns entirely, so a database carrying one would slip past the
+  // guard and be dropped by the rebuild exactly like the `extraction_stall_*`
+  // family nearly was; `table_xinfo` is the pragma that reports them.
+  test("the unknown-column guard sees a GENERATED column, which table_info hides", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    upsertSession(db, {
+      contentSessionId: "session-generated-column-guard",
+      project: "/tmp/project",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec("DROP TABLE turns");
+    db.exec(`
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        prompt_number INTEGER NOT NULL,
+        content_prompt_id TEXT,
+        was_interrupted INTEGER NOT NULL DEFAULT 0,
+        was_rolled_back INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        user_prompt TEXT,
+        assistant_response TEXT,
+        assistant_transcript TEXT,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        type TEXT,
+        significance_grade INTEGER,
+        tags TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        tool_call_count INTEGER,
+        transcript_line_start INTEGER,
+        consulted_memories TEXT,
+        compact_boundary_uuid TEXT,
+        parent_turn_id INTEGER,
+        a_generated_column_nobody_told_this_rebuild_about TEXT
+          GENERATED ALWAYS AS (title || '!') VIRTUAL,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        UNIQUE(session_id, prompt_number)
+      );
+    `);
+    db.exec("PRAGMA foreign_keys = ON");
+
+    // The premise, asserted rather than assumed: the pragma the guard used to
+    // read cannot see this column at all.
+    expect(
+      db
+        .query<{ name: string }, []>("PRAGMA table_info(turns)")
+        .all()
+        .map((row) => row.name),
+    ).not.toContain("a_generated_column_nobody_told_this_rebuild_about");
+
+    expect(() => initializeSchema(db)).toThrow(
+      /a_generated_column_nobody_told_this_rebuild_about/,
+    );
+
+    db.close();
+  });
+
+  /**
+   * Ticket 15 finding 4: SQLite's 12-step ALTER TABLE procedure runs
+   * `foreign_key_check` at step 10 and COMMITs at step 11. Both rebuilds ran it
+   * after their transaction closed, which inverts those two: the violation
+   * threw over a swap that was already durable, and because the swap made the
+   * staleness predicate read false, the next reload skipped the rebuild — the
+   * failure announced itself once and then had no repair path at all.
+   */
+  test("a foreign key violation rolls the turns rebuild back and leaves the migration pending", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionId = upsertSession(db, {
+      contentSessionId: "session-fk-rollback",
+      project: "/tmp/project",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    // A child row pointing at a turn that does not exist. Only storable with
+    // enforcement off, which is exactly the state a rebuild runs in.
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.query(
+      `INSERT INTO note_debt (turn_id, session_id, prompt_number, opened_at_epoch, updated_at_epoch)
+       VALUES (999999, ?, 1, 100, 100)`,
+    ).run(sessionId);
+    // Back `turns` out to the pre-ticket-02 scalar `type`, so the rebuild fires.
+    db.exec("ALTER TABLE turns RENAME TO turns_stale_source");
+    db.exec(`
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        prompt_number INTEGER NOT NULL,
+        content_prompt_id TEXT,
+        was_interrupted INTEGER NOT NULL DEFAULT 0,
+        was_rolled_back INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        user_prompt TEXT,
+        assistant_response TEXT,
+        assistant_transcript TEXT,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        type TEXT,
+        significance_grade INTEGER,
+        tags TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        tool_call_count INTEGER,
+        transcript_line_start INTEGER,
+        consulted_memories TEXT,
+        compact_boundary_uuid TEXT,
+        parent_turn_id INTEGER,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        UNIQUE(session_id, prompt_number)
+      );
+    `);
+    db.exec("DROP TABLE turns_stale_source");
+    db.query(
+      `INSERT INTO turns (session_id, prompt_number, status, type, created_at_epoch)
+       VALUES (?, 1, 'extracted', 'discovery', 100)`,
+    ).run(sessionId);
+    db.exec("PRAGMA foreign_keys = ON");
+
+    expect(() => initializeSchema(db)).toThrow(/foreign key violation/);
+
+    // The swap did NOT survive the throw: the stored DDL is still the stale
+    // one, so the staleness predicate still reads true and the next reload
+    // retries instead of skipping a table it never finished migrating.
+    const storedDdl = db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'turns'",
+      )
+      .get()?.sql;
+    expect(storedDdl).not.toContain("CHECK (json_type(type) = 'array')");
+    expect(
+      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM turns").get()
+        .count,
+    ).toBe(1);
+    // And no half-built table left standing under the rebuild's temporary name.
+    expect(
+      db
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'turns_pre_%'",
+        )
+        .all(),
+    ).toEqual([]);
+    // Enforcement is restored even on the failing path (the `finally`).
+    expect(
+      db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()
+        ?.foreign_keys,
+    ).toBe(1);
+
+    db.close();
+  });
 });
 
 /**

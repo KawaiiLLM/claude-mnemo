@@ -114,6 +114,30 @@ function parseStringArray(value: string | null): string[] {
   return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
 }
 
+/**
+ * The same parse, made total, for a MEMBER TURN's `type`/`tags`.
+ *
+ * `turns.tags` carries no `json_valid` CHECK, so a malformed value is storable
+ * (schema.ts's `stripRetiredTopicTagNamespace` carries the same P1 note and the
+ * same guard), and `turns.type` only gained its array CHECK in ticket 02 — a
+ * database mid-migration still holds pre-array values. `recomputeSegmentFacets`
+ * now runs over the whole corpus during schema initialisation (the ticket 15
+ * backfill below), so one unparseable member would otherwise abort schema init
+ * for every process. A member whose facet column cannot be read contributes
+ * nothing, exactly as an empty one does; it is not a reason to refuse the
+ * derivation for its twelve well-formed siblings.
+ */
+function parseMemberFacetArray(value: string | null): string[] {
+  if (!value) {
+    return [];
+  }
+  try {
+    return parseStringArray(value);
+  } catch {
+    return [];
+  }
+}
+
 function mapTopicRow(row: TopicRow | null): TopicRecord | null {
   return row ? { ...row, aliases: parseStringArray(row.aliases) } : null;
 }
@@ -417,6 +441,21 @@ function compareDerivedTags(
  * `revision`: the revision fence exists for the model's body writes (whose CAS
  * would otherwise be invalidated by a facet recomputation it never made), and
  * a facet is no longer something a caller can state, so nothing can conflict.
+ *
+ * TICKET 15 (findings 1-3): this is the ONE derivation, and it has THREE
+ * inputs, not one. Ticket 14 placed the only call in `addSegmentMembers` and
+ * described that as the single invariant point; it is the single point for a
+ * change of MEMBERSHIP, and a facet derives from the members' CONTENT too. The
+ * inputs and who pays for each:
+ *
+ *   1. a membership arriving — `addSegmentMembers`, unchanged;
+ *   2. a member turn's own `type`/`tags` changing — the turn write path
+ *      (`recomputeSegmentFacetsForTurn`, called from db/turns.ts);
+ *   3. a membership LEAVING, which only ever happens through the
+ *      `segment_members` FK cascade of a deleted turn or session — no
+ *      TypeScript writer exists to hook, so SQLite records the debt
+ *      (`segments.facets_stale`, schema.ts) and `repairStaleSegmentFacets`
+ *      pays it.
  */
 export function recomputeSegmentFacets(
   db: Database,
@@ -434,12 +473,12 @@ export function recomputeSegmentFacets(
   const typeCounts = new Map<string, number>();
   const tagCounts = new Map<string, number>();
   for (const member of members) {
-    for (const word of new Set(parseStringArray(member.type))) {
+    for (const word of new Set(parseMemberFacetArray(member.type))) {
       typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
     }
     // Per MEMBER, deduplicated: a turn that repeats a tag is still one turn
     // carrying it, so frequency counts turns and not array entries.
-    for (const tag of new Set(parseStringArray(member.tags))) {
+    for (const tag of new Set(parseMemberFacetArray(member.tags))) {
       if (tag.includes(":") || tag.trim() === "") {
         continue;
       }
@@ -460,7 +499,11 @@ export function recomputeSegmentFacets(
   const updated = mapSegmentRow(
     db
       .query<SegmentRow, [string, string, number]>(
-        `UPDATE segments SET type = ?, tags = ? WHERE id = ?
+        // `facets_stale = 0` in the same statement that stores the derivation:
+        // the flag means "a derivation is owed", and this IS the derivation, so
+        // whichever writer got here — membership, a member's own write, or the
+        // repair sweep — settles the debt by the act of paying it.
+        `UPDATE segments SET type = ?, tags = ?, facets_stale = 0 WHERE id = ?
          RETURNING ${SEGMENT_COLUMNS}`,
       )
       .get(JSON.stringify(type), JSON.stringify(tags), segmentId) ?? null,
@@ -474,6 +517,81 @@ export function recomputeSegmentFacets(
     indexSegment(db, updated);
   }
   return updated;
+}
+
+/**
+ * Input 2 (ticket 15 finding 1): a member turn's `type`/`tags` just moved, so
+ * every segment holding that turn has to re-derive.
+ *
+ * Called from the turn write path rather than resolved when a segment is read,
+ * because spec K5a already settled that question in the same breath as the
+ * derivation rule: "a segment is indexed to FTS with its tags, so the derived
+ * value is stored and recomputed when membership changes, not resolved at read
+ * time". A read-time derivation would still owe the FTS facet a write, so it
+ * relocates the write rather than removing it — and leaves `tag:`/`type:`
+ * search answering from the stale row in the meantime.
+ *
+ * Cheap by construction: one lookup on `idx_segment_members_turn`, which is
+ * empty for the ~94% of turns that belong to no segment at all, and a
+ * recomputation per segment for the rest (a turn in two segments pays twice,
+ * which is the true cost of the many-to-many and not a reason to defer).
+ */
+export function recomputeSegmentFacetsForTurn(db: Database, turnId: number): void {
+  const rows = db
+    .query<{ segmentId: number }, [number]>(
+      `SELECT segment_id AS segmentId FROM segment_members
+       WHERE turn_id = ? ORDER BY segment_id ASC`,
+    )
+    .all(turnId);
+  for (const row of rows) {
+    recomputeSegmentFacets(db, row.segmentId);
+  }
+}
+
+/**
+ * Input 3 (ticket 15 findings 2-3): pay every derivation SQLite recorded as
+ * owed. Returns how many segments were recomputed.
+ *
+ * The debt is written by the `segment_members` AFTER DELETE trigger (schema.ts)
+ * — the only writer that sees a membership removed, because a turn or session
+ * deletion never names `segment_members` at all, the FK cascade does — and once
+ * by the migration that introduced the flag, which is how the segments written
+ * before spec K5a get their model-stated facets replaced by derived ones.
+ *
+ * A trigger cannot do the derivation itself: the union's order comes from the
+ * `MEMORY_TYPES` constant and the result has to be rewritten into the segment's
+ * FTS row through `indexSegmentToFTS`, neither of which exists in SQL. So the
+ * flag is the seam — SQLite records the FACT, which it alone can see, and this
+ * runs the DERIVATION, which only TypeScript can express.
+ *
+ * The caller owns the transaction (schema.ts's initialisation sweep wraps it),
+ * so a repair pass is all-or-nothing rather than half-applied.
+ *
+ * BATCHED, because the transaction is a write lock and the sweep runs from
+ * schema initialisation, which every hook entry performs: the one-time backfill
+ * on the live database is 45 segments at ~16 ms each (measured — nearly all of
+ * it the FTS rewrite on a 1.9 GB trigram index), and holding the lock for the
+ * whole ~880 ms would sit above the 800 ms busy timeout a hook connection
+ * allows itself. A cap makes the hold ~250 ms and costs nothing, because the
+ * flag is durable: whatever this pass leaves is still owed, and the next
+ * process start — several per prompt — resumes it. Ordered by id so successive
+ * passes advance instead of re-drawing the same batch.
+ */
+export const SEGMENT_FACET_REPAIR_BATCH = 16;
+
+export function repairStaleSegmentFacets(
+  db: Database,
+  limit: number = SEGMENT_FACET_REPAIR_BATCH,
+): number {
+  const stale = db
+    .query<{ id: number }, [number]>(
+      "SELECT id FROM segments WHERE facets_stale = 1 ORDER BY id ASC LIMIT ?",
+    )
+    .all(Math.max(1, Math.floor(limit)));
+  for (const row of stale) {
+    recomputeSegmentFacets(db, row.id);
+  }
+  return stale.length;
 }
 
 export function getSegment(db: Database, segmentId: number): SegmentRecord | null {
@@ -591,12 +709,24 @@ export function listTopicsByFrequency(
 /**
  * Idempotent membership assertion; returns the turn ids newly linked.
  *
- * Membership is the ONLY input to `type` and `tags` (spec K5a), so this is
- * also where they are recomputed — one place, so a caller cannot land members
- * and forget the derivation, and so the FTS facet can never describe a
- * membership the row no longer has. Recomputation runs only when this call
+ * Membership is ONE of the three inputs to `type` and `tags` (spec K5a — see
+ * `recomputeSegmentFacets` for the other two and who pays for each), so this
+ * is where the derivation runs for a membership that arrives: a caller cannot
+ * land members and forget it, and the FTS facet can never describe a
+ * membership the row does not have. Recomputation runs only when this call
  * actually linked something new: an idempotent re-assertion changes no input
  * and therefore needs no recomputation.
+ *
+ * Ticket 15 finding 8, checked rather than assumed: the partial-insert window
+ * this loop opens (some memberships land, a later `turn_id` fails its foreign
+ * key, the throw skips the recomputation) is not reachable from production.
+ * The only production caller is `evaluateSettlementSegmentWrite(…, apply:
+ * true)`, which runs exclusively inside the settlement commit's
+ * `runWriteTransaction` (worker/note-settlement-staging.ts), so the throw
+ * rolls the partial insert back with everything else. A future caller OUTSIDE
+ * a transaction would need the `SAVEPOINT` idiom `applySegmentWrites` uses —
+ * nest-safe, unlike a bare `BEGIN` — not one added here speculatively, where
+ * on today's only path it would be a redundant savepoint per settlement write.
  */
 export function addSegmentMembers(
   db: Database,

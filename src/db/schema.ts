@@ -4,6 +4,7 @@ import { isCitationRelation, type CitationRelation } from "./citations";
 import { runWriteTransaction } from "./database";
 import { rankEdgeProvenance, type EdgeProvenance } from "./memory-edges";
 import { rebuildSearchIndex } from "./search";
+import { repairStaleSegmentFacets } from "./segments";
 
 const MEMORY_FTS_DDL = `
   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -397,6 +398,18 @@ const SCHEMA_SQL = `
       status IN ('open', 'delivered', 'abandoned')
     ),
     revision INTEGER NOT NULL DEFAULT 1,
+    -- Ticket 15 (findings 1-3): "this segment owes a facet derivation".
+    -- type/tags are derived from the members (spec K5a) and the derivation
+    -- lives in TypeScript (db/segments.ts) because its ordering comes from the
+    -- MEMORY_TYPES constant and its result has to be rewritten into the FTS
+    -- row. A membership that LEAVES has no TypeScript writer at all — nothing
+    -- in src/ deletes a turn or a session, the FK cascade below does it — so
+    -- SQLite records the fact through the trigger under segment_members and
+    -- repairStaleSegmentFacets performs the derivation at the next schema
+    -- initialisation, which for this process family is every hook invocation.
+    -- Bookkeeping, not a facet: no read surface renders it and no caller may
+    -- state it.
+    facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL
   );
@@ -850,6 +863,55 @@ const MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
     END;
 `;
 
+/**
+ * Ticket 15 (findings 1-2): the two facet inputs a TypeScript writer cannot be
+ * made to notice, recorded as a debt on `segments.facets_stale` and paid by
+ * `repairStaleSegmentFacets` (db/segments.ts).
+ *
+ * Same reasoning as `MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL` above, one level up:
+ * triggers rather than a check in the write APIs, because a cascade or a direct
+ * SQL statement bypasses any API-layer guard. What is different here is that
+ * the trigger cannot do the repair itself — the derivation's order comes from
+ * the `MEMORY_TYPES` constant and its result has to be rewritten into the
+ * segment's FTS row, neither of which is expressible in SQL — so it records the
+ * fact and leaves the derivation where its one definition already lives.
+ *
+ *   - MEMBER REMOVED: a turn or session deletion never names `segment_members`;
+ *     the FK cascade removes the row. Nothing in `src/` deletes either (grep),
+ *     so there is no call site to hook and this trigger is the only writer that
+ *     ever sees the event. Verified on this engine that a cascade fires an
+ *     AFTER DELETE trigger — the same fact the memory-edge triggers rely on.
+ *   - MEMBER'S FACETS REWRITTEN: `db/turns.ts` recomputes immediately (the FTS
+ *     facet has to be right for the settlement window that just revised the
+ *     turn, not at the next process start), so for that path this trigger only
+ *     writes a flag the same statement's caller clears a moment later. It earns
+ *     its place on the writers that do NOT go through `updateTurnById` —
+ *     `hooks/capture-repair.ts` rewrites `type`/`tags` in raw SQL when it claims
+ *     a compact boundary, and `stripRetiredTopicTagNamespace` below rewrites
+ *     `tags` in bulk during migration. The `WHEN` clause holds it to a value
+ *     that actually MOVED, and db/turns.ts gates its immediate recomputation on
+ *     the same question, so the two never disagree about whether a derivation
+ *     is owed — a debt raised by a write that changed nothing would be paid by
+ *     the next process start instead, which is the expensive direction: a
+ *     recomputation is ~16 ms on the live database, nearly all of it the FTS
+ *     rewrite.
+ */
+const SEGMENT_FACET_STALE_TRIGGERS_DDL = `
+  CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_removed
+    AFTER DELETE ON segment_members
+    BEGIN
+      UPDATE segments SET facets_stale = 1 WHERE id = OLD.segment_id;
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_facets_written
+    AFTER UPDATE OF type, tags ON turns
+    WHEN OLD.type IS NOT NEW.type OR OLD.tags IS NOT NEW.tags
+    BEGIN
+      UPDATE segments SET facets_stale = 1
+      WHERE id IN (SELECT segment_id FROM segment_members WHERE turn_id = NEW.id);
+    END;
+`;
+
 function hasTable(db: Database, table: string): boolean {
   return (
     db
@@ -1241,6 +1303,7 @@ export function initializeSchema(db: Database): void {
   ensureTurnInvalidationColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureSegmentInsightColumn(db);
+  ensureSegmentDerivedFacets(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
   retireLegacyTurnCitationsTable(db);
@@ -1275,6 +1338,9 @@ export function initializeSchema(db: Database): void {
   // function guarantees, so it must never be the one deciding what shape
   // `type` is in.
   retireTurnCitesRecordedColumn(db);
+  // Strictly last (ticket 15): both rebuilds above and the tag-namespace strip
+  // rewrite the member columns this derives from.
+  repairDerivedSegmentFacets(db);
 }
 
 /**
@@ -1709,6 +1775,91 @@ function ensureSegmentInsightColumn(db: Database): void {
   addColumnIfMissing(db, "segments", "insight", "TEXT");
 }
 
+/**
+ * Ticket 15 finding 3, the other half of the same K5a migration: the segments
+ * that already exist keep MODEL-STATED `type`/`tags` unless something rederives
+ * them.
+ *
+ * Ticket 14 made both fields derived and ran the derivation from
+ * `addSegmentMembers` onward, so a segment written before it — 45 of them on
+ * the live database — holds whatever the settlement agent typed, which is the
+ * A6 violation ("a segment's type is the union of its members'", asserted since
+ * A6 was written and never enforced) that K5a exists to end. It is not a
+ * cosmetic difference: `rebuildSearchIndex` indexes the STORED fields, so a
+ * `type:`/`tag:` search answers from them, and `deriveDominantType`
+ * (db/segment-rank.ts) reads the first word of the stored `type` as a
+ * judgement.
+ *
+ * Delivered as a flag rather than an inline loop so the cascade repair
+ * (finding 2) and any later backfill are one mechanism with one meaning —
+ * "this segment owes a derivation" — and one payer, the sweep at the end of
+ * `initializeSchema`.
+ *
+ * THE ONE-TIME BACKFILL IS DELIBERATELY NOT HERE (user ruling, S15069/T766).
+ * It was built, run against a copy of the live database, and withdrawn on what
+ * that run showed: all 45 segments derive to `type=[]`, `tags=[]`, because 8 of
+ * their 800 member turns carry any `type` and none carries a bare tag. Those
+ * members were written by `promoteTurnFromNote`, which records
+ * title/content/insight and never type/tags, so their activity word lives in
+ * the TITLE prefix instead (`"fix+observation-search: …"`). The derivation is
+ * therefore correct and the erasure is total: K5a's answer for a segment whose
+ * members state nothing genuinely is `[]`, and the live `addSegmentMembers`
+ * path already produces `[]` for such a segment today.
+ *
+ * What the backfill would cost is those 45 segments' only structured search
+ * facet, irreversibly, to record an emptiness that is an artefact of the old
+ * write path rather than a fact about the work. The activity words are
+ * recoverable — they are sitting in the titles — so the ordering is: recover
+ * the member turns' `type` first, THEN derive, and get real values instead of
+ * `[]`. That recovery is turn-level work and belongs to its own change; not
+ * every title prefix maps onto `MEMORY_TYPES` (`write+`, `feedback+` do not),
+ * so it needs rulings this migration has no business making.
+ *
+ * Until then the stored facet on a pre-ticket-14 segment means "model-stated"
+ * and on every later one means "derived". That is the two-meanings state K5a
+ * exists to end, accepted knowingly and for a bounded time, because it is
+ * already the state on disk and the alternative is irreversible.
+ */
+function ensureSegmentDerivedFacets(db: Database): void {
+  addColumnIfMissing(
+    db,
+    "segments",
+    "facets_stale",
+    "INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1))",
+  );
+  // Idempotent (CREATE TRIGGER IF NOT EXISTS) and re-run on every process
+  // start, so a database that predates this ticket gains them too.
+  db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
+}
+
+/**
+ * Ticket 15 (findings 2-3): pay every facet derivation the database records as
+ * owed — the migration backfill above, and any membership the FK cascade of a
+ * deleted turn or session removed since the last process start.
+ *
+ * Runs LAST in `initializeSchema`, after both `turns` rebuilds and after
+ * `stripRetiredTopicTagNamespace`: those rewrite the very `type`/`tags` columns
+ * the derivation reads, and the trigger flags the segments they touch, so a
+ * sweep placed earlier would derive from values this same initialisation is
+ * about to change.
+ *
+ * The read comes first so the ordinary case — nothing owed — costs one indexed
+ * probe and never opens a write transaction. `initializeSchema` runs from every
+ * hook entry, several per prompt, and an IMMEDIATE transaction per entry would
+ * be a new source of writer contention for no work. What IS owed is paid a
+ * batch at a time (`SEGMENT_FACET_REPAIR_BATCH`) for the same reason — see
+ * `repairStaleSegmentFacets` — with the remainder left flagged for the next
+ * start rather than held under one long write lock.
+ */
+function repairDerivedSegmentFacets(db: Database): void {
+  if (!hasRow(db, "SELECT 1 FROM segments WHERE facets_stale = 1")) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    repairStaleSegmentFacets(db);
+  });
+}
+
 function ensureTurnSignificanceGradeColumn(db: Database): void {
   addColumnIfMissing(
     db,
@@ -1947,6 +2098,16 @@ function presentRetiredExtractionStallColumns(
  * because nobody told the rebuild it existed is the opposite of that. Called
  * INSIDE the write transaction, before either rebuild touches the table, so a
  * throw here leaves the database exactly as it was.
+ *
+ * `table_xinfo`, not `table_info` (ticket 15 finding 7, confirmed on this
+ * engine): `table_info` OMITS generated columns entirely — a table with
+ * `c TEXT GENERATED ALWAYS AS (…) VIRTUAL` reports only its ordinary columns —
+ * while `table_xinfo` reports them with `hidden` 2 (stored) or 3 (virtual).
+ * Since the guard's whole job is to see what this codebase does not know about,
+ * reading the pragma that hides a whole column class is the guard having the
+ * exact blind spot it exists to close. `turns` carries no such column today, so
+ * this changes no current behaviour: `table_xinfo` returns the same names for a
+ * table without hidden columns.
  */
 function assertNoUnexpectedTurnsColumns(
   db: Database,
@@ -1955,7 +2116,7 @@ function assertNoUnexpectedTurnsColumns(
   rebuildName: string,
 ): void {
   const actual = db
-    .query<{ name: string }, []>("PRAGMA table_info(turns)")
+    .query<{ name: string }, []>("PRAGMA table_xinfo(turns)")
     .all()
     .map((row) => row.name);
   const accounted = new Set([...knownColumns, ...droppedColumns]);
@@ -2168,19 +2329,37 @@ ${stallColumnDdl}
                OR (cited_kind = 'turn' AND cited_id = OLD.id);
           END;
       `);
-    });
+      // Dropped with the old table like every other trigger on `turns`, and
+      // recreated here for the same reason (ticket 15): `stripRetiredTopicTagNamespace`
+      // runs between this rebuild and the next one and rewrites `tags` in bulk.
+      db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
 
-    // Matches the 12-step procedure's own verification step: every id was
-    // carried over unchanged (explicit column list, no id remapping), so a
-    // clean bill of health here is expected, not aspirational.
-    const violations = db
-      .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
-      .all();
-    if (violations.length > 0) {
-      throw new Error(
-        `turns table rebuild left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`,
-      );
-    }
+      // INSIDE the transaction (ticket 15 finding 4). SQLite's 12-step ALTER
+      // TABLE procedure runs `foreign_key_check` at step 10 and COMMITs at step
+      // 11; running it after the commit inverts those two, so a violation threw
+      // over a swap that was already durable — and the next reload's staleness
+      // predicate then reads false and skips the rebuild, leaving no repair
+      // path for the state the throw announced. Here the throw rolls the swap
+      // back, the predicate still reads true, and the next reload retries.
+      //
+      // `PRAGMA foreign_keys = OFF` is in force around this rebuild and does
+      // not weaken the check: `foreign_key_check` is a verification pragma that
+      // scans the stored rows, not the enforcement switch, and it reports the
+      // same violations with enforcement off (verified on this engine) and
+      // inside an open transaction.
+      //
+      // Matches the 12-step procedure's own verification step: every id was
+      // carried over unchanged (explicit column list, no id remapping), so a
+      // clean bill of health here is expected, not aspirational.
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `turns table rebuild left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`,
+        );
+      }
+    });
   } finally {
     db.exec("PRAGMA foreign_keys = ON;");
   }
@@ -2351,16 +2530,21 @@ ${stallColumnDdl}
                OR (cited_kind = 'turn' AND cited_id = OLD.id);
           END;
       `);
-    });
+      db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
 
-    const violations = db
-      .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
-      .all();
-    if (violations.length > 0) {
-      throw new Error(
-        `turns table rebuild left ${violations.length} foreign key violation(s) while retiring cites_recorded: ${JSON.stringify(violations)}`,
-      );
-    }
+      // Inside the transaction, for the reason spelled out in full at
+      // `ensureTurnTypeMultiValueColumn`'s own copy of this check (ticket 15
+      // finding 4): a check that runs after the commit turns a violation into a
+      // durable swap plus a skipped migration, i.e. no repair path.
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `turns table rebuild left ${violations.length} foreign key violation(s) while retiring cites_recorded: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
   } finally {
     db.exec("PRAGMA foreign_keys = ON;");
   }

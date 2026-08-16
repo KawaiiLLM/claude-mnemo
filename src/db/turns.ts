@@ -4,6 +4,7 @@ import { runWriteTransaction } from "./database";
 import { markSettledDiaryDayStaleForTurn } from "./diary-state";
 
 import { indexTurnToFTS, reindexTurnFromDb } from "./search";
+import { recomputeSegmentFacetsForTurn } from "./segments";
 
 export type TurnStatus =
   | "active"
@@ -336,6 +337,26 @@ export function updateTurnById(
   // status the write left it in. A skipped or undone turn keeps its originals
   // findable; what a reader is SHOWN is decided at render time.
   indexTurnToFTS(db, updated);
+  // A member's facets are an input to its segments' derived `type`/`tags`
+  // (spec K5a), so this write is a segment write too (ticket 15 finding 1).
+  // The two writes that most need it are the ordinary ones: a settlement window
+  // revising an EARLIER turn's type (the prompt's duty 1 invites exactly that),
+  // and a staged `segment` create replayed before the `note` that types its
+  // member. `promoteTurnFromNote` needs no such call — it writes title, content,
+  // insight and status, none of which any facet derives from.
+  //
+  // Gated on the facets having actually moved, on the same question the
+  // `segments_facets_stale_on_member_facets_written` trigger asks (schema.ts):
+  // a recomputation costs ~16 ms on the live database, nearly all of it the FTS
+  // rewrite, and `updateTurnById` restates `type`/`tags` on every write whether
+  // or not they changed. Skipping an unchanged write is safe precisely because
+  // the trigger raised no debt for it either.
+  if (
+    JSON.stringify(existing.type) !== stringifyArray(mergedType) ||
+    JSON.stringify(existing.tags) !== stringifyArray(nextTags)
+  ) {
+    recomputeSegmentFacetsForTurn(db, turnId);
+  }
 
   if (
     existing.status !== updated.status ||
@@ -460,6 +481,16 @@ export function resetTurnExtractionFields(
   // Re-index rather than delete: the extraction fields are gone, but the
   // prompt and response this turn was captured with are still the record.
   reindexTurnFromDb(db, turnId);
+  // This write clears `type` and strips the freeform tags, so a segment holding
+  // this turn was deriving from values that no longer exist (ticket 15). Same
+  // gate as `updateTurnById`: a reset of a turn that already held neither
+  // changes no input.
+  if (
+    existing.type.length > 0 ||
+    JSON.stringify(existing.tags) !== stringifyArray(keptTags)
+  ) {
+    recomputeSegmentFacetsForTurn(db, turnId);
+  }
 
   if (
     existing.status !== "active" ||

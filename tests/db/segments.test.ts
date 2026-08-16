@@ -16,10 +16,11 @@ import {
   listRecentSegments,
   listTopics,
   listTopicsByFrequency,
-  recomputeSegmentFacets,
+  repairStaleSegmentFacets,
   upsertTopic,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { resetTurnExtractionFields, updateTurnById } from "../../src/db/turns";
 import { normalizeTypeValues } from "../../src/shared/type-vocabulary";
 
 describe("segments, topics and membership", () => {
@@ -44,6 +45,26 @@ describe("segments, topics and membership", () => {
         JSON.stringify(facets.type ?? []),
         JSON.stringify(facets.tags ?? []),
       )!.id;
+  }
+
+  /** The search facet as stored — what a `tag:`/`type:` query actually reads. */
+  function readSegmentFtsExtra(segmentId: number): string {
+    return (
+      db
+        .query<{ extra: string | null }, [number]>(
+          "SELECT extra FROM memory_fts WHERE layer = 'segment' AND source_id = ?",
+        )
+        .get(segmentId)?.extra ?? ""
+    );
+  }
+
+  /** Ticket 15: the storage-level record that a derivation is owed. */
+  function readFacetsStale(segmentId: number): number {
+    return db
+      .query<{ facetsStale: number }, [number]>(
+        "SELECT facets_stale AS facetsStale FROM segments WHERE id = ?",
+      )
+      .get(segmentId)!.facetsStale;
   }
 
   beforeEach(() => {
@@ -520,10 +541,157 @@ describe("segments, topics and membership", () => {
 
       db.query("PRAGMA foreign_keys = ON").run();
       db.query("DELETE FROM turns WHERE id = ?").run(removed);
-      // The cascade removes the row; the facets are stale until something
-      // recomputes them, which is what this function is for.
-      expect(recomputeSegmentFacets(db, segment.id)?.type).toEqual(["design"]);
+
+      // Ticket 15 finding 2. This test used to assert the STALE state here and
+      // then hand-call `recomputeSegmentFacets`, which made it pass over a
+      // production path that never recomputed at all. Nothing is hand-called
+      // now: the deletion cascades `segment_members`, the trigger records the
+      // debt, and the production sweep — the same one `initializeSchema` runs
+      // — is the only repair invoked.
+      expect(readFacetsStale(segment.id)).toBe(1);
+      expect(repairStaleSegmentFacets(db)).toBe(1);
+
+      expect(getSegment(db, segment.id)?.type).toEqual(["design"]);
       expect(getSegment(db, segment.id)?.tags).toEqual(["lease"]);
+      expect(readFacetsStale(segment.id)).toBe(0);
+      // The search facet, not just the stored row: a segment left findable by
+      // the deleted member's tag is half the bug.
+      expect(readSegmentFtsExtra(segment.id)).toContain("lease");
+      expect(readSegmentFtsExtra(segment.id)).not.toContain("release");
+    });
+
+    test("a deleted SESSION reaches the debt the same way, through two cascades", () => {
+      const other = upsertSession(db, {
+        contentSessionId: "session-doomed",
+        project: "/tmp/project",
+        title: null,
+        content: null,
+        insight: null,
+        nextSteps: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: null,
+        completedAtEpoch: null,
+      }).id;
+      const doomed = db
+        .query<{ id: number }, [number]>(
+          `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch, type, tags)
+           VALUES (?, 1, 'extracted', 200, '["ops"]', '["release"]') RETURNING id`,
+        )
+        .get(other)!.id;
+      const kept = addTurn(1, 100, { type: ["design"], tags: ["lease"] });
+      const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
+      addSegmentMembers(db, segment.id, [kept, doomed], 100);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["lease", "release"]);
+
+      db.query("PRAGMA foreign_keys = ON").run();
+      db.query("DELETE FROM sessions WHERE id = ?").run(other);
+
+      expect(repairStaleSegmentFacets(db)).toBe(1);
+      expect(getSegment(db, segment.id)?.type).toEqual(["design"]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["lease"]);
+    });
+
+    test("nothing owed is nothing done — the sweep is a no-op on a settled database", () => {
+      const member = addTurn(1, 100, { type: ["design"], tags: ["lease"] });
+      const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
+      addSegmentMembers(db, segment.id, [member], 100);
+
+      expect(readFacetsStale(segment.id)).toBe(0);
+      expect(repairStaleSegmentFacets(db)).toBe(0);
+    });
+  });
+
+  /**
+   * Ticket 15 finding 1: the facets follow the members' CURRENT type and tags,
+   * not the values they held when the membership was recorded.
+   *
+   * Every test here writes the member's facets AFTER membership exists, which
+   * is the order the prompt's duty order discourages and nothing enforces —
+   * a staged `segment(create, members=[T1])` replayed before the `note` that
+   * types T1, and a later settlement window revising an earlier turn's type,
+   * which duty 1 explicitly invites.
+   */
+  describe("a member's facets moving after membership (ticket 15 finding 1)", () => {
+    test("a type written after the membership reaches the segment and its FTS row", () => {
+      const member = addTurn(1, 100);
+      const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
+      addSegmentMembers(db, segment.id, [member], 100);
+      // The member had no type at all when it joined — the vacuous segment A6's
+      // duty ordering exists to prevent.
+      expect(getSegment(db, segment.id)?.type).toEqual([]);
+
+      updateTurnById(db, member, {
+        type: ["design", "implement"],
+        tags: ["lease", "fencing"],
+        updatedAtEpoch: 200,
+      });
+
+      expect(getSegment(db, segment.id)?.type).toEqual(["design", "implement"]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["fencing", "lease"]);
+      expect(readSegmentFtsExtra(segment.id)).toContain("fencing");
+      expect(readFacetsStale(segment.id)).toBe(0);
+    });
+
+    test("a REVISED type replaces the old one rather than accumulating, in every segment holding the turn", () => {
+      const revised = addTurn(1, 100, { type: ["ops"], tags: ["release"] });
+      const other = addTurn(2, 200, { type: ["design"], tags: ["lease"] });
+      const first = createSegment(db, { title: "first", nowEpoch: 100 });
+      const second = createSegment(db, { title: "second", nowEpoch: 100 });
+      addSegmentMembers(db, first.id, [revised, other], 100);
+      addSegmentMembers(db, second.id, [revised], 100);
+
+      // The later window's verdict on an earlier turn (settlement duty 1).
+      updateTurnById(db, revised, {
+        type: ["correction"],
+        tags: ["fencing"],
+        updatedAtEpoch: 300,
+      });
+
+      expect(getSegment(db, first.id)?.type).toEqual(["design", "correction"]);
+      expect(getSegment(db, first.id)?.tags).toEqual(["fencing", "lease"]);
+      expect(getSegment(db, second.id)?.type).toEqual(["correction"]);
+      expect(getSegment(db, second.id)?.tags).toEqual(["fencing"]);
+      expect(readSegmentFtsExtra(second.id)).not.toContain("release");
+    });
+
+    test("a member reset back to no extraction empties what only it contributed", () => {
+      const member = addTurn(1, 100, { type: ["ops"], tags: ["release"] });
+      const segment = createSegment(db, { title: "release", nowEpoch: 100 });
+      addSegmentMembers(db, segment.id, [member], 100);
+      expect(getSegment(db, segment.id)?.type).toEqual(["ops"]);
+
+      resetTurnExtractionFields(db, member, 300);
+
+      expect(getSegment(db, segment.id)?.type).toEqual([]);
+      expect(getSegment(db, segment.id)?.tags).toEqual([]);
+      expect(readSegmentFtsExtra(segment.id)).not.toContain("release");
+    });
+
+    test("a raw-SQL facet write leaves the debt on file for the sweep to pay", () => {
+      // The writers that do not go through `updateTurnById` —
+      // hooks/capture-repair.ts claiming a compact boundary, the tag-namespace
+      // migration — are out of reach of any call site, so the trigger is what
+      // stands between them and a permanently stale facet.
+      const member = addTurn(1, 100, { type: ["ops"], tags: ["release"] });
+      const segment = createSegment(db, { title: "release", nowEpoch: 100 });
+      addSegmentMembers(db, segment.id, [member], 100);
+
+      db.query("UPDATE turns SET type = '[\"design\"]', tags = '[\"lease\"]' WHERE id = ?").run(
+        member,
+      );
+      expect(readFacetsStale(segment.id)).toBe(1);
+
+      expect(repairStaleSegmentFacets(db)).toBe(1);
+      expect(getSegment(db, segment.id)?.type).toEqual(["design"]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["lease"]);
+
+      // …and a write that restates the same facets raises no debt at all: the
+      // trigger's WHEN clause asks the same question db/turns.ts gates its own
+      // recomputation on, so the two never disagree about whether one is owed.
+      db.query("UPDATE turns SET type = '[\"design\"]', tags = '[\"lease\"]' WHERE id = ?").run(
+        member,
+      );
+      expect(readFacetsStale(segment.id)).toBe(0);
     });
   });
 

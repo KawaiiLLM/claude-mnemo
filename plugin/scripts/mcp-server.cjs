@@ -7859,194 +7859,6 @@ var init_search = __esm({
   }
 });
 
-// src/db/memory-edges.ts
-function rankEdgeProvenance(provenance) {
-  return PROVENANCE_RANK[provenance];
-}
-function isEdgeNodeKind(value) {
-  return typeof value === "string" && EDGE_NODE_KINDS.includes(value);
-}
-function isCitingNodeKind(value) {
-  return typeof value === "string" && CITING_NODE_KINDS.includes(value);
-}
-function isEdgeProvenance(value) {
-  return typeof value === "string" && EDGE_PROVENANCES.includes(value);
-}
-function mapEdgeRow(row) {
-  return {
-    citing: { kind: row.citingKind, id: row.citingId },
-    cited: { kind: row.citedKind, id: row.citedId },
-    relation: row.relation,
-    provenance: row.provenance,
-    createdAtEpoch: row.createdAtEpoch
-  };
-}
-function isValidCitingNode(node) {
-  return node !== void 0 && isCitingNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
-}
-function isValidCitedNode(node) {
-  return node !== void 0 && isEdgeNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
-}
-function pairKey(edge) {
-  return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
-}
-function mayCarryRelation(options, edge) {
-  const eligible = options.eligibleForRelation;
-  if (eligible === void 0) {
-    return false;
-  }
-  return eligible === "unrestricted" || eligible.has(pairKey(edge));
-}
-function writeMemoryEdges(db, edges, nowEpoch, options = {}) {
-  const written = [];
-  const rejected = [];
-  const relationsByPair = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited) || !isCitationRelation(edge.relation)) {
-      continue;
-    }
-    const key = pairKey(edge);
-    const relations = relationsByPair.get(key) ?? /* @__PURE__ */ new Set();
-    relations.add(edge.relation);
-    relationsByPair.set(key, relations);
-  }
-  const conflictingPairs = new Set(
-    [...relationsByPair.entries()].filter(([, relations]) => relations.size > 1).map(([key]) => key)
-  );
-  const upsert = db.query(
-    `
-      INSERT INTO memory_edges (
-        citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id)
-        DO UPDATE SET
-          -- Spec C14: no rank test between an authorised write and the
-          -- relation it sets. A relation-bearing write replaces relation AND
-          -- provenance together, unconditionally; a bare write (relation
-          -- NULL) touches neither \u2014 it can create a pair but never modify a
-          -- relation one already carries.
-          relation = CASE
-            WHEN excluded.relation IS NOT NULL THEN excluded.relation
-            ELSE memory_edges.relation
-          END,
-          provenance = CASE
-            WHEN excluded.relation IS NOT NULL THEN excluded.provenance
-            ELSE memory_edges.provenance
-          END
-      RETURNING ${EDGE_COLUMNS}
-    `
-  );
-  for (const edge of edges) {
-    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
-      rejected.push({ input: edge, reason: "invalid-node" });
-      continue;
-    }
-    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
-      rejected.push({ input: edge, reason: "self-loop" });
-      continue;
-    }
-    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
-      rejected.push({ input: edge, reason: "invalid-relation" });
-      continue;
-    }
-    if (!isEdgeProvenance(edge.provenance)) {
-      rejected.push({ input: edge, reason: "invalid-provenance" });
-      continue;
-    }
-    if (edge.relation !== null && conflictingPairs.has(pairKey(edge))) {
-      rejected.push({ input: edge, reason: "conflicting-relation" });
-      continue;
-    }
-    if (edge.relation !== null && !mayCarryRelation(options, edge)) {
-      rejected.push({ input: edge, reason: "relation-ineligible" });
-      continue;
-    }
-    const row = upsert.get(
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id,
-      edge.relation,
-      edge.provenance,
-      edge.createdAtEpoch ?? nowEpoch
-    );
-    if (row) {
-      written.push(mapEdgeRow(row));
-    }
-  }
-  return { written, rejected };
-}
-function getOutgoingEdges(db, citing) {
-  return db.query(
-    `SELECT ${EDGE_COLUMNS} FROM memory_edges
-       WHERE citing_kind = ? AND citing_id = ?
-       ORDER BY cited_kind ASC, cited_id ASC, relation ASC`
-  ).all(citing.kind, citing.id).map(mapEdgeRow);
-}
-function reconcileCitedPairs(db, citing, citedNodes, nowEpoch, provenance) {
-  const desired = /* @__PURE__ */ new Map();
-  for (const node of citedNodes) {
-    if (isValidCitedNode(node)) {
-      desired.set(`${node.kind}:${node.id}`, node);
-    }
-  }
-  const existing = getOutgoingEdges(db, citing);
-  const stale = existing.filter(
-    (edge) => !desired.has(`${edge.cited.kind}:${edge.cited.id}`)
-  );
-  const del = db.query(
-    `DELETE FROM memory_edges
-     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?`
-  );
-  for (const edge of stale) {
-    del.run(citing.kind, citing.id, edge.cited.kind, edge.cited.id);
-  }
-  const { written } = writeMemoryEdges(
-    db,
-    [...desired.values()].map((cited) => ({
-      citing,
-      cited,
-      relation: null,
-      provenance
-    })),
-    nowEpoch
-  );
-  return { written, deleted: stale };
-}
-var EDGE_NODE_KINDS, CITING_NODE_KINDS, EDGE_PROVENANCES, PROVENANCE_RANK, EDGE_COLUMNS;
-var init_memory_edges = __esm({
-  "src/db/memory-edges.ts"() {
-    "use strict";
-    init_citations();
-    EDGE_NODE_KINDS = ["turn", "segment"];
-    CITING_NODE_KINDS = ["turn", "segment", "session"];
-    EDGE_PROVENANCES = [
-      "retrieval",
-      "text-ref",
-      "rollback",
-      "judged",
-      "asserted"
-    ];
-    PROVENANCE_RANK = {
-      retrieval: 0,
-      rollback: 1,
-      "text-ref": 2,
-      judged: 3,
-      asserted: 4
-    };
-    EDGE_COLUMNS = `
-  citing_kind AS citingKind,
-  citing_id AS citingId,
-  cited_kind AS citedKind,
-  cited_id AS citedId,
-  relation,
-  provenance,
-  created_at_epoch AS createdAtEpoch
-`;
-  }
-});
-
 // src/db/references.ts
 function isBareAddressToken(bracketed) {
   return ADDRESS_TOKEN_PATTERN.test(bracketed);
@@ -8427,6 +8239,402 @@ var init_citations = __esm({
   }
 });
 
+// src/db/memory-edges.ts
+function rankEdgeProvenance(provenance) {
+  return PROVENANCE_RANK[provenance];
+}
+function isEdgeNodeKind(value) {
+  return typeof value === "string" && EDGE_NODE_KINDS.includes(value);
+}
+function isCitingNodeKind(value) {
+  return typeof value === "string" && CITING_NODE_KINDS.includes(value);
+}
+function isEdgeProvenance(value) {
+  return typeof value === "string" && EDGE_PROVENANCES.includes(value);
+}
+function mapEdgeRow(row) {
+  return {
+    citing: { kind: row.citingKind, id: row.citingId },
+    cited: { kind: row.citedKind, id: row.citedId },
+    relation: row.relation,
+    provenance: row.provenance,
+    createdAtEpoch: row.createdAtEpoch
+  };
+}
+function isValidCitingNode(node) {
+  return node !== void 0 && isCitingNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
+}
+function isValidCitedNode(node) {
+  return node !== void 0 && isEdgeNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
+}
+function pairKey(edge) {
+  return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
+}
+function mayCarryRelation(options, edge) {
+  const eligible = options.eligibleForRelation;
+  if (eligible === void 0) {
+    return false;
+  }
+  return eligible === "unrestricted" || eligible.has(pairKey(edge));
+}
+function writeMemoryEdges(db, edges, nowEpoch, options = {}) {
+  const written = [];
+  const rejected = [];
+  const relationsByPair = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited) || !isCitationRelation(edge.relation)) {
+      continue;
+    }
+    const key = pairKey(edge);
+    const relations = relationsByPair.get(key) ?? /* @__PURE__ */ new Set();
+    relations.add(edge.relation);
+    relationsByPair.set(key, relations);
+  }
+  const conflictingPairs = new Set(
+    [...relationsByPair.entries()].filter(([, relations]) => relations.size > 1).map(([key]) => key)
+  );
+  const upsert = db.query(
+    `
+      INSERT INTO memory_edges (
+        citing_kind, citing_id, cited_kind, cited_id,
+        relation, provenance, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id)
+        DO UPDATE SET
+          -- Spec C14: no rank test between an authorised write and the
+          -- relation it sets. A relation-bearing write replaces relation AND
+          -- provenance together, unconditionally; a bare write (relation
+          -- NULL) touches neither \u2014 it can create a pair but never modify a
+          -- relation one already carries.
+          relation = CASE
+            WHEN excluded.relation IS NOT NULL THEN excluded.relation
+            ELSE memory_edges.relation
+          END,
+          provenance = CASE
+            WHEN excluded.relation IS NOT NULL THEN excluded.provenance
+            ELSE memory_edges.provenance
+          END
+      RETURNING ${EDGE_COLUMNS}
+    `
+  );
+  for (const edge of edges) {
+    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
+      rejected.push({ input: edge, reason: "invalid-node" });
+      continue;
+    }
+    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
+      rejected.push({ input: edge, reason: "self-loop" });
+      continue;
+    }
+    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
+      rejected.push({ input: edge, reason: "invalid-relation" });
+      continue;
+    }
+    if (!isEdgeProvenance(edge.provenance)) {
+      rejected.push({ input: edge, reason: "invalid-provenance" });
+      continue;
+    }
+    if (edge.relation !== null && conflictingPairs.has(pairKey(edge))) {
+      rejected.push({ input: edge, reason: "conflicting-relation" });
+      continue;
+    }
+    if (edge.relation !== null && !mayCarryRelation(options, edge)) {
+      rejected.push({ input: edge, reason: "relation-ineligible" });
+      continue;
+    }
+    const row = upsert.get(
+      edge.citing.kind,
+      edge.citing.id,
+      edge.cited.kind,
+      edge.cited.id,
+      edge.relation,
+      edge.provenance,
+      edge.createdAtEpoch ?? nowEpoch
+    );
+    if (row) {
+      written.push(mapEdgeRow(row));
+    }
+  }
+  return { written, rejected };
+}
+function getOutgoingEdges(db, citing) {
+  return db.query(
+    `SELECT ${EDGE_COLUMNS} FROM memory_edges
+       WHERE citing_kind = ? AND citing_id = ?
+       ORDER BY cited_kind ASC, cited_id ASC, relation ASC`
+  ).all(citing.kind, citing.id).map(mapEdgeRow);
+}
+function reconcileCitedPairs(db, citing, citedNodes, nowEpoch, provenance) {
+  const desired = /* @__PURE__ */ new Map();
+  for (const node of citedNodes) {
+    if (isValidCitedNode(node)) {
+      desired.set(`${node.kind}:${node.id}`, node);
+    }
+  }
+  const existing = getOutgoingEdges(db, citing);
+  const stale = existing.filter(
+    (edge) => !desired.has(`${edge.cited.kind}:${edge.cited.id}`)
+  );
+  const del = db.query(
+    `DELETE FROM memory_edges
+     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?`
+  );
+  for (const edge of stale) {
+    del.run(citing.kind, citing.id, edge.cited.kind, edge.cited.id);
+  }
+  const { written } = writeMemoryEdges(
+    db,
+    [...desired.values()].map((cited) => ({
+      citing,
+      cited,
+      relation: null,
+      provenance
+    })),
+    nowEpoch
+  );
+  return { written, deleted: stale };
+}
+var EDGE_NODE_KINDS, CITING_NODE_KINDS, EDGE_PROVENANCES, PROVENANCE_RANK, EDGE_COLUMNS;
+var init_memory_edges = __esm({
+  "src/db/memory-edges.ts"() {
+    "use strict";
+    init_citations();
+    EDGE_NODE_KINDS = ["turn", "segment"];
+    CITING_NODE_KINDS = ["turn", "segment", "session"];
+    EDGE_PROVENANCES = [
+      "retrieval",
+      "text-ref",
+      "rollback",
+      "judged",
+      "asserted"
+    ];
+    PROVENANCE_RANK = {
+      retrieval: 0,
+      rollback: 1,
+      "text-ref": 2,
+      judged: 3,
+      asserted: 4
+    };
+    EDGE_COLUMNS = `
+  citing_kind AS citingKind,
+  citing_id AS citingId,
+  cited_kind AS citedKind,
+  cited_id AS citedId,
+  relation,
+  provenance,
+  created_at_epoch AS createdAtEpoch
+`;
+  }
+});
+
+// src/shared/type-vocabulary.ts
+function isMemoryType(value) {
+  return typeof value === "string" && MEMORY_TYPES.includes(value);
+}
+function typeWordGlyph(word) {
+  if (isMemoryType(word)) {
+    return TYPE_GLYPH[word];
+  }
+  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
+}
+function typeListGlyph(types) {
+  if (!types || types.length === 0) {
+    return "\u2022";
+  }
+  return types.map(typeWordGlyph).join("");
+}
+function normalizeTypeValues(values) {
+  const normalized = [];
+  for (const raw of values) {
+    const value = raw.trim();
+    if (!value) {
+      continue;
+    }
+    if (!isMemoryType(value)) {
+      throw new Error(`unknown type value: ${raw}`);
+    }
+    if (!normalized.includes(value)) {
+      normalized.push(value);
+    }
+  }
+  return normalized;
+}
+function typeListsEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+var MEMORY_TYPES, TYPE_GLYPH, COMPACT_TYPE_GLYPH, LEGACY_TYPE_GLYPH;
+var init_type_vocabulary = __esm({
+  "src/shared/type-vocabulary.ts"() {
+    "use strict";
+    MEMORY_TYPES = [
+      "discuss",
+      "research",
+      "design",
+      "implement",
+      "refactor",
+      "fix",
+      "measure",
+      "review",
+      "ops",
+      "delegate",
+      "correction"
+    ];
+    TYPE_GLYPH = {
+      discuss: "\u{1F4AC}",
+      research: "\u{1F50D}",
+      design: "\u2696\uFE0F",
+      implement: "\u{1F527}",
+      refactor: "\u{1F504}",
+      fix: "\u{1F534}",
+      measure: "\u{1F4CA}",
+      review: "\u2705",
+      ops: "\u2699\uFE0F",
+      delegate: "\u{1F91D}",
+      correction: "\u21A9\uFE0F"
+    };
+    COMPACT_TYPE_GLYPH = "\u23F8";
+    LEGACY_TYPE_GLYPH = {
+      bugfix: "\u{1F534}",
+      feature: "\u{1F7E3}",
+      refactor: "\u{1F504}",
+      change: "\u2705",
+      discovery: "\u{1F535}",
+      decision: "\u2696\uFE0F",
+      compact: COMPACT_TYPE_GLYPH
+    };
+  }
+});
+
+// src/db/segments.ts
+function parseStringArray(value) {
+  if (!value) {
+    return [];
+  }
+  const parsed = JSON.parse(value);
+  return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+}
+function parseMemberFacetArray(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    return parseStringArray(value);
+  } catch {
+    return [];
+  }
+}
+function mapSegmentRow(row) {
+  return row ? {
+    ...row,
+    type: parseStringArray(row.type),
+    tags: parseStringArray(row.tags)
+  } : null;
+}
+function indexSegment(db, segment) {
+  indexSegmentToFTS(db, {
+    id: segment.id,
+    title: segment.title,
+    content: segment.content,
+    insight: segment.insight,
+    type: JSON.stringify(segment.type),
+    tags: JSON.stringify(segment.tags)
+  });
+}
+function compareDerivedTags(left, right) {
+  return right.count - left.count || (left.tag < right.tag ? -1 : left.tag > right.tag ? 1 : 0);
+}
+function recomputeSegmentFacets(db, segmentId) {
+  const members = db.query(
+    `SELECT t.type AS type, t.tags AS tags
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id = ?`
+  ).all(segmentId);
+  const typeCounts = /* @__PURE__ */ new Map();
+  const tagCounts = /* @__PURE__ */ new Map();
+  for (const member of members) {
+    for (const word of new Set(parseMemberFacetArray(member.type))) {
+      typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
+    }
+    for (const tag of new Set(parseMemberFacetArray(member.tags))) {
+      if (tag.includes(":") || tag.trim() === "") {
+        continue;
+      }
+      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+    }
+  }
+  const type = MEMORY_TYPES.filter((word) => typeCounts.has(word)).sort(
+    (left, right) => (typeCounts.get(right) ?? 0) - (typeCounts.get(left) ?? 0) || MEMORY_TYPES.indexOf(left) - MEMORY_TYPES.indexOf(right)
+  );
+  const tags = [...tagCounts.entries()].map(([tag, count]) => ({ tag, count })).sort(compareDerivedTags).map((entry) => entry.tag);
+  const updated = mapSegmentRow(
+    db.query(
+      // `facets_stale = 0` in the same statement that stores the derivation:
+      // the flag means "a derivation is owed", and this IS the derivation, so
+      // whichever writer got here — membership, a member's own write, or the
+      // repair sweep — settles the debt by the act of paying it.
+      `UPDATE segments SET type = ?, tags = ?, facets_stale = 0 WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`
+    ).get(JSON.stringify(type), JSON.stringify(tags), segmentId) ?? null
+  );
+  if (updated) {
+    indexSegment(db, updated);
+  }
+  return updated;
+}
+function recomputeSegmentFacetsForTurn(db, turnId) {
+  const rows = db.query(
+    `SELECT segment_id AS segmentId FROM segment_members
+       WHERE turn_id = ? ORDER BY segment_id ASC`
+  ).all(turnId);
+  for (const row of rows) {
+    recomputeSegmentFacets(db, row.segmentId);
+  }
+}
+function repairStaleSegmentFacets(db, limit = SEGMENT_FACET_REPAIR_BATCH) {
+  const stale = db.query(
+    "SELECT id FROM segments WHERE facets_stale = 1 ORDER BY id ASC LIMIT ?"
+  ).all(Math.max(1, Math.floor(limit)));
+  for (const row of stale) {
+    recomputeSegmentFacets(db, row.id);
+  }
+  return stale.length;
+}
+function getSegment(db, segmentId) {
+  return mapSegmentRow(
+    db.query(
+      `SELECT ${SEGMENT_COLUMNS} FROM segments WHERE id = ?`
+    ).get(segmentId) ?? null
+  );
+}
+var SEGMENT_COLUMNS, SEGMENT_FACET_REPAIR_BATCH;
+var init_segments = __esm({
+  "src/db/segments.ts"() {
+    "use strict";
+    init_memory_edges();
+    init_references();
+    init_search();
+    init_type_vocabulary();
+    SEGMENT_COLUMNS = `
+  id,
+  topic_id AS topicId,
+  title,
+  content,
+  insight,
+  type,
+  tags,
+  status,
+  revision,
+  created_at_epoch AS createdAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+    SEGMENT_FACET_REPAIR_BATCH = 16;
+  }
+});
+
 // src/db/era.ts
 var era_exports = {};
 __export(era_exports, {
@@ -8701,6 +8909,7 @@ function initializeSchema(db) {
   ensureTurnInvalidationColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureSegmentInsightColumn(db);
+  ensureSegmentDerivedFacets(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
   retireLegacyTurnCitationsTable(db);
@@ -8724,6 +8933,7 @@ function initializeSchema(db) {
   ensureTurnTypeMultiValueColumn(db);
   stripRetiredTopicTagNamespace(db);
   retireTurnCitesRecordedColumn(db);
+  repairDerivedSegmentFacets(db);
 }
 function stripRetiredTopicTagNamespace(db) {
   const rows = db.query(
@@ -8941,6 +9151,23 @@ function ensureTurnInvalidationColumns(db) {
 function ensureSegmentInsightColumn(db) {
   addColumnIfMissing(db, "segments", "insight", "TEXT");
 }
+function ensureSegmentDerivedFacets(db) {
+  addColumnIfMissing(
+    db,
+    "segments",
+    "facets_stale",
+    "INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1))"
+  );
+  db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
+}
+function repairDerivedSegmentFacets(db) {
+  if (!hasRow(db, "SELECT 1 FROM segments WHERE facets_stale = 1")) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    repairStaleSegmentFacets(db);
+  });
+}
 function ensureTurnSignificanceGradeColumn(db) {
   addColumnIfMissing(
     db,
@@ -9053,7 +9280,7 @@ function presentRetiredExtractionStallColumns(db) {
   );
 }
 function assertNoUnexpectedTurnsColumns(db, knownColumns, droppedColumns, rebuildName) {
-  const actual = db.query("PRAGMA table_info(turns)").all().map((row) => row.name);
+  const actual = db.query("PRAGMA table_xinfo(turns)").all().map((row) => row.name);
   const accounted = /* @__PURE__ */ new Set([...knownColumns, ...droppedColumns]);
   const unexpected = actual.filter((name) => !accounted.has(name));
   if (unexpected.length > 0) {
@@ -9206,13 +9433,14 @@ ${stallColumnDdl}
                OR (cited_kind = 'turn' AND cited_id = OLD.id);
           END;
       `);
+      db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `turns table rebuild left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`
+        );
+      }
     });
-    const violations = db.query("PRAGMA foreign_key_check").all();
-    if (violations.length > 0) {
-      throw new Error(
-        `turns table rebuild left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`
-      );
-    }
   } finally {
     db.exec("PRAGMA foreign_keys = ON;");
   }
@@ -9352,13 +9580,14 @@ ${stallColumnDdl}
                OR (cited_kind = 'turn' AND cited_id = OLD.id);
           END;
       `);
+      db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `turns table rebuild left ${violations.length} foreign key violation(s) while retiring cites_recorded: ${JSON.stringify(violations)}`
+        );
+      }
     });
-    const violations = db.query("PRAGMA foreign_key_check").all();
-    if (violations.length > 0) {
-      throw new Error(
-        `turns table rebuild left ${violations.length} foreign key violation(s) while retiring cites_recorded: ${JSON.stringify(violations)}`
-      );
-    }
   } finally {
     db.exec("PRAGMA foreign_keys = ON;");
   }
@@ -9490,7 +9719,7 @@ function initializeDatabase(db) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
+var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -9498,6 +9727,7 @@ var init_schema = __esm({
     init_database();
     init_memory_edges();
     init_search();
+    init_segments();
     MEMORY_FTS_DDL = `
   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     layer UNINDEXED,
@@ -9875,6 +10105,18 @@ var init_schema = __esm({
       status IN ('open', 'delivered', 'abandoned')
     ),
     revision INTEGER NOT NULL DEFAULT 1,
+    -- Ticket 15 (findings 1-3): "this segment owes a facet derivation".
+    -- type/tags are derived from the members (spec K5a) and the derivation
+    -- lives in TypeScript (db/segments.ts) because its ordering comes from the
+    -- MEMORY_TYPES constant and its result has to be rewritten into the FTS
+    -- row. A membership that LEAVES has no TypeScript writer at all \u2014 nothing
+    -- in src/ deletes a turn or a session, the FK cascade below does it \u2014 so
+    -- SQLite records the fact through the trigger under segment_members and
+    -- repairStaleSegmentFacets performs the derivation at the next schema
+    -- initialisation, which for this process family is every hook invocation.
+    -- Bookkeeping, not a facet: no read surface renders it and no caller may
+    -- state it.
+    facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL
   );
@@ -10269,6 +10511,21 @@ var init_schema = __esm({
     BEGIN
       DELETE FROM memory_edges
       WHERE citing_kind = 'session' AND citing_id = OLD.id;
+    END;
+`;
+    SEGMENT_FACET_STALE_TRIGGERS_DDL = `
+  CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_removed
+    AFTER DELETE ON segment_members
+    BEGIN
+      UPDATE segments SET facets_stale = 1 WHERE id = OLD.segment_id;
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_facets_written
+    AFTER UPDATE OF type, tags ON turns
+    WHEN OLD.type IS NOT NEW.type OR OLD.tags IS NOT NEW.tags
+    BEGIN
+      UPDATE segments SET facets_stale = 1
+      WHERE id IN (SELECT segment_id FROM segment_members WHERE turn_id = NEW.id);
     END;
 `;
     EXPECTED_FTS_COLUMNS = [
@@ -33884,6 +34141,7 @@ function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
 
 // src/db/turns.ts
 init_search();
+init_segments();
 var TURN_SELECT = `
   SELECT
     id,
@@ -34035,6 +34293,9 @@ function updateTurnById(db, turnId, input) {
     return null;
   }
   indexTurnToFTS(db, updated);
+  if (JSON.stringify(existing.type) !== stringifyArray(mergedType) || JSON.stringify(existing.tags) !== stringifyArray(nextTags)) {
+    recomputeSegmentFacetsForTurn(db, turnId);
+  }
   if (existing.status !== updated.status || existing.userPrompt !== updated.userPrompt || existing.assistantResponse !== updated.assistantResponse || existing.title !== updated.title || existing.content !== updated.content || existing.insight !== updated.insight) {
     markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
   }
@@ -34491,82 +34752,8 @@ function toolCallSyntaxMessage(field) {
   return `${field} contains tool-call syntax (a literal "<parameter", "<invoke" or similar tag) \u2014 this is almost always a malformed tool call whose closing tag glued the next parameter onto this one. Nothing was stored; resend with well-formed prose.`;
 }
 
-// src/shared/type-vocabulary.ts
-var MEMORY_TYPES = [
-  "discuss",
-  "research",
-  "design",
-  "implement",
-  "refactor",
-  "fix",
-  "measure",
-  "review",
-  "ops",
-  "delegate",
-  "correction"
-];
-function isMemoryType(value) {
-  return typeof value === "string" && MEMORY_TYPES.includes(value);
-}
-var TYPE_GLYPH = {
-  discuss: "\u{1F4AC}",
-  research: "\u{1F50D}",
-  design: "\u2696\uFE0F",
-  implement: "\u{1F527}",
-  refactor: "\u{1F504}",
-  fix: "\u{1F534}",
-  measure: "\u{1F4CA}",
-  review: "\u2705",
-  ops: "\u2699\uFE0F",
-  delegate: "\u{1F91D}",
-  correction: "\u21A9\uFE0F"
-};
-var COMPACT_TYPE_GLYPH = "\u23F8";
-var LEGACY_TYPE_GLYPH = {
-  bugfix: "\u{1F534}",
-  feature: "\u{1F7E3}",
-  refactor: "\u{1F504}",
-  change: "\u2705",
-  discovery: "\u{1F535}",
-  decision: "\u2696\uFE0F",
-  compact: COMPACT_TYPE_GLYPH
-};
-function typeWordGlyph(word) {
-  if (isMemoryType(word)) {
-    return TYPE_GLYPH[word];
-  }
-  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
-}
-function typeListGlyph(types) {
-  if (!types || types.length === 0) {
-    return "\u2022";
-  }
-  return types.map(typeWordGlyph).join("");
-}
-function normalizeTypeValues(values) {
-  const normalized = [];
-  for (const raw of values) {
-    const value = raw.trim();
-    if (!value) {
-      continue;
-    }
-    if (!isMemoryType(value)) {
-      throw new Error(`unknown type value: ${raw}`);
-    }
-    if (!normalized.includes(value)) {
-      normalized.push(value);
-    }
-  }
-  return normalized;
-}
-function typeListsEqual(left, right) {
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every((value, index) => value === right[index]);
-}
-
 // src/mcp/note.ts
+init_type_vocabulary();
 var FIELD_MODE_VALUES = ["append", "overwrite"];
 var TURN_MODE_FIELDS = [
   "title",
@@ -35344,48 +35531,9 @@ init_search();
 
 // src/db/segment-rank.ts
 init_references();
-
-// src/db/segments.ts
-init_memory_edges();
-init_references();
-init_search();
-var SEGMENT_COLUMNS = `
-  id,
-  topic_id AS topicId,
-  title,
-  content,
-  insight,
-  type,
-  tags,
-  status,
-  revision,
-  created_at_epoch AS createdAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function parseStringArray(value) {
-  if (!value) {
-    return [];
-  }
-  const parsed = JSON.parse(value);
-  return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
-}
-function mapSegmentRow(row) {
-  return row ? {
-    ...row,
-    type: parseStringArray(row.type),
-    tags: parseStringArray(row.tags)
-  } : null;
-}
-function getSegment(db, segmentId) {
-  return mapSegmentRow(
-    db.query(
-      `SELECT ${SEGMENT_COLUMNS} FROM segments WHERE id = ?`
-    ).get(segmentId) ?? null
-  );
-}
-
-// src/db/segment-rank.ts
+init_segments();
 init_segment_era();
+init_type_vocabulary();
 var RANK_FACT_COLUMNS = `
   t.id AS turnId,
   t.session_id AS sessionId,
@@ -35660,8 +35808,10 @@ function getSegmentMembershipForTurns(db, turnIds) {
 }
 
 // src/mcp/recall.ts
+init_segments();
 init_segment_era();
 init_paths();
+init_type_vocabulary();
 
 // src/shared/file-tree.ts
 var import_node_path4 = __toESM(require("node:path"), 1);
@@ -36561,6 +36711,7 @@ function renderNode(node, options) {
 }
 
 // src/mcp/segment-spine.ts
+init_type_vocabulary();
 var ORPHAN_GLYPH = "\u2691";
 var SPINE_ROW_INDENT = "   ";
 var SPINE_TAG_CAP = 2;
@@ -37835,6 +37986,7 @@ function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUT
 }
 
 // src/mcp/timeline.ts
+init_type_vocabulary();
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var PROMPT_COLUMN_CAP = 100;
 var BROKEN_PROMPT_MIN_PREFIX = 20;

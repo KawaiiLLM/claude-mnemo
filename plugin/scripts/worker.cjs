@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msw2tvi2" : "dev";
+var BUILD_ID = true ? "0.10.0-msw5a7jl" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -90,6 +90,7 @@ function resolveSessionTranscriptPath(session) {
 
 // src/db/database.ts
 var DEFAULT_BUSY_TIMEOUT_MS = 5e3;
+var DEFAULT_HOOK_TRANSACTION_BUDGET_MS = 2500;
 function resolveDatabasePath2(path2) {
   if (!path2 || path2.trim() === "") {
     return resolveDatabasePath();
@@ -120,6 +121,9 @@ function syncSleep(ms) {
 }
 function genericWriteBackoffMs(attempt) {
   return Math.min(25, 5 * (attempt + 1));
+}
+function hookWriteBackoffMs(attempt) {
+  return Math.min(100, 25 * 2 ** attempt);
 }
 function configureDatabase(db, options) {
   db.exec("PRAGMA journal_mode = WAL;");
@@ -159,6 +163,39 @@ function runWriteTransaction(db, fn, attempts = 3) {
         throw err;
       }
       syncSleep(genericWriteBackoffMs(attempt));
+    }
+  }
+}
+function runHookWriteTransaction(db, fn, options = {}) {
+  const txn = db.transaction(fn);
+  const budgetMs = normalizeNonNegativeMilliseconds(
+    options.budgetMs ?? DEFAULT_HOOK_TRANSACTION_BUDGET_MS,
+    "budgetMs"
+  );
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? syncSleep;
+  const backoffMs = options.backoffMs ?? ((attempt) => hookWriteBackoffMs(attempt));
+  const start = now();
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return txn.immediate();
+    } catch (err) {
+      if (!isSqliteBusy(err)) {
+        throw err;
+      }
+      const elapsedMs = Math.max(0, now() - start);
+      if (elapsedMs >= budgetMs) {
+        throw err;
+      }
+      const delayMs = normalizeNonNegativeMilliseconds(
+        backoffMs(attempt, elapsedMs),
+        "backoffMs"
+      );
+      const remainingMs = budgetMs - elapsedMs;
+      if (delayMs >= remainingMs) {
+        throw err;
+      }
+      sleep(delayMs);
     }
   }
 }
@@ -2305,6 +2342,452 @@ function getObservation(db, observationId) {
   );
 }
 
+// src/shared/type-vocabulary.ts
+var MEMORY_TYPES = [
+  "discuss",
+  "research",
+  "design",
+  "implement",
+  "refactor",
+  "fix",
+  "measure",
+  "review",
+  "ops",
+  "delegate",
+  "correction"
+];
+function isMemoryType(value) {
+  return typeof value === "string" && MEMORY_TYPES.includes(value);
+}
+var TYPE_GLYPH = {
+  discuss: "\u{1F4AC}",
+  research: "\u{1F50D}",
+  design: "\u2696\uFE0F",
+  implement: "\u{1F527}",
+  refactor: "\u{1F504}",
+  fix: "\u{1F534}",
+  measure: "\u{1F4CA}",
+  review: "\u2705",
+  ops: "\u2699\uFE0F",
+  delegate: "\u{1F91D}",
+  correction: "\u21A9\uFE0F"
+};
+var COMPACT_TYPE_GLYPH = "\u23F8";
+var LEGACY_TYPE_GLYPH = {
+  bugfix: "\u{1F534}",
+  feature: "\u{1F7E3}",
+  refactor: "\u{1F504}",
+  change: "\u2705",
+  discovery: "\u{1F535}",
+  decision: "\u2696\uFE0F",
+  compact: COMPACT_TYPE_GLYPH
+};
+function typeWordGlyph(word) {
+  if (isMemoryType(word)) {
+    return TYPE_GLYPH[word];
+  }
+  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
+}
+function typeListGlyph(types) {
+  if (!types || types.length === 0) {
+    return "\u2022";
+  }
+  return types.map(typeWordGlyph).join("");
+}
+function normalizeTypeValues(values) {
+  const normalized = [];
+  for (const raw of values) {
+    const value = raw.trim();
+    if (!value) {
+      continue;
+    }
+    if (!isMemoryType(value)) {
+      throw new Error(`unknown type value: ${raw}`);
+    }
+    if (!normalized.includes(value)) {
+      normalized.push(value);
+    }
+  }
+  return normalized;
+}
+function typeListsEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
+// src/db/segments.ts
+var SEGMENT_STATUSES = ["open", "delivered", "abandoned"];
+var TOPIC_COLUMNS = `
+  id,
+  name,
+  aliases,
+  status,
+  created_at_epoch AS createdAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+var SEGMENT_COLUMNS = `
+  id,
+  topic_id AS topicId,
+  title,
+  content,
+  insight,
+  type,
+  tags,
+  status,
+  revision,
+  created_at_epoch AS createdAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function parseStringArray(value) {
+  if (!value) {
+    return [];
+  }
+  const parsed = JSON.parse(value);
+  return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+}
+function parseMemberFacetArray(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    return parseStringArray(value);
+  } catch {
+    return [];
+  }
+}
+function mapTopicRow(row) {
+  return row ? { ...row, aliases: parseStringArray(row.aliases) } : null;
+}
+function mapSegmentRow(row) {
+  return row ? {
+    ...row,
+    type: parseStringArray(row.type),
+    tags: parseStringArray(row.tags)
+  } : null;
+}
+function normalizeTopicKey(value) {
+  return value.normalize("NFKC").trim().toLocaleLowerCase("en-US");
+}
+function upsertTopic(db, input) {
+  const existing = findTopic(db, input.name);
+  if (existing) {
+    const merged = [...existing.aliases];
+    for (const alias of input.aliases ?? []) {
+      if (normalizeTopicKey(alias) !== normalizeTopicKey(existing.name) && !merged.some((known) => normalizeTopicKey(known) === normalizeTopicKey(alias))) {
+        merged.push(alias);
+      }
+    }
+    if (normalizeTopicKey(input.name) !== normalizeTopicKey(existing.name) && !merged.some((known) => normalizeTopicKey(known) === normalizeTopicKey(input.name))) {
+      merged.push(input.name);
+    }
+    const updated = mapTopicRow(
+      db.query(
+        `UPDATE topics SET aliases = ?, status = ?, updated_at_epoch = ?
+           WHERE id = ? RETURNING ${TOPIC_COLUMNS}`
+      ).get(
+        JSON.stringify(merged),
+        input.status ?? existing.status,
+        input.nowEpoch,
+        existing.id
+      ) ?? null
+    );
+    if (!updated) {
+      throw new Error(`Failed to update topic ${existing.id}.`);
+    }
+    return updated;
+  }
+  const inserted = mapTopicRow(
+    db.query(
+      `INSERT INTO topics (name, aliases, status, created_at_epoch, updated_at_epoch)
+         VALUES (?, ?, ?, ?, ?)
+         RETURNING ${TOPIC_COLUMNS}`
+    ).get(
+      input.name,
+      JSON.stringify(input.aliases ?? []),
+      input.status ?? "active",
+      input.nowEpoch,
+      input.nowEpoch
+    ) ?? null
+  );
+  if (!inserted) {
+    throw new Error(`Failed to register topic ${input.name}.`);
+  }
+  return inserted;
+}
+function findTopic(db, name) {
+  const key = normalizeTopicKey(name);
+  const rows = db.query(`SELECT ${TOPIC_COLUMNS} FROM topics`).all();
+  const byName = rows.find((row) => normalizeTopicKey(row.name) === key);
+  if (byName) {
+    return mapTopicRow(byName);
+  }
+  const byAlias = rows.find(
+    (row) => parseStringArray(row.aliases).some((alias) => normalizeTopicKey(alias) === key)
+  );
+  return mapTopicRow(byAlias ?? null);
+}
+function createSegment(db, input) {
+  const type = normalizeTypeValues(input.type ?? []);
+  const inserted = mapSegmentRow(
+    db.query(
+      `INSERT INTO segments (
+           topic_id, title, content, insight, type, tags, status,
+           created_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING ${SEGMENT_COLUMNS}`
+    ).get(
+      input.topicId ?? null,
+      input.title,
+      input.content ?? null,
+      input.insight ?? null,
+      JSON.stringify(type),
+      JSON.stringify(input.tags ?? []),
+      input.status ?? "open",
+      input.nowEpoch,
+      input.nowEpoch
+    ) ?? null
+  );
+  if (!inserted) {
+    throw new Error("Failed to create segment.");
+  }
+  indexSegment(db, inserted);
+  reconcileSegmentCitedPairs(db, inserted, input.nowEpoch);
+  return inserted;
+}
+function reconcileSegmentCitedPairs(db, segment, nowEpoch) {
+  const references = [
+    ...parseQualifiedReferences(segment.title),
+    ...parseQualifiedReferences(segment.content),
+    ...parseQualifiedReferences(segment.insight)
+  ];
+  const resolved = validateReferences(db, references).accepted;
+  reconcileCitedPairs(
+    db,
+    { kind: "segment", id: segment.id },
+    resolved.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref"
+  );
+}
+function indexSegment(db, segment) {
+  indexSegmentToFTS(db, {
+    id: segment.id,
+    title: segment.title,
+    content: segment.content,
+    insight: segment.insight,
+    type: JSON.stringify(segment.type),
+    tags: JSON.stringify(segment.tags)
+  });
+}
+function compareDerivedTags(left, right) {
+  return right.count - left.count || (left.tag < right.tag ? -1 : left.tag > right.tag ? 1 : 0);
+}
+function recomputeSegmentFacets(db, segmentId) {
+  const members = db.query(
+    `SELECT t.type AS type, t.tags AS tags
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id = ?`
+  ).all(segmentId);
+  const typeCounts = /* @__PURE__ */ new Map();
+  const tagCounts = /* @__PURE__ */ new Map();
+  for (const member of members) {
+    for (const word of new Set(parseMemberFacetArray(member.type))) {
+      typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
+    }
+    for (const tag of new Set(parseMemberFacetArray(member.tags))) {
+      if (tag.includes(":") || tag.trim() === "") {
+        continue;
+      }
+      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+    }
+  }
+  const type = MEMORY_TYPES.filter((word) => typeCounts.has(word)).sort(
+    (left, right) => (typeCounts.get(right) ?? 0) - (typeCounts.get(left) ?? 0) || MEMORY_TYPES.indexOf(left) - MEMORY_TYPES.indexOf(right)
+  );
+  const tags = [...tagCounts.entries()].map(([tag, count]) => ({ tag, count })).sort(compareDerivedTags).map((entry) => entry.tag);
+  const updated = mapSegmentRow(
+    db.query(
+      // `facets_stale = 0` in the same statement that stores the derivation:
+      // the flag means "a derivation is owed", and this IS the derivation, so
+      // whichever writer got here — membership, a member's own write, or the
+      // repair sweep — settles the debt by the act of paying it.
+      `UPDATE segments SET type = ?, tags = ?, facets_stale = 0 WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`
+    ).get(JSON.stringify(type), JSON.stringify(tags), segmentId) ?? null
+  );
+  if (updated) {
+    indexSegment(db, updated);
+  }
+  return updated;
+}
+function recomputeSegmentFacetsForTurn(db, turnId) {
+  const rows = db.query(
+    `SELECT segment_id AS segmentId FROM segment_members
+       WHERE turn_id = ? ORDER BY segment_id ASC`
+  ).all(turnId);
+  for (const row of rows) {
+    recomputeSegmentFacets(db, row.segmentId);
+  }
+}
+var SEGMENT_FACET_REPAIR_BATCH = 16;
+function repairStaleSegmentFacets(db, limit = SEGMENT_FACET_REPAIR_BATCH) {
+  const stale = db.query(
+    "SELECT id FROM segments WHERE facets_stale = 1 ORDER BY id ASC LIMIT ?"
+  ).all(Math.max(1, Math.floor(limit)));
+  for (const row of stale) {
+    recomputeSegmentFacets(db, row.id);
+  }
+  return stale.length;
+}
+function getSegment(db, segmentId) {
+  return mapSegmentRow(
+    db.query(
+      `SELECT ${SEGMENT_COLUMNS} FROM segments WHERE id = ?`
+    ).get(segmentId) ?? null
+  );
+}
+var JOINED_SEGMENT_COLUMNS = `
+  s.id,
+  s.topic_id AS topicId,
+  s.title,
+  s.content,
+  s.insight,
+  s.type,
+  s.tags,
+  s.status,
+  s.revision,
+  s.created_at_epoch AS createdAtEpoch,
+  s.updated_at_epoch AS updatedAtEpoch
+`;
+function listRecentSegments(db, limit) {
+  if (limit <= 0) {
+    return [];
+  }
+  return db.query(
+    `SELECT ${JOINED_SEGMENT_COLUMNS}, tp.name AS topicName
+       FROM segments s
+       LEFT JOIN topics tp ON tp.id = s.topic_id
+       ORDER BY s.updated_at_epoch DESC, s.id DESC
+       LIMIT ?`
+  ).all(limit).flatMap((row) => {
+    const segment = mapSegmentRow(row);
+    return segment ? [{ segment, topicName: row.topicName }] : [];
+  });
+}
+function listTopicsByFrequency(db, status) {
+  const columns = `
+    t.id,
+    t.name,
+    t.aliases,
+    t.status,
+    t.created_at_epoch AS createdAtEpoch,
+    t.updated_at_epoch AS updatedAtEpoch,
+    COUNT(s.id) AS segmentCount
+  `;
+  const sql = `SELECT ${columns}
+     FROM topics t
+     LEFT JOIN segments s ON s.topic_id = t.id
+     ${status ? "WHERE t.status = ?" : ""}
+     GROUP BY t.id
+     ORDER BY segmentCount DESC, t.name ASC`;
+  const rows = status ? db.query(sql).all(status) : db.query(sql).all();
+  return rows.flatMap((row) => {
+    const topic = mapTopicRow(row);
+    return topic ? [{ topic, segmentCount: row.segmentCount }] : [];
+  });
+}
+function addSegmentMembers(db, segmentId, turnIds, nowEpoch) {
+  const statement = db.query(
+    `INSERT INTO segment_members (segment_id, turn_id, created_at_epoch)
+     VALUES (?, ?, ?)
+     ON CONFLICT (segment_id, turn_id) DO NOTHING
+     RETURNING turn_id AS turnId`
+  );
+  const added = [];
+  for (const turnId of turnIds) {
+    const row = statement.get(segmentId, turnId, nowEpoch);
+    if (row) {
+      added.push(row.turnId);
+    }
+  }
+  if (added.length > 0) {
+    recomputeSegmentFacets(db, segmentId);
+  }
+  return added;
+}
+var SEGMENT_WRITE_SAVEPOINT = "mnemo_segment_writes";
+function applySegmentWrites(db, writes, options) {
+  const applied = [];
+  const excluded = [];
+  db.exec(`SAVEPOINT ${SEGMENT_WRITE_SAVEPOINT}`);
+  try {
+    for (const write of writes) {
+      const current = getSegment(db, write.segmentId);
+      if (!current) {
+        excluded.push({ write, reason: "missing", latest: null });
+        continue;
+      }
+      if (current.status !== "open") {
+        excluded.push({ write, reason: "frozen", latest: current });
+        continue;
+      }
+      let type;
+      try {
+        type = write.type ? normalizeTypeValues(write.type) : current.type;
+      } catch (error49) {
+        excluded.push({
+          write,
+          reason: "invalid-type",
+          latest: current,
+          detail: error49 instanceof Error ? error49.message : String(error49)
+        });
+        continue;
+      }
+      const updated = mapSegmentRow(
+        db.query(
+          `UPDATE segments
+               SET title = ?,
+                   content = ?,
+                   insight = ?,
+                   type = ?,
+                   tags = ?,
+                   status = ?,
+                   revision = revision + 1,
+                   updated_at_epoch = ?
+             WHERE id = ? AND revision = ?
+             RETURNING ${SEGMENT_COLUMNS}`
+        ).get(
+          write.title ?? current.title,
+          write.content === void 0 ? current.content : write.content,
+          write.insight === void 0 ? current.insight : write.insight,
+          JSON.stringify(type),
+          JSON.stringify(write.tags ?? current.tags),
+          write.status ?? current.status,
+          options.nowEpoch,
+          write.segmentId,
+          write.expectedRevision
+        ) ?? null
+      );
+      if (!updated) {
+        excluded.push({ write, reason: "revision-conflict", latest: current });
+        continue;
+      }
+      indexSegment(db, updated);
+      reconcileSegmentCitedPairs(db, updated, options.nowEpoch);
+      applied.push(updated);
+    }
+  } catch (error49) {
+    db.exec(`ROLLBACK TO ${SEGMENT_WRITE_SAVEPOINT}`);
+    db.exec(`RELEASE ${SEGMENT_WRITE_SAVEPOINT}`);
+    throw error49;
+  }
+  db.exec(`RELEASE ${SEGMENT_WRITE_SAVEPOINT}`);
+  return { applied, excluded };
+}
+
 // src/db/turns.ts
 var TURN_SELECT = `
   SELECT
@@ -2457,6 +2940,9 @@ function updateTurnById(db, turnId, input) {
     return null;
   }
   indexTurnToFTS(db, updated);
+  if (JSON.stringify(existing.type) !== stringifyArray(mergedType) || JSON.stringify(existing.tags) !== stringifyArray(nextTags)) {
+    recomputeSegmentFacetsForTurn(db, turnId);
+  }
   if (existing.status !== updated.status || existing.userPrompt !== updated.userPrompt || existing.assistantResponse !== updated.assistantResponse || existing.title !== updated.title || existing.content !== updated.content || existing.insight !== updated.insight) {
     markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
   }
@@ -3127,6 +3613,18 @@ var SCHEMA_SQL = `
       status IN ('open', 'delivered', 'abandoned')
     ),
     revision INTEGER NOT NULL DEFAULT 1,
+    -- Ticket 15 (findings 1-3): "this segment owes a facet derivation".
+    -- type/tags are derived from the members (spec K5a) and the derivation
+    -- lives in TypeScript (db/segments.ts) because its ordering comes from the
+    -- MEMORY_TYPES constant and its result has to be rewritten into the FTS
+    -- row. A membership that LEAVES has no TypeScript writer at all \u2014 nothing
+    -- in src/ deletes a turn or a session, the FK cascade below does it \u2014 so
+    -- SQLite records the fact through the trigger under segment_members and
+    -- repairStaleSegmentFacets performs the derivation at the next schema
+    -- initialisation, which for this process family is every hook invocation.
+    -- Bookkeeping, not a facet: no read surface renders it and no caller may
+    -- state it.
+    facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL
   );
@@ -3523,6 +4021,21 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
       WHERE citing_kind = 'session' AND citing_id = OLD.id;
     END;
 `;
+var SEGMENT_FACET_STALE_TRIGGERS_DDL = `
+  CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_removed
+    AFTER DELETE ON segment_members
+    BEGIN
+      UPDATE segments SET facets_stale = 1 WHERE id = OLD.segment_id;
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_facets_written
+    AFTER UPDATE OF type, tags ON turns
+    WHEN OLD.type IS NOT NEW.type OR OLD.tags IS NOT NEW.tags
+    BEGIN
+      UPDATE segments SET facets_stale = 1
+      WHERE id IN (SELECT segment_id FROM segment_members WHERE turn_id = NEW.id);
+    END;
+`;
 function hasTable(db, table) {
   return db.query(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
@@ -3732,6 +4245,7 @@ function initializeSchema(db) {
   ensureTurnInvalidationColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureSegmentInsightColumn(db);
+  ensureSegmentDerivedFacets(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
   retireLegacyTurnCitationsTable(db);
@@ -3755,6 +4269,7 @@ function initializeSchema(db) {
   ensureTurnTypeMultiValueColumn(db);
   stripRetiredTopicTagNamespace(db);
   retireTurnCitesRecordedColumn(db);
+  repairDerivedSegmentFacets(db);
 }
 function stripRetiredTopicTagNamespace(db) {
   const rows = db.query(
@@ -3972,6 +4487,23 @@ function ensureTurnInvalidationColumns(db) {
 function ensureSegmentInsightColumn(db) {
   addColumnIfMissing(db, "segments", "insight", "TEXT");
 }
+function ensureSegmentDerivedFacets(db) {
+  addColumnIfMissing(
+    db,
+    "segments",
+    "facets_stale",
+    "INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1))"
+  );
+  db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
+}
+function repairDerivedSegmentFacets(db) {
+  if (!hasRow(db, "SELECT 1 FROM segments WHERE facets_stale = 1")) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    repairStaleSegmentFacets(db);
+  });
+}
 function ensureTurnSignificanceGradeColumn(db) {
   addColumnIfMissing(
     db,
@@ -4111,7 +4643,7 @@ function presentRetiredExtractionStallColumns(db) {
   );
 }
 function assertNoUnexpectedTurnsColumns(db, knownColumns, droppedColumns, rebuildName) {
-  const actual = db.query("PRAGMA table_info(turns)").all().map((row) => row.name);
+  const actual = db.query("PRAGMA table_xinfo(turns)").all().map((row) => row.name);
   const accounted = /* @__PURE__ */ new Set([...knownColumns, ...droppedColumns]);
   const unexpected = actual.filter((name) => !accounted.has(name));
   if (unexpected.length > 0) {
@@ -4264,13 +4796,14 @@ ${stallColumnDdl}
                OR (cited_kind = 'turn' AND cited_id = OLD.id);
           END;
       `);
+      db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `turns table rebuild left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`
+        );
+      }
     });
-    const violations = db.query("PRAGMA foreign_key_check").all();
-    if (violations.length > 0) {
-      throw new Error(
-        `turns table rebuild left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`
-      );
-    }
   } finally {
     db.exec("PRAGMA foreign_keys = ON;");
   }
@@ -4410,13 +4943,14 @@ ${stallColumnDdl}
                OR (cited_kind = 'turn' AND cited_id = OLD.id);
           END;
       `);
+      db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `turns table rebuild left ${violations.length} foreign key violation(s) while retiring cites_recorded: ${JSON.stringify(violations)}`
+        );
+      }
     });
-    const violations = db.query("PRAGMA foreign_key_check").all();
-    if (violations.length > 0) {
-      throw new Error(
-        `turns table rebuild left ${violations.length} foreign key violation(s) while retiring cites_recorded: ${JSON.stringify(violations)}`
-      );
-    }
   } finally {
     db.exec("PRAGMA foreign_keys = ON;");
   }
@@ -5619,419 +6153,6 @@ function createNoteSettlementScheduler(deps) {
     onCompact: (sessionDbId) => runTrigger(sessionDbId, "compact"),
     leakDueSessions
   };
-}
-
-// src/shared/type-vocabulary.ts
-var MEMORY_TYPES = [
-  "discuss",
-  "research",
-  "design",
-  "implement",
-  "refactor",
-  "fix",
-  "measure",
-  "review",
-  "ops",
-  "delegate",
-  "correction"
-];
-function isMemoryType(value) {
-  return typeof value === "string" && MEMORY_TYPES.includes(value);
-}
-var TYPE_GLYPH = {
-  discuss: "\u{1F4AC}",
-  research: "\u{1F50D}",
-  design: "\u2696\uFE0F",
-  implement: "\u{1F527}",
-  refactor: "\u{1F504}",
-  fix: "\u{1F534}",
-  measure: "\u{1F4CA}",
-  review: "\u2705",
-  ops: "\u2699\uFE0F",
-  delegate: "\u{1F91D}",
-  correction: "\u21A9\uFE0F"
-};
-var COMPACT_TYPE_GLYPH = "\u23F8";
-var LEGACY_TYPE_GLYPH = {
-  bugfix: "\u{1F534}",
-  feature: "\u{1F7E3}",
-  refactor: "\u{1F504}",
-  change: "\u2705",
-  discovery: "\u{1F535}",
-  decision: "\u2696\uFE0F",
-  compact: COMPACT_TYPE_GLYPH
-};
-function typeWordGlyph(word) {
-  if (isMemoryType(word)) {
-    return TYPE_GLYPH[word];
-  }
-  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
-}
-function typeListGlyph(types) {
-  if (!types || types.length === 0) {
-    return "\u2022";
-  }
-  return types.map(typeWordGlyph).join("");
-}
-function normalizeTypeValues(values) {
-  const normalized = [];
-  for (const raw of values) {
-    const value = raw.trim();
-    if (!value) {
-      continue;
-    }
-    if (!isMemoryType(value)) {
-      throw new Error(`unknown type value: ${raw}`);
-    }
-    if (!normalized.includes(value)) {
-      normalized.push(value);
-    }
-  }
-  return normalized;
-}
-function typeListsEqual(left, right) {
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every((value, index) => value === right[index]);
-}
-
-// src/db/segments.ts
-var SEGMENT_STATUSES = ["open", "delivered", "abandoned"];
-var TOPIC_COLUMNS = `
-  id,
-  name,
-  aliases,
-  status,
-  created_at_epoch AS createdAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-var SEGMENT_COLUMNS = `
-  id,
-  topic_id AS topicId,
-  title,
-  content,
-  insight,
-  type,
-  tags,
-  status,
-  revision,
-  created_at_epoch AS createdAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function parseStringArray(value) {
-  if (!value) {
-    return [];
-  }
-  const parsed = JSON.parse(value);
-  return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
-}
-function mapTopicRow(row) {
-  return row ? { ...row, aliases: parseStringArray(row.aliases) } : null;
-}
-function mapSegmentRow(row) {
-  return row ? {
-    ...row,
-    type: parseStringArray(row.type),
-    tags: parseStringArray(row.tags)
-  } : null;
-}
-function normalizeTopicKey(value) {
-  return value.normalize("NFKC").trim().toLocaleLowerCase("en-US");
-}
-function upsertTopic(db, input) {
-  const existing = findTopic(db, input.name);
-  if (existing) {
-    const merged = [...existing.aliases];
-    for (const alias of input.aliases ?? []) {
-      if (normalizeTopicKey(alias) !== normalizeTopicKey(existing.name) && !merged.some((known) => normalizeTopicKey(known) === normalizeTopicKey(alias))) {
-        merged.push(alias);
-      }
-    }
-    if (normalizeTopicKey(input.name) !== normalizeTopicKey(existing.name) && !merged.some((known) => normalizeTopicKey(known) === normalizeTopicKey(input.name))) {
-      merged.push(input.name);
-    }
-    const updated = mapTopicRow(
-      db.query(
-        `UPDATE topics SET aliases = ?, status = ?, updated_at_epoch = ?
-           WHERE id = ? RETURNING ${TOPIC_COLUMNS}`
-      ).get(
-        JSON.stringify(merged),
-        input.status ?? existing.status,
-        input.nowEpoch,
-        existing.id
-      ) ?? null
-    );
-    if (!updated) {
-      throw new Error(`Failed to update topic ${existing.id}.`);
-    }
-    return updated;
-  }
-  const inserted = mapTopicRow(
-    db.query(
-      `INSERT INTO topics (name, aliases, status, created_at_epoch, updated_at_epoch)
-         VALUES (?, ?, ?, ?, ?)
-         RETURNING ${TOPIC_COLUMNS}`
-    ).get(
-      input.name,
-      JSON.stringify(input.aliases ?? []),
-      input.status ?? "active",
-      input.nowEpoch,
-      input.nowEpoch
-    ) ?? null
-  );
-  if (!inserted) {
-    throw new Error(`Failed to register topic ${input.name}.`);
-  }
-  return inserted;
-}
-function findTopic(db, name) {
-  const key = normalizeTopicKey(name);
-  const rows = db.query(`SELECT ${TOPIC_COLUMNS} FROM topics`).all();
-  const byName = rows.find((row) => normalizeTopicKey(row.name) === key);
-  if (byName) {
-    return mapTopicRow(byName);
-  }
-  const byAlias = rows.find(
-    (row) => parseStringArray(row.aliases).some((alias) => normalizeTopicKey(alias) === key)
-  );
-  return mapTopicRow(byAlias ?? null);
-}
-function createSegment(db, input) {
-  const type = normalizeTypeValues(input.type ?? []);
-  const inserted = mapSegmentRow(
-    db.query(
-      `INSERT INTO segments (
-           topic_id, title, content, insight, type, tags, status,
-           created_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-         RETURNING ${SEGMENT_COLUMNS}`
-    ).get(
-      input.topicId ?? null,
-      input.title,
-      input.content ?? null,
-      input.insight ?? null,
-      JSON.stringify(type),
-      JSON.stringify(input.tags ?? []),
-      input.status ?? "open",
-      input.nowEpoch,
-      input.nowEpoch
-    ) ?? null
-  );
-  if (!inserted) {
-    throw new Error("Failed to create segment.");
-  }
-  indexSegment(db, inserted);
-  reconcileSegmentCitedPairs(db, inserted, input.nowEpoch);
-  return inserted;
-}
-function reconcileSegmentCitedPairs(db, segment, nowEpoch) {
-  const references = [
-    ...parseQualifiedReferences(segment.title),
-    ...parseQualifiedReferences(segment.content),
-    ...parseQualifiedReferences(segment.insight)
-  ];
-  const resolved = validateReferences(db, references).accepted;
-  reconcileCitedPairs(
-    db,
-    { kind: "segment", id: segment.id },
-    resolved.map((entry) => entry.node),
-    nowEpoch,
-    "text-ref"
-  );
-}
-function indexSegment(db, segment) {
-  indexSegmentToFTS(db, {
-    id: segment.id,
-    title: segment.title,
-    content: segment.content,
-    insight: segment.insight,
-    type: JSON.stringify(segment.type),
-    tags: JSON.stringify(segment.tags)
-  });
-}
-function compareDerivedTags(left, right) {
-  return right.count - left.count || (left.tag < right.tag ? -1 : left.tag > right.tag ? 1 : 0);
-}
-function recomputeSegmentFacets(db, segmentId) {
-  const members = db.query(
-    `SELECT t.type AS type, t.tags AS tags
-       FROM segment_members sm
-       JOIN turns t ON t.id = sm.turn_id
-       WHERE sm.segment_id = ?`
-  ).all(segmentId);
-  const typeCounts = /* @__PURE__ */ new Map();
-  const tagCounts = /* @__PURE__ */ new Map();
-  for (const member of members) {
-    for (const word of new Set(parseStringArray(member.type))) {
-      typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
-    }
-    for (const tag of new Set(parseStringArray(member.tags))) {
-      if (tag.includes(":") || tag.trim() === "") {
-        continue;
-      }
-      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
-    }
-  }
-  const type = MEMORY_TYPES.filter((word) => typeCounts.has(word)).sort(
-    (left, right) => (typeCounts.get(right) ?? 0) - (typeCounts.get(left) ?? 0) || MEMORY_TYPES.indexOf(left) - MEMORY_TYPES.indexOf(right)
-  );
-  const tags = [...tagCounts.entries()].map(([tag, count]) => ({ tag, count })).sort(compareDerivedTags).map((entry) => entry.tag);
-  const updated = mapSegmentRow(
-    db.query(
-      `UPDATE segments SET type = ?, tags = ? WHERE id = ?
-         RETURNING ${SEGMENT_COLUMNS}`
-    ).get(JSON.stringify(type), JSON.stringify(tags), segmentId) ?? null
-  );
-  if (updated) {
-    indexSegment(db, updated);
-  }
-  return updated;
-}
-function getSegment(db, segmentId) {
-  return mapSegmentRow(
-    db.query(
-      `SELECT ${SEGMENT_COLUMNS} FROM segments WHERE id = ?`
-    ).get(segmentId) ?? null
-  );
-}
-var JOINED_SEGMENT_COLUMNS = `
-  s.id,
-  s.topic_id AS topicId,
-  s.title,
-  s.content,
-  s.insight,
-  s.type,
-  s.tags,
-  s.status,
-  s.revision,
-  s.created_at_epoch AS createdAtEpoch,
-  s.updated_at_epoch AS updatedAtEpoch
-`;
-function listRecentSegments(db, limit) {
-  if (limit <= 0) {
-    return [];
-  }
-  return db.query(
-    `SELECT ${JOINED_SEGMENT_COLUMNS}, tp.name AS topicName
-       FROM segments s
-       LEFT JOIN topics tp ON tp.id = s.topic_id
-       ORDER BY s.updated_at_epoch DESC, s.id DESC
-       LIMIT ?`
-  ).all(limit).flatMap((row) => {
-    const segment = mapSegmentRow(row);
-    return segment ? [{ segment, topicName: row.topicName }] : [];
-  });
-}
-function listTopicsByFrequency(db, status) {
-  const columns = `
-    t.id,
-    t.name,
-    t.aliases,
-    t.status,
-    t.created_at_epoch AS createdAtEpoch,
-    t.updated_at_epoch AS updatedAtEpoch,
-    COUNT(s.id) AS segmentCount
-  `;
-  const sql = `SELECT ${columns}
-     FROM topics t
-     LEFT JOIN segments s ON s.topic_id = t.id
-     ${status ? "WHERE t.status = ?" : ""}
-     GROUP BY t.id
-     ORDER BY segmentCount DESC, t.name ASC`;
-  const rows = status ? db.query(sql).all(status) : db.query(sql).all();
-  return rows.flatMap((row) => {
-    const topic = mapTopicRow(row);
-    return topic ? [{ topic, segmentCount: row.segmentCount }] : [];
-  });
-}
-function addSegmentMembers(db, segmentId, turnIds, nowEpoch) {
-  const statement = db.query(
-    `INSERT INTO segment_members (segment_id, turn_id, created_at_epoch)
-     VALUES (?, ?, ?)
-     ON CONFLICT (segment_id, turn_id) DO NOTHING
-     RETURNING turn_id AS turnId`
-  );
-  const added = [];
-  for (const turnId of turnIds) {
-    const row = statement.get(segmentId, turnId, nowEpoch);
-    if (row) {
-      added.push(row.turnId);
-    }
-  }
-  if (added.length > 0) {
-    recomputeSegmentFacets(db, segmentId);
-  }
-  return added;
-}
-var SEGMENT_WRITE_SAVEPOINT = "mnemo_segment_writes";
-function applySegmentWrites(db, writes, options) {
-  const applied = [];
-  const excluded = [];
-  db.exec(`SAVEPOINT ${SEGMENT_WRITE_SAVEPOINT}`);
-  try {
-    for (const write of writes) {
-      const current = getSegment(db, write.segmentId);
-      if (!current) {
-        excluded.push({ write, reason: "missing", latest: null });
-        continue;
-      }
-      if (current.status !== "open") {
-        excluded.push({ write, reason: "frozen", latest: current });
-        continue;
-      }
-      let type;
-      try {
-        type = write.type ? normalizeTypeValues(write.type) : current.type;
-      } catch (error49) {
-        excluded.push({
-          write,
-          reason: "invalid-type",
-          latest: current,
-          detail: error49 instanceof Error ? error49.message : String(error49)
-        });
-        continue;
-      }
-      const updated = mapSegmentRow(
-        db.query(
-          `UPDATE segments
-               SET title = ?,
-                   content = ?,
-                   insight = ?,
-                   type = ?,
-                   tags = ?,
-                   status = ?,
-                   revision = revision + 1,
-                   updated_at_epoch = ?
-             WHERE id = ? AND revision = ?
-             RETURNING ${SEGMENT_COLUMNS}`
-        ).get(
-          write.title ?? current.title,
-          write.content === void 0 ? current.content : write.content,
-          write.insight === void 0 ? current.insight : write.insight,
-          JSON.stringify(type),
-          JSON.stringify(write.tags ?? current.tags),
-          write.status ?? current.status,
-          options.nowEpoch,
-          write.segmentId,
-          write.expectedRevision
-        ) ?? null
-      );
-      if (!updated) {
-        excluded.push({ write, reason: "revision-conflict", latest: current });
-        continue;
-      }
-      indexSegment(db, updated);
-      reconcileSegmentCitedPairs(db, updated, options.nowEpoch);
-      applied.push(updated);
-    }
-  } catch (error49) {
-    db.exec(`ROLLBACK TO ${SEGMENT_WRITE_SAVEPOINT}`);
-    db.exec(`RELEASE ${SEGMENT_WRITE_SAVEPOINT}`);
-    throw error49;
-  }
-  db.exec(`RELEASE ${SEGMENT_WRITE_SAVEPOINT}`);
-  return { applied, excluded };
 }
 
 // src/db/shadow-notes.ts
@@ -48094,6 +48215,12 @@ function evaluateSettlementSegmentWrite(db, context, rawInput, nowEpoch, options
     if (!turn) {
       return { ok: false, message: `no turn at ${ref}.` };
     }
+    if (!context.reviewableTurnIds.has(turn.id)) {
+      return {
+        ok: false,
+        message: `${ref} is outside this dispatch's reviewable window (the window plus its rendered lookback) \u2014 an exclude verdict may only be recorded for a turn this prompt actually showed.`
+      };
+    }
     if (options.apply) {
       recordNoteSettlementSegmentExclusion(db, context.jobId, turn.id, nowEpoch);
     }
@@ -48646,6 +48773,19 @@ var CommitGateRefused = class extends Error {
 };
 var CommitPreviewComplete = class extends Error {
 };
+var PREVIEW_LOCK_POLL_TIMEOUT_MS = 200;
+function readBusyTimeoutMs(db) {
+  return db.query("PRAGMA busy_timeout").get()?.timeout ?? 0;
+}
+function runPreviewTransaction(db, fn) {
+  const priorBusyTimeoutMs = readBusyTimeoutMs(db);
+  db.exec(`PRAGMA busy_timeout = ${PREVIEW_LOCK_POLL_TIMEOUT_MS};`);
+  try {
+    return runHookWriteTransaction(db, fn);
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${priorBusyTimeoutMs};`);
+  }
+}
 function describeGateRefusal(result) {
   switch (result.reason) {
     case "segmentation-incomplete":
@@ -48724,79 +48864,80 @@ function createSettlementStagingEngine(options) {
   function attemptCommit(nowEpoch, preview) {
     const snapshot = [...staged.values()];
     let previewCounts = null;
-    try {
-      const { counts } = runWriteTransaction(db, () => {
-        assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
-        const handleMap = /* @__PURE__ */ new Map();
-        const counts2 = emptyCommitCounts();
-        for (const entry of snapshot) {
-          if (entry.kind === "segment") {
-            const evaluation = evaluateSettlementSegmentWrite(db, context, entry.input, nowEpoch, {
-              apply: true,
-              handleMap
-            });
-            if (!evaluation.ok) {
-              throw new CommitReplayRefused(
-                `segment ${entry.handle ?? entry.input.segmentId ?? entry.input.turn}: ${evaluation.message}`
-              );
-            }
-            if (entry.handle) {
-              handleMap.set(entry.handle, evaluation.outcome.segmentId);
-            }
-            const outcome = evaluation.outcome;
-            if (outcome.action === "create") {
-              counts2.segmentsCreated += 1;
-            } else if (outcome.action === "extend") {
-              counts2.segmentsExtended += 1;
-            } else {
-              counts2.segmentsExcluded += 1;
-            }
-            counts2.membersAdded += outcome.membersAdded;
+    const transactionBody = () => {
+      assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
+      const handleMap = /* @__PURE__ */ new Map();
+      const counts = emptyCommitCounts();
+      for (const entry of snapshot) {
+        if (entry.kind === "segment") {
+          const evaluation = evaluateSettlementSegmentWrite(db, context, entry.input, nowEpoch, {
+            apply: true,
+            handleMap
+          });
+          if (!evaluation.ok) {
+            throw new CommitReplayRefused(
+              `segment ${entry.handle ?? entry.input.segmentId ?? entry.input.turn}: ${evaluation.message}`
+            );
+          }
+          if (entry.handle) {
+            handleMap.set(entry.handle, evaluation.outcome.segmentId);
+          }
+          const outcome = evaluation.outcome;
+          if (outcome.action === "create") {
+            counts.segmentsCreated += 1;
+          } else if (outcome.action === "extend") {
+            counts.segmentsExtended += 1;
           } else {
-            const evaluation = evaluateSettlementTurnWrite(db, context, entry.input, nowEpoch, {
-              apply: true
-            });
-            if (!evaluation.ok) {
-              throw new CommitReplayRefused(`note ${entry.input.turn}: ${evaluation.message}`);
-            }
-            const outcome = evaluation.outcome;
-            if (outcome.prose) {
-              if (outcome.prose.kind === "written") {
-                counts2.notesReconstructed += 1;
-              } else {
-                counts2.notesYielded += 1;
-              }
-            }
-            if (outcome.review) {
-              counts2.turnsReviewed += 1;
-              if (outcome.review.kind === "yielded") {
-                counts2.reviewsYieldedToLateNote += 1;
-              }
-              if (outcome.review.grade !== void 0) {
-                counts2.gradeHistogram[outcome.review.grade] = (counts2.gradeHistogram[outcome.review.grade] ?? 0) + 1;
-              }
-            }
-            if (outcome.relations) {
-              counts2.relationsWritten += outcome.relations.written;
+            counts.segmentsExcluded += 1;
+          }
+          counts.membersAdded += outcome.membersAdded;
+        } else {
+          const evaluation = evaluateSettlementTurnWrite(db, context, entry.input, nowEpoch, {
+            apply: true
+          });
+          if (!evaluation.ok) {
+            throw new CommitReplayRefused(`note ${entry.input.turn}: ${evaluation.message}`);
+          }
+          const outcome = evaluation.outcome;
+          if (outcome.prose) {
+            if (outcome.prose.kind === "written") {
+              counts.notesReconstructed += 1;
+            } else {
+              counts.notesYielded += 1;
             }
           }
+          if (outcome.review) {
+            counts.turnsReviewed += 1;
+            if (outcome.review.kind === "yielded") {
+              counts.reviewsYieldedToLateNote += 1;
+            }
+            if (outcome.review.grade !== void 0) {
+              counts.gradeHistogram[outcome.review.grade] = (counts.gradeHistogram[outcome.review.grade] ?? 0) + 1;
+            }
+          }
+          if (outcome.relations) {
+            counts.relationsWritten += outcome.relations.written;
+          }
         }
-        const gate = completeNoteSettlementJobIfSegmentedCore(
-          db,
-          context.jobId,
-          context.claimGeneration,
-          nowEpoch,
-          {}
-        );
-        if (!gate.completed) {
-          throw new CommitGateRefused(gate);
-        }
-        if (preview) {
-          previewCounts = counts2;
-          throw new CommitPreviewComplete();
-        }
-        return { counts: counts2 };
-      });
+      }
+      const gate = completeNoteSettlementJobIfSegmentedCore(
+        db,
+        context.jobId,
+        context.claimGeneration,
+        nowEpoch,
+        {}
+      );
+      if (!gate.completed) {
+        throw new CommitGateRefused(gate);
+      }
+      if (preview) {
+        previewCounts = counts;
+        throw new CommitPreviewComplete();
+      }
+      return { counts };
+    };
+    try {
+      const { counts } = preview ? runPreviewTransaction(db, transactionBody) : runWriteTransaction(db, transactionBody);
       return { kind: "landed", counts };
     } catch (error49) {
       if (error49 instanceof CommitPreviewComplete) {
@@ -48811,6 +48952,12 @@ function createSettlementStagingEngine(options) {
       if (error49 instanceof NoteSettlementJobFenceError) {
         return { kind: "refused", refusal: { kind: "fence", message: error49.message } };
       }
+      if (preview && isSqliteBusy(error49)) {
+        return {
+          kind: "indeterminate",
+          message: error49 instanceof Error ? error49.message : "database busy"
+        };
+      }
       throw error49;
     }
   }
@@ -48822,6 +48969,11 @@ function createSettlementStagingEngine(options) {
       lastCommitMetrics = attempt.counts;
       return textResult4(
         `Committed. S${context.sessionId} window settled \u2014 job complete.`
+      );
+    }
+    if (attempt.kind === "indeterminate") {
+      throw new Error(
+        `unreachable: commit() attempt reported indeterminate (${attempt.message})`
       );
     }
     const { refusal } = attempt;
@@ -48848,7 +49000,22 @@ function createSettlementStagingEngine(options) {
     const attempt = attemptCommit(now(), true);
     const stagedCount = staged.size;
     if (attempt.kind === "landed") {
-      return { staged: stagedCount, wouldCommit: true, refusal: null, fenceLost: false };
+      return {
+        staged: stagedCount,
+        wouldCommit: true,
+        refusal: null,
+        fenceLost: false,
+        checkFailed: false
+      };
+    }
+    if (attempt.kind === "indeterminate") {
+      return {
+        staged: stagedCount,
+        wouldCommit: false,
+        refusal: null,
+        fenceLost: false,
+        checkFailed: true
+      };
     }
     const { refusal } = attempt;
     if (refusal.kind === "gate") {
@@ -48857,7 +49024,8 @@ function createSettlementStagingEngine(options) {
         staged: stagedCount,
         wouldCommit: false,
         refusal: describeGateRefusal(refusal.result),
-        fenceLost
+        fenceLost,
+        checkFailed: false
       };
     }
     if (refusal.kind === "replay") {
@@ -48865,14 +49033,16 @@ function createSettlementStagingEngine(options) {
         staged: stagedCount,
         wouldCommit: false,
         refusal: refusal.message,
-        fenceLost: false
+        fenceLost: false,
+        checkFailed: false
       };
     }
     return {
       staged: stagedCount,
       wouldCommit: false,
       refusal: "this dispatch's job lease was reclaimed; no further work will land. Stop making tool calls.",
-      fenceLost: true
+      fenceLost: true,
+      checkFailed: false
     };
   }
   return {
@@ -48887,12 +49057,19 @@ function createSettlementStagingEngine(options) {
 
 // src/worker/note-settlement-stop-hook.ts
 var NOTE_SETTLEMENT_MAX_STOP_BLOCKS = 2;
+function renderStakes(staged) {
+  return staged === 0 ? "You are stopping without having called `commit`, and you have staged nothing. This run has produced NOTHING: no note, no segment, no verdict." : `You are stopping without having called \`commit\`. Nothing you staged is written \u2014 ${staged} staged call${staged === 1 ? "" : "s"} ${staged === 1 ? "is" : "are"} discarded when this run ends, and this run will have produced NOTHING. \`commit\` is the only writer.`;
+}
 function renderStopReason(staged, wouldCommit, refusal) {
-  const stakes = staged === 0 ? "You are stopping without having called `commit`, and you have staged nothing. This run has produced NOTHING: no note, no segment, no verdict." : `You are stopping without having called \`commit\`. Nothing you staged is written \u2014 ${staged} staged call${staged === 1 ? "" : "s"} ${staged === 1 ? "is" : "are"} discarded when this run ends, and this run will have produced NOTHING. \`commit\` is the only writer.`;
   const next = wouldCommit ? "A `commit` right now would land this window. Call it." : `A \`commit\` right now would refuse \u2014 ${refusal ?? "the window is not yet complete."} Fill that with more \`note\`/\`segment\` calls (everything you staged is kept), then call \`commit\`.`;
-  return `${stakes}
+  return `${renderStakes(staged)}
 
 ${next}`;
+}
+function renderCheckFailedStopReason(staged) {
+  return `${renderStakes(staged)}
+
+The completion check itself could not run just now \u2014 the database was briefly locked by something else and the check's own bounded retry ran out before the lock cleared. This is NOT a statement that your work is incomplete; the check simply could not answer either way. Call \`commit\` directly \u2014 it has a longer retry budget and will either land your window or tell you exactly what is still missing.`;
 }
 function createSettlementStopHook(options) {
   const { engine } = options;
@@ -48910,6 +49087,13 @@ function createSettlementStopHook(options) {
       return { continue: true };
     }
     blocksIssued += 1;
+    if (preview.checkFailed) {
+      return {
+        continue: true,
+        decision: "block",
+        reason: renderCheckFailedStopReason(preview.staged)
+      };
+    }
     return {
       continue: true,
       decision: "block",
