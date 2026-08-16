@@ -35,11 +35,7 @@ interface SeedRow {
   epoch: number;
 }
 
-/**
- * Seeds an era-internal session straight into SQLite. `cites_recorded = 1` on
- * every row so an empty edge set is authoritative and the legacy inline
- * `[T<n>]` fallback stays out of the way.
- */
+/** Seeds an era-internal session straight into SQLite. */
 function seedSession(
   db: ReturnType<typeof createDatabase>,
   contentSessionId: string,
@@ -58,9 +54,9 @@ function seedSession(
   const insert = db.query(
     `INSERT INTO turns (
        session_id, prompt_number, status, user_prompt, title, content, type,
-       significance_grade, cites_recorded, tool_call_count, created_at_epoch,
+       significance_grade, tool_call_count, created_at_epoch,
        tags, files_read, files_modified
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, '[]', '[]', ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', ?)`,
   );
   db.transaction(() => {
     for (const row of rows) {
@@ -95,8 +91,6 @@ function turnDbId(
 // `replaceTurnCitations` (the old generic body-free structured-edge write)
 // was retired under spec C6/ticket 06; writing straight through
 // `writeMemoryEdges` sidesteps that churn (same fix as timeline.test.ts).
-// `cites_recorded = 1` is already set for every row by `seedSession` above,
-// so no extra flag flip is needed here (unlike timeline.era-milestones.test.ts).
 function cite(
   db: ReturnType<typeof createDatabase>,
   sessionId: number,

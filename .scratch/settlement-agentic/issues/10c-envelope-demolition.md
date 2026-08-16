@@ -37,15 +37,40 @@ derived from members rather than restated a level up.
 
 - [x] `cites_recorded` is retired whole — column, writer and projection — or the reason not to is stated
 
-**Reason stated, retirement not done — and the reason has since expired.**
-The column is confirmed dead (nothing has read it since ticket 06's citation
-union; `db/citations.ts`'s own comment says so), and the write/read/projection
-removal is small. What made it a table rebuild in practice is that dozens of
-fixtures in `tests/mcp/timeline.test.ts` and `tests/mcp/timeline.era-milestones.test.ts`
-hardcode `cites_recorded` in raw SQL inserts — files ticket 14's concurrent
-worker owned at the time. **14 has since landed, so `tests/mcp/` is free** and
-this is ready to close as its own change. The write and projection sites carry
-the note in the meantime.
+**Retired.** No live reader existed — confirmed independently by grepping
+`src/` and `tests/` before touching anything, matching `db/citations.ts`'s own
+comment that the column survives only as inert history. The column is gone
+from `SCHEMA_SQL`, both migration paths (`ensureTurnCitationsSchema`'s ALTER,
+now deleted outright) and the table-rebuild SQL; the write in
+`hooks/capture-repair.ts` and the projection in `db/turns.ts` are removed. A
+new table-rebuild migration (`retireTurnCitesRecordedColumn`, same
+rename-build-swap idiom as `ensureTurnTypeMultiValueColumn`) drops it from an
+existing database; it runs AFTER the type-multivalue rebuild so it never has
+to decide `type`'s shape itself. Every fixture that hardcoded the column
+(`tests/mcp/timeline.test.ts`, `tests/mcp/timeline.era-milestones.test.ts`,
+`tests/hooks/*`, `tests/db/schema.test.ts`, `tests/db/citations.test.ts`) is
+updated; several tests whose entire premise was the retired flag's behaviour
+are removed rather than left asserting nothing.
+
+Verified against a full-fidelity copy of the real production database
+(`~/.claude-mnemo/claude-mnemo.db`, ~11.7k turns): row count, foreign keys and
+every other column's values survive intact, and a second `initializeDatabase`
+call is a no-op. That same verification surfaced an adjacent, PRE-EXISTING bug
+in the already-shipped `ensureTurnTypeMultiValueColumn` (ticket 02): production
+is also still behind on that migration (`type` has never been widened there),
+and its column list — written before four now-fully-retired
+`extraction_stall_*` columns existed — would have silently dropped them the
+next time it fired for real, unrelated to `cites_recorded` entirely. Fixed in
+the same change (both rebuilds now carry `extraction_stall_*` through
+untouched, since retiring THAT family is a decision for
+`.scratch/extraction-redesign/`'s own ticket, not a side effect of this one),
+plus a new `assertNoUnexpectedTurnsColumns` guard in both rebuilds that fails
+loudly instead of silently dropping the next column neither one is told
+about. Also discovered, not touched (same "found here, out of fence" pattern
+as the sixth instance below): production is additionally behind on the
+ticket-05 `memory_edges` pair-identity rebuild and the `turn_citations`
+retirement — both already-shipped, already-tested migrations that will also
+fire on the next reload.
 
 ## A sixth instance of the pattern, found here and left alone
 

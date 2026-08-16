@@ -140,10 +140,6 @@ function seedGradedEraFixture(db: Database): {
   // `replaceTurnCitations` (the old generic body-free structured-edge write)
   // was retired under spec C6/ticket 06; writing straight through
   // `writeMemoryEdges` sidesteps that churn (same fix as timeline.test.ts).
-  // Unlike the retired function, this does not itself flip `cites_recorded`
-  // (spec §B's fallback predicate: 0 means "never spoke", reads inline prose
-  // instead) — so it is set explicitly here to keep this a genuine structured
-  // read, same as the retired call used to guarantee.
   writeMemoryEdges(
     db,
     [ids.victim1!, ids.victim2!, ids.victim3!, ids.victim4!, ids.victim5!].map(
@@ -157,8 +153,6 @@ function seedGradedEraFixture(db: Database): {
     CUTOFF,
     { eligibleForRelation: "unrestricted" },
   );
-  db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(ids.corrector!);
-
   const bracketEarly = createSegment(db, {
     title: "bracket early",
     type: ["research"],

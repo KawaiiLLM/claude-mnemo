@@ -1098,7 +1098,9 @@ describe("initializeSchema", () => {
       .query<{ name: string }, []>("PRAGMA table_info(turns)")
       .all()
       .map((row) => row.name);
-    expect(columns).toContain("cites_recorded");
+    // Ticket 10c: `cites_recorded` is retired — a fresh database built from
+    // the current DDL never had it.
+    expect(columns).not.toContain("cites_recorded");
   });
 
   test("reopening a pre-ticket-05 database retires turn_citations and its rows land in memory_edges (spec C13)", () => {
@@ -1166,10 +1168,8 @@ describe("initializeSchema", () => {
           .map((row) => row.name);
         expect(tableNames).not.toContain("turn_citations");
 
-        // Old rows land on 0, never NULL — the legacy inline fallback stays on —
-        // and no extraction field is rewritten.
+        // No extraction field is rewritten by the retirement.
         const row = getTurnById(migrated, citerId);
-        expect(row?.citesRecorded).toBe(false);
         expect(row?.title).toBe("legacy turn");
         expect(row?.content).toBe(`reverses [T${citedId}]`);
 
@@ -1706,7 +1706,6 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
         files_modified TEXT,
         tool_call_count INTEGER,
         transcript_line_start INTEGER,
-        cites_recorded INTEGER NOT NULL DEFAULT 0,
         consulted_memories TEXT,
         compact_boundary_uuid TEXT,
         parent_turn_id INTEGER,
@@ -1728,21 +1727,20 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
         number,
         string | null,
         string,
-        number,
         number | null,
         number,
       ]
     >(
       `INSERT INTO turns (
-         id, session_id, prompt_number, status, type, title, cites_recorded,
+         id, session_id, prompt_number, status, type, title,
          parent_turn_id, created_at_epoch
-       ) VALUES (?, ?, ?, 'extracted', ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, 'extracted', ?, ?, ?, ?)
        RETURNING id`,
     );
-    const discoveryId = insert.get(1, sessionId, 1, "discovery", "legacy discovery row", 1, null, 100)!.id;
-    const compactId = insert.get(3, sessionId, 2, "compact", "/compact", 0, null, 200)!.id;
-    const nullId = insert.get(5, sessionId, 3, null, "never typed", 0, discoveryId, 300)!.id;
-    const emptyId = insert.get(7, sessionId, 4, "", "empty string typed", 0, null, 400)!.id;
+    const discoveryId = insert.get(1, sessionId, 1, "discovery", "legacy discovery row", null, 100)!.id;
+    const compactId = insert.get(3, sessionId, 2, "compact", "/compact", null, 200)!.id;
+    const nullId = insert.get(5, sessionId, 3, null, "never typed", discoveryId, 300)!.id;
+    const emptyId = insert.get(7, sessionId, 4, "", "empty string typed", null, 400)!.id;
     expect([discoveryId, compactId, nullId, emptyId]).toEqual([1, 3, 5, 7]);
 
     // A dependent row in ANOTHER table (peer review mutation-check item
@@ -1755,11 +1753,10 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
       nowEpoch: 100,
     });
 
-    // A structured citation edge (peer review mutation-check item 4b): a
-    // copy list that dropped `cites_recorded` would silently fall this row
-    // back from structured-edge truth to inline `[T<n>]` parsing the
-    // moment the rebuild runs, even though the edge itself survives
-    // untouched in the separate `memory_edges` table.
+    // A structured citation edge (peer review mutation-check item 4b): proves
+    // the separate `memory_edges` table — and its endpoint-deletion trigger —
+    // survive the `turns` rebuild untouched, since the edge lives in a
+    // different table entirely.
     writeMemoryEdges(
       db,
       [
@@ -1795,10 +1792,7 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
     expect(getShadowNote(db, discoveryId)?.title).toBe("shadow title");
 
     // The edge survived the rebuild, which is what this assertion is for.
-    // `cites_recorded` survived too and is asserted only as a copied column
-    // now — no reader consults it since the union replaced the gate.
     const discoveryTurn = getTurnById(db, discoveryId)!;
-    expect(discoveryTurn.citesRecorded).toBe(true);
     const effective = getEffectiveCitations(db, discoveryTurn);
     expect(effective.citedTurnIds).toEqual([compactId]);
     expect(effective.edges.map((edge) => edge.citedTurnId)).toEqual([compactId]);
@@ -1887,7 +1881,6 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
         files_modified TEXT,
         tool_call_count INTEGER,
         transcript_line_start INTEGER,
-        cites_recorded INTEGER NOT NULL DEFAULT 0,
         consulted_memories TEXT,
         compact_boundary_uuid TEXT,
         parent_turn_id INTEGER,
@@ -1940,6 +1933,292 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
     execSpy.mockRestore();
 
     expect(getTurnById(db, fixId)!.type).toEqual(["fix"]);
+
+    db.close();
+  });
+});
+
+/**
+ * Ticket 10c — `cites_recorded` is retired outright: nothing has read it since
+ * ticket 06 made the citation read path an unconditional union (spec §B),
+ * and it is `NOT NULL`, so the retirement is a table rebuild
+ * (`retireTurnCitesRecordedColumn`), same idiom as `ensureTurnTypeMultiValueColumn`.
+ */
+describe("retireTurnCitesRecordedColumn (ticket 10c)", () => {
+  test("drops cites_recorded from an existing populated database, preserving every other column and row, and is idempotent", () => {
+    // A REAL pre-ticket-10c database: current schema (from `initializeSchema`)
+    // plus the retired column bolted back on by hand, the shape a production
+    // database in the wild carries today.
+    const directory = mkdtempSync(join(tmpdir(), "mnemo-cites-recorded-retire-"));
+    const path = join(directory, "memory.db");
+
+    try {
+      const before = createDatabase(path);
+      initializeSchema(before);
+      before.exec(
+        "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0",
+      );
+
+      const sessionId = upsertSession(before, {
+        contentSessionId: "cites-recorded-retirement",
+        project: "claude-mnemo",
+        title: "legacy session",
+        insight: null,
+        createdAtEpoch: 1,
+        updatedAtEpoch: 1,
+        completedAtEpoch: null,
+      }).id;
+
+      // One row a writer flagged (`cites_recorded = 1`) and one it never
+      // touched (`= 0`, the NOT NULL default) — both real states production
+      // carries, and both must survive the rebuild with everything but the
+      // flag intact.
+      const insert = before.query<
+        { id: number },
+        [number, number, string, string, number]
+      >(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, title, content, type, tags,
+           files_read, files_modified, significance_grade, cites_recorded,
+           created_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, 'extracted', ?, ?, '["decision"]', '["fixture-tag"]',
+           '["a.ts"]', '["b.ts"]', 3, ?, 100, 200)
+         RETURNING id`,
+      );
+      const recordedId = insert.get(
+        sessionId,
+        1,
+        "recorded row",
+        "cites [T2]",
+        1,
+      )!.id;
+      const legacyId = insert.get(
+        sessionId,
+        2,
+        "legacy row",
+        "cites [T1]",
+        0,
+      )!.id;
+
+      before.close();
+
+      const migrated = createDatabase(path);
+      try {
+        initializeDatabase(migrated);
+
+        const columns = migrated
+          .query<{ name: string }, []>("PRAGMA table_info(turns)")
+          .all()
+          .map((row) => row.name);
+        expect(columns).not.toContain("cites_recorded");
+
+        const rowCount = migrated
+          .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM turns")
+          .get()?.count;
+        expect(rowCount).toBe(2);
+
+        expect(getTurnById(migrated, recordedId)).toMatchObject({
+          id: recordedId,
+          sessionId,
+          promptNumber: 1,
+          status: "extracted",
+          title: "recorded row",
+          content: "cites [T2]",
+          type: ["decision"],
+          tags: ["fixture-tag"],
+          filesRead: ["a.ts"],
+          filesModified: ["b.ts"],
+          significanceGrade: 3,
+          createdAtEpoch: 100,
+          updatedAtEpoch: 200,
+        });
+        expect(getTurnById(migrated, legacyId)).toMatchObject({
+          id: legacyId,
+          promptNumber: 2,
+          title: "legacy row",
+          content: "cites [T1]",
+        });
+
+        // Idempotent: a second open must not re-rebuild, throw, or touch data.
+        const execSpy = spyOn(migrated, "exec");
+        initializeDatabase(migrated);
+        const rebuildExecCalls = execSpy.mock.calls.filter(
+          ([sql]) => typeof sql === "string" && sql.includes("DROP TABLE turns"),
+        );
+        expect(rebuildExecCalls).toHaveLength(0);
+        execSpy.mockRestore();
+
+        expect(getTurnById(migrated, recordedId)?.title).toBe("recorded row");
+      } finally {
+        migrated.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("a fresh database, which never had the column, is unaffected", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(turns)")
+      .all()
+      .map((row) => row.name);
+    expect(columns).not.toContain("cites_recorded");
+
+    db.close();
+  });
+
+  // Found running THIS migration against a copy of the real production
+  // database (ticket 10c's testing discipline): production's `turns` still
+  // carries four `extraction_stall_*` columns from a fully-removed feature
+  // (zero references anywhere in `src/`), and this rebuild's column list —
+  // written against what `schema.ts` currently declares — does not mention
+  // them. An explicit `INSERT ... SELECT` column list only copies what it
+  // names, so without this fix the columns (and their data) would vanish the
+  // moment this rebuild fired for real, on the next reload. Retiring them is
+  // a decision for their own ticket (`.scratch/extraction-redesign/`
+  // already names them for one), not a side effect of retiring an unrelated
+  // column.
+  test("carries retired-but-still-present extraction_stall_* columns through untouched", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionId = upsertSession(db, {
+      contentSessionId: "session-stall-columns",
+      project: "/tmp/project",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    // Back `turns` out to a shape carrying BOTH the retired column this
+    // ticket drops AND a column family this ticket has never heard of —
+    // exactly what the real production database looks like today.
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0",
+    );
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN extraction_stall_attempts INTEGER NOT NULL DEFAULT 0",
+    );
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN extraction_stall_retry_at_ms INTEGER",
+    );
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN extraction_stall_retry_after_seq INTEGER",
+    );
+    db.exec("ALTER TABLE turns ADD COLUMN extraction_stall_retry_mode TEXT");
+    db.exec("PRAGMA foreign_keys = ON");
+
+    const turnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, title, cites_recorded,
+           extraction_stall_attempts, extraction_stall_retry_at_ms,
+           extraction_stall_retry_after_seq, extraction_stall_retry_mode,
+           created_at_epoch
+         ) VALUES (?, 1, 'extracted', 'stall fixture', 1, 3, 5000, 42, 'resume', 100)
+         RETURNING id`,
+      )
+      .get(sessionId)!.id;
+
+    initializeSchema(db);
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(turns)")
+      .all()
+      .map((row) => row.name);
+    expect(columns).not.toContain("cites_recorded");
+    expect(columns).toContain("extraction_stall_attempts");
+    expect(columns).toContain("extraction_stall_retry_at_ms");
+    expect(columns).toContain("extraction_stall_retry_after_seq");
+    expect(columns).toContain("extraction_stall_retry_mode");
+
+    const row = db
+      .query<
+        {
+          attempts: number;
+          retryAtMs: number | null;
+          retryAfterSeq: number | null;
+          retryMode: string | null;
+        },
+        [number]
+      >(
+        `SELECT extraction_stall_attempts AS attempts,
+                extraction_stall_retry_at_ms AS retryAtMs,
+                extraction_stall_retry_after_seq AS retryAfterSeq,
+                extraction_stall_retry_mode AS retryMode
+         FROM turns WHERE id = ?`,
+      )
+      .get(turnId);
+    expect(row).toEqual({
+      attempts: 3,
+      retryAtMs: 5000,
+      retryAfterSeq: 42,
+      retryMode: "resume",
+    });
+
+    db.close();
+  });
+
+  // The safety net for the class of bug the test above fixes: a column this
+  // codebase has never heard of, on a database whose `type` is ALSO stale —
+  // so `ensureTurnTypeMultiValueColumn` fires — must fail loudly rather than
+  // silently vanish.
+  test("ensureTurnTypeMultiValueColumn refuses to silently drop a column it does not recognise", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    upsertSession(db, {
+      contentSessionId: "session-unknown-column-guard",
+      project: "/tmp/project",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec("DROP TABLE turns");
+    db.exec(`
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        prompt_number INTEGER NOT NULL,
+        content_prompt_id TEXT,
+        was_interrupted INTEGER NOT NULL DEFAULT 0,
+        was_rolled_back INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        user_prompt TEXT,
+        assistant_response TEXT,
+        assistant_transcript TEXT,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        type TEXT,
+        significance_grade INTEGER,
+        tags TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        tool_call_count INTEGER,
+        transcript_line_start INTEGER,
+        consulted_memories TEXT,
+        compact_boundary_uuid TEXT,
+        parent_turn_id INTEGER,
+        a_column_nobody_told_this_rebuild_about TEXT,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        UNIQUE(session_id, prompt_number)
+      );
+    `);
+    db.exec("PRAGMA foreign_keys = ON");
+
+    expect(() => initializeSchema(db)).toThrow(
+      /a_column_nobody_told_this_rebuild_about/,
+    );
 
     db.close();
   });

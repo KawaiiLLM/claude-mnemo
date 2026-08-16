@@ -44,23 +44,6 @@ export interface TurnRecord {
   toolCallCount: number | null;
   parentTurnId: number | null;
   /**
-   * True once an extraction supplied a structured `cites` array for this turn
-   * (see db/citations.ts). Used to be the from-absent vs recorded-empty
-   * predicate: false ⇒ fall back to parsing inline `[T<n>]` out of `content`.
-   *
-   * TICKET 10C AUDIT: dead. Ticket 06 made the citation read path an
-   * unconditional union of the edge table and the inline parse — see
-   * `db/citations.ts`'s `getSessionEffectiveCitations` doc comment ("the
-   * column survives as inert history; nothing reads it"). Confirmed still
-   * written (`hooks/capture-repair.ts`) and still projected (this field) with
-   * no reader anywhere. Left whole rather than retired: it is `NOT NULL`,
-   * threaded through both migration paths and the table-rebuild SQL
-   * (`db/schema.ts`), so retiring it correctly is a table rebuild whose test
-   * fixtures span files (`tests/mcp/timeline*.test.ts` among them) outside
-   * this ticket's fence while another worker is actively editing `tests/mcp/`.
-   */
-  citesRecorded: boolean;
-  /**
    * Identity key of the `compact_boundary` transcript entry this marker turn
    * claims (spec §F). NULL on every ordinary turn; unique per session, which is
    * what makes boundary claiming idempotent across re-scans.
@@ -92,7 +75,6 @@ interface TurnRow {
   filesModified: string | null;
   toolCallCount: number | null;
   parentTurnId: number | null;
-  citesRecorded: number;
   compactBoundaryUuid: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
@@ -121,7 +103,6 @@ const TURN_SELECT = `
     files_modified AS filesModified,
     tool_call_count AS toolCallCount,
     parent_turn_id AS parentTurnId,
-    cites_recorded AS citesRecorded,
     compact_boundary_uuid AS compactBoundaryUuid,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
@@ -154,7 +135,6 @@ function mapTurnRow(row: TurnRow | null): TurnRecord | null {
     filesRead: parseJsonArray(row.filesRead),
     filesModified: parseJsonArray(row.filesModified),
     parentTurnId: row.parentTurnId ?? null,
-    citesRecorded: row.citesRecorded === 1,
   };
 }
 
@@ -324,7 +304,6 @@ export function updateTurnById(
             files_modified AS filesModified,
             tool_call_count AS toolCallCount,
             parent_turn_id AS parentTurnId,
-            cites_recorded AS citesRecorded,
             compact_boundary_uuid AS compactBoundaryUuid,
             created_at_epoch AS createdAtEpoch,
             updated_at_epoch AS updatedAtEpoch

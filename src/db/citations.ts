@@ -500,7 +500,8 @@ function dedupeCitedIds(edges: readonly TurnCitationEdge[]): number[] {
  * derive from the SAME body, so the union cannot invent a pair and a rewrite
  * that drops a reference removes it from both. Correctness now follows from
  * what is in the tables at read time rather than from a bit somebody had to
- * remember to set. The column survives as inert history; nothing reads it.
+ * remember to set. The column outlived its reader for a while as inert
+ * history and ticket 10c has since dropped it outright.
  *
  * Structured first, then prose the edges did not already cover: the recompute
  * parses title, content and insight while the inline grammar sees `content`

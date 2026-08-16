@@ -182,8 +182,18 @@ describe("release artifacts", () => {
     for (const removed of [
       "needsReprime", // compact re-prime of the resident agent
       "onCompactBoundary", // SDK-auto compact boundary wiring
-      "extraction_stall_attempts", // the stall watchdog's durable counter
       "last_agent_session_id", // the resume pointer
+      // `extraction_stall_attempts` USED to be listed here as the stall
+      // watchdog's durable counter. It was removed when the `cites_recorded`
+      // retirement found that the four `extraction_stall_*` columns are still
+      // physically present on the production `turns` table, and that the
+      // ticket-02 rebuild — whose explicit INSERT column list predates them —
+      // would silently drop them the next time it fired. Preserving a column
+      // means naming it, so the literal now has a legitimate home in
+      // db/schema.ts's migration and its absence can no longer stand for "the
+      // watchdog is gone". The eight markers left still prove the rebuild;
+      // dropping the columns for real belongs to the extraction-redesign
+      // ticket that owns them, not to a bundle guard.
       "exceedsG3EvidenceGate", // obs/turn grade calibration fed to the agent
       "parseSettlementBatch", // 0.8.4 two-phase grading
       "This message is a SETTLEMENT", // the settle message class

@@ -174,7 +174,7 @@ function compactMetadataTags(claim: CompactBoundaryClaim): string[] {
  *
  * - preserve: prompt_number, user_prompt, created_at_epoch, content_prompt_id
  * - set:      type, status, title, compact_boundary_uuid, updated_at_epoch,
- *             tags (the boundary's compact: metadata), cites_recorded = 1
+ *             tags (the boundary's compact: metadata)
  * - clear:    every extraction-derived column, the stall-retry family, and the
  *             row's OUTGOING citation edges
  *
@@ -187,26 +187,13 @@ function compactMetadataTags(claim: CompactBoundaryClaim): string[] {
  * feed in-degree confirmation with citations no surviving text makes; they are
  * deleted from `memory_edges` (the sole edge table since ticket 05 retired
  * `turn_citations`). Incoming edges are a different thing entirely — provenance
- * written by OTHER turns about this one — and survive. `cites_recorded = 1`
- * makes the now-empty outgoing set authoritative instead of "unknown, go parse
- * inline [T<n>] out of content" (content is NULL after this, so the fallback
- * would find none anyway, but the predicate must state the fact rather than
- * imply it).
+ * written by OTHER turns about this one — and survive.
  *
- * TICKET 10C AUDIT: that predicate has had no reader since the citation read
- * path became an unconditional union (`db/citations.ts`'s
- * `getSessionEffectiveCitations` — "the column survives as inert history;
- * nothing reads it"). This write is confirmed dead storage, the same as the
- * projection in `db/turns.ts`. It is left whole rather than retired here:
- * the column is `NOT NULL`, threaded through both migration paths and the
- * table-rebuild SQL (`db/schema.ts`), so retiring it correctly is a table
- * rebuild — and its test fixtures (raw `cites_recorded` column lists and
- * `citesRecorded:` assertions in `tests/mcp/timeline.test.ts`,
- * `tests/mcp/timeline.era-milestones.test.ts`, `tests/hooks/*`,
- * `tests/db/schema.test.ts`, `tests/db/citations.test.ts`) span files this
- * ticket's fence does not own while another worker is actively editing
- * `tests/mcp/`. A half-retirement (drop the write, keep the column) would
- * leave the same dead storage with a shorter paper trail, which is worse.
+ * (Ticket 10c: this used to also set `cites_recorded = 1`, the "recorded-empty"
+ * predicate a legacy reader consulted before falling back to parsing inline
+ * `[T<n>]` out of `content`. The read path has been an unconditional union of
+ * the edge table and that parse since ticket 06, so the flag had no reader
+ * left; the column itself is now retired.)
  */
 function convertOccupiedTurnToMarker(
   db: Database,
@@ -222,7 +209,6 @@ function convertOccupiedTurnToMarker(
          compact_boundary_uuid = ?,
          updated_at_epoch = ?,
          tags = ?,
-         cites_recorded = 1,
          content = NULL,
          insight = NULL,
          significance_grade = NULL,

@@ -155,7 +155,6 @@ const SCHEMA_SQL = `
     files_modified TEXT,
     tool_call_count INTEGER,
     transcript_line_start INTEGER,
-    cites_recorded INTEGER NOT NULL DEFAULT 0,
     -- Which stored records this turn's recall/replay calls actually hit (D4).
     -- JSON array of {ref, strength}, where ref is a type-prefixed global id
     -- (turn:8942, session:15069, obs:77, segment:4) so the namespace stays
@@ -1242,7 +1241,6 @@ export function initializeSchema(db: Database): void {
   ensureTurnInvalidationColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureSegmentInsightColumn(db);
-  ensureTurnCitationsSchema(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
   retireLegacyTurnCitationsTable(db);
@@ -1264,7 +1262,7 @@ export function initializeSchema(db: Database): void {
   ensureNoteSettlementSessionEndTrigger(db);
   dropLegacyMemoriesTable(db);
   // Last on purpose: every other turns-column migration above (parent_turn_id,
-  // compact_boundary_uuid, consulted_memories, cites_recorded, ...) must have
+  // compact_boundary_uuid, consulted_memories, ...) must have
   // already landed on `turns` before this rebuild copies it, or the copy would
   // silently drop a column a database created between those migrations and
   // this one still needs.
@@ -1272,6 +1270,11 @@ export function initializeSchema(db: Database): void {
   // After the rebuild, not before: this rewrites rows in whichever table
   // answers to `turns` at the end of the chain.
   stripRetiredTopicTagNamespace(db);
+  // Also after `ensureTurnTypeMultiValueColumn`: this rebuild's own hardcoded
+  // `type` column definition assumes the canonical strict-array shape that
+  // function guarantees, so it must never be the one deciding what shape
+  // `type` is in.
+  retireTurnCitesRecordedColumn(db);
 }
 
 /**
@@ -1715,18 +1718,6 @@ function ensureTurnSignificanceGradeColumn(db: Database): void {
   );
 }
 
-// Structured citation edges (spec §B). The edge table itself is
-// `memory_edges` (ensureMemoryEdgesSchema); this function only carries the
-// `turns.cites_recorded` flag forward by ALTER on a database that predates
-// it. The flag — not a created-at epoch — is the "from-absent vs
-// recorded-empty" predicate: a turn created before this deployment but
-// extracted after it must still count as recorded, and a turn that genuinely
-// cites nothing must be distinguishable from one that predates the edge
-// table. Old rows land on 0 (never NULL) → legacy inline fallback.
-function ensureTurnCitationsSchema(db: Database): void {
-  addColumnIfMissing(db, "turns", "cites_recorded", "INTEGER NOT NULL DEFAULT 0");
-}
-
 // Mechanical retrieval provenance (spec D4). Old rows stay NULL, which reads as
 // "never observed" rather than "consulted nothing" — the column only starts
 // meaning something for turns captured after it existed.
@@ -1896,6 +1887,89 @@ function turnsTypeColumnIsStale(db: Database): boolean {
 }
 
 /**
+ * A column family with zero references anywhere in `src/` — the stall-
+ * watchdog feature they served is gone — but still standing on any real
+ * database old enough to have gained them before that removal (added via an
+ * `ALTER` this codebase no longer even contains the function for). Neither
+ * `turns` rebuild below is licensed to retire this family: that is a
+ * decision for its own ticket (`.scratch/extraction-redesign/spec.md` already
+ * names it a "退役列" for a future one to drop on purpose), so both carry it
+ * through VERBATIM — present or absent — using the exact DDL text the last
+ * version of this codebase that knew about them would have written.
+ *
+ * Found by running `retireTurnCitesRecordedColumn` against a copy of the real
+ * production database (ticket 10c's own testing discipline): that database's
+ * `turns` table still carries all four columns, `type` on it is ALSO still
+ * the pre-ticket-02 scalar shape, and `ensureTurnTypeMultiValueColumn`'s
+ * column list — written before these four columns existed — would have
+ * silently dropped them the moment it fired for real, on the very next
+ * reload. `assertNoUnexpectedTurnsColumns` below is the guard that turns the
+ * NEXT one of these into a loud failure instead of a repeat.
+ */
+const RETIRED_EXTRACTION_STALL_COLUMNS: ReadonlyArray<{
+  name: string;
+  ddl: string;
+}> = [
+  {
+    name: "extraction_stall_attempts",
+    ddl: "extraction_stall_attempts INTEGER NOT NULL DEFAULT 0 CHECK (extraction_stall_attempts >= 0)",
+  },
+  {
+    name: "extraction_stall_retry_at_ms",
+    ddl: "extraction_stall_retry_at_ms INTEGER",
+  },
+  {
+    name: "extraction_stall_retry_after_seq",
+    ddl: "extraction_stall_retry_after_seq INTEGER",
+  },
+  {
+    name: "extraction_stall_retry_mode",
+    ddl: "extraction_stall_retry_mode TEXT CHECK (extraction_stall_retry_mode IS NULL OR extraction_stall_retry_mode IN ('resume', 'forceFresh'))",
+  },
+];
+
+/** Only the subset of `RETIRED_EXTRACTION_STALL_COLUMNS` this database actually has. */
+function presentRetiredExtractionStallColumns(
+  db: Database,
+): ReadonlyArray<{ name: string; ddl: string }> {
+  return RETIRED_EXTRACTION_STALL_COLUMNS.filter((column) =>
+    hasColumn(db, "turns", column.name),
+  );
+}
+
+/**
+ * The safety net for the class of bug `RETIRED_EXTRACTION_STALL_COLUMNS` was
+ * found as: a `turns` rebuild whose column list was written against what this
+ * codebase knows about silently drops anything a database carries OUTSIDE
+ * that list, because an explicit `INSERT ... SELECT` column list only ever
+ * copies what it names. Retiring a column is a deliberate, per-column
+ * decision (this ticket's whole point); accidentally retiring a different one
+ * because nobody told the rebuild it existed is the opposite of that. Called
+ * INSIDE the write transaction, before either rebuild touches the table, so a
+ * throw here leaves the database exactly as it was.
+ */
+function assertNoUnexpectedTurnsColumns(
+  db: Database,
+  knownColumns: readonly string[],
+  droppedColumns: readonly string[],
+  rebuildName: string,
+): void {
+  const actual = db
+    .query<{ name: string }, []>("PRAGMA table_info(turns)")
+    .all()
+    .map((row) => row.name);
+  const accounted = new Set([...knownColumns, ...droppedColumns]);
+  const unexpected = actual.filter((name) => !accounted.has(name));
+  if (unexpected.length > 0) {
+    throw new Error(
+      `${rebuildName}: turns carries column(s) this rebuild does not know ` +
+        `about and would silently drop: ${unexpected.join(", ")}. Add them ` +
+        "to the rebuild's column list (or its explicit drop list) before retrying.",
+    );
+  }
+}
+
+/**
  * Widen `turns.type` from a nullable scalar to a JSON array (ticket 02, spec
  * B5). Every existing non-null scalar is wrapped into a one-element array
  * (`discovery` → `["discovery"]`, spec's Out of Scope: a value-preserving
@@ -1941,6 +2015,19 @@ function turnsTypeColumnIsStale(db: Database): boolean {
  * `initializeSchema`, after every one of those functions has already run
  * against the old table this call, so nothing later in the chain would
  * recreate what this rebuild just destroyed.
+ *
+ * Carries `extraction_stall_*` through even though nothing in this codebase
+ * reads or writes them any more (grep confirms zero references — the feature
+ * they served is gone, and `.scratch/extraction-redesign/spec.md` already
+ * names them a retired column family for a FUTURE ticket to drop on purpose).
+ * Found by running this rebuild against a copy of the real production
+ * database (ticket 10c's own testing discipline): its `turns` table still
+ * carries all four, `type` on that database is ALSO still the pre-ticket-02
+ * scalar shape, and this rebuild's column list — written before those four
+ * columns existed — silently dropped them the moment it fired for real. A
+ * column this codebase has already stopped declaring is not this rebuild's
+ * to retire; `assertNoUnexpectedTurnsColumns` below is the guard that turns
+ * the next one of these into a loud failure instead of a repeat.
  */
 function ensureTurnTypeMultiValueColumn(db: Database): void {
   if (!turnsTypeColumnIsStale(db)) {
@@ -1953,6 +2040,36 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
       if (!turnsTypeColumnIsStale(db)) {
         return;
       }
+
+      // Present-or-absent, never assumed: this rebuild also runs against a
+      // database old enough to predate the whole retired feature.
+      const stallColumns = presentRetiredExtractionStallColumns(db);
+      const stallColumnDdl = stallColumns
+        .map((column) => `          ${column.ddl},`)
+        .join("\n");
+      const stallColumnNames = stallColumns
+        .map((column) => column.name)
+        .join(", ");
+
+      const canonicalColumns = [
+        "id", "session_id", "prompt_number", "content_prompt_id",
+        "was_interrupted", "was_rolled_back", "status", "user_prompt",
+        "assistant_response", "assistant_transcript", "title", "content",
+        "insight", "type", "significance_grade", "tags", "files_read",
+        "files_modified", "tool_call_count", "transcript_line_start",
+        "consulted_memories", "compact_boundary_uuid", "parent_turn_id",
+        "created_at_epoch", "updated_at_epoch",
+      ];
+      assertNoUnexpectedTurnsColumns(
+        db,
+        [...canonicalColumns, ...stallColumns.map((c) => c.name)],
+        // `cites_recorded`: not this rebuild's to carry or drop. Ticket 10c's
+        // `retireTurnCitesRecordedColumn` runs right after this one in
+        // `initializeSchema` and owns it exclusively — present here or not,
+        // it is accounted for, not unexpected.
+        ["cites_recorded"],
+        "ensureTurnTypeMultiValueColumn",
+      );
 
       db.exec(`
         CREATE TABLE turns_pre_multivalued_type_new (
@@ -1978,7 +2095,7 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
           files_modified TEXT,
           tool_call_count INTEGER,
           transcript_line_start INTEGER,
-          cites_recorded INTEGER NOT NULL DEFAULT 0,
+${stallColumnDdl}
           consulted_memories TEXT,
           compact_boundary_uuid TEXT,
           parent_turn_id INTEGER,
@@ -1994,7 +2111,8 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
           was_rolled_back, status, user_prompt, assistant_response,
           assistant_transcript, title, content, insight, type,
           significance_grade, tags, files_read, files_modified,
-          tool_call_count, transcript_line_start, cites_recorded,
+          tool_call_count, transcript_line_start,
+          ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         )
@@ -2008,7 +2126,8 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
             ELSE json_array(type)
           END,
           significance_grade, tags, files_read, files_modified,
-          tool_call_count, transcript_line_start, cites_recorded,
+          tool_call_count, transcript_line_start,
+          ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         FROM turns
@@ -2060,6 +2179,186 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
     if (violations.length > 0) {
       throw new Error(
         `turns table rebuild left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`,
+      );
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
+/**
+ * Ticket 10c: `cites_recorded` was the "from-absent vs recorded-empty"
+ * predicate a legacy citation reader consulted before falling back to
+ * parsing inline `[T<n>]` out of `content`. Ticket 06 made
+ * `getEffectiveCitations` an unconditional union of the edge table and that
+ * parse, and the flag has driven no read since (`db/citations.ts`'s own doc
+ * comment says so — confirmed by grep across `src/` and `tests/` before this
+ * migration was written). It is now write-only dead storage.
+ *
+ * `NOT NULL`, so this is the same rebuild-and-swap idiom
+ * `ensureTurnTypeMultiValueColumn` (just above) uses, rather than
+ * `ALTER TABLE ... DROP COLUMN` — which the SQLite version floor this project
+ * has to support does not reliably ship.
+ *
+ * Runs strictly AFTER `ensureTurnTypeMultiValueColumn` (see that call site's
+ * own comment in `initializeSchema`): by the time this fires, `turns.type` is
+ * guaranteed to already be in its canonical strict-array shape, so this
+ * rebuild can carry every other column through unexamined — copying `type`
+ * verbatim like everything else — without ever being the one that has to
+ * decide what shape it is in.
+ *
+ * Detection is a direct `hasColumn` check, not a stored-DDL substring match
+ * the way `note_debt`/`memory_edges`'s CHECK-widening rebuilds detect
+ * staleness: unlike those, this removes a column rather than widening a
+ * CHECK, so "the column is gone" is directly observable and is the whole
+ * predicate. A fresh database built from the current DDL (which never had the
+ * column) and a database this has already run against both skip cleanly. A
+ * database whose `type` was ALSO stale skips too, by the time this runs —
+ * `ensureTurnTypeMultiValueColumn`'s own rebuild, above, no longer carries
+ * `cites_recorded` into its target schema, so it already dropped the column
+ * as a side effect.
+ *
+ * Also carries `RETIRED_EXTRACTION_STALL_COLUMNS` through, present or absent
+ * — same reasoning as `ensureTurnTypeMultiValueColumn`'s own copy of this
+ * comment, and the same `assertNoUnexpectedTurnsColumns` guard against the
+ * next column neither rebuild has been told about.
+ */
+function retireTurnCitesRecordedColumn(db: Database): void {
+  if (!hasColumn(db, "turns", "cites_recorded")) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!hasColumn(db, "turns", "cites_recorded")) {
+        return;
+      }
+
+      const stallColumns = presentRetiredExtractionStallColumns(db);
+      const stallColumnDdl = stallColumns
+        .map((column) => `          ${column.ddl},`)
+        .join("\n");
+      const stallColumnNames = stallColumns
+        .map((column) => column.name)
+        .join(", ");
+
+      const canonicalColumns = [
+        "id", "session_id", "prompt_number", "content_prompt_id",
+        "was_interrupted", "was_rolled_back", "status", "user_prompt",
+        "assistant_response", "assistant_transcript", "title", "content",
+        "insight", "type", "significance_grade", "tags", "files_read",
+        "files_modified", "tool_call_count", "transcript_line_start",
+        "consulted_memories", "compact_boundary_uuid", "parent_turn_id",
+        "created_at_epoch", "updated_at_epoch",
+      ];
+      assertNoUnexpectedTurnsColumns(
+        db,
+        [...canonicalColumns, ...stallColumns.map((c) => c.name)],
+        ["cites_recorded"],
+        "retireTurnCitesRecordedColumn",
+      );
+
+      db.exec(`
+        CREATE TABLE turns_pre_cites_recorded_retired (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          prompt_number INTEGER NOT NULL,
+          content_prompt_id TEXT,
+          was_interrupted INTEGER NOT NULL DEFAULT 0,
+          was_rolled_back INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'active',
+          user_prompt TEXT,
+          assistant_response TEXT,
+          assistant_transcript TEXT,
+          title TEXT,
+          content TEXT,
+          insight TEXT,
+          type TEXT NOT NULL DEFAULT '[]' CHECK (json_type(type) = 'array'),
+          significance_grade INTEGER CHECK (
+            significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
+          ),
+          tags TEXT,
+          files_read TEXT,
+          files_modified TEXT,
+          tool_call_count INTEGER,
+          transcript_line_start INTEGER,
+${stallColumnDdl}
+          consulted_memories TEXT,
+          compact_boundary_uuid TEXT,
+          parent_turn_id INTEGER,
+          created_at_epoch INTEGER NOT NULL,
+          updated_at_epoch INTEGER,
+          UNIQUE(session_id, prompt_number)
+        )
+      `);
+
+      db.exec(`
+        INSERT INTO turns_pre_cites_recorded_retired (
+          id, session_id, prompt_number, content_prompt_id, was_interrupted,
+          was_rolled_back, status, user_prompt, assistant_response,
+          assistant_transcript, title, content, insight, type,
+          significance_grade, tags, files_read, files_modified,
+          tool_call_count, transcript_line_start,
+          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          consulted_memories, compact_boundary_uuid, parent_turn_id,
+          created_at_epoch, updated_at_epoch
+        )
+        SELECT
+          id, session_id, prompt_number, content_prompt_id, was_interrupted,
+          was_rolled_back, status, user_prompt, assistant_response,
+          assistant_transcript, title, content, insight, type,
+          significance_grade, tags, files_read, files_modified,
+          tool_call_count, transcript_line_start,
+          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          consulted_memories, compact_boundary_uuid, parent_turn_id,
+          created_at_epoch, updated_at_epoch
+        FROM turns
+      `);
+
+      db.exec("DROP TABLE turns");
+      db.exec(
+        "ALTER TABLE turns_pre_cites_recorded_retired RENAME TO turns",
+      );
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
+          ON turns(session_id, prompt_number)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_turns_status_created
+          ON turns(status, created_at_epoch)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_turns_created_at
+          ON turns(created_at_epoch)
+      `);
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_compact_boundary_uuid
+          ON turns(session_id, compact_boundary_uuid)
+          WHERE compact_boundary_uuid IS NOT NULL
+      `);
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_prompt_id
+          ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
+      `);
+      db.exec(`
+        CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
+          AFTER DELETE ON turns
+          BEGIN
+            DELETE FROM memory_edges
+            WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
+               OR (cited_kind = 'turn' AND cited_id = OLD.id);
+          END;
+      `);
+    });
+
+    const violations = db
+      .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+      .all();
+    if (violations.length > 0) {
+      throw new Error(
+        `turns table rebuild left ${violations.length} foreign key violation(s) while retiring cites_recorded: ${JSON.stringify(violations)}`,
       );
     }
   } finally {

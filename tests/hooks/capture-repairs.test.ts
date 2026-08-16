@@ -283,9 +283,11 @@ describe("capture repairs", () => {
   });
 
   describe("occupied-promptId conversion", () => {
-    function seedOccupiedTurn(
-      options: { citesRecorded?: boolean } = {},
-    ): { turnId: number; neighbourId: number; path: string } {
+    function seedOccupiedTurn(): {
+      turnId: number;
+      neighbourId: number;
+      path: string;
+    } {
       const path = writeTranscript("occupied.jsonl", [
         boundary("boundary-1", 512, "auto"),
         wrapper("summary-1", "boundary-1", "prompt-9"),
@@ -302,17 +304,16 @@ describe("capture repairs", () => {
            title, content, insight, type, significance_grade, tags,
            files_read, files_modified, tool_call_count,
            was_interrupted, was_rolled_back,
-           cites_recorded, created_at_epoch, updated_at_epoch
+           created_at_epoch, updated_at_epoch
          ) VALUES (?, 7, 'prompt-9', 41, 'extracted', 'the real prompt',
                    'the real response', 'full narration',
                    'Real title', 'Real content', 'Real insight', '["decision"]', 3, ?,
-                   ?, ?, 12, 1, 1, ?, 700, 800)`,
+                   ?, ?, 12, 1, 1, 700, 800)`,
       ).run(
         sessionId,
         JSON.stringify(["topic:capture"]),
         JSON.stringify(["a.ts"]),
         JSON.stringify(["b.ts"]),
-        options.citesRecorded === false ? 0 : 1,
       );
       const turnId = db
         .query<{ id: number }, []>("SELECT id FROM turns ORDER BY id DESC LIMIT 1")
@@ -370,7 +371,6 @@ describe("capture repairs", () => {
         // set — the boundary's own metadata, so a converted marker renders
         // exactly like an inserted one
         tags: ["compact:pre_tokens=512", "compact:trigger=auto"],
-        citesRecorded: true,
         // cleared
         content: null,
         insight: null,
@@ -401,16 +401,6 @@ describe("capture repairs", () => {
       // Outgoing edges came from the erased phantom extraction and must not keep
       // feeding in-degree; incoming edges are another turn's provenance.
       expect(citationPairs()).toEqual([[neighbourId, turnId]]);
-    });
-
-    test("makes an un-recorded row's empty citation set authoritative", () => {
-      const { turnId, path } = seedOccupiedTurn({ citesRecorded: false });
-      expect(getTurnById(db, turnId)?.citesRecorded).toBe(false);
-
-      repair(path);
-
-      expect(getTurnById(db, turnId)?.citesRecorded).toBe(true);
-      expect(citationPairs()).toEqual([]);
     });
 
     test("a later Stop backfill cannot mutate the converted marker", () => {

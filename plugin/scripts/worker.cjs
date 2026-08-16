@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msvyskne" : "dev";
+var BUILD_ID = true ? "0.10.0-msw0w6xh" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -2079,9 +2079,9 @@ function updateSessionFields(db, sessionId, input, nowEpoch) {
   if (!existing) {
     return null;
   }
-  const resolve7 = (value, current2) => {
+  const resolve7 = (value, current) => {
     if (value === void 0) {
-      return current2;
+      return current;
     }
     if (value === null) {
       return null;
@@ -2090,21 +2090,20 @@ function updateSessionFields(db, sessionId, input, nowEpoch) {
   };
   const title = resolve7(input.title, existing.title);
   const content = resolve7(input.content, existing.content);
+  const insight = resolve7(input.insight, existing.insight);
   const decision = resolve7(input.decision, existing.decision);
   const done = resolve7(input.done, existing.done);
-  const current = resolve7(input.current, existing.current);
   const nextSteps = resolve7(input.nextSteps, existing.nextSteps);
   const reference = resolve7(input.reference, existing.reference);
   const session = db.query(`
       UPDATE sessions SET
         title = ?,
         content = ?,
+        insight = ?,
         decision = ?,
         done = ?,
-        "current" = ?,
         next_steps = ?,
         "reference" = ?,
-        insight = NULL,
         summary_updated_at_epoch = ?,
         updated_at_epoch = ?
       WHERE id = ?
@@ -2133,9 +2132,9 @@ function updateSessionFields(db, sessionId, input, nowEpoch) {
     `).get(
     title,
     content,
+    insight,
     decision,
     done,
-    current,
     nextSteps,
     reference,
     nowEpoch,
@@ -2149,9 +2148,9 @@ function updateSessionFields(db, sessionId, input, nowEpoch) {
   const references = [
     ...parseQualifiedReferences(session.title),
     ...parseQualifiedReferences(session.content),
+    ...parseQualifiedReferences(session.insight),
     ...parseQualifiedReferences(session.decision),
     ...parseQualifiedReferences(session.done),
-    ...parseQualifiedReferences(session.current),
     ...parseQualifiedReferences(session.nextSteps),
     ...parseQualifiedReferences(session.reference)
   ];
@@ -2166,6 +2165,14 @@ function updateSessionFields(db, sessionId, input, nowEpoch) {
     "text-ref"
   );
   return session;
+}
+function countTurnsSince(db, sessionId, sinceEpoch) {
+  return db.query(
+    `SELECT COUNT(*) AS count FROM turns
+         WHERE session_id = ?
+           AND status != 'undone'
+           AND created_at_epoch > ?`
+  ).get(sessionId, sinceEpoch ?? -1)?.count ?? 0;
 }
 function getSession(db, id) {
   return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
@@ -2322,7 +2329,6 @@ var TURN_SELECT = `
     files_modified AS filesModified,
     tool_call_count AS toolCallCount,
     parent_turn_id AS parentTurnId,
-    cites_recorded AS citesRecorded,
     compact_boundary_uuid AS compactBoundaryUuid,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
@@ -2349,8 +2355,7 @@ function mapTurnRow(row) {
     tags: parseJsonArray2(row.tags),
     filesRead: parseJsonArray2(row.filesRead),
     filesModified: parseJsonArray2(row.filesModified),
-    parentTurnId: row.parentTurnId ?? null,
-    citesRecorded: row.citesRecorded === 1
+    parentTurnId: row.parentTurnId ?? null
   };
 }
 function getTurn(db, sessionId, promptNumber) {
@@ -2426,7 +2431,6 @@ function updateTurnById(db, turnId, input) {
             files_modified AS filesModified,
             tool_call_count AS toolCallCount,
             parent_turn_id AS parentTurnId,
-            cites_recorded AS citesRecorded,
             compact_boundary_uuid AS compactBoundaryUuid,
             created_at_epoch AS createdAtEpoch,
             updated_at_epoch AS updatedAtEpoch
@@ -2881,7 +2885,6 @@ var SCHEMA_SQL = `
     files_modified TEXT,
     tool_call_count INTEGER,
     transcript_line_start INTEGER,
-    cites_recorded INTEGER NOT NULL DEFAULT 0,
     -- Which stored records this turn's recall/replay calls actually hit (D4).
     -- JSON array of {ref, strength}, where ref is a type-prefixed global id
     -- (turn:8942, session:15069, obs:77, segment:4) so the namespace stays
@@ -3729,7 +3732,6 @@ function initializeSchema(db) {
   ensureTurnInvalidationColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureSegmentInsightColumn(db);
-  ensureTurnCitationsSchema(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
   retireLegacyTurnCitationsTable(db);
@@ -3752,6 +3754,7 @@ function initializeSchema(db) {
   dropLegacyMemoriesTable(db);
   ensureTurnTypeMultiValueColumn(db);
   stripRetiredTopicTagNamespace(db);
+  retireTurnCitesRecordedColumn(db);
 }
 function stripRetiredTopicTagNamespace(db) {
   const rows = db.query(
@@ -3977,9 +3980,6 @@ function ensureTurnSignificanceGradeColumn(db) {
     "INTEGER CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)"
   );
 }
-function ensureTurnCitationsSchema(db) {
-  addColumnIfMissing(db, "turns", "cites_recorded", "INTEGER NOT NULL DEFAULT 0");
-}
 function ensureTurnConsultedMemoriesColumn(db) {
   addColumnIfMissing(db, "turns", "consulted_memories", "TEXT");
 }
@@ -4087,6 +4087,39 @@ function turnsTypeColumnIsStale(db) {
   ).get()?.sql ?? null;
   return storedDdl !== null && !storedDdl.includes("CHECK (json_type(type) = 'array')");
 }
+var RETIRED_EXTRACTION_STALL_COLUMNS = [
+  {
+    name: "extraction_stall_attempts",
+    ddl: "extraction_stall_attempts INTEGER NOT NULL DEFAULT 0 CHECK (extraction_stall_attempts >= 0)"
+  },
+  {
+    name: "extraction_stall_retry_at_ms",
+    ddl: "extraction_stall_retry_at_ms INTEGER"
+  },
+  {
+    name: "extraction_stall_retry_after_seq",
+    ddl: "extraction_stall_retry_after_seq INTEGER"
+  },
+  {
+    name: "extraction_stall_retry_mode",
+    ddl: "extraction_stall_retry_mode TEXT CHECK (extraction_stall_retry_mode IS NULL OR extraction_stall_retry_mode IN ('resume', 'forceFresh'))"
+  }
+];
+function presentRetiredExtractionStallColumns(db) {
+  return RETIRED_EXTRACTION_STALL_COLUMNS.filter(
+    (column) => hasColumn(db, "turns", column.name)
+  );
+}
+function assertNoUnexpectedTurnsColumns(db, knownColumns, droppedColumns, rebuildName) {
+  const actual = db.query("PRAGMA table_info(turns)").all().map((row) => row.name);
+  const accounted = /* @__PURE__ */ new Set([...knownColumns, ...droppedColumns]);
+  const unexpected = actual.filter((name) => !accounted.has(name));
+  if (unexpected.length > 0) {
+    throw new Error(
+      `${rebuildName}: turns carries column(s) this rebuild does not know about and would silently drop: ${unexpected.join(", ")}. Add them to the rebuild's column list (or its explicit drop list) before retrying.`
+    );
+  }
+}
 function ensureTurnTypeMultiValueColumn(db) {
   if (!turnsTypeColumnIsStale(db)) {
     return;
@@ -4097,6 +4130,46 @@ function ensureTurnTypeMultiValueColumn(db) {
       if (!turnsTypeColumnIsStale(db)) {
         return;
       }
+      const stallColumns = presentRetiredExtractionStallColumns(db);
+      const stallColumnDdl = stallColumns.map((column) => `          ${column.ddl},`).join("\n");
+      const stallColumnNames = stallColumns.map((column) => column.name).join(", ");
+      const canonicalColumns = [
+        "id",
+        "session_id",
+        "prompt_number",
+        "content_prompt_id",
+        "was_interrupted",
+        "was_rolled_back",
+        "status",
+        "user_prompt",
+        "assistant_response",
+        "assistant_transcript",
+        "title",
+        "content",
+        "insight",
+        "type",
+        "significance_grade",
+        "tags",
+        "files_read",
+        "files_modified",
+        "tool_call_count",
+        "transcript_line_start",
+        "consulted_memories",
+        "compact_boundary_uuid",
+        "parent_turn_id",
+        "created_at_epoch",
+        "updated_at_epoch"
+      ];
+      assertNoUnexpectedTurnsColumns(
+        db,
+        [...canonicalColumns, ...stallColumns.map((c) => c.name)],
+        // `cites_recorded`: not this rebuild's to carry or drop. Ticket 10c's
+        // `retireTurnCitesRecordedColumn` runs right after this one in
+        // `initializeSchema` and owns it exclusively — present here or not,
+        // it is accounted for, not unexpected.
+        ["cites_recorded"],
+        "ensureTurnTypeMultiValueColumn"
+      );
       db.exec(`
         CREATE TABLE turns_pre_multivalued_type_new (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4121,7 +4194,7 @@ function ensureTurnTypeMultiValueColumn(db) {
           files_modified TEXT,
           tool_call_count INTEGER,
           transcript_line_start INTEGER,
-          cites_recorded INTEGER NOT NULL DEFAULT 0,
+${stallColumnDdl}
           consulted_memories TEXT,
           compact_boundary_uuid TEXT,
           parent_turn_id INTEGER,
@@ -4136,7 +4209,8 @@ function ensureTurnTypeMultiValueColumn(db) {
           was_rolled_back, status, user_prompt, assistant_response,
           assistant_transcript, title, content, insight, type,
           significance_grade, tags, files_read, files_modified,
-          tool_call_count, transcript_line_start, cites_recorded,
+          tool_call_count, transcript_line_start,
+          ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         )
@@ -4150,7 +4224,8 @@ function ensureTurnTypeMultiValueColumn(db) {
             ELSE json_array(type)
           END,
           significance_grade, tags, files_read, files_modified,
-          tool_call_count, transcript_line_start, cites_recorded,
+          tool_call_count, transcript_line_start,
+          ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         FROM turns
@@ -4194,6 +4269,152 @@ function ensureTurnTypeMultiValueColumn(db) {
     if (violations.length > 0) {
       throw new Error(
         `turns table rebuild left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`
+      );
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+function retireTurnCitesRecordedColumn(db) {
+  if (!hasColumn(db, "turns", "cites_recorded")) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!hasColumn(db, "turns", "cites_recorded")) {
+        return;
+      }
+      const stallColumns = presentRetiredExtractionStallColumns(db);
+      const stallColumnDdl = stallColumns.map((column) => `          ${column.ddl},`).join("\n");
+      const stallColumnNames = stallColumns.map((column) => column.name).join(", ");
+      const canonicalColumns = [
+        "id",
+        "session_id",
+        "prompt_number",
+        "content_prompt_id",
+        "was_interrupted",
+        "was_rolled_back",
+        "status",
+        "user_prompt",
+        "assistant_response",
+        "assistant_transcript",
+        "title",
+        "content",
+        "insight",
+        "type",
+        "significance_grade",
+        "tags",
+        "files_read",
+        "files_modified",
+        "tool_call_count",
+        "transcript_line_start",
+        "consulted_memories",
+        "compact_boundary_uuid",
+        "parent_turn_id",
+        "created_at_epoch",
+        "updated_at_epoch"
+      ];
+      assertNoUnexpectedTurnsColumns(
+        db,
+        [...canonicalColumns, ...stallColumns.map((c) => c.name)],
+        ["cites_recorded"],
+        "retireTurnCitesRecordedColumn"
+      );
+      db.exec(`
+        CREATE TABLE turns_pre_cites_recorded_retired (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          prompt_number INTEGER NOT NULL,
+          content_prompt_id TEXT,
+          was_interrupted INTEGER NOT NULL DEFAULT 0,
+          was_rolled_back INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'active',
+          user_prompt TEXT,
+          assistant_response TEXT,
+          assistant_transcript TEXT,
+          title TEXT,
+          content TEXT,
+          insight TEXT,
+          type TEXT NOT NULL DEFAULT '[]' CHECK (json_type(type) = 'array'),
+          significance_grade INTEGER CHECK (
+            significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
+          ),
+          tags TEXT,
+          files_read TEXT,
+          files_modified TEXT,
+          tool_call_count INTEGER,
+          transcript_line_start INTEGER,
+${stallColumnDdl}
+          consulted_memories TEXT,
+          compact_boundary_uuid TEXT,
+          parent_turn_id INTEGER,
+          created_at_epoch INTEGER NOT NULL,
+          updated_at_epoch INTEGER,
+          UNIQUE(session_id, prompt_number)
+        )
+      `);
+      db.exec(`
+        INSERT INTO turns_pre_cites_recorded_retired (
+          id, session_id, prompt_number, content_prompt_id, was_interrupted,
+          was_rolled_back, status, user_prompt, assistant_response,
+          assistant_transcript, title, content, insight, type,
+          significance_grade, tags, files_read, files_modified,
+          tool_call_count, transcript_line_start,
+          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          consulted_memories, compact_boundary_uuid, parent_turn_id,
+          created_at_epoch, updated_at_epoch
+        )
+        SELECT
+          id, session_id, prompt_number, content_prompt_id, was_interrupted,
+          was_rolled_back, status, user_prompt, assistant_response,
+          assistant_transcript, title, content, insight, type,
+          significance_grade, tags, files_read, files_modified,
+          tool_call_count, transcript_line_start,
+          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          consulted_memories, compact_boundary_uuid, parent_turn_id,
+          created_at_epoch, updated_at_epoch
+        FROM turns
+      `);
+      db.exec("DROP TABLE turns");
+      db.exec(
+        "ALTER TABLE turns_pre_cites_recorded_retired RENAME TO turns"
+      );
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
+          ON turns(session_id, prompt_number)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_turns_status_created
+          ON turns(status, created_at_epoch)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_turns_created_at
+          ON turns(created_at_epoch)
+      `);
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_compact_boundary_uuid
+          ON turns(session_id, compact_boundary_uuid)
+          WHERE compact_boundary_uuid IS NOT NULL
+      `);
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_prompt_id
+          ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
+      `);
+      db.exec(`
+        CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
+          AFTER DELETE ON turns
+          BEGIN
+            DELETE FROM memory_edges
+            WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
+               OR (cited_kind = 'turn' AND cited_id = OLD.id);
+          END;
+      `);
+    });
+    const violations = db.query("PRAGMA foreign_key_check").all();
+    if (violations.length > 0) {
+      throw new Error(
+        `turns table rebuild left ${violations.length} foreign key violation(s) while retiring cites_recorded: ${JSON.stringify(violations)}`
       );
     }
   } finally {
@@ -7138,7 +7359,8 @@ function formatSessionExpandedWithMode(session, mode, truncate, truncateCap, sig
   }
   if (session.decision) {
     pushBulletField("decision", session.decision);
-  } else if (session.insight && session.insight.length > 0) {
+  }
+  if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
       lines,
@@ -7147,7 +7369,6 @@ function formatSessionExpandedWithMode(session, mode, truncate, truncateCap, sig
     );
   }
   pushBulletField("done", session.done);
-  pushField("current", session.current);
   pushField("next", session.nextSteps);
   pushBulletField("reference", session.reference);
   return lines.join("\n");
@@ -9833,7 +10054,6 @@ function buildSessionSummaryFields(db, session) {
     nextSteps: session.nextSteps,
     decision: resolveTurnPointers(db, session.id, session.decision),
     done: resolveTurnPointers(db, session.id, session.done),
-    current: session.current,
     reference: session.reference
   };
 }
@@ -10961,16 +11181,16 @@ function buildSessionStateLines(input, capPriorityFields = false, includeHistori
     }
   };
   pushField("content", input.content, 400);
-  pushField("current", input.current, 400);
   pushField("next", input.nextSteps, 200);
   if (!includeHistoricalFields) {
     return lines;
   }
   if (input.decision) {
     pushBulletField("decision", input.decision);
-  } else if ((input.legacyInsight?.length ?? 0) > 0) {
+  }
+  if ((input.insight?.length ?? 0) > 0) {
     lines.push("  insight:");
-    for (const item of input.legacyInsight ?? []) {
+    for (const item of input.insight ?? []) {
       lines.push(`    - ${item}`);
     }
   }
@@ -10981,14 +11201,14 @@ function buildSessionStateLines(input, capPriorityFields = false, includeHistori
 function renderSessionStateOutput(input) {
   return buildSessionStateLines(input).join("\n");
 }
-function renderBoundedSessionStateOutput(input) {
+function renderBoundedSessionStateOutput(input, tokenBudget = CURRENT_SESSION_STATE_TOKEN_BUDGET) {
   const full = renderSessionStateOutput(input);
-  if (estimateDiaryTokens(full) <= CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+  if (estimateDiaryTokens(full) <= tokenBudget) {
     return full;
   }
   const pointer = `  \u2026 state truncated; full summary: recall(id="S${input.id}")`;
   const uncappedStateLines = buildSessionStateLines(input, false, false);
-  const stateFitsUncapped = estimateDiaryTokens([...uncappedStateLines, pointer].join("\n")) <= CURRENT_SESSION_STATE_TOKEN_BUDGET;
+  const stateFitsUncapped = estimateDiaryTokens([...uncappedStateLines, pointer].join("\n")) <= tokenBudget;
   const lines = buildSessionStateLines(input, !stateFitsUncapped);
   const included = [];
   for (let index = 0; index < lines.length; index += 1) {
@@ -10997,19 +11217,15 @@ function renderBoundedSessionStateOutput(input) {
       lines[index],
       pointer
     ].join("\n");
-    if (estimateDiaryTokens(candidate) > CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+    if (estimateDiaryTokens(candidate) > tokenBudget) {
       break;
     }
     included.push(lines[index]);
   }
-  const withPointer = [...included, pointer].join("\n");
-  if (estimateDiaryTokens(withPointer) <= CURRENT_SESSION_STATE_TOKEN_BUDGET) {
-    return withPointer;
-  }
-  return included.join("\n");
+  return [...included, pointer].join("\n");
 }
-function renderSessionStateInjection(input) {
-  return renderBoundedSessionStateOutput(input);
+function renderSessionStateInjection(input, tokenBudget) {
+  return renderBoundedSessionStateOutput(input, tokenBudget);
 }
 
 // src/shared/tag-stripping.ts
@@ -46200,7 +46416,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // considered and rejected was moving the procedure to the SessionStart
   // injection, which is cheaper per turn but re-splits the contract T586
   // had just given one home.
-  note: 'Write or correct a turn\'s note, or a session\'s summary. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief \u2014 never recalled or invented) or `session` (`S<session>`). Timing: the SessionStart block\'s three rules. A non-empty field needs `mode.<field>`: `"overwrite"` replaces it whole, `"append"` adds (text: newline-joined; type/tags: unioned). Empty needs no mode; omitted stays untouched. Clearing (insight/grade/session fields) needs `null` + overwrite mode. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored.\nTurn \u2014 title (~' + NOTE_TOKEN_BUDGET.title + " tok): `<activity>+<topic>: <what this turn covered>`, the real stage. content (~" + NOTE_TOKEN_BUDGET.content + " tok): the conclusion, then the evidence chain \u2014 rejected alternatives with reasons; never restate the title, never narrate looking. A first note needs both title and content. insight (~" + NOTE_TOKEN_BUDGET.insight + " tok, default none): long-term knowledge orthogonal to the conclusion, claim first. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction \u2014 omit or [] when none fit, never guess. tags: bare topic words, no prefix. grade: 0-4. Receipt reports token counts and each touched field's post-write total; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson. `crossSession: true` only for another session's turn. Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content. Goes last in its batch.\nRelations \u2014 evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target this write does not cite rejects the call. Four ordered questions, first yes wins: (1) Did the citing turn overturn it? \u2192 supersedes. (2) Did it test the claim, for or against? \u2192 evidenceFor/Against. (3) If the cited turn were wrong, would the citing turn's conclusion also be wrong? \u2192 dependsOn. (4) None \u2192 no relation. Never soften (3) to \"used\"/\"built on\".\nSession \u2014 title/content: a compressed view for another session browsing this one. decision/done/current/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations.",
+  note: 'Write or correct a turn\'s note, or a session\'s summary. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief \u2014 never recalled or invented) or `session` (`S<session>`). Timing: the SessionStart block\'s three rules. A non-empty field needs `mode.<field>`: `"overwrite"` replaces it whole, `"append"` adds (text: newline-joined; type/tags: unioned). Empty needs no mode; omitted stays untouched. Clearing (insight/grade/session fields) needs `null` + overwrite mode. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored.\nTurn \u2014 title (~' + NOTE_TOKEN_BUDGET.title + " tok): `<activity>+<topic>: <what this turn covered>`, the real stage. content (~" + NOTE_TOKEN_BUDGET.content + " tok): the conclusion, then the evidence chain \u2014 rejected alternatives with reasons; never restate the title, never narrate looking. A first note needs both title and content. insight (~" + NOTE_TOKEN_BUDGET.insight + " tok, default none): long-term knowledge orthogonal to the conclusion, claim first. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction \u2014 omit or [] when none fit, never guess. tags: bare topic words, no prefix. grade: 0-4. Receipt reports token counts and each touched field's post-write total; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson. `crossSession: true` only for another session's turn. Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content. Goes last in its batch.\nRelations \u2014 evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target this write does not cite rejects the call. Four ordered questions, first yes wins: (1) Did the citing turn overturn it? \u2192 supersedes. (2) Did it test the claim, for or against? \u2192 evidenceFor/Against. (3) If the cited turn were wrong, would the citing turn's conclusion also be wrong? \u2192 dependsOn. (4) None \u2192 no relation. Never soften (3) to \"used\"/\"built on\".\nSession \u2014 title/content/insight: a compressed view for another session browsing this one. decision/done/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations.",
   // ticket 08 (spec G8): the coverage predicate pulled by the agent, not the
   // Stop hook (ticket 11) or the completion gate (ticket 09) — those call the
   // same underlying predicate (db/coverage.ts's `computeCoverageGaps`)
@@ -46231,7 +46447,6 @@ var noteModeShape = external_exports.object({
   grade: fieldModeEnum.optional(),
   decision: fieldModeEnum.optional(),
   done: fieldModeEnum.optional(),
-  current: fieldModeEnum.optional(),
   next_steps: fieldModeEnum.optional(),
   reference: fieldModeEnum.optional()
 }).strict().optional();
@@ -46263,10 +46478,14 @@ var noteInputShape = {
   evidenceAgainst: external_exports.array(external_exports.string()).optional(),
   supersedes: external_exports.array(external_exports.string()).optional(),
   dependsOn: external_exports.array(external_exports.string()).optional(),
-  // Session fields (D2/D4 — seven fields; ticket 04 trims the set).
+  // Session fields (D2/D4). Seven in total: `title`/`content`/`insight` are
+  // declared above and shared with the turn surface, and these four are the
+  // session's own. `current` is DELETED (ticket 04) and deliberately absent
+  // from the schema, so the model is never offered a field that no longer
+  // exists; a call that sends it anyway is refused by name in mcp/note.ts
+  // rather than having the field dropped in silence.
   decision: external_exports.string().nullable().optional(),
   done: external_exports.string().nullable().optional(),
-  current: external_exports.string().nullable().optional(),
   next_steps: external_exports.string().nullable().optional(),
   reference: external_exports.string().nullable().optional(),
   mode: noteModeShape
@@ -46388,6 +46607,37 @@ function checkTool(db, rawInput) {
   );
 }
 
+// src/mcp/session-summary.ts
+var SESSION_FIELD_GUIDANCE = {
+  title: 30,
+  content: 250,
+  insight: 80,
+  next_steps: 250,
+  decision: 300,
+  done: 150,
+  reference: 100
+};
+var SESSION_SUMMARY_FIELDS = Object.keys(
+  SESSION_FIELD_GUIDANCE
+);
+var RETIRED_SESSION_FIELD = "current";
+function retiredSessionFieldMessage(where) {
+  const subject = where === "mode" ? `mode.${RETIRED_SESSION_FIELD}` : RETIRED_SESSION_FIELD;
+  return `${subject} no longer exists: the session summary's \`current\` field is deleted (spec D2). It duplicated \`content\` at a different compression, so the two competed for the same material. Write \`content\` (the compressed view another session browsing this one reads) or \`next_steps\` (what this session does next) instead. Nothing was written.`;
+}
+function formatSessionFieldUsage(field, storedValue) {
+  if (storedValue === null) {
+    return `${field} (cleared)`;
+  }
+  const used = estimateTokens(storedValue);
+  const guidance = SESSION_FIELD_GUIDANCE[field];
+  return `${field} ${used}/${guidance}${used > guidance ? " (over guidance)" : ""}`;
+}
+function formatSummaryCadence(turnsSince, hadPreviousUpdate) {
+  const turns = `${turnsSince} turn${turnsSince === 1 ? "" : "s"}`;
+  return hadPreviousUpdate ? `${turns} since the last summary update.` : `No previous summary update; ${turns} so far.`;
+}
+
 // src/shared/tool-call-syntax.ts
 var TOOL_CALL_SYNTAX_PATTERN = /<\/?(?:parameter|invoke|function_calls|antml:[a-z_]+)\b/i;
 function containsToolCallSyntax(text) {
@@ -46407,15 +46657,10 @@ var TURN_MODE_FIELDS = [
   "tags",
   "grade"
 ];
-var SESSION_MODE_FIELDS = [
-  "title",
-  "content",
-  "decision",
-  "done",
-  "current",
-  "next_steps",
-  "reference"
-];
+var SESSION_MODE_FIELDS = SESSION_SUMMARY_FIELDS;
+var SESSION_ONLY_FIELDS = SESSION_MODE_FIELDS.filter(
+  (key) => key !== "title" && key !== "content" && key !== "insight"
+);
 function textResult2(text) {
   return { content: [{ type: "text", text }] };
 }
@@ -46700,6 +46945,9 @@ function parseModeMap(raw, allowed) {
   }
   const result = {};
   for (const [key, value] of Object.entries(raw)) {
+    if (key === RETIRED_SESSION_FIELD) {
+      fail(retiredSessionFieldMessage("mode"));
+    }
     if (!allowed.includes(key)) {
       fail(`mode.${key} names a field this call does not accept a mode for.`);
     }
@@ -46776,10 +47024,7 @@ function handleTurnWrite(db, address, input, options) {
   if (input.skip === true) {
     return declineTurn(db, address, options, crossSession);
   }
-  for (const key of SESSION_MODE_FIELDS) {
-    if (key === "title" || key === "content") {
-      continue;
-    }
+  for (const key of SESSION_ONLY_FIELDS) {
     if (input[key] !== void 0) {
       return parameterError2(`${key} is a session field; this call addresses a turn.`);
     }
@@ -47021,7 +47266,6 @@ function handleTurnWrite(db, address, input, options) {
 }
 function handleSessionWrite(db, sessionId, input, options) {
   for (const key of [
-    "insight",
     "type",
     "tags",
     "grade",
@@ -47041,7 +47285,7 @@ function handleSessionWrite(db, sessionId, input, options) {
   );
   if (providedFields.length === 0) {
     return parameterError2(
-      "at least one of title, content, decision, done, current, next_steps, reference is required."
+      `at least one of ${SESSION_MODE_FIELDS.join(", ")} is required.`
     );
   }
   let modeMap;
@@ -47060,14 +47304,14 @@ function handleSessionWrite(db, sessionId, input, options) {
   const fieldMap = [
     ["title", session.title],
     ["content", session.content],
+    ["insight", session.insight],
+    ["next_steps", session.nextSteps],
     ["decision", session.decision],
     ["done", session.done],
-    ["current", session.current],
-    ["next_steps", session.nextSteps],
     ["reference", session.reference]
   ];
   let resolvedInput;
-  const finals = {};
+  const finals = [];
   try {
     resolvedInput = {};
     for (const [key, existing] of fieldMap) {
@@ -47078,7 +47322,7 @@ function handleSessionWrite(db, sessionId, input, options) {
       const resolution = resolveStringField(key, provided, existing, modeMap[key], {
         nullable: true
       });
-      finals[key] = resolution.value;
+      finals.push([key, resolution.value]);
       const inputKey = key === "next_steps" ? "nextSteps" : key;
       resolvedInput[inputKey] = resolution.value;
     }
@@ -47088,6 +47332,8 @@ function handleSessionWrite(db, sessionId, input, options) {
     }
     throw error49;
   }
+  const priorSummaryEpoch = session.summaryUpdatedAtEpoch;
+  const turnsSinceUpdate = countTurnsSince(db, sessionId, priorSummaryEpoch);
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const updated = writeTransaction(
@@ -47097,15 +47343,17 @@ function handleSessionWrite(db, sessionId, input, options) {
   if (!updated) {
     return textResult2(`Session S${sessionId} not found.`);
   }
-  const verb = "Updated";
-  const parts = [`${verb} S${sessionId}.`];
-  const sizeParts = Object.entries(finals).filter(([, value]) => value !== null && value !== void 0).map(([key, value]) => `${key} ${estimateTokens(value)}tok`);
-  if (sizeParts.length > 0) {
-    parts.push(`sizes (after write): ${sizeParts.join(", ")}.`);
-  }
+  const parts = [`Updated S${sessionId}.`];
+  parts.push(
+    `after write: ${finals.map(([key, value]) => formatSessionFieldUsage(key, value)).join(", ")}.`
+  );
+  parts.push(formatSummaryCadence(turnsSinceUpdate, priorSummaryEpoch !== null));
   return textResult2(parts.join(" "));
 }
 function noteTool(db, rawInput, options = {}) {
+  if (rawInput[RETIRED_SESSION_FIELD] !== void 0) {
+    return parameterError2(retiredSessionFieldMessage("field"));
+  }
   const hasTurn = typeof rawInput.turn === "string";
   const hasSession = typeof rawInput.session === "string";
   if (rawInput.turn !== void 0 && !hasTurn) {

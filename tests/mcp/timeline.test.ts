@@ -93,7 +93,6 @@ function turn(overrides: TurnOverrides = {}): TurnRecord {
     filesModified: [],
     toolCallCount: 0,
     parentTurnId: null,
-    citesRecorded: false,
     createdAtEpoch: 1000,
     updatedAtEpoch: null,
     ...rest,
@@ -337,8 +336,9 @@ function structuredCitations(
 }
 
 /**
- * The legacy half of the same seam: `cites_recorded = 0`, so the ids came out of
- * the inline `[T<n>]` grammar and carry no relation at all.
+ * The legacy half of the same seam: an id that came out of the inline
+ * `[T<n>]` grammar, carrying no relation at all — as opposed to a structured
+ * edge (`structuredCitations`, above).
  */
 function inlineCitations(
   spec: Record<number, number[]>,
@@ -1312,7 +1312,7 @@ describe("buildCorrectionGraph", () => {
   it("derives victimhood from a supersedes edge alone, with no tag on the victim", () => {
     const seq = [
       turn({ id: 20, promptNumber: 2, type: "decision", title: "first conclusion", createdAtEpoch: era }),
-      turn({ id: 30, promptNumber: 3, type: "decision", title: "overturns it", citesRecorded: true, createdAtEpoch: era + 60 }),
+      turn({ id: 30, promptNumber: 3, type: "decision", title: "overturns it", createdAtEpoch: era + 60 }),
     ];
     const g = buildCorrectionGraph(seq, {
       citations: structuredCitations({ 30: [[20, "supersedes"]] }),
@@ -1379,7 +1379,7 @@ describe("buildCorrectionGraph", () => {
   it("ignores a non-supersedes relation (builds-on is consumption, not correction)", () => {
     const seq = [
       turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: era }),
-      turn({ id: 30, promptNumber: 3, type: "feature", citesRecorded: true, createdAtEpoch: era + 60 }),
+      turn({ id: 30, promptNumber: 3, type: "feature", createdAtEpoch: era + 60 }),
     ];
     const g = buildCorrectionGraph(seq, {
       citations: structuredCitations({ 30: [[20, "builds-on"], [20, "evidence-for"]] }),
@@ -1398,7 +1398,7 @@ describe("buildCorrectionGraph", () => {
   it("ignores a NULL relation — an unattributed pair is a citation, not a correction", () => {
     const seq = [
       turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: era }),
-      turn({ id: 30, promptNumber: 3, type: "feature", citesRecorded: true, createdAtEpoch: era + 60 }),
+      turn({ id: 30, promptNumber: 3, type: "feature", createdAtEpoch: era + 60 }),
     ];
     const citations = new Map<
       number,
@@ -1424,8 +1424,8 @@ describe("buildCorrectionGraph", () => {
   it("orders multiple superseders of one victim by prompt number", () => {
     const seq = [
       turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: era }),
-      turn({ id: 90, promptNumber: 9, type: "decision", citesRecorded: true, createdAtEpoch: era + 120 }),
-      turn({ id: 30, promptNumber: 3, type: "decision", citesRecorded: true, createdAtEpoch: era + 60 }),
+      turn({ id: 90, promptNumber: 9, type: "decision", createdAtEpoch: era + 120 }),
+      turn({ id: 30, promptNumber: 3, type: "decision", createdAtEpoch: era + 60 }),
     ];
     const g = buildCorrectionGraph(seq, {
       citations: structuredCitations({
@@ -1458,12 +1458,13 @@ describe("buildCorrectionGraph", () => {
   });
 
   it("does NOT apply the tag adapter to a pre-era citer whose edges are structured", () => {
-    // Created pre-era, extracted post-deployment: `cites_recorded = 1` makes the
-    // edge table authoritative (spec §B), and the stated relation is consumption.
-    // Era gating alone would misread this as a correction.
+    // Created pre-era: the citation read is an unconditional union of
+    // structured edges and inline prose regardless of era, and the stated
+    // relation here is consumption, not correction. Era gating alone would
+    // misread this as a correction.
     const seq = [
       turn({ id: 20, promptNumber: 2, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base }),
-      turn({ id: 30, promptNumber: 3, type: "bugfix", citesRecorded: true, createdAtEpoch: base + 60 }),
+      turn({ id: 30, promptNumber: 3, type: "bugfix", createdAtEpoch: base + 60 }),
     ];
     const g = buildCorrectionGraph(seq, {
       citations: structuredCitations({ 30: [[20, "builds-on"], [20, "evidence-for"]] }),
@@ -1501,7 +1502,7 @@ describe("buildCorrectionGraph", () => {
 
   it("ignores forward edges (predecessor guard: a correction points backward)", () => {
     const seq = [
-      turn({ id: 20, promptNumber: 2, type: "bugfix", citesRecorded: true, createdAtEpoch: era }),
+      turn({ id: 20, promptNumber: 2, type: "bugfix", createdAtEpoch: era }),
       turn({ id: 30, promptNumber: 3, type: "discovery", createdAtEpoch: era + 60 }),
     ];
     const g = buildCorrectionGraph(seq, {
@@ -1514,7 +1515,7 @@ describe("buildCorrectionGraph", () => {
 
   it("ignores an edge that resolves to no turn at all", () => {
     const seq = [
-      turn({ id: 30, promptNumber: 3, type: "bugfix", citesRecorded: true, createdAtEpoch: era }),
+      turn({ id: 30, promptNumber: 3, type: "bugfix", createdAtEpoch: era }),
     ];
     const g = buildCorrectionGraph(seq, {
       citations: structuredCitations({ 30: [[999, "supersedes"]] }),
@@ -1528,7 +1529,7 @@ describe("buildCorrectionGraph", () => {
     // Ranged view: the victim is resolved from the full session, not from `turns`.
     const victim = turn({ id: 5, promptNumber: 5, type: "decision", createdAtEpoch: era });
     const seq = [
-      turn({ id: 15, promptNumber: 15, type: "bugfix", citesRecorded: true, createdAtEpoch: era + 60 }),
+      turn({ id: 15, promptNumber: 15, type: "bugfix", createdAtEpoch: era + 60 }),
     ];
     const g = buildCorrectionGraph(seq, {
       citations: structuredCitations({ 15: [[5, "supersedes"]] }),
@@ -1721,7 +1722,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     const rows = [
       turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
       turn({ id: 2, promptNumber: 2, type: "decision", title: "first conclusion", significanceGrade: 3, createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "discovery", title: "the correction", significanceGrade: 0, citesRecorded: true, createdAtEpoch: era + 120 }),
+      turn({ id: 3, promptNumber: 3, type: "discovery", title: "the correction", significanceGrade: 0, createdAtEpoch: era + 120 }),
       turn({ id: 4, promptNumber: 4, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 180 }),
     ];
 
@@ -1748,8 +1749,8 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     const rows = [
       turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
       turn({ id: 2, promptNumber: 2, type: "decision", title: "first answer", significanceGrade: 2, createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "second answer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "decision", title: "final answer", significanceGrade: 0, citesRecorded: true, createdAtEpoch: era + 180 }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "second answer", significanceGrade: 3, createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 4, type: "decision", title: "final answer", significanceGrade: 0, createdAtEpoch: era + 180 }),
       turn({ id: 5, promptNumber: 5, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 240 }),
     ];
 
@@ -1787,7 +1788,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     const rows = [
       turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
       turn({ id: 2, promptNumber: 2, type: "decision", title: "arc origin, later refounded", significanceGrade: 4, createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "refoundation", significanceGrade: 2, citesRecorded: true, createdAtEpoch: era + 120 }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "refoundation", significanceGrade: 2, createdAtEpoch: era + 120 }),
       turn({ id: 4, promptNumber: 4, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 180 }),
     ];
 
@@ -1813,7 +1814,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
   it("keeps a victim's own grade even at a window endpoint, and still hands it the back-link", () => {
     const rows = [
       turn({ id: 1, promptNumber: 1, type: "decision", title: "opening premise", significanceGrade: 4, createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "decision", title: "overturns the premise", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 60 }),
+      turn({ id: 2, promptNumber: 2, type: "decision", title: "overturns the premise", significanceGrade: 3, createdAtEpoch: era + 60 }),
     ];
 
     const result = select(rows, {
@@ -1905,7 +1906,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
         userPrompt: longPrompt,
         createdAtEpoch: era + 60,
       }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 120 }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, createdAtEpoch: era + 120 }),
     ];
 
     const result = select(rows, {
@@ -1936,7 +1937,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
         userPrompt: "raw prompt text that must not win",
         createdAtEpoch: era + 60,
       }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 120 }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, createdAtEpoch: era + 120 }),
     ];
 
     const result = select(rows, {
@@ -1949,8 +1950,8 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     const rows = [
       turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
       turn({ id: 2, promptNumber: 2, type: "discovery", title: "shared evidence", significanceGrade: 2, createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "first consumer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "decision", title: "second consumer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 180 }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "first consumer", significanceGrade: 3, createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 4, type: "decision", title: "second consumer", significanceGrade: 3, createdAtEpoch: era + 180 }),
     ];
 
     const result = select(rows, {
@@ -1979,8 +1980,8 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
         createdAtEpoch: era + 60,
       }),
       turn({ id: 3, promptNumber: 3, type: "discovery", title: "plain G2", significanceGrade: 2, createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "discovery", title: "citer a", significanceGrade: 0, citesRecorded: true, createdAtEpoch: era + 180 }),
-      turn({ id: 5, promptNumber: 5, type: "discovery", title: "citer b", significanceGrade: 0, citesRecorded: true, createdAtEpoch: era + 240 }),
+      turn({ id: 4, promptNumber: 4, type: "discovery", title: "citer a", significanceGrade: 0, createdAtEpoch: era + 180 }),
+      turn({ id: 5, promptNumber: 5, type: "discovery", title: "citer b", significanceGrade: 0, createdAtEpoch: era + 240 }),
       turn({ id: 6, promptNumber: 6, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 300 }),
     ];
 
@@ -2055,7 +2056,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
       // is visible and must not also be counted as hidden. T10 is the only turn
       // on that day with no row of any kind.
       turn({ id: 8, promptNumber: 8, type: "discovery", title: "cited evidence", significanceGrade: 2, createdAtEpoch: era + day }),
-      turn({ id: 9, promptNumber: 9, type: "decision", title: "consumer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + day + 60 }),
+      turn({ id: 9, promptNumber: 9, type: "decision", title: "consumer", significanceGrade: 3, createdAtEpoch: era + day + 60 }),
       turn({ id: 10, promptNumber: 10, type: "discovery", title: "day two noise", significanceGrade: 1, createdAtEpoch: era + day + 120 }),
       turn({ id: 11, promptNumber: 11, type: "decision", title: "end", significanceGrade: 3, createdAtEpoch: era + day + 180 }),
     ];
@@ -2111,7 +2112,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
   it("resolves a corrector against a full-session victim, but no longer inherits that victim's grade", () => {
     const victim = turn({ id: 5, promptNumber: 5, type: "decision", title: "early premise", significanceGrade: 4, createdAtEpoch: era });
     const windowRows = [
-      turn({ id: 15, promptNumber: 15, type: "decision", title: "overturns it", significanceGrade: 0, citesRecorded: true, createdAtEpoch: era + 600 }),
+      turn({ id: 15, promptNumber: 15, type: "decision", title: "overturns it", significanceGrade: 0, createdAtEpoch: era + 600 }),
       turn({ id: 16, promptNumber: 16, type: "discovery", title: "end", significanceGrade: 0, createdAtEpoch: era + 660 }),
     ];
 
@@ -2209,9 +2210,9 @@ describe("milestone selection on a multi-day legacy fixture", () => {
  * antecedent, a skipped turn revived by a citation, and three classes of
  * always-keep anchor (endpoint, corrector, reversed-with-no-corrector).
  *
- * Frozen by construction: fixed epochs, no `Date.now()`, `citesRecorded` set
- * explicitly on every row so the source of each turn's citations is stated
- * rather than inferred.
+ * Frozen by construction: fixed epochs, no `Date.now()` — each row's citation
+ * source (inline prose vs structured edge) is stated by `mixedArcCitations`
+ * below rather than inferred from the row itself.
  */
 function mixedArcFixtureTurns(): TurnRecord[] {
   const day = 24 * 60 * 60;
@@ -2254,7 +2255,6 @@ function mixedArcFixtureTurns(): TurnRecord[] {
   add(10, legacy + day + 180, {
     type: "decision",
     title: "legacy consumer with structured edges",
-    citesRecorded: true,
   });
   add(11, legacy + day + 240, { type: "discovery", title: "legacy noise c" });
 
@@ -2265,7 +2265,6 @@ function mixedArcFixtureTurns(): TurnRecord[] {
     type: "decision",
     title: "mechanism locked",
     significanceGrade: 3,
-    citesRecorded: true,
   });
   add(15, era + 180, { type: "discovery", title: "era noise a", significanceGrade: 1 });
   add(16, era + 240, { type: "discovery", title: "era noise b", significanceGrade: 1 });
@@ -2279,7 +2278,6 @@ function mixedArcFixtureTurns(): TurnRecord[] {
     type: "decision",
     title: "consumes a skipped probe",
     significanceGrade: 3,
-    citesRecorded: true,
   });
   add(19, era + 420, { type: "discovery", title: "era noise c", significanceGrade: 1 });
 
@@ -2291,13 +2289,11 @@ function mixedArcFixtureTurns(): TurnRecord[] {
     type: "decision",
     title: "refoundation",
     significanceGrade: 2,
-    citesRecorded: true,
   });
   add(23, era + day + 180, {
     type: "decision",
     title: "second consumer of the shared evidence",
     significanceGrade: 3,
-    citesRecorded: true,
   });
   add(24, era + day + 240, { type: "discovery", title: "era noise d", significanceGrade: 1 });
   add(25, era + day + 300, { type: "discovery", title: "era noise e", significanceGrade: 1 });
@@ -3758,11 +3754,10 @@ describe("parseContentReferences", () => {
 const ERA_BASE = 1_785_000_000;
 
 /**
- * Era fixture seeder. Writes the stored grade AND states `cites_recorded`
- * explicitly for every row: `1` means "the extractor spoke", so an empty edge
- * set is authoritative and the legacy inline `[T<n>]` fallback stays out of the
- * way. Leaving the flag at its default would silently route era fixtures through
- * the legacy reader.
+ * Era fixture seeder. Writes the stored grade for every row that has one.
+ * Citation reads no longer gate on any per-turn flag — `getEffectiveCitations`
+ * always unions structured edges with the inline `[T<n>]` parse — so there is
+ * nothing else to state here.
  */
 function seedArcSession(
   db: Database,
@@ -3778,9 +3773,6 @@ function seedArcSession(
       setGrade.run(row.significanceGrade, session.id, row.promptNumber);
     }
   }
-  db.query("UPDATE turns SET cites_recorded = 1 WHERE session_id = ?").run(
-    session.id,
-  );
   return session;
 }
 
@@ -5317,8 +5309,9 @@ describe("unified row renderer — frozen shapes", () => {
         createdAtEpoch: preEra + 120,
       }),
     ];
-    // No seedArcSession here on purpose: `cites_recorded` stays 0, so the
-    // legacy inline `[T<n>]` grammar is the citation source.
+    // No seedArcSession here on purpose: no structured edges are written for
+    // this session, so the union's structured side is empty and the legacy
+    // inline `[T<n>]` grammar is the only citation source.
     const session = seedTimelineSession(db, rows);
     db.query(
       "UPDATE turns SET content = ? WHERE session_id = ? AND prompt_number = 2",
@@ -5432,7 +5425,7 @@ describe("the →被T<n>推翻 back-link on a main row", () => {
   const victimArc = () => [
     turn({ id: 10, promptNumber: 1, type: "design", title: "origin", significanceGrade: 4, createdAtEpoch: era }),
     turn({ id: 20, promptNumber: 2, type: "design", title: "the conclusion later overturned", significanceGrade: 3, createdAtEpoch: era + 60 }),
-    turn({ id: 30, promptNumber: 3, type: "fix", title: "overturns it", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 120 }),
+    turn({ id: 30, promptNumber: 3, type: "fix", title: "overturns it", significanceGrade: 3, createdAtEpoch: era + 120 }),
   ];
 
   it("renders on the victim's own main row, not only under a ↳", () => {

@@ -159,15 +159,6 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
       nowEpoch,
       { eligibleForRelation: "unrestricted" },
     );
-    // getSessionCitationInDegree/getEffectiveCitations read the structured
-    // edge only once this flag is set (spec §B's from-absent-vs-recorded-empty
-    // predicate) — the retired `replaceTurnCitations` used to flip it in the
-    // same transaction as the edge write; a raw `writeMemoryEdges` call does
-    // not, so tests that read through the effective-citations layer set it
-    // by hand here, same as `writeMemoryEdges`'s other direct callers do.
-    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(
-      citingTurnId,
-    );
   }
 
   beforeEach(() => {
@@ -929,8 +920,6 @@ describe("effective citations predicate", () => {
   // 838 flagged turns gain citations, 185 ids in all, and sampling showed them
   // to be real prose links the structured writer had failed to record.
   test("an empty edge set no longer retracts what the prose still says", () => {
-    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
-
     const effective = getEffectiveCitations(db, getTurnById(db, citerId)!);
     expect(effective.edges).toEqual([]);
     expect(effective.citedTurnIds).toEqual([citedId]);
@@ -950,7 +939,6 @@ describe("effective citations predicate", () => {
       500,
       { eligibleForRelation: "unrestricted" },
     );
-    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
 
     const effective = getEffectiveCitations(db, getTurnById(db, citerId)!);
     // The pair is named by both sources and counts once; 4242 is inline-only
@@ -984,7 +972,6 @@ describe("effective citations predicate", () => {
       500,
       { eligibleForRelation: "unrestricted" },
     );
-    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
 
     // Structured first, then prose the edges did not cover.
     expect(
@@ -1007,7 +994,6 @@ describe("effective citations predicate", () => {
          (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
        VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', 500)`,
     ).run(citerId, citedId);
-    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
 
     const effective = getEffectiveCitations(db, getTurnById(db, citerId)!);
     expect(effective.citedTurnIds).toEqual([citedId]);
@@ -1107,9 +1093,6 @@ describe("session-wide effective citations", () => {
       500,
       { eligibleForRelation: "unrestricted" },
     );
-    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(
-      structuredCiter,
-    );
   });
 
   afterEach(() => {
@@ -1153,13 +1136,13 @@ describe("session-wide effective citations", () => {
   });
 
   // The exact population the union exists to recover: settlement wrote a
-  // structured `supersedes` edge, nothing ever set `cites_recorded`, and the
-  // prose says nothing. Under the retired gate this turn read as citing
-  // NOTHING — 353 turns were in that state on the live database, and the
-  // reversal they recorded was invisible to the correction graph the timeline
-  // builds from this very map.
-  test("a settlement supersedes edge on a never-flagged turn reaches the graph", () => {
-    db.query("UPDATE turns SET content = NULL, cites_recorded = 0 WHERE id = ?").run(
+  // structured `supersedes` edge, and the prose says nothing. Under the
+  // retired `cites_recorded` gate this turn read as citing NOTHING unless a
+  // writer had separately flagged it — 353 turns were in that state on the
+  // live database, and the reversal they recorded was invisible to the
+  // correction graph the timeline builds from this very map.
+  test("a settlement supersedes edge on a turn with no inline citation reaches the graph", () => {
+    db.query("UPDATE turns SET content = NULL WHERE id = ?").run(
       structuredCiter,
     );
 
@@ -1191,27 +1174,11 @@ describe("session-wide effective citations", () => {
   test("in-degree counts legacy citers, not just structured ones", () => {
     const inDegree = getSessionCitationInDegree(db, sessionA);
 
-    // One structured citer + one `cites_recorded = 0` citer whose only signal is
-    // inline prose. Reading turn_citations alone would say 1.
+    // One structured citer + one legacy citer whose only signal is inline
+    // prose. Reading turn_citations alone would say 1.
     expect(inDegree.get(anchor)).toBe(2);
     expect(inDegree.has(foreignTurn)).toBe(false);
     expect(inDegree.has(selfCiter)).toBe(false);
   });
 
-  // The batched reader loses the retraction for the same reason the single
-  // reader does, and it matters more here: in-degree feeds milestone selection,
-  // so a flag nobody sets any more would have silently zeroed a turn's inbound
-  // count. Setting it now changes nothing at all.
-  test("the retired flag no longer suppresses a turn's prose citations", () => {
-    const before = getSessionEffectiveCitations(db, sessionA)
-      .get(legacyCiter)?.citedTurnIds;
-
-    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(legacyCiter);
-
-    const effective = getSessionEffectiveCitations(db, sessionA);
-    expect(effective.get(legacyCiter)?.citedTurnIds).toEqual(before!);
-    expect(effective.get(legacyCiter)?.citedTurnIds).toEqual([anchor]);
-    // anchor is cited by legacyCiter AND by structuredCiter's edge.
-    expect(getSessionCitationInDegree(db, sessionA).get(anchor)).toBe(2);
-  });
 });
