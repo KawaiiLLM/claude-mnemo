@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msvmj8y1" : "dev";
+var BUILD_ID = true ? "0.10.0-msvwrhq4" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -11320,6 +11320,7 @@ function createNoteSettlementDispatch(options) {
   const model = options.model ?? NOTE_SETTLEMENT_MODEL;
   const logger = options.logger ?? console;
   const metrics = options.metrics ?? defaultNoteSettlementMetricsSink(logger);
+  const maxAttempts = options.maxAttempts ?? NOTE_SETTLEMENT_MAX_ATTEMPTS;
   return async ({ job }) => {
     if (!config3.settlementEnabled) {
       return { ok: false, reason: "note settlement is disabled" };
@@ -11339,8 +11340,9 @@ function createNoteSettlementDispatch(options) {
     }
     const rideTurnId = context.windowTurns[context.windowTurns.length - 1]?.turnId ?? null;
     const eligibleRelationPairKeys = getExistingEdgePairKeys(db);
+    let queryResult;
     try {
-      await options.runQuery({
+      queryResult = await options.runQuery({
         prompt: renderNoteSettlementPrompt(context),
         systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
         model,
@@ -11373,7 +11375,16 @@ function createNoteSettlementDispatch(options) {
       triggerType: job.triggerType,
       windowTurns: context.windowTurns.length,
       interiorHoles: context.interiorHoles.length,
-      committed
+      committed,
+      attempt: job.attempts,
+      // Abandonment, not convergence (spec A2a, ticket 10c): this attempt
+      // consumed the job's LAST life and still did not commit. The
+      // scheduler's own cursor advance is what actually walks past the
+      // window (db/note-settlement.ts) — this flag only reports that fact
+      // for the operator, from the same `job.attempts` the claim already
+      // incremented before this dispatch ran.
+      attemptsExhausted: !committed && job.attempts >= maxAttempts,
+      commit: committed ? queryResult.commitMetrics : null
     });
     if (!committed) {
       return {
@@ -45999,7 +46010,13 @@ function formatRatio(total, budget) {
 
 // src/mcp/definitions.ts
 var MNEMO_TOOL_DESCRIPTIONS = {
-  recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes).",
+  // ticket 14 (spec K1): the segment addressing and `query=` participation
+  // below were already load-bearing in the implementation before this
+  // sentence existed — the description just never told the one reader who
+  // needs it. K1's whole point is that a segment lets an agent avoid
+  // rediscovering its own prior work; that only happens if `recall`'s own
+  // description says the capability exists.
+  recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id=\"E<n>\"` (also `E*`, `E1..9`) recalls a segment \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. Segments also surface in `query=` search (text, `tag:`, `type:`) alongside sessions and turns.",
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
   // The per-field budgets are spliced in from `NOTE_TOKEN_BUDGET`, the constant
   // the receipt measures a write against, rather than restated as prose here.
@@ -47951,6 +47968,20 @@ function renderSettlementTurnWriteReceipt(outcome, options) {
 }
 
 // src/worker/note-settlement-staging.ts
+function emptyCommitCounts() {
+  return {
+    notesReconstructed: 0,
+    notesYielded: 0,
+    turnsReviewed: 0,
+    reviewsYieldedToLateNote: 0,
+    gradeHistogram: [0, 0, 0, 0, 0],
+    relationsWritten: 0,
+    segmentsCreated: 0,
+    segmentsExtended: 0,
+    segmentsExcluded: 0,
+    membersAdded: 0
+  };
+}
 function segmentStagingKeyOf(rawInput) {
   if (rawInput.action === "create") {
     const handle = rawInput.handle?.trim();
@@ -48009,6 +48040,7 @@ function createSettlementStagingEngine(options) {
   const now = options.now ?? (() => Math.floor(Date.now() / 1e3));
   const staged = /* @__PURE__ */ new Map();
   let knownHandles = /* @__PURE__ */ new Map();
+  let lastCommitMetrics = null;
   function stageNoteWrite(rawInput) {
     const nowEpoch = now();
     const address = parseTurnAddress(rawInput.turn);
@@ -48067,9 +48099,10 @@ function createSettlementStagingEngine(options) {
     const nowEpoch = now();
     const snapshot = [...staged.values()];
     try {
-      const gateResult = runWriteTransaction(db, () => {
+      const { counts } = runWriteTransaction(db, () => {
         assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
         const handleMap = /* @__PURE__ */ new Map();
+        const counts2 = emptyCommitCounts();
         for (const entry of snapshot) {
           if (entry.kind === "segment") {
             const evaluation = evaluateSettlementSegmentWrite(db, context, entry.input, nowEpoch, {
@@ -48084,12 +48117,41 @@ function createSettlementStagingEngine(options) {
             if (entry.handle) {
               handleMap.set(entry.handle, evaluation.outcome.segmentId);
             }
+            const outcome = evaluation.outcome;
+            if (outcome.action === "create") {
+              counts2.segmentsCreated += 1;
+            } else if (outcome.action === "extend") {
+              counts2.segmentsExtended += 1;
+            } else {
+              counts2.segmentsExcluded += 1;
+            }
+            counts2.membersAdded += outcome.membersAdded;
           } else {
             const evaluation = evaluateSettlementTurnWrite(db, context, entry.input, nowEpoch, {
               apply: true
             });
             if (!evaluation.ok) {
               throw new CommitReplayRefused(`note ${entry.input.turn}: ${evaluation.message}`);
+            }
+            const outcome = evaluation.outcome;
+            if (outcome.prose) {
+              if (outcome.prose.kind === "written") {
+                counts2.notesReconstructed += 1;
+              } else {
+                counts2.notesYielded += 1;
+              }
+            }
+            if (outcome.review) {
+              counts2.turnsReviewed += 1;
+              if (outcome.review.kind === "yielded") {
+                counts2.reviewsYieldedToLateNote += 1;
+              }
+              if (outcome.review.grade !== void 0) {
+                counts2.gradeHistogram[outcome.review.grade] = (counts2.gradeHistogram[outcome.review.grade] ?? 0) + 1;
+              }
+            }
+            if (outcome.relations) {
+              counts2.relationsWritten += outcome.relations.written;
             }
           }
         }
@@ -48103,11 +48165,11 @@ function createSettlementStagingEngine(options) {
         if (!gate.completed) {
           throw new CommitGateRefused(gate);
         }
-        return gate;
+        return { counts: counts2 };
       });
       staged.clear();
       knownHandles = /* @__PURE__ */ new Map();
-      void gateResult;
+      lastCommitMetrics = counts;
       return textResult4(
         `Committed. S${context.sessionId} window settled \u2014 job complete.`
       );
@@ -48139,7 +48201,8 @@ function createSettlementStagingEngine(options) {
     stageNoteWrite,
     stageSegmentWrite,
     commit,
-    pendingCount: () => staged.size
+    pendingCount: () => staged.size,
+    getLastCommitMetrics: () => lastCommitMetrics
   };
 }
 
@@ -48271,7 +48334,7 @@ function createNoteSettlementSdkQuery(options) {
       if (envelope === null) {
         throw new Error("note settlement query returned no result envelope");
       }
-      return envelope;
+      return { text: envelope, commitMetrics: staging.getLastCommitMetrics() };
     } finally {
       if (request.signal) {
         request.signal.removeEventListener("abort", forwardAbort);

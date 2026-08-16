@@ -33466,7 +33466,13 @@ function formatRatio(total, budget) {
 
 // src/mcp/definitions.ts
 var MNEMO_TOOL_DESCRIPTIONS = {
-  recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes).",
+  // ticket 14 (spec K1): the segment addressing and `query=` participation
+  // below were already load-bearing in the implementation before this
+  // sentence existed — the description just never told the one reader who
+  // needs it. K1's whole point is that a segment lets an agent avoid
+  // rediscovering its own prior work; that only happens if `recall`'s own
+  // description says the capability exists.
+  recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id=\"E<n>\"` (also `E*`, `E1..9`) recalls a segment \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. Segments also surface in `query=` search (text, `tag:`, `type:`) alongside sessions and turns.",
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
   // The per-field budgets are spliced in from `NOTE_TOKEN_BUDGET`, the constant
   // the receipt measures a write against, rather than restated as prose here.
