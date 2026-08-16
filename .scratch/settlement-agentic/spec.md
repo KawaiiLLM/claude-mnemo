@@ -459,6 +459,12 @@ The failure this guards against is measured, not feared: in this project's own n
 
 The rule that keeps a segment from becoming a retelling, and it is checkable sentence by sentence: **anything readable from the member turns does not go in the segment.** A segment only states what reading every member would not yield. Note the inversion this creates against the turn's own contract — a turn's `insight` is empty by default, a segment's is the point.
 
+**K5a. `type` and `tags` are derived from the members, not stated by the model** (user ruling, S15069/T747). `type` is the union of its members' activities — which A6 has asserted since it was written, as the reason the three duties are ordered (review every member's activity, then segment, because a segment's type is vacuous while its members have none) — and which nothing has ever enforced: the tool took a caller-stated type that could contradict every member. `tags` are the members' tags **ordered by frequency**, so what a segment is most about comes first.
+
+Both are mechanical, so **the segment tool takes neither**. A value the system can compute is a value the model can only get wrong, and A6's duty ordering exists precisely so this derivation has its inputs by the time it runs. Frequency ordering also supplies the natural truncation under a budget, which an unordered union does not.
+
+One implementation consequence: a segment is indexed to FTS with its tags, so the derived value is stored and recomputed when membership changes, not resolved at read time.
+
 **K6. Members and citations are two resolutions of one index.** Membership is attention allocation and is exhaustive: every eligible turn is a member, excluded, or skipped (G7). Body citations are the load-bearing few — cite the turns that carry the conclusion, not every member.
 
 **K7. A segment's citations follow the turn rule exactly** (C6): a pair exists iff the body's post-state cites it, same address grammar, same deletion on rewrite. `reconcileSegmentCitedPairs` currently scans title and content only, so admitting `insight` requires admitting it there in the same change — otherwise a citation written in `insight` looks real to a reader and produces no edge.
