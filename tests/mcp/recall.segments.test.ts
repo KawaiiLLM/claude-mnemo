@@ -238,6 +238,158 @@ describe("recall segment selector and cross-granularity filters", () => {
   });
 });
 
+/**
+ * Ticket 14's acceptance test (spec K8a), stated in the ticket itself:
+ * "recalling one task must not drag another task's memory along with it."
+ * K8a names `action-roleplay`'s card-extraction and harness lines — two
+ * threads of work interleaved turn-by-turn in one session — as the real
+ * shape this has to survive, and notes it has zero segments today so the
+ * check has to be built rather than found. This constructs that shape: two
+ * segments over ONE session whose member turns alternate 1-2-1-2-1-2, one
+ * `delivered`, one `open` (K4).
+ *
+ * Every assertion below is an ABSENCE check against a marker string unique
+ * to the other task, not just a presence check on the right one — a
+ * implementation that (for instance) forgot to scope member lookup by
+ * `segment_id` and rendered the whole session's turns would still pass every
+ * "contains" assertion the collapsed test above makes; it would only fail
+ * here.
+ */
+describe("acceptance: recalling one task does not drag another task's memory along (spec K8a)", () => {
+  let db: Database;
+  let sessionId: number;
+  let cardSegmentId: number;
+  let harnessSegmentId: number;
+  const CUTOFF = 1_900_200_000;
+
+  function makeTurn(promptNumber: number, title: string, tags: string[]): number {
+    const id = db
+      .query<{ id: number }, [number, number, string, string, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, title, tags, created_at_epoch,
+           user_prompt, assistant_response, content, files_read, files_modified
+         ) VALUES (?, ?, 'extracted', ?, ?, ?, 'user prompt text',
+                   'assistant response text', 'turn body', '[]', '[]')
+         RETURNING id`,
+      )
+      .get(sessionId, promptNumber, title, JSON.stringify(tags), CUTOFF + promptNumber)!
+      .id;
+    reindexTurnFromDb(db, id);
+    return id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-interleaved-tasks",
+      project: "/tmp/project",
+      title: "Two interleaved workstreams",
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: CUTOFF,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    // T1/T3/T5 = card-extraction line, T2/T4/T6 = harness-retry line,
+    // interleaved in the SAME session the way action-roleplay's threads do.
+    const card1 = makeTurn(1, "extract card ruleset from bundle", ["card-extraction"]);
+    const harness1 = makeTurn(2, "retry queue backoff timer", ["harness-retry"]);
+    const card2 = makeTurn(3, "card schema validated against golden set", ["card-extraction"]);
+    const harness2 = makeTurn(4, "harness retry queue drains under load", ["harness-retry"]);
+    const card3 = makeTurn(5, "card extraction ships in 0.9.1", ["card-extraction"]);
+    const harness3 = makeTurn(6, "harness retry queue ships in 0.9.2", ["harness-retry"]);
+
+    const cardSegment = createSegment(db, {
+      title: "card extraction ruleset",
+      content: "CARD_MARKER_9f2a ships the ruleset end to end.",
+      type: ["implement"],
+      tags: ["card-extraction"],
+      status: "delivered",
+      nowEpoch: CUTOFF,
+    });
+    cardSegmentId = cardSegment.id;
+    addSegmentMembers(db, cardSegmentId, [card1, card2, card3], CUTOFF);
+
+    const harnessSegment = createSegment(db, {
+      title: "harness retry queue",
+      content: "HARNESS_MARKER_7c31 still draining under load.",
+      type: ["implement"],
+      tags: ["harness-retry"],
+      status: "open",
+      nowEpoch: CUTOFF,
+    });
+    harnessSegmentId = harnessSegment.id;
+    addSegmentMembers(db, harnessSegmentId, [harness1, harness2, harness3], CUTOFF);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("drilling into the card segment never surfaces the harness line", () => {
+    const output = recallMemory(db, { id: `E${cardSegmentId}`, depth: "expanded" });
+
+    expect(output).toContain("CARD_MARKER_9f2a");
+    expect(output).toContain("extract card ruleset from bundle");
+    expect(output).toContain("card schema validated against golden set");
+    expect(output).toContain("card extraction ships in 0.9.1");
+
+    expect(output).not.toContain("HARNESS_MARKER_7c31");
+    expect(output).not.toContain("harness retry queue");
+    expect(output).not.toContain("retry queue backoff timer");
+    expect(output).not.toContain("harness retry queue drains under load");
+    expect(output).not.toContain("harness retry queue ships in 0.9.2");
+  });
+
+  test("drilling into the harness segment never surfaces the card line", () => {
+    const output = recallMemory(db, { id: `E${harnessSegmentId}`, depth: "expanded" });
+
+    expect(output).toContain("HARNESS_MARKER_7c31");
+    expect(output).toContain("retry queue backoff timer");
+    expect(output).toContain("harness retry queue drains under load");
+    expect(output).toContain("harness retry queue ships in 0.9.2");
+
+    expect(output).not.toContain("CARD_MARKER_9f2a");
+    expect(output).not.toContain("card extraction ruleset");
+    expect(output).not.toContain("extract card ruleset from bundle");
+    expect(output).not.toContain("card schema validated against golden set");
+    expect(output).not.toContain("card extraction ships in 0.9.1");
+  });
+
+  test("searching one task's tag returns only its own segment, never the other's", () => {
+    const cardHits = recallMemory(db, { query: "tag:card-extraction" });
+    expect(cardHits).toContain(`[E${cardSegmentId}]`);
+    expect(cardHits).toContain("CARD_MARKER_9f2a");
+    expect(cardHits).not.toContain(`[E${harnessSegmentId}]`);
+    expect(cardHits).not.toContain("HARNESS_MARKER_7c31");
+    expect(cardHits).not.toContain("harness retry queue");
+
+    const harnessHits = recallMemory(db, { query: "tag:harness-retry" });
+    expect(harnessHits).toContain(`[E${harnessSegmentId}]`);
+    expect(harnessHits).toContain("HARNESS_MARKER_7c31");
+    expect(harnessHits).not.toContain(`[E${cardSegmentId}]`);
+    expect(harnessHits).not.toContain("CARD_MARKER_9f2a");
+    expect(harnessHits).not.toContain("card extraction ruleset");
+  });
+
+  // Requirement 2: an open segment (live working state) and a delivered one
+  // (settled impression, spec K4) must read as distinguishable on sight, not
+  // just by chance content. Both share the exact same field shape, so the
+  // only structural signal is the status tag itself.
+  test("an open segment and a delivered one carry distinguishable status tags", () => {
+    const delivered = recallMemory(db, { id: `E${cardSegmentId}` });
+    const open = recallMemory(db, { id: `E${harnessSegmentId}` });
+
+    expect(delivered).toContain("[delivered]");
+    expect(delivered).not.toContain("[open]");
+    expect(open).toContain("[open]");
+    expect(open).not.toContain("[delivered]");
+  });
+});
+
 const SWEEP_INPUT = JSON.stringify({
   command: "rg --files-with-matches watchdog src/",
 });

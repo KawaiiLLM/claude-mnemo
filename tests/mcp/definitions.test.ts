@@ -75,6 +75,19 @@ describe("tool surface", () => {
     expect(MNEMO_TOOL_DESCRIPTIONS.timeline).not.toContain("set false");
   });
 
+  // ticket 14 (spec K1/K4): the segment selector already worked mechanically
+  // (recall.ts's `E<n>` route, search.ts's segment layer); this pins that the
+  // model-facing description actually SAYS so, and states the open/delivered
+  // distinction K4 requires a reader be able to tell apart on sight.
+  it("the recall description tells the caller a segment is queryable and distinguishes open from delivered", () => {
+    const recall = MNEMO_TOOL_DESCRIPTIONS.recall;
+    expect(recall).toContain('id="E<n>"');
+    expect(recall).toContain("segment");
+    expect(recall).toContain("[open]");
+    expect(recall).toContain("[delivered]");
+    expect(recall).toContain("query=");
+  });
+
   // Single home of the note contract (user ruling, S15069 T586): the
   // SessionStart block carries only the batch-timing digest, so everything an
   // agent needs at note-composition time must be pinned HERE — if a clause

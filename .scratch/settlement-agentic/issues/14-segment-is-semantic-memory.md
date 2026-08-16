@@ -18,7 +18,7 @@ This is an **MVP to be run and looked at**, not a finished mechanism (user rulin
 - [ ] The prompt states that members are exhaustive attention allocation while body citations are the load-bearing few — the existing "cite the turns that carry the conclusion, not every member" rule, kept and made explicit
 - [ ] **`type` and `tags` are derived from the members, and the segment tool stops accepting them** (spec K5a): type is the union of member activities, tags are the member tags ordered by frequency. This finally enforces A6, which asserted the union as the reason the three duties are ordered and was never checked — the tool accepted a stated type that could contradict every member. Recomputed on membership change, because segments are FTS-indexed with their tags
 - [ ] The settlement context shows the **50 most recently active segments with their topics**, and renders the topic registry **ordered by frequency** — how many segments carry each — so an established name is visibly established and a one-off is visibly a one-off. This is the anti-fragmentation surface D9's `noCandidateReason` gate has always assumed and never actually provided
-- [ ] **`recall` can query segments.** Design is the implementer's to make: no selector grammar, output shape or ranking is prescribed here beyond the one requirement below
+- [x] **`recall` can query segments.** Design is the implementer's to make: no selector grammar, output shape or ranking is prescribed here beyond the one requirement below
 - [ ] Full suite green
 
 ## The only thing `recall`'s segment query must satisfy
@@ -41,5 +41,40 @@ Splitting, merging and member removal are unnecessary while membership is many-t
 By eye, on real sessions with genuinely interleaved work — not by a proxy metric:
 
 **Recalling one task must not drag another task's memory along with it.**
+
+## Half closed: `recall`'s segment query already existed, and nobody could find it
+
+The capability was built and shipped under an older spec section (D11, since
+reorganised into K): `recall.ts`'s `E<n>` / `E*` / `E5..9` route, the segment
+layer in `search.ts`'s `searchMemory`, and `segment-spine.ts`'s header
+rendering with its `[open]` / `[delivered]` tag. **Eighteen tests already
+covered it and all passed at baseline** — verified against `HEAD` before the
+claim was accepted.
+
+The only real gap was that `MNEMO_TOOL_DESCRIPTIONS.recall`, the text the
+calling agent actually reads, never said segments existed. So a working
+capability was undiscoverable by the one reader K1 built it for — this
+effort's recurring defect class arriving inverted: not storage written where
+nothing reads, but a read path nothing was told about.
+
+The isolation the acceptance test asks for is **structural, not incidental**:
+`rankSegmentMembers` scopes every member lookup by `segment_id`, and
+`querySegmentsByScope` scopes every tag, type and text filter by the
+segment's own id. Both were shown to discriminate by injecting a scoping leak
+and watching the tests go red.
+
+**The acceptance test passes on a constructed fixture and is NOT claimed on
+production.** The corpus has no genuine two-interleaved-threads example to
+check against: the one multi-segment session is chapter succession with soft
+boundary overlap, not sustained alternation — K8a's own admission, reached
+from the other direction. Four production turns do belong to two segments
+each, which is K6's many-to-many working rather than dragging.
+
+### Follow-up this surfaced
+
+`plugin/skills/mnemo-recall/SKILL.md` — the skill document that teaches the
+three read axes — still does not mention segments or the `E` selector at all.
+The same defect as the tool description, one surface over. Belongs with this
+ticket's remaining half.
 
 The first honest check is `action-roleplay`, whose card-extraction and harness lines run interleaved and which has zero segments today.
