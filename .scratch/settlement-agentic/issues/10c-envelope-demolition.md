@@ -14,6 +14,19 @@ Expand–contract. 10b made `commit` the only live writer, which leaves the enve
 - [ ] The three-strike cursor advance is documented in the job log as abandoning a remainder, not converging
 - [ ] Full suite green
 
+## Restored here: a segment may assert a relation
+
+Spec A3 says there is **no edge tool** precisely because an edge is always
+asserted by some turn, segment or session, and so lives as a field on those
+calls. The old envelope's `edges` array could carry
+`{citing: "E47", cited: "E31", relation: "supersedes"}` — one chapter
+overturning another. Ticket 10b's field list for the segment tool omitted
+that; the omission was in the ticket, not in the implementation, and a
+segment can currently only gain a bare edge through a body citation.
+
+- [ ] The segment call carries the four relation fields, under ticket 07's own rules: the target must be cited in that call's body post-state, one relation per pair, the same target under two fields is rejected
+- [ ] A segment can once again be the citing side of an asserted relation — arc-level supersession has a home
+
 ## Inherited from 10a: the metrics sink reads zero
 
 `note-settlement-dispatch.ts`'s `metrics()` sources `turnsReviewed`, `notesReconstructed` and their siblings entirely from the write-back's result. Since 10a moved turn writes onto a tool, the model no longer emits those envelope sections, so the counters report zero while the work happens through calls nothing counts. It is a log sink, not a health surface, so nothing broke — but it is telemetry that has stopped reflecting reality, and this is the ticket that owns the code.

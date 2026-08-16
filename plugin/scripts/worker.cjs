@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msvja0gr" : "dev";
+var BUILD_ID = true ? "0.10.0-msvjhcgk" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -47272,12 +47272,6 @@ function evaluateSettlementSegmentWrite(db, context, rawInput, nowEpoch, options
     return {
       ok: false,
       message: "extend requires segmentId and expectedRevision, both naming an already-existing segment."
-    };
-  }
-  if (!context.exposedSegmentIds.has(rawInput.segmentId)) {
-    return {
-      ok: false,
-      message: `E${rawInput.segmentId} was not shown to this dispatch as an open segment \u2014 extend may only target a segment this run's prompt actually listed.`
     };
   }
   const current = getSegment(db, rawInput.segmentId);

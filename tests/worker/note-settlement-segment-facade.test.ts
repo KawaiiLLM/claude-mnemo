@@ -245,23 +245,6 @@ describe("create — required fields (requirement 3)", () => {
 });
 
 describe("extend — scope, freeze, and the compare-and-set (requirements 3/5)", () => {
-  test("refuses a segment not exposed to this dispatch (carried-over review-scope discipline)", () => {
-    const sessionDbId = seedSession();
-    const job = claimWindow(sessionDbId, 1, 1);
-    const existing = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
-
-    const result = evaluateSettlementSegmentWrite(
-      db,
-      baseContext(job, { exposedSegmentIds: new Set() }),
-      { action: "extend", segmentId: existing.id, expectedRevision: existing.revision },
-      NOW,
-      { apply: true, handleMap: NO_HANDLES },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain("not shown");
-  });
-
   test("refuses a nonexistent segment", () => {
     const sessionDbId = seedSession();
     const job = claimWindow(sessionDbId, 1, 1);

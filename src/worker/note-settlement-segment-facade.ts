@@ -294,12 +294,16 @@ export function evaluateSettlementSegmentWrite(
       message: "extend requires segmentId and expectedRevision, both naming an already-existing segment.",
     };
   }
-  if (!context.exposedSegmentIds.has(rawInput.segmentId)) {
-    return {
-      ok: false,
-      message: `E${rawInput.segmentId} was not shown to this dispatch as an open segment — extend may only target a segment this run's prompt actually listed.`,
-    };
-  }
+  // No "was this segment shown to the dispatch" check, deliberately (user
+  // ruling, S15069/T728). An implementation of this ticket added one, gating
+  // `extend` on the open segments the prompt listed; it was removed rather
+  // than kept. The retiring write-back declared `exposedSegmentIds` and never
+  // read it — extend was gated only by the compare-and-set below (exists,
+  // open, revision matches) — so the gate was new authority arriving under
+  // the appearance of a carry-over. And the durable reason: whether a model
+  // saw something is not auditable, which is the same ruling that retired the
+  // note-id exposure ledger. Existence and openness are facts storage answers
+  // exactly; "was it listed" approximates in both directions.
   const current = getSegment(db, rawInput.segmentId);
   if (!current) {
     return { ok: false, message: `no segment E${rawInput.segmentId}.` };
