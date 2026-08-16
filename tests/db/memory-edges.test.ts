@@ -81,6 +81,7 @@ describe("universal memory edges", () => {
           },
         ],
         500,
+        { eligibleForRelation: "unrestricted" },
       );
       expect(getOutgoingEdges(db, { kind: "turn", id: citer })).toHaveLength(2);
 
@@ -125,6 +126,7 @@ describe("universal memory edges", () => {
         },
       ],
       300,
+      { eligibleForRelation: "unrestricted" },
     );
 
     expect(result.written).toHaveLength(1);
@@ -163,6 +165,7 @@ describe("universal memory edges", () => {
         },
       ],
       300,
+      { eligibleForRelation: "unrestricted" },
     );
 
     expect(result.written).toHaveLength(1);
@@ -179,9 +182,9 @@ describe("universal memory edges", () => {
       relation: "depends-on" as const,
     };
 
-    writeMemoryEdges(db, [{ ...edge, provenance: "retrieval" }], 300);
-    writeMemoryEdges(db, [{ ...edge, provenance: "judged" }], 400);
-    writeMemoryEdges(db, [{ ...edge, provenance: "retrieval" }], 500);
+    writeMemoryEdges(db, [{ ...edge, provenance: "retrieval" }], 300, { eligibleForRelation: "unrestricted" });
+    writeMemoryEdges(db, [{ ...edge, provenance: "judged" }], 400, { eligibleForRelation: "unrestricted" });
+    writeMemoryEdges(db, [{ ...edge, provenance: "retrieval" }], 500, { eligibleForRelation: "unrestricted" });
 
     const stored = getOutgoingEdges(db, edge.citing);
     expect(stored).toHaveLength(1);
@@ -209,6 +212,7 @@ describe("universal memory edges", () => {
         },
       ],
       300,
+      { eligibleForRelation: "unrestricted" },
     );
     expect(bare.written).toHaveLength(1);
     expect(bare.written[0]?.relation).toBeNull();
@@ -226,6 +230,7 @@ describe("universal memory edges", () => {
         },
       ],
       400,
+      { eligibleForRelation: "unrestricted" },
     );
 
     // A later bare re-mention (weaker signal) must NOT retract the relation.
@@ -240,6 +245,7 @@ describe("universal memory edges", () => {
         },
       ],
       500,
+      { eligibleForRelation: "unrestricted" },
     );
 
     expect(remention.written[0]?.relation).toBe("supersedes");
@@ -261,6 +267,7 @@ describe("universal memory edges", () => {
       db,
       [{ ...pair, relation: "depends-on", provenance: "judged" }],
       300,
+      { eligibleForRelation: "unrestricted" },
     );
     // Same-rank correction (another `judged` pass revising the earlier one) —
     // must land as an UPDATE of the one row, not a second edge.
@@ -268,6 +275,7 @@ describe("universal memory edges", () => {
       db,
       [{ ...pair, relation: "supersedes", provenance: "judged" }],
       400,
+      { eligibleForRelation: "unrestricted" },
     );
 
     expect(countMemoryEdges(db)).toBe(1);
@@ -290,6 +298,7 @@ describe("universal memory edges", () => {
       db,
       [{ ...pair, relation: "depends-on", provenance: "asserted" }],
       300,
+      { eligibleForRelation: "unrestricted" },
     );
     // Settlement later corrects it with hindsight. This is exactly the
     // operation spec C7 exists to permit — a rank gate that made an
@@ -299,6 +308,7 @@ describe("universal memory edges", () => {
       db,
       [{ ...pair, relation: "supersedes", provenance: "judged" }],
       400,
+      { eligibleForRelation: "unrestricted" },
     );
 
     const stored = getOutgoingEdges(db, pair.citing);
@@ -327,6 +337,7 @@ describe("universal memory edges", () => {
         },
       ],
       300,
+      { eligibleForRelation: "unrestricted" },
     );
 
     expect(result.written).toHaveLength(0);
@@ -363,6 +374,7 @@ describe("universal memory edges", () => {
         },
       ],
       300,
+      { eligibleForRelation: "unrestricted" },
     );
 
     expect(result.written).toHaveLength(0);
@@ -396,6 +408,7 @@ describe("universal memory edges", () => {
         },
       ],
       300,
+      { eligibleForRelation: "unrestricted" },
     );
 
     expect(getEdgeInDegree(db, { kind: "turn", id: cited })).toBe(2);
@@ -502,6 +515,7 @@ describe("universal memory edges", () => {
           },
         ],
         300,
+        { eligibleForRelation: "unrestricted" },
       );
 
       const snapshot = getExistingEdgePairKeys(db);

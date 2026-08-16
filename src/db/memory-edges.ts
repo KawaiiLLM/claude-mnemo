@@ -218,27 +218,43 @@ export function pairKey(edge: Pick<WriteEdgeInput, "citing" | "cited">): string 
 export interface WriteMemoryEdgesOptions {
   /**
    * Ticket 07 (spec C7/C14): pair keys (see `pairKey`) that MAY receive a
-   * non-null relation on THIS call. Checked only against a relation-BEARING
-   * write — a bare (`relation: null`) edge never needs to appear here,
+   * non-null relation on THIS call, or `"unrestricted"` to state that this
+   * caller answers for eligibility itself. Checked only against a
+   * relation-BEARING write — a bare (`relation: null`) edge is never gated,
    * because C6/C7's "settlement writing a body whose citations create bare
    * pairs stays legal" rule is about the pair, not about who classified it;
-   * gating bare writes too would re-introduce the free-standing-edge problem
-   * C6 already closed, just from the opposite direction.
+   * gating bare writes would re-introduce the free-standing-edge problem C6
+   * already closed, from the opposite direction.
    *
-   * Omitted (the default) means NO eligibility check runs at all — every
-   * caller that does not pass this keeps writing relations exactly as it did
-   * before ticket 07 existed. This is deliberately OPT-IN rather than a
-   * global default-deny: C14's own rule is that eligibility lives in each
-   * write path, not in a property of the primitive every caller inherits
-   * whether it asked for one or not, and a default-deny would have broken
-   * every direct caller of this function that has no C7 stake at all
-   * (schema-migration collapse, and this file's own test suite exercising
-   * the upsert itself). The two callers ticket 07 actually gates — the main
-   * agent's own relation fields (db/citations.ts's `attachTurnRelations`)
-   * and the settlement write-back's judged edges — compute and pass this
-   * explicitly.
+   * **Omitting it DENIES every relation.** The first implementation made it
+   * opt-in — omitted meant no check at all — and a cross-session review
+   * named the consequence before it happened: a later caller that writes
+   * `relation: "supersedes"` and forgets the option would silently mint the
+   * unqualified relation-only edge C7 exists to forbid, and nothing would
+   * fail. Safety must not rest on every future caller remembering a
+   * parameter. Deny-by-default inverts that: a forgotten option costs the
+   * caller its relations loudly (`rejected: "relation-ineligible"`, and its
+   * own tests go red) instead of costing the invariant quietly.
+   *
+   * `"unrestricted"` exists so an exempt path says so out loud rather than
+   * inheriting an exemption by omission. Nothing in production uses it — the
+   * two gated callers pass real sets (`db/citations.ts`'s body post-state,
+   * the settlement write-back's transaction pre-state) and the two bare-pair
+   * callers write no relations at all — so its only users are tests
+   * exercising the upsert itself.
    */
-  eligibleForRelation?: ReadonlySet<string>;
+  eligibleForRelation?: ReadonlySet<string> | "unrestricted";
+}
+
+function mayCarryRelation(
+  options: WriteMemoryEdgesOptions,
+  edge: Pick<WriteEdgeInput, "citing" | "cited">,
+): boolean {
+  const eligible = options.eligibleForRelation;
+  if (eligible === undefined) {
+    return false;
+  }
+  return eligible === "unrestricted" || eligible.has(pairKey(edge));
 }
 
 /**
@@ -250,8 +266,9 @@ export interface WriteMemoryEdgesOptions {
  * correct a relation on THIS pair — is `options.eligibleForRelation`: a
  * main-agent write needs the target cited in its own body's post-state, a
  * settlement write needs the pair already present in its transaction's
- * pre-state (ticket 07). Each caller computes its own set; this function only
- * enforces membership in whatever set it was handed. A relation of `null` (a
+ * pre-state (ticket 07). Each caller computes its own set; this function
+ * only enforces membership in whatever set it was handed, and refuses every
+ * relation when handed none. A relation of `null` (a
  * bare reference) never clears or relabels an existing relation, and never
  * touches its provenance either — a citation in prose says the pair exists
  * and says nothing about its relation, so relation and provenance move as one
@@ -356,15 +373,12 @@ export function writeMemoryEdges(
       continue;
     }
     // Ticket 07 (spec C7/C14): only a relation-BEARING write is gated — a
-    // bare write always passes, whatever `eligibleForRelation` contains,
-    // which is what keeps a mechanically derived bare pair (segment anchors,
-    // `reconcileCitedPairs`'s own recompute) legal regardless of who is
-    // writing it.
-    if (
-      edge.relation !== null &&
-      options.eligibleForRelation !== undefined &&
-      !options.eligibleForRelation.has(pairKey(edge))
-    ) {
+    // bare write always passes, which is what keeps a mechanically derived
+    // bare pair (segment anchors, `reconcileCitedPairs`'s own recompute)
+    // legal regardless of who is writing it. A relation-bearing write with
+    // no eligibility stated is REFUSED, not waved through; see
+    // `WriteMemoryEdgesOptions` for why the default is deny.
+    if (edge.relation !== null && !mayCarryRelation(options, edge)) {
       rejected.push({ input: edge, reason: "relation-ineligible" });
       continue;
     }

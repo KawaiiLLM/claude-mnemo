@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { createDatabase, runWriteTransaction } from "../../src/db/database";
+import {
+  createDatabase,
+  isSqliteBusy,
+  runWriteTransaction,
+} from "../../src/db/database";
 import {
   assertNoteSettlementJobClaimed,
   completeNoteSettlementJobIfSegmented,
@@ -432,40 +439,86 @@ describe("completeNoteSettlementJobIfSegmented — the completion gate", () => {
     expect(getNoteSettlementJob(db, job.id)?.status).toBe("done");
     expect(getNoteSettlementCursor(db, sessionDbId)).toBe(3);
   });
+});
 
-  test("a competing claim that lands between the anti-join passing and the compare-and-set still refuses — same transaction, not a separate one", () => {
+/**
+ * The gate's transaction boundary (spec G7), on a FILE database with a second
+ * connection — the only shape that can test it.
+ *
+ * The first version of this test ran on one `:memory:` connection and fired a
+ * `claim_generation` bump between the anti-join's read and the
+ * compare-and-set. A cross-session review showed it proved nothing: the CAS
+ * re-verifies the generation on its own, so removing `runWriteTransaction`
+ * entirely left the test green. Worse, a same-connection write lands INSIDE
+ * the gate's own transaction, so no single-connection fixture can distinguish
+ * "these reads and this write share a transaction" from "they do not".
+ *
+ * What `BEGIN IMMEDIATE` actually buys is stated directly here: while the gate
+ * is deciding, nobody else can change the facts it decided on. The competing
+ * write is a coverage REGRESSION (clearing a turn's type) carrying no
+ * generation change, so the CAS cannot catch it — the lock is the only thing
+ * that can.
+ */
+describe("the completion gate holds its window while it decides (spec G7)", () => {
+  let directory: string;
+  let other: Database;
+
+  beforeEach(() => {
+    // The outer hook made a `:memory:` database; two connections need a file.
+    db.close();
+    directory = mkdtempSync(join(tmpdir(), "mnemo-completion-txn-"));
+    db = createDatabase(join(directory, "mnemo.sqlite"));
+    initializeSchema(db);
+    // `busyTimeoutMs: 0` so the competing write fails immediately instead of
+    // blocking on the lock for the default timeout.
+    other = createDatabase(join(directory, "mnemo.sqlite"), { busyTimeoutMs: 0 });
+  });
+
+  afterEach(() => {
+    other.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  test("a competing connection cannot clear a turn's type between the coverage read and the compare-and-set", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
     markTyped([t1]);
     const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
     addSegmentMembers(db, segment.id, [t1], NOW);
-    const originalGeneration = job.claimGeneration;
 
-    // Fires right after the anti-join's read of the window's turns — i.e.
-    // AFTER the check has effectively already found the window fully
-    // segmented, but BEFORE the completion compare-and-set runs. A
-    // competing dispatch reclaims the job in that gap.
+    let competingWriteLanded = false;
     fireAfterNextTurnsRead(db, () => {
-      db.query<unknown, [number]>(
-        "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
-      ).run(job.id);
+      try {
+        other
+          .query<unknown, [number]>("UPDATE turns SET type = '[]' WHERE id = ?")
+          .run(t1);
+        competingWriteLanded = true;
+      } catch (error) {
+        if (!isSqliteBusy(error)) {
+          throw error;
+        }
+      }
     });
 
     const result = completeNoteSettlementJobIfSegmented(
       db,
       job.id,
-      originalGeneration,
+      job.claimGeneration,
       NOW + 10,
     );
 
-    expect(result.completed).toBe(false);
-    expect(result.reason).toBe("generation-mismatch");
-    const row = getNoteSettlementJob(db, job.id)!;
-    // Ownership moved (a new dispatch's generation), but nothing about the
-    // row's own resolution moved: still `claimed`, cursor untouched.
-    expect(row.status).toBe("claimed");
-    expect(row.claimGeneration).toBe(originalGeneration + 1);
-    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
+    // The load-bearing assertion: the write was locked out. Without
+    // `runWriteTransaction` it lands, and the gate then completes a window
+    // whose coverage no longer holds — with the generation untouched, so
+    // nothing downstream would notice.
+    expect(competingWriteLanded).toBe(false);
+    expect(result.completed).toBe(true);
+    expect(
+      db
+        .query<{ type: string }, [number]>("SELECT type FROM turns WHERE id = ?")
+        .get(t1)?.type,
+    ).toBe(JSON.stringify(["discuss"]));
+    expect(getNoteSettlementJob(db, job.id)?.status).toBe("done");
   });
 });

@@ -38,11 +38,11 @@ const NO_REPLY_COMMAND_ENVELOPE_PREFIXES = [
  * to its notification marker instead of spending row budget on it — the two
  * must agree on which envelope is a pure marker.
  *
- * A `<command-name>` tag ANYWHERE in the prompt (not necessarily leading)
- * means the command WAS routed to the model — a real turn, kept eligible —
- * matching `extractCommandName`'s own non-anchored search. Only an envelope
- * that opens one of the four command-related prefixes and never states a
- * command name is the local, no-reply shape.
+ * A complete `<command-name>…</command-name>` tag ANYWHERE in the prompt (not
+ * necessarily leading) means the command WAS routed to the model — a real
+ * turn, kept eligible — matching `extractCommandName`'s own non-anchored
+ * search. Only an envelope that opens one of the four command-related
+ * prefixes and never states a command name is the local, no-reply shape.
  *
  * No production row currently exercises this branch: `turns.user_prompt` is
  * captured from the UserPromptSubmit hook's raw prompt text (e.g. "/to-tickets
@@ -64,7 +64,15 @@ export function isNoReplySlashCommandPrompt(userPrompt: string | null): boolean 
   if (!isCommandEnvelope) {
     return false;
   }
-  return !trimmed.includes("<command-name>");
+  // A COMPLETE tag naming something, not the opener text:
+  // `<local-command-stdout>… mentioning <command-name></local-command-stdout>`
+  // states no command, and a bare `includes("<command-name>")` would read it
+  // as model-routed and keep the envelope eligible. The pattern is
+  // `mcp/timeline.ts`'s `extractCommandName` verbatim — mirrored rather than
+  // imported, because a db-layer module must not depend on the MCP layer, and
+  // the two disagreeing about what a command envelope is would be worse than
+  // the duplication.
+  return !/<command-name>\s*([^<]+?)\s*<\/command-name>/.test(trimmed);
 }
 
 /**

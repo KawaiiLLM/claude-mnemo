@@ -7890,6 +7890,13 @@ function isValidCitedNode(node) {
 function pairKey(edge) {
   return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
 }
+function mayCarryRelation(options, edge) {
+  const eligible = options.eligibleForRelation;
+  if (eligible === void 0) {
+    return false;
+  }
+  return eligible === "unrestricted" || eligible.has(pairKey(edge));
+}
 function writeMemoryEdges(db, edges, nowEpoch, options = {}) {
   const written = [];
   const rejected = [];
@@ -7951,7 +7958,7 @@ function writeMemoryEdges(db, edges, nowEpoch, options = {}) {
       rejected.push({ input: edge, reason: "conflicting-relation" });
       continue;
     }
-    if (edge.relation !== null && options.eligibleForRelation !== void 0 && !options.eligibleForRelation.has(pairKey(edge))) {
+    if (edge.relation !== null && !mayCarryRelation(options, edge)) {
       rejected.push({ input: edge, reason: "relation-ineligible" });
       continue;
     }
@@ -33872,7 +33879,7 @@ function isNoReplySlashCommandPrompt(userPrompt) {
   if (!isCommandEnvelope) {
     return false;
   }
-  return !trimmed.includes("<command-name>");
+  return !/<command-name>\s*([^<]+?)\s*<\/command-name>/.test(trimmed);
 }
 function isCompactMarkerTurn(turn) {
   return turn.type.includes("compact");
@@ -33935,6 +33942,13 @@ function checkTool(db, rawInput) {
     return parameterError(`id must be a "S<session>" address; got "${rawInput.id}".`);
   }
   const sessionId = Number.parseInt(match[1], 10);
+  if (!Number.isSafeInteger(sessionId) || sessionId <= 0) {
+    return parameterError(`id must be a "S<session>" address; got "${rawInput.id}".`);
+  }
+  const sessionExists = db.query("SELECT id FROM sessions WHERE id = ?").get(sessionId);
+  if (!sessionExists) {
+    return parameterError(`S${sessionId} is not a session in this database.`);
+  }
   const turnIds = db.query(
     "SELECT id FROM turns WHERE session_id = ? ORDER BY prompt_number ASC"
   ).all(sessionId).map((row) => row.id);

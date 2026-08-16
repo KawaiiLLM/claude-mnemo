@@ -3811,6 +3811,7 @@ function citeTurns(
       provenance: "judged" as const,
     })),
     ERA_BASE,
+    { eligibleForRelation: "unrestricted" },
   );
 }
 

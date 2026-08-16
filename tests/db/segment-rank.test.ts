@@ -69,6 +69,7 @@ describe("segment member derived rank (spec D8)", () => {
         provenance: "judged" as const,
       })),
       ERA,
+      { eligibleForRelation: "unrestricted" },
     );
   }
 
@@ -248,6 +249,7 @@ describe("segment member derived rank (spec D8)", () => {
         { citing: { kind: "turn", id: citerB }, cited: { kind: "turn", id: cited }, relation: "evidence-for", provenance: "judged" },
       ],
       ERA,
+      { eligibleForRelation: "unrestricted" },
     );
 
     const segment = createSegment(db, { title: "measure dedup", nowEpoch: ERA });
@@ -278,6 +280,7 @@ describe("segment member derived rank (spec D8)", () => {
         },
       ],
       ERA,
+      { eligibleForRelation: "unrestricted" },
     );
 
     const segment = createSegment(db, {
@@ -506,6 +509,7 @@ describe("segment spine and orphan anchors (spec D11)", () => {
         { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: skipped }, relation: "depends-on", provenance: "judged" },
       ],
       CUTOFF,
+      { eligibleForRelation: "unrestricted" },
     );
 
     const segment = createSegment(db, { title: "implement the claimed one", nowEpoch: CUTOFF });

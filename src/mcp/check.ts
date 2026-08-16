@@ -51,6 +51,24 @@ export function checkTool(db: Database, rawInput: CheckToolInput): ToolTextResul
   }
 
   const sessionId = Number.parseInt(match[1]!, 10);
+  // `S9007199254740993` matches the pattern and parses to a value that is not
+  // the number the caller typed; past that boundary the id silently becomes a
+  // different one.
+  if (!Number.isSafeInteger(sessionId) || sessionId <= 0) {
+    return parameterError(`id must be a "S<session>" address; got "${rawInput.id}".`);
+  }
+  // An unknown session must not answer "nothing owed". Every other outcome of
+  // this tool is a statement about turns that exist; a bare empty window is
+  // indistinguishable from a clean one, and a clean bill is exactly what the
+  // caller acts on — G8's whole value is that an agent can trust the answer
+  // before it believes it has finished.
+  const sessionExists = db
+    .query<{ id: number }, [number]>("SELECT id FROM sessions WHERE id = ?")
+    .get(sessionId);
+  if (!sessionExists) {
+    return parameterError(`S${sessionId} is not a session in this database.`);
+  }
+
   const turnIds = db
     .query<{ id: number }, [number]>(
       "SELECT id FROM turns WHERE session_id = ? ORDER BY prompt_number ASC",

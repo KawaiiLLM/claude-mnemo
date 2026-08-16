@@ -78,13 +78,29 @@ describe("check tool (spec G8/G9, ticket 08)", () => {
     );
   });
 
+  test("rejects an unsafe id and a session that does not exist", () => {
+    // Matches the address pattern, parses to a DIFFERENT number.
+    expect(resultText(checkTool(db, { id: "S9007199254740993" }))).toStartWith(
+      "Parameter error:",
+    );
+    // Well-formed, absent: must not answer with a clean bill, which is what
+    // the caller acts on.
+    const absent = resultText(checkTool(db, { id: `S${sessionId + 4242}` }));
+    expect(absent).toStartWith("Parameter error:");
+    expect(absent).not.toContain("nothing owed");
+  });
+
   test("reports nothing owed when every eligible turn is typed or skipped", () => {
     seedTurn({ promptNumber: 1, type: ["design"] });
     seedTurn({ promptNumber: 2, status: "skipped" });
     seedTurn({ promptNumber: 3, userPrompt: "/compact", type: ["compact"] });
 
-    const text = resultText(checkTool(db, { id: `S${sessionId}` }));
-    expect(text).toContain("nothing owed");
+    // Exact, not a substring: a report that ALSO listed one of these three as
+    // owed would still contain "nothing owed" if the phrase were merely a
+    // prefix.
+    expect(resultText(checkTool(db, { id: `S${sessionId}` }))).toBe(
+      `S${sessionId}: nothing owed — every eligible turn is typed or skipped.`,
+    );
   });
 
   // Acceptance criterion 5: reports WHAT is missing, never why.
@@ -95,16 +111,13 @@ describe("check tool (spec G8/G9, ticket 08)", () => {
 
     const text = resultText(checkTool(db, { id: `S${sessionId}` }));
 
-    expect(text).toContain(`S${sessionId}/T2`);
-    expect(text).toContain(`S${sessionId}/T3`);
-    expect(text).not.toContain(`S${sessionId}/T1`);
-    expect(text).toContain("2");
-
-    // "Never why": no mechanism word leaks into the report. The agent already
-    // knows why a turn is a gap; this tool states only which ones are.
-    for (const mechanismWord of ["empty", "type field", "declined", "mechanical", "floor"]) {
-      expect(text.toLowerCase()).not.toContain(mechanismWord.toLowerCase());
-    }
+    // The WHOLE report, not a substring and not a denylist of five words. A
+    // denylist passes any explanation phrased differently, and a `toContain`
+    // on the addresses passes a report that also listed T1 — so the test that
+    // is supposed to enforce "what, never why" has to pin the entire string.
+    expect(text).toBe(
+      `S${sessionId}: 2 turn(s) still owe review: S${sessionId}/T2, S${sessionId}/T3.`,
+    );
   });
 
   test("excludes a compact marker and a no-reply slash command, includes a sidechain turn", () => {
@@ -115,22 +128,22 @@ describe("check tool (spec G8/G9, ticket 08)", () => {
     });
     seedTurn({ promptNumber: 3, status: "undone" });
 
-    const text = resultText(checkTool(db, { id: `S${sessionId}` }));
-
-    expect(text).not.toContain(`T1`);
-    expect(text).not.toContain(`T2`);
-    expect(text).toContain(`S${sessionId}/T3`);
+    expect(resultText(checkTool(db, { id: `S${sessionId}` }))).toBe(
+      `S${sessionId}: 1 turn(s) still owe review: S${sessionId}/T3.`,
+    );
   });
 
   test("a filled type clears a previously reported gap", () => {
     const turnId = seedTurn({ promptNumber: 1 });
-    expect(resultText(checkTool(db, { id: `S${sessionId}` }))).toContain(
-      `S${sessionId}/T1`,
+    expect(resultText(checkTool(db, { id: `S${sessionId}` }))).toBe(
+      `S${sessionId}: 1 turn(s) still owe review: S${sessionId}/T1.`,
     );
 
     updateTurnById(db, turnId, { type: ["fix"], updatedAtEpoch: nextEpoch });
 
-    expect(resultText(checkTool(db, { id: `S${sessionId}` }))).toContain("nothing owed");
+    expect(resultText(checkTool(db, { id: `S${sessionId}` }))).toBe(
+      `S${sessionId}: nothing owed — every eligible turn is typed or skipped.`,
+    );
   });
 
   // Acceptance criterion 6 (spec G9): the per-grade histogram must not be

@@ -366,7 +366,12 @@ describe("era cutover write path", () => {
       );
 
       expect(isNoteSuccess(result)).toBe(true);
-      expect(getShadowNote(db, legacyTurnId)).not.toBeNull();
+      // Existence alone would pass on an empty or wrong-turn payload.
+      const shadow = getShadowNote(db, legacyTurnId);
+      expect(shadow?.title).toBe("implement+era-cutover: rollback shape");
+      expect(shadow?.content).toBe(
+        "Shadow-only is the intended record under a null cutoff.",
+      );
     });
   });
 
@@ -737,7 +742,9 @@ describe("era cutover write path", () => {
       );
 
       expect(snapshotTurnRow(db, eraTurnId)).toBe(before);
-      expect(getShadowNote(db, eraTurnId)).not.toBeNull();
+      const shadow = getShadowNote(db, eraTurnId);
+      expect(shadow?.title).toBe("implement+era-cutover: rollback");
+      expect(shadow?.content).toBe("With no cutoff every turn is legacy.");
       expect(getNoteDebt(db, eraTurnId)?.status).toBe("noted");
     });
 
@@ -777,7 +784,9 @@ describe("era cutover write path", () => {
       );
 
       expect(snapshotTurnRow(db, eraTurnId)).toBe(before);
-      expect(getShadowNote(db, eraTurnId)).not.toBeNull();
+      const shadow = getShadowNote(db, eraTurnId);
+      expect(shadow?.title).toBe("implement+era-cutover: default");
+      expect(shadow?.content).toBe("No option supplied at all.");
     });
   });
 
@@ -838,13 +847,23 @@ describe("era cutover write path", () => {
       });
       const before = snapshotTurnRow(db, eraTurnId);
 
-      await handlers.note!({
+      const result = await handlers.note!({
         turn: `S${sessionId}/T11`,
         title: "implement+era-cutover: inert",
         content: "Nothing reaches the turn row.",
       });
 
+      // "Turns unchanged" alone does not distinguish the legacy path from an
+      // erroneous REFUSAL, which leaves the row untouched too — and the
+      // refusal firing under a null cutoff is the exact regression this
+      // ticket already shipped once. So the write has to be shown to have
+      // succeeded and landed somewhere.
+      expect(result.content[0]!.text).not.toStartWith("Parameter error:");
       expect(snapshotTurnRow(db, eraTurnId)).toBe(before);
+      const shadow = getShadowNote(db, eraTurnId);
+      expect(shadow?.title).toBe("implement+era-cutover: inert");
+      expect(shadow?.content).toBe("Nothing reaches the turn row.");
+      expect(getNoteDebt(db, eraTurnId)?.status).toBe("noted");
     });
   });
 });

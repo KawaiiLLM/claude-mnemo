@@ -600,6 +600,7 @@ describe("relation attach eligibility (spec C7/C14, ticket 07)", () => {
         },
       ],
       NOW - 500,
+      { eligibleForRelation: "unrestricted" },
     );
     const job = claimWindow(sessionDbId, 1, 2);
 
@@ -682,6 +683,7 @@ describe("relation attach eligibility (spec C7/C14, ticket 07)", () => {
         },
       ],
       NOW - 500,
+      { eligibleForRelation: "unrestricted" },
     );
     const job = claimWindow(sessionDbId, 1, 2);
 

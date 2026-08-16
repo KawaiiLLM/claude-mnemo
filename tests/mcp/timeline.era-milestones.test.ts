@@ -155,6 +155,7 @@ function seedGradedEraFixture(db: Database): {
       }),
     ),
     CUTOFF,
+    { eligibleForRelation: "unrestricted" },
   );
   db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(ids.corrector!);
 

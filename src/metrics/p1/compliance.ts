@@ -60,13 +60,22 @@ export function resolveExposureLedgerFreeze(db: Database): number | null {
   return row?.frozenAtEpoch ?? null;
 }
 
+/**
+ * `>=`, not `>`. Epochs here are whole seconds, so a turn created in the SAME
+ * second as the ledger's final row is genuinely ambiguous — and `>` resolved
+ * that ambiguity toward `unreached`, which is the one direction this function
+ * must never take: `unreached` drops the debt out of the compliance
+ * denominator entirely, so a real miss would vanish rather than be
+ * over-counted. Found by a cross-session review, not by the boundary test I
+ * wrote, which only exercised freeze+100.
+ */
 function wasExposed(
   reminderExposures: number,
   turnCreatedAtEpoch: number,
   freezeEpoch: number | null,
 ): boolean {
   return (
-    reminderExposures > 0 || freezeEpoch === null || turnCreatedAtEpoch > freezeEpoch
+    reminderExposures > 0 || freezeEpoch === null || turnCreatedAtEpoch >= freezeEpoch
   );
 }
 

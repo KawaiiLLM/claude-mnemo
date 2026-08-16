@@ -170,10 +170,17 @@ export function createFixtureDatabase(): FixtureIds {
     rideTurnId: number,
     exposedTurnId: number,
   ): void => {
+    // Epoch 2000, strictly AFTER every turn (all seeded at 1000). This
+    // fixture models the reminder era, where the ledger is the only exposure
+    // signal, so every one of its turns must sit before the ledger's freeze —
+    // otherwise `wasExposed` reads them as post-freeze and `unreached`, the
+    // outcome three of these tests exist to exercise, becomes unreachable.
+    // The whole fixture previously shared one epoch, which made that
+    // distinction invisible rather than merely wrong.
     db.query<unknown, [number, number, number]>(
       `INSERT INTO note_id_exposures (
          session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-       ) VALUES (?, ?, ?, 'reminder', 1000)`,
+       ) VALUES (?, ?, ?, 'reminder', 2000)`,
     ).run(sessionId, rideTurnId, exposedTurnId);
   };
 

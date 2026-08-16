@@ -374,6 +374,7 @@ describe("segments, topics and membership", () => {
           },
         ],
         150,
+        { eligibleForRelation: "unrestricted" },
       );
       expect(
         getOutgoingEdges(db, { kind: "segment", id: segment.id }),
@@ -415,6 +416,7 @@ describe("segments, topics and membership", () => {
           },
         ],
         150,
+        { eligibleForRelation: "unrestricted" },
       );
 
       applySegmentWrites(

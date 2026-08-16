@@ -407,6 +407,7 @@ describe("settlement write-back", () => {
         },
       ],
       NOW - 4_000,
+      { eligibleForRelation: "unrestricted" },
     );
 
     const reply = JSON.stringify({

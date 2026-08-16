@@ -157,6 +157,7 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
         },
       ],
       nowEpoch,
+      { eligibleForRelation: "unrestricted" },
     );
     // getSessionCitationInDegree/getEffectiveCitations read the structured
     // edge only once this flag is set (spec §B's from-absent-vs-recorded-empty
@@ -528,6 +529,7 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
         },
       ],
       500,
+      { eligibleForRelation: "unrestricted" },
     );
     expect(
       getOutgoingEdges(db, { kind: "turn", id: turns[2]! }),
@@ -570,6 +572,7 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
         },
       ],
       500,
+      { eligibleForRelation: "unrestricted" },
     );
 
     recomputeTurnCitedPairs(
@@ -945,6 +948,7 @@ describe("effective citations predicate", () => {
         },
       ],
       500,
+      { eligibleForRelation: "unrestricted" },
     );
     db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
 
@@ -978,6 +982,7 @@ describe("effective citations predicate", () => {
         },
       ],
       500,
+      { eligibleForRelation: "unrestricted" },
     );
     db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
 
@@ -1100,6 +1105,7 @@ describe("session-wide effective citations", () => {
         },
       ],
       500,
+      { eligibleForRelation: "unrestricted" },
     );
     db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(
       structuredCiter,

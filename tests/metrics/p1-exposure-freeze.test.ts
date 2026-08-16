@@ -106,6 +106,22 @@ describe("the exposure ledger's freeze (metric a)", () => {
     expect(outcomeOf(unshown)).toBe("unreached");
   });
 
+  test("a turn created in the SAME second as the ledger's last row counts as shown", () => {
+    const shown = seedTurn(1, FREEZE - 200);
+    seedExposure(shown, FREEZE);
+
+    // Epochs are whole seconds, so this turn is genuinely ambiguous: it may
+    // have been created just before or just after the last write. Resolving
+    // it as `unreached` would drop it out of the compliance denominator
+    // entirely — a real miss vanishing rather than being over-counted, which
+    // is the one direction this rule must never take.
+    const sameSecond = seedTurn(2, FREEZE);
+    seedAgedDebt(sameSecond, 2);
+    seedTurn(99, FREEZE + 50);
+
+    expect(outcomeOf(sameSecond)).toBe("defaulted");
+  });
+
   test("after the freeze, a turn absent from the ledger is not evidence it was never shown", () => {
     const shown = seedTurn(1, FREEZE - 200);
     seedExposure(shown, FREEZE);

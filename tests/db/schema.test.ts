@@ -1771,6 +1771,7 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
         },
       ],
       100,
+      { eligibleForRelation: "unrestricted" },
     );
     db.exec("PRAGMA foreign_keys = ON");
 
