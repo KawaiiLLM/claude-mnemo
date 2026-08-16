@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { recordNoteIdExposure } from "../../src/db/note-debt";
 import {
   parseQualifiedReferences,
   resolveContentReferences,
@@ -25,16 +24,6 @@ describe("qualified reference parsing and validation", () => {
          RETURNING id`,
       )
       .get(sessionDbId, promptNumber)!.id;
-  }
-
-  function expose(rideTurnId: number, exposedTurnId: number): void {
-    recordNoteIdExposure(db, {
-      sessionId,
-      rideTurnId,
-      exposedTurnIds: [exposedTurnId],
-      source: "reminder",
-      nowEpoch: 100,
-    });
   }
 
   beforeEach(() => {
@@ -134,7 +123,6 @@ describe("qualified reference parsing and validation", () => {
     test("accepts a reference that resolves and was shown to the writer", () => {
       const rideTurn = addTurn(sessionId, 10);
       const cited = addTurn(sessionId, 3);
-      expose(rideTurn, cited);
 
       const result = resolveContentReferences(db, `builds on [S${sessionId}/T3]`, {
         writerSessionId: sessionId,
@@ -148,7 +136,6 @@ describe("qualified reference parsing and validation", () => {
 
     test("rejects an id that names no turn, and logs it instead of writing it", () => {
       const rideTurn = addTurn(sessionId, 10);
-      expose(rideTurn, rideTurn);
       const logged: unknown[] = [];
 
       const result = resolveContentReferences(db, `[S${sessionId}/T9999]`, {
@@ -170,7 +157,6 @@ describe("qualified reference parsing and validation", () => {
     // auditable in the first place; existence is.
     test("accepts an existing turn the writer was never handed, since existence is the only gate", () => {
       const rideTurn = addTurn(sessionId, 10);
-      expose(rideTurn, rideTurn);
       addTurn(otherSessionId, 4);
       const logged: unknown[] = [];
 
@@ -187,7 +173,6 @@ describe("qualified reference parsing and validation", () => {
     test("a cross-session reference passes once it IS in the ledger", () => {
       const rideTurn = addTurn(sessionId, 10);
       const foreign = addTurn(otherSessionId, 4);
-      expose(rideTurn, foreign);
 
       const result = resolveContentReferences(db, `[S${otherSessionId}/T4]`, {
         writerSessionId: sessionId,

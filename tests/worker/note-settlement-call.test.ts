@@ -347,21 +347,6 @@ describe("settlement context assembly", () => {
     expect(prompt).toContain("segmentation is LAST because it");
     expect(prompt).toContain("turn_review");
   });
-
-  test("records the rendered window ids in the exposure ledger", () => {
-    const fixture = seedInteriorHoleWindow();
-    buildNoteSettlementContext(db, fixture.job, { nowEpoch: NOW });
-
-    const exposed = db
-      .query<{ exposedTurnId: number }, [number]>(
-        `SELECT exposed_turn_id AS exposedTurnId FROM note_id_exposures
-         WHERE session_id = ? AND source = 'injection'`,
-      )
-      .all(fixture.sessionDbId)
-      .map((row) => row.exposedTurnId)
-      .sort((a, b) => a - b);
-    expect(exposed).toEqual([...fixture.turnIds].sort((a, b) => a - b));
-  });
 });
 
 describe("settlement write-back", () => {

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { recordNoteIdExposure } from "../../src/db/note-debt";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -200,16 +199,6 @@ test("a mechanical reconstruction writes only the note; type and tags stay empty
  * same gate `members`/`edges` already go through — so a direct writeback test
  * (bypassing `buildNoteSettlementContext`, which records exposure itself)
  * must seed it, or every address in these tests would read as "not shown". */
-function expose(sessionDbId: number, rideTurnId: number, turnIds: number[]): void {
-  recordNoteIdExposure(db, {
-    sessionId: sessionDbId,
-    rideTurnId,
-    exposedTurnIds: turnIds,
-    source: "injection",
-    nowEpoch: NOW,
-  });
-}
-
 /**
  * Run `fire` the instant after the next read of a turns row, then get out of
  * the way. Ticket 05's own race: the main agent notes its own turn WHILE the
@@ -262,7 +251,6 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
        VALUES (?, ?, ?, ?, ?)`,
     ).run(t1, "agent's own title", "agent's own content", NOW - 10, NOW - 10);
     const job = claimWindow(sessionDbId, 1, 2);
-    expose(sessionDbId, t2, [t1, t2]);
 
     const result = applyNoteSettlementWriteBack(db, {
       job,
@@ -314,7 +302,6 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
       `UPDATE turns SET tags = '["deferred","topic:stale"]' WHERE id = ?`,
     ).run(t1);
     const job = claimWindow(sessionDbId, 1, 1);
-    expose(sessionDbId, t1, [t1]);
 
     applyNoteSettlementWriteBack(db, {
       job,
@@ -339,7 +326,6 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const sessionDbId = seedSession();
     const t1 = seedHoleTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    expose(sessionDbId, t1, [t1]);
 
     const result = applyNoteSettlementWriteBack(db, {
       job,
@@ -369,7 +355,6 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const sessionDbId = seedSession();
     const t1 = seedHoleTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    expose(sessionDbId, t1, [t1]);
     const response = emptyResponse([], [
       { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tag: "widgets" },
     ]);
@@ -429,7 +414,6 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const sessionDbId = seedSession();
     const t1 = seedHoleTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    expose(sessionDbId, t1, [t1]);
 
     fireAfterNextTurnRead(() => {
       const raced = noteTool(
@@ -503,7 +487,6 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     expect(isNoteSuccess(written)).toBe(true);
 
     const job = claimWindow(sessionDbId, 1, 1);
-    expose(sessionDbId, t1, [t1]);
 
     const result = applyNoteSettlementWriteBack(db, {
       job,
@@ -537,7 +520,6 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     // landing a destructive write on it.
     const older = seedHoleTurn(sessionDbId, 2);
     const job = claimWindow(sessionDbId, 1, 1);
-    expose(sessionDbId, t1, [t1, older]);
 
     const result = applyNoteSettlementWriteBack(db, {
       job,
@@ -561,7 +543,6 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     const sessionDbId = seedSession();
     const t1 = seedHoleTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    expose(sessionDbId, t1, [t1]);
 
     // A settlement-origin note carries a timestamp newer than the claim too,
     // but it is this same reply's own work — yielding to it would mean the

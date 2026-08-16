@@ -5,14 +5,12 @@ import { createDatabase } from "../../src/db/database";
 import {
   closeNoteDebtAsDeclined,
   closeNoteDebtAsNoted,
-  getExposedTurnIds,
   getNoteDebt,
   listNoteDebt,
   listOwedNoteTurns,
   listOwedNoteTurnsInRange,
   NOTE_DEBT_AGING_TURNS,
   recordDeclinedNoteDebt,
-  recordNoteIdExposure,
 } from "../../src/db/note-debt";
 import {
   initializeDatabase,
@@ -482,24 +480,4 @@ describe("note id exposure ledger", () => {
     db.close();
   });
 
-  test("records which turn ids reached the model, by source", () => {
-    const rideTurn = db
-      .query<{ id: number }, [number]>(
-        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
-         VALUES (?, 1, 'active', 100) RETURNING id`,
-      )
-      .get(sessionId)!.id;
-
-    recordNoteIdExposure(db, {
-      sessionId,
-      rideTurnId: rideTurn,
-      exposedTurnIds: [rideTurn],
-      source: "injection",
-      nowEpoch: 300,
-    });
-
-    expect([...getExposedTurnIds(db, sessionId)]).toEqual([rideTurn]);
-    expect([...getExposedTurnIds(db, sessionId, "injection")]).toEqual([rideTurn]);
-    expect([...getExposedTurnIds(db, sessionId, "reminder")]).toEqual([]);
-  });
 });

@@ -11,7 +11,6 @@ import {
 } from "../../src/db/citations";
 import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
-import { recordNoteIdExposure } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
@@ -429,16 +428,6 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
       .get(sessionDbId, promptNumber)!.id;
 
   /** Exposes every turn id to `sessionId`'s ledger — recomputeTurnCitedPairs' own gate. */
-  function exposeAll(rideTurnId: number, exposedTurnIds: readonly number[]): void {
-    recordNoteIdExposure(db, {
-      sessionId,
-      rideTurnId,
-      exposedTurnIds,
-      source: "reminder",
-      nowEpoch: 100,
-    });
-  }
-
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
@@ -471,7 +460,6 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
   // an unattributed (relation: null) pair — no relation field, no separate
   // structured input, the body alone.
   test("a bare qualified reference in content creates an unattributed pair", () => {
-    exposeAll(turns[3]!, [turns[0]!]);
 
     const result = recomputeTurnCitedPairs(
       db,
@@ -491,7 +479,6 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
   });
 
   test("title and insight are citation-bearing fields too", () => {
-    exposeAll(turns[3]!, [turns[0]!, turns[1]!]);
 
     recomputeTurnCitedPairs(
       db,
@@ -517,7 +504,6 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
   // it citing only one, and prove the dropped pair is gone along with its
   // relation. Not merely "a delete helper exists".
   test("a rewrite that drops a reference drops its pair and any relation it carried", () => {
-    exposeAll(turns[3]!, [turns[0]!, turns[1]!]);
 
     recomputeTurnCitedPairs(
       db,
@@ -564,7 +550,6 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
   // Acceptance criterion 4: a relation on a pair the rewrite STILL cites
   // survives untouched — the bare re-scan must not clear or relabel it.
   test("a relation on a surviving pair is not disturbed by a rewrite that still cites it", () => {
-    exposeAll(turns[3]!, [turns[0]!]);
     recomputeTurnCitedPairs(
       db,
       turns[2]!,
@@ -633,7 +618,6 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
 
   test("a cross-session reference is written as provenance", () => {
     const foreign = insertTurn(otherSessionId, 1);
-    exposeAll(turns[3]!, [foreign]);
 
     recomputeTurnCitedPairs(
       db,

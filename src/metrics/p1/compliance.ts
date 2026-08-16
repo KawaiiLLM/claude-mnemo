@@ -23,7 +23,52 @@ import { isMnemoOwnToolName } from "../../shared/note-tool";
  *    would measure the display cap, not compliance. Exposure comes from the
  *    `note_id_exposures` ledger, whose rows mean "rendered into the model's
  *    context" — the only fact that makes a miss the agent's to answer for.
+ *
+ *    That ledger is now FROZEN. Under the per-debt reminder it discriminated,
+ *    because the five-oldest display cap meant a backlog genuinely hid debts.
+ *    The current-turn address injection that replaced it renders every turn's
+ *    address, so exposure measured 99-100% for the ledger's final days and
+ *    `unreached` became an empty category by design rather than by neglect —
+ *    at which point the two writers were removed and the accumulated rows kept
+ *    as the historical evidence. `resolveExposureLedgerFreeze` below is what
+ *    stops a missing row after the freeze from being read as "never shown":
+ *    absence of a ledger row is not a statement that nothing was shown.
  */
+
+/**
+ * The instant the exposure ledger stopped growing, read off the ledger itself
+ * rather than pinned as a release date. A turn created after it is in the
+ * always-injected era and counts as exposed by construction.
+ *
+ * Derived, not configured, because the writers were removed in one commit but
+ * reach an install only when its plugin reloads — so the real freeze is
+ * whenever THIS database last got a row, which is exactly what the data says.
+ * `null` (an empty ledger: a fresh install, a test fixture that seeds none)
+ * means the ledger never ran here, so every turn is post-freeze.
+ *
+ * The residual matters and is deliberately resolved against the agent: the
+ * final days measured 99-100%, not 100%, so a handful of genuinely un-injected
+ * turns will now read as exposed. That direction over-counts `defaulted` and
+ * therefore never hides a violation behind "we never asked it".
+ */
+export function resolveExposureLedgerFreeze(db: Database): number | null {
+  const row = db
+    .query<{ frozenAtEpoch: number | null }, []>(
+      "SELECT MAX(created_at_epoch) AS frozenAtEpoch FROM note_id_exposures",
+    )
+    .get();
+  return row?.frozenAtEpoch ?? null;
+}
+
+function wasExposed(
+  reminderExposures: number,
+  turnCreatedAtEpoch: number,
+  freezeEpoch: number | null,
+): boolean {
+  return (
+    reminderExposures > 0 || freezeEpoch === null || turnCreatedAtEpoch > freezeEpoch
+  );
+}
 
 /** How a debt ended, from the trial's point of view. */
 export type DebtOutcome =
@@ -136,6 +181,7 @@ interface DebtRow {
   writerModel: string | null;
   ridePromptNumber: number | null;
   reminderExposures: number;
+  turnCreatedAtEpoch: number;
   /**
    * A real agent-authored note exists for this turn RIGHT NOW, independent of
    * `status`. `closeNoteDebtAsNoted` (note-debt.ts) only flips `pending` or
@@ -287,6 +333,7 @@ interface DerivedFactRow {
   writerModel: string | null;
   ridePromptNumber: number | null;
   reminderExposures: number;
+  turnCreatedAtEpoch: number;
   hasNote: number;
 }
 
@@ -331,6 +378,7 @@ function collectDerivedDebtFacts(
         WHERE e.session_id = t.session_id
           AND e.exposed_turn_id = t.id
           AND e.source IN ('reminder', 'injection')) AS reminderExposures,
+      t.created_at_epoch AS turnCreatedAtEpoch,
       (CASE WHEN n.turn_id IS NOT NULL THEN 1 ELSE 0 END) AS hasNote
     FROM turns t
     JOIN session_size z ON z.sessionId = t.session_id
@@ -381,6 +429,7 @@ export function collectDebtFacts(
         WHERE e.session_id = d.session_id
           AND e.exposed_turn_id = d.turn_id
           AND e.source IN ('reminder', 'injection')) AS reminderExposures,
+      t.created_at_epoch AS turnCreatedAtEpoch,
       (CASE WHEN n.turn_id IS NOT NULL THEN 1 ELSE 0 END) AS hasNote
     FROM note_debt d
     JOIN turns t ON t.id = d.turn_id
@@ -399,9 +448,17 @@ export function collectDebtFacts(
 
   const toolCalls = countSubstantiveToolCallsForDebts(db, options.sessionId);
   const sessionModels = dominantWriterModelPerSession(db);
+  // Resolved once for both the ledger-based facts below and the derived ones,
+  // so the two halves of the same report cannot disagree about when the ledger
+  // stopped.
+  const exposureFreeze = resolveExposureLedgerFreeze(db);
 
   const facts = rows.map((row) => {
-    const exposed = row.reminderExposures > 0;
+    const exposed = wasExposed(
+      row.reminderExposures,
+      row.turnCreatedAtEpoch,
+      exposureFreeze,
+    );
     const pastBound = row.sessionMaxPromptNumber - row.promptNumber > agingTurns;
     const lazyAged = row.status === "pending" && pastBound;
 
@@ -460,7 +517,11 @@ export function collectDebtFacts(
     eraCutoffEpoch,
     options.sessionId,
   ).map((row) => {
-    const exposed = row.reminderExposures > 0;
+    const exposed = wasExposed(
+      row.reminderExposures,
+      row.turnCreatedAtEpoch,
+      exposureFreeze,
+    );
     const pastBound = row.sessionMaxPromptNumber - row.promptNumber > agingTurns;
 
     let outcome: DebtOutcome;

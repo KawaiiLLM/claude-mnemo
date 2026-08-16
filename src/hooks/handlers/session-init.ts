@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
-import { listOwedNoteTurns, recordNoteIdExposure } from "../../db/note-debt";
+import { listOwedNoteTurns } from "../../db/note-debt";
 import {
   deriveProcessIdentityKeys,
   upsertProcessSessionMap,
@@ -11,7 +11,6 @@ import { reindexTurnFromDb } from "../../db/search";
 import { getMaxPromptNumber } from "../../db/turns";
 import {
   formatOwedSuffix,
-  NOTE_REMINDER_DISPLAY_LIMIT,
   NOTE_RELIEF_PENDING_THRESHOLD,
   renderNoteBacklogRelief,
 } from "../note-reminder";
@@ -237,24 +236,8 @@ export function createSessionInitHandler(
         const owed = listOwedNoteTurns(dependencies.db, session.id, promptNumber);
         owedSuffix = formatOwedSuffix(owed);
 
-        const exposedTurnIds = new Set<number>();
-        if (owed.length > 0) {
-          exposedTurnIds.add(owed[owed.length - 1]!.turnId);
-        }
         if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
           reliefText = renderNoteBacklogRelief(owed);
-          for (const turn of owed.slice(0, NOTE_REMINDER_DISPLAY_LIMIT)) {
-            exposedTurnIds.add(turn.turnId);
-          }
-        }
-        if (exposedTurnIds.size > 0) {
-          recordNoteIdExposure(dependencies.db, {
-            sessionId: session.id,
-            rideTurnId: turnId,
-            exposedTurnIds: [...exposedTurnIds],
-            source: "injection",
-            nowEpoch: epoch,
-          });
         }
       }
 

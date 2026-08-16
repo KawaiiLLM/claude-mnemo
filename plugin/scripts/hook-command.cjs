@@ -3727,7 +3727,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msvbn370" : "dev";
+var BUILD_ID = true ? "0.10.0-msvbz05g" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -20269,25 +20269,6 @@ function listOwedNoteTurns(db, sessionId, currentPromptNumber, options = {}) {
     pendingTurns: currentPromptNumber - row.promptNumber
   }));
 }
-function recordNoteIdExposure(db, input) {
-  const statement = db.query(
-    `INSERT OR IGNORE INTO note_id_exposures (
-       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-     ) VALUES (?, ?, ?, ?, ?)`
-  );
-  let written = 0;
-  for (const exposedTurnId of input.exposedTurnIds) {
-    statement.run(
-      input.sessionId,
-      input.rideTurnId,
-      exposedTurnId,
-      input.source,
-      input.nowEpoch
-    );
-    written += 1;
-  }
-  return written;
-}
 
 // src/db/observations.ts
 var OBSERVATION_COLUMNS = `
@@ -25254,24 +25235,8 @@ function createSessionInitHandler(dependencies) {
       if (!isSubagent && turnId !== null) {
         const owed = listOwedNoteTurns(dependencies.db, session.id, promptNumber);
         owedSuffix = formatOwedSuffix(owed);
-        const exposedTurnIds = /* @__PURE__ */ new Set();
-        if (owed.length > 0) {
-          exposedTurnIds.add(owed[owed.length - 1].turnId);
-        }
         if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
           reliefText = renderNoteBacklogRelief(owed);
-          for (const turn of owed.slice(0, NOTE_REMINDER_DISPLAY_LIMIT)) {
-            exposedTurnIds.add(turn.turnId);
-          }
-        }
-        if (exposedTurnIds.size > 0) {
-          recordNoteIdExposure(dependencies.db, {
-            sessionId: session.id,
-            rideTurnId: turnId,
-            exposedTurnIds: [...exposedTurnIds],
-            source: "injection",
-            nowEpoch: epoch
-          });
         }
       }
       return { sessionDbId: session.id, promptNumber, owedSuffix, reliefText };

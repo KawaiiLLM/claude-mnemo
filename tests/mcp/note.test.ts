@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
-import { getNoteDebt, listOwedNoteTurns, recordNoteIdExposure } from "../../src/db/note-debt";
+import { getNoteDebt, listOwedNoteTurns } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { getSession, upsertSession } from "../../src/db/sessions";
@@ -965,16 +965,6 @@ describe("note tool citations (spec C6)", () => {
   let targetTurnId: number;
   let citedTurnId: number;
 
-  function expose(rideTurnId: number, exposedTurnIds: readonly number[]): void {
-    recordNoteIdExposure(db, {
-      sessionId,
-      rideTurnId,
-      exposedTurnIds,
-      source: "reminder",
-      nowEpoch: 100,
-    });
-  }
-
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
@@ -1005,7 +995,6 @@ describe("note tool citations (spec C6)", () => {
   // Acceptance criterion 1: a bare `[S/T]` in a note body creates an
   // unattributed pair.
   test("a bare qualified reference in content creates an unattributed pair", () => {
-    expose(targetTurnId, [citedTurnId]);
 
     const result = noteTool(
       db,
@@ -1032,7 +1021,6 @@ describe("note tool citations (spec C6)", () => {
   });
 
   test("a rewrite (mode: overwrite) that drops a reference drops its pair and any relation it carried", () => {
-    expose(targetTurnId, [citedTurnId]);
     noteTool(
       db,
       {

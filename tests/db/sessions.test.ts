@@ -3,7 +3,6 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
-import { recordNoteIdExposure } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import {
   getRecentSessions,
@@ -325,16 +324,6 @@ describe("session queries", () => {
            VALUES (?, 1, 'extracted', 100) RETURNING id`,
         )
         .get(session.id)!.id;
-      // The recompute's writer-session IS the session being written (a
-      // session states nothing about anyone else's exposure ledger), so its
-      // own citations are exposure-gated the same way a note's are.
-      recordNoteIdExposure(db, {
-        sessionId: session.id,
-        rideTurnId: turnId,
-        exposedTurnIds: [turnId],
-        source: "reminder",
-        nowEpoch: 100,
-      });
       return { sessionId: session.id, turnId };
     }
 
@@ -381,14 +370,6 @@ describe("session queries", () => {
            VALUES (?, 2, 'extracted', 100) RETURNING id`,
         )
         .get(sessionId)!.id;
-      recordNoteIdExposure(db, {
-        sessionId,
-        rideTurnId: turnId,
-        exposedTurnIds: [other],
-        source: "reminder",
-        nowEpoch: 100,
-      });
-
       updateSessionSummaryRewrite(
         db,
         sessionId,

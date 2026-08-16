@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-import { runWriteTransaction } from "../db/database";
-import { listOwedNoteTurnsInRange, recordNoteIdExposure } from "../db/note-debt";
+import { listOwedNoteTurnsInRange } from "../db/note-debt";
 import type { NoteSettlementJob } from "../db/note-settlement";
 import {
   listOpenSegments,
@@ -125,12 +124,6 @@ export interface NoteSettlementContext {
 export interface BuildNoteSettlementContextOptions {
   nowEpoch: number;
   priorTurns?: number;
-  /**
-   * Record the rendered turn ids in the exposure ledger. On by default: a
-   * citation may only name an id its writer was shown (D7), and this render IS
-   * the showing. Tests that only inspect the payload turn it off.
-   */
-  recordExposure?: boolean;
 }
 
 /** Cut `text` to a token budget, measured with the shared estimator. */
@@ -301,23 +294,6 @@ export function buildNoteSettlementContext(
     ]),
     builtAtEpoch: options.nowEpoch,
   };
-
-  if (options.recordExposure !== false && windowTurns.length > 0) {
-    // The ride turn is the window's last turn: settlement has no turn of its
-    // own, and the window's end is the point in the session's history at which
-    // these ids were put in front of a writer.
-    const rideTurnId = windowTurns[windowTurns.length - 1]!.turnId;
-    const exposedTurnIds = [...context.reviewableTurnIds];
-    runWriteTransaction(db, () =>
-      recordNoteIdExposure(db, {
-        sessionId: job.sessionId,
-        rideTurnId,
-        exposedTurnIds,
-        source: "injection",
-        nowEpoch: options.nowEpoch,
-      }),
-    );
-  }
 
   return context;
 }

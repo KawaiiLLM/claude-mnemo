@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msvbn370" : "dev";
+var BUILD_ID = true ? "0.10.0-msvbz05g" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -2261,25 +2261,6 @@ function listOwedNoteTurnsInRange(db, sessionId, rangeStart, rangeEnd) {
          )
        ORDER BY t.prompt_number ASC`
   ).all(sessionId, rangeStart, rangeEnd);
-}
-function recordNoteIdExposure(db, input) {
-  const statement = db.query(
-    `INSERT OR IGNORE INTO note_id_exposures (
-       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-     ) VALUES (?, ?, ?, ?, ?)`
-  );
-  let written = 0;
-  for (const exposedTurnId of input.exposedTurnIds) {
-    statement.run(
-      input.sessionId,
-      input.rideTurnId,
-      exposedTurnId,
-      input.source,
-      input.nowEpoch
-    );
-    written += 1;
-  }
-  return written;
 }
 
 // src/db/observations.ts
@@ -11116,20 +11097,6 @@ function buildNoteSettlementContext(db, job, options) {
     ]),
     builtAtEpoch: options.nowEpoch
   };
-  if (options.recordExposure !== false && windowTurns.length > 0) {
-    const rideTurnId = windowTurns[windowTurns.length - 1].turnId;
-    const exposedTurnIds = [...context.reviewableTurnIds];
-    runWriteTransaction(
-      db,
-      () => recordNoteIdExposure(db, {
-        sessionId: job.sessionId,
-        rideTurnId,
-        exposedTurnIds,
-        source: "injection",
-        nowEpoch: options.nowEpoch
-      })
-    );
-  }
   return context;
 }
 

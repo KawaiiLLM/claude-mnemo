@@ -129,6 +129,10 @@ describe("P1 compliance reads shadow_notes over a terminal debt row", () => {
     const fact = collectDebtFacts(db).find(
       (candidate) => candidate.turnId === closedTurn,
     )!;
-    expect(fact.outcome).toBe("unreached");
+    // `defaulted`, not `unreached`: this database's exposure ledger is empty,
+    // so it is entirely post-freeze and every turn counts as shown. What this
+    // test is actually about is the line below — a terminal debt with no note
+    // does not become `noted`.
+    expect(fact.outcome).toBe("defaulted");
   });
 });

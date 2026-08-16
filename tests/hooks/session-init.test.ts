@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createDatabase } from "../../src/db/database";
-import { getExposedTurnIds, recordDeclinedNoteDebt } from "../../src/db/note-debt";
+import { recordDeclinedNoteDebt } from "../../src/db/note-debt";
 import {
   deriveProcessIdentityKeys,
   getMnemoSessionIdForProcessSession,
@@ -801,26 +801,6 @@ describe("owed-notes injection (spec D3/D4/D9)", () => {
     );
 
     expect(result).toEqual({ continue: true, suppressOutput: true });
-  });
-
-  test("the addresses actually shown are recorded as exposed, so a later note may cite them", async () => {
-    for (let promptNumber = 1; promptNumber <= 6; promptNumber += 1) {
-      addOwedTurn(promptNumber);
-    }
-
-    await createSessionInitHandler({ db })(createInput({ prompt: "seventh" }));
-
-    // The relief's oldest five (T1..T5) plus the owed suffix's newest (T6).
-    const exposed = getExposedTurnIds(db, sessionId, "injection");
-    const turnIdByPrompt = (promptNumber: number) =>
-      db
-        .query<{ id: number }, [number, number]>(
-          "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
-        )
-        .get(sessionId, promptNumber)!.id;
-    for (let promptNumber = 1; promptNumber <= 6; promptNumber += 1) {
-      expect(exposed.has(turnIdByPrompt(promptNumber))).toBe(true);
-    }
   });
 
   test("prompt-dispatch, the sibling UserPromptSubmit entry, never renders owed or relief text — session-init is the sole writer (spec D9)", async () => {
