@@ -40277,7 +40277,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.10.0" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.11.0" : "0.0.0-test";
 function resolveCallerSessionIdFromEnv(db, env = process.env) {
   for (const identityKey of deriveProcessIdentityKeys(env)) {
     const sessionId = getMnemoSessionIdForProcessSession(db, identityKey);
