@@ -51,3 +51,19 @@ turn-id list and is unaffected: ticket 09's completion gate and ticket 11's
 Stop hook both pass their own window. If the agent-facing tool is to be useful
 it needs the window too — a turn-range address, or the settlement job's frozen
 window. Deferred, not resolved.
+
+### Closed by review (cde7cf3)
+
+`check` answered "nothing owed" for a session that does not exist — a clean
+bill is exactly what the caller acts on — and accepted
+`S9007199254740993`, which matches the address pattern and parses to a
+different number. Both now refuse.
+
+Its output tests asserted by substring plus a five-word denylist, so any
+differently-worded explanation passed the "what, never why" rule they were
+meant to enforce. They now pin the whole string.
+
+The no-reply command detector matched the OPENER `<command-name>` rather than
+a complete tag, so `<local-command-stdout>… <command-name></local-command-stdout>`
+read as model-routed. Now `extractCommandName`'s own pattern, mirrored rather
+than imported so a db-layer module keeps out of the MCP layer.

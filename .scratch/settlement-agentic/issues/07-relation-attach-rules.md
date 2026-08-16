@@ -59,9 +59,16 @@ settlement prompt, which has no cap; the main agent sees four fields in the
 zod shape with no stated decision procedure. Which of the cap or C4 gives is
 the user's call.
 
-### Open 2: `eligibleForRelation` is opt-in
+### Closed by review (cde7cf3): `eligibleForRelation` now denies by default
 
-Omitting it means no gate. That was chosen so a default-deny would not break
-the schema-migration collapse and the edge suite's own upsert tests, and it
-matches C14's "eligibility lives in each write path". But the default is the
-loose one, and ticket 10 builds new write tools — pin it there.
+Shipped opt-in, on the argument that a default-deny would break the
+schema-migration collapse and the edge suite's own upsert tests, and that C14
+puts eligibility in each write path. A cross-session review named the
+consequence: a later caller writing `relation: "supersedes"` and forgetting
+the option mints the unqualified relation-only edge C7 forbids, and nothing
+fails. Safety cannot rest on every future caller remembering a parameter.
+
+Omitting it now denies every relation; an exempt path passes `"unrestricted"`
+and says so. Forty test call sites state their stance. No production caller
+changed — the two gated ones already passed real sets, the two bare-pair ones
+write no relations.

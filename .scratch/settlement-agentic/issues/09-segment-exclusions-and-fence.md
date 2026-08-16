@@ -48,3 +48,17 @@ incomplete" is routine.
 into the settlement write tools. **The gate has no production caller until
 then.** Also added the new table to `resetSchema`'s drop list, which the
 implementation missed.
+
+### Closed by review (cde7cf3): the transaction test proved nothing
+
+The interleave test fired a `claim_generation` bump between the anti-join and
+the compare-and-set. The CAS re-verifies the generation on its own, so
+removing `runWriteTransaction` left the test green — and no single-connection
+fixture can distinguish the two at all, because a same-connection write lands
+INSIDE the gate's own transaction.
+
+Rewritten on a file database with a second connection, and the competing write
+is a coverage regression (clearing a turn's type) carrying no generation
+change, so the lock is the only thing that can stop it. Mutation-checked: the
+exact mutation that left the old test green turns this one red. The gate's
+production logic was not defective.
