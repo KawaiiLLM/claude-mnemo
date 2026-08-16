@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { getOutgoingEdges, pairKey, writeMemoryEdges } from "../../src/db/memory-edges";
+import {
+  getOutgoingEdges,
+  pairKey,
+  reconcileCitedPairs,
+  writeMemoryEdges,
+} from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -175,6 +180,43 @@ describe("tags overwrite whole, never append (requirement 3)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Ticket 10d: the retired `topic:` tag namespace (spec B6) must stay
+// retired at this write boundary too — the facade used to pass tags raw.
+// ---------------------------------------------------------------------------
+
+describe("the retired topic: tag namespace is refused, not silently revived (ticket 10d)", () => {
+  test("a staged tag with the topic: prefix is refused, and nothing lands", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, grade: 2, tags: ["topic:lease"] },
+      NOW,
+    );
+
+    expect(resultText(result)).toContain("Parameter error");
+    expect(resultText(result)).toContain("retired topic:");
+    expect(getTurnById(db, t1)!.tags).toEqual([]);
+    expect(getTurnById(db, t1)!.significanceGrade).toBeNull();
+  });
+
+  test("a bare tag alongside an existing bare tag is unaffected", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(context, { turn: `S${sessionDbId}/T1`, tags: ["lease"] }, NOW);
+
+    expect(resultText(result)).not.toContain("Parameter error");
+    expect(getTurnById(db, t1)!.tags).toEqual(["lease"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Stage vs apply (ticket 10b, spec A7 requirements 1/2): a dry run performs
 // no write and still reports the same decision a real write would.
 // ---------------------------------------------------------------------------
@@ -232,6 +274,17 @@ describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
     const job = claimWindow(sessionDbId, 1, 2);
+    // The frozen snapshot names a pair only ever taken from a real row in
+    // THIS same database — a real pre-existing bare pair, so the fixture
+    // matches what a real pre-run snapshot would only ever contain (ticket
+    // 10d: eligibility is frozen INTERSECTED with current, so a key with no
+    // backing row is not a state the real snapshot builder ever produces).
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
+      NOW - 500,
+      { eligibleForRelation: "unrestricted" },
+    );
     const snapshot = new Set([
       pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } }),
     ]);
@@ -247,7 +300,12 @@ describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A
 
     expect(evaluation.ok).toBe(true);
     expect(evaluation.ok && evaluation.outcome.relations).toEqual({ written: 1 });
-    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+    // The dry run wrote nothing NEW — the one edge present is the fixture's
+    // own pre-existing BARE pair (relation still null), not a relation this
+    // `apply: false` call landed.
+    const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.relation).toBeNull();
   });
 
   test("a dry run rejects exactly what a real write would reject — full validation, not a shape check", () => {
@@ -530,6 +588,14 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
     const job = claimWindow(sessionDbId, 1, 2);
+    // A real pre-existing bare pair — what the pre-run snapshot builder only
+    // ever takes a key FROM (ticket 10d: frozen alone is never enough).
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
+      NOW - 500,
+      { eligibleForRelation: "unrestricted" },
+    );
     const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
     const context = baseContext(job, { eligibleRelationPairKeys: snapshot });
     const input: SettlementTurnWriteInput = {
@@ -556,6 +622,57 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
     });
     expect(atCommit.ok).toBe(false);
     expect(!atCommit.ok && atCommit.message).toContain("not eligible");
+    // The pre-existing BARE pair survives untouched — refusing the relation
+    // must not also erase the citation that made the pair eligible in the
+    // first place; only the relation itself never lands.
+    const survivingEdges = getOutgoingEdges(db, { kind: "turn", id: t2 });
+    expect(survivingEdges).toHaveLength(1);
+    expect(survivingEdges[0]!.relation).toBeNull();
+  });
+
+  // Ticket 10d (review test-gap finding): the test above replaces the
+  // FROZEN Set but never touches the DATABASE pair, which is precisely why
+  // it could not have caught the resurrection bug — a stale frozen key and
+  // a genuinely-deleted current pair are two different kinds of "the world
+  // moved", and only this second one is the bug the review found. This test
+  // holds the frozen snapshot FIXED (as `commit`'s own replay does — the
+  // snapshot never changes mid-run) and instead deletes the underlying
+  // `memory_edges` row between stage and commit, the way the main agent's
+  // own `reconcileCitedPairs` would when a body stops citing something.
+  test("a pair the frozen snapshot still names, but that the CURRENT database no longer has, is refused at commit — frozen alone must not resurrect it (ticket 10d finding 1, spec C6/C7)", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const job = claimWindow(sessionDbId, 1, 2);
+    // T2's body cites T1 at snapshot time — a real, pre-existing bare pair.
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
+      NOW - 500,
+      { eligibleForRelation: "unrestricted" },
+    );
+    const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
+    // The SAME context/snapshot throughout — nothing about the frozen set
+    // ever changes; only the database does.
+    const context = baseContext(job, { eligibleRelationPairKeys: snapshot });
+    const input: SettlementTurnWriteInput = {
+      turn: `S${sessionDbId}/T2`,
+      dependsOn: [`S${sessionDbId}/T1`],
+    };
+
+    const staged = evaluateSettlementTurnWrite(db, context, input, NOW, { apply: false });
+    expect(staged.ok).toBe(true);
+
+    // The main agent rewrites T2's body; `reconcileCitedPairs` deletes the
+    // pair because the new body no longer cites T1. The frozen snapshot
+    // above is untouched — it still names this pair as eligible.
+    reconcileCitedPairs(db, { kind: "turn", id: t2 }, [], NOW + 5, "text-ref");
+    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+
+    const atCommit = evaluateSettlementTurnWrite(db, context, input, NOW + 10, { apply: true });
+    expect(atCommit.ok).toBe(false);
+    expect(!atCommit.ok && atCommit.message).toContain("no longer exists");
+    // The load-bearing assertion: nothing got resurrected.
     expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
   });
 });

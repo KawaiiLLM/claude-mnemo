@@ -482,6 +482,7 @@ describe("settlement dispatch — staged writes and commit (ticket 10b, spec A7)
         });
         engine.stageSegmentWrite({
           action: "create",
+          handle: "hole-reconstruction",
           topic: "hole reconstruction",
           topicAliases: ["interior holes"],
           noCandidateReason: "No open segment and no registered topic covers hole reconstruction.",
@@ -570,6 +571,7 @@ describe("settlement dispatch — staged writes and commit (ticket 10b, spec A7)
       queryThatStages((engine) => {
         engine.stageSegmentWrite({
           action: "create",
+          handle: "late-window",
           topic: "late window",
           noCandidateReason: "nothing open",
           title: "implement+late: should not land",
@@ -757,22 +759,31 @@ describe("settlement dispatch — staged writes and commit (ticket 10b, spec A7)
     const fixture = seedInteriorHoleWindow();
     const firstOutcome = await dispatchWith(
       queryThatStages((engine) => {
+        // Spec A7a: a turn note's staging key is the turn address alone —
+        // restaging T2/T4 for their review would REPLACE the reconstruction
+        // call above rather than merge with it, so reconstruction and review
+        // are stated together, one call per turn (exactly what duty 1/2's
+        // shared `note` tool already allows).
         engine.stageNoteWrite({
           turn: "S1/T2",
           title: "research+lease: hole reconstructed",
           content: "Filled in.",
           insight: null,
+          grade: 1,
+          type: ["research"],
+          tags: ["lease"],
         });
         engine.stageNoteWrite({
           turn: "S1/T4",
           title: "research+lease: trailing hole reconstructed",
           content: "Filled in.",
           insight: null,
+          grade: 1,
+          type: ["research"],
+          tags: ["lease"],
         });
         engine.stageNoteWrite({ turn: "S1/T1", grade: 4, type: ["design"], tags: ["settlement"] });
-        engine.stageNoteWrite({ turn: "S1/T2", grade: 1, type: ["research"], tags: ["lease"] });
         engine.stageNoteWrite({ turn: "S1/T3", grade: 2, type: ["implement"], tags: ["settlement"] });
-        engine.stageNoteWrite({ turn: "S1/T4", grade: 1, type: ["research"], tags: ["lease"] });
         for (const turnId of fixture.turnIds) {
           recordNoteSettlementSegmentExclusion(db, fixture.job.id, turnId, NOW);
         }
@@ -869,6 +880,7 @@ describe("settlement payload at the scheduler seam", () => {
           }
           engine.stageSegmentWrite({
             action: "create",
+            handle: "scheduler-seam",
             topic: "scheduler seam",
             noCandidateReason: "first window of this topic",
             title: "implement+seam: the payload plugs in unchanged",

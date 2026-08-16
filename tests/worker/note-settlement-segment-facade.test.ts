@@ -8,6 +8,7 @@ import {
   enqueueNoteSettlementWindows,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
+import { listNoteSettlementSegmentExclusions } from "../../src/db/note-settlement-completion";
 import { initializeSchema } from "../../src/db/schema";
 import {
   createSegment,
@@ -115,6 +116,7 @@ const NO_HANDLES: SettlementHandleMap = new Map();
 function createInput(overrides: Partial<SettlementSegmentWriteInput> = {}): SettlementSegmentWriteInput {
   return {
     action: "create",
+    handle: "chapter",
     title: "implement+lease: a new chapter",
     content: "Conclusion first.",
     noCandidateReason: "No open segment or registered topic covers this.",
@@ -124,6 +126,25 @@ function createInput(overrides: Partial<SettlementSegmentWriteInput> = {}): Sett
     ...overrides,
   };
 }
+
+describe("the retired topic: tag namespace is refused, not silently revived (ticket 10d)", () => {
+  test("a create carrying a topic: prefixed tag is refused, and nothing lands", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      createInput({ tags: ["topic:lease"] }),
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("retired topic:");
+    expect(listOpenSegments(db)).toHaveLength(0);
+  });
+});
 
 describe("create — required fields (requirement 3)", () => {
   test("rejects an empty title", () => {
@@ -141,7 +162,7 @@ describe("create — required fields (requirement 3)", () => {
     expect(listOpenSegments(db)).toHaveLength(0);
   });
 
-  test("rejects a create with no no_candidate_reason (D9 anti-fragmentation, carried over)", () => {
+  test("rejects a create with no noCandidateReason (D9 anti-fragmentation, carried over)", () => {
     const sessionDbId = seedSession();
     const job = claimWindow(sessionDbId, 1, 1);
     const result = evaluateSettlementSegmentWrite(
@@ -152,7 +173,35 @@ describe("create — required fields (requirement 3)", () => {
       { apply: true, handleMap: NO_HANDLES },
     );
     expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain("no_candidate_reason");
+    expect(!result.ok && result.message).toContain("noCandidateReason");
+  });
+
+  test("rejects a create with no handle (spec A7a — the model-named staging key)", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      createInput({ handle: undefined }),
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("handle");
+  });
+
+  test("rejects a handle with an illegal character — it must be safely embeddable in [E#<handle>]", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      createInput({ handle: "lease fencing" }),
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("handle");
   });
 
   test("rejects an unknown type word", () => {
@@ -431,5 +480,264 @@ describe("run-scoped handles", () => {
     const anchors = getOutgoingEdges(db, { kind: "segment", id: secondId });
     expect(anchors).toHaveLength(1);
     expect(anchors[0]!.cited).toEqual({ kind: "segment", id: realId });
+  });
+
+  // Ticket 10d finding: `E#<n>` handling was a bare, unbracketed scan
+  // (`/E#(\d+)/g`) that rewrote ordinary prose and refused an unrelated
+  // "E#2024". A handle is now recognised ONLY inside a `[E#<handle>]`
+  // citation token, matching every other reference's bracket-qualified
+  // grammar.
+  test("an ordinary mention of the substring 'E#<n>' outside brackets is left untouched, not rewritten as a handle reference", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job);
+
+    const first = evaluateSettlementSegmentWrite(
+      db,
+      context,
+      createInput({ handle: "chapter-one", title: "implement+lease: first chapter" }),
+      NOW,
+      { apply: true, handleMap: new Map() },
+    );
+    expect(first.ok).toBe(true);
+    const realId = first.ok ? first.outcome.segmentId! : -1;
+    const handleMap: SettlementHandleMap = new Map([["E#chapter-one", realId]]);
+
+    const second = evaluateSettlementSegmentWrite(
+      db,
+      context,
+      createInput({
+        handle: "chapter-two",
+        title: "implement+lease: second chapter",
+        content: "The error code E#1 was observed during the fencing work.",
+      }),
+      NOW,
+      { apply: true, handleMap },
+    );
+    expect(second.ok).toBe(true);
+    const secondId = second.ok ? second.outcome.segmentId! : -1;
+    const stored = getSegment(db, secondId)!;
+    // The unbracketed "E#1" survives byte-for-byte — the old unbracketed
+    // scan would have rewritten it to "E<realId>".
+    expect(stored.content).toBe("The error code E#1 was observed during the fencing work.");
+    expect(getOutgoingEdges(db, { kind: "segment", id: secondId })).toEqual([]);
+  });
+
+  test("an ordinary unbracketed 'E#2024' is not refused as an unknown handle", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      createInput({ content: "Filed as E#2024 in the external tracker." }),
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+
+    expect(result.ok).toBe(true);
+  });
+
+  test("a bracketed [E#<handle>] citation is still recognised and substituted at commit", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job);
+
+    const first = evaluateSettlementSegmentWrite(
+      db,
+      context,
+      createInput({ handle: "alpha", title: "implement+lease: alpha" }),
+      NOW,
+      { apply: true, handleMap: new Map() },
+    );
+    const realId = first.ok ? first.outcome.segmentId! : -1;
+    const handleMap: SettlementHandleMap = new Map([["E#alpha", realId]]);
+
+    const second = evaluateSettlementSegmentWrite(
+      db,
+      context,
+      createInput({
+        handle: "beta",
+        title: "implement+lease: beta",
+        content: "Builds on [E#alpha].",
+      }),
+      NOW,
+      { apply: true, handleMap },
+    );
+    expect(second.ok).toBe(true);
+    const secondId = second.ok ? second.outcome.segmentId! : -1;
+    expect(getSegment(db, secondId)!.content).toBe(`Builds on [E${realId}].`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `action: "exclude"` (spec A7a, ticket 10d finding 3)
+// ---------------------------------------------------------------------------
+
+describe("exclude — the model-facing path to the job-scoped no-segment verdict", () => {
+  test("writes the exclusion through the SAME facade a model calls, not the DB helper directly", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      { action: "exclude", turn: `S${sessionDbId}/T1` },
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.outcome.excludedTurnRef).toBe(`S${sessionDbId}/T1`);
+    expect(listNoteSettlementSegmentExclusions(db, job.id)).toEqual([t1]);
+  });
+
+  test("a dry run (apply: false) writes no exclusion row", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      { action: "exclude", turn: `S${sessionDbId}/T1` },
+      NOW,
+      { apply: false, handleMap: NO_HANDLES },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(listNoteSettlementSegmentExclusions(db, job.id)).toEqual([]);
+  });
+
+  test("refuses a missing turn field", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      { action: "exclude" },
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
+  test("refuses a turn address naming no turn", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      { action: "exclude", turn: `S${sessionDbId}/T999` },
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("no turn");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `status` on create (ticket 10d: honoured, not silently accepted-and-ignored)
+// ---------------------------------------------------------------------------
+
+describe("create honours a stated status rather than dropping it (ticket 10d)", () => {
+  test("a create stating status: \"delivered\" lands a segment already in that status", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      createInput({ status: "delivered" }),
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+
+    expect(result.ok).toBe(true);
+    const segmentId = result.ok ? result.outcome.segmentId! : -1;
+    expect(getSegment(db, segmentId)!.status).toBe("delivered");
+  });
+
+  test("an omitted status still defaults to open, unchanged from before", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      createInput(),
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+
+    expect(result.ok).toBe(true);
+    const segmentId = result.ok ? result.outcome.segmentId! : -1;
+    expect(getSegment(db, segmentId)!.status).toBe("open");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Body citations validated at STAGE time, not only at apply (ticket 10d)
+// ---------------------------------------------------------------------------
+
+describe("segment body citations are validated at stage time (ticket 10d)", () => {
+  test("an unresolvable [S999/T1] in content is reported as a dropped citation at STAGE time, not just silently absorbed at commit", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const staged = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      createInput({ content: "Fenced. [S999/T1]" }),
+      NOW,
+      { apply: false, handleMap: NO_HANDLES },
+    );
+
+    expect(staged.ok).toBe(true);
+    expect(staged.ok && staged.outcome.citationsDropped).toBe(1);
+    // Still nothing landed — this is a dry run.
+    expect(listOpenSegments(db)).toHaveLength(0);
+  });
+
+  test("the same unresolved citation is reported again at commit (apply: true), and no anchor edge is created for it", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      createInput({ content: "Fenced. [S999/T1]" }),
+      NOW,
+      { apply: true, handleMap: NO_HANDLES },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.outcome.citationsDropped).toBe(1);
+    const segmentId = result.ok ? result.outcome.segmentId! : -1;
+    expect(getOutgoingEdges(db, { kind: "segment", id: segmentId })).toEqual([]);
+  });
+
+  test("a resolvable citation reports zero dropped and does become an anchor", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const staged = evaluateSettlementSegmentWrite(
+      db,
+      baseContext(job),
+      createInput({ content: `Fenced. [S${sessionDbId}/T1]` }),
+      NOW,
+      { apply: false, handleMap: NO_HANDLES },
+    );
+
+    expect(staged.ok).toBe(true);
+    expect(staged.ok && staged.outcome.citationsDropped).toBe(0);
+    void t1;
   });
 });

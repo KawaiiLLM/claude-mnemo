@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msvjhcgk" : "dev";
+var BUILD_ID = true ? "0.10.0-msvmaose" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -11162,7 +11162,8 @@ function renderNoteSettlementPrompt(context) {
     "   `grade`, `type` and `tags`. `type` is a LIST \u2014 a turn may state more",
     "   than one activity \u2014 drawn from",
     `   ${MEMORY_TYPES.join(", ")}; \`[]\` means none fit, never a guess. \`tags\``,
-    "   are bare topic words (no namespace prefix \u2014 none is applied); omit a",
+    "   are bare topic words \u2014 a `topic:` prefix is a retired namespace and",
+    "   refuses the whole call, it is not stripped for you; omit a",
     "   field to leave it alone, state `[]` to clear it \u2014 there is no append,",
     "   each call overwrites whole. You may ALSO revise a turn from the",
     "   preceding-turns section below if you can see it needs correcting \u2014",
@@ -11184,37 +11185,51 @@ function renderNoteSettlementPrompt(context) {
     holes.length > 0 ? `2. RECONSTRUCTION, via the SAME \`note\` tool. These turns still owe a note: ${holes.join(", ")}. Their raw material is in the window below (marked raw>). Call \`note\` once per turn with \`turn\`, \`title\`, \`content\` and \`insight\` all named TOGETHER in one call (insight may be null, but must be named \u2014 an omitted field is refused, not left blank): title names the activity and topic, content leads with the conclusion. Do not call it for any other turn \u2014 a turn this window does not list here is not this dispatch's to reconstruct.` : "2. RECONSTRUCTION. No turn in this window needs one.",
     "",
     "3. SEGMENT ATTACHMENT, via the `segment` tool. For each window turn decide",
-    "   which segment it joins:",
+    "   which segment it joins, or that it joins none:",
     "   - same topic as an open segment, work continuous with it \u2192 EXTEND that",
     '     segment (action="extend", the real segmentId shown below, copy its',
-    "     expected_revision) \u2014 only a segment shown to you as open below, never",
-    "     one this same run just created (see the handle note below);",
+    "     revision as expectedRevision) \u2014 an open segment's id and revision are",
+    `     always legal, whether or not this prompt's "Open segments" list below`,
+    "     happens to show it; never a handle from this same run (see the handle",
+    "     note below \u2014 a handle has no real id yet, so it can never be an",
+    "     extend target);",
     "   - same topic but the segment has been silent for a long stretch, or the",
     "     work restarted from a different premise \u2192 CREATE a new segment on the",
     '     same topic (action="create");',
     "   - no topic in the registry fits \u2192 SEARCH the registry and the open",
-    "     segments first, then create. A create MUST carry no_candidate_reason",
+    "     segments first, then create. A create MUST carry noCandidateReason",
     "     naming what you looked for and why nothing matched. Minting a near-",
     "     duplicate topic is the failure this rule exists to prevent; reuse an",
-    "     existing name (or add your spelling to topic_aliases) whenever it fits.",
+    "     existing name (or add your spelling to topicAliases) whenever it fits;",
+    '   - the turn genuinely fits no chapter \u2192 EXCLUDE it (action="exclude",',
+    '     turn="S<session>/T<prompt>") rather than forcing it into one or',
+    "     leaving it unaddressed \u2014 this window cannot complete until every",
+    "     window turn either joins a segment or is explicitly excluded.",
     "   A change of activity (design \u2192 implement) is NOT a segment boundary; a",
     "   change of topic is. `members` need not be consecutive turn numbers, and",
     "   an address that does not resolve is simply dropped, not a failure of",
     "   the call.",
     "",
-    '   HANDLES: a `create` call\'s receipt states a handle, "E#<n>", scoped to',
-    "   THIS run only \u2014 a staged segment has no real id yet. Use that handle,",
-    "   not a guessed real id, if a LATER segment in this same run needs to",
-    "   cite or extend it; `commit` resolves every handle to a real id, in the",
-    "   order you staged them.",
+    "   HANDLES: a `create` call requires `handle`, a short id YOU choose (e.g.",
+    `   "lease-fencing") \u2014 this is that call's own key, so re-staging the SAME`,
+    "   handle later in this run REPLACES that create rather than minting a",
+    '   second one. The receipt states it back as "E#<handle>", scoped to THIS',
+    "   run only \u2014 cite it as [E#<handle>] in a LATER segment's `content` to",
+    "   refer to the segment you just created before it has a real id;",
+    "   `commit` resolves every handle to a real id, in the order you staged",
+    "   them. A handle is a CITATION only: it is never a `members` entry (a",
+    "   member is always a turn) and never an `extend` target (extend needs a",
+    "   real, already-existing segment id).",
     "",
     "4. SEGMENT BODY, the `segment` tool's `content`. Conclusion first, then how",
     "   the work got there, including the alternatives that were rejected and",
     "   who decided. Cite member turns inline as [S<session>/T<prompt>] and",
-    "   other segments as [E<n>] (or [E#<n>] for one this run itself created) \u2014",
-    "   those citations become the segment's anchors automatically, so cite the",
-    "   turns that carry the conclusion, not every member. Only ids shown in",
-    "   this prompt, or a handle this run itself assigned, are legal.",
+    "   other segments as [E<n>] (or [E#<handle>] for one this run itself",
+    "   created) \u2014 those citations become the segment's anchors automatically,",
+    "   so cite the turns that carry the conclusion, not every member. Only ids",
+    "   shown in this prompt, or a handle this run itself assigned, are legal \u2014",
+    "   an address that does not resolve is dropped and reported, not a",
+    "   failure of the call.",
     "",
     `5. RELATIONS, via the \`note\` tool's evidenceFor/evidenceAgainst/supersedes/`,
     `dependsOn fields (${CITATION_RELATIONS.join(" / ")}). Decide with four`,
@@ -11245,12 +11260,16 @@ function renderNoteSettlementPrompt(context) {
     "   spelling.",
     "",
     "7. COMMIT. Once every window turn is reviewed, every owed note is",
-    "   reconstructed, and every window turn has joined a segment, call",
-    "   `commit`. If the window is not actually complete, or a fact this run",
-    "   staged against has since changed, `commit` lands NOTHING and tells you",
-    "   exactly what is still missing \u2014 every staged `note`/`segment` call is",
-    "   kept, so fill the gap with more calls and call `commit` again. Nothing",
-    "   about this window is durable until a `commit` call succeeds.",
+    "   reconstructed, and every window turn has either joined a segment or",
+    "   been explicitly excluded (duty 3), call `commit`. If the window is not",
+    "   actually complete, `commit` lands NOTHING and tells you exactly what",
+    "   is still missing \u2014 every staged `note`/`segment` call is kept, so fill",
+    "   the gap with more calls and call `commit` again. If instead ONE staged",
+    "   call has gone stale (a fact it depended on changed since you staged",
+    "   it), re-stage that SAME call \u2014 same turn, handle, segmentId, or",
+    "   exclude turn \u2014 with corrected input; that REPLACES the stale entry",
+    "   rather than adding to it. Nothing about this window is durable until a",
+    "   `commit` call succeeds.",
     "",
     "## Open segments (candidates to extend)",
     "",
@@ -47136,250 +47155,6 @@ function resolveClaudeCodeExecutablePath(sourceEnv = process.env, deps = {
   return deps.findOnPath() ?? void 0;
 }
 
-// src/worker/note-settlement-segment-facade.ts
-var HANDLE_TOKEN_PATTERN = /^E#(\d+)$/;
-var HANDLE_IN_TEXT_PATTERN = /E#(\d+)/g;
-function isSettlementHandleToken(token) {
-  return HANDLE_TOKEN_PATTERN.test(token.trim());
-}
-function scanUnknownHandles(text, handleMap) {
-  const unknown3 = [];
-  for (const match of text.matchAll(HANDLE_IN_TEXT_PATTERN)) {
-    const key = `E#${match[1]}`;
-    if (!handleMap.has(key)) {
-      unknown3.push(key);
-    }
-  }
-  return unknown3;
-}
-function substituteHandles(text, handleMap) {
-  return text.replace(HANDLE_IN_TEXT_PATTERN, (whole, digits) => {
-    const real = handleMap.get(`E#${digits}`);
-    return typeof real === "number" ? `E${real}` : whole;
-  });
-}
-var settlementSegmentWriteInputShape = {
-  action: external_exports.enum(["create", "extend"]),
-  /** extend only — a REAL, already-existing segment id. Never a handle: the schema's number type makes that unrepresentable, so `extend` can only ever target a segment that existed before this run (see the module doc comment). */
-  segmentId: external_exports.number().int().positive().optional(),
-  /** extend only. */
-  expectedRevision: external_exports.number().int().min(0).optional(),
-  /** create only: exact registry name if reusing, or a new name to mint. */
-  topic: external_exports.string().optional(),
-  topicAliases: external_exports.array(external_exports.string()).optional(),
-  /** create only, required: D9's anti-fragmentation discipline — why no open segment and no registered topic fits. */
-  noCandidateReason: external_exports.string().optional(),
-  /** Required (non-empty) for create; optional for extend — omit to leave the stored title alone (spec D5a). */
-  title: external_exports.string().optional(),
-  /** Optional for both. `null` explicitly clears (extend only); omit leaves alone. */
-  content: external_exports.string().nullable().optional(),
-  type: external_exports.array(external_exports.string()).optional(),
-  tags: external_exports.array(external_exports.string()).optional(),
-  status: external_exports.enum(SEGMENT_STATUSES).optional(),
-  /** `S<session>/T<prompt>` turn addresses, or `E#<n>` handles naming a segment this SAME run creates — but see the module doc comment: a handle here is always rejected, because a member is always a turn. */
-  members: external_exports.array(external_exports.string()).optional()
-};
-var settlementSegmentWriteInputSchema = external_exports.object(settlementSegmentWriteInputShape).strict();
-function evaluateSettlementSegmentWrite(db, context, rawInput, nowEpoch, options) {
-  const handleIssues = [
-    ...scanUnknownHandles(rawInput.title ?? "", options.handleMap),
-    ...scanUnknownHandles(rawInput.content ?? "", options.handleMap)
-  ];
-  for (const member of rawInput.members ?? []) {
-    if (isSettlementHandleToken(member)) {
-      return {
-        ok: false,
-        message: `members entry "${member}" names a segment, not a turn \u2014 a member must be a "S<session>/T<prompt>" address.`
-      };
-    }
-  }
-  if (handleIssues.length > 0) {
-    return {
-      ok: false,
-      message: `references an unknown handle: ${[...new Set(handleIssues)].join(", ")} \u2014 a handle must have been assigned by an earlier "create" call in this same run.`
-    };
-  }
-  let normalizedType2;
-  if (rawInput.type !== void 0) {
-    try {
-      normalizedType2 = normalizeTypeValues(rawInput.type);
-    } catch (error49) {
-      return {
-        ok: false,
-        message: `${error49 instanceof Error ? error49.message : String(error49)}. Allowed: ${MEMORY_TYPES.join(", ")}.`
-      };
-    }
-  }
-  const resolvedTitle = substituteHandles(rawInput.title ?? "", options.handleMap);
-  const resolvedContent = rawInput.content === void 0 ? void 0 : rawInput.content === null ? null : substituteHandles(rawInput.content, options.handleMap);
-  if (rawInput.action === "create") {
-    if (rawInput.title === void 0 || rawInput.title.trim() === "") {
-      return { ok: false, message: "title is required and must not be empty for a create." };
-    }
-    if (!rawInput.noCandidateReason || rawInput.noCandidateReason.trim() === "") {
-      return {
-        ok: false,
-        message: "no_candidate_reason is required for a create \u2014 name what you searched in the topic registry and open segments, and why nothing fit."
-      };
-    }
-    let topicMinted = false;
-    let topicReused = false;
-    let topicId = null;
-    if (rawInput.topic) {
-      const existing = findTopic(db, rawInput.topic);
-      topicReused = existing !== null;
-      topicMinted = !topicReused;
-      if (options.apply) {
-        const topic = upsertTopic(db, {
-          name: rawInput.topic,
-          aliases: rawInput.topicAliases,
-          nowEpoch
-        });
-        topicId = topic.id;
-      }
-    }
-    const memberResolution2 = resolveMemberTokens(
-      db,
-      rawInput.members ?? [],
-      context
-    );
-    let segmentId = null;
-    if (options.apply) {
-      const created = createSegment(db, {
-        title: resolvedTitle,
-        topicId,
-        content: resolvedContent ?? null,
-        type: normalizedType2 ?? [],
-        tags: rawInput.tags ?? [],
-        nowEpoch
-      });
-      segmentId = created.id;
-      addSegmentMembers(db, created.id, memberResolution2.turnIds, nowEpoch);
-    }
-    return {
-      ok: true,
-      outcome: {
-        action: "create",
-        segmentId,
-        membersAdded: memberResolution2.turnIds.length,
-        membersDropped: memberResolution2.dropped,
-        topicMinted,
-        topicReused
-      }
-    };
-  }
-  if (rawInput.segmentId === void 0 || rawInput.expectedRevision === void 0) {
-    return {
-      ok: false,
-      message: "extend requires segmentId and expectedRevision, both naming an already-existing segment."
-    };
-  }
-  const current = getSegment(db, rawInput.segmentId);
-  if (!current) {
-    return { ok: false, message: `no segment E${rawInput.segmentId}.` };
-  }
-  if (current.status !== "open") {
-    return {
-      ok: false,
-      message: `E${rawInput.segmentId} is ${current.status}, not open \u2014 spec D6 overturns a closed segment with an edge, never by rewriting it.`
-    };
-  }
-  const memberResolution = resolveMemberTokens(db, rawInput.members ?? [], context);
-  if (!options.apply) {
-    return {
-      ok: true,
-      outcome: {
-        action: "extend",
-        segmentId: rawInput.segmentId,
-        membersAdded: memberResolution.turnIds.length,
-        membersDropped: memberResolution.dropped,
-        topicMinted: false,
-        topicReused: false
-      }
-    };
-  }
-  const { applied, excluded } = applySegmentWrites(
-    db,
-    [
-      {
-        segmentId: rawInput.segmentId,
-        expectedRevision: rawInput.expectedRevision,
-        title: rawInput.title === void 0 ? void 0 : resolvedTitle,
-        content: resolvedContent,
-        type: normalizedType2,
-        tags: rawInput.tags,
-        status: rawInput.status
-      }
-    ],
-    { nowEpoch }
-  );
-  const landed = applied[0];
-  if (!landed) {
-    const rejection = excluded[0];
-    const latest = rejection?.latest;
-    return {
-      ok: false,
-      message: `E${rawInput.segmentId} extend refused (${rejection?.reason ?? "unknown"})` + (latest ? ` \u2014 current revision on file is ${latest.revision}.` : ".")
-    };
-  }
-  addSegmentMembers(db, landed.id, memberResolution.turnIds, nowEpoch);
-  return {
-    ok: true,
-    outcome: {
-      action: "extend",
-      segmentId: landed.id,
-      membersAdded: memberResolution.turnIds.length,
-      membersDropped: memberResolution.dropped,
-      topicMinted: false,
-      topicReused: false
-    }
-  };
-}
-function resolveMemberTokens(db, tokens, context) {
-  const turnIds = [];
-  let dropped = 0;
-  for (const token of tokens) {
-    const reference = parseBareAddressReference(token);
-    if (!reference || reference.kind !== "turn") {
-      dropped += 1;
-      context.logger?.warn?.(
-        `[claude-mnemo] settlement job ${context.jobId}: member "${token}" is not a turn address`
-      );
-      continue;
-    }
-    const { accepted } = validateReferences(db, [reference], {
-      writerSessionId: context.sessionId,
-      logger: context.logger
-    });
-    const node = accepted[0]?.node;
-    if (!node) {
-      dropped += 1;
-      continue;
-    }
-    turnIds.push(node.id);
-  }
-  return { turnIds, dropped };
-}
-function renderSettlementSegmentWriteReceipt(outcome, options) {
-  const verb = options.staged ? "Staged" : "Landed";
-  const address = outcome.action === "create" ? options.handle ?? (outcome.segmentId !== null ? `E${outcome.segmentId}` : "a new segment") : `E${outcome.segmentId}`;
-  const parts = [
-    `${verb} ${outcome.action} of ${address}${options.staged ? " (pending commit)" : ""}.`
-  ];
-  if (outcome.topicMinted) {
-    parts.push("New topic minted.");
-  } else if (outcome.topicReused) {
-    parts.push("Reused an existing topic.");
-  }
-  if (outcome.membersAdded > 0) {
-    parts.push(`${outcome.membersAdded} member(s).`);
-  }
-  if (outcome.membersDropped > 0) {
-    parts.push(`${outcome.membersDropped} member address(es) dropped (did not resolve to a turn).`);
-  }
-  return parts.join(" ");
-}
-
 // src/db/note-settlement-completion.ts
 var NoteSettlementJobFenceError = class extends Error {
   jobId;
@@ -47408,6 +47183,13 @@ function assertNoteSettlementJobClaimed(db, jobId, claimGeneration) {
     );
   }
   return job;
+}
+function recordNoteSettlementSegmentExclusion(db, jobId, turnId, nowEpoch) {
+  db.query(
+    `INSERT INTO note_settlement_segment_exclusions (job_id, turn_id, created_at_epoch)
+     VALUES (?, ?, ?)
+     ON CONFLICT (job_id, turn_id) DO NOTHING`
+  ).run(jobId, turnId, nowEpoch);
 }
 function getWindowTurnRows(db, sessionId, windowStart, windowEnd) {
   return db.query(
@@ -47540,6 +47322,359 @@ function completeNoteSettlementJobIfSegmentedCore(db, jobId, claimGeneration, no
   };
 }
 
+// src/worker/note-settlement-segment-facade.ts
+var HANDLE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+var HANDLE_TOKEN_PATTERN = /^E#([A-Za-z0-9][A-Za-z0-9_-]*)$/;
+var HANDLE_GROUP_PATTERN = /^\[[ \t]*E#([A-Za-z0-9][A-Za-z0-9_-]*)[ \t]*\][ \t]*$/;
+function isSettlementHandleToken(token) {
+  return HANDLE_TOKEN_PATTERN.test(token.trim());
+}
+function isValidSettlementHandleName(name) {
+  return HANDLE_NAME_PATTERN.test(name.trim());
+}
+function findHandleCitations(text) {
+  const found = [];
+  for (const group of topLevelBracketGroups(text)) {
+    const match = HANDLE_GROUP_PATTERN.exec(group);
+    if (match) {
+      found.push({ raw: group, key: `E#${match[1]}` });
+    }
+  }
+  return found;
+}
+function scanUnknownHandles(text, handleMap) {
+  const unknown3 = [];
+  for (const { key } of findHandleCitations(text)) {
+    if (!handleMap.has(key)) {
+      unknown3.push(key);
+    }
+  }
+  return unknown3;
+}
+function substituteHandles(text, handleMap) {
+  let result = text;
+  for (const { raw, key } of findHandleCitations(text)) {
+    const real = handleMap.get(key);
+    if (typeof real === "number") {
+      result = result.split(raw).join(`[E${real}]`);
+    }
+  }
+  return result;
+}
+var settlementSegmentWriteInputShape = {
+  action: external_exports.enum(["create", "extend", "exclude"]),
+  /**
+   * create only, required (spec A7a) — a short id the MODEL chooses and can
+   * restate identically on a retry (e.g. "lease-fencing"), never server-
+   * issued. This is what a later call cites as `[E#<handle>]`, and it is
+   * this create's own STAGING KEY: re-staging the same handle REPLACES the
+   * earlier staged entry rather than appending a second one — the point of
+   * a model-named handle, since a server-issued one would differ on every
+   * call and a retry could never be recognised as one.
+   */
+  handle: external_exports.string().optional(),
+  /** extend only — a REAL, already-existing segment id. Never a handle: the schema's number type makes that unrepresentable, so `extend` can only ever target a segment that existed before this run (see the module doc comment). */
+  segmentId: external_exports.number().int().positive().optional(),
+  /** extend only. */
+  expectedRevision: external_exports.number().int().min(0).optional(),
+  /** create only: exact registry name if reusing, or a new name to mint. */
+  topic: external_exports.string().optional(),
+  topicAliases: external_exports.array(external_exports.string()).optional(),
+  /** create only, required: D9's anti-fragmentation discipline — why no open segment and no registered topic fits. */
+  noCandidateReason: external_exports.string().optional(),
+  /** Required (non-empty) for create; optional for extend — omit to leave the stored title alone (spec D5a). */
+  title: external_exports.string().optional(),
+  /** Optional for both. `null` explicitly clears (extend only); omit leaves alone. */
+  content: external_exports.string().nullable().optional(),
+  type: external_exports.array(external_exports.string()).optional(),
+  tags: external_exports.array(external_exports.string()).optional(),
+  /** create: honoured, defaults to "open" same as a bare insert would. extend: the compare-and-set's own status change (spec D6). */
+  status: external_exports.enum(SEGMENT_STATUSES).optional(),
+  /** `S<session>/T<prompt>` turn addresses, or `E#<n>` handles naming a segment this SAME run creates — but see the module doc comment: a handle here is always rejected, because a member is always a turn. */
+  members: external_exports.array(external_exports.string()).optional(),
+  /** exclude only, required — the turn address this verdict covers, and this exclude call's own staging key (spec A7a). */
+  turn: external_exports.string().optional()
+};
+var settlementSegmentWriteInputSchema = external_exports.object(settlementSegmentWriteInputShape).strict();
+function scanBodyCitationIssues(db, texts) {
+  const references = texts.flatMap((text) => parseQualifiedReferences(text));
+  if (references.length === 0) {
+    return 0;
+  }
+  return validateReferences(db, references).rejected.length;
+}
+function evaluateSettlementSegmentWrite(db, context, rawInput, nowEpoch, options) {
+  const handleIssues = [
+    ...scanUnknownHandles(rawInput.title ?? "", options.handleMap),
+    ...scanUnknownHandles(rawInput.content ?? "", options.handleMap)
+  ];
+  for (const member of rawInput.members ?? []) {
+    if (isSettlementHandleToken(member)) {
+      return {
+        ok: false,
+        message: `members entry "${member}" names a segment, not a turn \u2014 a member must be a "S<session>/T<prompt>" address.`
+      };
+    }
+  }
+  if (handleIssues.length > 0) {
+    return {
+      ok: false,
+      message: `references an unknown handle: ${[...new Set(handleIssues)].join(", ")} \u2014 a handle must have been assigned by an earlier "create" call in this same run.`
+    };
+  }
+  let normalizedType2;
+  if (rawInput.type !== void 0) {
+    try {
+      normalizedType2 = normalizeTypeValues(rawInput.type);
+    } catch (error49) {
+      return {
+        ok: false,
+        message: `${error49 instanceof Error ? error49.message : String(error49)}. Allowed: ${MEMORY_TYPES.join(", ")}.`
+      };
+    }
+  }
+  if (rawInput.tags !== void 0) {
+    const retiredTag = findRetiredTopicTag(rawInput.tags);
+    if (retiredTag) {
+      return { ok: false, message: retiredTopicTagMessage(retiredTag) };
+    }
+  }
+  const resolvedTitle = substituteHandles(rawInput.title ?? "", options.handleMap);
+  const resolvedContent = rawInput.content === void 0 ? void 0 : rawInput.content === null ? null : substituteHandles(rawInput.content, options.handleMap);
+  if (rawInput.action === "exclude") {
+    if (!rawInput.turn || rawInput.turn.trim() === "") {
+      return {
+        ok: false,
+        message: 'exclude requires turn, a "S<session>/T<prompt>" address.'
+      };
+    }
+    const address = parseTurnAddress(rawInput.turn);
+    if (!address) {
+      return {
+        ok: false,
+        message: `turn must be a fully qualified "S<session>/T<prompt>" address; got "${rawInput.turn}".`
+      };
+    }
+    const ref = `S${address.sessionId}/T${address.promptNumber}`;
+    const turn = getTurn(db, address.sessionId, address.promptNumber);
+    if (!turn) {
+      return { ok: false, message: `no turn at ${ref}.` };
+    }
+    if (options.apply) {
+      recordNoteSettlementSegmentExclusion(db, context.jobId, turn.id, nowEpoch);
+    }
+    return {
+      ok: true,
+      outcome: {
+        action: "exclude",
+        segmentId: null,
+        excludedTurnRef: ref,
+        membersAdded: 0,
+        membersDropped: 0,
+        citationsDropped: 0,
+        topicMinted: false,
+        topicReused: false
+      }
+    };
+  }
+  if (rawInput.action === "create") {
+    if (rawInput.title === void 0 || rawInput.title.trim() === "") {
+      return { ok: false, message: "title is required and must not be empty for a create." };
+    }
+    if (!rawInput.noCandidateReason || rawInput.noCandidateReason.trim() === "") {
+      return {
+        ok: false,
+        message: "noCandidateReason is required for a create \u2014 name what you searched in the topic registry and open segments, and why nothing fit."
+      };
+    }
+    if (!rawInput.handle || !isValidSettlementHandleName(rawInput.handle)) {
+      return {
+        ok: false,
+        message: 'handle is required for a create \u2014 a short id YOU choose and can restate identically on a retry (e.g. "lease-fencing"; letters, digits, hyphens, underscores only). It becomes the [E#<handle>] address other calls in this run cite before this segment has a real id, and re-staging the same handle replaces this call rather than duplicating it.'
+      };
+    }
+    let topicMinted = false;
+    let topicReused = false;
+    let topicId = null;
+    if (rawInput.topic) {
+      const existing = findTopic(db, rawInput.topic);
+      topicReused = existing !== null;
+      topicMinted = !topicReused;
+      if (options.apply) {
+        const topic = upsertTopic(db, {
+          name: rawInput.topic,
+          aliases: rawInput.topicAliases,
+          nowEpoch
+        });
+        topicId = topic.id;
+      }
+    }
+    const memberResolution2 = resolveMemberTokens(
+      db,
+      rawInput.members ?? [],
+      context
+    );
+    const citationsDropped2 = scanBodyCitationIssues(db, [resolvedTitle, resolvedContent]);
+    let segmentId = null;
+    if (options.apply) {
+      const created = createSegment(db, {
+        title: resolvedTitle,
+        topicId,
+        content: resolvedContent ?? null,
+        type: normalizedType2 ?? [],
+        tags: rawInput.tags ?? [],
+        // Ticket 10d: honoured, not silently dropped. `createSegment` already
+        // accepted a `status` param and defaulted it to "open" when absent —
+        // this facade simply never passed the model's value through, so a
+        // model-stated status was accepted by the schema and then ignored.
+        // No new eligibility invented: it is the SAME
+        // `SEGMENT_STATUSES`/default `createSegment` already enforced.
+        status: rawInput.status,
+        nowEpoch
+      });
+      segmentId = created.id;
+      addSegmentMembers(db, created.id, memberResolution2.turnIds, nowEpoch);
+    }
+    return {
+      ok: true,
+      outcome: {
+        action: "create",
+        segmentId,
+        excludedTurnRef: null,
+        membersAdded: memberResolution2.turnIds.length,
+        membersDropped: memberResolution2.dropped,
+        citationsDropped: citationsDropped2,
+        topicMinted,
+        topicReused
+      }
+    };
+  }
+  if (rawInput.segmentId === void 0 || rawInput.expectedRevision === void 0) {
+    return {
+      ok: false,
+      message: "extend requires segmentId and expectedRevision, both naming an already-existing segment."
+    };
+  }
+  const current = getSegment(db, rawInput.segmentId);
+  if (!current) {
+    return { ok: false, message: `no segment E${rawInput.segmentId}.` };
+  }
+  if (current.status !== "open") {
+    return {
+      ok: false,
+      message: `E${rawInput.segmentId} is ${current.status}, not open \u2014 spec D6 overturns a closed segment with an edge, never by rewriting it.`
+    };
+  }
+  const memberResolution = resolveMemberTokens(db, rawInput.members ?? [], context);
+  const citationsDropped = scanBodyCitationIssues(db, [
+    rawInput.title !== void 0 ? resolvedTitle : void 0,
+    rawInput.content !== void 0 ? resolvedContent : void 0
+  ]);
+  if (!options.apply) {
+    return {
+      ok: true,
+      outcome: {
+        action: "extend",
+        segmentId: rawInput.segmentId,
+        excludedTurnRef: null,
+        membersAdded: memberResolution.turnIds.length,
+        membersDropped: memberResolution.dropped,
+        citationsDropped,
+        topicMinted: false,
+        topicReused: false
+      }
+    };
+  }
+  const { applied, excluded } = applySegmentWrites(
+    db,
+    [
+      {
+        segmentId: rawInput.segmentId,
+        expectedRevision: rawInput.expectedRevision,
+        title: rawInput.title === void 0 ? void 0 : resolvedTitle,
+        content: resolvedContent,
+        type: normalizedType2,
+        tags: rawInput.tags,
+        status: rawInput.status
+      }
+    ],
+    { nowEpoch }
+  );
+  const landed = applied[0];
+  if (!landed) {
+    const rejection = excluded[0];
+    const latest = rejection?.latest;
+    return {
+      ok: false,
+      message: `E${rawInput.segmentId} extend refused (${rejection?.reason ?? "unknown"})` + (latest ? ` \u2014 current revision on file is ${latest.revision}.` : ".")
+    };
+  }
+  addSegmentMembers(db, landed.id, memberResolution.turnIds, nowEpoch);
+  return {
+    ok: true,
+    outcome: {
+      action: "extend",
+      segmentId: landed.id,
+      excludedTurnRef: null,
+      membersAdded: memberResolution.turnIds.length,
+      membersDropped: memberResolution.dropped,
+      citationsDropped,
+      topicMinted: false,
+      topicReused: false
+    }
+  };
+}
+function resolveMemberTokens(db, tokens, context) {
+  const turnIds = [];
+  let dropped = 0;
+  for (const token of tokens) {
+    const reference = parseBareAddressReference(token);
+    if (!reference || reference.kind !== "turn") {
+      dropped += 1;
+      context.logger?.warn?.(
+        `[claude-mnemo] settlement job ${context.jobId}: member "${token}" is not a turn address`
+      );
+      continue;
+    }
+    const { accepted } = validateReferences(db, [reference], {
+      writerSessionId: context.sessionId,
+      logger: context.logger
+    });
+    const node = accepted[0]?.node;
+    if (!node) {
+      dropped += 1;
+      continue;
+    }
+    turnIds.push(node.id);
+  }
+  return { turnIds, dropped };
+}
+function renderSettlementSegmentWriteReceipt(outcome, options) {
+  const verb = options.staged ? "Staged" : "Landed";
+  const address = outcome.action === "create" ? options.handle ?? (outcome.segmentId !== null ? `E${outcome.segmentId}` : "a new segment") : outcome.action === "exclude" ? outcome.excludedTurnRef ?? "a turn" : `E${outcome.segmentId}`;
+  const replacedSuffix = options.replaced ? " \u2014 replaces the earlier staged call for this same key" : "";
+  const parts = [
+    `${verb} ${outcome.action} of ${address}${options.staged ? " (pending commit)" : ""}${replacedSuffix}.`
+  ];
+  if (outcome.topicMinted) {
+    parts.push("New topic minted.");
+  } else if (outcome.topicReused) {
+    parts.push("Reused an existing topic.");
+  }
+  if (outcome.membersAdded > 0) {
+    parts.push(`${outcome.membersAdded} member(s).`);
+  }
+  if (outcome.membersDropped > 0) {
+    parts.push(`${outcome.membersDropped} member address(es) dropped (did not resolve to a turn).`);
+  }
+  if (outcome.citationsDropped > 0) {
+    parts.push(
+      `${outcome.citationsDropped} citation(s) in title/content did not resolve and will not become an anchor.`
+    );
+  }
+  return parts.join(" ");
+}
+
 // src/worker/note-settlement-turn-facade.ts
 var settlementTurnWriteInputShape = {
   turn: external_exports.string().min(1),
@@ -47561,7 +47696,10 @@ var RELATION_FIELD_ENTRIES2 = [
   ["supersedes", "supersedes"],
   ["dependsOn", "depends-on"]
 ];
-function evaluateRelationCandidates(citing, candidates, eligiblePairKeys) {
+function evaluateRelationCandidates(db, citing, candidates, eligiblePairKeys) {
+  const currentPairKeys = new Set(
+    getOutgoingEdges(db, citing).map((edge) => pairKey({ citing, cited: edge.cited }))
+  );
   const relationsByPair = /* @__PURE__ */ new Map();
   for (const candidate of candidates) {
     const key = pairKey({ citing, cited: candidate.node });
@@ -47589,6 +47727,12 @@ function evaluateRelationCandidates(citing, candidates, eligiblePairKeys) {
     if (!eligiblePairKeys.has(key)) {
       rejections.push(
         `${candidate.key} names a pair not eligible for a relation \u2014 settlement may only attach a relation to a pair that already existed before this dispatch's model run began (spec C7)`
+      );
+      continue;
+    }
+    if (!currentPairKeys.has(key)) {
+      rejections.push(
+        `${candidate.key} names a pair that no longer exists \u2014 the citing side's body has stopped citing it since this run's eligibility snapshot was taken (frozen \u2229 current, spec C6/C7); a relation cannot outlive the citation it rests on`
       );
       continue;
     }
@@ -47644,6 +47788,12 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch, options) {
         ok: false,
         message: `${error49 instanceof Error ? error49.message : String(error49)}. Allowed: ${MEMORY_TYPES.join(", ")}.`
       };
+    }
+  }
+  if (rawInput.tags !== void 0) {
+    const retiredTag = findRetiredTopicTag(rawInput.tags);
+    if (retiredTag) {
+      return { ok: false, message: retiredTopicTagMessage(retiredTag) };
     }
   }
   const turn = getTurn(db, address.sessionId, address.promptNumber);
@@ -47741,6 +47891,7 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch, options) {
       return { ok: false, message: `relation field rejected: ${rejections.join("; ")}.` };
     }
     const evaluated = evaluateRelationCandidates(
+      db,
       citing,
       candidates,
       context.eligibleRelationPairKeys
@@ -47765,6 +47916,9 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch, options) {
 function renderSettlementTurnWriteReceipt(outcome, options) {
   const verb = options.staged ? "Staged" : "Landed";
   const parts = [];
+  if (options.replaced) {
+    parts.push(`(replaces the earlier staged call for ${outcome.ref})`);
+  }
   if (outcome.prose) {
     parts.push(
       outcome.prose.kind === "written" ? `${verb} reconstruction for ${outcome.ref}${options.staged ? " (pending commit)" : ""}.` : `${outcome.ref} reconstruction ${options.staged ? "would yield" : "yielded"}: an agent note has landed first.`
@@ -47797,6 +47951,18 @@ function renderSettlementTurnWriteReceipt(outcome, options) {
 }
 
 // src/worker/note-settlement-staging.ts
+function noteStagingKey(ref) {
+  return `note:${ref}`;
+}
+function segmentCreateStagingKey(handle) {
+  return `segment-create:${handle}`;
+}
+function segmentExtendStagingKey(segmentId) {
+  return `segment-extend:${segmentId}`;
+}
+function segmentExcludeStagingKey(ref) {
+  return `segment-exclude:${ref}`;
+}
 function textResult4(text) {
   return { content: [{ type: "text", text }] };
 }
@@ -47830,9 +47996,8 @@ function describeGateRefusal(result) {
 function createSettlementStagingEngine(options) {
   const { db, context } = options;
   const now = options.now ?? (() => Math.floor(Date.now() / 1e3));
-  const staged = [];
+  const staged = /* @__PURE__ */ new Map();
   let knownHandles = /* @__PURE__ */ new Map();
-  let nextHandleNumber = 1;
   function stageNoteWrite(rawInput) {
     const nowEpoch = now();
     const evaluation = evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch, {
@@ -47841,8 +48006,12 @@ function createSettlementStagingEngine(options) {
     if (!evaluation.ok) {
       return parameterError3(evaluation.message);
     }
-    staged.push({ kind: "note", input: rawInput });
-    return textResult4(renderSettlementTurnWriteReceipt(evaluation.outcome, { staged: true }));
+    const key = noteStagingKey(evaluation.outcome.ref);
+    const replaced = staged.has(key);
+    staged.set(key, { kind: "note", input: rawInput });
+    return textResult4(
+      renderSettlementTurnWriteReceipt(evaluation.outcome, { staged: true, replaced })
+    );
   }
   function stageSegmentWrite(rawInput) {
     const nowEpoch = now();
@@ -47853,22 +48022,30 @@ function createSettlementStagingEngine(options) {
     if (!evaluation.ok) {
       return parameterError3(evaluation.message);
     }
+    let key;
     let handle = null;
     if (rawInput.action === "create") {
-      handle = `E#${nextHandleNumber}`;
-      nextHandleNumber += 1;
-      const grown = new Map(knownHandles);
-      grown.set(handle, null);
-      knownHandles = grown;
+      handle = `E#${rawInput.handle.trim()}`;
+      key = segmentCreateStagingKey(handle);
+      if (!knownHandles.has(handle)) {
+        const grown = new Map(knownHandles);
+        grown.set(handle, null);
+        knownHandles = grown;
+      }
+    } else if (rawInput.action === "extend") {
+      key = segmentExtendStagingKey(rawInput.segmentId);
+    } else {
+      key = segmentExcludeStagingKey(evaluation.outcome.excludedTurnRef);
     }
-    staged.push({ kind: "segment", handle, input: rawInput });
+    const replaced = staged.has(key);
+    staged.set(key, { kind: "segment", handle, input: rawInput });
     return textResult4(
-      renderSettlementSegmentWriteReceipt(evaluation.outcome, { staged: true, handle })
+      renderSettlementSegmentWriteReceipt(evaluation.outcome, { staged: true, handle, replaced })
     );
   }
   function commit() {
     const nowEpoch = now();
-    const snapshot = [...staged];
+    const snapshot = [...staged.values()];
     try {
       const gateResult = runWriteTransaction(db, () => {
         assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
@@ -47881,7 +48058,7 @@ function createSettlementStagingEngine(options) {
             });
             if (!evaluation.ok) {
               throw new CommitReplayRefused(
-                `segment ${entry.handle ?? entry.input.segmentId}: ${evaluation.message}`
+                `segment ${entry.handle ?? entry.input.segmentId ?? entry.input.turn}: ${evaluation.message}`
               );
             }
             if (entry.handle) {
@@ -47908,22 +48085,26 @@ function createSettlementStagingEngine(options) {
         }
         return gate;
       });
-      staged.length = 0;
+      staged.clear();
       knownHandles = /* @__PURE__ */ new Map();
-      nextHandleNumber = 1;
       void gateResult;
       return textResult4(
         `Committed. S${context.sessionId} window settled \u2014 job complete.`
       );
     } catch (error49) {
       if (error49 instanceof CommitGateRefused) {
+        if (error49.result.reason === "not-claimed" || error49.result.reason === "generation-mismatch") {
+          return textResult4(
+            `Commit refused \u2014 ${describeGateRefusal(error49.result)}`
+          );
+        }
         return textResult4(
           `Commit refused \u2014 ${describeGateRefusal(error49.result)} Staging kept: fill the gap and call commit again.`
         );
       }
       if (error49 instanceof CommitReplayRefused) {
         return textResult4(
-          `Commit refused \u2014 ${error49.message} Staging kept: fix and call commit again.`
+          `Commit refused \u2014 ${error49.message} Staging kept: re-stage the SAME call (same key) with corrected input, then call commit again \u2014 a stale staged entry is not dropped automatically.`
         );
       }
       if (error49 instanceof NoteSettlementJobFenceError) {
@@ -47938,7 +48119,7 @@ function createSettlementStagingEngine(options) {
     stageNoteWrite,
     stageSegmentWrite,
     commit,
-    pendingCount: () => staged.length
+    pendingCount: () => staged.size
   };
 }
 
@@ -47950,9 +48131,9 @@ var SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__segment",
   "mcp__mnemo__commit"
 ];
-var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'STAGE one turn\'s reconstruction note and/or its grade/type/tags/relations \u2014 validated now, written only when you call `commit`. One call per turn, any time during this run. `turn`: "S<session>/T<prompt>", from the window or preceding-turns section below. title/content/insight: all three together, only for a turn this window lists as owing a note (insight may be null, but must be named). grade (0-4, against the rubric)/type/tags: only for a turn shown in this prompt (window or preceding turns); each overwrites whole when present, omit to leave alone \u2014 there is no append. evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target must already be a pair that existed before this run started \u2014 you cannot license a relation on a pair a call earlier in this SAME run just created.';
-var SETTLEMENT_SEGMENT_TOOL_DESCRIPTION = 'STAGE a segment write (create a new chapter, or extend an open one) \u2014 validated now, written only when you call `commit`. action: "create" or "extend". create: title (required), no_candidate_reason (required \u2014 what you searched in the topic registry and open segments, and why nothing fit), topic/topicAliases (optional), content/type/tags/members (optional). extend: segmentId + expectedRevision naming an ALREADY-EXISTING segment shown to you as open (never a segment this same run just created \u2014 see the E#n handle below); every other field overwrites whole when present, omit to leave alone. members: "S<session>/T<prompt>" turn addresses; an address that does not resolve is dropped, not a failure of the call. Cite member turns inline in content as [S<session>/T<prompt>] and other segments as [E<n>] \u2014 those citations become the segment\'s anchors automatically, no separate step. A successful create\'s receipt states a handle, "E#<n>", scoped to THIS run only \u2014 use it (in a later segment\'s members or content) to refer to the segment you just created, before it has a real id; `commit` resolves every handle to a real id, in the order you staged them.';
-var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Land every staged `note`/`segment` write in one transaction, THEN check this window is complete (every eligible turn typed or skipped, every one segmented or explicitly excluded, no turn still owing a note). Call this once you believe the window is done \u2014 it is the only way any of your work becomes durable. If the window is not actually complete, or the world moved under a staged write, NOTHING lands and this tells you exactly what is still missing; every staged write is kept, so you fill the gap with more `note`/`segment` calls and call `commit` again.";
+var SETTLEMENT_NOTE_TOOL_DESCRIPTION = "STAGE one turn's reconstruction note and/or its grade/type/tags/relations \u2014 validated now, written only when you call `commit`. `turn`: \"S<session>/T<prompt>\", from the window or preceding-turns section below \u2014 this is also this call's KEY: staging the same turn again REPLACES what you staged for it before, so a lost-receipt retry or a same-run correction is just another call, not a new problem. title/content/insight: all three together, only for a turn this window lists as owing a note (insight may be null, but must be named). grade (0-4, against the rubric)/type/tags: only for a turn shown in this prompt (window or preceding turns); each overwrites whole when present, omit to leave alone \u2014 there is no append. evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target must already be a pair that existed before this run started AND still exist when `commit` lands it \u2014 you cannot license a relation on a pair a call earlier in this SAME run just created, or on one the main agent has since stopped citing.";
+var SETTLEMENT_SEGMENT_TOOL_DESCRIPTION = `STAGE a segment write \u2014 create a new chapter, extend an open one, or record that a turn belongs to no segment \u2014 validated now, written only when you call \`commit\`. action: "create", "extend" or "exclude". create: title (required), handle (required \u2014 a short id YOU choose, e.g. "lease-fencing"; letters/digits/hyphens/underscores only; this is this call's KEY, so re-staging the same handle REPLACES this create rather than minting a second one), noCandidateReason (required \u2014 what you searched in the topic registry and open segments, and why nothing fit), topic/topicAliases/content/type/tags/status/members (optional). extend: segmentId + expectedRevision naming an already-existing, OPEN segment (this is this call's KEY \u2014 re-staging the same segmentId replaces the earlier call; a handle from THIS run can never be an extend target \u2014 it has no real id yet, use it only as a citation, see below); every other field overwrites whole when present, omit to leave alone. exclude: turn ("S<session>/T<prompt>", also this call's KEY) \u2014 records that this turn was reviewed and belongs to no segment; use it for a turn that genuinely fits no chapter, instead of inventing one. members: "S<session>/T<prompt>" turn addresses (never a handle \u2014 a member is always a turn); an address that does not resolve is dropped, not a failure of the call. Cite member turns inline in content as [S<session>/T<prompt>] and other segments as [E<n>] \u2014 those citations become the segment's anchors automatically, no separate step; an address that does not resolve is likewise dropped and reported, not a failure. A successful create's receipt states its handle as "E#<handle>", scoped to THIS run only \u2014 cite it as [E#<handle>] in a LATER segment's content to refer to the segment you just created before it has a real id (never in members, never as an extend target); \`commit\` resolves every handle to a real id, in the order you staged them.`;
+var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Land every staged `note`/`segment` write in one transaction, THEN check this window is complete (every eligible turn typed or skipped, every one segmented or explicitly excluded, no turn still owing a note). Call this once you believe the window is done \u2014 it is the only way any of your work becomes durable. If the window is not actually complete, this tells you exactly what is still missing; every staged write is kept, so you fill the gap with more `note`/`segment` calls and call `commit` again. If instead a specific staged call has gone stale (the world moved under it \u2014 a revision, a relation pair the main agent stopped citing, ...), re-stage that SAME key with corrected input \u2014 that replaces the stale entry \u2014 and call `commit` again; blindly retrying the same input will fail the same way. If your job lease has been reclaimed, no commit from this run will ever succeed again \u2014 stop making tool calls.";
 function textResult5(text) {
   return { content: [{ type: "text", text }] };
 }

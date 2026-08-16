@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { isCitationRelation, type CitationRelation } from "../db/citations";
 import {
+  getOutgoingEdges,
   pairKey,
   writeMemoryEdges,
   type CitingNode,
@@ -12,6 +13,7 @@ import {
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import { getShadowNote, upsertReconstructedShadowNote } from "../db/shadow-notes";
 import { getTurn, updateTurnById } from "../db/turns";
+import { findRetiredTopicTag, retiredTopicTagMessage } from "../shared/tag-stripping";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
 import { parseTurnAddress } from "../mcp/note";
 
@@ -228,12 +230,37 @@ export interface EvaluateSettlementTurnWriteOptions {
  * call with the same accepted list) run this same function first, so the two
  * can never disagree about WHICH inputs are legal — only about whether they
  * are actually written.
+ *
+ * Ticket 10d finding 1: eligibility is the FROZEN pre-run snapshot
+ * INTERSECTED with the pair's CURRENT existence, not the frozen set alone.
+ * The freeze (ticket 07/C7) exists to stop a run self-licensing a pair its
+ * OWN writes just minted mid-run; it says nothing about the pair surviving
+ * to commit time. Without the current-state half, a stale frozen key can
+ * RESURRECT a pair the main agent deleted between the snapshot and commit:
+ * T2 cites T1 when the snapshot is taken, settlement stages `dependsOn(T1)`,
+ * the main agent then rewrites T2's body and `reconcileCitedPairs` deletes
+ * T2->T1 — the frozen set still names the key, so without this check
+ * `writeMemoryEdges` would re-INSERT a relation-only pair T2's body no
+ * longer supports, which is exactly what C6 forbids. Dropping the CURRENT
+ * check reintroduces that bug; dropping the FROZEN check reintroduces the
+ * self-licensing bug ticket 07 closed. Both constraints, not either — hence
+ * the intersection, not a replacement.
+ *
+ * `currentPairKeys` is read from `citing`'s own outgoing edges — one query
+ * regardless of how many candidates this call carries, and correct at BOTH
+ * stage time (still frozen==current, ordinarily) and commit time (fresh,
+ * inside the same transaction the write lands in), because this function
+ * runs unconditionally at both, same as every other read in this file.
  */
 function evaluateRelationCandidates(
+  db: Database,
   citing: CitingNode,
   candidates: ReadonlyArray<{ key: string; relation: CitationRelation; node: EdgeNode }>,
   eligiblePairKeys: ReadonlySet<string>,
 ): { accepted: WriteEdgeInput[]; rejections: string[] } {
+  const currentPairKeys = new Set(
+    getOutgoingEdges(db, citing).map((edge) => pairKey({ citing, cited: edge.cited })),
+  );
   const relationsByPair = new Map<string, Set<CitationRelation>>();
   for (const candidate of candidates) {
     const key = pairKey({ citing, cited: candidate.node });
@@ -267,6 +294,15 @@ function evaluateRelationCandidates(
         `${candidate.key} names a pair not eligible for a relation — settlement ` +
           "may only attach a relation to a pair that already existed before " +
           "this dispatch's model run began (spec C7)",
+      );
+      continue;
+    }
+    if (!currentPairKeys.has(key)) {
+      rejections.push(
+        `${candidate.key} names a pair that no longer exists — the citing ` +
+          "side's body has stopped citing it since this run's eligibility " +
+          "snapshot was taken (frozen ∩ current, spec C6/C7); a relation " +
+          "cannot outlive the citation it rests on",
       );
       continue;
     }
@@ -361,6 +397,23 @@ export function evaluateSettlementTurnWrite(
         ok: false,
         message: `${error instanceof Error ? error.message : String(error)}. Allowed: ${MEMORY_TYPES.join(", ")}.`,
       };
+    }
+  }
+
+  // Ticket 10d: the retired `topic:` namespace (spec B6) stays retired at
+  // THIS write boundary too. `mcp/note.ts` refuses it loudly rather than
+  // silently stripping it (`findRetiredTopicTag`/`retiredTopicTagMessage`,
+  // shared/tag-stripping.ts) — reused verbatim here, not re-derived, because
+  // 10a's own judgement call already put this facade on "match the note
+  // tool's own discipline: a live tool call the agent can retry is not a
+  // fire-and-forget batch" for every other rejection (relations, prose
+  // targets). The retiring write-back silently STRIPPED the prefix instead,
+  // but that was a batch parser with no agent to correct after a refusal;
+  // this facade is not that any more.
+  if (rawInput.tags !== undefined) {
+    const retiredTag = findRetiredTopicTag(rawInput.tags);
+    if (retiredTag) {
+      return { ok: false, message: retiredTopicTagMessage(retiredTag) };
     }
   }
 
@@ -491,6 +544,7 @@ export function evaluateSettlementTurnWrite(
     // here to cite anything into, and even if it did, a pair this same
     // run just minted must not license its own relation.
     const evaluated = evaluateRelationCandidates(
+      db,
       citing,
       candidates,
       context.eligibleRelationPairKeys,
@@ -523,10 +577,13 @@ export function evaluateSettlementTurnWrite(
  */
 export function renderSettlementTurnWriteReceipt(
   outcome: SettlementTurnWriteOutcome,
-  options: { staged: boolean },
+  options: { staged: boolean; replaced?: boolean },
 ): string {
   const verb = options.staged ? "Staged" : "Landed";
   const parts: string[] = [];
+  if (options.replaced) {
+    parts.push(`(replaces the earlier staged call for ${outcome.ref})`);
+  }
   if (outcome.prose) {
     parts.push(
       outcome.prose.kind === "written"

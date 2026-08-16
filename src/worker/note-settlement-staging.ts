@@ -29,12 +29,12 @@ import {
  * real receipt, but the intent they describe is only APPENDED to an
  * in-memory list; no mutating statement runs. `commit` is the only function
  * in this whole module that writes: it replays every staged intent, IN
- * STAGING ORDER, inside one `runWriteTransaction`, resolving `E#n` handles
- * to real segment ids as it creates them, then runs the completion gate as
- * that same transaction's last statement. A crash before `commit` loses
- * nothing that was ever real (requirement 1) — the job stays `claimed` and
- * the next attempt starts clean, which is why no per-write idempotency key
- * is needed (spec A7, G5 dissolved).
+ * STAGING ORDER, inside one `runWriteTransaction`, resolving `E#<handle>`
+ * handles to real segment ids as it creates them, then runs the completion
+ * gate as that same transaction's last statement. A crash before `commit`
+ * loses nothing that was ever real (requirement 1) — the job stays
+ * `claimed` and the next attempt starts clean, which is why no per-write
+ * idempotency key is needed (spec A7, G5 dissolved).
  *
  * `commit`'s own transaction is ALSO the only place staged intents are
  * re-evaluated (`evaluateSettlementTurnWrite`/`evaluateSettlementSegmentWrite`
@@ -45,7 +45,7 @@ import {
  * A REFUSED commit — a replay conflict, or the completion gate finding a gap
  * — throws inside the transaction, which SQLite rolls back whole: nothing
  * any staged write would have landed lands, and the job stays `claimed`.
- * Critically, the in-memory `staged` array is NOT cleared on a refusal
+ * Critically, the in-memory `staged` map is NOT cleared on a refusal
  * (requirement 7) — only a genuinely committed transaction clears it — so
  * the agent's existing work survives, it fills the gap the refusal named
  * with more tool calls, and `commit` again replays the WHOLE list (old
@@ -54,6 +54,24 @@ import {
  * is what makes a refused-then-retried commit safe without any staged
  * write needing its own replay contract (spec A7's G5 dissolution): a
  * rolled-back attempt left no trace to reconcile against.
+ *
+ * STAGED ENTRIES ARE KEYED (spec A7a, ticket 10d — `staged` is a `Map`, not
+ * an array). A7's first draft left staged intents identityless: a retried
+ * stage call appended a duplicate `commit` then landed twice, and a model
+ * that noticed its own mistake had no way to replace the stale entry — the
+ * bad intent replayed, and failed, on every subsequent commit. The fix is
+ * the SAME "present overwrites" rule D5a already applies to every field,
+ * applied one level up to the staged CALL: a turn note keys on the turn
+ * address (automatic), `segment` create keys on a handle the MODEL names
+ * (so a retry reproduces it by construction — see note-settlement-segment-
+ * facade.ts), `segment` extend keys on the segment id, `segment` exclude
+ * keys on the turn address. Re-staging a key REPLACES its Map entry rather
+ * than appending a second one — `Map.set` on an existing key updates the
+ * value but leaves its ITERATION POSITION exactly where it was first
+ * staged, which is deliberate: staging order still matches the order the
+ * agent's calls were FIRST recognised in, so a correction does not silently
+ * reorder itself past a handle it needs to reference (or that references
+ * it).
  */
 
 export interface CreateSettlementStagingEngineOptions {
@@ -66,6 +84,26 @@ export interface CreateSettlementStagingEngineOptions {
 type StagedEntry =
   | { kind: "note"; input: SettlementTurnWriteInput }
   | { kind: "segment"; handle: string | null; input: SettlementSegmentWriteInput };
+
+// ---------------------------------------------------------------------------
+// Staging keys (spec A7a) — one canonical, kind-prefixed key per staged call
+// shape, so a `note` on turn S3/T5 and a `segment exclude` on the SAME turn
+// (a legitimate, unrelated pair of facts) never collide, while two calls of
+// the SAME shape naming the SAME address/handle/id always do.
+// ---------------------------------------------------------------------------
+
+function noteStagingKey(ref: string): string {
+  return `note:${ref}`;
+}
+function segmentCreateStagingKey(handle: string): string {
+  return `segment-create:${handle}`;
+}
+function segmentExtendStagingKey(segmentId: number): string {
+  return `segment-extend:${segmentId}`;
+}
+function segmentExcludeStagingKey(ref: string): string {
+  return `segment-exclude:${ref}`;
+}
 
 type ToolTextResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -129,10 +167,13 @@ export function createSettlementStagingEngine(
   const { db, context } = options;
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
 
-  const staged: StagedEntry[] = [];
+  // Keyed staging (spec A7a) — see the module doc comment. Iteration order
+  // is `Map`'s own insertion order, and `Map.set` on an EXISTING key updates
+  // the value without moving its position, so a same-key restage lands
+  // exactly where it was first staged, not at the end of the run.
+  const staged = new Map<string, StagedEntry>();
   /** Handles assigned so far, every value `null` until `commit` resolves them for real. */
   let knownHandles: SettlementHandleMap = new Map();
-  let nextHandleNumber = 1;
 
   function stageNoteWrite(rawInput: SettlementTurnWriteInput): ToolTextResult {
     const nowEpoch = now();
@@ -142,8 +183,12 @@ export function createSettlementStagingEngine(
     if (!evaluation.ok) {
       return parameterError(evaluation.message);
     }
-    staged.push({ kind: "note", input: rawInput });
-    return textResult(renderSettlementTurnWriteReceipt(evaluation.outcome, { staged: true }));
+    const key = noteStagingKey(evaluation.outcome.ref);
+    const replaced = staged.has(key);
+    staged.set(key, { kind: "note", input: rawInput });
+    return textResult(
+      renderSettlementTurnWriteReceipt(evaluation.outcome, { staged: true, replaced }),
+    );
   }
 
   function stageSegmentWrite(rawInput: SettlementSegmentWriteInput): ToolTextResult {
@@ -155,17 +200,31 @@ export function createSettlementStagingEngine(
     if (!evaluation.ok) {
       return parameterError(evaluation.message);
     }
+
+    let key: string;
     let handle: string | null = null;
     if (rawInput.action === "create") {
-      handle = `E#${nextHandleNumber}`;
-      nextHandleNumber += 1;
-      const grown = new Map(knownHandles);
-      grown.set(handle, null);
-      knownHandles = grown;
+      // Model-named (spec A7a) — see note-settlement-segment-facade.ts's
+      // own required-field check; `rawInput.handle` is guaranteed present
+      // and valid here because `evaluation.ok` is true.
+      handle = `E#${rawInput.handle!.trim()}`;
+      key = segmentCreateStagingKey(handle);
+      if (!knownHandles.has(handle)) {
+        const grown = new Map(knownHandles);
+        grown.set(handle, null);
+        knownHandles = grown;
+      }
+    } else if (rawInput.action === "extend") {
+      key = segmentExtendStagingKey(rawInput.segmentId!);
+    } else {
+      // exclude
+      key = segmentExcludeStagingKey(evaluation.outcome.excludedTurnRef!);
     }
-    staged.push({ kind: "segment", handle, input: rawInput });
+
+    const replaced = staged.has(key);
+    staged.set(key, { kind: "segment", handle, input: rawInput });
     return textResult(
-      renderSettlementSegmentWriteReceipt(evaluation.outcome, { staged: true, handle }),
+      renderSettlementSegmentWriteReceipt(evaluation.outcome, { staged: true, handle, replaced }),
     );
   }
 
@@ -174,8 +233,8 @@ export function createSettlementStagingEngine(
     // An empty snapshot is not special-cased: the gate still runs (an
     // earlier commit attempt may have landed everything already and only
     // failed the gate for a reason since fixed by other means), it just
-    // replays nothing first.
-    const snapshot = [...staged];
+    // replays nothing first. Map iteration order is insertion order.
+    const snapshot = [...staged.values()];
 
     try {
       const gateResult = runWriteTransaction(db, () => {
@@ -193,7 +252,7 @@ export function createSettlementStagingEngine(
             });
             if (!evaluation.ok) {
               throw new CommitReplayRefused(
-                `segment ${entry.handle ?? entry.input.segmentId}: ${evaluation.message}`,
+                `segment ${entry.handle ?? entry.input.segmentId ?? entry.input.turn}: ${evaluation.message}`,
               );
             }
             if (entry.handle) {
@@ -232,9 +291,8 @@ export function createSettlementStagingEngine(
       // everything the loop above did is now durable, so replaying it again
       // on a later `commit` call would be redundant (and, for a `create`,
       // wrong: it would mint a second segment).
-      staged.length = 0;
+      staged.clear();
       knownHandles = new Map();
-      nextHandleNumber = 1;
       void gateResult; // completed:true by construction — the gate throws before returning otherwise
       return textResult(
         `Committed. S${context.sessionId} window settled — job complete.`,
@@ -244,14 +302,45 @@ export function createSettlementStagingEngine(
       // requirement 7): the transaction rolled back, so nothing any entry
       // in `snapshot` would have written actually landed, and the agent's
       // existing staged work is exactly as good as it was before this call.
+      //
+      // Ticket 10d: the message must not tell the model to do the
+      // impossible. A GATE GAP (segmentation/note/coverage-incomplete) is
+      // genuinely fixable by staging MORE calls — nothing already staged was
+      // wrong, the window just does not cover itself yet. A FENCE-shaped
+      // refusal (the job's lease is gone — `not-claimed`/`generation-
+      // mismatch`, whether it reaches here as a thrown `NoteSettlementJobFenceError`
+      // or, defensively, as a `CommitGateRefused` whose OWN reason is one of
+      // those two) is different in kind: THIS dispatch's `claimGeneration`
+      // is fixed for its whole life and can never match a newer one, so no
+      // amount of re-staging or re-committing from THIS run will ever
+      // succeed — telling the model to "fill the gap and commit again" here
+      // would be the exact self-contradiction the review found (saying
+      // "commit again" and "stop making tool calls" in the same breath).
       if (error instanceof CommitGateRefused) {
+        if (error.result.reason === "not-claimed" || error.result.reason === "generation-mismatch") {
+          return textResult(
+            `Commit refused — ${describeGateRefusal(error.result)}`,
+          );
+        }
         return textResult(
           `Commit refused — ${describeGateRefusal(error.result)} Staging kept: fill the gap and call commit again.`,
         );
       }
       if (error instanceof CommitReplayRefused) {
+        // A REPLAY conflict is a specific staged entry disagreeing with the
+        // world as of commit time (a stale segment revision, a relation
+        // pair the main agent's own edit has since dropped, ...) — spec
+        // A7a's keyed staging (this same ticket) is what makes this
+        // genuinely fixable in-run: re-stage the SAME key (the turn address
+        // for a note, the handle for a segment create, the segment id for
+        // extend, the turn address for exclude) with corrected input — that
+        // REPLACES the stale entry rather than adding to it — then call
+        // commit again. Blindly retrying the SAME staged input would just
+        // fail again the same way.
         return textResult(
-          `Commit refused — ${error.message} Staging kept: fix and call commit again.`,
+          `Commit refused — ${error.message} Staging kept: re-stage the SAME call ` +
+            "(same key) with corrected input, then call commit again — a stale " +
+            "staged entry is not dropped automatically.",
         );
       }
       if (error instanceof NoteSettlementJobFenceError) {
@@ -268,6 +357,6 @@ export function createSettlementStagingEngine(
     stageNoteWrite,
     stageSegmentWrite,
     commit,
-    pendingCount: () => staged.length,
+    pendingCount: () => staged.size,
   };
 }

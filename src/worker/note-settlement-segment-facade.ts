@@ -1,7 +1,13 @@
 import { z } from "zod";
 import type { Database } from "bun:sqlite";
 
-import { parseBareAddressReference, validateReferences } from "../db/references";
+import { recordNoteSettlementSegmentExclusion } from "../db/note-settlement-completion";
+import {
+  parseBareAddressReference,
+  parseQualifiedReferences,
+  topLevelBracketGroups,
+  validateReferences,
+} from "../db/references";
 import {
   addSegmentMembers,
   applySegmentWrites,
@@ -12,7 +18,10 @@ import {
   SEGMENT_STATUSES,
   type SegmentStatus,
 } from "../db/segments";
+import { findRetiredTopicTag, retiredTopicTagMessage } from "../shared/tag-stripping";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
+import { getTurn } from "../db/turns";
+import { parseTurnAddress } from "../mcp/note";
 import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade";
 
 /**
@@ -49,6 +58,31 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  * code in this file. This facade's own job is narrower than the retired
  * write-back's `writeAnchorEdges`: resolve handles, decide create vs extend,
  * and land membership.
+ *
+ * TICKET 10D'S REPAIRS, on top of the above:
+ *
+ *   - `action` gains `"exclude"` (spec A7a): the job-scoped verdict "this
+ *     turn was reviewed and belongs to no segment"
+ *     (`recordNoteSettlementSegmentExclusion`, db/note-settlement-completion.ts)
+ *     had no model-facing path before this — only `create`/`extend` existed,
+ *     so a window holding one legitimately unsegmented turn could not
+ *     complete. `exclude` writes exactly that row and nothing else.
+ *   - a body citation (`[S<session>/T<prompt>]`/`[E<n>]` in title/content) is
+ *     now validated at STAGE time too, not only when `createSegment`/
+ *     `applySegmentWrites` reconcile it at apply time — the same "the agent
+ *     learns of an error while it can still act on it" promise every other
+ *     field already keeps. Still DROPPED, never a reason to fail the call
+ *     (same discipline as `members`), just no longer SILENT.
+ *   - `create`'s handle is now MODEL-NAMED, not server-issued (spec A7a) —
+ *     see `HANDLE_NAME_PATTERN` below — and every place that read or wrote
+ *     `E#<n>` in free text now requires the bracketed `[E#<n>]` CITATION
+ *     form, matching the bracket-qualified grammar `db/references.ts` already
+ *     requires for every other reference. The old bare, unbracketed
+ *     `/E#(\d+)/g` scan rewrote ordinary prose that happened to contain the
+ *     substring ("the error code E#1 was observed" silently became "...E#42
+ *     ...") and refused an unrelated "E#2024" that was never meant as a
+ *     citation — both fixed by requiring the same `[...]` wrapper every
+ *     other address needs.
  */
 
 // ---------------------------------------------------------------------------
@@ -57,21 +91,37 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
 
 /**
  * A staged segment has no id. The agent addresses it within this run as
- * `E#<n>` (assigned by the staging engine, in staging order, as each
- * `action: "create"` call is staged) so a LATER call — another segment's
- * body citing it as an anchor — can name it before it exists. This is a
- * small interpreter, not the parser A1 removed: that one carried
+ * `E#<handle>` — MODEL-NAMED (spec A7a), not server-issued — so a LATER call
+ * (another segment's body citing it as an anchor) can name it before it
+ * exists, AND so a lost-receipt retry restates the identical handle and
+ * replaces its own stale staged entry instead of minting a second one. This
+ * is a small interpreter, not the parser A1 removed: that one carried
  * authorization and was wrong three times in ways that destroyed data; this
  * one replays intents authorization has already passed (every staged write
  * already ran its own full validation when it was staged) and re-checks
  * them against real ids inside the commit transaction, immediately before
  * the write that uses them.
+ *
+ * The handle NAME grammar is deliberately permissive text the model chooses
+ * (not a server-generated shape): printable ASCII word characters and
+ * hyphens, first character alphanumeric — enough to keep it safely
+ * embeddable inside a `[E#<handle>]` bracket group without needing its own
+ * escaping rules.
  */
-const HANDLE_TOKEN_PATTERN = /^E#(\d+)$/;
-const HANDLE_IN_TEXT_PATTERN = /E#(\d+)/g;
+const HANDLE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+/** A BARE handle token — `E#<handle>`, no brackets — the shape ONE ALREADY-ISOLATED `members` array entry takes (matching `parseBareAddressReference`'s own bracket-optional convention for that field). Anchored to the whole string: never scanned across prose. */
+const HANDLE_TOKEN_PATTERN = /^E#([A-Za-z0-9][A-Za-z0-9_-]*)$/;
+
+/** A handle CITATION inside one already-isolated top-level bracket group — `[E#<handle>]`. */
+const HANDLE_GROUP_PATTERN = /^\[[ \t]*E#([A-Za-z0-9][A-Za-z0-9_-]*)[ \t]*\][ \t]*$/;
 
 export function isSettlementHandleToken(token: string): boolean {
   return HANDLE_TOKEN_PATTERN.test(token.trim());
+}
+
+export function isValidSettlementHandleName(name: string): boolean {
+  return HANDLE_NAME_PATTERN.test(name.trim());
 }
 
 /**
@@ -84,11 +134,30 @@ export function isSettlementHandleToken(token: string): boolean {
  */
 export type SettlementHandleMap = ReadonlyMap<string, number | null>;
 
-/** Every `E#<n>` token in `text` that `handleMap` has never heard of — a typo or a forward reference past what this run has staged. */
+/**
+ * Every `[E#<handle>]` CITATION in `text`, each with its exact bracketed raw
+ * form and the bare `E#<handle>` key `handleMap` is keyed by. Ticket 10d:
+ * confined to a top-level bracket group via `topLevelBracketGroups` (the
+ * SAME bracket scanner `db/references.ts` uses for `[S<n>/T<n>]`/`[E<n>]`),
+ * not a bare substring scan — a handle is a segment reference that merely
+ * lacks a real id yet, so it must follow the identical bracket-qualified
+ * grammar every other reference does, not a looser one while it doesn't.
+ */
+function findHandleCitations(text: string): Array<{ raw: string; key: string }> {
+  const found: Array<{ raw: string; key: string }> = [];
+  for (const group of topLevelBracketGroups(text)) {
+    const match = HANDLE_GROUP_PATTERN.exec(group);
+    if (match) {
+      found.push({ raw: group, key: `E#${match[1]}` });
+    }
+  }
+  return found;
+}
+
+/** Every `[E#<handle>]` citation in `text` that `handleMap` has never heard of — a typo or a forward reference past what this run has staged. */
 function scanUnknownHandles(text: string, handleMap: SettlementHandleMap): string[] {
   const unknown: string[] = [];
-  for (const match of text.matchAll(HANDLE_IN_TEXT_PATTERN)) {
-    const key = `E#${match[1]}`;
+  for (const { key } of findHandleCitations(text)) {
     if (!handleMap.has(key)) {
       unknown.push(key);
     }
@@ -96,12 +165,20 @@ function scanUnknownHandles(text: string, handleMap: SettlementHandleMap): strin
   return unknown;
 }
 
-/** Replace every resolvable `E#<n>` in `text` with its real `E<id>` form. Commit-only — at stage every value in the map is still `null`. */
+/** Replace every resolvable `[E#<handle>]` in `text` with its real `[E<id>]` form. Commit-only — at stage every value in the map is still `null`, so every citation is left exactly as written. */
 function substituteHandles(text: string, handleMap: SettlementHandleMap): string {
-  return text.replace(HANDLE_IN_TEXT_PATTERN, (whole, digits: string) => {
-    const real = handleMap.get(`E#${digits}`);
-    return typeof real === "number" ? `E${real}` : whole;
-  });
+  let result = text;
+  for (const { raw, key } of findHandleCitations(text)) {
+    const real = handleMap.get(key);
+    if (typeof real === "number") {
+      // Replace the exact bracketed group text, not a bare substring — the
+      // same reason `findHandleCitations` scans bracket groups rather than
+      // matching anywhere: a coincidental "E#1" inside unrelated prose
+      // elsewhere in the same body must never be touched.
+      result = result.split(raw).join(`[E${real}]`);
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +186,17 @@ function substituteHandles(text: string, handleMap: SettlementHandleMap): string
 // ---------------------------------------------------------------------------
 
 export const settlementSegmentWriteInputShape = {
-  action: z.enum(["create", "extend"]),
+  action: z.enum(["create", "extend", "exclude"]),
+  /**
+   * create only, required (spec A7a) — a short id the MODEL chooses and can
+   * restate identically on a retry (e.g. "lease-fencing"), never server-
+   * issued. This is what a later call cites as `[E#<handle>]`, and it is
+   * this create's own STAGING KEY: re-staging the same handle REPLACES the
+   * earlier staged entry rather than appending a second one — the point of
+   * a model-named handle, since a server-issued one would differ on every
+   * call and a retry could never be recognised as one.
+   */
+  handle: z.string().optional(),
   /** extend only — a REAL, already-existing segment id. Never a handle: the schema's number type makes that unrepresentable, so `extend` can only ever target a segment that existed before this run (see the module doc comment). */
   segmentId: z.number().int().positive().optional(),
   /** extend only. */
@@ -125,9 +212,12 @@ export const settlementSegmentWriteInputShape = {
   content: z.string().nullable().optional(),
   type: z.array(z.string()).optional(),
   tags: z.array(z.string()).optional(),
+  /** create: honoured, defaults to "open" same as a bare insert would. extend: the compare-and-set's own status change (spec D6). */
   status: z.enum(SEGMENT_STATUSES).optional(),
   /** `S<session>/T<prompt>` turn addresses, or `E#<n>` handles naming a segment this SAME run creates — but see the module doc comment: a handle here is always rejected, because a member is always a turn. */
   members: z.array(z.string()).optional(),
+  /** exclude only, required — the turn address this verdict covers, and this exclude call's own staging key (spec A7a). */
+  turn: z.string().optional(),
 };
 
 export const settlementSegmentWriteInputSchema = z
@@ -143,12 +233,15 @@ export type SettlementSegmentWriteInput = z.infer<
 // ---------------------------------------------------------------------------
 
 export interface SettlementSegmentWriteOutcome {
-  action: "create" | "extend";
-  /** The real id once landed (commit, `apply: true`); null at stage time — nothing has one yet. */
+  action: "create" | "extend" | "exclude";
+  /** The real id once landed (commit, `apply: true`); null at stage time — nothing has one yet. Always null for `exclude`, which mints no segment. */
   segmentId: number | null;
-  /** The handle this write's OWN staged entry will be addressable as, when `action === "create"`. Assigned by the staging engine, not this function. */
+  /** exclude only — the resolved turn ref (`S<session>/T<prompt>`), also this call's own staging key (spec A7a). */
+  excludedTurnRef: string | null;
   membersAdded: number;
   membersDropped: number;
+  /** A `[S<session>/T<prompt>]`/`[E<n>]` citation in title/content that did not resolve — dropped, same discipline as `membersDropped`, but previously silent until commit (ticket 10d). */
+  citationsDropped: number;
   topicMinted: boolean;
   topicReused: boolean;
 }
@@ -168,6 +261,32 @@ export interface EvaluateSettlementSegmentWriteOptions {
    * handle entries 1..N-1 assigned is resolvable.
    */
   handleMap: SettlementHandleMap;
+}
+
+/**
+ * Body citations at BOTH stage and commit (ticket 10d: "a stage-time dry run
+ * promises a real receipt, and today an unresolvable [S999/T1] stages clean
+ * and is silently dropped at commit"). Mirrors what `reconcileSegmentCitedPairs`
+ * (db/segments.ts) does internally at APPLY time, WITHOUT writing — the same
+ * "small, deliberate duplication" the turn facade's `evaluateRelationCandidates`
+ * already uses for the identical reason. `E#<handle>` citations are excluded
+ * on purpose: at stage time they are still pending (no real id, so
+ * `parseQualifiedReferences`' `E(\d+)` grammar does not even match the `#`)
+ * and are validated separately by `scanUnknownHandles`; by commit time
+ * `substituteHandles` has already turned every KNOWN handle into a real
+ * `[E<id>]` before this ever runs, so a resolved handle is checked here like
+ * any other citation, and one that never got created was already caught
+ * earlier, by `scanUnknownHandles`, not here.
+ */
+function scanBodyCitationIssues(
+  db: Database,
+  texts: ReadonlyArray<string | null | undefined>,
+): number {
+  const references = texts.flatMap((text) => parseQualifiedReferences(text));
+  if (references.length === 0) {
+    return 0;
+  }
+  return validateReferences(db, references).rejected.length;
 }
 
 /**
@@ -216,6 +335,15 @@ export function evaluateSettlementSegmentWrite(
     }
   }
 
+  // Ticket 10d: same retired-namespace refusal as the turn facade — see its
+  // own comment for why this rejects rather than silently strips.
+  if (rawInput.tags !== undefined) {
+    const retiredTag = findRetiredTopicTag(rawInput.tags);
+    if (retiredTag) {
+      return { ok: false, message: retiredTopicTagMessage(retiredTag) };
+    }
+  }
+
   const resolvedTitle = substituteHandles(rawInput.title ?? "", options.handleMap);
   const resolvedContent =
     rawInput.content === undefined
@@ -223,6 +351,49 @@ export function evaluateSettlementSegmentWrite(
       : rawInput.content === null
         ? null
         : substituteHandles(rawInput.content, options.handleMap);
+
+  if (rawInput.action === "exclude") {
+    if (!rawInput.turn || rawInput.turn.trim() === "") {
+      return {
+        ok: false,
+        message: "exclude requires turn, a \"S<session>/T<prompt>\" address.",
+      };
+    }
+    const address = parseTurnAddress(rawInput.turn);
+    if (!address) {
+      return {
+        ok: false,
+        message: `turn must be a fully qualified "S<session>/T<prompt>" address; got "${rawInput.turn}".`,
+      };
+    }
+    const ref = `S${address.sessionId}/T${address.promptNumber}`;
+    const turn = getTurn(db, address.sessionId, address.promptNumber);
+    if (!turn) {
+      return { ok: false, message: `no turn at ${ref}.` };
+    }
+    if (options.apply) {
+      // The job-scoped negative verdict (spec G7) — the ONLY thing an
+      // exclude call writes. No fence check here: like
+      // `addSegmentMembers`/`recordNoteSettlementSegmentExclusion`'s own doc
+      // comment says, that belongs to the CALLER's transaction (`commit`,
+      // which runs `assertNoteSettlementJobClaimed` as its own first
+      // statement), not to this plain write.
+      recordNoteSettlementSegmentExclusion(db, context.jobId, turn.id, nowEpoch);
+    }
+    return {
+      ok: true,
+      outcome: {
+        action: "exclude",
+        segmentId: null,
+        excludedTurnRef: ref,
+        membersAdded: 0,
+        membersDropped: 0,
+        citationsDropped: 0,
+        topicMinted: false,
+        topicReused: false,
+      },
+    };
+  }
 
   if (rawInput.action === "create") {
     if (rawInput.title === undefined || rawInput.title.trim() === "") {
@@ -232,8 +403,20 @@ export function evaluateSettlementSegmentWrite(
       return {
         ok: false,
         message:
-          "no_candidate_reason is required for a create — name what you searched " +
+          "noCandidateReason is required for a create — name what you searched " +
           "in the topic registry and open segments, and why nothing fit.",
+      };
+    }
+    if (!rawInput.handle || !isValidSettlementHandleName(rawInput.handle)) {
+      return {
+        ok: false,
+        message:
+          "handle is required for a create — a short id YOU choose and can " +
+          'restate identically on a retry (e.g. "lease-fencing"; letters, ' +
+          "digits, hyphens, underscores only). It becomes the [E#<handle>] " +
+          "address other calls in this run cite before this segment has a " +
+          "real id, and re-staging the same handle replaces this call rather " +
+          "than duplicating it.",
       };
     }
 
@@ -259,6 +442,7 @@ export function evaluateSettlementSegmentWrite(
       rawInput.members ?? [],
       context,
     );
+    const citationsDropped = scanBodyCitationIssues(db, [resolvedTitle, resolvedContent]);
 
     let segmentId: number | null = null;
     if (options.apply) {
@@ -268,6 +452,13 @@ export function evaluateSettlementSegmentWrite(
         content: resolvedContent ?? null,
         type: normalizedType ?? [],
         tags: rawInput.tags ?? [],
+        // Ticket 10d: honoured, not silently dropped. `createSegment` already
+        // accepted a `status` param and defaulted it to "open" when absent —
+        // this facade simply never passed the model's value through, so a
+        // model-stated status was accepted by the schema and then ignored.
+        // No new eligibility invented: it is the SAME
+        // `SEGMENT_STATUSES`/default `createSegment` already enforced.
+        status: rawInput.status as SegmentStatus | undefined,
         nowEpoch,
       });
       segmentId = created.id;
@@ -279,8 +470,10 @@ export function evaluateSettlementSegmentWrite(
       outcome: {
         action: "create",
         segmentId,
+        excludedTurnRef: null,
         membersAdded: memberResolution.turnIds.length,
         membersDropped: memberResolution.dropped,
+        citationsDropped,
         topicMinted,
         topicReused,
       },
@@ -316,6 +509,13 @@ export function evaluateSettlementSegmentWrite(
   }
 
   const memberResolution = resolveMemberTokens(db, rawInput.members ?? [], context);
+  // Only fields THIS call is actually rewriting — an omitted field leaves
+  // the stored value alone (spec D5a), so its EXISTING citations are not
+  // this call's concern to re-validate.
+  const citationsDropped = scanBodyCitationIssues(db, [
+    rawInput.title !== undefined ? resolvedTitle : undefined,
+    rawInput.content !== undefined ? resolvedContent : undefined,
+  ]);
 
   if (!options.apply) {
     // Stage-time feedback only: the revision this call was composed against
@@ -328,8 +528,10 @@ export function evaluateSettlementSegmentWrite(
       outcome: {
         action: "extend",
         segmentId: rawInput.segmentId,
+        excludedTurnRef: null,
         membersAdded: memberResolution.turnIds.length,
         membersDropped: memberResolution.dropped,
+        citationsDropped,
         topicMinted: false,
         topicReused: false,
       },
@@ -369,8 +571,10 @@ export function evaluateSettlementSegmentWrite(
     outcome: {
       action: "extend",
       segmentId: landed.id,
+      excludedTurnRef: null,
       membersAdded: memberResolution.turnIds.length,
       membersDropped: memberResolution.dropped,
+      citationsDropped,
       topicMinted: false,
       topicReused: false,
     },
@@ -420,15 +624,20 @@ function resolveMemberTokens(
  */
 export function renderSettlementSegmentWriteReceipt(
   outcome: SettlementSegmentWriteOutcome,
-  options: { staged: boolean; handle: string | null },
+  options: { staged: boolean; handle: string | null; replaced?: boolean },
 ): string {
   const verb = options.staged ? "Staged" : "Landed";
   const address =
     outcome.action === "create"
       ? (options.handle ?? (outcome.segmentId !== null ? `E${outcome.segmentId}` : "a new segment"))
-      : `E${outcome.segmentId}`;
+      : outcome.action === "exclude"
+        ? (outcome.excludedTurnRef ?? "a turn")
+        : `E${outcome.segmentId}`;
+  const replacedSuffix = options.replaced
+    ? " — replaces the earlier staged call for this same key"
+    : "";
   const parts: string[] = [
-    `${verb} ${outcome.action} of ${address}${options.staged ? " (pending commit)" : ""}.`,
+    `${verb} ${outcome.action} of ${address}${options.staged ? " (pending commit)" : ""}${replacedSuffix}.`,
   ];
   if (outcome.topicMinted) {
     parts.push("New topic minted.");
@@ -440,6 +649,11 @@ export function renderSettlementSegmentWriteReceipt(
   }
   if (outcome.membersDropped > 0) {
     parts.push(`${outcome.membersDropped} member address(es) dropped (did not resolve to a turn).`);
+  }
+  if (outcome.citationsDropped > 0) {
+    parts.push(
+      `${outcome.citationsDropped} citation(s) in title/content did not resolve and will not become an anchor.`,
+    );
   }
   return parts.join(" ");
 }

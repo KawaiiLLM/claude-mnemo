@@ -112,8 +112,15 @@ export function parseBareAddressReference(token: string): ParsedReference | null
  * into — that is what "a malformed bracket is skipped whole" means, and it
  * cannot be expressed by a pattern that scans, because the inner bracket looks
  * innocent from the inside. An unterminated `[` yields no group at all.
+ *
+ * Exported (ticket 10d): the settlement segment facade's `E#<handle>` run-
+ * scoped citation needs the identical "only a real bracket group, never a
+ * bare substring in running prose" discipline this project's own address
+ * grammar already applies to `[S<n>/T<n>]`/`[E<n>]` — reusing this rather
+ * than a second bracket-scanner is what keeps the two grammars from silently
+ * drifting apart.
  */
-function topLevelBracketGroups(content: string): string[] {
+export function topLevelBracketGroups(content: string): string[] {
   const groups: string[] = [];
   for (let index = 0; index < content.length; index += 1) {
     if (content[index] !== "[") {

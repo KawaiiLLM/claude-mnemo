@@ -63,36 +63,52 @@ const SETTLEMENT_ALLOWED_TOOLS = [
  */
 const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "STAGE one turn's reconstruction note and/or its grade/type/tags/relations " +
-  "— validated now, written only when you call `commit`. One call per turn, " +
-  "any time during this run. `turn`: \"S<session>/T<prompt>\", from the " +
-  "window or preceding-turns section below. title/content/insight: all three " +
-  "together, only for a turn this window lists as owing a note (insight may " +
-  "be null, but must be named). grade (0-4, against the rubric)/type/tags: " +
-  "only for a turn shown in this prompt (window or preceding turns); each " +
-  "overwrites whole when present, omit to leave alone — there is no append. " +
+  "— validated now, written only when you call `commit`. `turn`: " +
+  "\"S<session>/T<prompt>\", from the window or preceding-turns section " +
+  "below — this is also this call's KEY: staging the same turn again " +
+  "REPLACES what you staged for it before, so a lost-receipt retry or a " +
+  "same-run correction is just another call, not a new problem. " +
+  "title/content/insight: all three together, only for a turn this window " +
+  "lists as owing a note (insight may be null, but must be named). grade " +
+  "(0-4, against the rubric)/type/tags: only for a turn shown in this " +
+  "prompt (window or preceding turns); each overwrites whole when present, " +
+  "omit to leave alone — there is no append. " +
   "evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target " +
-  "must already be a pair that existed before this run started — you cannot " +
-  "license a relation on a pair a call earlier in this SAME run just created.";
+  "must already be a pair that existed before this run started AND still " +
+  "exist when `commit` lands it — you cannot license a relation on a pair a " +
+  "call earlier in this SAME run just created, or on one the main agent has " +
+  "since stopped citing.";
 
-/** Ticket 10b (spec A7/A3-amended): the new segment tool's call contract. */
+/** Ticket 10b/10d (spec A7/A3-amended, A7a): the segment tool's call contract. */
 const SETTLEMENT_SEGMENT_TOOL_DESCRIPTION =
-  "STAGE a segment write (create a new chapter, or extend an open one) — " +
-  "validated now, written only when you call `commit`. action: \"create\" or " +
-  "\"extend\". create: title (required), no_candidate_reason (required — " +
-  "what you searched in the topic registry and open segments, and why " +
-  "nothing fit), topic/topicAliases (optional), content/type/tags/members " +
-  "(optional). extend: segmentId + expectedRevision naming an ALREADY-" +
-  "EXISTING segment shown to you as open (never a segment this same run " +
-  "just created — see the E#n handle below); every other field overwrites " +
-  "whole when present, omit to leave alone. members: \"S<session>/T<prompt>\" " +
-  "turn addresses; an address that does not resolve is dropped, not a " +
-  "failure of the call. Cite member turns inline in content as " +
+  "STAGE a segment write — create a new chapter, extend an open one, or " +
+  "record that a turn belongs to no segment — validated now, written only " +
+  "when you call `commit`. action: \"create\", \"extend\" or \"exclude\". " +
+  "create: title (required), handle (required — a short id YOU choose, " +
+  "e.g. \"lease-fencing\"; letters/digits/hyphens/underscores only; this is " +
+  "this call's KEY, so re-staging the same handle REPLACES this create " +
+  "rather than minting a second one), noCandidateReason (required — what " +
+  "you searched in the topic registry and open segments, and why nothing " +
+  "fit), topic/topicAliases/content/type/tags/status/members (optional). " +
+  "extend: segmentId + expectedRevision naming an already-existing, OPEN " +
+  "segment (this is this call's KEY — re-staging the same segmentId " +
+  "replaces the earlier call; a handle from THIS run can never be an " +
+  "extend target — it has no real id yet, use it only as a citation, see " +
+  "below); every other field overwrites whole when present, omit to leave " +
+  "alone. exclude: turn (\"S<session>/T<prompt>\", also this call's KEY) — " +
+  "records that this turn was reviewed and belongs to no segment; use it " +
+  "for a turn that genuinely fits no chapter, instead of inventing one. " +
+  "members: \"S<session>/T<prompt>\" turn addresses (never a handle — a " +
+  "member is always a turn); an address that does not resolve is dropped, " +
+  "not a failure of the call. Cite member turns inline in content as " +
   "[S<session>/T<prompt>] and other segments as [E<n>] — those citations " +
-  "become the segment's anchors automatically, no separate step. A " +
-  "successful create's receipt states a handle, \"E#<n>\", scoped to THIS " +
-  "run only — use it (in a later segment's members or content) to refer to " +
-  "the segment you just created, before it has a real id; `commit` resolves " +
-  "every handle to a real id, in the order you staged them.";
+  "become the segment's anchors automatically, no separate step; an address " +
+  "that does not resolve is likewise dropped and reported, not a failure. A " +
+  "successful create's receipt states its handle as \"E#<handle>\", scoped " +
+  "to THIS run only — cite it as [E#<handle>] in a LATER segment's content " +
+  "to refer to the segment you just created before it has a real id (never " +
+  "in members, never as an extend target); `commit` resolves every handle " +
+  "to a real id, in the order you staged them.";
 
 /** Ticket 10b (spec A7): the completion gate exposed as commit's own precondition — settlement gets no separate `check` tool (spec G8 amended). */
 const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
@@ -100,10 +116,16 @@ const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "this window is complete (every eligible turn typed or skipped, every one " +
   "segmented or explicitly excluded, no turn still owing a note). Call this " +
   "once you believe the window is done — it is the only way any of your " +
-  "work becomes durable. If the window is not actually complete, or the " +
-  "world moved under a staged write, NOTHING lands and this tells you " +
-  "exactly what is still missing; every staged write is kept, so you fill " +
-  "the gap with more `note`/`segment` calls and call `commit` again.";
+  "work becomes durable. If the window is not actually complete, this " +
+  "tells you exactly what is still missing; every staged write is kept, so " +
+  "you fill the gap with more `note`/`segment` calls and call `commit` " +
+  "again. If instead a specific staged call has gone stale (the world " +
+  "moved under it — a revision, a relation pair the main agent stopped " +
+  "citing, ...), re-stage that SAME key with corrected input — that " +
+  "replaces the stale entry — and call `commit` again; blindly retrying " +
+  "the same input will fail the same way. If your job lease has been " +
+  "reclaimed, no commit from this run will ever succeed again — stop " +
+  "making tool calls.";
 
 export interface CreateNoteSettlementSdkQueryOptions {
   db: Database;
