@@ -627,13 +627,154 @@ describe("acceptance criterion 7 — a refused commit reports what is missing an
 // ---------------------------------------------------------------------------
 
 describe("acceptance criterion 8 — the staging engine exposes no check", () => {
-  test("SettlementStagingEngine has exactly stageNoteWrite/stageSegmentWrite/commit/pendingCount", () => {
+  test("SettlementStagingEngine has exactly stageNoteWrite/stageSegmentWrite/commit/pendingCount/getLastCommitMetrics", () => {
     const sessionDbId = seedSession();
     const job = claimWindow(db, sessionDbId, 1, 1);
     const engine = createSettlementStagingEngine({ db, context: baseContext(job) });
+    // `getLastCommitMetrics` (ticket 10c) widens this list but not the MODEL-
+    // FACING one: `note-settlement-sdk-query.ts` never registers it with the
+    // SDK's `tool()` the way `note`/`segment`/`commit` are — this assertion is
+    // about the engine's own JS surface, and a `check`-shaped tool would show
+    // up in `note-settlement-sdk-query.ts`'s tool list, not here.
     expect(Object.keys(engine).sort()).toEqual(
-      ["commit", "pendingCount", "stageNoteWrite", "stageSegmentWrite"].sort(),
+      [
+        "commit",
+        "getLastCommitMetrics",
+        "pendingCount",
+        "stageNoteWrite",
+        "stageSegmentWrite",
+      ].sort(),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 10c — `commit`'s own replay is the source of the operator job-log
+// metrics (worker/note-settlement-dispatch.ts), and the per-grade histogram
+// inside it must never reach the agent (spec G9). Both checked at the lowest
+// level that can see a leak: the engine itself, not the dispatch wrapper
+// around it (that end-to-end path is covered in note-settlement-call.test.ts).
+// ---------------------------------------------------------------------------
+
+describe("ticket 10c — commit's own result feeds the job log, never the agent", () => {
+  test("commit's agent-visible receipt is the fixed 'Committed' sentence — no count or grade data rides along (spec G9)", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      reconstructableTurnIds: new Set([t1]),
+    });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    engine.stageNoteWrite({
+      turn: `S${sessionDbId}/T1`,
+      title: "design+lease: reconstructed",
+      content: "Filled in from raw material.",
+      insight: null,
+      grade: 4,
+      type: ["design"],
+      tags: ["lease"],
+    });
+    engine.stageSegmentWrite({
+      action: "create",
+      handle: "chapter",
+      title: "design+lease: staged chapter",
+      content: "Body.",
+      noCandidateReason: "nothing open covers this",
+      type: ["design"],
+      tags: ["lease"],
+      members: [`S${sessionDbId}/T1`],
+    });
+
+    const commitReceipt = engine.commit();
+    // Exact-string, not "does not contain" — a substring check could miss a
+    // count folded into different wording. Grade 4 is chosen deliberately:
+    // if the histogram (or the grade itself) leaked into this text at all,
+    // the literal "4" would be the easiest thing to spot and the easiest to
+    // miss with a looser assertion.
+    expect(commitReceipt.content[0]!.text).toBe(
+      `Committed. S${sessionDbId} window settled — job complete.`,
+    );
+  });
+
+  test("getLastCommitMetrics reflects exactly what commit's replay landed, including the grade histogram", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const t3 = seedTurn(sessionDbId, 3);
+    const t4 = seedTurn(sessionDbId, 4);
+    const existing = createSegment(db, {
+      title: "existing chapter",
+      content: "Prior body.",
+      type: ["design"],
+      tags: [],
+      nowEpoch: NOW - 5_000,
+    });
+    // T1/T3 are reviewed but not reconstructed (not owed a note) — pre-seed
+    // their shadow notes directly, bypassing the note TOOL, so the gate's
+    // note-coverage clause (G1a) is satisfied without adding to `commit`'s
+    // OWN counted metrics, which is exactly the distinction this test is
+    // checking. T4 needs no review at all — typed and noted directly, and
+    // covered by the segment `extend` below.
+    markNoted([t1, t3]);
+    markTyped([t4]);
+    markNoted([t4]);
+    const job = claimWindow(db, sessionDbId, 1, 4);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1, t2, t3]),
+      reconstructableTurnIds: new Set([t2]),
+    });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    expect(engine.getLastCommitMetrics()).toBeNull();
+
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 2, type: ["discuss"], tags: [] });
+    engine.stageNoteWrite({
+      turn: `S${sessionDbId}/T2`,
+      title: "reconstructed",
+      content: "Filled in.",
+      insight: null,
+      grade: 1,
+      type: ["research"],
+      tags: [],
+    });
+    // Same grade as T1, to prove the histogram ACCUMULATES rather than
+    // overwriting per turn.
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T3`, grade: 2, type: ["discuss"], tags: [] });
+    engine.stageSegmentWrite({
+      action: "create",
+      handle: "chapter",
+      title: "new chapter",
+      content: "Body.",
+      noCandidateReason: "nothing open fits",
+      type: ["discuss"],
+      tags: [],
+      members: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
+    });
+    engine.stageSegmentWrite({ action: "exclude", turn: `S${sessionDbId}/T3` });
+    engine.stageSegmentWrite({
+      action: "extend",
+      segmentId: existing.id,
+      expectedRevision: existing.revision,
+      members: [`S${sessionDbId}/T4`],
+    });
+
+    const commitReceipt = engine.commit();
+    expect(commitReceipt.content[0]!.text).toContain("Committed");
+
+    expect(engine.getLastCommitMetrics()).toEqual({
+      notesReconstructed: 1,
+      notesYielded: 0,
+      turnsReviewed: 3,
+      reviewsYieldedToLateNote: 0,
+      gradeHistogram: [0, 1, 2, 0, 0],
+      relationsWritten: 0,
+      segmentsCreated: 1,
+      segmentsExtended: 1,
+      segmentsExcluded: 1,
+      membersAdded: 3,
+    });
   });
 });
 

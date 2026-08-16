@@ -17,6 +17,7 @@ import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type {
   NoteSettlementQuery,
   NoteSettlementQueryRequest,
+  NoteSettlementQueryResult,
 } from "./note-settlement-dispatch";
 import {
   settlementSegmentWriteInputShape,
@@ -156,7 +157,9 @@ export function createNoteSettlementSdkQuery(
     audience: "worker",
   });
 
-  return async (request: NoteSettlementQueryRequest): Promise<string> => {
+  return async (
+    request: NoteSettlementQueryRequest,
+  ): Promise<NoteSettlementQueryResult> => {
     const abortController = new AbortController();
     const forwardAbort = (): void => {
       abortController.abort(request.signal?.reason);
@@ -285,7 +288,13 @@ export function createNoteSettlementSdkQuery(
       if (envelope === null) {
         throw new Error("note settlement query returned no result envelope");
       }
-      return envelope;
+      // Ticket 10c: `commitMetrics` is read from the staging engine ONCE,
+      // here, after the model's run has fully ended (every message drained
+      // above) — never during it, and never through a tool the model could
+      // call. This is what makes it safe under spec G9 (invisible to the
+      // grading agent at every point in its run): the value did not exist
+      // anywhere the model could observe it until this line.
+      return { text: envelope, commitMetrics: staging.getLastCommitMetrics() };
     } finally {
       if (request.signal) {
         request.signal.removeEventListener("abort", forwardAbort);

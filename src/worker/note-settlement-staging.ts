@@ -74,7 +74,71 @@ import {
  * agent's calls were FIRST recognised in, so a correction does not silently
  * reorder itself past a handle it needs to reference (or that references
  * it).
+ *
+ * TICKET 10C'S ADDITION: `commit`'s own replay is now the source of the
+ * operator-facing job-log metrics (`worker/note-settlement-dispatch.ts`'s
+ * `metrics()`), which used to read `turnsReviewed`/`notesReconstructed`/etc.
+ * off the retired write-back's parsed-envelope result — a payload the model
+ * has not produced since turn writes moved onto the `note`/`segment` tools
+ * (ticket 10a), so that sink had been reporting zero while real work landed
+ * through calls nothing counted. `getLastCommitMetrics` exposes exactly what
+ * THIS module's own replay loop landed, counted as it happens rather than
+ * inferred from what the model claimed. It is deliberately NOT an MCP tool —
+ * `note-settlement-sdk-query.ts` never registers it with the SDK's `tool()`,
+ * so the model can never call it, and the per-grade histogram inside it
+ * never appears in any `ToolTextResult` this module returns. The query
+ * wrapper reads it exactly once, after the model's run has already ended,
+ * for a sink the model never sees (spec G9).
  */
+
+/**
+ * What `commit`'s own replay actually landed, this call (ticket 10c). Built
+ * by walking the SAME `snapshot` the replay loop below iterates, so every
+ * count here is a fact about a transaction that just committed, never a
+ * guess about what the model said it would do.
+ */
+export interface NoteSettlementCommitCounts {
+  notesReconstructed: number;
+  /** A reconstruction that yielded to an agent note landing first (spec D7's race) — still a real outcome, not a failure. */
+  notesYielded: number;
+  /** Turns a `note` call actually carried a review (grade/type/tags) for, landed or yielded. */
+  turnsReviewed: number;
+  /** Of `turnsReviewed`, how many had their type/tags step aside because an agent note landed after this dispatch's context was read — grade still lands either way. */
+  reviewsYieldedToLateNote: number;
+  /**
+   * Indexed 0-4 (the task-causality scale). Counted whenever a landed review
+   * carried a grade, written OR yielded — grade always lands regardless
+   * (`evaluateSettlementTurnWrite`: only the note-derived half stands down).
+   * Operator-only (spec G9) — see the module doc comment above for how that
+   * is enforced, not merely intended.
+   */
+  gradeHistogram: number[];
+  relationsWritten: number;
+  segmentsCreated: number;
+  segmentsExtended: number;
+  segmentsExcluded: number;
+  membersAdded: number;
+}
+
+function emptyCommitCounts(): NoteSettlementCommitCounts {
+  // A fresh array every call — the same reason the retired write-back's
+  // EMPTY_COUNTS spread its histogram per use rather than sharing one
+  // reference: this object is mutated in place below, and a shared array
+  // would let every window this process ever commits corrupt every other
+  // window's histogram.
+  return {
+    notesReconstructed: 0,
+    notesYielded: 0,
+    turnsReviewed: 0,
+    reviewsYieldedToLateNote: 0,
+    gradeHistogram: [0, 0, 0, 0, 0],
+    relationsWritten: 0,
+    segmentsCreated: 0,
+    segmentsExtended: 0,
+    segmentsExcluded: 0,
+    membersAdded: 0,
+  };
+}
 
 export interface CreateSettlementStagingEngineOptions {
   db: Database;
@@ -159,6 +223,13 @@ export interface SettlementStagingEngine {
   commit(): ToolTextResult;
   /** Test/inspection only — how many intents are currently staged. */
   pendingCount(): number;
+  /**
+   * `commit`'s own replay result (ticket 10c) — null until a commit actually
+   * lands. NOT an MCP tool (see the module doc comment): the model can never
+   * reach this, only `note-settlement-sdk-query.ts`'s own code, after the
+   * model's run has already produced its final message.
+   */
+  getLastCommitMetrics(): NoteSettlementCommitCounts | null;
 }
 
 function describeGateRefusal(result: NoteSettlementCompletionResult): string {
@@ -200,6 +271,8 @@ export function createSettlementStagingEngine(
   const staged = new Map<string, StagedEntry>();
   /** Handles assigned so far, every value `null` until `commit` resolves them for real. */
   let knownHandles: SettlementHandleMap = new Map();
+  /** `commit`'s own last landed result (ticket 10c) — see `getLastCommitMetrics`. */
+  let lastCommitMetrics: NoteSettlementCommitCounts | null = null;
 
   function stageNoteWrite(rawInput: SettlementTurnWriteInput): ToolTextResult {
     const nowEpoch = now();
@@ -292,13 +365,19 @@ export function createSettlementStagingEngine(
     const snapshot = [...staged.values()];
 
     try {
-      const gateResult = runWriteTransaction(db, () => {
+      const { counts } = runWriteTransaction(db, () => {
         // The fence, first statement (spec G6/G7) — guards EVERYTHING below,
         // the staged replay included. A lease reclaimed between staging and
         // commit throws here, before any staged write can land.
         assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
 
         const handleMap = new Map<string, number | null>();
+        // Ticket 10c: counted from what this replay ACTUALLY does below, not
+        // from a payload the model sends — see `NoteSettlementCommitCounts`'s
+        // own doc comment and the module doc comment's "TICKET 10C'S
+        // ADDITION" paragraph for why this replaces the retired write-back's
+        // envelope-sourced counters.
+        const counts = emptyCommitCounts();
         for (const entry of snapshot) {
           if (entry.kind === "segment") {
             const evaluation = evaluateSettlementSegmentWrite(db, context, entry.input, nowEpoch, {
@@ -313,12 +392,47 @@ export function createSettlementStagingEngine(
             if (entry.handle) {
               handleMap.set(entry.handle, evaluation.outcome.segmentId);
             }
+            const outcome = evaluation.outcome;
+            if (outcome.action === "create") {
+              counts.segmentsCreated += 1;
+            } else if (outcome.action === "extend") {
+              counts.segmentsExtended += 1;
+            } else {
+              counts.segmentsExcluded += 1;
+            }
+            counts.membersAdded += outcome.membersAdded;
           } else {
             const evaluation = evaluateSettlementTurnWrite(db, context, entry.input, nowEpoch, {
               apply: true,
             });
             if (!evaluation.ok) {
               throw new CommitReplayRefused(`note ${entry.input.turn}: ${evaluation.message}`);
+            }
+            const outcome = evaluation.outcome;
+            if (outcome.prose) {
+              if (outcome.prose.kind === "written") {
+                counts.notesReconstructed += 1;
+              } else {
+                counts.notesYielded += 1;
+              }
+            }
+            if (outcome.review) {
+              counts.turnsReviewed += 1;
+              if (outcome.review.kind === "yielded") {
+                counts.reviewsYieldedToLateNote += 1;
+              }
+              // Grade always lands regardless of written/yielded — only the
+              // note-derived half (type/tags) stands down on a late agent
+              // note (see evaluateSettlementTurnWrite) — so the histogram
+              // counts it unconditionally, same as the retired write-back did
+              // when grade was a required field on every review directive.
+              if (outcome.review.grade !== undefined) {
+                counts.gradeHistogram[outcome.review.grade] =
+                  (counts.gradeHistogram[outcome.review.grade] ?? 0) + 1;
+              }
+            }
+            if (outcome.relations) {
+              counts.relationsWritten += outcome.relations.written;
             }
           }
         }
@@ -339,16 +453,21 @@ export function createSettlementStagingEngine(
         if (!gate.completed) {
           throw new CommitGateRefused(gate);
         }
-        return gate;
+        // `gate` itself is not returned: its only remaining fact,
+        // `completed`, is true by construction past this point (the throw
+        // above is the only other exit), so nothing after this needs it.
+        return { counts };
       });
 
       // Only a transaction that actually committed clears the staging —
       // everything the loop above did is now durable, so replaying it again
       // on a later `commit` call would be redundant (and, for a `create`,
-      // wrong: it would mint a second segment).
+      // wrong: it would mint a second segment). The counts are kept, not
+      // cleared: they describe what THIS commit did, for a caller that reads
+      // them only after this call returns.
       staged.clear();
       knownHandles = new Map();
-      void gateResult; // completed:true by construction — the gate throws before returning otherwise
+      lastCommitMetrics = counts;
       return textResult(
         `Committed. S${context.sessionId} window settled — job complete.`,
       );
@@ -413,5 +532,6 @@ export function createSettlementStagingEngine(
     stageSegmentWrite,
     commit,
     pendingCount: () => staged.size,
+    getLastCommitMetrics: () => lastCommitMetrics,
   };
 }

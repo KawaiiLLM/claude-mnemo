@@ -1,7 +1,11 @@
 import type { Database } from "bun:sqlite";
 
 import { getExistingEdgePairKeys } from "../db/memory-edges";
-import { getNoteSettlementJob, type NoteSettlementJob } from "../db/note-settlement";
+import {
+  getNoteSettlementJob,
+  NOTE_SETTLEMENT_MAX_ATTEMPTS,
+  type NoteSettlementJob,
+} from "../db/note-settlement";
 import type { MnemoConfig } from "../shared/config";
 import { DEFAULT_CONFIG } from "../shared/config";
 import {
@@ -12,6 +16,7 @@ import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
 } from "./note-settlement-prompt";
+import type { NoteSettlementCommitCounts } from "./note-settlement-staging";
 import type {
   NoteSettlementDispatch,
   NoteSettlementDispatchOutcome,
@@ -33,19 +38,27 @@ import type {
  *
  * TICKET 10B'S CHANGE (spec A7 requirement 9 — "the dispatch stops routing
  * through the write-back"): this module used to parse the model's final
- * reply as a structured envelope and apply it in one write-back transaction
- * (`note-settlement-response.ts`/`note-settlement-writeback.ts`). Neither is
- * called here any more, and this module reads no envelope of any kind — the
- * settlement agent's WORK now lands as it happens, one staged tool call at a
- * time, and durability is decided entirely by whether the agent's own
- * `commit` call succeeded (note-settlement-staging.ts), inside the
- * subprocess. This function's whole job after `runQuery` returns is to look:
- * `commit`'s completion gate is the ONLY path that can move a job to `done`
- * (requirement 9), so re-reading the job row is a complete answer to "did
- * this run settle its window" — no parsing, no reconciliation, no replay.
- * `note-settlement-writeback.ts`/`note-settlement-response.ts` are left in
- * place, unreached (ticket 10c deletes them, deliberately, in its own
- * change, on expand-contract) — nothing in this file imports them any more.
+ * reply as a structured envelope and apply it in one write-back transaction.
+ * Neither exists any more (ticket 10c deleted `note-settlement-response.ts`
+ * and `note-settlement-writeback.ts` outright, on expand-contract — 10b had
+ * already made them unreached, 10c is the change that removes them), and
+ * this module reads no envelope of any kind — the settlement agent's WORK
+ * lands as it happens, one staged tool call at a time, and durability is
+ * decided entirely by whether the agent's own `commit` call succeeded
+ * (note-settlement-staging.ts), inside the subprocess. This function's whole
+ * job after `runQuery` returns is to look: `commit`'s completion gate is the
+ * ONLY path that can move a job to `done` (requirement 9), so re-reading the
+ * job row is a complete answer to "did this run settle its window" — no
+ * parsing, no reconciliation, no replay.
+ *
+ * TICKET 10C'S OWN CHANGE: `metrics()` below used to source
+ * `turnsReviewed`/`notesReconstructed`/etc. from that write-back's result —
+ * a payload the model has not produced since ticket 10a, so the sink had
+ * been reporting zero while real work landed through calls nothing counted.
+ * It now reads `commit`'s own replay counts, returned by `runQuery` itself
+ * (`NoteSettlementQueryResult.commitMetrics`, sourced from
+ * `note-settlement-staging.ts`'s `getLastCommitMetrics`), which is a fact
+ * about what THIS run's `commit` actually landed, never a guess.
  */
 
 /** Spec D9: settlement runs on Sonnet, by user decision (裁决 10). */
@@ -81,18 +94,30 @@ export interface NoteSettlementQueryRequest {
 }
 
 /**
+ * What one query call produces, once the model's run has fully ended (ticket
+ * 10c). `text` is whatever final message the model produced after its tool
+ * calls — no longer a structured envelope this module parses (ticket 10b);
+ * it is not inspected for correctness, `commit`'s own effect on the job row
+ * is. `commitMetrics` is `commit`'s own replay result (null if the run never
+ * committed), read by the query implementation ONLY after the model's run
+ * has ended and never exposed to the model as a tool result — see
+ * `note-settlement-staging.ts`'s `getLastCommitMetrics` doc comment for why
+ * that ordering is what makes the per-grade histogram inside it safe under
+ * spec G9.
+ */
+export interface NoteSettlementQueryResult {
+  text: string;
+  commitMetrics: NoteSettlementCommitCounts | null;
+}
+
+/**
  * The subprocess boundary. The worker hosts no model in-process (D10), so this
  * is always a spawned child; it is injectable so tests stub it and never reach
  * a network.
- *
- * The returned string is whatever final text the model produced after its
- * tool calls — no longer a structured envelope this module parses (ticket
- * 10b). It is not inspected for correctness; `commit`'s own effect on the
- * job row is.
  */
 export type NoteSettlementQuery = (
   request: NoteSettlementQueryRequest,
-) => Promise<string>;
+) => Promise<NoteSettlementQueryResult>;
 
 export interface NoteSettlementWindowMetrics {
   jobId: number;
@@ -104,6 +129,26 @@ export interface NoteSettlementWindowMetrics {
   interiorHoles: number;
   /** Did the run's own `commit` call land the window (job status read back `done`)? */
   committed: boolean;
+  /** This dispatch's own attempt number against the job row (1 = first claim). */
+  attempt: number;
+  /**
+   * True when this was the job's LAST allowed attempt and it did not commit.
+   * The scheduler's own cursor logic then walks past this window for good
+   * (db/note-settlement.ts's `advanceNoteSettlementCursor`, A2a) — spec's
+   * three-strike policy ABANDONS the remainder here, it does not converge
+   * toward eventually settling it. `attemptsExhausted: true` is that
+   * abandonment being logged, not evidence of a bug this dispatch caused.
+   */
+  attemptsExhausted: boolean;
+  /**
+   * What `commit` itself landed, sourced from its own replay
+   * (`note-settlement-staging.ts`'s `getLastCommitMetrics`) rather than from
+   * a payload nobody sends any more (ticket 10c). Null when `committed` is
+   * false — nothing landed, so there is nothing to count. The per-grade
+   * histogram inside is for THIS log line only (spec G9): it is never
+   * returned to the agent at any point before this line runs.
+   */
+  commit: NoteSettlementCommitCounts | null;
 }
 
 export type NoteSettlementMetricsSink = (
@@ -120,6 +165,14 @@ export interface CreateNoteSettlementDispatchOptions {
   writerModel?: string | null;
   metrics?: NoteSettlementMetricsSink;
   logger?: NoteSettlementDispatchLogger;
+  /**
+   * The same three-strike cap the scheduler's own claim/fail path enforces
+   * (db/note-settlement.ts). Duplicated here as a metrics-only reading, not a
+   * second source of truth for retry behaviour: this module never writes
+   * `attempts` or decides terminality, it only reports what `job.attempts`
+   * already says against this ceiling, for the job-log line (ticket 10c).
+   */
+  maxAttempts?: number;
 }
 
 /**
@@ -153,6 +206,7 @@ export function createNoteSettlementDispatch(
   const model = options.model ?? NOTE_SETTLEMENT_MODEL;
   const logger = options.logger ?? console;
   const metrics = options.metrics ?? defaultNoteSettlementMetricsSink(logger);
+  const maxAttempts = options.maxAttempts ?? NOTE_SETTLEMENT_MAX_ATTEMPTS;
 
   return async ({ job }): Promise<NoteSettlementDispatchOutcome> => {
     if (!config.settlementEnabled) {
@@ -184,8 +238,9 @@ export function createNoteSettlementDispatch(
     // shares one frozen snapshot rather than each re-reading the table fresh.
     const eligibleRelationPairKeys = getExistingEdgePairKeys(db);
 
+    let queryResult: NoteSettlementQueryResult;
     try {
-      await options.runQuery({
+      queryResult = await options.runQuery({
         prompt: renderNoteSettlementPrompt(context),
         systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
         model,
@@ -233,6 +288,15 @@ export function createNoteSettlementDispatch(
       windowTurns: context.windowTurns.length,
       interiorHoles: context.interiorHoles.length,
       committed,
+      attempt: job.attempts,
+      // Abandonment, not convergence (spec A2a, ticket 10c): this attempt
+      // consumed the job's LAST life and still did not commit. The
+      // scheduler's own cursor advance is what actually walks past the
+      // window (db/note-settlement.ts) — this flag only reports that fact
+      // for the operator, from the same `job.attempts` the claim already
+      // incremented before this dispatch ran.
+      attemptsExhausted: !committed && job.attempts >= maxAttempts,
+      commit: committed ? queryResult.commitMetrics : null,
     });
 
     if (!committed) {

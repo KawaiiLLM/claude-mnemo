@@ -11,6 +11,7 @@ import {
   enqueueNoteSettlementWindows,
   getNoteSettlementCursor,
   getNoteSettlementJob,
+  NOTE_SETTLEMENT_MAX_ATTEMPTS,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { recordNoteSettlementSegmentExclusion } from "../../src/db/note-settlement-completion";
@@ -27,7 +28,6 @@ import {
   NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET,
 } from "../../src/worker/note-settlement-context";
 import { renderNoteSettlementPrompt } from "../../src/worker/note-settlement-prompt";
-import { parseNoteSettlementResponse } from "../../src/worker/note-settlement-response";
 import {
   createNoteSettlementDispatch,
   NOTE_SETTLEMENT_METRICS_PREFIX,
@@ -239,7 +239,14 @@ function queryThatStages(
     };
     const engine = createSettlementStagingEngine({ db, context });
     build(engine, request);
-    return "settlement run finished.";
+    // Ticket 10c: `runQuery` no longer returns a bare envelope string —
+    // `commitMetrics` is `commit`'s own replay result, read the SAME way
+    // `note-settlement-sdk-query.ts` reads it (once, after the model's "run"
+    // — here, the synchronous `build` call above — has fully finished).
+    return {
+      text: "settlement run finished.",
+      commitMetrics: engine.getLastCommitMetrics(),
+    };
   };
 }
 
@@ -536,6 +543,29 @@ describe("settlement dispatch — staged writes and commit (ticket 10b, spec A7)
     expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(4);
     expect(metricsSeen).toHaveLength(1);
     expect(metricsSeen[0]!.committed).toBe(true);
+
+    // Ticket 10c: the job log's counts are sourced from `commit`'s own
+    // replay, not from a payload nobody sends — checked against exactly what
+    // this run staged above. T1 review-only (grade 2, no prose — it already
+    // had a note); T3 review + a dependsOn relation; T2/T4 reconstruction +
+    // review each; one extend (2 members) and one create (2 members).
+    expect(metricsSeen[0]!.commit).toEqual({
+      notesReconstructed: 2,
+      notesYielded: 0,
+      turnsReviewed: 4,
+      reviewsYieldedToLateNote: 0,
+      gradeHistogram: [0, 2, 1, 1, 0],
+      relationsWritten: 1,
+      segmentsCreated: 1,
+      segmentsExtended: 1,
+      segmentsExcluded: 0,
+      membersAdded: 4,
+    });
+    // Attempt bookkeeping (spec A2a): a first-attempt success is convergence,
+    // never abandonment — `attemptsExhausted` must read false even though
+    // `job.attempts` (1) equals neither here nor at the cap.
+    expect(metricsSeen[0]!.attempt).toBe(fixture.job.attempts);
+    expect(metricsSeen[0]!.attemptsExhausted).toBe(false);
   });
 
   test("commit is the only path that completes a job — a run that stages everything but never calls commit lands nothing (requirement 9)", async () => {
@@ -562,6 +592,97 @@ describe("settlement dispatch — staged writes and commit (ticket 10b, spec A7)
     expect(getShadowNote(db, fixture.turnIds[1]!)).toBeNull();
     expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
     expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
+  });
+
+  /**
+   * Ticket 10c: the job log documents the three-strike cursor advance as
+   * ABANDONING a remainder, not converging toward eventually settling it
+   * (spec A2a). This dispatch never decides terminality itself (that is
+   * db/note-settlement.ts's `failNoteSettlementJob`/`advanceNoteSettlementCursor`,
+   * driven by the scheduler after this call returns) — it only reports
+   * `job.attempts` against the same cap, which is why the fixture job here
+   * is spread with a fabricated `attempts` rather than driven through three
+   * real claim/fail cycles: the metrics computation reads no state this
+   * dispatch itself would not already have in hand.
+   */
+  test("a failed run on the job's last attempt reports attemptsExhausted — abandonment, not convergence (spec A2a)", async () => {
+    const fixture = seedInteriorHoleWindow();
+    const lastAttemptJob = { ...fixture.job, attempts: NOTE_SETTLEMENT_MAX_ATTEMPTS };
+
+    const metricsSeen: NoteSettlementWindowMetrics[] = [];
+    const outcome = await dispatchWith(
+      queryThatStages((engine) => {
+        engine.stageNoteWrite({
+          turn: "S1/T2",
+          title: "never committed",
+          content: "Staged only.",
+          insight: null,
+        });
+        // Deliberately no commit — this attempt fails, and it is the job's
+        // last one.
+      }),
+      (value) => metricsSeen.push(value),
+    )({ job: lastAttemptJob });
+
+    expect(outcome.ok).toBe(false);
+    expect(metricsSeen).toHaveLength(1);
+    expect(metricsSeen[0]!.attempt).toBe(NOTE_SETTLEMENT_MAX_ATTEMPTS);
+    expect(metricsSeen[0]!.attemptsExhausted).toBe(true);
+    expect(metricsSeen[0]!.commit).toBeNull();
+  });
+
+  test("a failed run BEFORE the last attempt does not report attemptsExhausted — there is still a retry coming", async () => {
+    const fixture = seedInteriorHoleWindow();
+    const firstAttemptJob = { ...fixture.job, attempts: 1 };
+
+    const metricsSeen: NoteSettlementWindowMetrics[] = [];
+    await dispatchWith(
+      queryThatStages(() => {
+        // No staged writes, no commit — this attempt simply fails.
+      }),
+      (value) => metricsSeen.push(value),
+    )({ job: firstAttemptJob });
+
+    expect(metricsSeen).toHaveLength(1);
+    expect(metricsSeen[0]!.attempt).toBe(1);
+    expect(metricsSeen[0]!.attemptsExhausted).toBe(false);
+  });
+
+  test("a SUCCESSFUL commit on the job's last attempt is convergence, not abandonment — attemptsExhausted stays false", async () => {
+    const fixture = seedInteriorHoleWindow();
+    const lastAttemptJob = { ...fixture.job, attempts: NOTE_SETTLEMENT_MAX_ATTEMPTS };
+
+    const metricsSeen: NoteSettlementWindowMetrics[] = [];
+    const outcome = await dispatchWith(
+      queryThatStages((engine) => {
+        // T2/T4 are the fixture's holes — the note gate (G1a) refuses commit
+        // until they are reconstructed, same as every other passing commit
+        // test in this file.
+        engine.stageNoteWrite({
+          turn: "S1/T2",
+          title: "reconstructed on the last attempt",
+          content: "Filled in.",
+          insight: null,
+        });
+        engine.stageNoteWrite({
+          turn: "S1/T4",
+          title: "reconstructed on the last attempt",
+          content: "Filled in.",
+          insight: null,
+        });
+        for (const turnId of fixture.turnIds) {
+          updateTurnById(db, turnId, { type: ["research"] });
+          recordNoteSettlementSegmentExclusion(db, lastAttemptJob.id, turnId, NOW);
+        }
+        engine.commit();
+      }),
+      (value) => metricsSeen.push(value),
+    )({ job: lastAttemptJob });
+
+    expect(outcome).toEqual({ ok: true });
+    expect(metricsSeen).toHaveLength(1);
+    expect(metricsSeen[0]!.attempt).toBe(NOTE_SETTLEMENT_MAX_ATTEMPTS);
+    expect(metricsSeen[0]!.attemptsExhausted).toBe(false);
   });
 
   test("discards the whole run when the job generation expired before commit's own fence", async () => {
@@ -973,104 +1094,5 @@ describe("settlement payload at the scheduler seam", () => {
     // row `commit` moved — never from a parsed envelope.
     expect(metricsSeen).toHaveLength(1);
     expect(metricsSeen[0]!.committed).toBe(true);
-  });
-});
-describe("settlement response schema", () => {
-  test("accepts a fenced object and rejects schema violations whole", () => {
-    const fenced = "```json\n" + JSON.stringify({ segments: [] }) + "\n```";
-    expect(parseNoteSettlementResponse(fenced).ok).toBe(true);
-
-    const noReason = JSON.stringify({
-      segments: [
-        { action: "create", title: "t", content: "c", type: [], tags: [] },
-      ],
-    });
-    const rejected = parseNoteSettlementResponse(noReason);
-    expect(rejected.ok).toBe(false);
-    expect(rejected.ok === false && rejected.reason).toContain(
-      "no_candidate_reason",
-    );
-
-    const badType = JSON.stringify({
-      segments: [
-        {
-          action: "extend",
-          segment_id: 1,
-          expected_revision: 1,
-          title: "t",
-          content: "c",
-          // A retired legacy word — never in the current vocabulary (spec B2).
-          type: ["bugfix"],
-          tags: [],
-        },
-      ],
-    });
-    expect(parseNoteSettlementResponse(badType).ok).toBe(false);
-
-    const badRelation = JSON.stringify({
-      edges: [{ citing: "S1/T1", cited: "S1/T2", relation: "relates-to" }],
-    });
-    expect(parseNoteSettlementResponse(badRelation).ok).toBe(false);
-  });
-
-  test("turn_review: accepts a full verdict and rejects an out-of-range grade or an unknown type whole (ticket 05; tags grown from a single tag, ticket 10a)", () => {
-    const good = JSON.stringify({
-      turn_review: [
-        { turn: "S1/T1", grade: 4, type: ["design"], tags: ["widgets"] },
-        { turn: "S1/T2", grade: 0, type: [], tags: [] },
-      ],
-    });
-    const parsed = parseNoteSettlementResponse(good);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.ok && parsed.response.turnReview).toEqual([
-      { turn: "S1/T1", grade: 4, type: ["design"], tags: ["widgets"] },
-      { turn: "S1/T2", grade: 0, type: [], tags: [] },
-    ]);
-
-    const outOfRangeHigh = JSON.stringify({
-      turn_review: [{ turn: "S1/T1", grade: 5, type: [], tags: [] }],
-    });
-    const rejectedHigh = parseNoteSettlementResponse(outOfRangeHigh);
-    expect(rejectedHigh.ok).toBe(false);
-    expect(rejectedHigh.ok === false && rejectedHigh.reason).toContain(
-      "grade",
-    );
-
-    const outOfRangeLow = JSON.stringify({
-      turn_review: [{ turn: "S1/T1", grade: -1, type: [], tags: [] }],
-    });
-    expect(parseNoteSettlementResponse(outOfRangeLow).ok).toBe(false);
-
-    const missingGrade = JSON.stringify({
-      turn_review: [{ turn: "S1/T1", type: [], tags: [] }],
-    });
-    expect(parseNoteSettlementResponse(missingGrade).ok).toBe(false);
-
-    // Requirement 6 (ticket 10a): `tags` is now REQUIRED-present, same as
-    // `type` — an omitted key is a schema violation, not a synonym for `[]`.
-    const missingTags = JSON.stringify({
-      turn_review: [{ turn: "S1/T1", grade: 2, type: [] }],
-    });
-    const rejectedMissingTags = parseNoteSettlementResponse(missingTags);
-    expect(rejectedMissingTags.ok).toBe(false);
-    expect(rejectedMissingTags.ok === false && rejectedMissingTags.reason).toContain(
-      "tags",
-    );
-
-    const badVocabWord = JSON.stringify({
-      // A retired legacy word — never in the current vocabulary (spec B2).
-      turn_review: [{ turn: "S1/T1", grade: 2, type: ["bugfix"], tags: [] }],
-    });
-    const rejectedType = parseNoteSettlementResponse(badVocabWord);
-    expect(rejectedType.ok).toBe(false);
-    expect(rejectedType.ok === false && rejectedType.reason).toContain(
-      "type",
-    );
-
-    // Omitting the array entirely — like every other duty array — is not
-    // malformed; "nothing to report" is a legal, empty answer.
-    expect(parseNoteSettlementResponse("{}").ok).toBe(true);
-    const empty = parseNoteSettlementResponse("{}");
-    expect(empty.ok && empty.response.turnReview).toEqual([]);
   });
 });

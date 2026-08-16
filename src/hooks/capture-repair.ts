@@ -192,6 +192,21 @@ function compactMetadataTags(claim: CompactBoundaryClaim): string[] {
  * inline [T<n>] out of content" (content is NULL after this, so the fallback
  * would find none anyway, but the predicate must state the fact rather than
  * imply it).
+ *
+ * TICKET 10C AUDIT: that predicate has had no reader since the citation read
+ * path became an unconditional union (`db/citations.ts`'s
+ * `getSessionEffectiveCitations` — "the column survives as inert history;
+ * nothing reads it"). This write is confirmed dead storage, the same as the
+ * projection in `db/turns.ts`. It is left whole rather than retired here:
+ * the column is `NOT NULL`, threaded through both migration paths and the
+ * table-rebuild SQL (`db/schema.ts`), so retiring it correctly is a table
+ * rebuild — and its test fixtures (raw `cites_recorded` column lists and
+ * `citesRecorded:` assertions in `tests/mcp/timeline.test.ts`,
+ * `tests/mcp/timeline.era-milestones.test.ts`, `tests/hooks/*`,
+ * `tests/db/schema.test.ts`, `tests/db/citations.test.ts`) span files this
+ * ticket's fence does not own while another worker is actively editing
+ * `tests/mcp/`. A half-retirement (drop the write, keep the column) would
+ * leave the same dead storage with a shorter paper trail, which is worse.
  */
 function convertOccupiedTurnToMarker(
   db: Database,
