@@ -117,10 +117,20 @@ describe("tool surface", () => {
     expect(note).toContain("never include <private> content");
     // spec E2: tool-call syntax is rejected, not silently stored.
     expect(note).toContain("Tool-call markup");
-    // 500 tokens by user decree (S15069 T586): the description is in the
-    // cached prefix of every request, and the whole point of the single-home
-    // split was to stop paying for two copies.
-    expect(estimateTokens(note)).toBeLessThanOrEqual(500);
+    // ticket 07 (spec C3/C4): the relation fields' decision procedure is
+    // normative down to question 3's counterfactual wording, so it is here
+    // verbatim rather than paraphrased — a paraphrase that fit the old cap
+    // would be the exact softening the predecessor vocabulary measured at
+    // 61% precision.
+    expect(note).toContain(
+      "If the cited turn were wrong, would the citing turn's conclusion also be wrong?",
+    );
+    expect(note).toContain("(4) None → no relation");
+    // 600 tokens by user decree (S15069 T717), raised from 500 (T586) to pay
+    // for that procedure. The description is in the cached prefix of every
+    // request, so the cap is a real per-turn cost and not a style rule; the
+    // number is the measured floor for carrying C3/C4 whole, not a round one.
+    expect(estimateTokens(note)).toBeLessThanOrEqual(600);
   });
 
   // ticket 03 (spec E1): the merged input shape covers both addressing

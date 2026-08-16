@@ -33467,8 +33467,8 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // Single home of the note contract (user ruling, S15069 T586): fields,
   // budgets, the skip test and the mode vocabulary live HERE and nowhere else;
   // the SessionStart block (src/hooks/handlers/context-note-taking.ts) carries
-  // only the batch-timing digest and points at this text. Capped at 500
-  // tokens by tests/mcp/definitions.test.ts.
+  // only the batch-timing digest and points at this text. Capped by
+  // tests/mcp/definitions.test.ts.
   //
   // ticket 03 (spec E1/D5/D5a): `note` and the retired `remember` are one tool
   // now, addressed by `turn` (a turn) XOR `session` (a session's summary).
@@ -33477,26 +33477,26 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // `"overwrite"` (replace whole) or `"append"` (add to it) — named once for
   // the caller, not spelled out per field below.
   //
-  // ticket 07 (spec C7) added four relation fields to `noteInputShape` below
-  // — evidenceFor/evidenceAgainst/supersedes/dependsOn — with NO mention here.
-  // Measured at write time: this string sits at 487/500 tokens, 13 of
-  // headroom, and C4 (spec) makes the decision procedure's exact wording
-  // (the four ordered questions, question 3's counterfactual) NORMATIVE —
-  // not something a terser paraphrase may stand in for, because the
-  // predecessor vocabulary measured 61% precision at exactly that softening.
-  // Neither the field names alone nor any trimmed form of the procedure fit
-  // 13 tokens, and which of the cap or C4 gives is stated as a call neither
-  // ticket 07 nor this pass gets to make silently — flagged to the user
-  // rather than forced. The full procedure DOES reach the settlement
-  // prompt (worker/note-settlement-prompt.ts), which carries no such cap.
-  // The fields are fully functional here regardless (zod shape below, and
-  // mcp/note.ts's validation) — only this prose is silent about them.
-  note: 'Write or correct a turn\'s note, or a session\'s summary. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief \u2014 never recalled or invented) or `session` (`S<session>`). Timing: the SessionStart block\'s three rules. A non-empty field needs `mode.<field>`: `"overwrite"` replaces it whole, `"append"` adds (text: newline-joined; type/tags: unioned). Empty needs no mode; omitted stays untouched. Clearing (insight/grade/session fields) needs `null` + overwrite mode. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored.\nTurn \u2014 title (~' + NOTE_TOKEN_BUDGET.title + " tok): `<activity>+<topic>: <what this turn covered>`, the real stage. content (~" + NOTE_TOKEN_BUDGET.content + " tok): the conclusion, then the evidence chain \u2014 rejected alternatives with reasons; never restate the title, never narrate looking. A first note needs both title and content. insight (~" + NOTE_TOKEN_BUDGET.insight + " tok, default none): long-term knowledge orthogonal to the conclusion, claim first. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction \u2014 omit or [] when none fit, never guess. tags: bare topic words, no prefix. grade: 0-4. Receipt reports token counts and each touched field's post-write total; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson. `crossSession: true` only for another session's turn. Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content. Goes last in its batch.\nSession \u2014 title/content: a compressed view for another session browsing this one. decision/done/current/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations.",
+  // ticket 07 (spec C7) added four relation fields, and the cap moved 500 →
+  // 600 to pay for them (user decision, S15069/T717; the estimate put to
+  // the user was +80 and the measured cost is +112, all of it procedure).
+  // C4 makes that procedure's exact wording normative — the four ordered
+  // questions, and
+  // above all question 3's counterfactual — because the predecessor
+  // vocabulary measured 61% precision at exactly the point where it was
+  // softened to "used" or "built on". A paraphrase that fits 13 tokens of
+  // headroom is therefore not a cheaper version of this text, it is the
+  // failure mode; shipping the fields undocumented instead would have left
+  // the main agent guessing in that same direction. The alternative
+  // considered and rejected was moving the procedure to the SessionStart
+  // injection, which is cheaper per turn but re-splits the contract T586
+  // had just given one home.
+  note: 'Write or correct a turn\'s note, or a session\'s summary. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief \u2014 never recalled or invented) or `session` (`S<session>`). Timing: the SessionStart block\'s three rules. A non-empty field needs `mode.<field>`: `"overwrite"` replaces it whole, `"append"` adds (text: newline-joined; type/tags: unioned). Empty needs no mode; omitted stays untouched. Clearing (insight/grade/session fields) needs `null` + overwrite mode. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored.\nTurn \u2014 title (~' + NOTE_TOKEN_BUDGET.title + " tok): `<activity>+<topic>: <what this turn covered>`, the real stage. content (~" + NOTE_TOKEN_BUDGET.content + " tok): the conclusion, then the evidence chain \u2014 rejected alternatives with reasons; never restate the title, never narrate looking. A first note needs both title and content. insight (~" + NOTE_TOKEN_BUDGET.insight + " tok, default none): long-term knowledge orthogonal to the conclusion, claim first. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction \u2014 omit or [] when none fit, never guess. tags: bare topic words, no prefix. grade: 0-4. Receipt reports token counts and each touched field's post-write total; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson. `crossSession: true` only for another session's turn. Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content. Goes last in its batch.\nRelations \u2014 evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target this write does not cite rejects the call. Four ordered questions, first yes wins: (1) Did the citing turn overturn it? \u2192 supersedes. (2) Did it test the claim, for or against? \u2192 evidenceFor/Against. (3) If the cited turn were wrong, would the citing turn's conclusion also be wrong? \u2192 dependsOn. (4) None \u2192 no relation. Never soften (3) to \"used\"/\"built on\".\nSession \u2014 title/content: a compressed view for another session browsing this one. decision/done/current/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations.",
   // ticket 08 (spec G8): the coverage predicate pulled by the agent, not the
   // Stop hook (ticket 11) or the completion gate (ticket 09) — those call the
   // same underlying predicate (db/coverage.ts's `computeCoverageGaps`)
   // directly rather than through this tool. Own budget, own test in
-  // definitions.test.ts — independent of note's 500-token cap.
+  // definitions.test.ts — independent of note's own cap.
   check: "Ask what a session still owes before you believe you are finished \u2014 the same predicate the Stop hook and the completion gate check, so a clean answer here does not reopen later. Input: `id` (`S<session>`). Reports missing turns as bare addresses, never why \u2014 you already know why. An eligible turn is owed when it carries no stated `type`, unless it was skipped: skip is itself a verdict and counts as covered. Eligible excludes a compact marker and a slash command the harness answered with no model reply; a sidechain turn is included."
 };
 var recallInputShape = {
