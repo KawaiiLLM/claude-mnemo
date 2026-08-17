@@ -20,7 +20,7 @@ same per-view overflow; shape signals stay session-side only.
 
 **Blocked by:** 02 (members, ordinals); 04 (filter surface).
 
-**Status:** ready-for-agent
+**Status:** done — E addressing in both views, admission union (state-cited ∪ A, B as budget filler) with demote-never-paginate structural (the selector has no page parameter at all), minimal rows landed on segment and era-nested session rows alike; the legacy pre-era S renderer deliberately untouched (241 tests pin its bytes; citation and tier don't exist pre-era). The old row-degradation ladder (~150 lines) deleted, obsolete under minimal rows. Reviewer completed the owed pageBudget wiring (schema field + handler forwarding + TimelineQueryInput + a forwarding test) once ticket 07 unfroze the definitions surface. E-view filter left unbuilt as the ticket never asked — follow-up candidate with the segment-side roster filter.
 
 - [ ] Milestone rows render as `id time glyphs title`; no excerpt, no tier labels, no antecedent counters; ⚑ and the overflow pointer survive
 - [ ] Milestone admission: state-cited rows appear without any tier; A rows appear when tiers exist; B fills only leftover budget; overflow demotes, never paginates

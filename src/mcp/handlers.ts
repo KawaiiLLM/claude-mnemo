@@ -40,6 +40,9 @@ export interface TimelineQueryInput {
   eraCutoffEpoch?: number | null;
   // Ticket 04 (spec "Tools"): the structured filter grammar shared with recall.
   filter?: MemoryFilterInput;
+  // Ticket 05: token budget for the segment views (milestone size governor,
+  // turn-view pagination budget).
+  pageBudget?: number;
 }
 
 export interface CreateDatabaseBackedHandlersOptions {
@@ -103,6 +106,10 @@ export function toTimelineQueryInput(args: Record<string, unknown>): TimelineQue
   }
   if (args.filter !== undefined) {
     input.filter = args.filter as MemoryFilterInput;
+  }
+  // Ticket 05's owed wiring: the segment views' token budget (spec "Budgets").
+  if (args.pageBudget !== undefined) {
+    input.pageBudget = args.pageBudget as number;
   }
 
   return input;

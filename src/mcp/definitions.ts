@@ -371,6 +371,10 @@ export const timelineInputShape = {
   id: z.string().min(1),
   page: z.number().int().positive().optional(),
   pageSize: z.number().int().positive().optional(),
+  // Ticket 05: the view's token budget — the milestone view's size governor
+  // and the turn view's pagination budget. Mirrors recall's field; interactive
+  // default 1000 lives in timeline.ts, injections pass their own explicitly.
+  pageBudget: z.number().int().positive().optional(),
   // Ticket 04: `phases` retires. Removing it from the enum outright (rather
   // than keeping it defined only to reject, as `truncate` below does) is
   // enough — zod's own invalid-enum message already names the surviving

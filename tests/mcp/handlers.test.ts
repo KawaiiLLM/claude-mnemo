@@ -220,6 +220,12 @@ describe("database-backed MCP handlers", () => {
     });
   });
 
+  test("timeline handler input forwards pageBudget (ticket 05's owed wiring)", () => {
+    expect(
+      toTimelineQueryInput({ id: "E31", view: "milestones", pageBudget: 2000 }),
+    ).toEqual({ id: "E31", view: "milestones", pageBudget: 2000 });
+  });
+
   describe("note's caller identity option (spec D2)", () => {
     let sessionId: number;
     let otherSessionId: number;

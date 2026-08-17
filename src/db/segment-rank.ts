@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { getOutgoingEdges } from "./memory-edges";
 import { parseQualifiedReferences } from "./references";
 import { getSegment, type SegmentRecord } from "./segments";
 import { isSegmentEra } from "../segment-era";
@@ -47,6 +48,7 @@ interface MemberRankFactsRow {
   citedBy: number;
   isDeliveryMember: number;
   filesModifiedCount: number;
+  electionTier: string | null;
 }
 
 /** The fact columns the ORDER BY reads, carried out so a caller can print them. */
@@ -68,6 +70,14 @@ export interface MemberRankFacts {
   /** 1 when this turn belongs to at least one `delivered` segment. */
   isDeliveryMember: number;
   filesModifiedCount: number;
+  /**
+   * Ticket 05 (spec "Judging"/ADR-0003): the settlement election's A/B/C tier,
+   * era-gated at write time — `null` before settlement reaches the turn, or for
+   * a pre-segment-era turn that will never carry one. Read alongside a
+   * segment's state-cited set (`getSegmentCitedTurnIds` below) to admit a
+   * segment's milestone rows: state-cited ∪ A always, B fills remaining budget.
+   */
+  electionTier: string | null;
 }
 
 export interface RankedSegmentMember extends MemberRankFacts {
@@ -117,7 +127,8 @@ const RANK_FACT_COLUMNS = `
      WHERE dm.turn_id = t.id AND ds.status = 'delivered'
    )) AS isDeliveryMember,
   (CASE WHEN json_valid(t.files_modified)
-        THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount
+        THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount,
+  t.election_tier AS electionTier
 `;
 
 /** `RANK_FACT_COLUMNS`' raw `type` text, parsed once for every reader (ticket 02, spec B5). */
@@ -532,6 +543,29 @@ export function hasEraTurns(
   eraCutoffEpoch: number | null,
 ): boolean {
   return turns.some((turn) => isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch));
+}
+
+/**
+ * A segment's "state-cited" turns (ticket 05, spec "Tools"/ADR-0006): every
+ * turn its Working State and summary fields currently cite, over
+ * `memory_edges` — the same graph `reconcileSegmentCitedPairs` (db/segments.ts)
+ * keeps in sync with the segment's nine text fields on every write. This is
+ * the live, authoritative membership test for "state-cited" milestone
+ * admission: a turn a decisions/done/reference row names is exactly a turn the
+ * graph already records as cited, so no second scan of the segment's prose is
+ * needed here.
+ */
+export function getSegmentCitedTurnIds(
+  db: Database,
+  segmentId: number,
+): ReadonlySet<number> {
+  const cited = new Set<number>();
+  for (const edge of getOutgoingEdges(db, { kind: "segment", id: segmentId })) {
+    if (edge.cited.kind === "turn") {
+      cited.add(edge.cited.id);
+    }
+  }
+  return cited;
 }
 
 /**
