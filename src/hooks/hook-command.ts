@@ -9,7 +9,6 @@ import { createDatabase, isSqliteBusy } from "../db/database";
 import { ensureRecordedEraCutoff } from "../db/era";
 import { initializeDatabase } from "../db/schema";
 import { createLogger } from "../shared/logger";
-import { DiaryFileStore } from "../diary/file-store";
 import { DreamMemoryStore } from "../diary/memory-store";
 import { DATA_DIR, resolveDatabasePath } from "../shared/paths";
 import { normalizeHookInput } from "./adapters";
@@ -20,13 +19,20 @@ import {
   type ContextHandlerDependencies,
 } from "./handlers/context";
 import { createPostToolUseHandler } from "./handlers/post-tool-use";
-import { createMilestoneContextHandler } from "./handlers/context-milestones";
+import {
+  createProposalsContextHandler,
+  createSegmentBlockContextHandler,
+} from "./handlers/context-segments";
+import { ATTACHED_SEGMENT_BLOCK_SLOTS, type SegmentBlockKind } from "./session-composition";
 import { createNoteTakingContextHandler } from "./handlers/context-note-taking";
 import { createPromptDispatchHandler } from "./handlers/prompt-dispatch";
 import { createSessionEndHandler } from "./handlers/session-end";
 import { createSessionInitHandler } from "./handlers/session-init";
 import { createStopHandler } from "./handlers/stop";
 import type { HookEventName, HookHandler, HookResult } from "./types";
+
+/** `context segment<slotIndex>-<kind>` argv sections, e.g. `segment1-fields`. */
+const SEGMENT_BLOCK_SECTION_PATTERN = /^segment([1-9][0-9]*)-(fields|milestones)$/;
 
 export interface HookCommandDependencies {
   env?: NodeJS.ProcessEnv;
@@ -45,9 +51,9 @@ export interface HookCommandLogger {
 
 let defaultHandlers: Record<string, HookHandler> | undefined;
 let defaultReadOnlyContextHandlers: Record<string, HookHandler> | undefined;
-let defaultRecentContextHandler: HookHandler | undefined;
 let defaultDigestContextHandler: HookHandler | undefined;
-let defaultMilestoneContextHandler: HookHandler | undefined;
+let defaultProposalsContextHandler: HookHandler | undefined;
+const defaultSegmentBlockContextHandlers = new Map<string, HookHandler>();
 let defaultNoteTakingContextHandler: HookHandler | undefined;
 let defaultUserPromptSubmitDispatcher: HookHandler | undefined;
 let defaultHookDatabase: ReturnType<typeof createDatabase> | undefined;
@@ -88,7 +94,6 @@ export function createDefaultHookHandlers({
   workerEnv,
   enableSessionEnvCapture = false,
 }: DefaultHookHandlersDependencies): Record<string, HookHandler> {
-  const fileStore = new DiaryFileStore(dataRoot);
   const contextDependencies: ContextHandlerDependencies = {
     db,
     workerClientDeps,
@@ -96,14 +101,19 @@ export function createDefaultHookHandlers({
     enableSessionEnvCapture,
   };
 
+  const segmentBlockHandlers: Record<string, HookHandler> = {};
+  for (let slot = 1; slot <= ATTACHED_SEGMENT_BLOCK_SLOTS; slot += 1) {
+    for (const kind of ["fields", "milestones"] as const) {
+      segmentBlockHandlers[`SessionStart:segment${slot}-${kind}`] =
+        createSegmentBlockContextHandler({ db }, slot, kind);
+    }
+  }
+
   return {
     ...createDefaultReadOnlyContextHandlers({ dataRoot }),
-    "SessionStart:recent": createReadOnlyContextHandler(
-      { db, fileStore },
-      "recent",
-    ),
+    ...segmentBlockHandlers,
     "SessionStart:digest": createReadOnlyContextHandler({ db }, "digest"),
-    "SessionStart:milestones": createMilestoneContextHandler({ db }),
+    "SessionStart:proposals": createProposalsContextHandler({ db }),
     "SessionStart:notes": createNoteTakingContextHandler(),
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
@@ -154,45 +164,57 @@ function getDefaultReadOnlyContextHandlers(): Record<string, HookHandler> {
   return defaultReadOnlyContextHandlers;
 }
 
-function getDefaultRecentContextHandler(): HookHandler {
-  if (defaultRecentContextHandler) {
-    return defaultRecentContextHandler;
+function getDefaultProposalsContextHandler(): HookHandler {
+  if (defaultProposalsContextHandler) {
+    return defaultProposalsContextHandler;
   }
 
   const databasePath = resolveDatabasePath();
   if (!existsSync(databasePath)) {
-    defaultRecentContextHandler = async () => ({ continue: true });
-    return defaultRecentContextHandler;
+    defaultProposalsContextHandler = async () => ({ continue: true });
+    return defaultProposalsContextHandler;
   }
 
   const db = new Database(databasePath, {
     readonly: true,
     create: false,
   });
-  defaultRecentContextHandler = createReadOnlyContextHandler(
-    { db, fileStore: new DiaryFileStore(DATA_DIR) },
-    "recent",
-  );
-  return defaultRecentContextHandler;
+  defaultProposalsContextHandler = createProposalsContextHandler({ db });
+  return defaultProposalsContextHandler;
 }
 
-function getDefaultMilestoneContextHandler(): HookHandler {
-  if (defaultMilestoneContextHandler) {
-    return defaultMilestoneContextHandler;
+/**
+ * One slot of the fixed segment-block pool (ticket 10). Same lazy
+ * readonly-DB pattern as the retired `recent`/`milestones` getters: each
+ * SessionStart hook command is its own process, so only the writable
+ * `context` (bare) command opens the shared writable handle — every other
+ * section reads through its own readonly connection to avoid write-lock
+ * contention across the parallel hook processes one SessionStart fires.
+ */
+function getDefaultSegmentBlockContextHandler(
+  slotIndex: number,
+  kind: SegmentBlockKind,
+): HookHandler {
+  const cacheKey = `${slotIndex}-${kind}`;
+  const cached = defaultSegmentBlockContextHandlers.get(cacheKey);
+  if (cached) {
+    return cached;
   }
 
   const databasePath = resolveDatabasePath();
   if (!existsSync(databasePath)) {
-    defaultMilestoneContextHandler = async () => ({ continue: true });
-    return defaultMilestoneContextHandler;
+    const noop: HookHandler = async () => ({ continue: true });
+    defaultSegmentBlockContextHandlers.set(cacheKey, noop);
+    return noop;
   }
 
   const db = new Database(databasePath, {
     readonly: true,
     create: false,
   });
-  defaultMilestoneContextHandler = createMilestoneContextHandler({ db });
-  return defaultMilestoneContextHandler;
+  const handler = createSegmentBlockContextHandler({ db }, slotIndex, kind);
+  defaultSegmentBlockContextHandlers.set(cacheKey, handler);
+  return handler;
 }
 
 function getDefaultDigestContextHandler(): HookHandler {
@@ -241,14 +263,20 @@ function getDefaultHandler(handlerKey: string): HookHandler | undefined {
   if (handlerKey === "SessionStart:notes") {
     return getDefaultNoteTakingContextHandler();
   }
-  if (handlerKey === "SessionStart:recent") {
-    return getDefaultRecentContextHandler();
-  }
   if (handlerKey === "SessionStart:digest") {
     return getDefaultDigestContextHandler();
   }
-  if (handlerKey === "SessionStart:milestones") {
-    return getDefaultMilestoneContextHandler();
+  if (handlerKey === "SessionStart:proposals") {
+    return getDefaultProposalsContextHandler();
+  }
+  if (handlerKey.startsWith("SessionStart:")) {
+    const match = SEGMENT_BLOCK_SECTION_PATTERN.exec(handlerKey.slice("SessionStart:".length));
+    if (match) {
+      return getDefaultSegmentBlockContextHandler(
+        Number.parseInt(match[1]!, 10),
+        match[2] as SegmentBlockKind,
+      );
+    }
   }
   if (handlerKey === "SessionStart:persona") {
     return getDefaultReadOnlyContextHandlers()[handlerKey];
@@ -295,20 +323,27 @@ function ruleDispatcherKeyFromCommandArgument(
   return arg === "prompt-dispatch" ? "UserPromptSubmit:rule-dispatch" : undefined;
 }
 
+type SegmentBlockSection = `segment${number}-fields` | `segment${number}-milestones`;
+
 function contextSectionFromCommandArguments(
   command?: string,
   section?: string,
-): "sessions" | "persona" | "recent" | "digest" | "milestones" | "notes" {
+): "sessions" | "persona" | "digest" | "proposals" | "notes" | SegmentBlockSection {
   if (command !== "context") {
     return "sessions";
   }
-  return section === "persona" ||
-    section === "recent" ||
+  if (
+    section === "persona" ||
     section === "digest" ||
-    section === "milestones" ||
+    section === "proposals" ||
     section === "notes"
-    ? section
-    : "sessions";
+  ) {
+    return section;
+  }
+  if (section && SEGMENT_BLOCK_SECTION_PATTERN.test(section)) {
+    return section as SegmentBlockSection;
+  }
+  return "sessions";
 }
 
 function writeHookResult(

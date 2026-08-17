@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import {
   existsSync,
@@ -15,15 +15,19 @@ import { createDiaryStateStore } from "../../src/db/diary-state";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { estimateDiaryTokens } from "../../src/diary/domain";
-import { DiaryFileStore } from "../../src/diary/file-store";
 import { DreamMemoryStore } from "../../src/diary/memory-store";
-import {
-  DIARY_INDEX_INJECTION_TOKEN_BUDGET,
-  PROFILE_INJECTION_TOKEN_BUDGET,
-  SESSION_INJECTION_TOKEN_BUDGET,
-} from "../../src/diary/persona-render";
+import { PROFILE_INJECTION_TOKEN_BUDGET } from "../../src/diary/persona-render";
 import { createContextHandler } from "../../src/hooks/handlers/context";
 
+/**
+ * The persona section stays isolated from the archive/experience documents
+ * regardless of what the diary artifacts on disk carry, and the bare
+ * `context` command's own side effects (session registration, stranded
+ * recovery) still run once per SessionStart. The "recent" section this file
+ * used to also cover retired at ticket 10 (RecentSessions and the diary
+ * index no longer render at SessionStart) — see `injection-matrix.test.ts`
+ * for the roster that replaced its body.
+ */
 describe("SessionStart dream isolation and injection", () => {
   let db: Database;
   const roots: string[] = [];
@@ -77,7 +81,7 @@ describe("SessionStart dream isolation and injection", () => {
     ).get()?.count).toBe(1);
   });
 
-  test("splits bounded state, persona, and recent/diary output while sessions side effects run once", async () => {
+  test("persona stays isolated from experience/archive while roster and side effects run once", async () => {
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-context-dream-"));
     roots.push(dataRoot);
     const memoryStore = new DreamMemoryStore(dataRoot);
@@ -94,7 +98,6 @@ describe("SessionStart dream isolation and injection", () => {
     // installs can still carry larger docs on disk, and the injection renderer
     // must stay bounded for them regardless.
     mkdirSync(join(dataRoot, "memory"), { recursive: true });
-    mkdirSync(join(dataRoot, "diary"), { recursive: true });
     writeFileSync(
       join(dataRoot, "memory", "user-profile.md"),
       longDocument("User Profile", "profile"),
@@ -107,27 +110,8 @@ describe("SessionStart dream isolation and injection", () => {
       join(dataRoot, "memory", "archive.md"),
       "# Memory Archive\n\n- ARCHIVE_MUST_NEVER_BE_INJECTED\n",
     );
-    writeFileSync(
-      join(dataRoot, "diary", "2026-07-10.md"),
-      "# 2026-07-10\n\n- current day\n",
-    );
-    writeFileSync(
-      join(dataRoot, "diary", "INDEX.md"),
-      [
-        "# Diary Index",
-        "",
-        "- 2026-07-08：older",
-        "- 2026-07-10：newest",
-        "- 2026-07-09：middle",
-        "",
-      ].join("\n"),
-    );
     const nowEpoch = Date.parse("2026-07-11T12:00:00+08:00") / 1_000;
-    const dependencies = {
-      db,
-      fileStore: new DiaryFileStore(dataRoot),
-      memoryStore,
-    };
+    const dependencies = { db, memoryStore };
     const input = {
       ...session("dream-injection", nowEpoch),
       source: "resume" as const,
@@ -143,44 +127,19 @@ describe("SessionStart dream isolation and injection", () => {
       ) VALUES (?, 1, 'active', 'stranded after sessions hook', 'answer', ?)`,
     ).run(sessionDbId, nowEpoch + 1);
     const personaResult = await createContextHandler(dependencies, "persona")(input);
-    const recentResult = await createContextHandler(
-      dependencies,
-      "recent",
-    )(input);
     const sessions = sessionsResult.hookSpecificOutput ?? "";
     const persona = personaResult.hookSpecificOutput ?? "";
-    const recent = recentResult.hookSpecificOutput ?? "";
-    const indexStart = recent.indexOf("# Diary Index");
-    const index = recent.slice(indexStart).trim();
 
-    expect(sessions).toContain("claude-mnemo:");
-    expect(sessions).not.toContain("## Recent Sessions");
+    expect(sessions).toContain("## Segment roster");
     expect(sessions).not.toContain("## Persona");
     expect(sessions).not.toContain("## Experience");
-    expect(estimateDiaryTokens(sessions.split("\n").slice(3).join("\n")))
-      .toBeLessThanOrEqual(SESSION_INJECTION_TOKEN_BUDGET);
     expect(persona).toContain("## Persona");
     expect(persona).not.toContain("## Experience");
-    expect(persona).not.toContain("# Diary Index");
     expect(estimateDiaryTokens(persona)).toBeLessThanOrEqual(
       PROFILE_INJECTION_TOKEN_BUDGET,
     );
-    expect(estimateDiaryTokens(recent)).toBeLessThanOrEqual(
-      SESSION_INJECTION_TOKEN_BUDGET,
-    );
-    expect(estimateDiaryTokens(index)).toBeLessThanOrEqual(
-      DIARY_INDEX_INJECTION_TOKEN_BUDGET,
-    );
-    expect(recent).toContain("# Diary Index");
-    expect(recent).not.toContain("## Experience");
-    expect(recent).not.toContain("## Persona");
     expect(persona).not.toContain("ARCHIVE_MUST_NEVER_BE_INJECTED");
-    expect(recent).not.toContain("ARCHIVE_MUST_NEVER_BE_INJECTED");
-    expect(recent).not.toContain("experience 0");
     expect(persona).not.toContain("memory/archive.md");
-    expect(recent).not.toContain("memory/archive.md");
-    expect(index.indexOf("2026-07-10")).toBeLessThan(index.indexOf("2026-07-09"));
-    expect(index.indexOf("2026-07-09")).toBeLessThan(index.indexOf("2026-07-08"));
     expect(db.query<{ startTurnId: number }, []>(
       `SELECT start_turn_id AS startTurnId
        FROM session_run_state
@@ -191,12 +150,9 @@ describe("SessionStart dream isolation and injection", () => {
     ).get()?.count).toBe(0);
   });
 
-  test("persona and recent reads are silent when their stores are unavailable or fail", async () => {
+  test("persona reads are silent when the store is unavailable or fails", async () => {
     const input = session("dream-empty-injection", 100);
     const missingPersona = await createContextHandler({ db }, "persona")(input);
-    const missingRecent = await createContextHandler({ db }, "recent")(
-      input,
-    );
     const failedPersona = await createContextHandler({
       db,
       memoryStore: {
@@ -208,11 +164,10 @@ describe("SessionStart dream isolation and injection", () => {
     }, "persona")(input);
 
     expect(missingPersona).toEqual({ continue: true });
-    expect(missingRecent).toEqual({ continue: true });
     expect(failedPersona).toEqual({ continue: true });
   });
 
-  test("persona and recent do not create missing roots; diary-only content still emits", async () => {
+  test("persona does not create missing roots and stays silent on a heading-only profile", async () => {
     const parent = mkdtempSync(join(tmpdir(), "claude-mnemo-read-only-context-"));
     roots.push(parent);
     const missingDataRoot = join(parent, "missing");
@@ -223,10 +178,6 @@ describe("SessionStart dream isolation and injection", () => {
       db,
       memoryStore: missingMemoryStore,
     }, "persona")(input);
-    const missingRecent = await createContextHandler({
-      db,
-      fileStore: new DiaryFileStore(missingDataRoot),
-    }, "recent")(input);
     const headingOnlyMemoryStore = {
       dataRoot: parent,
       readInjectionDocuments: async () => ({
@@ -238,19 +189,9 @@ describe("SessionStart dream isolation and injection", () => {
       db,
       memoryStore: headingOnlyMemoryStore,
     }, "persona")(input);
-    const diaryOnlyRecent = await createContextHandler({
-      db,
-      fileStore: {
-        readIndex: async () =>
-          new TextEncoder().encode("# Diary Index\n\n- 2026-07-10：entry\n"),
-      },
-    }, "recent")(input);
 
     expect(missingPersona).toEqual({ continue: true });
-    expect(missingRecent).toEqual({ continue: true });
     expect(headingOnlyPersona).toEqual({ continue: true });
-    expect(diaryOnlyRecent.hookSpecificOutput).toContain("# Diary Index");
-    expect(diaryOnlyRecent.hookSpecificOutput).not.toContain("## Experience");
     expect(existsSync(missingDataRoot)).toBe(false);
   });
 });

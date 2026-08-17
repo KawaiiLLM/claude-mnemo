@@ -1,66 +1,57 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 
 import { createDatabase } from "../../src/db/database";
+import {
+  claimNextNoteSettlementJob,
+  enqueueNoteSettlementWindows,
+} from "../../src/db/note-settlement";
+import { recordNoteSettlementProposal } from "../../src/db/note-settlement-proposals";
 import { createRuleStore } from "../../src/db/rules";
 import { initializeSchema } from "../../src/db/schema";
+import {
+  addSegmentMembers,
+  attachSegmentToSession,
+  createSegment,
+  upsertTopic,
+} from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
-import { estimateDiaryTokens } from "../../src/diary/domain";
-import { SESSION_INJECTION_TOKEN_BUDGET } from "../../src/diary/persona-render";
-import { createMilestoneContextHandler } from "../../src/hooks/handlers/context-milestones";
 import {
   createContextHandler,
   createReadOnlyContextHandler,
 } from "../../src/hooks/handlers/context";
+import {
+  createProposalsContextHandler,
+  createSegmentBlockContextHandler,
+} from "../../src/hooks/handlers/context-segments";
 import type { NormalizedHookInput } from "../../src/hooks/types";
+import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 const SOURCES = ["startup", "clear", "resume", "compact"] as const;
 
-function totalChanges(db: ReturnType<typeof createDatabase>): number {
-  return db.query<{ count: number }, []>(
-    "SELECT total_changes() AS count",
-  ).get()!.count;
-}
-
 describe("SessionStart injection matrix", () => {
   for (const source of SOURCES) {
-    test(`${source} emits only its matrix sections while sessions side effects run once`, async () => {
+    test(`${source} renders roster+proposals ungated, gates segment blocks to resume|compact, persona/digest stay ungated, side effects run once`, async () => {
       const db = createDatabase(":memory:");
       initializeSchema(db);
       const current = upsertSession(db, {
         contentSessionId: `current-${source}`,
         project: "/projects/matrix",
         title: `Current ${source}`,
-        content: "Current session state",
-        current: "Continue the matrix implementation.",
         insight: null,
         createdAtEpoch: 1_700_000_100,
         updatedAtEpoch: null,
         completedAtEpoch: null,
       });
-      const prior = upsertSession(db, {
-        contentSessionId: `prior-${source}`,
-        project: "/projects/matrix",
-        title: `Prior ${source}`,
-        content: "Prior session context",
-        insight: null,
-        createdAtEpoch: 1_700_000_000,
-        updatedAtEpoch: null,
-        completedAtEpoch: null,
-      });
-      db.query(
-        `INSERT INTO turns (
-          session_id, prompt_number, status, user_prompt,
-          assistant_response, title, type, created_at_epoch
-        ) VALUES (?, 1, 'extracted', 'prior prompt', 'prior response',
-          'Prior milestone', '["feature"]', 1700000010)`,
-      ).run(prior.id);
-      db.query(
-        `INSERT INTO turns (
-          session_id, prompt_number, status, user_prompt,
-          assistant_response, title, type, created_at_epoch
-        ) VALUES (?, 1, 'extracted', 'current prompt', 'current response',
-          'Current milestone', '["feature"]', 1700000110)`,
-      ).run(current.id);
+      const memberTurn = db
+        .query<{ id: number }, [number]>(
+          `INSERT INTO turns (
+            session_id, prompt_number, status, user_prompt,
+            assistant_response, title, type, created_at_epoch
+          ) VALUES (?, 1, 'extracted', 'current prompt', 'current response',
+            'Current milestone', '["feature"]', 1700000110)
+          RETURNING id`,
+        )
+        .get(current.id)!;
       createRuleStore(db).create({
         name: `matrix-rule-${source}`,
         claim: "当前任务涉及断言时，先检查证据。",
@@ -71,6 +62,8 @@ describe("SessionStart injection matrix", () => {
         status: "confirmed",
         createdAtEpoch: 1_700_000_120,
       });
+      // A stranded active turn — SessionStart recovery must enqueue turn-stop
+      // regardless of which sections gate shut.
       db.query(
         `INSERT INTO turns (
           session_id, prompt_number, status, user_prompt,
@@ -78,6 +71,34 @@ describe("SessionStart injection matrix", () => {
         ) VALUES (?, 2, 'active', 'stranded prompt',
           'stranded response', 1700000120)`,
       ).run(current.id);
+
+      // An attached segment — the fixed pool's slot 1 should render it when
+      // the section is unblocked, and stay silent otherwise.
+      const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_700_000_000 });
+      const segment = createSegment(db, {
+        title: `Ship the matrix ${source}`,
+        topicId: topic.id,
+        nowEpoch: 1_700_000_000,
+      });
+      addSegmentMembers(db, segment.id, [memberTurn.id], 1_700_000_000);
+      attachSegmentToSession(db, current.id, segment.id, 1_700_000_050);
+
+      // A stored proposal — must surface on EVERY source, startup included
+      // (ticket 08: stored for the NEXT session, which opens cold).
+      enqueueNoteSettlementWindows(
+        db,
+        [{ sessionId: current.id, windowStart: 1, windowEnd: 1, triggerType: "consecutive" }],
+        1_700_000_200,
+        SETTLEMENT_ERA_CUTOFF_EPOCH,
+      );
+      const job = claimNextNoteSettlementJob(db, current.id, 1_700_000_200, 2_000_000)!;
+      recordNoteSettlementProposal(db, {
+        jobId: job.id,
+        sessionId: current.id,
+        title: `Adopt the ${source} cluster`,
+        addresses: [`S${current.id}/T1`],
+        nowEpoch: 1_700_000_200,
+      });
 
       const input: NormalizedHookInput = {
         eventName: "SessionStart",
@@ -89,12 +110,6 @@ describe("SessionStart injection matrix", () => {
       };
       const dependencies = {
         db,
-        fileStore: {
-          readIndex: async () =>
-            new TextEncoder().encode(
-              "# Diary Index\n\n- 2026-07-10: diary entry\n",
-            ),
-        },
         memoryStore: {
           dataRoot: "/virtual",
           readInjectionDocuments: async () => ({
@@ -105,45 +120,35 @@ describe("SessionStart injection matrix", () => {
       };
 
       const sessions = await createContextHandler(dependencies)(input);
-      const persona = await createReadOnlyContextHandler(
-        dependencies,
-        "persona",
-      )(input);
-      const recent = await createReadOnlyContextHandler(
-        dependencies,
-        "recent",
-      )(input);
-      const digest = await createReadOnlyContextHandler(
-        dependencies,
-        "digest",
-      )(input);
-      const milestones = await createMilestoneContextHandler({
-        db,
-        renderMilestoneInjection: () => "MILESTONE_OUTPUT",
-      })(input);
+      const persona = await createReadOnlyContextHandler(dependencies, "persona")(input);
+      const digest = await createReadOnlyContextHandler(dependencies, "digest")(input);
+      const proposals = await createProposalsContextHandler({ db })(input);
+      const segment1Fields = await createSegmentBlockContextHandler({ db }, 1, "fields")(input);
 
+      // Roster and proposals render on EVERY source (review overturned the
+      // resume|compact gate): the roster serves the session that has not
+      // attached anything yet — a cold start — and a proposal is stored for
+      // "the next session's injection" (ticket 08), which opens cold. Only
+      // the attached-segment blocks stay gated: a cold session cannot have
+      // attachments to render.
+      expect(sessions.hookSpecificOutput).toContain("## Segment roster");
+      expect(proposals.hookSpecificOutput).toContain("## Proposals");
+      expect(proposals.hookSpecificOutput).toContain(`Adopt the ${source} cluster`);
       if (source === "resume" || source === "compact") {
-        expect(sessions.hookSpecificOutput).toContain("## Current Session");
-        expect(milestones.hookSpecificOutput).toBe("MILESTONE_OUTPUT");
+        expect(segment1Fields.hookSpecificOutput).toContain(
+          `[E${segment.id}] #claude-mnemo · fields`,
+        );
       } else {
-        expect(sessions).toEqual({ continue: true });
-        expect(milestones).toEqual({ continue: true });
+        expect(segment1Fields).toEqual({ continue: true });
       }
-      expect(sessions.hookSpecificOutput ?? "").not.toContain(
-        "## Recent Sessions",
-      );
+      // Persona/digest are general orientation, not task-axis content — they
+      // render on every SessionStart source, unlike the segment/roster/
+      // proposals sections above (ticket 10).
       expect(persona.hookSpecificOutput).toContain("## Persona");
-      expect(recent.hookSpecificOutput).toContain("## Recent Sessions");
-      expect(recent.hookSpecificOutput).toContain("# Diary Index");
-      expect(recent.hookSpecificOutput).toContain(`Prior ${source}`);
       expect(digest.hookSpecificOutput).toContain("## Rule Digest");
       expect(digest.hookSpecificOutput).toContain(`matrix-rule-${source}`);
       expect(digest.hookSpecificOutput).toContain("适用范围：仅当前项目");
-      expect(recent.hookSpecificOutput).not.toContain(
-        "MUST_NOT_BE_INJECTED",
-      );
-      expect(estimateDiaryTokens(recent.hookSpecificOutput!))
-        .toBeLessThanOrEqual(SESSION_INJECTION_TOKEN_BUDGET);
+      expect(persona.hookSpecificOutput).not.toContain("MUST_NOT_BE_INJECTED");
       expect(db.query<{ count: number }, [string]>(
         "SELECT COUNT(*) AS count FROM sessions WHERE content_session_id = ?",
       ).get(`current-${source}`)?.count).toBe(1);
@@ -160,53 +165,46 @@ describe("SessionStart injection matrix", () => {
     });
   }
 
-  test("recent sessions uses read-only DB access and a naked recall() overflow pointer", async () => {
+  test("roster overflow points a discovered live segment to recall() and marks an attached-but-unrendered segment", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    upsertSession(db, {
+    const current = upsertSession(db, {
       contentSessionId: "current-overflow",
       project: "/projects/matrix",
       title: "Current",
-      content: null,
       insight: null,
       createdAtEpoch: 2_000,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
-    for (let index = 1; index <= 10; index += 1) {
-      upsertSession(db, {
-        contentSessionId: `overflow-${index}`,
-        project: "/projects/matrix",
-        title: `Overflow ${index} ${"超长标题".repeat(180)}`,
-        content: `Context ${index}`,
-        insight: null,
-        createdAtEpoch: 2_000 - index,
-        updatedAtEpoch: null,
-        completedAtEpoch: null,
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
+    // One attached segment beyond the fixed pool's slot count.
+    const attachedIds: number[] = [];
+    for (let index = 1; index <= 4; index += 1) {
+      const segment = createSegment(db, {
+        title: `Attached lane ${index}`,
+        topicId: topic.id,
+        nowEpoch: 1_000 + index,
       });
+      attachSegmentToSession(db, current.id, segment.id, 1_000 + index);
+      attachedIds.push(segment.id);
     }
-    const before = totalChanges(db);
 
-    const result = await createReadOnlyContextHandler({
-      db,
-      fileStore: {
-        readIndex: async () =>
-          new TextEncoder().encode(
-            "# Diary Index\n\n- 2026-07-10: newest\n",
-          ),
-      },
-    }, "recent")({
+    const result = await createContextHandler({ db })({
       eventName: "SessionStart",
-      source: "startup",
+      source: "resume",
       sessionId: "current-overflow",
       cwd: "/projects/matrix",
       stopHookActive: false,
       raw: {},
     });
 
-    expect(result.hookSpecificOutput).toContain("完整见 recall()");
-    expect(result.hookSpecificOutput).not.toContain('recall(id="S');
-    expect(totalChanges(db)).toBe(before);
+    const output = result.hookSpecificOutput ?? "";
+    // The most recently attached (highest id, most recently activity-ordered)
+    // segment beyond the 3-slot pool gets a recall pointer instead of a block.
+    expect(output).toContain(
+      `attached, not rendered here — recall(id="E${attachedIds[0]}")`,
+    );
     db.close();
   });
 });

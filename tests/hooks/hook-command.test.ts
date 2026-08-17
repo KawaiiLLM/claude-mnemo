@@ -168,35 +168,32 @@ describe("runHookCommand", () => {
       } as const;
       const sessionsResult = await handlers.SessionStart!(input);
       const personaResult = await handlers["SessionStart:persona"]!(input);
-      const recentResult = await handlers["SessionStart:recent"]!(input);
       const digestResult = await handlers["SessionStart:digest"]!(input);
-      const milestonesResult = await handlers["SessionStart:milestones"]!(input);
+      const proposalsResult = await handlers["SessionStart:proposals"]!(input);
+      const segment1FieldsResult = await handlers["SessionStart:segment1-fields"]!(input);
       await Promise.resolve();
       await Promise.resolve();
 
       expect(createDiaryStateStore(db).hasQueuedDay("2026-07-10")).toBe(false);
-      expect(sessionsResult).toEqual({ continue: true });
+      // `startup` renders the roster (un-gated at review — the cold session
+      // is its audience); proposals stay silent because none are stored, and
+      // the segment blocks stay gated to resume/compact.
+      expect(sessionsResult.hookSpecificOutput).toContain("## Segment roster");
+      expect(proposalsResult).toEqual({ continue: true });
+      expect(segment1FieldsResult).toEqual({ continue: true });
       expect(personaResult.hookSpecificOutput).toContain("## Persona");
       expect(personaResult.hookSpecificOutput).toContain(
         "- 生产 wiring 中的用户画像 [S1/T1]",
       );
       expect(personaResult.hookSpecificOutput).not.toContain("## Experience");
-      expect(recentResult.hookSpecificOutput).toContain("# Diary Index");
-      expect(recentResult.hookSpecificOutput).not.toContain("## Experience");
-      expect(recentResult.hookSpecificOutput).toContain(
-        "- 2026-07-10：生产 wiring 日记索引",
-      );
       expect(digestResult.hookSpecificOutput).toContain("## Rule Digest");
       expect(digestResult.hookSpecificOutput).toContain("production-digest-rule");
-      expect(milestonesResult).toEqual({ continue: true });
       expect(personaResult.hookSpecificOutput).not.toContain("不应注入的归档内容");
-      expect(recentResult.hookSpecificOutput).not.toContain("生产 wiring 中的协作经历");
-      expect(recentResult.hookSpecificOutput).not.toContain("不应注入的归档内容");
       expect(sessionsResult.asyncWork).toBeUndefined();
       expect(personaResult.asyncWork).toBeUndefined();
-      expect(recentResult.asyncWork).toBeUndefined();
       expect(digestResult.asyncWork).toBeUndefined();
-      expect(milestonesResult.asyncWork).toBeUndefined();
+      expect(proposalsResult.asyncWork).toBeUndefined();
+      expect(segment1FieldsResult.asyncWork).toBeUndefined();
       expect(readFileSync(join(dataRoot, "diary", "INDEX.md"), "utf8"))
         .toBe(indexBeforeSessionStart);
       expect(fetchImpl).toHaveBeenCalledTimes(2);
@@ -217,7 +214,7 @@ describe("runHookCommand", () => {
     }
   });
 
-  test("production startup stays silent before persona and diary artifacts exist", async () => {
+  test("production startup before persona/diary artifacts: roster renders, digest and proposals stay silent", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-empty-default-hooks-"));
@@ -248,12 +245,15 @@ describe("runHookCommand", () => {
         raw: {},
       } as const;
       const sessionsResult = await handlers.SessionStart!(input);
-      const recentResult = await handlers["SessionStart:recent"]!(input);
       const digestResult = await handlers["SessionStart:digest"]!(input);
+      const proposalsResult = await handlers["SessionStart:proposals"]!(input);
 
-      expect(sessionsResult).toEqual({ continue: true });
-      expect(recentResult).toEqual({ continue: true });
+      // The roster renders on startup (un-gated at review), even on a corpus
+      // with zero segments — its empty line names the remember(create) path.
+      expect(sessionsResult.hookSpecificOutput).toContain("## Segment roster");
       expect(digestResult).toEqual({ continue: true });
+      // Proposals are silent only because none are stored, not source-gated.
+      expect(proposalsResult).toEqual({ continue: true });
     } finally {
       db.close();
       rmSync(dataRoot, { recursive: true, force: true });
@@ -323,29 +323,32 @@ describe("runHookCommand", () => {
   test("routes context section arguments to their dedicated SessionStart handlers", async () => {
     const sessionsHandler = mock(async () => ({ continue: true }));
     const personaHandler = mock(async () => ({ continue: true }));
-    const recentHandler = mock(async () => ({ continue: true }));
     const digestHandler = mock(async () => ({ continue: true }));
-    const milestonesHandler = mock(async () => ({ continue: true }));
+    const proposalsHandler = mock(async () => ({ continue: true }));
     const notesHandler = mock(async () => ({ continue: true }));
+    const segment1FieldsHandler = mock(async () => ({ continue: true }));
+    const segment3MilestonesHandler = mock(async () => ({ continue: true }));
     const run = runHookCommand as unknown as (
       dependencies?: TestHookCommandDependencies,
     ) => Promise<number>;
     const handlers = {
       SessionStart: sessionsHandler,
       "SessionStart:persona": personaHandler,
-      "SessionStart:recent": recentHandler,
       "SessionStart:digest": digestHandler,
-      "SessionStart:milestones": milestonesHandler,
+      "SessionStart:proposals": proposalsHandler,
       "SessionStart:notes": notesHandler,
+      "SessionStart:segment1-fields": segment1FieldsHandler,
+      "SessionStart:segment3-milestones": segment3MilestonesHandler,
     };
 
     for (const [section, expectedHandler] of [
       [undefined, sessionsHandler],
       ["persona", personaHandler],
-      ["recent", recentHandler],
       ["digest", digestHandler],
-      ["milestones", milestonesHandler],
+      ["proposals", proposalsHandler],
       ["notes", notesHandler],
+      ["segment1-fields", segment1FieldsHandler],
+      ["segment3-milestones", segment3MilestonesHandler],
     ] as const) {
       await run({
         env: {},

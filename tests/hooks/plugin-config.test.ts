@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { ATTACHED_SEGMENT_BLOCK_SLOTS } from "../../src/hooks/session-composition";
+
 function readHookConfig(): {
   hooks: Record<
     string,
@@ -48,11 +50,40 @@ test("SessionStart diary backfill also runs when a session resumes", () => {
   expect(config.hooks.SessionStart[0]?.hooks.map((hook) => hook.command)).toEqual([
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context",
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context persona",
-    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context recent",
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context digest",
-    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context milestones",
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context notes",
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context proposals",
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context segment1-fields",
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context segment1-milestones",
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context segment2-fields",
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context segment2-milestones",
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context segment3-fields",
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context segment3-milestones",
   ]);
+});
+
+test("SessionStart's segment-block pool is a FIXED size tied to ATTACHED_SEGMENT_BLOCK_SLOTS — ticket 10's linear-scaling contract", () => {
+  const config = readHookConfig();
+  const commands = config.hooks.SessionStart?.[0]?.hooks.map((hook) => hook.command) ?? [];
+
+  const segmentCommands = commands.filter((command) => /context segment\d+-(fields|milestones)/.test(command));
+  expect(segmentCommands).toHaveLength(ATTACHED_SEGMENT_BLOCK_SLOTS * 2);
+  // Exactly one fields + one milestones command per slot 1..N — no gaps, no
+  // duplicates, and nothing that scales with attachment count at the
+  // hooks.json level (the pool is fixed; overflow attachments get a roster
+  // pointer instead of a new hook command).
+  for (let slot = 1; slot <= ATTACHED_SEGMENT_BLOCK_SLOTS; slot += 1) {
+    expect(commands).toContain(
+      `node \${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js \${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context segment${slot}-fields`,
+    );
+    expect(commands).toContain(
+      `node \${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js \${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context segment${slot}-milestones`,
+    );
+  }
+  // recent/milestones (RecentSessions, diary index, the old single-timeline
+  // milestones section) are gone — ticket 10 requirement 6.
+  expect(commands.some((command) => command.endsWith("context recent"))).toBe(false);
+  expect(commands.some((command) => command.endsWith("context milestones"))).toBe(false);
 });
 
 test("UserPromptSubmit keeps exactly two entries, split the same way", () => {

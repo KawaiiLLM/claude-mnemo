@@ -2,32 +2,21 @@ import type { Database } from "bun:sqlite";
 import { join } from "node:path";
 
 import {
-  getRecentSessions,
   getSessionByContentId,
   setSessionTranscriptPathIfAbsent,
   upsertSession,
-  type SessionRecord,
 } from "../../db/sessions";
-import * as formatModule from "../../mcp/format";
-import { resolveTurnPointers } from "../../mcp/turn-pointers";
-import type {
-  FormattedSession,
-} from "../../mcp/format";
 import {
-  renderMainAgentSessionInjection,
-  splitInsight,
-} from "../session-injection";
+  ATTACHED_SEGMENT_BLOCK_SLOTS,
+  renderSegmentRoster,
+} from "../session-composition";
+import { listAttachedSegmentsByActivity } from "../../db/segments";
 import { resolveEraCutoff } from "../../db/era";
 import { parseMarkdownSections } from "../../shared/markdown-sections";
-import { resolveSessionTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
 import { recoverStrandedTurns } from "../../db/recover-stranded";
-import type { DiaryFileStore } from "../../diary/file-store";
 import type { DreamMemoryStore } from "../../diary/memory-store";
-import {
-  renderSessionStartPersonaInjection,
-  renderSessionStartRecentSessionsInjection,
-} from "../../diary/persona-render";
+import { renderSessionStartPersonaInjection } from "../../diary/persona-render";
 import { markSessionRunStart } from "../../db/session-run";
 import { createRuleStore } from "../../db/rules";
 import { renderRuleDigest } from "../../rules/digest";
@@ -38,8 +27,6 @@ import {
 
 export interface ReadOnlyContextHandlerDependencies {
   db?: Database;
-  fileStore?: Pick<DiaryFileStore, "readIndex"> &
-    Partial<Pick<DiaryFileStore, "dataRoot">>;
   memoryStore?: Pick<
     DreamMemoryStore,
     "dataRoot" | "readInjectionDocuments"
@@ -61,10 +48,8 @@ export interface ContextHandlerDependencies
   eraCutoffEpoch?: number | null;
 }
 
-export type ContextSection = "sessions" | "persona" | "recent" | "digest";
+export type ContextSection = "sessions" | "persona" | "digest";
 export type ReadOnlyContextSection = Exclude<ContextSection, "sessions">;
-
-const EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
 
 function hasDocumentBody(document: string): boolean {
   return parseMarkdownSections(document).some((section) =>
@@ -93,216 +78,6 @@ function hasSessionRunStart(db: Database, sessionId: number): boolean {
   return db.query<{ present: number }, [number]>(
     "SELECT 1 AS present FROM session_run_state WHERE session_db_id = ?",
   ).get(sessionId) !== null;
-}
-
-function resolvePrimarySessionRecord(
-  db: Database,
-  input: NormalizedHookInput,
-  recentSessions: SessionRecord[],
-): SessionRecord | null {
-  const currentSession = input.sessionId
-    ? getSessionByContentId(db, input.sessionId)
-    : null;
-
-  return currentSession ?? recentSessions[0] ?? null;
-}
-
-function buildSessionMetricMap(
-  db: Database,
-  sessionIds: number[],
-): Map<number, { turnCount: number; observationCount: number }> {
-  if (sessionIds.length === 0) {
-    return new Map();
-  }
-
-  const placeholders = sessionIds.map(() => "?").join(", ");
-  const metrics = new Map<number, { turnCount: number; observationCount: number }>();
-
-  for (const sessionId of sessionIds) {
-    metrics.set(sessionId, { turnCount: 0, observationCount: 0 });
-  }
-
-  const turnRows = db
-    .query<{ sessionId: number; count: number }, number[]>(
-      `SELECT session_id AS sessionId, COUNT(*) AS count
-       FROM turns
-       WHERE session_id IN (${placeholders})
-       GROUP BY session_id`,
-    )
-    .all(...sessionIds);
-
-  for (const row of turnRows) {
-    const metric = metrics.get(row.sessionId);
-    if (metric) {
-      metric.turnCount = row.count;
-    }
-  }
-
-  const observationRows = db
-    .query<{ sessionId: number; count: number }, number[]>(
-      `SELECT t.session_id AS sessionId, COUNT(*) AS count
-       FROM observations o
-       JOIN turns t ON t.id = o.turn_id
-       WHERE t.session_id IN (${placeholders})
-         AND o.excluded_from_extraction = 0
-       GROUP BY t.session_id`,
-    )
-    .all(...sessionIds);
-
-  for (const row of observationRows) {
-    const metric = metrics.get(row.sessionId);
-    if (metric) {
-      metric.observationCount = row.count;
-    }
-  }
-
-  return metrics;
-}
-
-// Exported for the reader-seam test: `jsonlPath` is the only field here that is
-// derived rather than copied, and the renderers this feeds (collapsed session
-// list, current-session state) both drop it, so the returned view is the only
-// place the resolution is observable.
-export function buildSessionView(
-  db: Database,
-  session: SessionRecord,
-  metrics: { turnCount: number; observationCount: number } | undefined,
-): FormattedSession {
-  return {
-    id: session.id,
-    title: session.title,
-    project: session.project,
-    createdAtEpoch: session.createdAtEpoch,
-    content: session.content,
-    insight: splitInsight(session.insight),
-    nextSteps: session.nextSteps,
-    decision: resolveTurnPointers(db, session.id, session.decision),
-    done: resolveTurnPointers(db, session.id, session.done),
-    reference: session.reference,
-    turnCount: metrics?.turnCount ?? 0,
-    observationCount: metrics?.observationCount ?? 0,
-    jsonlPath: resolveSessionTranscriptPath(session),
-  };
-}
-
-function classifyTimeGroup(epochSeconds: number, now: Date): string {
-  const target = new Date(epochSeconds * 1000);
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterdayStart = new Date(todayStart.getTime() - 86400_000);
-  const weekStart = new Date(todayStart.getTime() - 6 * 86400_000);
-
-  if (target >= todayStart) {
-    return "Today";
-  }
-
-  if (target >= yesterdayStart) {
-    return "Yesterday";
-  }
-
-  if (target >= weekStart) {
-    return "Last 7 days";
-  }
-
-  return "Earlier";
-}
-
-function isHuskSession(
-  session: SessionRecord,
-  sessionMetrics: Map<number, { turnCount: number; observationCount: number }>,
-): boolean {
-  const untitled = !session.title || session.title.trim().length === 0;
-  const turnCount = sessionMetrics.get(session.id)?.turnCount ?? 0;
-  return untitled && turnCount === 0;
-}
-
-function buildRecentSessionsOutput(
-  db: Database,
-  recentSessions: SessionRecord[],
-  sessionMetrics: Map<number, { turnCount: number; observationCount: number }>,
-  currentSessionId?: number,
-): string[] {
-  const others = recentSessions
-    .filter((session) => session.id !== currentSessionId)
-    .filter((session) => !isHuskSession(session, sessionMetrics))
-    .slice(0, 10);
-
-  if (others.length === 0) {
-    return [];
-  }
-
-  const now = new Date();
-  const lines: string[] = [];
-  let currentGroup = "";
-
-  for (const session of others) {
-    const group = classifyTimeGroup(session.createdAtEpoch, now);
-    if (group !== currentGroup) {
-      currentGroup = group;
-      lines.push(`### ${group}`);
-    }
-
-    lines.push(
-      formatModule.renderNode(
-        { type: "session", value: buildSessionView(db, session, sessionMetrics.get(session.id)) },
-        { depth: "collapsed", truncate: 120, mode: "unified" },
-      ),
-    );
-  }
-
-  return lines;
-}
-
-async function readRecentContext(
-  db: Database,
-  fileStore: ReadOnlyContextHandlerDependencies["fileStore"],
-  input: NormalizedHookInput,
-): Promise<string | undefined> {
-  try {
-    const recentSessions = getRecentSessions(db, {
-      project: input.cwd ?? undefined,
-      limit: 20,
-    });
-    const currentSession = input.sessionId
-      ? getSessionByContentId(db, input.sessionId)
-      : null;
-    const sessionMetrics = buildSessionMetricMap(
-      db,
-      recentSessions.map((session) => session.id),
-    );
-    const recentSessionDocument = buildRecentSessionsOutput(
-      db,
-      recentSessions,
-      sessionMetrics,
-      currentSession?.id,
-    ).join("\n");
-
-    let diaryIndex = "";
-    if (fileStore) {
-      try {
-        diaryIndex = new TextDecoder("utf-8", { fatal: true })
-          .decode(await fileStore.readIndex());
-      } catch {
-        // Recent sessions remain useful before the first diary index exists.
-      }
-    }
-
-    if (recentSessionDocument.trim() === "" && !hasDocumentBody(diaryIndex)) {
-      return undefined;
-    }
-
-    return renderSessionStartRecentSessionsInjection({
-      recentSessions: recentSessionDocument,
-      diaryIndex,
-      paths: {
-        recentSessions: "recall()",
-        diaryIndex: fileStore?.dataRoot
-          ? join(fileStore.dataRoot, "diary", "INDEX.md")
-          : "diary/INDEX.md",
-      },
-    });
-  } catch {
-    return undefined;
-  }
 }
 
 function readRuleDigestContext(
@@ -361,39 +136,28 @@ function buildContextOutput(
     );
   }
 
-  if (input.source !== "resume" && input.source !== "compact") {
-    return undefined;
-  }
+  // Ticket 10 (ADR-0006): the bare `context` command's body is the segment
+  // roster now — the session's own seven semantic fields retired in 0.11.x
+  // (ticket 09), so there is no more per-session state to render here.
+  // Deliberately NOT source-gated (review overturned the implementer's
+  // resume|compact gate): the roster's whole job is letting a session see
+  // every segment's title + facets so it can pick what to attach, and the
+  // session with nothing attached yet — a cold start — is its primary
+  // audience. The attached-segment blocks (context-segments.ts) DO keep a
+  // resume|compact gate: a cold session cannot have attachments to render.
+  const overflowAttachedSegmentIds = currentSession
+    ? new Set(
+        listAttachedSegmentsByActivity(
+          db,
+          currentSession.id,
+          Number.MAX_SAFE_INTEGER,
+        )
+          .slice(ATTACHED_SEGMENT_BLOCK_SLOTS)
+          .map((segment) => segment.id),
+      )
+    : undefined;
 
-  const recentSessions = getRecentSessions(db, {
-    project: input.cwd ?? undefined,
-    limit: 20,
-  });
-  const primarySessionRecord = resolvePrimarySessionRecord(
-    db,
-    input,
-    recentSessions,
-  );
-
-  if (!primarySessionRecord) {
-    return EMPTY_CONTEXT_FALLBACK;
-  }
-
-  const sessionIds = Array.from(
-    new Set([...recentSessions.map((session) => session.id), primarySessionRecord.id]),
-  );
-  const sessionMetrics = buildSessionMetricMap(db, sessionIds);
-  const primaryTurnCount = sessionMetrics.get(primarySessionRecord.id)?.turnCount ?? 0;
-
-  // Ticket 11 (spec A4): assembled by the shared entry point, which the
-  // settlement subagent calls too — see hooks/session-injection.ts for why a
-  // second assembly here is the defect rather than a convenience. A husk
-  // session (no turns yet) has no state worth a heading, and passes `null`.
-  return renderMainAgentSessionInjection(db, {
-    session: primaryTurnCount > 0 ? primarySessionRecord : null,
-    currentSessionId: input.sessionId ? primarySessionRecord.id : undefined,
-    includeCorpusHeader: true,
-  });
+  return renderSegmentRoster(db, { eraCutoffEpoch, overflowAttachedSegmentIds });
 }
 
 export function createReadOnlyContextHandler(
@@ -418,18 +182,10 @@ export function createReadOnlyContextHandler(
     if (!dependencies.db) {
       return { continue: true };
     }
-    if (section === "digest") {
-      const hookSpecificOutput = readRuleDigestContext(
-        dependencies.db,
-        _input,
-      );
-      return hookSpecificOutput
-        ? { continue: true, hookSpecificOutput }
-        : { continue: true };
-    }
-    const hookSpecificOutput = await readRecentContext(
+    // Only "digest" is left in this union (ticket 10 removed "recent" —
+    // RecentSessions and the diary index no longer render at SessionStart).
+    const hookSpecificOutput = readRuleDigestContext(
       dependencies.db,
-      dependencies.fileStore,
       _input,
     );
     return hookSpecificOutput

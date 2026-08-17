@@ -1318,3 +1318,88 @@ export function listSegmentsByActivity(db: Database, limit: number): SegmentReco
     .map((row) => mapSegmentRow(row))
     .filter((segment): segment is SegmentRecord => segment !== null);
 }
+
+/**
+ * The SessionStart roster's candidate set (ticket 10): live segments only,
+ * activity-ordered like `listSegmentsByActivity`, with the topic name joined
+ * so the roster can group by it without a second query per row.
+ *
+ * "Live" excludes the frozen pre-redesign rows ADR-0005 counted at 47 and
+ * ruled "absent from the roster". There is no dedicated era column for this:
+ * no writer in this codebase ever moves a segment created under this
+ * redesign off `status = 'open'` (`createSegment` always defaults to `open`
+ * and no close verb exists yet — ticket 08's own follow-up note), so
+ * `status != 'open'` today uniquely identifies those legacy rows. This reads
+ * the same boolean `applySegmentWrites`' "frozen" guard already uses for a
+ * different purpose (refusing writes) — same fact, read here for listing.
+ */
+export function listLiveSegmentsByActivity(db: Database, limit: number): SegmentWithTopic[] {
+  if (limit <= 0) {
+    return [];
+  }
+  return db
+    .query<SegmentRow & { topicName: string | null }, [number]>(
+      `SELECT ${JOINED_SEGMENT_COLUMNS}, tp.name AS topicName
+       FROM segments s
+       LEFT JOIN topics tp ON tp.id = s.topic_id
+       LEFT JOIN (
+         SELECT sm.segment_id AS segmentId, MAX(t.created_at_epoch) AS lastMemberEpoch
+         FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         GROUP BY sm.segment_id
+       ) activity ON activity.segmentId = s.id
+       WHERE s.status = 'open'
+       ORDER BY MAX(s.updated_at_epoch, COALESCE(activity.lastMemberEpoch, 0)) DESC, s.id DESC
+       LIMIT ?`,
+    )
+    .all(limit)
+    .flatMap((row) => {
+      const segment = mapSegmentRow(row);
+      return segment ? [{ segment, topicName: row.topicName }] : [];
+    });
+}
+
+/** Same status filter as `listLiveSegmentsByActivity`, unpaged — the roster's overflow count. */
+export function countLiveSegments(db: Database): number {
+  return (
+    db
+      .query<{ count: number }, []>(
+        `SELECT COUNT(*) AS count FROM segments WHERE status = 'open'`,
+      )
+      .get()?.count ?? 0
+  );
+}
+
+/**
+ * The session's attached segments, activity-ordered (ticket 10) — which
+ * attachments fill the fixed SessionStart block-slot pool when the session
+ * has attached more segments than the pool has slots for. Unlike the
+ * roster this is NOT status-filtered: an attachment is loaded working
+ * memory regardless of the segment's status — a session that attached a
+ * segment before it froze still gets its fields and milestones rendered.
+ */
+export function listAttachedSegmentsByActivity(
+  db: Database,
+  sessionId: number,
+  limit: number,
+): SegmentRecord[] {
+  if (limit <= 0) {
+    return [];
+  }
+  return db
+    .query<SegmentRow, [number, number]>(
+      `SELECT ${JOINED_SEGMENT_COLUMNS} FROM segments s
+       JOIN segment_attachments sa ON sa.segment_id = s.id AND sa.session_id = ?
+       LEFT JOIN (
+         SELECT sm.segment_id AS segmentId, MAX(t.created_at_epoch) AS lastMemberEpoch
+         FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         GROUP BY sm.segment_id
+       ) activity ON activity.segmentId = s.id
+       ORDER BY MAX(s.updated_at_epoch, COALESCE(activity.lastMemberEpoch, 0)) DESC, s.id DESC
+       LIMIT ?`,
+    )
+    .all(sessionId, limit)
+    .map((row) => mapSegmentRow(row))
+    .filter((segment): segment is SegmentRecord => segment !== null);
+}
