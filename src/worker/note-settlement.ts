@@ -430,7 +430,7 @@ export function createNoteSettlementScheduler(
 
   async function runTrigger(
     sessionDbId: number,
-    trigger: Exclude<NoteSettlementTrigger, "residual">,
+    trigger: Exclude<NoteSettlementTrigger, "residual" | "backfill">,
   ): Promise<NoteSettlementPassResult> {
     // The era is the switch: with no cutoff every turn is legacy, and a legacy
     // turn is settled by nothing. `settlementEnabled` only stops a live era.

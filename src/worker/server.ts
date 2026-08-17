@@ -12,6 +12,7 @@ import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 
 import { BUILD_ID } from "../shared/build-id";
+import { isBuildStaleForDatabase } from "../db/build-state";
 import { createDatabase, runWriteTransaction } from "../db/database";
 import { createDiaryStateStore } from "../db/diary-state";
 import { contentDateAt } from "../diary/calendar";
@@ -33,6 +34,11 @@ import {
 import { ensureRecordedEraCutoff, resolveEraCutoff } from "../db/era";
 import { initializeDatabase, migrateTurnCitationsToEdges } from "../db/schema";
 import { runTranscriptPathBackfill } from "../db/transcript-path-backfill";
+import {
+  enqueueBackfillNoteSettlementJob,
+  type NoteSettlementInsertRefusal,
+  type NoteSettlementJob,
+} from "../db/note-settlement";
 import {
   createNoteSettlementScheduler,
   type NoteSettlementDispatch,
@@ -119,6 +125,11 @@ export interface WorkerCoreDeps {
   noteSettlementDispatchImpl?: NoteSettlementDispatch;
   /** Forces the record-only graceful-exit window in tests. */
   isGracefulExitImpl?: () => boolean;
+  /**
+   * True once a DIFFERENT build has migrated this database since this worker
+   * booted (db/build-state.ts). Testing seam; the default asks the database.
+   */
+  isStaleBuildImpl?: () => boolean;
   logger?: Pick<Console, "warn" | "error">;
   config?: MnemoConfig;
 }
@@ -137,6 +148,7 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
     transcriptPath?: string | null,
   ) => Promise<void>;
   handleDreamImpl?: (date: unknown) => ManualDreamResult;
+  handleSettleImpl?: (request: ManualSettleRequest) => ManualSettleResult;
   registerSessionEnvImpl?: (
     contentSessionId: string,
     sessionDbId: number | undefined,
@@ -197,6 +209,63 @@ export type ManualDreamResult =
   | { ok: true; date: string }
   | { ok: false; status: number; message: string };
 
+/**
+ * Result of a manual `POST /settle` backfill: either the one job it created, or
+ * a NAMED refusal plus the status the fetch handler echoes.
+ *
+ * The reason is a stable identifier rather than only prose because this is an
+ * operator surface driven from a shell: "nothing happened" is not something a
+ * human can act on, and each refusal here has a different repair (widen the
+ * range, fix the inversion, look at the job that already exists).
+ */
+export type ManualSettleRefusal =
+  | NoteSettlementInsertRefusal
+  | "invalid_payload"
+  | "unknown_session"
+  | "settlement_disabled"
+  | "no_era_cutoff";
+
+export type ManualSettleResult =
+  | { ok: true; job: NoteSettlementJob }
+  | { ok: false; status: number; reason: ManualSettleRefusal; message: string };
+
+/** The window `POST /settle` names, before anything has been validated. */
+export interface ManualSettleRequest {
+  sessionId: unknown;
+  windowStart: unknown;
+  windowEnd: unknown;
+}
+
+const MANUAL_SETTLE_REFUSAL_STATUS: Record<
+  NoteSettlementInsertRefusal,
+  number
+> = {
+  // Not a range at all, and not a range any state of the database could make
+  // legal — the payload itself is wrong.
+  inverted_range: 400,
+  // The one bound a backfill may never cross: pre-cutoff turns were graded
+  // under legacy semantics that must not be mixed into a post-era window.
+  below_era_floor: 409,
+  // Unreachable while the exemption holds; reported rather than mapped away so
+  // a regression names itself instead of arriving as a plausible other reason.
+  below_window_floor: 409,
+  // UNIQUE(session, window_start, 'backfill') already holds this window.
+  duplicate_window: 409,
+};
+
+const MANUAL_SETTLE_REFUSAL_MESSAGE: Record<
+  NoteSettlementInsertRefusal,
+  string
+> = {
+  inverted_range: "window_end is before window_start",
+  below_era_floor:
+    "window_start is at or below the session's last pre-era prompt number",
+  below_window_floor:
+    "window_start is below the monotonic settlement floor, which a backfill should be exempt from",
+  duplicate_window:
+    "a backfill job for this session and window_start already exists",
+};
+
 export interface WorkerCore {
   recoverFromCrash(): void;
   scanAndDrainQueue(sessionFilter?: number): Promise<void>;
@@ -211,6 +280,16 @@ export interface WorkerCore {
   noteSettlement: NoteSettlementScheduler;
   handleCompact(sessionDbId: number, transcriptPath?: string | null): Promise<void>;
   triggerManualDream(date: unknown): ManualDreamResult;
+  /**
+   * Enqueue ONE explicit backfill window (`POST /settle`). Deliberately an
+   * operator surface and not an MCP tool: an MCP tool would hand the main agent
+   * a lever over the grading of its own record.
+   *
+   * It enqueues and stops there — no planning, no range guessing, no dispatch of
+   * its own. The row is picked up by the existing leak/claim path at the next
+   * content event, exactly like a `sessionend` job.
+   */
+  settleBackfillWindow(request: ManualSettleRequest): ManualSettleResult;
   /**
    * Enter the record-only window: from here settlement records jobs and
    * dispatches nothing, because anything started now would be killed before it
@@ -342,6 +421,13 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   // Latched by the shutdown path. Inside this window settlement records jobs and
   // dispatches nothing.
   let gracefulExitWindow = false;
+  // Wall clock on purpose, and captured once: the stamp this is compared against
+  // is written with the same clock, and an injected `now` is a test's fiction
+  // that has no bearing on when another process migrated the database.
+  const workerBootEpoch = Math.floor(Date.now() / 1000);
+  const isStaleBuild =
+    deps.isStaleBuildImpl ??
+    (() => isBuildStaleForDatabase(deps.db, BUILD_ID, workerBootEpoch));
   const noteSettlement: NoteSettlementScheduler = createNoteSettlementScheduler({
     db: deps.db,
     config,
@@ -351,7 +437,15 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     // "Closed" is derived, never stored: a session counts as live exactly while
     // its env registration is present, which is worker memory, not a column.
     activeSessionIds: () => contentSessionIdByDbId.keys(),
-    isGracefulExit: deps.isGracefulExitImpl ?? (() => gracefulExitWindow),
+    // Two reasons to claim nothing, and one latch for both (ticket 08). A stale
+    // build is the graceful-exit window arriving from the outside: this process
+    // is about to go away either way, and until it does, every claim it makes
+    // runs the PREVIOUS release's SQL against a schema somebody else migrated.
+    // The latch already gates before claiming, refunds the attempt on a claim
+    // that raced it, leaves the job durable and blocks the leak outright — which
+    // is exactly what a stale build owes the work it must not touch.
+    isGracefulExit:
+      deps.isGracefulExitImpl ?? (() => gracefulExitWindow || isStaleBuild()),
     logger,
   });
 
@@ -818,6 +912,72 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     beginGracefulExit(): void {
       gracefulExitWindow = true;
     },
+    settleBackfillWindow(request: ManualSettleRequest): ManualSettleResult {
+      const { sessionId, windowStart, windowEnd } = request;
+      if (
+        !Number.isInteger(sessionId) ||
+        !Number.isInteger(windowStart) ||
+        !Number.isInteger(windowEnd) ||
+        (windowStart as number) < 1
+      ) {
+        return {
+          ok: false,
+          status: 400,
+          reason: "invalid_payload",
+          message:
+            "session_id, window_start and window_end must be integers, and window_start must be at least 1",
+        };
+      }
+
+      // The same two gates every settlement path checks, and refused BEFORE the
+      // insert for the same reason the dream refuses before enqueueing: a job
+      // recorded into a system that cannot dispatch it would burn its three
+      // attempts on a payload that is not there and go terminal.
+      const eraCutoffEpoch = config.eraCutoffEpoch ?? resolveEraCutoff(deps.db);
+      if (!config.settlementEnabled) {
+        return {
+          ok: false,
+          status: 503,
+          reason: "settlement_disabled",
+          message: "note settlement is disabled (set settlementEnabled to true)",
+        };
+      }
+      if (eraCutoffEpoch === null) {
+        return {
+          ok: false,
+          status: 503,
+          reason: "no_era_cutoff",
+          message: "no era cutoff is recorded; every turn is legacy",
+        };
+      }
+
+      if (!getSession(deps.db, sessionId as number)) {
+        return {
+          ok: false,
+          status: 404,
+          reason: "unknown_session",
+          message: `no session ${sessionId}`,
+        };
+      }
+
+      const result = enqueueBackfillNoteSettlementJob(
+        deps.db,
+        sessionId as number,
+        windowStart as number,
+        windowEnd as number,
+        now(),
+        eraCutoffEpoch,
+      );
+      if (result.ok) {
+        return { ok: true, job: result.job };
+      }
+      return {
+        ok: false,
+        status: MANUAL_SETTLE_REFUSAL_STATUS[result.reason],
+        reason: result.reason,
+        message: MANUAL_SETTLE_REFUSAL_MESSAGE[result.reason],
+      };
+    },
     triggerManualDream(date: unknown): ManualDreamResult {
       // Reject before any DB write: a disabled dream must leave no queued day
       // behind that a later re-enable would silently run.
@@ -1015,6 +1175,15 @@ export function createWorkerFetchHandler(
     deps.handleDreamImpl ??
     runtime?.triggerManualDream ??
     (() => ({ ok: false, status: 503, message: "dream runtime unavailable" }));
+  const handleSettleImpl: (request: ManualSettleRequest) => ManualSettleResult =
+    deps.handleSettleImpl ??
+    runtime?.settleBackfillWindow ??
+    (() => ({
+      ok: false,
+      status: 503,
+      reason: "settlement_disabled",
+      message: "settlement runtime unavailable",
+    }));
   const registerSessionEnvImpl =
     deps.registerSessionEnvImpl ?? runtime?.registerSessionEnv;
   const clearSessionEnvImpl =
@@ -1234,6 +1403,31 @@ export function createWorkerFetchHandler(
         return new Response(null, { status: 200 });
       }
 
+      // Operator-only, by construction: settlement's other entry points are all
+      // content events, and re-grading a stretch of history is a decision a
+      // human makes about the record — not one the agent being recorded gets to
+      // make about itself. This never plans and never guesses a range; the
+      // caller states one, and exactly one job comes of it.
+      if (req.method === "POST" && url.pathname === "/settle") {
+        const payload = (await req.json()) as {
+          session_id?: unknown;
+          window_start?: unknown;
+          window_end?: unknown;
+        };
+        const result = handleSettleImpl({
+          sessionId: payload.session_id,
+          windowStart: payload.window_start,
+          windowEnd: payload.window_end,
+        });
+        if (!result.ok) {
+          return Response.json(
+            { ok: false, reason: result.reason, message: result.message },
+            { status: result.status },
+          );
+        }
+        return Response.json({ ok: true, job: result.job });
+      }
+
       if (req.method === "POST" && url.pathname === "/dream") {
         const payload = (await req.json()) as { date?: unknown };
         const result = handleDreamImpl(payload.date);
@@ -1375,6 +1569,82 @@ export async function checkForLastAgentShutdown(
   }
 }
 
+/**
+ * Get off a schema somebody else migrated (ticket 08).
+ *
+ * Same shape as `checkForLastAgentShutdown` with one guard deliberately absent:
+ * there is no `hasLiveSessions()` check. Waiting for the user to close the
+ * session would leave a stale worker resident for hours, and the whole point of
+ * leaving is that this process can no longer be trusted with a write. Exiting is
+ * also the repair: the next hook event lazily starts a worker from whatever
+ * version the hook itself resolves to, which is by construction the build that
+ * migrated the database.
+ *
+ * Nothing is torn out from under itself. New claims stopped at the settlement
+ * latch the moment this went stale, so the guards below describe work that is
+ * already in flight and is left to finish; each watchdog beat re-asks, and the
+ * exit happens on the first beat where the process is genuinely idle.
+ */
+export async function checkForStaleBuildShutdown(
+  state: WorkerServerState,
+  deps: WorkerServerDeps = {},
+): Promise<boolean> {
+  const isStaleBuild = deps.isStaleBuildImpl ?? (() => false);
+  if (!isStaleBuild()) {
+    return false;
+  }
+
+  const isDreamRunning = deps.isDreamRunningImpl ?? (() => false);
+
+  if (state.shuttingDown || state.activeRequests > 0) {
+    return false;
+  }
+
+  const dreamWasRunning = isDreamRunning();
+  const serverWork = state.globalScanInFlight;
+  const coreWork = deps.getGlobalScanInFlightImpl?.() ?? null;
+
+  // Same division as the last-agent path: ordinary queue work is a hard guard
+  // and gets the next beat, a dream is the sole exception because its query has
+  // to be aborted before the global drain carrying it can ever settle.
+  if (!dreamWasRunning && (serverWork || coreWork)) {
+    return false;
+  }
+  if (dreamWasRunning && !deps.abortDreamImpl) {
+    return false;
+  }
+
+  state.shuttingDown = true;
+  try {
+    if (dreamWasRunning) {
+      await deps.abortDreamImpl?.();
+      await Promise.all([
+        serverWork?.catch(() => {}),
+        coreWork?.catch(() => {}),
+      ]);
+    }
+
+    // Work may have arrived while the dream/global drain unwound. Staleness is
+    // not re-asked: it is monotone — the foreign stamp that caused it cannot be
+    // taken back — so only the guards that can still change are re-read.
+    if (
+      state.activeRequests > 0 ||
+      state.globalScanInFlight !== null ||
+      (deps.getGlobalScanInFlightImpl?.() ?? null) !== null ||
+      isDreamRunning()
+    ) {
+      state.shuttingDown = false;
+      return false;
+    }
+
+    await createShutdownCleanup(deps)();
+    return true;
+  } catch (error) {
+    state.shuttingDown = false;
+    throw error;
+  }
+}
+
 export function registerShutdownCleanup(deps: WorkerServerDeps = {}): void {
   const processImpl = deps.processImpl ?? process;
   const cleanup = createShutdownCleanup(deps);
@@ -1395,6 +1665,13 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   const startingPath = deps.startingPath ?? WORKER_STARTING_PATH;
   const unlinkSyncImpl = deps.unlinkSyncImpl ?? unlinkSync;
   const db = deps.db ?? createDatabase();
+  // Before `initializeDatabase` below, so the window this covers starts as early
+  // as it can. Our OWN stamp can never make us stale, so recording it a moment
+  // after this line is not a self-accusation (db/build-state.ts).
+  const workerBootEpoch = Math.floor(Date.now() / 1000);
+  const isStaleBuildImpl =
+    deps.isStaleBuildImpl ??
+    (() => isBuildStaleForDatabase(db, BUILD_ID, workerBootEpoch));
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
   const config = deps.config ?? loadConfig();
   const sessionEnvRegistry = new Map<string, CapturedSessionEnv>();
@@ -1459,6 +1736,10 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     workerEnv: env,
     sessionEnvRegistry,
     noteSettlementDispatchImpl,
+    // Shared with the lifecycle deps below rather than left to the core's own
+    // default, so both halves of this check — the claim latch and the exit —
+    // answer from one boot epoch and can never disagree about being stale.
+    isStaleBuildImpl,
     now: deps.now,
     nowMs: deps.nowMs,
     setTimeoutImpl: deps.setTimeoutImpl,
@@ -1481,6 +1762,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     hasLiveSessionsImpl: () => sessionEnvRegistry.size > 0,
     getGlobalScanInFlightImpl: core.getGlobalScanInFlight,
     isDreamRunningImpl: () => diaryRuntime?.isDreamRunning?.() ?? false,
+    isStaleBuildImpl,
     abortDreamImpl: async () => {
       await diaryRuntime?.abortDream?.("shutdown");
     },
@@ -1519,8 +1801,10 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
       clearSessionEnvImpl: core.clearSessionEnv,
       hardExitTimerImpl: hardExitTimer,
       // Injecting core pieces above leaves the fetch factory's internal
-      // runtime unset, so /dream must be wired explicitly or it 503s.
+      // runtime unset, so /dream and /settle must be wired explicitly or they
+      // 503s.
       handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream,
+      handleSettleImpl: deps.handleSettleImpl ?? core.settleBackfillWindow,
     },
     serverState,
   );
@@ -1570,6 +1854,12 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
     void (async () => {
+      // Stale first: it is the only one of the three that must not wait for the
+      // user to close a session, and once it fires the other two have nothing
+      // left to decide.
+      if (await checkForStaleBuildShutdown(serverState, lifecycleDeps)) {
+        return;
+      }
       const didShutdown = await checkForLastAgentShutdown(
         serverState,
         lifecycleDeps,

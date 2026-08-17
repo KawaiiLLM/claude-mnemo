@@ -34,6 +34,7 @@ __export(server_exports, {
   acquireWorkerSingleton: () => acquireWorkerSingleton,
   checkForIdleWorkerShutdown: () => checkForIdleWorkerShutdown,
   checkForLastAgentShutdown: () => checkForLastAgentShutdown,
+  checkForStaleBuildShutdown: () => checkForStaleBuildShutdown,
   createHardExitTimer: () => createHardExitTimer,
   createWorkerCore: () => createWorkerCore,
   createWorkerFetchHandler: () => createWorkerFetchHandler,
@@ -50,7 +51,34 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.11.1-msw7mnas" : "dev";
+var BUILD_ID = true ? "0.11.2-mswtfh3c" : "dev";
+
+// src/db/build-state.ts
+function readInitializerBuild(db) {
+  const row = db.query(
+    `SELECT build_id AS buildId, recorded_at_epoch AS recordedAtEpoch
+       FROM build_state
+       WHERE id = 1`
+  ).get();
+  return row && typeof row.buildId === "string" ? row : null;
+}
+function recordInitializerBuild(db, buildId, nowEpoch) {
+  if (readInitializerBuild(db)?.buildId === buildId) {
+    return;
+  }
+  db.query(
+    `INSERT INTO build_state (id, build_id, recorded_at_epoch)
+     VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET build_id = ?, recorded_at_epoch = ?`
+  ).run(buildId, nowEpoch, buildId, nowEpoch);
+}
+function isBuildStaleForDatabase(db, buildId, sinceEpoch) {
+  const recorded = readInitializerBuild(db);
+  if (!recorded || recorded.buildId === buildId) {
+    return false;
+  }
+  return recorded.recordedAtEpoch >= sinceEpoch;
+}
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -3274,8 +3302,8 @@ var NOTE_DEBT_INDEX_DDL = `
   CREATE INDEX IF NOT EXISTS idx_note_debt_open
     ON note_debt(session_id, status, prompt_number);
 `;
-var NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
-  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
+var noteSettlementJobsTableDdl = (tableName) => `
+  CREATE TABLE IF NOT EXISTS ${tableName} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
@@ -3283,8 +3311,13 @@ var NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
     -- settles the same set the first attempt saw.
     window_start INTEGER NOT NULL,
     window_end INTEGER NOT NULL,
+    -- 'backfill' is the operator's explicit re-settlement of an already
+    -- covered range (db/note-settlement.ts): the only value exempt from the
+    -- monotonic window floor, and never produced by any automatic planner.
     trigger_type TEXT NOT NULL CHECK (
-      trigger_type IN ('consecutive', 'compact', 'residual', 'sessionend')
+      trigger_type IN (
+        'consecutive', 'compact', 'residual', 'sessionend', 'backfill'
+      )
     ),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (
       status IN ('pending', 'claimed', 'done', 'failed')
@@ -3305,6 +3338,9 @@ var NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
     UNIQUE(session_id, window_start, trigger_type)
   );
 `;
+var NOTE_SETTLEMENT_JOBS_TABLE_DDL = noteSettlementJobsTableDdl(
+  "note_settlement_jobs"
+);
 var NOTE_SETTLEMENT_JOBS_INDEX_DDL = `
   CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
     ON note_settlement_jobs(session_id, status, window_start);
@@ -3781,6 +3817,18 @@ var SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS era_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     cutoff_epoch INTEGER NOT NULL,
+    recorded_at_epoch INTEGER NOT NULL
+  );
+
+  -- Which build last migrated this database (db/build-state.ts). One row,
+  -- rewritten whenever a different build runs the migrations. The resident
+  -- worker cannot see a newer release from its own side \u2014 a plugin update
+  -- installs into a new directory, so its plugin root, its bundle path and that
+  -- file's mtime never move \u2014 and this row is the one thing both builds touch,
+  -- so it is how the worker learns the schema changed underneath it.
+  CREATE TABLE IF NOT EXISTS build_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    build_id TEXT NOT NULL,
     recorded_at_epoch INTEGER NOT NULL
   );
 
@@ -4264,7 +4312,7 @@ function initializeSchema(db) {
   ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
   retireLegacyPendingNoteDebts(db);
-  ensureNoteSettlementSessionEndTrigger(db);
+  ensureNoteSettlementTriggerVocabulary(db);
   dropLegacyMemoriesTable(db);
   ensureTurnTypeMultiValueColumn(db);
   stripRetiredTopicTagNamespace(db);
@@ -4371,35 +4419,46 @@ function noteSettlementTriggerVocabularyIsStale(db) {
     `SELECT sql FROM sqlite_master
          WHERE type = 'table' AND name = 'note_settlement_jobs'`
   ).get()?.sql ?? null;
-  return storedDdl !== null && !storedDdl.includes("'sessionend'");
+  return storedDdl !== null && !storedDdl.includes("'backfill'");
 }
-function ensureNoteSettlementSessionEndTrigger(db) {
+function ensureNoteSettlementTriggerVocabulary(db) {
   if (!noteSettlementTriggerVocabularyIsStale(db)) {
     return;
   }
-  runWriteTransaction(db, () => {
-    if (!noteSettlementTriggerVocabularyIsStale(db)) {
-      return;
-    }
-    db.exec(
-      "ALTER TABLE note_settlement_jobs RENAME TO note_settlement_jobs_pre_sessionend"
-    );
-    db.exec(NOTE_SETTLEMENT_JOBS_TABLE_DDL);
-    db.exec(
-      `INSERT INTO note_settlement_jobs (
-         id, session_id, window_start, window_end, trigger_type, status,
-         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
-         last_error, created_at_epoch, updated_at_epoch
-       )
-       SELECT
-         id, session_id, window_start, window_end, trigger_type, status,
-         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
-         last_error, created_at_epoch, updated_at_epoch
-       FROM note_settlement_jobs_pre_sessionend`
-    );
-    db.exec("DROP TABLE note_settlement_jobs_pre_sessionend");
-    db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
-  });
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!noteSettlementTriggerVocabularyIsStale(db)) {
+        return;
+      }
+      db.exec(noteSettlementJobsTableDdl("note_settlement_jobs_trigger_rebuild"));
+      db.exec(
+        `INSERT INTO note_settlement_jobs_trigger_rebuild (
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error, created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error, created_at_epoch, updated_at_epoch
+         FROM note_settlement_jobs`
+      );
+      db.exec("DROP TABLE note_settlement_jobs");
+      db.exec(
+        "ALTER TABLE note_settlement_jobs_trigger_rebuild RENAME TO note_settlement_jobs"
+      );
+      db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `note_settlement_jobs rebuild left ${violations.length} foreign key violation(s) while widening trigger_type: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
 }
 function ensureObservationExtractionExclusionColumn(db) {
   addColumnIfMissing(
@@ -5078,6 +5137,7 @@ function initializeDatabase(db) {
     resetSchema(db);
   }
   initializeSchema(db);
+  recordInitializerBuild(db, BUILD_ID, Math.floor(Date.now() / 1e3));
   if (shouldRebuildSearchIndex(db)) {
     rebuildSearchIndex(db);
   }
@@ -5484,7 +5544,7 @@ function getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch) {
 function getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch) {
   const highestEnqueued = db.query(
     `SELECT MAX(window_end) AS windowEnd FROM note_settlement_jobs
-         WHERE session_id = ?`
+         WHERE session_id = ? AND trigger_type != 'backfill'`
   ).get(sessionId)?.windowEnd ?? 0;
   return Math.max(
     getNoteSettlementCursor(db, sessionId),
@@ -5558,11 +5618,14 @@ function planNoteSettlementWindows(db, sessionId, trigger, options) {
   return plans;
 }
 function insertJob(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch, eraCutoffEpoch) {
-  if (windowStart < getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch)) {
-    return null;
-  }
   if (windowEnd < windowStart) {
-    return null;
+    return { ok: false, reason: "inverted_range" };
+  }
+  if (windowStart <= getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch)) {
+    return { ok: false, reason: "below_era_floor" };
+  }
+  if (triggerType !== "backfill" && windowStart < getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch)) {
+    return { ok: false, reason: "below_window_floor" };
   }
   const job = db.query(
     `INSERT OR IGNORE INTO note_settlement_jobs (
@@ -5572,15 +5635,18 @@ function insertJob(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch,
          ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
          RETURNING${JOB_COLUMNS}`
   ).get(sessionId, windowStart, windowEnd, triggerType, nowEpoch, nowEpoch) ?? null;
-  if (job) {
+  if (job && triggerType !== "backfill") {
     ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch);
   }
-  return job;
+  if (!job) {
+    return { ok: false, reason: "duplicate_window" };
+  }
+  return { ok: true, job };
 }
 function insertJobs(db, plans, nowEpoch, eraCutoffEpoch) {
   const created = [];
   for (const plan of plans) {
-    const job = insertJob(
+    const result = insertJob(
       db,
       plan.sessionId,
       plan.windowStart,
@@ -5589,8 +5655,8 @@ function insertJobs(db, plans, nowEpoch, eraCutoffEpoch) {
       nowEpoch,
       eraCutoffEpoch
     );
-    if (job) {
-      created.push(job);
+    if (result.ok) {
+      created.push(result.job);
     }
   }
   return created;
@@ -5635,9 +5701,13 @@ function listResidualNoteSettlementCandidates(db, options) {
                 FROM note_settlement_cursors c WHERE c.session_id = s.id),
                0
              ),
+             -- Excluding backfill for the reason given at
+             -- getNoteSettlementWindowStart: this is the same derived bound,
+             -- and the two must not disagree about where a session's next
+             -- automatic window begins.
              COALESCE(
                (SELECT MAX(j.window_end) FROM note_settlement_jobs j
-                WHERE j.session_id = s.id),
+                WHERE j.session_id = s.id AND j.trigger_type != 'backfill'),
                0
              ),
              COALESCE(
@@ -5655,14 +5725,28 @@ function listResidualNoteSettlementCandidates(db, options) {
   ).all(options.eraCutoffEpoch, idleCutoffEpoch, minWindowTurns, scanLimit).filter((row) => !options.activeSessionIds.has(row.sessionId)).slice(0, limit);
 }
 function enqueueResidualNoteSettlementJob(db, candidate, nowEpoch, eraCutoffEpoch) {
-  return runWriteTransaction(
-    db,
-    () => insertJob(
+  return runWriteTransaction(db, () => {
+    const result = insertJob(
       db,
       candidate.sessionId,
       candidate.windowStart,
       candidate.windowEnd,
       "residual",
+      nowEpoch,
+      eraCutoffEpoch
+    );
+    return result.ok ? result.job : null;
+  });
+}
+function enqueueBackfillNoteSettlementJob(db, sessionId, windowStart, windowEnd, nowEpoch, eraCutoffEpoch) {
+  return runWriteTransaction(
+    db,
+    () => insertJob(
+      db,
+      sessionId,
+      windowStart,
+      windowEnd,
+      "backfill",
       nowEpoch,
       eraCutoffEpoch
     )
@@ -5823,7 +5907,8 @@ function advanceNoteSettlementCursor(db, sessionId, nowEpoch, maxAttempts = NOTE
   const rows = db.query(
     `SELECT window_end AS windowEnd, status, attempts
        FROM note_settlement_jobs
-       WHERE session_id = ? ORDER BY window_start ASC, id ASC`
+       WHERE session_id = ? AND trigger_type != 'backfill'
+       ORDER BY window_start ASC, id ASC`
   ).all(sessionId);
   let consecutive = 0;
   for (const row of rows) {
@@ -49160,7 +49245,7 @@ function createNoteSettlementSdkQuery(options) {
     const stopHook = createSettlementStopHook({ engine: staging });
     const server = createSdkMcpServerImpl({
       name: "mnemo",
-      version: "0.11.1",
+      version: "0.11.2",
       tools: [
         toolImpl(
           "recall",
@@ -51815,7 +51900,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.11.1",
+        version: "0.11.2",
         tools: [
           toolImpl(
             "recall",
@@ -53516,6 +53601,25 @@ var WORKER_PORT = 37778;
 var STARTING_STALE_MS = 1e4;
 var WATCHDOG_INTERVAL_MS = 1e4;
 var IDLE_WORKER_HTTP_MS = 30 * 60 * 1e3;
+var MANUAL_SETTLE_REFUSAL_STATUS = {
+  // Not a range at all, and not a range any state of the database could make
+  // legal — the payload itself is wrong.
+  inverted_range: 400,
+  // The one bound a backfill may never cross: pre-cutoff turns were graded
+  // under legacy semantics that must not be mixed into a post-era window.
+  below_era_floor: 409,
+  // Unreachable while the exemption holds; reported rather than mapped away so
+  // a regression names itself instead of arriving as a plausible other reason.
+  below_window_floor: 409,
+  // UNIQUE(session, window_start, 'backfill') already holds this window.
+  duplicate_window: 409
+};
+var MANUAL_SETTLE_REFUSAL_MESSAGE = {
+  inverted_range: "window_end is before window_start",
+  below_era_floor: "window_start is at or below the session's last pre-era prompt number",
+  below_window_floor: "window_start is below the monotonic settlement floor, which a backfill should be exempt from",
+  duplicate_window: "a backfill job for this session and window_start already exists"
+};
 function defaultNoopDrain() {
   return Promise.resolve();
 }
@@ -53593,6 +53697,8 @@ function createWorkerCore(deps) {
   const sessionEnvRegistry = deps.sessionEnvRegistry ?? /* @__PURE__ */ new Map();
   const contentSessionIdByDbId = /* @__PURE__ */ new Map();
   let gracefulExitWindow = false;
+  const workerBootEpoch = Math.floor(Date.now() / 1e3);
+  const isStaleBuild = deps.isStaleBuildImpl ?? (() => isBuildStaleForDatabase(deps.db, BUILD_ID, workerBootEpoch));
   const noteSettlement = createNoteSettlementScheduler({
     db: deps.db,
     config: config3,
@@ -53602,7 +53708,14 @@ function createWorkerCore(deps) {
     // "Closed" is derived, never stored: a session counts as live exactly while
     // its env registration is present, which is worker memory, not a column.
     activeSessionIds: () => contentSessionIdByDbId.keys(),
-    isGracefulExit: deps.isGracefulExitImpl ?? (() => gracefulExitWindow),
+    // Two reasons to claim nothing, and one latch for both (ticket 08). A stale
+    // build is the graceful-exit window arriving from the outside: this process
+    // is about to go away either way, and until it does, every claim it makes
+    // runs the PREVIOUS release's SQL against a schema somebody else migrated.
+    // The latch already gates before claiming, refunds the attempt on a claim
+    // that raced it, leaves the job durable and blocks the leak outright — which
+    // is exactly what a stale build owes the work it must not touch.
+    isGracefulExit: deps.isGracefulExitImpl ?? (() => gracefulExitWindow || isStaleBuild()),
     logger
   });
   async function runNoteSettlementTrigger(sessionDbId, trigger) {
@@ -53913,6 +54026,59 @@ function createWorkerCore(deps) {
     beginGracefulExit() {
       gracefulExitWindow = true;
     },
+    settleBackfillWindow(request) {
+      const { sessionId, windowStart, windowEnd } = request;
+      if (!Number.isInteger(sessionId) || !Number.isInteger(windowStart) || !Number.isInteger(windowEnd) || windowStart < 1) {
+        return {
+          ok: false,
+          status: 400,
+          reason: "invalid_payload",
+          message: "session_id, window_start and window_end must be integers, and window_start must be at least 1"
+        };
+      }
+      const eraCutoffEpoch = config3.eraCutoffEpoch ?? resolveEraCutoff(deps.db);
+      if (!config3.settlementEnabled) {
+        return {
+          ok: false,
+          status: 503,
+          reason: "settlement_disabled",
+          message: "note settlement is disabled (set settlementEnabled to true)"
+        };
+      }
+      if (eraCutoffEpoch === null) {
+        return {
+          ok: false,
+          status: 503,
+          reason: "no_era_cutoff",
+          message: "no era cutoff is recorded; every turn is legacy"
+        };
+      }
+      if (!getSession(deps.db, sessionId)) {
+        return {
+          ok: false,
+          status: 404,
+          reason: "unknown_session",
+          message: `no session ${sessionId}`
+        };
+      }
+      const result = enqueueBackfillNoteSettlementJob(
+        deps.db,
+        sessionId,
+        windowStart,
+        windowEnd,
+        now(),
+        eraCutoffEpoch
+      );
+      if (result.ok) {
+        return { ok: true, job: result.job };
+      }
+      return {
+        ok: false,
+        status: MANUAL_SETTLE_REFUSAL_STATUS[result.reason],
+        reason: result.reason,
+        message: MANUAL_SETTLE_REFUSAL_MESSAGE[result.reason]
+      };
+    },
     triggerManualDream(date7) {
       if (!config3.dreamAgentEnabled) {
         return {
@@ -54057,6 +54223,12 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
     await scanAndDrainQueue(sessionId);
   });
   const handleDreamImpl = deps.handleDreamImpl ?? runtime?.triggerManualDream ?? (() => ({ ok: false, status: 503, message: "dream runtime unavailable" }));
+  const handleSettleImpl = deps.handleSettleImpl ?? runtime?.settleBackfillWindow ?? (() => ({
+    ok: false,
+    status: 503,
+    reason: "settlement_disabled",
+    message: "settlement runtime unavailable"
+  }));
   const registerSessionEnvImpl = deps.registerSessionEnvImpl ?? runtime?.registerSessionEnv;
   const clearSessionEnvImpl = deps.clearSessionEnvImpl ?? runtime?.clearSessionEnv;
   let wakeScanInFlight = null;
@@ -54225,6 +54397,21 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
         trackGlobalWork(flush);
         return new Response(null, { status: 200 });
       }
+      if (req.method === "POST" && url2.pathname === "/settle") {
+        const payload = await req.json();
+        const result = handleSettleImpl({
+          sessionId: payload.session_id,
+          windowStart: payload.window_start,
+          windowEnd: payload.window_end
+        });
+        if (!result.ok) {
+          return Response.json(
+            { ok: false, reason: result.reason, message: result.message },
+            { status: result.status }
+          );
+        }
+        return Response.json({ ok: true, job: result.job });
+      }
       if (req.method === "POST" && url2.pathname === "/dream") {
         const payload = await req.json();
         const result = handleDreamImpl(payload.date);
@@ -54322,6 +54509,46 @@ async function checkForLastAgentShutdown(state, deps = {}) {
     throw error49;
   }
 }
+async function checkForStaleBuildShutdown(state, deps = {}) {
+  const isStaleBuild = deps.isStaleBuildImpl ?? (() => false);
+  if (!isStaleBuild()) {
+    return false;
+  }
+  const isDreamRunning = deps.isDreamRunningImpl ?? (() => false);
+  if (state.shuttingDown || state.activeRequests > 0) {
+    return false;
+  }
+  const dreamWasRunning = isDreamRunning();
+  const serverWork = state.globalScanInFlight;
+  const coreWork = deps.getGlobalScanInFlightImpl?.() ?? null;
+  if (!dreamWasRunning && (serverWork || coreWork)) {
+    return false;
+  }
+  if (dreamWasRunning && !deps.abortDreamImpl) {
+    return false;
+  }
+  state.shuttingDown = true;
+  try {
+    if (dreamWasRunning) {
+      await deps.abortDreamImpl?.();
+      await Promise.all([
+        serverWork?.catch(() => {
+        }),
+        coreWork?.catch(() => {
+        })
+      ]);
+    }
+    if (state.activeRequests > 0 || state.globalScanInFlight !== null || (deps.getGlobalScanInFlightImpl?.() ?? null) !== null || isDreamRunning()) {
+      state.shuttingDown = false;
+      return false;
+    }
+    await createShutdownCleanup(deps)();
+    return true;
+  } catch (error49) {
+    state.shuttingDown = false;
+    throw error49;
+  }
+}
 function registerShutdownCleanup(deps = {}) {
   const processImpl = deps.processImpl ?? process;
   const cleanup = createShutdownCleanup(deps);
@@ -54339,6 +54566,8 @@ async function main(deps = {}) {
   const startingPath = deps.startingPath ?? WORKER_STARTING_PATH;
   const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs9.unlinkSync;
   const db = deps.db ?? createDatabase();
+  const workerBootEpoch = Math.floor(Date.now() / 1e3);
+  const isStaleBuildImpl = deps.isStaleBuildImpl ?? (() => isBuildStaleForDatabase(db, BUILD_ID, workerBootEpoch));
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
   const config3 = deps.config ?? loadConfig();
   const sessionEnvRegistry = /* @__PURE__ */ new Map();
@@ -54376,6 +54605,10 @@ async function main(deps = {}) {
     workerEnv: env,
     sessionEnvRegistry,
     noteSettlementDispatchImpl,
+    // Shared with the lifecycle deps below rather than left to the core's own
+    // default, so both halves of this check — the claim latch and the exit —
+    // answer from one boot epoch and can never disagree about being stale.
+    isStaleBuildImpl,
     now: deps.now,
     nowMs: deps.nowMs,
     setTimeoutImpl: deps.setTimeoutImpl,
@@ -54395,6 +54628,7 @@ async function main(deps = {}) {
     hasLiveSessionsImpl: () => sessionEnvRegistry.size > 0,
     getGlobalScanInFlightImpl: core.getGlobalScanInFlight,
     isDreamRunningImpl: () => diaryRuntime?.isDreamRunning?.() ?? false,
+    isStaleBuildImpl,
     abortDreamImpl: async () => {
       await diaryRuntime?.abortDream?.("shutdown");
     },
@@ -54432,8 +54666,10 @@ async function main(deps = {}) {
       clearSessionEnvImpl: core.clearSessionEnv,
       hardExitTimerImpl: hardExitTimer,
       // Injecting core pieces above leaves the fetch factory's internal
-      // runtime unset, so /dream must be wired explicitly or it 503s.
-      handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream
+      // runtime unset, so /dream and /settle must be wired explicitly or they
+      // 503s.
+      handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream,
+      handleSettleImpl: deps.handleSettleImpl ?? core.settleBackfillWindow
     },
     serverState
   );
@@ -54475,6 +54711,9 @@ async function main(deps = {}) {
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
     void (async () => {
+      if (await checkForStaleBuildShutdown(serverState, lifecycleDeps)) {
+        return;
+      }
       const didShutdown = await checkForLastAgentShutdown(
         serverState,
         lifecycleDeps
@@ -54498,6 +54737,7 @@ if (isDirectExecution()) {
   acquireWorkerSingleton,
   checkForIdleWorkerShutdown,
   checkForLastAgentShutdown,
+  checkForStaleBuildShutdown,
   createHardExitTimer,
   createWorkerCore,
   createWorkerFetchHandler,

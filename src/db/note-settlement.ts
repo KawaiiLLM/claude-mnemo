@@ -69,11 +69,31 @@ export const NOTE_SETTLEMENT_RESIDUAL_IDLE_MS = 24 * 60 * 60 * 1000;
 /** Closed sessions one trigger may pick up, oldest first (裁决 11). */
 export const NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER = 2;
 
+/**
+ * Why a window exists — and, for `backfill`, the one thing that distinguishes
+ * it from every other window.
+ *
+ * `consecutive`/`compact`/`sessionend`/`residual` are all AUTOMATIC: some event
+ * derived the window from the session's own state, and the four of them tile a
+ * session's post-era turns monotonically forward, each starting past the last
+ * one enqueued.
+ *
+ * `backfill` is the operator's explicit re-settlement of a range that has
+ * ALREADY been covered — turns settled by a build whose payload never graded
+ * them, say. It is the only trigger permitted to reach back below the monotonic
+ * floor, and the trigger type IS that permission: there is no second flag to
+ * disagree with it, so a window that says it is a backfill is exactly a window
+ * exempt from the floor. Nothing derives one; only an explicit caller
+ * (`enqueueBackfillNoteSettlementJob`, reached from the worker's `POST /settle`)
+ * ever creates one, which is why the planner's own trigger parameter excludes it
+ * at the type level rather than by convention.
+ */
 export type NoteSettlementTrigger =
   | "consecutive"
   | "compact"
   | "residual"
-  | "sessionend";
+  | "sessionend"
+  | "backfill";
 export type NoteSettlementJobStatus =
   | "pending"
   | "claimed"
@@ -99,12 +119,39 @@ export interface NoteSettlementJob {
   updatedAtEpoch: number;
 }
 
-/** A window the planner would cut, before anything is written. */
+/**
+ * Why a window was not written. Every structural refusal settlement can issue,
+ * in one closed set — the operator's `POST /settle` maps it exhaustively, and
+ * the automatic callers discard it.
+ */
+export type NoteSettlementInsertRefusal =
+  /** `window_end < window_start` — not a window at all. */
+  | "inverted_range"
+  /** At or below the session's last pre-era prompt number. Never exempt. */
+  | "below_era_floor"
+  /** Below max(cursor, highest enqueued window_end). `backfill` is exempt. */
+  | "below_window_floor"
+  /** UNIQUE(session_id, window_start, trigger_type) already holds this window. */
+  | "duplicate_window";
+
+export type InsertNoteSettlementJobResult =
+  | { ok: true; job: NoteSettlementJob }
+  | { ok: false; reason: NoteSettlementInsertRefusal };
+
+/**
+ * A window the planner would cut, before anything is written.
+ *
+ * `backfill` is excluded alongside `residual` because neither is ever DERIVED:
+ * a residual is built by its own scan and a backfill only ever comes from an
+ * explicit operator call, so a plan carrying either would be a plan nobody can
+ * produce. Excluding it here is also what makes "no automatic planner emits a
+ * backfill" a compile-time fact rather than a test's hope.
+ */
 export interface NoteSettlementWindowPlan {
   sessionId: number;
   windowStart: number;
   windowEnd: number;
-  triggerType: Exclude<NoteSettlementTrigger, "residual">;
+  triggerType: Exclude<NoteSettlementTrigger, "residual" | "backfill">;
 }
 
 const JOB_COLUMNS = `
@@ -207,6 +254,14 @@ export function getEraFloorPromptNumber(
  * through it: a session settlement has never written about has no cursor row at
  * all, and deriving the bound is what lets the below-threshold trigger stay a
  * pure read (see `planNoteSettlementWindows`).
+ *
+ * `backfill` rows are excluded, for the same reason they are excluded from the
+ * cursor walk: this bound exists to keep the AUTOMATIC tiling disjoint, and a
+ * backfill is by definition a window that overlaps it. Counting one here would
+ * let an operator re-settling history push the automatic floor past turns no
+ * automatic window has covered yet — the turns between the backfill's end and
+ * the tiling's own next start would then never be planned at all. One rule,
+ * both derivations: a backfill is invisible to the automatic sequence.
  */
 export function getNoteSettlementWindowStart(
   db: Database,
@@ -217,7 +272,7 @@ export function getNoteSettlementWindowStart(
     db
       .query<{ windowEnd: number | null }, [number]>(
         `SELECT MAX(window_end) AS windowEnd FROM note_settlement_jobs
-         WHERE session_id = ?`,
+         WHERE session_id = ? AND trigger_type != 'backfill'`,
       )
       .get(sessionId)?.windowEnd ?? 0;
   return (
@@ -374,7 +429,7 @@ export interface NoteSettlementWindowOptions {
 export function planNoteSettlementWindows(
   db: Database,
   sessionId: number,
-  trigger: Exclude<NoteSettlementTrigger, "residual">,
+  trigger: Exclude<NoteSettlementTrigger, "residual" | "backfill">,
   options: NoteSettlementWindowOptions,
 ): NoteSettlementWindowPlan[] {
   const consecutiveTurns =
@@ -471,6 +526,24 @@ export function enqueueSessionEndNoteSettlementWindow(
  *
  * Refusing rather than clipping is deliberate: a clipped window can fall under
  * the minimum-window floor, and the floor is the planner's judgement to make.
+ *
+ * A `backfill` is floored on the ERA BOUNDARY ALONE. The monotonic bound above
+ * is derived from `MAX(window_end)` over the session's own jobs, so it can only
+ * ever rise and a historical window is simply unexpressible under it — which is
+ * the whole reason `backfill` exists. What does NOT yield is the era: a pre-era
+ * turn's record was written by the extraction agent under legacy grading
+ * semantics, and letting a window straddle the cutover would mix the two
+ * vocabularies in one payload. A backfill may revisit settled ground; it may
+ * never cross the era boundary. `windowEnd < windowStart` is refused for every
+ * type, backfill included — an inverted range is not a window at all.
+ *
+ * Returns WHY it refused rather than a bare null. Every caller but one throws
+ * the reason away, and that one (`enqueueBackfillNoteSettlementJob`, the
+ * operator's path) is the reason it exists: "nothing happened" is not something
+ * a human driving a backfill can act on. Naming the refusal HERE rather than
+ * re-deriving it in the operator's wrapper is what keeps each guard to a single
+ * home — a second copy of the era check in the wrapper could disagree with this
+ * one, and only one of them would be the guard that actually holds.
  */
 function insertJob(
   db: Database,
@@ -480,12 +553,21 @@ function insertJob(
   triggerType: NoteSettlementTrigger,
   nowEpoch: number,
   eraCutoffEpoch: number,
-): NoteSettlementJob | null {
-  if (windowStart < getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch)) {
-    return null;
-  }
+): InsertNoteSettlementJobResult {
   if (windowEnd < windowStart) {
-    return null;
+    return { ok: false, reason: "inverted_range" };
+  }
+  if (windowStart <= getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch)) {
+    return { ok: false, reason: "below_era_floor" };
+  }
+  // The monotonic floor, and the ONE thing a backfill is exempt from. The era
+  // floor above is checked first and separately for exactly that reason: it
+  // applies to every type, this does not.
+  if (
+    triggerType !== "backfill" &&
+    windowStart < getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch)
+  ) {
+    return { ok: false, reason: "below_window_floor" };
   }
   const job =
     db
@@ -502,14 +584,26 @@ function insertJob(
       )
       .get(sessionId, windowStart, windowEnd, triggerType, nowEpoch, nowEpoch) ??
     null;
-  if (job) {
+  if (job && triggerType !== "backfill") {
     // The first job is the first moment settlement writes anything about this
     // session, and therefore the place its cursor is born — at the era boundary,
     // so the row states outright that the legacy prefix is out of scope. Written
     // only on a job that landed: a refused window leaves no trace at all.
+    //
+    // A backfill is excluded because the cursor means "everything at or below
+    // here is resolved" and a backfill asserts nothing of the kind. On a session
+    // settlement has never touched, `ensureNoteSettlementCursor` would create the
+    // row at the era boundary and so move the READ value from 0 up to the last
+    // legacy prompt — a forward move bought by an out-of-band window rather than
+    // by the automatic sequence that owns the cursor.
     ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch);
   }
-  return job;
+  if (!job) {
+    // Every structural guard above passed, so the only thing left that can
+    // swallow the row is UNIQUE(session_id, window_start, trigger_type).
+    return { ok: false, reason: "duplicate_window" };
+  }
+  return { ok: true, job };
 }
 
 /**
@@ -526,7 +620,7 @@ function insertJobs(
 ): NoteSettlementJob[] {
   const created: NoteSettlementJob[] = [];
   for (const plan of plans) {
-    const job = insertJob(
+    const result = insertJob(
       db,
       plan.sessionId,
       plan.windowStart,
@@ -535,8 +629,8 @@ function insertJobs(
       nowEpoch,
       eraCutoffEpoch,
     );
-    if (job) {
-      created.push(job);
+    if (result.ok) {
+      created.push(result.job);
     }
   }
   return created;
@@ -580,7 +674,7 @@ export function enqueueNoteSettlementWindows(
 export function planAndEnqueueNoteSettlementWindows(
   db: Database,
   sessionId: number,
-  trigger: Exclude<NoteSettlementTrigger, "residual">,
+  trigger: Exclude<NoteSettlementTrigger, "residual" | "backfill">,
   nowEpoch: number,
   options: NoteSettlementWindowOptions,
 ): NoteSettlementJob[] {
@@ -678,9 +772,13 @@ export function listResidualNoteSettlementCandidates(
                 FROM note_settlement_cursors c WHERE c.session_id = s.id),
                0
              ),
+             -- Excluding backfill for the reason given at
+             -- getNoteSettlementWindowStart: this is the same derived bound,
+             -- and the two must not disagree about where a session's next
+             -- automatic window begins.
              COALESCE(
                (SELECT MAX(j.window_end) FROM note_settlement_jobs j
-                WHERE j.session_id = s.id),
+                WHERE j.session_id = s.id AND j.trigger_type != 'backfill'),
                0
              ),
              COALESCE(
@@ -708,13 +806,50 @@ export function enqueueResidualNoteSettlementJob(
   nowEpoch: number,
   eraCutoffEpoch: number,
 ): NoteSettlementJob | null {
-  return runWriteTransaction(db, () =>
-    insertJob(
+  return runWriteTransaction(db, () => {
+    const result = insertJob(
       db,
       candidate.sessionId,
       candidate.windowStart,
       candidate.windowEnd,
       "residual",
+      nowEpoch,
+      eraCutoffEpoch,
+    );
+    return result.ok ? result.job : null;
+  });
+}
+
+/**
+ * Enqueue ONE explicitly named window for re-settlement, exempt from the
+ * monotonic floor and from nothing else.
+ *
+ * The range is taken verbatim: this never derives, clips or plans, because the
+ * whole point is that the caller — an operator, through `POST /settle` — states
+ * which turns are to be settled again. Everything after the insert is the
+ * ordinary path: the row is claimed, dispatched, committed and retried by
+ * exactly the machinery every other trigger type uses.
+ *
+ * `below_window_floor` is not reachable here — the monotonic floor is precisely
+ * what a backfill is exempt from — and it is deliberately left in the returned
+ * union rather than mapped away: if that exemption ever regresses, the operator
+ * is told which floor stopped them instead of being handed a plausible lie.
+ */
+export function enqueueBackfillNoteSettlementJob(
+  db: Database,
+  sessionId: number,
+  windowStart: number,
+  windowEnd: number,
+  nowEpoch: number,
+  eraCutoffEpoch: number,
+): InsertNoteSettlementJobResult {
+  return runWriteTransaction(db, () =>
+    insertJob(
+      db,
+      sessionId,
+      windowStart,
+      windowEnd,
+      "backfill",
       nowEpoch,
       eraCutoffEpoch,
     ),
@@ -1053,6 +1188,15 @@ export function failNoteSettlementJob(
  * `last_error` stays as the audit trail of the gap.
  *
  * Monotonic: it never moves backwards.
+ *
+ * `backfill` rows are excluded from the walk entirely. The cursor is derived
+ * from the AUTOMATIC window sequence, which tiles the session contiguously
+ * forward; a backfill deliberately overlaps that sequence, so a resolved one
+ * sitting between two automatic windows would either drag the local prefix end
+ * backwards (harmless only because of the `Math.max` below) or, when its range
+ * reaches past a still-unresolved automatic window, carry the cursor over turns
+ * nobody has settled. Excluding it makes the derivation exactly what it was
+ * before backfill existed.
  */
 export function advanceNoteSettlementCursor(
   db: Database,
@@ -1071,7 +1215,8 @@ export function advanceNoteSettlementCursor(
     >(
       `SELECT window_end AS windowEnd, status, attempts
        FROM note_settlement_jobs
-       WHERE session_id = ? ORDER BY window_start ASC, id ASC`,
+       WHERE session_id = ? AND trigger_type != 'backfill'
+       ORDER BY window_start ASC, id ASC`,
     )
     .all(sessionId);
 

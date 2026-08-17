@@ -8691,6 +8691,40 @@ var init_era = __esm({
   }
 });
 
+// src/shared/build-id.ts
+var BUILD_ID;
+var init_build_id = __esm({
+  "src/shared/build-id.ts"() {
+    "use strict";
+    BUILD_ID = true ? "0.11.2-mswtfh3c" : "dev";
+  }
+});
+
+// src/db/build-state.ts
+function readInitializerBuild(db) {
+  const row = db.query(
+    `SELECT build_id AS buildId, recorded_at_epoch AS recordedAtEpoch
+       FROM build_state
+       WHERE id = 1`
+  ).get();
+  return row && typeof row.buildId === "string" ? row : null;
+}
+function recordInitializerBuild(db, buildId, nowEpoch) {
+  if (readInitializerBuild(db)?.buildId === buildId) {
+    return;
+  }
+  db.query(
+    `INSERT INTO build_state (id, build_id, recorded_at_epoch)
+     VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET build_id = ?, recorded_at_epoch = ?`
+  ).run(buildId, nowEpoch, buildId, nowEpoch);
+}
+var init_build_state = __esm({
+  "src/db/build-state.ts"() {
+    "use strict";
+  }
+});
+
 // src/db/schema.ts
 var schema_exports = {};
 __export(schema_exports, {
@@ -8928,7 +8962,7 @@ function initializeSchema(db) {
   ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
   retireLegacyPendingNoteDebts(db);
-  ensureNoteSettlementSessionEndTrigger(db);
+  ensureNoteSettlementTriggerVocabulary(db);
   dropLegacyMemoriesTable(db);
   ensureTurnTypeMultiValueColumn(db);
   stripRetiredTopicTagNamespace(db);
@@ -9035,35 +9069,46 @@ function noteSettlementTriggerVocabularyIsStale(db) {
     `SELECT sql FROM sqlite_master
          WHERE type = 'table' AND name = 'note_settlement_jobs'`
   ).get()?.sql ?? null;
-  return storedDdl !== null && !storedDdl.includes("'sessionend'");
+  return storedDdl !== null && !storedDdl.includes("'backfill'");
 }
-function ensureNoteSettlementSessionEndTrigger(db) {
+function ensureNoteSettlementTriggerVocabulary(db) {
   if (!noteSettlementTriggerVocabularyIsStale(db)) {
     return;
   }
-  runWriteTransaction(db, () => {
-    if (!noteSettlementTriggerVocabularyIsStale(db)) {
-      return;
-    }
-    db.exec(
-      "ALTER TABLE note_settlement_jobs RENAME TO note_settlement_jobs_pre_sessionend"
-    );
-    db.exec(NOTE_SETTLEMENT_JOBS_TABLE_DDL);
-    db.exec(
-      `INSERT INTO note_settlement_jobs (
-         id, session_id, window_start, window_end, trigger_type, status,
-         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
-         last_error, created_at_epoch, updated_at_epoch
-       )
-       SELECT
-         id, session_id, window_start, window_end, trigger_type, status,
-         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
-         last_error, created_at_epoch, updated_at_epoch
-       FROM note_settlement_jobs_pre_sessionend`
-    );
-    db.exec("DROP TABLE note_settlement_jobs_pre_sessionend");
-    db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
-  });
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!noteSettlementTriggerVocabularyIsStale(db)) {
+        return;
+      }
+      db.exec(noteSettlementJobsTableDdl("note_settlement_jobs_trigger_rebuild"));
+      db.exec(
+        `INSERT INTO note_settlement_jobs_trigger_rebuild (
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error, created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error, created_at_epoch, updated_at_epoch
+         FROM note_settlement_jobs`
+      );
+      db.exec("DROP TABLE note_settlement_jobs");
+      db.exec(
+        "ALTER TABLE note_settlement_jobs_trigger_rebuild RENAME TO note_settlement_jobs"
+      );
+      db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `note_settlement_jobs rebuild left ${violations.length} foreign key violation(s) while widening trigger_type: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
 }
 function ensureObservationExtractionExclusionColumn(db) {
   addColumnIfMissing(
@@ -9715,14 +9760,17 @@ function initializeDatabase(db) {
     resetSchema(db);
   }
   initializeSchema(db);
+  recordInitializerBuild(db, BUILD_ID, Math.floor(Date.now() / 1e3));
   if (shouldRebuildSearchIndex(db)) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
+var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
+    init_build_id();
+    init_build_state();
     init_citations();
     init_database();
     init_memory_edges();
@@ -9766,8 +9814,8 @@ var init_schema = __esm({
   CREATE INDEX IF NOT EXISTS idx_note_debt_open
     ON note_debt(session_id, status, prompt_number);
 `;
-    NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
-  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
+    noteSettlementJobsTableDdl = (tableName) => `
+  CREATE TABLE IF NOT EXISTS ${tableName} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
@@ -9775,8 +9823,13 @@ var init_schema = __esm({
     -- settles the same set the first attempt saw.
     window_start INTEGER NOT NULL,
     window_end INTEGER NOT NULL,
+    -- 'backfill' is the operator's explicit re-settlement of an already
+    -- covered range (db/note-settlement.ts): the only value exempt from the
+    -- monotonic window floor, and never produced by any automatic planner.
     trigger_type TEXT NOT NULL CHECK (
-      trigger_type IN ('consecutive', 'compact', 'residual', 'sessionend')
+      trigger_type IN (
+        'consecutive', 'compact', 'residual', 'sessionend', 'backfill'
+      )
     ),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (
       status IN ('pending', 'claimed', 'done', 'failed')
@@ -9797,6 +9850,9 @@ var init_schema = __esm({
     UNIQUE(session_id, window_start, trigger_type)
   );
 `;
+    NOTE_SETTLEMENT_JOBS_TABLE_DDL = noteSettlementJobsTableDdl(
+      "note_settlement_jobs"
+    );
     NOTE_SETTLEMENT_JOBS_INDEX_DDL = `
   CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
     ON note_settlement_jobs(session_id, status, window_start);
@@ -10273,6 +10329,18 @@ var init_schema = __esm({
   CREATE TABLE IF NOT EXISTS era_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     cutoff_epoch INTEGER NOT NULL,
+    recorded_at_epoch INTEGER NOT NULL
+  );
+
+  -- Which build last migrated this database (db/build-state.ts). One row,
+  -- rewritten whenever a different build runs the migrations. The resident
+  -- worker cannot see a newer release from its own side \u2014 a plugin update
+  -- installs into a new directory, so its plugin root, its bundle path and that
+  -- file's mtime never move \u2014 and this row is the one thing both builds touch,
+  -- so it is how the worker learns the schema changed underneath it.
+  CREATE TABLE IF NOT EXISTS build_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    build_id TEXT NOT NULL,
     recorded_at_epoch INTEGER NOT NULL
   );
 
@@ -40277,7 +40345,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.11.1" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.11.2" : "0.0.0-test";
 function resolveCallerSessionIdFromEnv(db, env = process.env) {
   for (const identityKey of deriveProcessIdentityKeys(env)) {
     const sessionId = getMnemoSessionIdForProcessSession(db, identityKey);

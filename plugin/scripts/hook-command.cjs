@@ -389,6 +389,29 @@ function loadConfigEraCutoff() {
   }
 }
 
+// src/shared/build-id.ts
+var BUILD_ID = true ? "0.11.2-mswtfh3c" : "dev";
+
+// src/db/build-state.ts
+function readInitializerBuild(db) {
+  const row = db.query(
+    `SELECT build_id AS buildId, recorded_at_epoch AS recordedAtEpoch
+       FROM build_state
+       WHERE id = 1`
+  ).get();
+  return row && typeof row.buildId === "string" ? row : null;
+}
+function recordInitializerBuild(db, buildId, nowEpoch) {
+  if (readInitializerBuild(db)?.buildId === buildId) {
+    return;
+  }
+  db.query(
+    `INSERT INTO build_state (id, build_id, recorded_at_epoch)
+     VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET build_id = ?, recorded_at_epoch = ?`
+  ).run(buildId, nowEpoch, buildId, nowEpoch);
+}
+
 // src/db/memory-edges.ts
 var PROVENANCE_RANK = {
   retrieval: 0,
@@ -976,8 +999,8 @@ var NOTE_DEBT_INDEX_DDL = `
   CREATE INDEX IF NOT EXISTS idx_note_debt_open
     ON note_debt(session_id, status, prompt_number);
 `;
-var NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
-  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
+var noteSettlementJobsTableDdl = (tableName) => `
+  CREATE TABLE IF NOT EXISTS ${tableName} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
@@ -985,8 +1008,13 @@ var NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
     -- settles the same set the first attempt saw.
     window_start INTEGER NOT NULL,
     window_end INTEGER NOT NULL,
+    -- 'backfill' is the operator's explicit re-settlement of an already
+    -- covered range (db/note-settlement.ts): the only value exempt from the
+    -- monotonic window floor, and never produced by any automatic planner.
     trigger_type TEXT NOT NULL CHECK (
-      trigger_type IN ('consecutive', 'compact', 'residual', 'sessionend')
+      trigger_type IN (
+        'consecutive', 'compact', 'residual', 'sessionend', 'backfill'
+      )
     ),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (
       status IN ('pending', 'claimed', 'done', 'failed')
@@ -1007,6 +1035,9 @@ var NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
     UNIQUE(session_id, window_start, trigger_type)
   );
 `;
+var NOTE_SETTLEMENT_JOBS_TABLE_DDL = noteSettlementJobsTableDdl(
+  "note_settlement_jobs"
+);
 var NOTE_SETTLEMENT_JOBS_INDEX_DDL = `
   CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
     ON note_settlement_jobs(session_id, status, window_start);
@@ -1483,6 +1514,18 @@ var SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS era_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     cutoff_epoch INTEGER NOT NULL,
+    recorded_at_epoch INTEGER NOT NULL
+  );
+
+  -- Which build last migrated this database (db/build-state.ts). One row,
+  -- rewritten whenever a different build runs the migrations. The resident
+  -- worker cannot see a newer release from its own side \u2014 a plugin update
+  -- installs into a new directory, so its plugin root, its bundle path and that
+  -- file's mtime never move \u2014 and this row is the one thing both builds touch,
+  -- so it is how the worker learns the schema changed underneath it.
+  CREATE TABLE IF NOT EXISTS build_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    build_id TEXT NOT NULL,
     recorded_at_epoch INTEGER NOT NULL
   );
 
@@ -1966,7 +2009,7 @@ function initializeSchema(db) {
   ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
   retireLegacyPendingNoteDebts(db);
-  ensureNoteSettlementSessionEndTrigger(db);
+  ensureNoteSettlementTriggerVocabulary(db);
   dropLegacyMemoriesTable(db);
   ensureTurnTypeMultiValueColumn(db);
   stripRetiredTopicTagNamespace(db);
@@ -2073,35 +2116,46 @@ function noteSettlementTriggerVocabularyIsStale(db) {
     `SELECT sql FROM sqlite_master
          WHERE type = 'table' AND name = 'note_settlement_jobs'`
   ).get()?.sql ?? null;
-  return storedDdl !== null && !storedDdl.includes("'sessionend'");
+  return storedDdl !== null && !storedDdl.includes("'backfill'");
 }
-function ensureNoteSettlementSessionEndTrigger(db) {
+function ensureNoteSettlementTriggerVocabulary(db) {
   if (!noteSettlementTriggerVocabularyIsStale(db)) {
     return;
   }
-  runWriteTransaction(db, () => {
-    if (!noteSettlementTriggerVocabularyIsStale(db)) {
-      return;
-    }
-    db.exec(
-      "ALTER TABLE note_settlement_jobs RENAME TO note_settlement_jobs_pre_sessionend"
-    );
-    db.exec(NOTE_SETTLEMENT_JOBS_TABLE_DDL);
-    db.exec(
-      `INSERT INTO note_settlement_jobs (
-         id, session_id, window_start, window_end, trigger_type, status,
-         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
-         last_error, created_at_epoch, updated_at_epoch
-       )
-       SELECT
-         id, session_id, window_start, window_end, trigger_type, status,
-         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
-         last_error, created_at_epoch, updated_at_epoch
-       FROM note_settlement_jobs_pre_sessionend`
-    );
-    db.exec("DROP TABLE note_settlement_jobs_pre_sessionend");
-    db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
-  });
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!noteSettlementTriggerVocabularyIsStale(db)) {
+        return;
+      }
+      db.exec(noteSettlementJobsTableDdl("note_settlement_jobs_trigger_rebuild"));
+      db.exec(
+        `INSERT INTO note_settlement_jobs_trigger_rebuild (
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error, created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error, created_at_epoch, updated_at_epoch
+         FROM note_settlement_jobs`
+      );
+      db.exec("DROP TABLE note_settlement_jobs");
+      db.exec(
+        "ALTER TABLE note_settlement_jobs_trigger_rebuild RENAME TO note_settlement_jobs"
+      );
+      db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `note_settlement_jobs rebuild left ${violations.length} foreign key violation(s) while widening trigger_type: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
 }
 function ensureObservationExtractionExclusionColumn(db) {
   addColumnIfMissing(
@@ -2780,6 +2834,7 @@ function initializeDatabase(db) {
     resetSchema(db);
   }
   initializeSchema(db);
+  recordInitializerBuild(db, BUILD_ID, Math.floor(Date.now() / 1e3));
   if (shouldRebuildSearchIndex(db)) {
     rebuildSearchIndex(db);
   }
@@ -4175,9 +4230,6 @@ function setSessionLineageStatus(db, sessionId, status) {
 var import_node_child_process = require("node:child_process");
 var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
-
-// src/shared/build-id.ts
-var BUILD_ID = true ? "0.11.1-msw7mnas" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -24254,7 +24306,7 @@ function getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch) {
 function getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch) {
   const highestEnqueued = db.query(
     `SELECT MAX(window_end) AS windowEnd FROM note_settlement_jobs
-         WHERE session_id = ?`
+         WHERE session_id = ? AND trigger_type != 'backfill'`
   ).get(sessionId)?.windowEnd ?? 0;
   return Math.max(
     getNoteSettlementCursor(db, sessionId),
@@ -24333,11 +24385,14 @@ function enqueueSessionEndNoteSettlementWindow(db, sessionId, nowEpoch, eraCutof
   });
 }
 function insertJob(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch, eraCutoffEpoch) {
-  if (windowStart < getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch)) {
-    return null;
-  }
   if (windowEnd < windowStart) {
-    return null;
+    return { ok: false, reason: "inverted_range" };
+  }
+  if (windowStart <= getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch)) {
+    return { ok: false, reason: "below_era_floor" };
+  }
+  if (triggerType !== "backfill" && windowStart < getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch)) {
+    return { ok: false, reason: "below_window_floor" };
   }
   const job = db.query(
     `INSERT OR IGNORE INTO note_settlement_jobs (
@@ -24347,15 +24402,18 @@ function insertJob(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch,
          ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
          RETURNING${JOB_COLUMNS}`
   ).get(sessionId, windowStart, windowEnd, triggerType, nowEpoch, nowEpoch) ?? null;
-  if (job) {
+  if (job && triggerType !== "backfill") {
     ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch);
   }
-  return job;
+  if (!job) {
+    return { ok: false, reason: "duplicate_window" };
+  }
+  return { ok: true, job };
 }
 function insertJobs(db, plans, nowEpoch, eraCutoffEpoch) {
   const created = [];
   for (const plan of plans) {
-    const job = insertJob(
+    const result = insertJob(
       db,
       plan.sessionId,
       plan.windowStart,
@@ -24364,8 +24422,8 @@ function insertJobs(db, plans, nowEpoch, eraCutoffEpoch) {
       nowEpoch,
       eraCutoffEpoch
     );
-    if (job) {
-      created.push(job);
+    if (result.ok) {
+      created.push(result.job);
     }
   }
   return created;

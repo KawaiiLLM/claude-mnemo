@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 
+import { BUILD_ID } from "../shared/build-id";
+import { recordInitializerBuild } from "./build-state";
 import { isCitationRelation, type CitationRelation } from "./citations";
 import { runWriteTransaction } from "./database";
 import { rankEdgeProvenance, type EdgeProvenance } from "./memory-edges";
@@ -54,11 +56,17 @@ const NOTE_DEBT_INDEX_DDL = `
 
 // Hoisted for the same reason as NOTE_DEBT_TABLE_DDL: `trigger_type`'s CHECK
 // constraint cannot be ALTERed, so widening it (spec note-prompt-clock D7,
-// ticket 05: `sessionend` joins `compact`/`consecutive`/`residual`) requires
-// rebuilding the table from this one definition rather than editing SCHEMA_SQL
-// and a migration out of step with each other.
-const NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
-  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
+// ticket 05: `sessionend` joins `compact`/`consecutive`/`residual`; the
+// settlement-backfill ticket then adds `backfill`) requires rebuilding the table
+// from this one definition rather than editing SCHEMA_SQL and a migration out of
+// step with each other.
+//
+// Parametrised by table name because the rebuild follows SQLite's 12-step ALTER
+// TABLE procedure: the NEW table is built under a temporary name and renamed
+// INTO place last (see `ensureNoteSettlementTriggerVocabulary` for why renaming
+// the old one away instead is unsafe here). One definition, two names.
+const noteSettlementJobsTableDdl = (tableName: string): string => `
+  CREATE TABLE IF NOT EXISTS ${tableName} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
@@ -66,8 +74,13 @@ const NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
     -- settles the same set the first attempt saw.
     window_start INTEGER NOT NULL,
     window_end INTEGER NOT NULL,
+    -- 'backfill' is the operator's explicit re-settlement of an already
+    -- covered range (db/note-settlement.ts): the only value exempt from the
+    -- monotonic window floor, and never produced by any automatic planner.
     trigger_type TEXT NOT NULL CHECK (
-      trigger_type IN ('consecutive', 'compact', 'residual', 'sessionend')
+      trigger_type IN (
+        'consecutive', 'compact', 'residual', 'sessionend', 'backfill'
+      )
     ),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (
       status IN ('pending', 'claimed', 'done', 'failed')
@@ -88,6 +101,10 @@ const NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
     UNIQUE(session_id, window_start, trigger_type)
   );
 `;
+
+const NOTE_SETTLEMENT_JOBS_TABLE_DDL = noteSettlementJobsTableDdl(
+  "note_settlement_jobs",
+);
 
 const NOTE_SETTLEMENT_JOBS_INDEX_DDL = `
   CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
@@ -566,6 +583,18 @@ const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS era_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     cutoff_epoch INTEGER NOT NULL,
+    recorded_at_epoch INTEGER NOT NULL
+  );
+
+  -- Which build last migrated this database (db/build-state.ts). One row,
+  -- rewritten whenever a different build runs the migrations. The resident
+  -- worker cannot see a newer release from its own side — a plugin update
+  -- installs into a new directory, so its plugin root, its bundle path and that
+  -- file's mtime never move — and this row is the one thing both builds touch,
+  -- so it is how the worker learns the schema changed underneath it.
+  CREATE TABLE IF NOT EXISTS build_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    build_id TEXT NOT NULL,
     recorded_at_epoch INTEGER NOT NULL
   );
 
@@ -1322,7 +1351,7 @@ export function initializeSchema(db: Database): void {
   ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
   retireLegacyPendingNoteDebts(db);
-  ensureNoteSettlementSessionEndTrigger(db);
+  ensureNoteSettlementTriggerVocabulary(db);
   dropLegacyMemoriesTable(db);
   // Last on purpose: every other turns-column migration above (parent_turn_id,
   // compact_boundary_uuid, consulted_memories, ...) must have
@@ -1571,16 +1600,19 @@ export function retireLegacyPendingNoteDebts(db: Database): number {
 }
 
 // `note_settlement_jobs` shipped (arc-spine-redesign, 0.8.4) with a three-value
-// trigger vocabulary. Spec note-prompt-clock D7 (ticket 05) adds a fourth: the
-// SessionEnd hook now freezes and enqueues its own window synchronously, tagged
-// `sessionend`. `trigger_type`'s CHECK constraint cannot be ALTERed, and
-// `CREATE TABLE IF NOT EXISTS` is a no-op on a database that already has the
-// table, so without this rebuild the hook's first insert throws a constraint
-// failure on every install that shipped before this ticket.
+// trigger vocabulary. Spec note-prompt-clock D7 (ticket 05) added a fourth
+// (`sessionend`, frozen and enqueued by the SessionEnd hook), and the
+// settlement-backfill ticket adds a fifth (`backfill`, the operator's explicit
+// re-settlement of an already covered range). `trigger_type`'s CHECK constraint
+// cannot be ALTERed, and `CREATE TABLE IF NOT EXISTS` is a no-op on a database
+// that already has the table, so without this rebuild the first insert of the
+// new value throws a constraint failure on every install that shipped before.
 //
 // Same detection idiom as `ensureNoteDebtReasonVocabulary`: read the stored DDL
-// for the newest value rather than a version counter, so a fresh database (whose
-// CREATE TABLE already carries `sessionend`) skips the rebuild entirely.
+// for the NEWEST value rather than a version counter. One predicate covers every
+// older vocabulary at once — a three-value database and a four-value one are
+// both simply missing `'backfill'`, and both are rebuilt to the single current
+// DDL — while a fresh database skips entirely.
 function noteSettlementTriggerVocabularyIsStale(db: Database): boolean {
   const storedDdl =
     db
@@ -1589,43 +1621,82 @@ function noteSettlementTriggerVocabularyIsStale(db: Database): boolean {
          WHERE type = 'table' AND name = 'note_settlement_jobs'`,
       )
       .get()?.sql ?? null;
-  return storedDdl !== null && !storedDdl.includes("'sessionend'");
+  return storedDdl !== null && !storedDdl.includes("'backfill'");
 }
 
-function ensureNoteSettlementSessionEndTrigger(db: Database): void {
+/**
+ * Widen `trigger_type`'s CHECK by rebuilding the table, SQLite's 12-step ALTER
+ * TABLE procedure — build the new table under a temporary name, copy, drop the
+ * old, rename the new INTO place.
+ *
+ * The earlier form of this migration renamed the OLD table away instead
+ * (`note_settlement_jobs` → `..._pre_sessionend`, recreate, copy, drop). That
+ * shape is unsafe here for the reason spelled out at
+ * `ensureTurnTypeMultiValueColumn`: `note_settlement_segment_exclusions` holds
+ * `REFERENCES note_settlement_jobs(id) ON DELETE CASCADE`, and with
+ * `PRAGMA foreign_keys = ON` (database.ts) SQLite's rename REPOINTS that clause
+ * at the renamed table — so the subsequent `DROP TABLE` would cascade every
+ * settlement exclusion row away and leave the exclusions table pointing at a
+ * name nothing answers to. Renaming into place instead never moves the name the
+ * REFERENCES clause names. It went unnoticed before only because that migration
+ * predates any database holding exclusion rows.
+ *
+ * `PRAGMA foreign_keys` is a no-op inside a transaction, so it is turned off on
+ * the connection before `runWriteTransaction` opens one and restored after.
+ * `foreign_key_check` runs INSIDE the transaction (ticket 15 finding 4): a check
+ * after the commit turns a violation into a durable swap plus a skipped
+ * migration, i.e. no repair path.
+ */
+function ensureNoteSettlementTriggerVocabulary(db: Database): void {
   if (!noteSettlementTriggerVocabularyIsStale(db)) {
     return;
   }
 
-  // One IMMEDIATE transaction, same shape as the note_debt rebuild: deciding to
-  // rebuild outside the write lock is what lets two racing hook processes both
-  // start the rename, and a crash mid-rebuild must not leave the jobs table
-  // parked under a name nothing reads.
-  runWriteTransaction(db, () => {
-    if (!noteSettlementTriggerVocabularyIsStale(db)) {
-      return;
-    }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    // One IMMEDIATE transaction, same shape as the note_debt rebuild: deciding
+    // to rebuild outside the write lock is what lets two racing hook processes
+    // both start it, and a crash mid-rebuild must not leave the jobs table
+    // parked under a name nothing reads.
+    runWriteTransaction(db, () => {
+      if (!noteSettlementTriggerVocabularyIsStale(db)) {
+        return;
+      }
 
-    db.exec(
-      "ALTER TABLE note_settlement_jobs RENAME TO note_settlement_jobs_pre_sessionend",
-    );
-    db.exec(NOTE_SETTLEMENT_JOBS_TABLE_DDL);
-    db.exec(
-      `INSERT INTO note_settlement_jobs (
-         id, session_id, window_start, window_end, trigger_type, status,
-         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
-         last_error, created_at_epoch, updated_at_epoch
-       )
-       SELECT
-         id, session_id, window_start, window_end, trigger_type, status,
-         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
-         last_error, created_at_epoch, updated_at_epoch
-       FROM note_settlement_jobs_pre_sessionend`,
-    );
-    db.exec("DROP TABLE note_settlement_jobs_pre_sessionend");
-    // The index followed the renamed table and died with it.
-    db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
-  });
+      db.exec(noteSettlementJobsTableDdl("note_settlement_jobs_trigger_rebuild"));
+      // Explicit column list on both sides: a `SELECT *` copy would bind
+      // positionally and silently mis-map the day this table grows a column.
+      db.exec(
+        `INSERT INTO note_settlement_jobs_trigger_rebuild (
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error, created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error, created_at_epoch, updated_at_epoch
+         FROM note_settlement_jobs`,
+      );
+      db.exec("DROP TABLE note_settlement_jobs");
+      db.exec(
+        "ALTER TABLE note_settlement_jobs_trigger_rebuild RENAME TO note_settlement_jobs",
+      );
+      // The index belonged to the dropped table and died with it.
+      db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `note_settlement_jobs rebuild left ${violations.length} foreign key violation(s) while widening trigger_type: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
 }
 
 // `shadow_notes` arrives whole from SCHEMA_SQL (CREATE TABLE IF NOT EXISTS), but
@@ -2150,8 +2221,10 @@ function assertNoUnexpectedTurnsColumns(
  *
  * A CHECK constraint cannot be ALTERed onto an existing column, so this is a
  * table rebuild, not an `ALTER TABLE ... ADD COLUMN` — same family of move as
- * `ensureNoteDebtReasonVocabulary` / `ensureNoteSettlementSessionEndTrigger`,
- * but `turns` cannot reuse their rename-the-old-table-away shape. Six other
+ * `ensureNoteDebtReasonVocabulary` / `ensureNoteSettlementTriggerVocabulary`,
+ * but `turns` cannot reuse the first one's rename-the-old-table-away shape (the
+ * settlement rebuild has since moved onto the procedure below for the very same
+ * reason, its own referencing table). Six other
  * tables (`note_debt`, `observations`, `shadow_notes`, `note_id_exposures`
  * ×2, `segment_members`) hold `REFERENCES turns(id)`, and with
  * `PRAGMA foreign_keys = ON` (database.ts) SQLite's rename repoints every one
@@ -2738,6 +2811,11 @@ export function initializeDatabase(db: Database): void {
   }
 
   initializeSchema(db);
+  // Only once the migrations above have RETURNED. A build whose migrations threw
+  // did not finish taking this database over, and must not leave a row claiming
+  // it did — the worker reads this row to decide whether the schema it is about
+  // to write against is still the one it knows.
+  recordInitializerBuild(db, BUILD_ID, Math.floor(Date.now() / 1000));
 
   if (shouldRebuildSearchIndex(db)) {
     rebuildSearchIndex(db);
