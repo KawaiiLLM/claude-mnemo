@@ -4,9 +4,9 @@
 
 **Blocked by:** 01–10.
 
-**Status:** ready-for-agent
+**Status:** done — findings-only ticket, no source changes. All work against `/tmp/mnemo-t11-copy.db` (a `VACUUM INTO` snapshot; production never opened for write). Full findings, numbers table, transcripts and proposed follow-up tickets in `11-findings.md`. Headline: production is still pre-ticket-01..10 (no segment schema, no election tiers, old note contract) — "fresh window under the current contract" does not exist anywhere in real data, so every improvement/regression measured this round is attributable to something other than the shipped contract (mostly: mid-session self-correction after diagnosis, and a methodology upgrade to blind grading that likely corrects for self-grading contamination in the two original baselines that used it). The lifecycle demo hit a real acceptance criterion live and by accident (the election ceiling validator refused my own over-generous first tiering on real data, named the exact ceiling arithmetic, and let a re-stage of the same keys land clean). The A/B's citation arm is my own operationalization (unpinned by ADR-0003) — flagged as the most consequential judgment call in the ticket.
 
-- [ ] Each baseline re-measured on a fresh window with method matching the original
-- [ ] One full segment lifecycle demonstrated end to end on real data
-- [ ] A/B agreement rate + eyeballed disagreement set reported
-- [ ] A written finding lands; no code changes under this ticket
+- [x] Each baseline re-measured on a fresh window with method matching the original (§1, `11-findings.md`) — three of five methods matched exactly (mechanical audit ×2, direct code re-run ×1); two were deliberately upgraded from self-graded to blind-graded per this ticket's own instruction, so their numbers are not a strict apples-to-apples delta
+- [x] One full segment lifecycle demonstrated end to end on real data (§2) — create → attach → append → settle (election + membership + staged commit, including a live ceiling refusal and recovery) → both injection blocks rendered → simulated session boundary → roster
+- [x] A/B agreement rate + eyeballed disagreement set reported (§3) — 100%/91%/44% agreement across three budgets; on every observed disagreement the union arm was judged better (with a flagged self-tiering objectivity caveat)
+- [x] A written finding lands; no code changes under this ticket — `11-findings.md`, 7 proposed follow-up tickets, this repo's only other write is this Status line
