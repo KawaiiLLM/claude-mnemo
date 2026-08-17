@@ -80,13 +80,12 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   remember:
     "Maintain a segment — claude-mnemo's per-topic, long-lived semantic container (记住; `note` is the per-turn episodic surface, 记录). Four verbs: `create` mints a new segment from the roster you have in view — deliberate, never automatic, never a near-duplicate of an existing topic; `attach` binds the current session to a segment (by `id=\"E<n>\"` or an existing topic name) and returns its full fields; `append` adds rows to one named Working State field; `replace` finds `oldString` in one field and swaps in `newString` — ambiguous (matches more than once) or missing rejects loudly naming which, and `newString: \"\"` deletes the matched row. Working State fields: goal, constraints, decisions, done, next_steps, reference — each an uncapped markdown row list. Rows may cite `[S<session>/T<prompt>]` or `[E<n>]`, ids seen in injected context only, never invented. Tool-call markup (`<parameter`, `<invoke`, …) is rejected, nothing stored. Every field is written in English.\n" +
     "Maintenance is advisory, never a gate: every append/replace reports turns since this segment was last touched — under 10 turns draws a too-soon reminder (a `decisions` append is exempt — a lost ruling is the costliest loss), 20+ turns without a touch draws a nudge on the next write.",
-  // ticket 08 (spec G8): the coverage predicate pulled by the agent, not the
-  // Stop hook (ticket 11) or the completion gate (ticket 09) — those call the
-  // same underlying predicate (db/coverage.ts's `computeCoverageGaps`)
-  // directly rather than through this tool. Own budget, own test in
-  // definitions.test.ts — independent of note's own cap.
-  check:
-    "Ask what a session still owes before you believe you are finished — the same predicate the Stop hook and the completion gate check, so a clean answer here does not reopen later. Input: `id` (`S<session>`). Reports missing turns as bare addresses, never why — you already know why. An eligible turn is owed when it carries no stated `type`, unless it was skipped: skip is itself a verdict and counts as covered. Eligible excludes a compact marker and a slash command the harness answered with no model reply; a sidechain turn is included.",
+  // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
+  // Stop hook and the completion gate already call the coverage predicate
+  // (db/coverage.ts's `computeCoverageGaps`) directly, and this self-service
+  // pull duplicated the same answer for no reader who could not already get
+  // it another way. No replacement entry: the main agent has no tool here
+  // any more, by design, not by omission.
 } as const;
 
 export const recallInputShape = {
@@ -386,13 +385,34 @@ export const timelineInputShape = {
   ),
 };
 
-// ticket 08 (spec G8): `id` addresses a whole session (`S<session>`) — the
-// predicate itself (db/coverage.ts) takes a bare turn-id list and does not
-// care how a caller assembled it; this tool's own choice is "the caller's
-// whole session", the shape a live agent asking about its own work has on
-// hand without a range to compute.
-export const checkInputShape = {
-  id: z.string().min(1),
+// Ticket 07 (ADR-0007, semantic-container): the settlement subagent's
+// note-write surface. Reuses THIS shape's own field objects for every rule
+// that is genuinely identical on both surfaces — type, tags, insight, and
+// the four relation fields — so a contract change to one of those (a budget,
+// a vocabulary word, a description) reaches both surfaces from a single
+// edit here rather than needing a second, independently hand-kept copy
+// (worker/note-settlement-turn-facade.ts used to carry exactly that copy).
+// `title`/`content` are declared separately, on purpose: settlement's
+// reconstruction is a whole-rewrite with no append mode and no null-clear
+// (see that module's own doc comment), so `noteInputShape`'s nullable,
+// append-aware pair does not describe the same operation and must not be
+// shared. `turn`/`grade`/`tier` have no main-agent analogue at all (ADR-0003:
+// grade/tier are settlement's alone to assign) and are declared fresh.
+export const settlementNoteInputShape = {
+  turn: z.string().min(1),
+  title: z.string().optional(),
+  content: z.string().optional(),
+  insight: noteInputShape.insight,
+  /** A legacy-era turn only (`src/election-era.ts`); mutually exclusive with `tier`. */
+  grade: z.number().int().min(0).max(4).optional(),
+  /** Election tier (ADR-0003) — a new-era turn only; mutually exclusive with `grade`. */
+  tier: z.enum(["A", "B", "C"]).optional(),
+  type: noteInputShape.type,
+  tags: noteInputShape.tags,
+  evidenceFor: noteInputShape.evidenceFor,
+  evidenceAgainst: noteInputShape.evidenceAgainst,
+  supersedes: noteInputShape.supersedes,
+  dependsOn: noteInputShape.dependsOn,
 };
 
 // Ticket 04: `truncate` is defined on `recallInputShape` (above) purely so
@@ -416,5 +436,4 @@ export const recallInputSchema = z
   });
 export const timelineInputSchema = z.object(timelineInputShape).strict();
 export const noteInputSchema = z.object(noteInputShape).strict();
-export const checkInputSchema = z.object(checkInputShape).strict();
 export const rememberInputSchema = z.object(rememberInputShape).strict();

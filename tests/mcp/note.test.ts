@@ -1377,7 +1377,6 @@ describe("the merged write tool (ticket 03)", () => {
     test("the database-backed handlers expose a remember key beside note", () => {
       const handlers = createDatabaseBackedHandlers(db);
       expect(Object.keys(handlers).sort()).toEqual([
-        "check",
         "note",
         "recall",
         "remember",
@@ -1385,7 +1384,7 @@ describe("the merged write tool (ticket 03)", () => {
       ]);
     });
 
-    test("the main MCP server registers remember beside recall, timeline, note and check", () => {
+    test("the main MCP server registers remember beside recall, timeline and note", () => {
       const registered: string[] = [];
       registerMainMcpTools(
         { registerTool: (name) => registered.push(name) },
@@ -1394,10 +1393,9 @@ describe("the merged write tool (ticket 03)", () => {
           timeline: () => ({ content: [] }),
           note: () => ({ content: [] }),
           remember: () => ({ content: [] }),
-          check: () => ({ content: [] }),
         } as never,
       );
-      expect(registered).toEqual(["recall", "timeline", "note", "remember", "check"]);
+      expect(registered).toEqual(["recall", "timeline", "note", "remember"]);
     });
   });
 

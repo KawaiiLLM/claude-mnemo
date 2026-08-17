@@ -4,6 +4,8 @@
 
 **Blocked by:** 06 (the settlement pass it rides); 07 (the write surface it uses).
 
+**Inherited from 07's licensed deviation:** the segment facade retires HERE — settlement's segment authority shrinks to membership writes within attached segments plus text proposals, and the completion gate's segmentation check re-keys accordingly (it currently rides the facade's duty-3 machinery; every window would refuse forever if the facade died without this re-keying).
+
 **Status:** ready-for-agent
 
 - [ ] Assignment only ever targets the session's attached segments; a turn matching nothing stays homeless

@@ -16,6 +16,7 @@ import { getShadowNote, upsertReconstructedShadowNote } from "../db/shadow-notes
 import { getTurn, updateTurnById } from "../db/turns";
 import { findRetiredTopicTag, retiredTopicTagMessage } from "../shared/tag-stripping";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
+import { settlementNoteInputShape } from "../mcp/definitions";
 import { parseTurnAddress } from "../mcp/note";
 
 /**
@@ -156,21 +157,20 @@ export function parameterError(message: string): ToolTextResult {
 //      path from model output into that closure at all — the two live in
 //      variables with different names, not the same field gated by a filter
 //      that could be forgotten.
-export const settlementTurnWriteInputShape = {
-  turn: z.string().min(1),
-  title: z.string().optional(),
-  content: z.string().optional(),
-  insight: z.string().nullable().optional(),
-  grade: z.number().int().min(0).max(4).optional(),
-  /** Election tier (ADR-0003) — a new-era turn only; mutually exclusive with `grade`. */
-  tier: z.enum(["A", "B", "C"]).optional(),
-  type: z.array(z.string()).optional(),
-  tags: z.array(z.string()).optional(),
-  evidenceFor: z.array(z.string()).optional(),
-  evidenceAgainst: z.array(z.string()).optional(),
-  supersedes: z.array(z.string()).optional(),
-  dependsOn: z.array(z.string()).optional(),
-};
+//
+// Ticket 07 (ADR-0007, semantic-container): the shape itself is no longer
+// hand-kept here — it is `mcp/definitions.ts`'s `settlementNoteInputShape`,
+// re-exported under this module's pre-existing name so every import site
+// (`note-settlement-sdk-query.ts`'s tool registration, this file's own
+// `.strict()` schema below, every test that imports it from here) is
+// untouched. What moved is only WHERE the field objects are authored: type,
+// tags and the four relation fields are the SAME zod objects `noteInputShape`
+// declares, so a contract change to one of those reaches both surfaces from
+// a single edit in `mcp/definitions.ts` — see that shape's own doc comment
+// for which fields are shared and which (title/content, turn, grade/tier)
+// are declared fresh because they describe an operation the main `note` tool
+// does not have.
+export const settlementTurnWriteInputShape = settlementNoteInputShape;
 
 export const settlementTurnWriteInputSchema = z
   .object(settlementTurnWriteInputShape)

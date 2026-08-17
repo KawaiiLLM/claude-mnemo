@@ -8,7 +8,6 @@ import { getSessionByContentId } from "../../src/db/sessions";
 import { createSessionInitHandler } from "../../src/hooks/handlers/session-init";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import {
-  checkInputSchema,
   MNEMO_TOOL_DESCRIPTIONS,
   noteInputSchema,
   recallInputSchema,
@@ -31,7 +30,7 @@ type ToolRegistration = {
 };
 
 describe("registerMainMcpTools", () => {
-  test("registers exactly the five main-server tools", () => {
+  test("registers exactly the four main-server tools", () => {
     const registrations: ToolRegistration[] = [];
 
     registerMainMcpTools(
@@ -45,7 +44,6 @@ describe("registerMainMcpTools", () => {
         timeline: mock(() => ({ content: [{ type: "text", text: "timeline" }] })),
         note: mock(() => ({ content: [{ type: "text", text: "note" }] })),
         remember: mock(() => ({ content: [{ type: "text", text: "remember" }] })),
-        check: mock(() => ({ content: [{ type: "text", text: "check" }] })),
       },
     );
 
@@ -54,9 +52,8 @@ describe("registerMainMcpTools", () => {
       "timeline",
       "note",
       "remember",
-      "check",
     ]);
-    expect(registrations).toHaveLength(5);
+    expect(registrations).toHaveLength(4);
     expect(registrations[0]?.config).toEqual({
       description: MNEMO_TOOL_DESCRIPTIONS.recall,
       inputSchema: recallInputSchema,
@@ -72,10 +69,6 @@ describe("registerMainMcpTools", () => {
     expect(registrations[3]?.config).toEqual({
       description: MNEMO_TOOL_DESCRIPTIONS.remember,
       inputSchema: rememberInputSchema,
-    });
-    expect(registrations[4]?.config).toEqual({
-      description: MNEMO_TOOL_DESCRIPTIONS.check,
-      inputSchema: checkInputSchema,
     });
   });
 
@@ -96,7 +89,6 @@ describe("registerMainMcpTools", () => {
         timeline,
         note: mock(() => ({ content: [{ type: "text", text: "note" }] })),
         remember: mock(() => ({ content: [{ type: "text", text: "remember" }] })),
-        check: mock(() => ({ content: [{ type: "text", text: "check" }] })),
       },
     );
 
@@ -132,13 +124,10 @@ describe("registerMainMcpTools", () => {
     const remember = mock(async () => ({
       content: [{ type: "text" as const, text: "remember" }],
     }));
-    const check = mock(async () => ({
-      content: [{ type: "text" as const, text: "check" }],
-    }));
 
     try {
       createMcpServer({
-        handlers: { recall, timeline, note, remember, check },
+        handlers: { recall, timeline, note, remember },
       });
 
       expect(registrations.map((registration) => registration.name)).toEqual([
@@ -146,9 +135,8 @@ describe("registerMainMcpTools", () => {
         "timeline",
         "note",
         "remember",
-        "check",
       ]);
-      expect(registrations).toHaveLength(5);
+      expect(registrations).toHaveLength(4);
       expect(registrations[0]?.config).toEqual({
         description: MNEMO_TOOL_DESCRIPTIONS.recall,
         inputSchema: recallInputSchema,
@@ -164,10 +152,6 @@ describe("registerMainMcpTools", () => {
       expect(registrations[3]?.config).toEqual({
         description: MNEMO_TOOL_DESCRIPTIONS.remember,
         inputSchema: rememberInputSchema,
-      });
-      expect(registrations[4]?.config).toEqual({
-        description: MNEMO_TOOL_DESCRIPTIONS.check,
-        inputSchema: checkInputSchema,
       });
 
       await registrations[1]?.handler({ id: "S42/T10..30" });

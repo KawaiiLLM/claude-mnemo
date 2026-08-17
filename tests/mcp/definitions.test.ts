@@ -6,9 +6,9 @@ import {
   recallInputSchema,
   noteInputSchema,
   noteInputShape,
-  checkInputSchema,
   rememberInputSchema,
   rememberInputShape,
+  settlementNoteInputShape,
   workerRecallInputShape,
 } from "../../src/mcp/definitions";
 import { estimateTokens } from "../../src/utils/token-estimate";
@@ -94,11 +94,11 @@ describe("tool surface", () => {
     // (ticket 02, ADR-0001/0002) is the segment write surface the name
     // returned FOR, once ticket 03 (spec E1, 0.11.x) had merged it into
     // `note` and freed it — same reasoning: main-agent-only, absent from the
-    // worker allowlist. `check` (ticket 08, spec G8) is likewise absent from
-    // the worker allowlist here: it is the main agent's own pull, not a
-    // channel this worker's extraction pipeline uses.
+    // worker allowlist. `check` retired outright (ticket 07, ADR-0007): the
+    // Stop hook and the completion gate already call the coverage predicate
+    // directly, and the main agent's own self-service pull added nothing a
+    // reader could not already get another way.
     expect(Object.keys(MNEMO_TOOL_DESCRIPTIONS).sort()).toEqual([
-      "check",
       "note",
       "recall",
       "remember",
@@ -342,22 +342,6 @@ describe("tool surface", () => {
     ).toThrow();
   });
 
-  // ticket 08 (spec G8/G9): `check` gets its own description and its own
-  // budget, independent of note's 500-token cap — the two are unrelated
-  // tools whose descriptions happen to share this object.
-  it("the check description states what it reports, and G9's histogram never appears in it", () => {
-    const check = MNEMO_TOOL_DESCRIPTIONS.check;
-    expect(check).toContain("never why");
-    expect(check).toContain("skip is itself a verdict");
-    expect(check).toContain("compact marker");
-    expect(check).toContain("sidechain");
-    // G9: the per-grade histogram must not be visible to the grading agent
-    // at any point in its run — including in the tool's own description.
-    expect(check.toLowerCase()).not.toContain("histogram");
-    expect(check).not.toMatch(/\bG[0-4]\s*:/);
-    expect(estimateTokens(check)).toBeLessThanOrEqual(200);
-  });
-
   // Ticket 02 (ADR-0001/0002): `remember` revives the retired tool name as
   // the segment write surface, distinct from `note`.
   it("the remember description names all four verbs, the field list, markup/citation/English rules and stays capped", () => {
@@ -404,13 +388,45 @@ describe("rememberInputShape", () => {
   });
 });
 
-describe("checkInputSchema", () => {
-  it("accepts a session address and rejects extra fields", () => {
-    expect(checkInputSchema.parse({ id: "S42" })).toEqual({ id: "S42" });
-    expect(() => checkInputSchema.parse({})).toThrow();
-    expect(() =>
-      checkInputSchema.parse({ id: "S42", page: 2 }),
-    ).toThrow();
+// Ticket 07 (ADR-0007, semantic-container): `settlementNoteInputShape` (the
+// settlement subagent's note-write surface, sourced from here rather than
+// hand-kept in worker/note-settlement-turn-facade.ts) must actually SHARE
+// field objects with `noteInputShape` for every rule both surfaces agree
+// on — not merely produce an equal-looking copy. Reference equality is the
+// only assertion that would go red if a future edit reintroduced a second,
+// independently hand-kept `type`/`tags`/relation field: a deep-equal check
+// would still pass on two objects that happen to agree today and silently
+// drift tomorrow.
+describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)", () => {
+  it("type, tags and all four relation fields are the SAME zod object as noteInputShape's", () => {
+    expect(settlementNoteInputShape.type).toBe(noteInputShape.type);
+    expect(settlementNoteInputShape.tags).toBe(noteInputShape.tags);
+    expect(settlementNoteInputShape.insight).toBe(noteInputShape.insight);
+    expect(settlementNoteInputShape.evidenceFor).toBe(noteInputShape.evidenceFor);
+    expect(settlementNoteInputShape.evidenceAgainst).toBe(noteInputShape.evidenceAgainst);
+    expect(settlementNoteInputShape.supersedes).toBe(noteInputShape.supersedes);
+    expect(settlementNoteInputShape.dependsOn).toBe(noteInputShape.dependsOn);
+  });
+
+  it("declares no skip, session, crossSession, mode, or job-identity field", () => {
+    const keys = Object.keys(settlementNoteInputShape);
+    for (const forbidden of [
+      "skip",
+      "session",
+      "crossSession",
+      "mode",
+      "jobId",
+      "claimGeneration",
+    ]) {
+      expect(keys).not.toContain(forbidden);
+    }
+  });
+
+  it("title/content stay non-nullable — settlement's reconstruction never clears a field", () => {
+    expect(() => z.object(settlementNoteInputShape).strict().parse({
+      turn: "S1/T1",
+      title: null,
+    })).toThrow();
   });
 });
 

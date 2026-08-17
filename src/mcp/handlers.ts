@@ -1,6 +1,5 @@
 import type { Database } from "bun:sqlite";
 
-import { checkTool } from "./check";
 import type { MemoryFilterInput } from "./memory-filter";
 import { noteTool } from "./note";
 import { recallMemory, type RecallInput } from "./recall";
@@ -28,7 +27,6 @@ export interface MnemoToolHandlers {
   timeline: ToolHandler;
   note: ToolHandler;
   remember: ToolHandler;
-  check: ToolHandler;
 }
 
 // Ticket 04: `phases` retired.
@@ -190,7 +188,5 @@ export function createDatabaseBackedHandlers(
       rememberTool(database, args as Parameters<typeof rememberTool>[1], {
         callerSessionId: options.resolveCallerSessionId?.() ?? null,
       }),
-    // Same shape as `note`: a short mechanical report, nothing to truncate.
-    check: (args) => checkTool(database, args as Parameters<typeof checkTool>[1]),
   };
 }
