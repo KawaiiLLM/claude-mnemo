@@ -23,6 +23,7 @@ import {
   listTopics,
 } from "../../src/db/segments";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
+import { ELECTION_ERA_CUTOFF_EPOCH } from "../../src/election-era";
 import {
   buildNoteSettlementContext,
   NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET,
@@ -236,6 +237,10 @@ function queryThatStages(
       rideTurnId: request.rideTurnId,
       writerModel: request.writerModel,
       eligibleRelationPairKeys: request.eligibleRelationPairKeys,
+      // Mirrors note-settlement-sdk-query.ts's own choice: the election-era
+      // boundary is a deterministic constant, not a per-request fact
+      // `NoteSettlementQueryRequest` carries.
+      eraCutoffEpoch: ELECTION_ERA_CUTOFF_EPOCH,
     };
     const engine = createSettlementStagingEngine({ db, context });
     build(engine, request);
@@ -358,12 +363,15 @@ describe("settlement context assembly", () => {
     })!;
     const prompt = renderNoteSettlementPrompt(context);
 
-    // The rubric's own words, not a paraphrase — a snippet unique enough
-    // that only the imported constant, never a rewrite, would produce it.
+    // Ticket 06 (ADR-0003): the old absolute rubric's own words are GONE from
+    // the prompt — replaced by the one-line election criterion, imported
+    // verbatim from src/election.ts, never restated here.
+    expect(prompt).not.toContain("Grade 4 — task origin or re-foundation");
+    expect(prompt).not.toContain("Misleading-turn downgrade");
     expect(prompt).toContain(
-      "Grade 4 — task origin or re-foundation",
+      "How much does this task's future depend on this turn?",
     );
-    expect(prompt).toContain("Misleading-turn downgrade");
+    expect(prompt).toContain("Seats are CEILINGS, never");
 
     // The three duties appear in this order, and duty 1 is the turn review
     // while segmentation (duty 3, "SEGMENT ATTACHMENT") comes after both duty
@@ -556,6 +564,7 @@ describe("settlement dispatch — staged writes and commit (ticket 10b, spec A7)
       turnsReviewed: 4,
       reviewsYieldedToLateNote: 0,
       gradeHistogram: [0, 2, 1, 1, 0],
+      tierCounts: { A: 0, B: 0, C: 0 },
       relationsWritten: 1,
       segmentsCreated: 1,
       segmentsExtended: 1,

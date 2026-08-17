@@ -16,6 +16,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
+import { ELECTION_ERA_CUTOFF_EPOCH } from "../../src/election-era";
 import { createNoteSettlementSdkQuery } from "../../src/worker/note-settlement-sdk-query";
 import {
   createSettlementStagingEngine,
@@ -116,6 +117,7 @@ function baseContext(
     rideTurnId: null,
     writerModel: "claude-sonnet-5",
     eligibleRelationPairKeys: new Set(),
+    eraCutoffEpoch: ELECTION_ERA_CUTOFF_EPOCH,
     ...overrides,
   };
 }

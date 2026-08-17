@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done — tier storage + ceiling validator + duty-1 rewrite landed. Two flagged deviations accepted at review: (1) election era is a NEW placeholder constant (inert in production until a release-time ticket pins the epoch — the segment-era rollback pattern, deliberate); (2) duty 3 still reads grades and is dead for new-era windows until tickets 07/08 land — known ADR-0003 consequence.
 
 - [ ] Tier storage is era-gated; a legacy-era read never sees tiers and a new-era read never sees 0–4 grades
 - [ ] Validator rejects over-ceiling submissions naming the ceiling; an empty or sparse election passes (ceilings are not targets)

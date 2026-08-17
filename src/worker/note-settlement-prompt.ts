@@ -1,9 +1,6 @@
 import { CITATION_RELATIONS } from "../db/citations";
+import { ELECTION_RANKING_RUBRIC } from "../election";
 import { MEMORY_TYPES } from "../shared/type-vocabulary";
-import {
-  TASK_CAUSALITY_GRADE_CORRECTION_RUBRIC,
-  TASK_CAUSALITY_GRADE_RUBRIC,
-} from "../task-causality-rubric";
 import type {
   NoteSettlementContext,
   NoteSettlementWindowTurn,
@@ -40,6 +37,21 @@ import type {
  * list is no longer open-only: 50 most recently active, with topics, over a
  * frequency-ordered registry, which is the anti-fragmentation surface D9's
  * `noCandidateReason` gate always assumed it had.
+ *
+ * TICKET 06'S CHANGE (ADR-0003): duty 1's absolute 0-4 rubric leaves the
+ * prompt — the long `TASK_CAUSALITY_GRADE_RUBRIC`/`_CORRECTION_RUBRIC` text
+ * this file used to inline here is gone — replaced by a one-line election
+ * criterion plus seat ceilings (`ELECTION_RANKING_RUBRIC`, src/election.ts).
+ * A new-era turn is ranked into a tier (A/B/C); a legacy turn (from before
+ * this session's election era, src/election-era.ts) still states `grade`,
+ * exactly as before, just without the rubric text taught here. ONLY duty 1
+ * changed: duty 3's own words still read "the grades you just assigned" to
+ * find the arc partition — that coupling is real and duty 3 is NOT this
+ * ticket's to rewrite (spec's "Partition decouples from grades" is a
+ * DIFFERENT ticket's consequence to land, tracked in
+ * `.scratch/semantic-container/issues/07-shared-surface-staged-commit.md` and
+ * `08-membership-and-proposals.md`, which replace the `segment` tool and its
+ * grade-4-boundary partition outright).
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -191,28 +203,24 @@ export function renderNoteSettlementPrompt(
     "",
     "1. TURN REVIEW, via the `note` tool. For EVERY turn in the window below —",
     "   including one that already carries a note — call `note` with `turn`,",
-    "   `grade`, `type` and `tags`. `type` is a LIST — a turn may state more",
-    "   than one activity — drawn from",
+    "   `type` and `tags`, plus EITHER `tier` or `grade` depending on the",
+    "   turn's era (see below) — never both on the same turn. `type` is a",
+    "   LIST — a turn may state more than one activity — drawn from",
     `   ${MEMORY_TYPES.join(", ")}; \`[]\` means none fit, never a guess. \`tags\``,
     "   are bare topic words — a `topic:` prefix is a retired namespace and",
     "   refuses the whole call, it is not stripped for you; omit a",
     "   field to leave it alone, state `[]` to clear it — there is no append,",
     "   each call overwrites whole. You may ALSO revise a turn from the",
-    "   preceding-turns section below if you can see it needs correcting —",
-    "   grade a Grade 4 down once the arc's real scale is visible, fix a type a",
-    "   later window shows was wrong. That is not a loophole, it is what the",
-    "   grading rubric below expects.",
+    "   preceding-turns section below if you can see it needs correcting — a",
+    "   later window seeing the arc's real scale, or a type a later window",
+    "   shows was wrong. That is not a loophole, it is what this review",
+    "   duty expects.",
     "",
-    "   Grade every reviewed turn against this rubric — the exact standard",
-    "   historical grades were assigned under:",
+    ELECTION_RANKING_RUBRIC,
     "",
-    TASK_CAUSALITY_GRADE_RUBRIC,
-    "",
-    TASK_CAUSALITY_GRADE_CORRECTION_RUBRIC,
-    "",
-    "   This schema has no separate `regrade` verb: express any grade —",
-    "   first assignment or correction of an earlier window's verdict — as one",
-    "   `note` tool call naming that turn's address.",
+    "   This schema has no separate `regrade`/`re-elect` verb: express a new",
+    "   tier or grade — first assignment or correction of an earlier window's",
+    "   verdict — as one `note` tool call naming that turn's address.",
     "",
     holes.length > 0
       ? `2. RECONSTRUCTION, via the SAME \`note\` tool. These turns still owe a ` +

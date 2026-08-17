@@ -17,6 +17,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
+import { ELECTION_ERA_CUTOFF_EPOCH } from "../../src/election-era";
 import {
   evaluateSettlementTurnWrite,
   renderSettlementTurnWriteReceipt,
@@ -121,6 +122,12 @@ function baseContext(
     rideTurnId: null,
     writerModel: "claude-sonnet-5",
     eligibleRelationPairKeys: new Set(),
+    // Every fixture turn in this file is seeded around NOW (~1.8B), well
+    // below the placeholder election-era constant (~1.95B) — so the DEFAULT
+    // here keeps every pre-existing grade-based test on the legacy side,
+    // unchanged. The "election tier" describe block below overrides this
+    // directly to move individual turns to either side of the boundary.
+    eraCutoffEpoch: ELECTION_ERA_CUTOFF_EPOCH,
     ...overrides,
   };
 }
@@ -751,5 +758,105 @@ describe("call shape", () => {
     const result = write(baseContext(job), { turn: `S${sessionDbId}/T999`, grade: 1 }, NOW);
 
     expect(resultText(result)).toContain("Parameter error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0003: election tier is the third grading semantics, era-gated against
+// grade — never both on the same turn, and never the one that does not
+// match this turn's own era.
+// ---------------------------------------------------------------------------
+
+describe("election tier is era-gated against grade (ADR-0003)", () => {
+  /** Below every seeded turn's createdAtEpoch (NOW - 1000 + promptNumber), so the turn reads as new-era. */
+  const NEW_ERA_CUTOFF = NOW - 2_000;
+
+  test("elects a tier for a new-era turn and persists it", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      eraCutoffEpoch: NEW_ERA_CUTOFF,
+    });
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, tier: "A", type: ["design"], tags: ["widgets"] },
+      NOW,
+    );
+
+    expect(resultText(result)).not.toContain("Parameter error");
+    expect(resultText(result)).toContain("tier A");
+    const turn = getTurnById(db, t1)!;
+    expect(turn.electionTier).toBe("A");
+    expect(turn.significanceGrade).toBeNull();
+  });
+
+  test("refuses a tier on a legacy-era turn, naming the era", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    // Default context: eraCutoffEpoch is the placeholder constant, well above
+    // this fixture's NOW — the turn is legacy.
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(context, { turn: `S${sessionDbId}/T1`, tier: "B" }, NOW);
+
+    expect(resultText(result)).toContain("Parameter error");
+    expect(resultText(result)).toContain("predates this session's election era");
+    expect(getTurnById(db, t1)!.electionTier).toBeNull();
+  });
+
+  test("refuses a grade on a new-era turn, naming the era", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      eraCutoffEpoch: NEW_ERA_CUTOFF,
+    });
+
+    const result = write(context, { turn: `S${sessionDbId}/T1`, grade: 3 }, NOW);
+
+    expect(resultText(result)).toContain("Parameter error");
+    expect(resultText(result)).toContain("state tier (A/B/C), not grade");
+    expect(getTurnById(db, t1)!.significanceGrade).toBeNull();
+  });
+
+  test("refuses grade and tier together on the same call, whatever the turn's era", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      eraCutoffEpoch: NEW_ERA_CUTOFF,
+    });
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, grade: 2, tier: "A" },
+      NOW,
+    );
+
+    expect(resultText(result)).toContain("Parameter error");
+    expect(resultText(result)).toContain("mutually exclusive");
+    const turn = getTurnById(db, t1)!;
+    expect(turn.significanceGrade).toBeNull();
+    expect(turn.electionTier).toBeNull();
+  });
+
+  test("keeps grading a legacy-era turn exactly as before — the default path is unchanged", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(context, { turn: `S${sessionDbId}/T1`, grade: 2 }, NOW);
+
+    expect(resultText(result)).not.toContain("Parameter error");
+    const turn = getTurnById(db, t1)!;
+    expect(turn.significanceGrade).toBe(2);
+    expect(turn.electionTier).toBeNull();
   });
 });

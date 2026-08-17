@@ -18,6 +18,7 @@ import {
   listTopics,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { ELECTION_ERA_CUTOFF_EPOCH } from "../../src/election-era";
 import {
   evaluateSettlementSegmentWrite,
   settlementSegmentWriteInputSchema,
@@ -114,6 +115,7 @@ function baseContext(
     rideTurnId: null,
     writerModel: "claude-sonnet-5",
     eligibleRelationPairKeys: new Set(),
+    eraCutoffEpoch: ELECTION_ERA_CUTOFF_EPOCH,
     ...overrides,
   };
 }

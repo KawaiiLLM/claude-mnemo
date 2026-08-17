@@ -168,6 +168,15 @@ const SCHEMA_SQL = `
     significance_grade INTEGER CHECK (
       significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
     ),
+    -- Election tier (ADR-0003, ticket 06) — the third grading semantics, era-
+    -- gated against significance_grade above (src/election-era.ts): a legacy
+    -- turn carries a grade, a new-era one carries a tier, never both. Added by
+    -- ensureTurnElectionTierColumn below on a pre-existing database; declared
+    -- here too so a FRESH database gets it at creation without waiting on that
+    -- migration to run.
+    election_tier TEXT CHECK (
+      election_tier IS NULL OR election_tier IN ('A', 'B', 'C')
+    ),
     tags TEXT,
     files_read TEXT,
     files_modified TEXT,
@@ -1331,6 +1340,7 @@ export function initializeSchema(db: Database): void {
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureTurnSignificanceGradeColumn(db);
+  ensureTurnElectionTierColumn(db);
   ensureSegmentInsightColumn(db);
   ensureSegmentDerivedFacets(db);
   ensureTurnConsultedMemoriesColumn(db);
@@ -1940,6 +1950,26 @@ function ensureTurnSignificanceGradeColumn(db: Database): void {
   );
 }
 
+/**
+ * Election tier (ADR-0003, ticket 06) — same shape of migration as
+ * `ensureTurnSignificanceGradeColumn` immediately above: a plain nullable
+ * column whose CHECK references only itself, so `ALTER TABLE … ADD COLUMN`
+ * is legal SQLite (no rebuild needed — a CHECK constraint only blocks a bare
+ * ADD COLUMN when it references OTHER columns or forbids NULL without a
+ * default, neither of which applies here). Every existing row reads NULL,
+ * which is correct: a turn already on disk when this migration runs predates
+ * the election-era cutoff by construction, so it was never going to carry a
+ * tier anyway (src/election-era.ts).
+ */
+function ensureTurnElectionTierColumn(db: Database): void {
+  addColumnIfMissing(
+    db,
+    "turns",
+    "election_tier",
+    "TEXT CHECK (election_tier IS NULL OR election_tier IN ('A', 'B', 'C'))",
+  );
+}
+
 // Mechanical retrieval provenance (spec D4). Old rows stay NULL, which reads as
 // "never observed" rather than "consulted nothing" — the column only starts
 // meaning something for turns captured after it existed.
@@ -2289,8 +2319,9 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
         "id", "session_id", "prompt_number", "content_prompt_id",
         "was_interrupted", "was_rolled_back", "status", "user_prompt",
         "assistant_response", "assistant_transcript", "title", "content",
-        "insight", "type", "significance_grade", "tags", "files_read",
-        "files_modified", "tool_call_count", "transcript_line_start",
+        "insight", "type", "significance_grade", "election_tier", "tags",
+        "files_read", "files_modified", "tool_call_count",
+        "transcript_line_start",
         "consulted_memories", "compact_boundary_uuid", "parent_turn_id",
         "created_at_epoch", "updated_at_epoch",
       ];
@@ -2324,6 +2355,9 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
           significance_grade INTEGER CHECK (
             significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
           ),
+          election_tier TEXT CHECK (
+            election_tier IS NULL OR election_tier IN ('A', 'B', 'C')
+          ),
           tags TEXT,
           files_read TEXT,
           files_modified TEXT,
@@ -2344,7 +2378,7 @@ ${stallColumnDdl}
           id, session_id, prompt_number, content_prompt_id, was_interrupted,
           was_rolled_back, status, user_prompt, assistant_response,
           assistant_transcript, title, content, insight, type,
-          significance_grade, tags, files_read, files_modified,
+          significance_grade, election_tier, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
           ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
@@ -2359,7 +2393,7 @@ ${stallColumnDdl}
             WHEN json_valid(type) AND json_type(type) = 'array' THEN type
             ELSE json_array(type)
           END,
-          significance_grade, tags, files_read, files_modified,
+          significance_grade, election_tier, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
           ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
@@ -2499,8 +2533,9 @@ function retireTurnCitesRecordedColumn(db: Database): void {
         "id", "session_id", "prompt_number", "content_prompt_id",
         "was_interrupted", "was_rolled_back", "status", "user_prompt",
         "assistant_response", "assistant_transcript", "title", "content",
-        "insight", "type", "significance_grade", "tags", "files_read",
-        "files_modified", "tool_call_count", "transcript_line_start",
+        "insight", "type", "significance_grade", "election_tier", "tags",
+        "files_read", "files_modified", "tool_call_count",
+        "transcript_line_start",
         "consulted_memories", "compact_boundary_uuid", "parent_turn_id",
         "created_at_epoch", "updated_at_epoch",
       ];
@@ -2530,6 +2565,9 @@ function retireTurnCitesRecordedColumn(db: Database): void {
           significance_grade INTEGER CHECK (
             significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
           ),
+          election_tier TEXT CHECK (
+            election_tier IS NULL OR election_tier IN ('A', 'B', 'C')
+          ),
           tags TEXT,
           files_read TEXT,
           files_modified TEXT,
@@ -2550,7 +2588,7 @@ ${stallColumnDdl}
           id, session_id, prompt_number, content_prompt_id, was_interrupted,
           was_rolled_back, status, user_prompt, assistant_response,
           assistant_transcript, title, content, insight, type,
-          significance_grade, tags, files_read, files_modified,
+          significance_grade, election_tier, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
           ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
@@ -2560,7 +2598,7 @@ ${stallColumnDdl}
           id, session_id, prompt_number, content_prompt_id, was_interrupted,
           was_rolled_back, status, user_prompt, assistant_response,
           assistant_transcript, title, content, insight, type,
-          significance_grade, tags, files_read, files_modified,
+          significance_grade, election_tier, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
           ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Database } from "bun:sqlite";
 
 import { isCitationRelation, type CitationRelation } from "../db/citations";
+import { isElectionEra } from "../election-era";
 import {
   getOutgoingEdges,
   pairKey,
@@ -110,6 +111,14 @@ export interface SettlementTurnFacadeContext {
    * writes never enter this set either way.
    */
   eligibleRelationPairKeys: ReadonlySet<string>;
+  /**
+   * The election-era cutoff (ADR-0003, `src/election-era.ts`) this dispatch
+   * runs under — a turn at or after it takes `tier`, a turn before it keeps
+   * `grade`, and a call naming the wrong one for a turn's era is refused.
+   * Threaded explicitly, like every other per-request fact this context
+   * carries, rather than defaulted inside the decision function below.
+   */
+  eraCutoffEpoch: number;
   logger?: Pick<Console, "warn">;
 }
 
@@ -153,6 +162,8 @@ export const settlementTurnWriteInputShape = {
   content: z.string().optional(),
   insight: z.string().nullable().optional(),
   grade: z.number().int().min(0).max(4).optional(),
+  /** Election tier (ADR-0003) — a new-era turn only; mutually exclusive with `grade`. */
+  tier: z.enum(["A", "B", "C"]).optional(),
   type: z.array(z.string()).optional(),
   tags: z.array(z.string()).optional(),
   evidenceFor: z.array(z.string()).optional(),
@@ -188,6 +199,7 @@ export interface ProseOutcome {
 export interface ReviewOutcome {
   kind: "written" | "yielded";
   grade?: number;
+  tier?: string;
   type?: string[];
   tags?: string[];
 }
@@ -346,6 +358,7 @@ export function evaluateSettlementTurnWrite(
     rawInput.insight !== undefined;
   const touchesReview =
     rawInput.grade !== undefined ||
+    rawInput.tier !== undefined ||
     rawInput.type !== undefined ||
     rawInput.tags !== undefined;
   const relationFields = RELATION_FIELD_ENTRIES.filter(
@@ -466,8 +479,36 @@ export function evaluateSettlementTurnWrite(
         ok: false,
         message:
           `${ref} is outside this dispatch's reviewable window (the window ` +
-          "plus its rendered lookback) — grade/type/tags may only be " +
+          "plus its rendered lookback) — grade/tier/type/tags may only be " +
           "written for a turn this prompt actually showed.",
+      };
+    }
+    // ADR-0003: grade and tier are the SAME slot under two different eras'
+    // rules, never both at once, and never the one that does not match this
+    // turn's own era (src/election-era.ts) — checked before either value
+    // touches a row, staged or applied alike.
+    if (rawInput.grade !== undefined && rawInput.tier !== undefined) {
+      return {
+        ok: false,
+        message:
+          `${ref}: grade and tier are mutually exclusive — a turn carries ` +
+          "one or the other, decided by its own era, never both in the same call.",
+      };
+    }
+    const turnIsElectionEra = isElectionEra(
+      turn.createdAtEpoch,
+      context.eraCutoffEpoch,
+    );
+    if (rawInput.tier !== undefined && !turnIsElectionEra) {
+      return {
+        ok: false,
+        message: `${ref} predates this session's election era — state grade (0-4), not tier.`,
+      };
+    }
+    if (rawInput.grade !== undefined && turnIsElectionEra) {
+      return {
+        ok: false,
+        message: `${ref} is in this session's election era — state tier (A/B/C), not grade.`,
       };
     }
     // Re-read fresh, right here, right before the write it guards (the
@@ -477,8 +518,8 @@ export function evaluateSettlementTurnWrite(
     //   2. yield-when-the-document-changed — `type`/`tags` are facts
     //      ABOUT the note, so a review of a turn whose note arrived
     //      during the async gap between claim and this call is a review
-    //      of a document the model never saw. Grade still lands: it
-    //      judges what the turn DID, read off raw material no later note
+    //      of a document the model never saw. Grade/tier still land: they
+    //      judge what the turn DID, read off raw material no later note
     //      can change; only the note-derived half stands down.
     const currentNote = getShadowNote(db, turn.id);
     const noteSupersedesReview =
@@ -487,17 +528,22 @@ export function evaluateSettlementTurnWrite(
       currentNote.updatedAtEpoch >= context.contextBuiltAtEpoch;
 
     if (noteSupersedesReview) {
-      if (options.apply && rawInput.grade !== undefined) {
+      if (
+        options.apply &&
+        (rawInput.grade !== undefined || rawInput.tier !== undefined)
+      ) {
         updateTurnById(db, turn.id, {
           significanceGrade: rawInput.grade,
+          electionTier: rawInput.tier,
           updatedAtEpoch: nowEpoch,
         });
       }
-      review = { kind: "yielded", grade: rawInput.grade };
+      review = { kind: "yielded", grade: rawInput.grade, tier: rawInput.tier };
     } else {
       if (options.apply) {
         updateTurnById(db, turn.id, {
           significanceGrade: rawInput.grade,
+          electionTier: rawInput.tier,
           type: normalizedType,
           tags: rawInput.tags,
           updatedAtEpoch: nowEpoch,
@@ -506,6 +552,7 @@ export function evaluateSettlementTurnWrite(
       review = {
         kind: "written",
         grade: rawInput.grade,
+        tier: rawInput.tier,
         type: normalizedType,
         tags: rawInput.tags,
       };
@@ -594,15 +641,16 @@ export function renderSettlementTurnWriteReceipt(
   if (outcome.review) {
     if (outcome.review.kind === "yielded") {
       parts.push(
-        outcome.review.grade !== undefined
+        outcome.review.grade !== undefined || outcome.review.tier !== undefined
           ? `${outcome.ref} review ${options.staged ? "would yield" : "yielded"} (an agent note landed after this dispatch's ` +
-              "context was read) — grade recorded, type/tags left as the agent's own."
+              `context was read) — ${outcome.review.tier !== undefined ? "tier" : "grade"} recorded, type/tags left as the agent's own.`
           : `${outcome.ref} review ${options.staged ? "would yield" : "yielded"} (an agent note landed after this dispatch's ` +
               "context was read) — nothing to write.",
       );
     } else {
       const bits: string[] = [];
       if (outcome.review.grade !== undefined) bits.push(`grade ${outcome.review.grade}`);
+      if (outcome.review.tier !== undefined) bits.push(`tier ${outcome.review.tier}`);
       if (outcome.review.type !== undefined)
         bits.push(`type ${outcome.review.type.length > 0 ? outcome.review.type.join(",") : "(none)"}`);
       if (outcome.review.tags !== undefined)

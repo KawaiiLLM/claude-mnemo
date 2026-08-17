@@ -6,6 +6,12 @@ import {
   type CoverageGap,
 } from "./coverage";
 import { runWriteTransaction } from "./database";
+import {
+  ELECTION_A_SEAT_SHARE,
+  ELECTION_B_SEAT_SHARE,
+  electionSeatCeiling,
+  type ElectionTier,
+} from "../election";
 import { listOwedNoteTurnsInRange } from "./note-debt";
 import {
   advanceNoteSettlementCursor,
@@ -353,11 +359,98 @@ export function computeNoteSettlementNoteGaps(
   );
 }
 
+/**
+ * ADR-0003's ceiling validator: seats are ceilings, never targets. Checked
+ * over the FROZEN window (`job.windowStart`..`job.windowEnd`), the same scope
+ * `computeNoteSettlementSegmentationGaps`/`computeNoteSettlementNoteGaps`
+ * already use — a tier correction to a turn OUTSIDE this window (duty 1
+ * explicitly allows revising an earlier window's verdict) affects that
+ * EARLIER window's own ceiling, already settled, not this one's; re-checking
+ * a closed window retroactively is out of this ticket's scope, the same way
+ * a grade correction never re-validates against the old calibration targets.
+ */
+export interface ElectionCeilingViolation {
+  tier: Extract<ElectionTier, "A" | "B">;
+  /** floor(share * windowTurns) — the ceiling this tier may not exceed. */
+  ceiling: number;
+  /** How many window turns currently carry this tier. */
+  count: number;
+  /** N — every turn in the window, the ceiling's own denominator. */
+  windowTurns: number;
+}
+
+interface WindowElectionTierCounts {
+  windowTurns: number;
+  aCount: number;
+  bCount: number;
+}
+
+function getWindowElectionTierCounts(
+  db: Database,
+  sessionId: number,
+  windowStart: number,
+  windowEnd: number,
+): WindowElectionTierCounts {
+  const row = db
+    .query<
+      { windowTurns: number; aCount: number; bCount: number },
+      [number, number, number]
+    >(
+      `SELECT
+         COUNT(*) AS windowTurns,
+         COALESCE(SUM(CASE WHEN election_tier = 'A' THEN 1 ELSE 0 END), 0) AS aCount,
+         COALESCE(SUM(CASE WHEN election_tier = 'B' THEN 1 ELSE 0 END), 0) AS bCount
+       FROM turns
+       WHERE session_id = ? AND prompt_number BETWEEN ? AND ?`,
+    )
+    .get(sessionId, windowStart, windowEnd) ?? { windowTurns: 0, aCount: 0, bCount: 0 };
+  return row;
+}
+
+/**
+ * The mechanical validator itself (ADR-0003): a window that stages more A or
+ * B tiers than its own ceiling allows is refused, naming the ceiling and the
+ * count — never mechanically demoted. An empty or sparse election (0 A, 0 B)
+ * always passes, whatever N is; only an OVER-ceiling count is a violation.
+ */
+export function computeElectionCeilingViolations(
+  db: Database,
+  sessionId: number,
+  windowStart: number,
+  windowEnd: number,
+): ElectionCeilingViolation[] {
+  const counts = getWindowElectionTierCounts(db, sessionId, windowStart, windowEnd);
+  const violations: ElectionCeilingViolation[] = [];
+
+  const aCeiling = electionSeatCeiling(ELECTION_A_SEAT_SHARE, counts.windowTurns);
+  if (counts.aCount > aCeiling) {
+    violations.push({
+      tier: "A",
+      ceiling: aCeiling,
+      count: counts.aCount,
+      windowTurns: counts.windowTurns,
+    });
+  }
+
+  const bCeiling = electionSeatCeiling(ELECTION_B_SEAT_SHARE, counts.windowTurns);
+  if (counts.bCount > bCeiling) {
+    violations.push({
+      tier: "B",
+      ceiling: bCeiling,
+      count: counts.bCount,
+      windowTurns: counts.windowTurns,
+    });
+  }
+
+  return violations;
+}
+
 export type NoteSettlementCompletionReason =
   | NoteSettlementJobFenceReason
   | "segmentation-incomplete"
   | "note-incomplete"
-  | "coverage-incomplete";
+  | "coverage-incomplete"
+  | "election-ceiling-exceeded";
 
 export interface NoteSettlementCompletionResult {
   completed: boolean;
@@ -368,6 +461,8 @@ export interface NoteSettlementCompletionResult {
   noteGaps: NoteSettlementNoteGap[];
   /** Populated only when `reason === "coverage-incomplete"`. */
   coverageGaps: CoverageGap[];
+  /** Populated only when `reason === "election-ceiling-exceeded"` (ADR-0003). */
+  electionCeilingViolations: ElectionCeilingViolation[];
 }
 
 export interface CompleteNoteSettlementJobIfSegmentedOptions {
@@ -423,6 +518,7 @@ export function completeNoteSettlementJobIfSegmentedCore(
       segmentationGaps,
       noteGaps: [],
       coverageGaps: [],
+      electionCeilingViolations: [],
     };
   }
 
@@ -443,6 +539,7 @@ export function completeNoteSettlementJobIfSegmentedCore(
       segmentationGaps: [],
       noteGaps,
       coverageGaps: [],
+      electionCeilingViolations: [],
     };
   }
 
@@ -460,6 +557,29 @@ export function completeNoteSettlementJobIfSegmentedCore(
       segmentationGaps: [],
       noteGaps: [],
       coverageGaps,
+      electionCeilingViolations: [],
+    };
+  }
+
+  // ADR-0003's ceiling validator: computed inside this SAME transaction, over
+  // the window's CURRENT election_tier values — whatever this run's `note`
+  // calls just replayed. A mechanical refusal only, naming the ceiling and
+  // the count; re-ranking which turns hold a seat is the subagent's job, not
+  // this gate's — it never demotes anyone itself.
+  const electionCeilingViolations = computeElectionCeilingViolations(
+    db,
+    job.sessionId,
+    job.windowStart,
+    job.windowEnd,
+  );
+  if (electionCeilingViolations.length > 0) {
+    return {
+      completed: false,
+      reason: "election-ceiling-exceeded" as const,
+      segmentationGaps: [],
+      noteGaps: [],
+      coverageGaps: [],
+      electionCeilingViolations,
     };
   }
 
@@ -479,6 +599,7 @@ export function completeNoteSettlementJobIfSegmentedCore(
       segmentationGaps: [],
       noteGaps: [],
       coverageGaps: [],
+      electionCeilingViolations: [],
     };
   }
 
@@ -495,6 +616,7 @@ export function completeNoteSettlementJobIfSegmentedCore(
     segmentationGaps: [],
     noteGaps: [],
     coverageGaps: [],
+    electionCeilingViolations: [],
   };
 }
 
@@ -530,6 +652,7 @@ export function completeNoteSettlementJobIfSegmented(
         segmentationGaps: [],
         noteGaps: [],
         coverageGaps: [],
+        electionCeilingViolations: [],
       };
     }
     throw error;

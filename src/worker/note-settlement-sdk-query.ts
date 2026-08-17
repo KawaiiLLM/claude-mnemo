@@ -12,6 +12,7 @@ import {
   workerRecallInputShape,
 } from "../mcp/definitions";
 import { createDatabaseBackedHandlers } from "../mcp/handlers";
+import { ELECTION_ERA_CUTOFF_EPOCH } from "../election-era";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type {
@@ -71,10 +72,11 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "REPLACES what you staged for it before, so a lost-receipt retry or a " +
   "same-run correction is just another call, not a new problem. " +
   "title/content/insight: all three together, only for a turn this window " +
-  "lists as owing a note (insight may be null, but must be named). grade " +
-  "(0-4, against the rubric)/type/tags: only for a turn shown in this " +
-  "prompt (window or preceding turns); each overwrites whole when present, " +
-  "omit to leave alone — there is no append. " +
+  "lists as owing a note (insight may be null, but must be named). " +
+  "grade (0-4, a legacy-era turn) OR tier (A/B/C, a new-era turn — ADR-0003; " +
+  "never both)/type/tags: only for a turn shown in this prompt (window or " +
+  "preceding turns); each overwrites whole when present, omit to leave " +
+  "alone — there is no append. " +
   "evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target " +
   "must already be a pair that existed before this run started AND still " +
   "exist when `commit` lands it — you cannot license a relation on a pair a " +
@@ -203,6 +205,12 @@ export function createNoteSettlementSdkQuery(
       rideTurnId: request.rideTurnId,
       writerModel: request.writerModel,
       eligibleRelationPairKeys: request.eligibleRelationPairKeys,
+      // ADR-0003: not threaded through `NoteSettlementQueryRequest` — the
+      // election-era boundary is a deterministic constant
+      // (`src/election-era.ts`), not a per-request fact the dispatch layer
+      // computes, so it is read here directly, the same way every other
+      // pure constant this module needs would be.
+      eraCutoffEpoch: ELECTION_ERA_CUTOFF_EPOCH,
     };
     const staging = createSettlementStagingEngine({
       db: options.db,

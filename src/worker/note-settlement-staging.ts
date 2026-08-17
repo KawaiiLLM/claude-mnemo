@@ -7,8 +7,15 @@ import {
   assertNoteSettlementJobClaimed,
   completeNoteSettlementJobIfSegmentedCore,
   NoteSettlementJobFenceError,
+  type ElectionCeilingViolation,
   type NoteSettlementCompletionResult,
 } from "../db/note-settlement-completion";
+import {
+  ELECTION_A_SEAT_SHARE,
+  ELECTION_B_SEAT_SHARE,
+  ELECTION_TIERS,
+  type ElectionTier,
+} from "../election";
 import {
   evaluateSettlementSegmentWrite,
   renderSettlementSegmentWriteReceipt,
@@ -156,6 +163,13 @@ export interface NoteSettlementCommitCounts {
    * is enforced, not merely intended.
    */
   gradeHistogram: number[];
+  /**
+   * Election tier counts (ADR-0003), same "always lands regardless of
+   * written/yielded" reasoning as `gradeHistogram` — a landed review counted
+   * here whenever it carried a tier, because tier (like grade) is judged from
+   * raw material, not the note, so the note-derived yield never touches it.
+   */
+  tierCounts: Record<ElectionTier, number>;
   relationsWritten: number;
   segmentsCreated: number;
   segmentsExtended: number;
@@ -175,6 +189,8 @@ function emptyCommitCounts(): NoteSettlementCommitCounts {
     turnsReviewed: 0,
     reviewsYieldedToLateNote: 0,
     gradeHistogram: [0, 0, 0, 0, 0],
+    // A fresh object per call, same reasoning as the histogram array above.
+    tierCounts: { A: 0, B: 0, C: 0 },
     relationsWritten: 0,
     segmentsCreated: 0,
     segmentsExtended: 0,
@@ -376,6 +392,17 @@ function runPreviewTransaction<T>(db: Database, fn: () => T): T {
   }
 }
 
+/** ADR-0003: names the ceiling and the count, never a demotion — the model re-ranks. */
+function describeElectionCeilingViolation(violation: ElectionCeilingViolation): string {
+  const sharePercent = Math.round(
+    (violation.tier === "A" ? ELECTION_A_SEAT_SHARE : ELECTION_B_SEAT_SHARE) * 100,
+  );
+  return (
+    `tier ${violation.tier}: ${violation.count} elected exceeds the ceiling ` +
+    `floor(${sharePercent}%·${violation.windowTurns})=${violation.ceiling}`
+  );
+}
+
 function describeGateRefusal(result: NoteSettlementCompletionResult): string {
   switch (result.reason) {
     case "segmentation-incomplete":
@@ -393,6 +420,12 @@ function describeGateRefusal(result: NoteSettlementCompletionResult): string {
       return (
         `${result.coverageGaps.length} turn(s) still have no stated type: ` +
         result.coverageGaps.map((gap) => `S${gap.sessionId}/T${gap.promptNumber}`).join(", ")
+      );
+    case "election-ceiling-exceeded":
+      return (
+        result.electionCeilingViolations
+          .map(describeElectionCeilingViolation)
+          .join("; ") + " — re-rank and re-stage rather than expecting a mechanical demotion."
       );
     case "not-claimed":
     case "generation-mismatch":
@@ -579,14 +612,18 @@ export function createSettlementStagingEngine(
               if (outcome.review.kind === "yielded") {
                 counts.reviewsYieldedToLateNote += 1;
               }
-              // Grade always lands regardless of written/yielded — only the
-              // note-derived half (type/tags) stands down on a late agent
+              // Grade/tier always land regardless of written/yielded — only
+              // the note-derived half (type/tags) stands down on a late agent
               // note (see evaluateSettlementTurnWrite) — so the histogram
               // counts it unconditionally, same as the retired write-back did
               // when grade was a required field on every review directive.
               if (outcome.review.grade !== undefined) {
                 counts.gradeHistogram[outcome.review.grade] =
                   (counts.gradeHistogram[outcome.review.grade] ?? 0) + 1;
+              }
+              if (outcome.review.tier !== undefined) {
+                const tier = outcome.review.tier as ElectionTier;
+                counts.tierCounts[tier] = (counts.tierCounts[tier] ?? 0) + 1;
               }
             }
             if (outcome.relations) {

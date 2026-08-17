@@ -12,10 +12,12 @@ import {
 import {
   assertNoteSettlementJobClaimed,
   completeNoteSettlementJobIfSegmented,
+  computeElectionCeilingViolations,
   computeNoteSettlementSegmentationGaps,
   listNoteSettlementSegmentExclusions,
   NoteSettlementJobFenceError,
   recordNoteSettlementSegmentExclusion,
+  recordNoteSettlementSegmentExclusions,
 } from "../../src/db/note-settlement-completion";
 import {
   claimNextNoteSettlementJob,
@@ -28,7 +30,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
-import { updateTurnById } from "../../src/db/turns";
+import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
@@ -378,6 +380,7 @@ describe("completeNoteSettlementJobIfSegmented — the completion gate", () => {
       segmentationGaps: [],
       noteGaps: [],
       coverageGaps: [],
+      electionCeilingViolations: [],
     });
     expect(getNoteSettlementJob(db, job.id)?.status).toBe("claimed");
   });
@@ -409,6 +412,7 @@ describe("completeNoteSettlementJobIfSegmented — the completion gate", () => {
       segmentationGaps: [],
       noteGaps: [{ turnId: t1, sessionId: sessionDbId, promptNumber: 1 }],
       coverageGaps: [],
+      electionCeilingViolations: [],
     });
     // G2: a refusal for ANY reason leaves the job exactly as it was.
     expect(getNoteSettlementJob(db, job.id)?.status).toBe("claimed");
@@ -537,6 +541,7 @@ describe("completeNoteSettlementJobIfSegmented — the completion gate", () => {
       segmentationGaps: [],
       noteGaps: [],
       coverageGaps: [],
+      electionCeilingViolations: [],
     });
     expect(getNoteSettlementJob(db, job.id)?.status).toBe("done");
     expect(getNoteSettlementCursor(db, sessionDbId)).toBe(3);
@@ -623,5 +628,164 @@ describe("the completion gate holds its window while it decides (spec G7)", () =
         .get(t1)?.type,
     ).toBe(JSON.stringify(["discuss"]));
     expect(getNoteSettlementJob(db, job.id)?.status).toBe("done");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0003 — the election ceiling validator: seats are ceilings, never
+// targets. A window that stages more A or B tiers than floor(share·N)
+// refuses commit, naming the ceiling and the count; the gate never demotes
+// anyone itself.
+// ---------------------------------------------------------------------------
+
+describe("computeElectionCeilingViolations — the ceiling validator (ADR-0003)", () => {
+  /** N=10 window turns → ceiling(A) = floor(0.1*10) = 1, ceiling(B) = floor(0.3*10) = 3. */
+  function seedTenTurnWindow(sessionDbId: number): number[] {
+    const turnIds: number[] = [];
+    for (let promptNumber = 1; promptNumber <= 10; promptNumber += 1) {
+      turnIds.push(seedTurn(sessionDbId, promptNumber));
+    }
+    return turnIds;
+  }
+
+  test("an empty election (0 A, 0 B) is never a violation, whatever N is", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    seedTurn(sessionDbId, 2);
+    seedTurn(sessionDbId, 3);
+
+    // N=3 → ceiling(A) = ceiling(B) = 0 — a ceiling of zero is legal, and an
+    // election that elects nothing at all must still pass it.
+    expect(computeElectionCeilingViolations(db, sessionDbId, 1, 3)).toEqual([]);
+  });
+
+  test("an A-tier count exactly at the ceiling passes", () => {
+    const sessionDbId = seedSession();
+    const turnIds = seedTenTurnWindow(sessionDbId);
+    updateTurnById(db, turnIds[0]!, { electionTier: "A" });
+
+    expect(computeElectionCeilingViolations(db, sessionDbId, 1, 10)).toEqual([]);
+  });
+
+  test("an A-tier count one over the ceiling is a violation naming the ceiling and the count", () => {
+    const sessionDbId = seedSession();
+    const turnIds = seedTenTurnWindow(sessionDbId);
+    updateTurnById(db, turnIds[0]!, { electionTier: "A" });
+    updateTurnById(db, turnIds[1]!, { electionTier: "A" });
+
+    expect(computeElectionCeilingViolations(db, sessionDbId, 1, 10)).toEqual([
+      { tier: "A", ceiling: 1, count: 2, windowTurns: 10 },
+    ]);
+  });
+
+  test("a B-tier count over the ceiling is a violation, independent of A", () => {
+    const sessionDbId = seedSession();
+    const turnIds = seedTenTurnWindow(sessionDbId);
+    for (let index = 0; index < 4; index += 1) {
+      updateTurnById(db, turnIds[index]!, { electionTier: "B" });
+    }
+
+    expect(computeElectionCeilingViolations(db, sessionDbId, 1, 10)).toEqual([
+      { tier: "B", ceiling: 3, count: 4, windowTurns: 10 },
+    ]);
+  });
+
+  test("A and B can both violate their ceilings in the same window", () => {
+    const sessionDbId = seedSession();
+    const turnIds = seedTenTurnWindow(sessionDbId);
+    updateTurnById(db, turnIds[0]!, { electionTier: "A" });
+    updateTurnById(db, turnIds[1]!, { electionTier: "A" });
+    for (let index = 2; index < 6; index += 1) {
+      updateTurnById(db, turnIds[index]!, { electionTier: "B" });
+    }
+
+    expect(computeElectionCeilingViolations(db, sessionDbId, 1, 10)).toEqual([
+      { tier: "A", ceiling: 1, count: 2, windowTurns: 10 },
+      { tier: "B", ceiling: 3, count: 4, windowTurns: 10 },
+    ]);
+  });
+
+  test("a tier assigned to a turn OUTSIDE the frozen window is not counted", () => {
+    const sessionDbId = seedSession();
+    const turnIds = seedTenTurnWindow(sessionDbId);
+    const outside = seedTurn(sessionDbId, 11);
+    updateTurnById(db, outside, { electionTier: "A" });
+
+    expect(computeElectionCeilingViolations(db, sessionDbId, 1, 10)).toEqual([]);
+    void turnIds;
+  });
+});
+
+describe("completeNoteSettlementJobIfSegmented — the election ceiling gate refuses commit (ADR-0003)", () => {
+  /** Every OTHER duty satisfied for a 10-turn window: typed, noted, explicitly excluded. */
+  function satisfyEveryDutyExceptElection(
+    sessionDbId: number,
+    job: NoteSettlementJob,
+  ): number[] {
+    const turnIds: number[] = [];
+    for (let promptNumber = 1; promptNumber <= 10; promptNumber += 1) {
+      turnIds.push(seedTurn(sessionDbId, promptNumber));
+    }
+    markTyped(turnIds);
+    markNoted(turnIds);
+    recordNoteSettlementSegmentExclusions(db, job.id, turnIds, NOW);
+    return turnIds;
+  }
+
+  test("a commit-shaped over-ceiling window refuses with election-ceiling-exceeded, naming the ceiling and the count, and leaves the job claimed", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 10);
+    const turnIds = satisfyEveryDutyExceptElection(sessionDbId, job);
+    // Ceiling(A) = 1 at N=10 — two A-tier turns is one over.
+    updateTurnById(db, turnIds[0]!, { electionTier: "A" });
+    updateTurnById(db, turnIds[1]!, { electionTier: "A" });
+
+    const result = completeNoteSettlementJobIfSegmented(db, job.id, job.claimGeneration, NOW);
+
+    expect(result.completed).toBe(false);
+    expect(result.reason).toBe("election-ceiling-exceeded");
+    expect(result.electionCeilingViolations).toEqual([
+      { tier: "A", ceiling: 1, count: 2, windowTurns: 10 },
+    ]);
+    // Every OTHER gap array stays empty — this is the ONLY thing blocking.
+    expect(result.segmentationGaps).toEqual([]);
+    expect(result.noteGaps).toEqual([]);
+    expect(result.coverageGaps).toEqual([]);
+    // G2: a refusal for ANY reason leaves the job exactly as it was.
+    expect(getNoteSettlementJob(db, job.id)?.status).toBe("claimed");
+  });
+
+  test("re-ranking down to the ceiling and retrying completes the window — the gate never demotes anyone itself", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 10);
+    const turnIds = satisfyEveryDutyExceptElection(sessionDbId, job);
+    updateTurnById(db, turnIds[0]!, { electionTier: "A" });
+    updateTurnById(db, turnIds[1]!, { electionTier: "A" });
+
+    const firstAttempt = completeNoteSettlementJobIfSegmented(db, job.id, job.claimGeneration, NOW);
+    expect(firstAttempt.reason).toBe("election-ceiling-exceeded");
+
+    // The subagent re-ranks: T2 stands down to C (cleared), never
+    // mechanically demoted by the gate itself.
+    updateTurnById(db, turnIds[1]!, { electionTier: null });
+
+    const retried = completeNoteSettlementJobIfSegmented(db, job.id, job.claimGeneration, NOW + 1);
+    expect(retried.completed).toBe(true);
+    expect(retried.reason).toBeNull();
+    expect(getNoteSettlementJob(db, job.id)?.status).toBe("done");
+    expect(getTurnById(db, turnIds[0]!)?.electionTier).toBe("A");
+    expect(getTurnById(db, turnIds[1]!)?.electionTier).toBeNull();
+  });
+
+  test("an empty or sparse election passes the gate — ceilings are never targets", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 10);
+    satisfyEveryDutyExceptElection(sessionDbId, job);
+    // Nobody elected at all.
+
+    const result = completeNoteSettlementJobIfSegmented(db, job.id, job.claimGeneration, NOW);
+
+    expect(result.completed).toBe(true);
+    expect(result.electionCeilingViolations).toEqual([]);
   });
 });

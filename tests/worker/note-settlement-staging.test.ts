@@ -21,6 +21,7 @@ import { createSegment, getSegment, getSegmentMemberTurnIds } from "../../src/db
 import { upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
+import { ELECTION_ERA_CUTOFF_EPOCH } from "../../src/election-era";
 import { createSettlementStagingEngine } from "../../src/worker/note-settlement-staging";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
@@ -112,6 +113,10 @@ function baseContext(
     rideTurnId: null,
     writerModel: "claude-sonnet-5",
     eligibleRelationPairKeys: new Set(),
+    // Every fixture turn in this file is seeded around NOW (~1.8B), below the
+    // placeholder election-era constant (~1.95B) — the default keeps every
+    // pre-existing grade-based test on the legacy side, unchanged.
+    eraCutoffEpoch: ELECTION_ERA_CUTOFF_EPOCH,
     ...overrides,
   };
 }
@@ -777,6 +782,7 @@ describe("ticket 10c — commit's own result feeds the job log, never the agent"
       turnsReviewed: 3,
       reviewsYieldedToLateNote: 0,
       gradeHistogram: [0, 1, 2, 0, 0],
+      tierCounts: { A: 0, B: 0, C: 0 },
       relationsWritten: 0,
       segmentsCreated: 1,
       segmentsExtended: 1,
