@@ -4,6 +4,10 @@ import { reconcileCitedPairs } from "./memory-edges";
 import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
 import {
+  SEGMENT_WORKING_STATE_FIELDS,
+  type SegmentWorkingStateField,
+} from "../shared/segment-fields";
+import {
   MEMORY_TYPES,
   normalizeTypeValues,
   type MemoryType,
@@ -56,6 +60,22 @@ export interface SegmentRecord {
   tags: string[];
   status: SegmentStatus;
   revision: number;
+  /**
+   * Working State (ADR-0001, ticket 02): the resuming worker's six fields,
+   * beside the summary trio above. Each is a markdown row list ("- " rows,
+   * newline-joined), uncapped, `null` when nothing has been written yet.
+   * Maintained ONLY through `remember` (`appendSegmentWorkingStateRows` /
+   * `replaceInSegmentWorkingStateField` below) — `applySegmentWrites` (the
+   * settlement CAS path) never touches these six, ADR-0002's one-writer-per-
+   * layer split.
+   */
+  goal: string | null;
+  constraints: string | null;
+  decisions: string | null;
+  done: string | null;
+  /** Column `next_steps` — camelCased here like every other multi-word column. */
+  nextSteps: string | null;
+  reference: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
 }
@@ -79,6 +99,12 @@ interface SegmentRow {
   tags: string;
   status: SegmentStatus;
   revision: number;
+  goal: string | null;
+  constraints: string | null;
+  decisions: string | null;
+  done: string | null;
+  nextSteps: string | null;
+  reference: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
 }
@@ -102,9 +128,33 @@ const SEGMENT_COLUMNS = `
   tags,
   status,
   revision,
+  goal,
+  constraints,
+  decisions,
+  done,
+  next_steps AS nextSteps,
+  reference,
   created_at_epoch AS createdAtEpoch,
   updated_at_epoch AS updatedAtEpoch
 `;
+
+/**
+ * `field` (the external, snake_case `remember` vocabulary) -> the
+ * `SegmentRecord` property it reads/writes. One map, so the MCP seam and the
+ * DB writers below cannot disagree about which property a field name means.
+ * `next_steps` is the only entry where the two spellings differ.
+ */
+const SEGMENT_WORKING_STATE_PROPERTY: Record<
+  SegmentWorkingStateField,
+  "goal" | "constraints" | "decisions" | "done" | "nextSteps" | "reference"
+> = {
+  goal: "goal",
+  constraints: "constraints",
+  decisions: "decisions",
+  done: "done",
+  next_steps: "nextSteps",
+  reference: "reference",
+};
 
 function parseStringArray(value: string | null): string[] {
   if (!value) {
@@ -361,6 +411,16 @@ export function createSegment(
  * applied, which left one reference kind licensed differently depending on
  * which body carried it. The gate is gone everywhere now, so there is nothing
  * left to be inconsistent about.
+ *
+ * TICKET 02 (spec "Data model") widened the scan to the six Working State
+ * fields alongside the summary trio: a `decisions` row citing its source is
+ * exactly as real a citation as one in `content`, and scanning the whole
+ * record here — rather than adding a second reconciler for the new columns —
+ * is what keeps "every segment write reconciles its own citations" a single
+ * invariant instead of two that could drift. Harmless on the settlement path
+ * (`applySegmentWrites`), whose `UPDATE` never touches these six: the
+ * `RETURNING` row still carries their current stored value, so the scan
+ * simply re-confirms citations that did not change.
  */
 function reconcileSegmentCitedPairs(
   db: Database,
@@ -371,6 +431,12 @@ function reconcileSegmentCitedPairs(
     ...parseQualifiedReferences(segment.title),
     ...parseQualifiedReferences(segment.content),
     ...parseQualifiedReferences(segment.insight),
+    ...parseQualifiedReferences(segment.goal),
+    ...parseQualifiedReferences(segment.constraints),
+    ...parseQualifiedReferences(segment.decisions),
+    ...parseQualifiedReferences(segment.done),
+    ...parseQualifiedReferences(segment.nextSteps),
+    ...parseQualifiedReferences(segment.reference),
   ];
   const resolved = validateReferences(db, references).accepted;
   reconcileCitedPairs(
@@ -626,6 +692,12 @@ const JOINED_SEGMENT_COLUMNS = `
   s.tags,
   s.status,
   s.revision,
+  s.goal,
+  s.constraints,
+  s.decisions,
+  s.done,
+  s.next_steps AS nextSteps,
+  s.reference,
   s.created_at_epoch AS createdAtEpoch,
   s.updated_at_epoch AS updatedAtEpoch
 `;
@@ -773,18 +845,7 @@ export function getSegmentMemberTurnIds(
 export function getSegmentsForTurn(db: Database, turnId: number): SegmentRecord[] {
   return db
     .query<SegmentRow, [number]>(
-      `SELECT
-         s.id,
-         s.topic_id AS topicId,
-         s.title,
-         s.content,
-         s.insight,
-         s.type,
-         s.tags,
-         s.status,
-         s.revision,
-         s.created_at_epoch AS createdAtEpoch,
-         s.updated_at_epoch AS updatedAtEpoch
+      `SELECT ${JOINED_SEGMENT_COLUMNS}
        FROM segments s
        JOIN segment_members sm ON sm.segment_id = s.id
        WHERE sm.turn_id = ?
@@ -941,4 +1002,194 @@ export function applySegmentWrites(
   db.exec(`RELEASE ${SEGMENT_WRITE_SAVEPOINT}`);
 
   return { applied, excluded };
+}
+
+// ---------------------------------------------------------------------------
+// Working State (ADR-0001/0002, ticket 02) — the main agent's own write path
+// through `remember`, disjoint from `applySegmentWrites` above (settlement's
+// CAS path over the summary trio + structural fields). No revision fence
+// here: ADR-0002 makes maintenance advisory and single-writer-per-session, not
+// a concurrency domain the way an OPEN segment's settlement rewrites are.
+// ---------------------------------------------------------------------------
+
+/**
+ * The stored shape of one row: a leading "- " (ADR-0001's "markdown row
+ * lists"). Idempotent on a caller that already includes the dash, so
+ * `remember(append)` never double-prefixes regardless of whether its caller
+ * typed the bullet itself.
+ */
+export function normalizeWorkingStateRow(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.startsWith("- ") ? trimmed : `- ${trimmed}`;
+}
+
+/**
+ * Append one or more rows to a Working State field (spec "Tools", `remember`
+ * `append`). Newline-joined onto whatever the field already holds; a `null`/
+ * empty field starts fresh. Returns the updated record, or `null` if the
+ * segment does not exist.
+ *
+ * `field` is typed as `SegmentWorkingStateField` — the closed six-value union
+ * `remember`'s own parameter schema enforces — so the column name interpolated
+ * into the `UPDATE` below is never a caller-controlled string, the same
+ * discipline `shouldRebuildSearchIndex` (schema.ts) applies to its own
+ * whitelisted table names.
+ */
+export function appendSegmentWorkingStateRows(
+  db: Database,
+  segmentId: number,
+  field: SegmentWorkingStateField,
+  rows: readonly string[],
+  nowEpoch: number,
+): SegmentRecord | null {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return null;
+  }
+
+  const property = SEGMENT_WORKING_STATE_PROPERTY[field];
+  const existing = segment[property];
+  const addition = rows.map(normalizeWorkingStateRow).join("\n");
+  const merged =
+    existing !== null && existing.trim() !== "" ? `${existing}\n${addition}` : addition;
+
+  const updated = mapSegmentRow(
+    db
+      .query<SegmentRow, [string, number, number]>(
+        `UPDATE segments SET ${field} = ?, updated_at_epoch = ? WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`,
+      )
+      .get(merged, nowEpoch, segmentId) ?? null,
+  );
+
+  if (updated) {
+    reconcileSegmentCitedPairs(db, updated, nowEpoch);
+  }
+  return updated;
+}
+
+export type SegmentFieldReplaceRejection = "missing" | "ambiguous";
+
+export interface ReplaceSegmentWorkingStateFieldResult {
+  /** `null` only when the segment itself does not exist. */
+  segment: SegmentRecord | null;
+  /** Present iff the replace was rejected — `segment` is then the row AS IT STOOD, unchanged. */
+  rejection?: SegmentFieldReplaceRejection;
+  /** How many times `oldString` matched, when `rejection` is `"ambiguous"`. */
+  occurrences?: number;
+}
+
+/**
+ * `remember`'s `replace(old, new)` (ADR-0001): a literal, non-overlapping
+ * substring find within one field's stored text. Rejects loudly rather than
+ * guessing when `oldString` is absent (`"missing"`) or matches more than once
+ * (`"ambiguous"`, with the count) — "replace forces read-before-write and
+ * silence structurally cannot overwrite a statement" is only true if an
+ * ambiguous match refuses rather than picks one silently.
+ *
+ * `newString: ""` deletes the matched text; when that leaves a wholly blank
+ * line (the common case — `oldString` was an entire row, dash included), the
+ * blank line is dropped rather than stored as a gap, and a field emptied to
+ * nothing reverts to `null` — the same "empty means null" convention `note`'s
+ * own field resolvers already use.
+ */
+export function replaceInSegmentWorkingStateField(
+  db: Database,
+  segmentId: number,
+  field: SegmentWorkingStateField,
+  oldString: string,
+  newString: string,
+  nowEpoch: number,
+): ReplaceSegmentWorkingStateFieldResult {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return { segment: null };
+  }
+
+  const property = SEGMENT_WORKING_STATE_PROPERTY[field];
+  const current = segment[property] ?? "";
+  const occurrences = current === "" ? 0 : current.split(oldString).length - 1;
+
+  if (occurrences === 0) {
+    return { segment, rejection: "missing" };
+  }
+  if (occurrences > 1) {
+    return { segment, rejection: "ambiguous", occurrences };
+  }
+
+  const replaced = current.split(oldString).join(newString);
+  const cleaned = replaced
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .join("\n");
+
+  const updated = mapSegmentRow(
+    db
+      .query<SegmentRow, [string | null, number, number]>(
+        `UPDATE segments SET ${field} = ?, updated_at_epoch = ? WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`,
+      )
+      .get(cleaned === "" ? null : cleaned, nowEpoch, segmentId) ?? null,
+  );
+
+  if (updated) {
+    reconcileSegmentCitedPairs(db, updated, nowEpoch);
+  }
+  return { segment: updated };
+}
+
+/** Every segment currently carrying `topicId` — attach-by-topic's candidate set. */
+export function getSegmentsForTopic(
+  db: Database,
+  topicId: number,
+): SegmentRecord[] {
+  return db
+    .query<SegmentRow, [number]>(
+      `SELECT ${SEGMENT_COLUMNS} FROM segments WHERE topic_id = ?
+       ORDER BY updated_at_epoch DESC, id DESC`,
+    )
+    .all(topicId)
+    .map((row) => mapSegmentRow(row))
+    .filter((segment): segment is SegmentRecord => segment !== null);
+}
+
+// ---------------------------------------------------------------------------
+// Attachment (ADR-0005) — the session↔segment binding. Rows accumulate, never
+// expire, no detach verb: `attachSegmentToSession` is a pure idempotent
+// assertion, the same `ON CONFLICT … DO NOTHING` idiom `addSegmentMembers`
+// uses for membership. Consulted-only attachments (zero members) are legal by
+// construction — this table has no relationship to `segment_members` at all.
+// ---------------------------------------------------------------------------
+
+export interface AttachSegmentResult {
+  /** `false` when the binding already existed — idempotent, not an error. */
+  attached: boolean;
+}
+
+export function attachSegmentToSession(
+  db: Database,
+  sessionId: number,
+  segmentId: number,
+  nowEpoch: number,
+): AttachSegmentResult {
+  const row = db
+    .query<{ inserted: number }, [number, number, number]>(
+      `INSERT INTO segment_attachments (session_id, segment_id, created_at_epoch)
+       VALUES (?, ?, ?)
+       ON CONFLICT (session_id, segment_id) DO NOTHING
+       RETURNING 1 AS inserted`,
+    )
+    .get(sessionId, segmentId, nowEpoch);
+  return { attached: row !== null };
+}
+
+/** Every segment id the session has ever attached, oldest attachment first. */
+export function getAttachedSegmentIds(db: Database, sessionId: number): number[] {
+  return db
+    .query<{ segmentId: number }, [number]>(
+      `SELECT segment_id AS segmentId FROM segment_attachments
+       WHERE session_id = ? ORDER BY created_at_epoch ASC, segment_id ASC`,
+    )
+    .all(sessionId)
+    .map((row) => row.segmentId);
 }

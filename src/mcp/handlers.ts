@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { checkTool } from "./check";
 import { noteTool } from "./note";
 import { recallMemory } from "./recall";
+import { rememberTool } from "./remember";
 import { timelineQuery } from "./timeline";
 import { resolveEraCutoff } from "../db/era";
 import { stripPrivateTags } from "../shared/tag-stripping";
@@ -25,6 +26,7 @@ export interface MnemoToolHandlers {
   recall: ToolHandler;
   timeline: ToolHandler;
   note: ToolHandler;
+  remember: ToolHandler;
   check: ToolHandler;
 }
 
@@ -165,6 +167,14 @@ export function createDatabaseBackedHandlers(
     note: (args) =>
       noteTool(database, args as Parameters<typeof noteTool>[1], {
         eraCutoffEpoch: eraCutoff(),
+        callerSessionId: options.resolveCallerSessionId?.() ?? null,
+      }),
+    // Same shape as `note`: a main-agent-only write (ADR-0002), a short
+    // mechanical receipt (plus `attach`'s field render), nothing to truncate.
+    // No era gating — segments carry no legacy shape `remember` needs to
+    // route around.
+    remember: (args) =>
+      rememberTool(database, args as Parameters<typeof rememberTool>[1], {
         callerSessionId: options.resolveCallerSessionId?.() ?? null,
       }),
     // Same shape as `note`: a short mechanical report, nothing to truncate.

@@ -10,3 +10,4 @@
 - [ ] A proposal stores addresses + title + reminder as text, renders at most three, and creates no segment row
 - [ ] remember(create) with the proposal's addresses seeds exactly those members (adoption path, from ticket 02)
 - [ ] System-namespaced tag values never influence assignment
+- [ ] The settlement report flags summary-layer claims contradicting member turns, never rewriting them (ADR-0004 — criterion added at review; a ticket-drafting omission, the spec always carried it)

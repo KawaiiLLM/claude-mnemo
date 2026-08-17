@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { NOTE_TOKEN_BUDGET } from "../shared/note-budget";
+import { SEGMENT_WORKING_STATE_FIELDS } from "../shared/segment-fields";
 import { MEMORY_TYPES } from "../shared/type-vocabulary";
 
 export const MNEMO_TOOL_DESCRIPTIONS = {
@@ -36,6 +37,15 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
     "Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\n" +
     "Relations — evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target this write does not cite rejects the call. Four ordered questions, first yes wins: (1) Did the citing turn overturn it? → supersedes. (2) Did it test the claim, for or against? → evidenceFor/Against. (3) If the cited turn were wrong, would the citing turn's conclusion also be wrong? → dependsOn. (4) None → no relation. Never soften (3) to \"used\"/\"built on\".\n" +
     "Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
+  // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
+  // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
+  // per-turn). Revives the retired 0.x tool name, now scoped to segments only.
+  // Per-verb parameter contracts live in `rememberInputShape`'s `.describe()`s
+  // below, same split as `note`'s ticket 01 revision — this text keeps only
+  // what governs the call as a whole.
+  remember:
+    "Maintain a segment — claude-mnemo's per-topic, long-lived semantic container (记住; `note` is the per-turn episodic surface, 记录). Four verbs: `create` mints a new segment from the roster you have in view — deliberate, never automatic, never a near-duplicate of an existing topic; `attach` binds the current session to a segment (by `id=\"E<n>\"` or an existing topic name) and returns its full fields; `append` adds rows to one named Working State field; `replace` finds `oldString` in one field and swaps in `newString` — ambiguous (matches more than once) or missing rejects loudly naming which, and `newString: \"\"` deletes the matched row. Working State fields: goal, constraints, decisions, done, next_steps, reference — each an uncapped markdown row list. Rows may cite `[S<session>/T<prompt>]` or `[E<n>]`, ids seen in injected context only, never invented. Tool-call markup (`<parameter`, `<invoke`, …) is rejected, nothing stored. Every field is written in English.\n" +
+    "Maintenance is advisory, never a gate: every append/replace reports turns since this segment was last touched — under 10 turns draws a too-soon reminder (a `decisions` append is exempt — a lost ruling is the costliest loss), 20+ turns without a touch draws a nudge on the next write.",
   // ticket 08 (spec G8): the coverage predicate pulled by the agent, not the
   // Stop hook (ticket 11) or the completion gate (ticket 09) — those call the
   // same underlying predicate (db/coverage.ts's `computeCoverageGaps`)
@@ -218,6 +228,74 @@ export const noteInputShape = {
   mode: noteModeShape,
 };
 
+// ticket 02: one shape for all four `remember` verbs (D5/D5a's own
+// discipline extended to the segment surface) — `.strict()` further down
+// rejects a field a verb does not accept, e.g. `rows` on `attach`, the same
+// way `noteInputSchema` rejects a session call sending `type`. Per-field
+// verb scoping is enforced in `mcp/remember.ts`, not by a zod union: a
+// union's error dump names no field, the same reasoning `note`'s
+// `turn`/`session` dispatch already settled.
+const WORKING_STATE_FIELD_LIST = SEGMENT_WORKING_STATE_FIELDS.join("/");
+
+export const rememberInputShape = {
+  verb: z
+    .enum(["create", "attach", "append", "replace"])
+    .describe(
+      "create: mint a new segment. attach: bind the current session to one. append: add rows to a Working State field. replace: find/replace text within one field.",
+    ),
+  id: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'attach/append/replace: the target segment — an "E<n>" address, or a topic name resolved through the topic registry (ambiguous — more than one segment on that topic — rejects, asking for the explicit "E<n>" address instead). Not used by create.',
+    ),
+  title: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("create only (required): the segment's title, written in English."),
+  topic: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "create only (required): the topic this segment belongs to. Reused verbatim or by alias when it already exists (search the roster before minting) — never assume a new name is needed.",
+    ),
+  goal: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("create only, optional: a seed row for the new segment's `goal` field."),
+  members: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'create only, optional: seed member turn addresses ("S<session>/T<prompt>", as seen in context — from an approved proposal, never recalled or invented). Membership is recorded for exactly these turns; a call naming even one bad address seeds none.',
+    ),
+  field: z
+    .enum(SEGMENT_WORKING_STATE_FIELDS)
+    .optional()
+    .describe(`append/replace only (required): which Working State field — ${WORKING_STATE_FIELD_LIST}.`),
+  rows: z
+    .array(z.string().min(1))
+    .optional()
+    .describe(
+      'append only (required): one or more row texts to add, one line each — a leading "- " is added if you did not include it.',
+    ),
+  oldString: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "replace only (required): the exact existing text to find within `field` — missing or matching more than once rejects, naming which.",
+    ),
+  newString: z
+    .string()
+    .optional()
+    .describe('replace only (required): the replacement text; "" deletes the matched text.'),
+};
+
 export const timelineInputShape = {
   id: z.string().min(1),
   page: z.number().int().positive().optional(),
@@ -238,3 +316,4 @@ export const recallInputSchema = z.object(recallInputShape).strict();
 export const timelineInputSchema = z.object(timelineInputShape).strict();
 export const noteInputSchema = z.object(noteInputShape).strict();
 export const checkInputSchema = z.object(checkInputShape).strict();
+export const rememberInputSchema = z.object(rememberInputShape).strict();

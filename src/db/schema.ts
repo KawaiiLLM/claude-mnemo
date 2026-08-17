@@ -436,6 +436,23 @@ const SCHEMA_SQL = `
     -- Bookkeeping, not a facet: no read surface renders it and no caller may
     -- state it.
     facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
+    -- Working State (ADR-0001, ticket 02): the resuming worker's six fields,
+    -- beside the summary trio above. Each stores a markdown row list ("- "
+    -- rows, newline-joined), uncapped, maintained ONLY through remember
+    -- (db/segments.ts's appendSegmentWorkingStateRows /
+    -- replaceInSegmentWorkingStateField) — never applySegmentWrites, the
+    -- settlement CAS path over the summary trio and structural fields
+    -- (ADR-0002's one-writer-per-layer split). Plain nullable TEXT with no
+    -- CHECK referencing another column, so a bare ALTER TABLE ... ADD COLUMN
+    -- is legal SQLite on an existing database (ensureSegmentWorkingStateColumns
+    -- below) — same shape of migration as election_tier on turns, no
+    -- 12-step rebuild needed.
+    goal TEXT,
+    constraints TEXT,
+    decisions TEXT,
+    done TEXT,
+    next_steps TEXT,
+    reference TEXT,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL
   );
@@ -459,6 +476,26 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_segment_members_turn
     ON segment_members(turn_id);
+
+  -- Attachment (ADR-0005, ticket 02): a session's reference to a segment as
+  -- loaded working memory — "binding rows accumulate, never expire, no
+  -- detach". remember(attach) asserts a row idempotently
+  -- (attachSegmentToSession, db/segments.ts); there is no writer that ever
+  -- removes one. Consulted-only attachments (zero segment_members rows for
+  -- the pair) are legal and expected — this table carries no relationship to
+  -- membership at all, only to which sessions have loaded which segments.
+  --
+  -- PRIMARY KEY (session_id, segment_id): one row per pair, so attaching an
+  -- already-attached segment is a no-op rather than a growing duplicate log.
+  CREATE TABLE IF NOT EXISTS segment_attachments (
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (session_id, segment_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_segment_attachments_segment
+    ON segment_attachments(segment_id);
 
   -- Segmentation exclusions (spec G7, ticket 09): the completion gate's
   -- anti-join needs a NEGATIVE fact — "this turn was reviewed under this
@@ -1342,6 +1379,7 @@ export function initializeSchema(db: Database): void {
   ensureTurnSignificanceGradeColumn(db);
   ensureTurnElectionTierColumn(db);
   ensureSegmentInsightColumn(db);
+  ensureSegmentWorkingStateColumns(db);
   ensureSegmentDerivedFacets(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
@@ -1854,6 +1892,26 @@ function ensureTurnInvalidationColumns(db: Database): void {
 // than as a lost value, so no backfill is possible or wanted.
 function ensureSegmentInsightColumn(db: Database): void {
   addColumnIfMissing(db, "segments", "insight", "TEXT");
+}
+
+/**
+ * Working State (ADR-0001, ticket 02): the six columns that reach an EXISTING
+ * database. Same shape of migration as `ensureTurnElectionTierColumn` right
+ * above it in `initializeSchema`'s call list — every one of these six is a
+ * plain nullable `TEXT` whose (absent) CHECK references only itself, so
+ * `ALTER TABLE … ADD COLUMN` is legal SQLite and no 12-step rebuild is
+ * needed. A database created fresh from `SCHEMA_SQL` already carries all six
+ * (declared directly on the `segments` table above), so `addColumnIfMissing`
+ * is a no-op there — this function only ever does real work on a database
+ * that predates this migration.
+ */
+function ensureSegmentWorkingStateColumns(db: Database): void {
+  addColumnIfMissing(db, "segments", "goal", "TEXT");
+  addColumnIfMissing(db, "segments", "constraints", "TEXT");
+  addColumnIfMissing(db, "segments", "decisions", "TEXT");
+  addColumnIfMissing(db, "segments", "done", "TEXT");
+  addColumnIfMissing(db, "segments", "next_steps", "TEXT");
+  addColumnIfMissing(db, "segments", "reference", "TEXT");
 }
 
 /**
@@ -2829,6 +2887,7 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS note_debt");
   db.exec("DROP TABLE IF EXISTS note_debt_pre_closed_reason");
   db.exec("DROP TABLE IF EXISTS observations");
+  db.exec("DROP TABLE IF EXISTS segment_attachments");
   db.exec("DROP TABLE IF EXISTS segment_members");
   db.exec("DROP TABLE IF EXISTS segments");
   db.exec("DROP TABLE IF EXISTS topics");

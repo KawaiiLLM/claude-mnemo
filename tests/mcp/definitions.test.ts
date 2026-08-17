@@ -7,6 +7,8 @@ import {
   noteInputSchema,
   noteInputShape,
   checkInputSchema,
+  rememberInputSchema,
+  rememberInputShape,
   workerRecallInputShape,
 } from "../../src/mcp/definitions";
 import { estimateTokens } from "../../src/utils/token-estimate";
@@ -58,15 +60,18 @@ describe("tool surface", () => {
   it("keeps the worker allowlist at the three read/write tools and exposes timeline descriptions", () => {
     // `note` is deliberately absent: it is the MAIN agent's own write channel
     // (spec D1). Handing it to the extraction worker would let the pipeline
-    // write the notes the P1 trial exists to compare it against. ticket 03
-    // (spec E1) merged `remember` into `note` — there is no second name left.
-    // `check` (ticket 08, spec G8) is likewise absent from the worker
-    // allowlist here: it is the main agent's own pull, not a channel this
-    // worker's extraction pipeline uses.
+    // write the notes the P1 trial exists to compare it against. `remember`
+    // (ticket 02, ADR-0001/0002) is the segment write surface the name
+    // returned FOR, once ticket 03 (spec E1, 0.11.x) had merged it into
+    // `note` and freed it — same reasoning: main-agent-only, absent from the
+    // worker allowlist. `check` (ticket 08, spec G8) is likewise absent from
+    // the worker allowlist here: it is the main agent's own pull, not a
+    // channel this worker's extraction pipeline uses.
     expect(Object.keys(MNEMO_TOOL_DESCRIPTIONS).sort()).toEqual([
       "check",
       "note",
       "recall",
+      "remember",
       "timeline",
     ]);
     expect(MNEMO_TOOL_DESCRIPTIONS.timeline).toContain("page/pageSize");
@@ -321,6 +326,51 @@ describe("tool surface", () => {
     expect(check.toLowerCase()).not.toContain("histogram");
     expect(check).not.toMatch(/\bG[0-4]\s*:/);
     expect(estimateTokens(check)).toBeLessThanOrEqual(200);
+  });
+
+  // Ticket 02 (ADR-0001/0002): `remember` revives the retired tool name as
+  // the segment write surface, distinct from `note`.
+  it("the remember description names all four verbs, the field list, markup/citation/English rules and stays capped", () => {
+    const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
+    expect(remember).toContain("`create`");
+    expect(remember).toContain("`attach`");
+    expect(remember).toContain("`append`");
+    expect(remember).toContain("`replace`");
+    expect(remember).toContain("goal, constraints, decisions, done, next_steps, reference");
+    expect(remember).toContain("Tool-call markup");
+    expect(remember).toContain("Every field is written in English.");
+    expect(remember).toContain("under 10 turns draws a too-soon reminder");
+    expect(remember).toContain("20+ turns without a touch draws a nudge");
+    expect(remember).toContain("`decisions` append is exempt");
+    expect(estimateTokens(remember)).toBeLessThanOrEqual(380);
+  });
+});
+
+describe("rememberInputShape", () => {
+  it("every remember parameter carries a non-empty description on the rendered schema", () => {
+    const rendered = z.toJSONSchema(rememberInputSchema) as {
+      properties: Record<string, { description?: string }>;
+    };
+    const keys = Object.keys(rememberInputShape);
+    expect(keys.length).toBeGreaterThan(0);
+    for (const key of keys) {
+      const description = rendered.properties[key]?.description;
+      expect(description, `${key} should carry a description`).toBeTruthy();
+      expect(description!.length, `${key}'s description is too short`).toBeGreaterThan(10);
+    }
+  });
+
+  it("field's enum matches the six Working State columns exactly", () => {
+    expect(() =>
+      rememberInputSchema.parse({ verb: "append", id: "E1", field: "goal", rows: ["x"] }),
+    ).not.toThrow();
+    expect(() =>
+      rememberInputSchema.parse({ verb: "append", id: "E1", field: "not-a-field", rows: ["x"] }),
+    ).toThrow();
+  });
+
+  it("rejects a verb outside the closed vocabulary", () => {
+    expect(() => rememberInputSchema.parse({ verb: "delete", id: "E1" })).toThrow();
   });
 });
 

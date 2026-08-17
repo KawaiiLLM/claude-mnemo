@@ -1359,25 +1359,33 @@ describe("the merged write tool (ticket 03)", () => {
     db.close();
   });
 
-  // Acceptance criterion 1: the old entry point is gone, and nothing routes
-  // to it any more.
-  describe("the retired remember entry point", () => {
-    test("the module no longer exists", async () => {
-      await expect(import("../../src/mcp/remember")).rejects.toThrow();
+  // Ticket 02 (ADR-0001/0002) revives `remember` — the name the 0.11.x merge
+  // above freed — as the segment (semantic) write surface, distinct from
+  // `note` (episodic). The three tests this block used to carry (the module
+  // does not exist; the handler map carries no `remember` key; the server
+  // never registers it) asserted the OLD state and are superseded by their
+  // exact opposites: `remember` exists, is a SEPARATE tool from `note` (not
+  // re-merged into it), and is registered on the main server. See
+  // tests/mcp/remember.test.ts for `remember`'s own behavioural coverage.
+  describe("the revived remember entry point (ticket 02)", () => {
+    test("the module exports a tool distinct from noteTool", async () => {
+      const remembered = await import("../../src/mcp/remember");
+      expect(typeof remembered.rememberTool).toBe("function");
+      expect(remembered.rememberTool).not.toBe(noteTool);
     });
 
-    test("the database-backed handlers expose no remember key", () => {
+    test("the database-backed handlers expose a remember key beside note", () => {
       const handlers = createDatabaseBackedHandlers(db);
       expect(Object.keys(handlers).sort()).toEqual([
         "check",
         "note",
         "recall",
+        "remember",
         "timeline",
       ]);
-      expect((handlers as Record<string, unknown>).remember).toBeUndefined();
     });
 
-    test("the main MCP server registers recall, timeline, note and check — never remember", () => {
+    test("the main MCP server registers remember beside recall, timeline, note and check", () => {
       const registered: string[] = [];
       registerMainMcpTools(
         { registerTool: (name) => registered.push(name) },
@@ -1385,11 +1393,11 @@ describe("the merged write tool (ticket 03)", () => {
           recall: () => ({ content: [] }),
           timeline: () => ({ content: [] }),
           note: () => ({ content: [] }),
+          remember: () => ({ content: [] }),
           check: () => ({ content: [] }),
         } as never,
       );
-      expect(registered).toEqual(["recall", "timeline", "note", "check"]);
-      expect(registered).not.toContain("remember");
+      expect(registered).toEqual(["recall", "timeline", "note", "remember", "check"]);
     });
   });
 

@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Note contract revision (shared definitions surface).
 
-**Status:** ready-for-agent
+**Status:** done — six columns + segment_attachments + remember's four verbs landed. Judgment calls accepted at review: (1) decisions exemption reads narrow — the too-soon nag skips decisions appends, the 20+ nudge stays informational for all verbs (refines ADR-0002's wording); (2) E-or-topic id resolution extended to all verbs, ambiguous topic rejects; (3) non-open segments refuse append/replace — 03+ should sanity-check; (4) embedded-newline rows rejected, protecting the row-list format later tickets parse.
 
 - [ ] Migration adds the six columns and binding table; migration test proves existing production-shaped data survives the rebuild
 - [ ] create/attach/append/replace round-trip at the MCP seam; replace with a non-unique or missing old_string rejects with a readable error

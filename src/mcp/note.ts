@@ -299,7 +299,11 @@ const HTML_ENTITY_MAP: Record<string, string> = { lt: "<", gt: ">", amp: "&" };
 // The memory agent sometimes emits HTML-escaped text even though every field
 // here is plain text; decode once at the persistence boundary. Single-pass so
 // `&amp;lt;` decodes to `&lt;`, never `<`.
-function decodeHtmlEntities(value: string): string {
+//
+// Exported (ticket 02): `remember`'s Working State fields need the identical
+// decode note's own fields get — one entity map, not a second copy in
+// `mcp/remember.ts`.
+export function decodeHtmlEntities(value: string): string {
   return value.replace(/&(lt|gt|amp);/g, (_match, name: string) => HTML_ENTITY_MAP[name]!);
 }
 
