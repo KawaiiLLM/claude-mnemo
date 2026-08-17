@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done — the summary agent was already fully retired in 0.11.0 (ticket 04); this ticket reduced to regression lock-in (spawn-suppression + queue-drain tests) plus the era gate on session semantic-field rendering. Attachments line deferred to tickets 02/10 as planned.
 
 - [ ] The summary agent no longer spawns on any trigger; its schedule/queue entries drain harmlessly (the note(session) title-only parse rule moved to ticket 01 — shared definitions surface)
 - [ ] recall(id="S<n>") renders title + attachments + stats with no dead-field gaps

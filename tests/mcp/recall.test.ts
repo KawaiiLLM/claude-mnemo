@@ -4,7 +4,11 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
-import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
+import {
+  getSessionByContentId,
+  updateSessionFields,
+  upsertSession,
+} from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { recallInputSchema } from "../../src/mcp/definitions";
 import { NAVIGATION_LEGEND } from "../../src/mcp/format";
@@ -1012,13 +1016,19 @@ describe("recall navigation legend (spec D1)", () => {
     db = createDatabase(":memory:");
     initializeSchema(db);
 
+    // Session created just BEFORE the era cutoff: ticket 09's session-field
+    // era gate (below the turn's own gate) must not blank this session's
+    // `content` and swallow the truncation this test is checking for. The
+    // turn stays at/after the cutoff so its own era-gated (mechanical
+    // observation) rendering — the thing this test actually exercises — is
+    // unaffected.
     const session = upsertSession(db, {
       contentSessionId: "legend-many-fields",
       project: "claude-mnemo",
       title: "Legend coverage",
       content: "s".repeat(500),
       insight: null,
-      createdAtEpoch: ERA,
+      createdAtEpoch: ERA - 1,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
@@ -1104,5 +1114,143 @@ describe("recall navigation legend (spec D1)", () => {
 
     expect(output).not.toContain("Legend:");
     expect(output).not.toContain(NAVIGATION_LEGEND);
+  });
+});
+
+// Semantic-container ticket 09 (ADR-0006): the session's six non-title
+// summary fields retire. A session created before the era cutoff still
+// renders whatever it has stored (read-only, never written again since
+// ticket 01 restricts `note(session)` to title-only). A session created at
+// or after the cutoff renders title + computed stats only — even if some
+// value slipped into storage — because a stray write must not resurrect a
+// dead field. `eraCutoffEpoch: null` (the product default and the rollback
+// value) leaves every session on the legacy path, same invariant `turns`
+// already rely on.
+describe("session semantic fields retire behind the era (ticket 09)", () => {
+  let db: Database;
+  const ERA = 500_000;
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function seedSessionWithFields(contentSessionId: string, createdAtEpoch: number): number {
+    const session = upsertSession(db, {
+      contentSessionId,
+      project: "claude-mnemo",
+      title: "Ticket 09 fixture",
+      content: "The summary layer's compressed view",
+      insight: "- a lesson worth keeping",
+      nextSteps: "pick up where this left off",
+      createdAtEpoch,
+      updatedAtEpoch: createdAtEpoch,
+      completedAtEpoch: null,
+    });
+    updateSessionFields(
+      db,
+      session.id,
+      {
+        decision: "- the call landed [T1]",
+        done: "- shipped the fix",
+        reference: "- docs/plans/redesign.md",
+      },
+      createdAtEpoch,
+    );
+    return session.id;
+  }
+
+  test("a pre-cutoff (legacy) session still renders its stored fields", () => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionId = seedSessionWithFields("ticket09-legacy", ERA - 100);
+
+    const output = recallMemory(db, {
+      id: `S${sessionId}`,
+      depth: "expanded",
+      eraCutoffEpoch: ERA,
+    });
+
+    expect(output).toContain("desc: The summary layer's compressed view");
+    expect(output).toContain("- a lesson worth keeping");
+    expect(output).toContain("- the call landed");
+    expect(output).toContain("- shipped the fix");
+    expect(output).toContain("next: pick up where this left off");
+    expect(output).toContain("- docs/plans/redesign.md");
+  });
+
+  test("a post-cutoff (new) session renders title + stats only, no dead fields", () => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionId = seedSessionWithFields("ticket09-new", ERA + 100);
+    saveTurn(db, {
+      sessionId,
+      promptNumber: 1,
+      userPrompt: "prompt",
+      assistantResponse: "response",
+      title: "A turn",
+      content: "turn content",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: ERA + 110,
+      updatedAtEpoch: ERA + 110,
+      observations: [],
+    });
+
+    const output = recallMemory(db, {
+      id: `S${sessionId}`,
+      depth: "expanded",
+      eraCutoffEpoch: ERA,
+    });
+
+    expect(output).toContain("Ticket 09 fixture");
+    // Stats survive: the turn just seeded still counts.
+    expect(output).toContain("💬1");
+    // The turn's own `content` still renders — only the SESSION's six
+    // retired fields are gated.
+    expect(output).toContain("desc: turn content");
+    // None of the six retired session fields leak through, even though they
+    // are still sitting in storage (seedSessionWithFields wrote all of them).
+    expect(output).not.toContain("The summary layer's compressed view");
+    expect(output).not.toContain("a lesson worth keeping");
+    expect(output).not.toContain("- decision:");
+    expect(output).not.toContain("the call landed");
+    expect(output).not.toContain("- done:");
+    expect(output).not.toContain("shipped the fix");
+    expect(output).not.toContain("next:");
+    expect(output).not.toContain("- reference:");
+    expect(output).not.toContain("redesign.md");
+  });
+
+  test("collapsed (list) rendering also drops a post-cutoff session's content line", () => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    seedSessionWithFields("ticket09-collapsed", ERA + 100);
+
+    const output = recallMemory(db, {
+      query: "Ticket 09",
+      depth: "collapsed",
+      eraCutoffEpoch: ERA,
+    });
+
+    expect(output).toContain("Ticket 09 fixture");
+    expect(output).not.toContain("desc:");
+  });
+
+  test("no eraCutoffEpoch configured (product default) leaves every session on the legacy path", () => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    // A session "created" far in the future still renders its stored fields
+    // when no operator has set a cutoff — null must mean "every session is
+    // legacy", the same rollback-safe default the turn-level era gate uses.
+    const sessionId = seedSessionWithFields("ticket09-no-cutoff", ERA + 100);
+
+    const output = recallMemory(db, {
+      id: `S${sessionId}`,
+      depth: "expanded",
+    });
+
+    expect(output).toContain("desc: The summary layer's compressed view");
+    expect(output).toContain("- shipped the fix");
   });
 });

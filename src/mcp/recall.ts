@@ -104,13 +104,32 @@ function splitInsight(insight: string | null): string[] {
 // seven now (ticket 04), not a legacy fallback for an empty `decision`;
 // `current` is deleted and is not read here even though the column survives as
 // dead storage.
+//
+// Semantic-container ticket 09 (ADR-0006): the session keeps one semantic
+// field, `title`; these six retire. A session created at or after the era
+// cutoff renders none of them — same `isSegmentEra` boundary buildTurnView
+// already gates on — regardless of what (if anything) is still stored,
+// because a stray write must not resurrect a dead field. A pre-cutoff session
+// keeps reading whatever it already has: read-only, never written again.
 function buildSessionSummaryFields(
   db: Database,
   session: NonNullable<ReturnType<typeof getSession>>,
+  eraCutoffEpoch: number | null = null,
 ): Pick<
   FormattedSession,
   "content" | "insight" | "nextSteps" | "decision" | "done" | "reference"
 > {
+  if (isSegmentEra(session.createdAtEpoch, eraCutoffEpoch)) {
+    return {
+      content: null,
+      insight: [],
+      nextSteps: null,
+      decision: null,
+      done: null,
+      reference: null,
+    };
+  }
+
   return {
     content: session.content,
     insight: splitInsight(session.insight),
@@ -363,7 +382,7 @@ function buildSessionView(
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    ...buildSessionSummaryFields(db, session),
+    ...buildSessionSummaryFields(db, session, eraCutoffEpoch),
     turnCount: turns.length,
     observationCount: turns.reduce(
       (sum, turn) => sum + (turn.observationCount ?? 0),
@@ -398,6 +417,7 @@ function getObservationCountByTurnId(
 export function buildSessionSummary(
   db: Database,
   sessionId: number,
+  eraCutoffEpoch: number | null = null,
 ): FormattedSession | null {
   const session = getSession(db, sessionId);
   if (!session) {
@@ -425,7 +445,7 @@ export function buildSessionSummary(
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    ...buildSessionSummaryFields(db, session),
+    ...buildSessionSummaryFields(db, session, eraCutoffEpoch),
     turnCount,
     observationCount,
     jsonlPath: undefined,
@@ -476,7 +496,7 @@ export function buildFormattedSession(
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    ...buildSessionSummaryFields(db, session),
+    ...buildSessionSummaryFields(db, session, eraCutoffEpoch),
     turnCount: turns.length,
     observationCount: turns.reduce(
       (sum, turn) => sum + (turn.observationCount ?? 0),
@@ -605,7 +625,7 @@ function renderSession(
 ): string {
   const view = depth === "expanded"
     ? buildSessionView(db, session, eraCutoffEpoch)
-    : buildSessionSummary(db, session.id) ??
+    : buildSessionSummary(db, session.id, eraCutoffEpoch) ??
       buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
@@ -685,7 +705,7 @@ function renderTurnScope(
     );
 
   for (const session of sessions) {
-    const view = buildSessionSummary(db, session.id);
+    const view = buildSessionSummary(db, session.id, eraCutoffEpoch);
     if (!view) {
       continue;
     }
@@ -780,7 +800,7 @@ function renderObservationScope(
     );
 
   for (const session of sessions) {
-    const sessionView = buildSessionSummary(db, session.id);
+    const sessionView = buildSessionSummary(db, session.id, eraCutoffEpoch);
     if (!sessionView) {
       continue;
     }
@@ -1276,7 +1296,7 @@ function renderGroupedSearchResults(
         {
           type: "session",
           value:
-            buildSessionSummary(db, session.id) ??
+            buildSessionSummary(db, session.id, eraCutoffEpoch) ??
             buildSessionView(db, session, eraCutoffEpoch),
         },
         { depth: "collapsed", mode: "unified", truncate, truncateCap, signal },
