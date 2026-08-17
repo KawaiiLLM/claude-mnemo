@@ -33,14 +33,12 @@ describe("database-backed MCP handlers", () => {
         depth: "expanded",
         page: 2,
         pageSize: 10,
-        truncate: 500,
       }),
     ).toEqual({
       id: "S1/T2",
       depth: "expanded",
       page: 2,
       pageSize: 10,
-      truncate: 500,
     });
 
     expect(() =>
@@ -53,6 +51,13 @@ describe("database-backed MCP handlers", () => {
       recallInputSchema.parse({
         id: "S1",
         depth: "full",
+      }),
+    ).toThrow();
+    // Ticket 04: `truncate` retires from the public surface.
+    expect(() =>
+      recallInputSchema.parse({
+        id: "S1",
+        truncate: 500,
       }),
     ).toThrow();
   });

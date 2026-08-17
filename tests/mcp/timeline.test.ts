@@ -2603,34 +2603,6 @@ describe("buildTimelineView", () => {
     ]);
   });
 
-  it("paginates the phases view over phases and anchors to the first phase start", () => {
-    const db = createDatabase(":memory:");
-    seedTimelineSession(db, [
-      turn({ promptNumber: 1, type: "discovery", createdAtEpoch: 1_779_782_400 }),
-      turn({ promptNumber: 2, type: "discovery", createdAtEpoch: 1_779_782_460 }),
-      turn({ promptNumber: 3, type: "decision", createdAtEpoch: 1_779_782_520 }),
-      turn({ promptNumber: 4, type: "feature", createdAtEpoch: 1_779_782_580 }),
-      turn({ promptNumber: 5, type: "feature", createdAtEpoch: 1_779_782_640 }),
-      turn({ promptNumber: 6, type: "bugfix", createdAtEpoch: 1_779_782_700 }),
-    ]);
-
-    const view = buildTimelineView(db, {
-      id: "S1",
-      view: "phases",
-      page: 2,
-      pageSize: 2,
-    });
-
-    expect(view.view).toBe("phases");
-    expect(view.viewItemTotal).toBe(4);
-    expect(view.pageCount).toBe(2);
-    expect(view.pageAnchorEpoch).toBe(1_779_782_580);
-    expect(view.pagedPhases.map((phase) => phase.startPromptNumber)).toEqual([
-      4,
-      6,
-    ]);
-  });
-
   it("rejects unknown session ids", () => {
     const db = createDatabase(":memory:");
 
@@ -3090,32 +3062,6 @@ describe("renderTimeline", () => {
     expect(compactLine).not.toContain("ignored raw summary wrapper");
   });
 
-  it("renders phases scoped to window only in the phases view", () => {
-    const db = createDatabase(":memory:");
-
-    seedSession(db);
-
-    const view = buildTimelineView(db, { id: "S1/T10..15", view: "phases" });
-    const output = renderTimeline(view);
-
-    expect(output).toContain("phases:");
-    expect(output).toMatch(/shape signals \(window T10-T15\):/);
-    expect(output).not.toContain(TURN_TABLE_HEADER);
-  });
-
-  it("renders phases labeled session-wide only in the phases view", () => {
-    const db = createDatabase(":memory:");
-
-    seedSession(db);
-
-    const view = buildTimelineView(db, { id: "S1", view: "phases" });
-    const output = renderTimeline(view);
-
-    expect(output).toContain("phases:");
-    expect(output).toMatch(/shape signals \(window T1-T21 = full session\):/);
-    expect(output).not.toContain(TURN_TABLE_HEADER);
-  });
-
   it("renders shape signals as a window-scoped block", () => {
     const db = createDatabase(":memory:");
 
@@ -3129,7 +3075,7 @@ describe("renderTimeline", () => {
     expect(output).toMatch(/tool bursts:/);
   });
 
-  it("dispatches default, turns, milestones, and phases views to separate bodies", () => {
+  it("dispatches default, turns, and milestones views to separate bodies", () => {
     const db = createDatabase(":memory:");
     seedTimelineSession(db, [
       turn({ promptNumber: 1, type: "discovery", title: "start", createdAtEpoch: 1_779_782_400 }),
@@ -3160,9 +3106,6 @@ describe("renderTimeline", () => {
     const milestoneOutput = renderTimeline(
       buildTimelineView(db, { id: "S1", view: "milestones" }),
     );
-    const phasesOutput = renderTimeline(
-      buildTimelineView(db, { id: "S1", view: "phases" }),
-    );
 
     expect(defaultOutput).toContain(TURN_TABLE_HEADER);
     expect(defaultOutput).toContain("shape signals");
@@ -3175,9 +3118,6 @@ describe("renderTimeline", () => {
     expect(milestoneOutput).not.toContain(TURN_TABLE_HEADER);
     expect(milestoneOutput).toContain("shape signals");
     expect(milestoneOutput).not.toMatch(/\n\s+phases[:(]/);
-    expect(phasesOutput).toContain("phases:");
-    expect(phasesOutput).toContain("shape signals");
-    expect(phasesOutput).not.toContain(TURN_TABLE_HEADER);
   });
 
   it("renders cross-day header dates and day dividers for turns and milestones", () => {
@@ -3251,53 +3191,6 @@ describe("renderTimeline", () => {
       /showing: turns .*page 2\s*\/\s*3.*3.*2026-05-27 Wed/,
     );
     expect(singlePageOutput).not.toContain("showing:");
-  });
-
-  it("renders phase dates, cross-day phase spans, and lead titles in the phases view", () => {
-    const db = createDatabase(":memory:");
-    seedTimelineSession(db, [
-      turn({
-        promptNumber: 1,
-        type: "discovery",
-        title: "same day research",
-        createdAtEpoch: 1_779_782_400,
-      }),
-      turn({
-        promptNumber: 2,
-        type: "discovery",
-        title: "same day follow-up",
-        createdAtEpoch: 1_779_783_000,
-      }),
-      turn({
-        promptNumber: 3,
-        type: "feature",
-        title: "cross-day feature",
-        createdAtEpoch: 1_780_178_400,
-      }),
-      turn({
-        promptNumber: 4,
-        type: "feature",
-        title: "feature after midnight",
-        createdAtEpoch: 1_780_187_400,
-      }),
-      turn({
-        promptNumber: 5,
-        type: "decision",
-        title: "next day decision",
-        createdAtEpoch: 1_780_233_900,
-      }),
-    ]);
-
-    const output = renderTimeline(
-      buildTimelineView(db, { id: "S1", view: "phases" }),
-    );
-
-    expect(output).toContain("05-26 Tue");
-    expect(output).toContain("same day research");
-    expect(output).toContain("05-30→05-31");
-    expect(output).toContain("cross-day feature");
-    expect(output).toContain("next day decision");
-    expect(output).not.toContain(TURN_TABLE_HEADER);
   });
 
   it("renderTimeline respects promptCap option", () => {
@@ -3485,7 +3378,6 @@ describe("timelineQuery", () => {
     seedSession(db);
 
     expect(timelineQuery(db, { id: "S1" })).not.toMatch(/\n\s+phases[:(]/);
-    expect(timelineQuery(db, { id: "S1", view: "phases" })).toContain("phases:");
 
     // The milestone view dispatches to the day-grouped digest, not the turn table.
     const milestoneOut = timelineQuery(db, { id: "S1", view: "milestones" });
@@ -5094,7 +4986,7 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
   it("keeps the three view names and their bodies distinct", () => {
     const db = createDatabase(":memory:");
     seedDesignArc(db);
-    const views = (["turns", "milestones", "phases"] as const).map((view) => ({
+    const views = (["turns", "milestones"] as const).map((view) => ({
       view,
       out: renderTimeline(buildTimelineView(db, { id: "S1", view })),
     }));
@@ -5107,11 +4999,8 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
       } else {
         expect(out).not.toContain(TURN_TABLE_HEADER);
       }
-      if (view === "phases") {
-        expect(out).toContain("# | date | type | turns | span | work | lead title");
-      } else {
-        expect(out).not.toContain("# | date | type | turns | span | work | lead title");
-      }
+      // ticket 04: `phases` retired — no view emits its digest header any more.
+      expect(out).not.toContain("# | date | type | turns | span | work | lead title");
     }
   });
 
@@ -5467,4 +5356,187 @@ describe("the →被T<n>推翻 back-link on a main row", () => {
     expect(victimRow).toBeDefined();
     expect(victimRow?.supersededBy).toEqual([3]);
   });
+});
+
+// Ticket 04 (spec "Tools"): the shared filter grammar — {type, tag, session,
+// time, file} — AND-composed with each other and with the id selector's
+// range. Narrows `windowTurns` (turn table + milestone selection candidate
+// set) the same way `recall`'s `S<n>/T*` id route narrows its own turn
+// listing (see recall.test.ts's "filter unification" describe block for the
+// cross-tool equivalence check).
+describe("timeline filter (ticket 04, spec \"Tools\")", () => {
+  function seedFilterFixture(db: Database) {
+    seedTimelineSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "discovery",
+        tags: ["auth"],
+        filesModified: ["src/auth.ts"],
+        createdAtEpoch: 1_000, // 1970-01-01
+      }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        tags: ["auth"],
+        filesModified: [],
+        createdAtEpoch: 2_000, // 1970-01-01
+      }),
+      turn({
+        promptNumber: 3,
+        type: "discovery",
+        tags: ["billing"],
+        filesModified: ["src/billing.ts"],
+        createdAtEpoch: 90_000, // 1970-01-02
+      }),
+      turn({
+        promptNumber: 4,
+        type: "decision",
+        tags: ["billing"],
+        filesModified: [],
+        createdAtEpoch: 91_000, // 1970-01-02
+      }),
+    ]);
+  }
+
+  const turnLine = (output: string, n: number) =>
+    new RegExp(`^T${n} \\|`, "m").test(output);
+
+  it("with no filter, every turn renders (the mutation baseline)", () => {
+    const db = createDatabase(":memory:");
+    seedFilterFixture(db);
+
+    const output = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
+
+    expect(turnLine(output, 1)).toBe(true);
+    expect(turnLine(output, 2)).toBe(true);
+    expect(turnLine(output, 3)).toBe(true);
+    expect(turnLine(output, 4)).toBe(true);
+  });
+
+  it("filter.type narrows the turn table to matching turns only", () => {
+    const db = createDatabase(":memory:");
+    seedFilterFixture(db);
+
+    const output = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "turns", filter: { type: "decision" } }),
+    );
+
+    expect(turnLine(output, 1)).toBe(false);
+    expect(turnLine(output, 2)).toBe(true);
+    expect(turnLine(output, 3)).toBe(false);
+    expect(turnLine(output, 4)).toBe(true);
+  });
+
+  it("filter.tag narrows the turn table to matching turns only", () => {
+    const db = createDatabase(":memory:");
+    seedFilterFixture(db);
+
+    const output = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "turns", filter: { tag: "billing" } }),
+    );
+
+    expect(turnLine(output, 1)).toBe(false);
+    expect(turnLine(output, 2)).toBe(false);
+    expect(turnLine(output, 3)).toBe(true);
+    expect(turnLine(output, 4)).toBe(true);
+  });
+
+  it("filter.file substring-matches files_modified", () => {
+    const db = createDatabase(":memory:");
+    seedFilterFixture(db);
+
+    const output = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "turns", filter: { file: "billing" } }),
+    );
+
+    expect(turnLine(output, 1)).toBe(false);
+    expect(turnLine(output, 2)).toBe(false);
+    expect(turnLine(output, 3)).toBe(true);
+    expect(turnLine(output, 4)).toBe(false);
+  });
+
+  it("filter.time AND-composes with the id selector — same grammar as recall's", () => {
+    const db = createDatabase(":memory:");
+    seedFilterFixture(db);
+
+    const output = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "turns", filter: { time: "1970-01-02" } }),
+    );
+
+    expect(turnLine(output, 1)).toBe(false);
+    expect(turnLine(output, 2)).toBe(false);
+    expect(turnLine(output, 3)).toBe(true);
+    expect(turnLine(output, 4)).toBe(true);
+  });
+
+  // Mutation check (method: "disable one filter member → red"): two filter
+  // members together admit STRICTLY FEWER turns than either alone — proving
+  // the composition is AND, never OR. T4 (decision/billing) is excluded only
+  // when BOTH members apply at once.
+  it("two filter members AND-compose — narrower than either alone", () => {
+    const db = createDatabase(":memory:");
+    seedFilterFixture(db);
+
+    const typeOnly = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "turns", filter: { type: "decision" } }),
+    );
+    const tagOnly = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "turns", filter: { tag: "auth" } }),
+    );
+    const both = renderTimeline(
+      buildTimelineView(db, {
+        id: "S1",
+        view: "turns",
+        filter: { type: "decision", tag: "auth" },
+      }),
+    );
+
+    // RED: type alone still admits T4 (decision/billing) — disabling the tag
+    // member brings it back.
+    expect(turnLine(typeOnly, 4)).toBe(true);
+    // RED: tag alone still admits T1 (discovery/auth) — disabling the type
+    // member brings it back.
+    expect(turnLine(tagOnly, 1)).toBe(true);
+    // GREEN: both members together admit only T2 (decision AND auth).
+    expect(turnLine(both, 1)).toBe(false);
+    expect(turnLine(both, 2)).toBe(true);
+    expect(turnLine(both, 3)).toBe(false);
+    expect(turnLine(both, 4)).toBe(false);
+  });
+
+  it("filter.session AND-composes with the id selector — a mismatched session empties the window", () => {
+    const db = createDatabase(":memory:");
+    seedFilterFixture(db);
+
+    const matched = buildTimelineView(db, {
+      id: "S1",
+      view: "turns",
+      filter: { session: "S1" },
+    });
+    const mismatched = buildTimelineView(db, {
+      id: "S1",
+      view: "turns",
+      filter: { session: "S999" },
+    });
+
+    expect(matched.windowTurns.length).toBe(4);
+    expect(mismatched.windowTurns.length).toBe(0);
+  });
+
+  it("an invalid filter.time is a timeline error, same grammar as recall's", () => {
+    const db = createDatabase(":memory:");
+    seedFilterFixture(db);
+
+    const output = timelineQuery(db, {
+      id: "S1",
+      filter: { time: "yesterday" },
+    });
+
+    expect(output).toBe('timeline error: invalid time selector "yesterday"');
+  });
+
+  // Ticket 05 (blocked by this ticket) retires the phases VIEW; the
+  // underlying `segmentPhases` grouping utility is unrelated to `filter` and
+  // stays live (its own `describe("segmentPhases")` suite above), so this
+  // filter suite does not touch it.
 });

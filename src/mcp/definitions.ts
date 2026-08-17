@@ -4,6 +4,40 @@ import { NOTE_TOKEN_BUDGET } from "../shared/note-budget";
 import { SEGMENT_WORKING_STATE_FIELDS } from "../shared/segment-fields";
 import { MEMORY_TYPES } from "../shared/type-vocabulary";
 
+// Ticket 04 (spec "Tools"): the one structured filter grammar shared by
+// `recall` and `timeline` — mirrors `MemoryFilterInput` (mcp/memory-filter.ts)
+// field-for-field. `.strict()` so an unrecognised filter key (e.g. the
+// retired `project`) is a parse error, not a silent no-op.
+export const memoryFilterShape = {
+  type: z
+    .string()
+    .optional()
+    .describe(
+      "Exact match against one stored `type` value (a turn's type array, or a segment's).",
+    ),
+  tag: z
+    .string()
+    .optional()
+    .describe(
+      "Exact match against one whole `tags` array element, either namespace (bare or `topic:`-prefixed) — a prefix does not match.",
+    ),
+  session: z
+    .union([z.string(), z.number()])
+    .optional()
+    .describe('Scope to one session: "S12" or bare "12"/12.'),
+  time: z
+    .string()
+    .optional()
+    .describe(
+      "`-7d`/`-2w` (relative), `YYYY-MM-DD` (one day), or `YYYY-MM-DD..YYYY-MM-DD` (inclusive range).",
+    ),
+  file: z
+    .string()
+    .optional()
+    .describe("Substring match against files_read + files_modified."),
+};
+export const memoryFilterSchema = z.object(memoryFilterShape).strict();
+
 export const MNEMO_TOOL_DESCRIPTIONS = {
   // ticket 14 (spec K1): the segment addressing and `query=` participation
   // below were already load-bearing in the implementation before this
@@ -12,9 +46,9 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall:
-    "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id=\"E<n>\"` (also `E*`, `E1..9`) recalls the segment card — the accumulated impression of one arc of work, not a session or a turn — so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. `id=\"E<n>/T<m>\"` (also `E<n>/T*`, `E<n>/T3..7`) addresses the segment's own members by their 1-based EVENT-ORDER position — a navigation handle only, never a citation (cite the rendered `[S<session>][T<prompt>]` address instead, since a late-settling member shifts the ordinal). `depth` is a field-set switch: turns collapsed show prompt/title/content, expanded adds insight/response/observations; a segment collapsed shows its metadata header and counts with the newest field rows, expanded shows every row plus a member index. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=` search (text, `tag:`, `type:`) alongside sessions and turns.",
+    "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id=\"E<n>\"` (also `E*`, `E1..9`) recalls the segment card — the accumulated impression of one arc of work, not a session or a turn — so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. `id=\"E<n>/T<m>\"` (also `E<n>/T*`, `E<n>/T3..7`) addresses the segment's own members by their 1-based EVENT-ORDER position — a navigation handle only, never a citation (cite the rendered `[S<session>][T<prompt>]` address instead, since a late-settling member shifts the ordinal). `depth` is a field-set switch: turns collapsed show prompt/title/content, expanded adds insight/response/observations; a segment collapsed shows its metadata header and counts with the newest field rows, expanded shows every row plus a member index. `query` is pure full-text search — it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.",
   timeline:
-    "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
+    "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` (key chronological digest) — `phases` has retired. `filter` — the same structured grammar `recall` uses — AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
   // test, type's vocabulary, tags' noun order, the session's seven fields —
@@ -57,12 +91,35 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
 
 export const recallInputShape = {
   id: z.string().optional(),
-  query: z.string().optional(),
-  time: z.string().optional(),
+  query: z
+    .string()
+    .optional()
+    .describe(
+      "Pure full-text search — no in-string dialect (a literal `tag:foo` searches those characters). Use `filter` for type/tag/session/time/file scoping.",
+    ),
+  // Ticket 04 (spec "Tools"): the one structured filter grammar, shared with
+  // `timeline`. AND-composed with each other, with `id`, and with `query`.
+  // Replaces the retired in-query prefix dialect AND the top-level `time`
+  // param this shape used to carry (folded in as `filter.time`, same
+  // grammar) — no non-test caller in this repo passed top-level `time`, so
+  // it is cut clean rather than kept as a deprecated alias.
+  filter: memoryFilterSchema.optional().describe(
+    "Structured scoping — {type, tag, session, time, file} — AND-composed with each other, with `id`, and with `query`.",
+  ),
   depth: z.enum(["collapsed", "expanded"]).optional(),
   page: z.number().int().positive().optional(),
   pageSize: z.number().int().positive().optional(),
-  truncate: z.number().int().min(1).max(2000).optional(),
+  // Ticket 04: `truncate` retires from the public surface. The field stays
+  // DEFINED (rather than simply omitted) so `recallInputSchema`'s superRefine
+  // below can reject it with a message naming its replacements — an omitted
+  // key would only ever produce zod's generic "unrecognized key" text, which
+  // names nothing to point the caller at.
+  truncate: z
+    .number()
+    .optional()
+    .describe(
+      "Retired — use `pageBudget` (segment cards) or `turn` (per-turn token cap) instead.",
+    ),
   // ticket 03 (spec "Budgets"): the segment card's own token budget, default
   // 1000. Distinct from `page` above (still the 1-indexed page NUMBER) —
   // `page` doubles as this render's own overflow escape: page 1 is the
@@ -79,7 +136,9 @@ export const recallInputShape = {
 };
 
 // SDK workers share recall's public selector grammar, but may request long
-// fields. The main MCP schema above deliberately retains its 2000-char cap.
+// fields — worker callers (diary, settlement) never go through
+// `recallInputSchema`'s superRefine below, so `truncate` keeps working here
+// exactly as before ticket 04.
 export const workerRecallInputShape = {
   ...recallInputShape,
   truncate: z.number().int().min(1).optional(),
@@ -313,7 +372,18 @@ export const timelineInputShape = {
   id: z.string().min(1),
   page: z.number().int().positive().optional(),
   pageSize: z.number().int().positive().optional(),
-  view: z.enum(["turns", "milestones", "phases"]).optional(),
+  // Ticket 04: `phases` retires. Removing it from the enum outright (rather
+  // than keeping it defined only to reject, as `truncate` below does) is
+  // enough — zod's own invalid-enum message already names the surviving
+  // options ("expected one of \"turns\"|\"milestones\""), so no custom
+  // superRefine is needed to satisfy "parse error naming the two surviving
+  // views".
+  view: z.enum(["turns", "milestones"]).optional(),
+  // Ticket 04 (spec "Tools"): the same structured filter grammar recall
+  // carries, shared verbatim — AND-composed with the id selector's range.
+  filter: memoryFilterSchema.optional().describe(
+    "Structured scoping, shared with recall's `filter`: {type, tag, session, time, file}, AND-composed with the id selector's range.",
+  ),
 };
 
 // ticket 08 (spec G8): `id` addresses a whole session (`S<session>`) — the
@@ -325,7 +395,25 @@ export const checkInputShape = {
   id: z.string().min(1),
 };
 
-export const recallInputSchema = z.object(recallInputShape).strict();
+// Ticket 04: `truncate` is defined on `recallInputShape` (above) purely so
+// this refine can name its replacements — a `.strict()`-rejected unknown key
+// would only ever carry zod's generic message. `workerRecallInputShape`
+// never routes through THIS schema (worker call sites build their own
+// `z.object(workerRecallInputShape)`), so the worker's long-field `truncate`
+// is untouched by this rejection.
+export const recallInputSchema = z
+  .object(recallInputShape)
+  .strict()
+  .superRefine((data, ctx) => {
+    if (data.truncate !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "`truncate` has retired — use `pageBudget` (segment cards) or `turn` (per-turn token cap) instead.",
+        path: ["truncate"],
+      });
+    }
+  });
 export const timelineInputSchema = z.object(timelineInputShape).strict();
 export const noteInputSchema = z.object(noteInputShape).strict();
 export const checkInputSchema = z.object(checkInputShape).strict();

@@ -15,13 +15,12 @@ import { estimateTokens } from "../../src/utils/token-estimate";
 import { z } from "zod";
 
 describe("recallInputSchema", () => {
-  it("accepts page + pageSize + truncate and rejects limit + depth=full", () => {
+  it("accepts page + pageSize and rejects limit + depth=full", () => {
     const ok = recallInputSchema.parse({
       id: "S1",
       depth: "expanded",
       page: 2,
       pageSize: 10,
-      truncate: 500,
     });
 
     expect(ok).toEqual({
@@ -29,7 +28,6 @@ describe("recallInputSchema", () => {
       depth: "expanded",
       page: 2,
       pageSize: 10,
-      truncate: 500,
     });
 
     expect(() =>
@@ -38,11 +36,43 @@ describe("recallInputSchema", () => {
     expect(() =>
       recallInputSchema.parse({ id: "S1", depth: "full" }),
     ).toThrow();
+  });
+
+  // Ticket 04 (spec "Tools"): `truncate` retires from the public surface —
+  // a parse error whose message names its replacements, not merely a
+  // `.strict()` "unrecognized key". Checked at the same seam the MCP SDK
+  // validates a real call against (`normalizeObjectSchema` +
+  // `safeParseAsync`, confirmed to still apply this schema's `superRefine`).
+  it("truncate is a parse error naming pageBudget and turn as replacements", () => {
+    const result = recallInputSchema.safeParse({ id: "S1", truncate: 500 });
+    expect(result.success).toBe(false);
+    const message = result.success ? "" : result.error.issues.map((i) => i.message).join(" ");
+    expect(message).toContain("pageBudget");
+    expect(message).toContain("turn");
+
+    // Any value — not just an out-of-range one — is rejected; the field
+    // exists only to carry this message, not to still accept some inputs.
+    expect(recallInputSchema.safeParse({ id: "S1", truncate: 1 }).success).toBe(false);
+    expect(recallInputSchema.safeParse({ id: "S1" }).success).toBe(true);
+  });
+
+  // Ticket 04: the shared `filter` object — AND-composed members, `.strict()`
+  // against the retired `project` member and any other unrecognised key.
+  it("accepts the shared filter object and rejects an unrecognised filter key", () => {
+    expect(
+      recallInputSchema.parse({
+        id: "S1",
+        filter: { type: "decision", tag: "auth", session: "S12", time: "-7d", file: "src/" },
+      }),
+    ).toEqual({
+      id: "S1",
+      filter: { type: "decision", tag: "auth", session: "S12", time: "-7d", file: "src/" },
+    });
+    expect(recallInputSchema.parse({ id: "S1", filter: { session: 12 } }).filter).toEqual({
+      session: 12,
+    });
     expect(() =>
-      recallInputSchema.parse({ id: "S1", truncate: 5000 }),
-    ).toThrow();
-    expect(() =>
-      recallInputSchema.parse({ id: "S1", truncate: 0 }),
+      recallInputSchema.parse({ id: "S1", filter: { project: "claude-mnemo" } }),
     ).toThrow();
   });
 });
@@ -422,10 +452,6 @@ describe("timelineInputSchema", () => {
       id: "S42",
       view: "milestones",
     });
-    expect(timelineInputSchema.parse({ id: "S42", view: "phases" })).toEqual({
-      id: "S42",
-      view: "phases",
-    });
 
     expect(() =>
       timelineInputSchema.parse({ id: "S42", view: "summary" }),
@@ -435,6 +461,35 @@ describe("timelineInputSchema", () => {
     ).toThrow();
     expect(() =>
       timelineInputSchema.parse({ id: "S42", phases: false }),
+    ).toThrow();
+  });
+
+  // Ticket 04 (spec "Tools"): `phases` retires — a parse error naming the
+  // two surviving views. Removing it from the enum (rather than keeping it
+  // defined only to reject, the way `recall`'s `truncate` does) is enough:
+  // zod's own invalid-option message already lists "turns"/"milestones".
+  it("view: \"phases\" is a parse error naming the two surviving views", () => {
+    const result = timelineInputSchema.safeParse({ id: "S42", view: "phases" });
+    expect(result.success).toBe(false);
+    const message = result.success ? "" : result.error.issues.map((i) => i.message).join(" ");
+    expect(message).toContain("turns");
+    expect(message).toContain("milestones");
+    expect(message).not.toContain("phases");
+  });
+
+  // Ticket 04: the same shared `filter` object recall carries.
+  it("accepts the shared filter object", () => {
+    expect(
+      timelineInputSchema.parse({
+        id: "S42",
+        filter: { type: "decision", tag: "auth", session: "S12", time: "-7d", file: "src/" },
+      }),
+    ).toEqual({
+      id: "S42",
+      filter: { type: "decision", tag: "auth", session: "S12", time: "-7d", file: "src/" },
+    });
+    expect(() =>
+      timelineInputSchema.parse({ id: "S42", filter: { project: "claude-mnemo" } }),
     ).toThrow();
   });
 });

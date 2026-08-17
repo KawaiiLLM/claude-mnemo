@@ -34,6 +34,12 @@ import {
   type TruncationSignal,
 } from "./format";
 import {
+  hasFilterCriteria,
+  parseMemoryFilter,
+  turnMatchesFilter,
+  type MemoryFilterInput,
+} from "./memory-filter";
+import {
   legacyEraHeader,
   renderSegmentSpineBlock,
 } from "./segment-spine";
@@ -57,9 +63,23 @@ export interface TimelineInput {
    * legacy path, so the output is byte-identical to the pre-segment renderer.
    */
   eraCutoffEpoch?: number | null;
+  /**
+   * Ticket 04 (spec "Tools"): the same structured filter grammar `recall`
+   * carries — {type, tag, session, time, file} — AND-composed with the id
+   * selector's range. Narrows `windowTurns` (the display candidate set) right
+   * after the range does, before the turn table, milestone selection, and
+   * shape signals consume it; the citation-resolution universe
+   * (`legacySessionTurns`/`eraSessionTurns`) stays unfiltered, same as it
+   * already ignores the range — a filtered-out turn can still be cited as an
+   * antecedent.
+   */
+  filter?: MemoryFilterInput;
 }
 
-export type TimelineViewKind = "turns" | "milestones" | "phases";
+// Ticket 04 (spec "Tools"): `phases` retired — a parse error at the schema
+// layer (definitions.ts's `timelineInputShape`); its renderer is deleted
+// below rather than left reachable dead code.
+export type TimelineViewKind = "turns" | "milestones";
 
 export interface TimelineView {
   view: TimelineViewKind;
@@ -88,7 +108,6 @@ export interface TimelineView {
    */
   turnEffGrades: ReadonlyMap<number, number>;
   milestoneDayGroups: MilestoneDayGroup[];
-  pagedPhases: Phase[];
   viewItemTotal: number;
   pageAnchorEpoch: number | null;
   page: number;
@@ -1922,11 +1941,25 @@ export function buildTimelineView(
     ? { first: sorted[0].promptNumber, last: sorted[totalTurns - 1].promptNumber }
     : { first: 1, last: 0 };
   const window = resolveWindow(parsed.range, totalTurns, bounds);
-  const windowTurns = sorted.filter(
+  const rangeWindowTurns = sorted.filter(
     (turn) =>
       turn.promptNumber >= window.startPromptNumber &&
       turn.promptNumber <= window.endPromptNumber,
   );
+  // Ticket 04 (spec "Tools"): the shared filter grammar AND-composes with the
+  // range above — same subset semantics `recall`'s `turns` id-route applies
+  // to a turn (`turnMatchesFilter`, memory-filter.ts). Narrows the display
+  // candidate set ONLY: the citation-resolution universe below
+  // (`legacySessionTurns`/`eraSessionTurns`, from `allTurns`) stays
+  // unfiltered, same as it already ignores the range narrowing above — a
+  // filtered-out turn can still be cited as an antecedent.
+  const { parsed: memoryFilter, error: filterError } = parseMemoryFilter(input.filter);
+  if (filterError) {
+    throw new Error(filterError);
+  }
+  const windowTurns = hasFilterCriteria(memoryFilter)
+    ? rangeWindowTurns.filter((turn) => turnMatchesFilter(turn, memoryFilter))
+    : rangeWindowTurns;
   // Era split (spec D11, R2#7). The legacy selection runs over the pre-cutoff
   // turns ALONE — including the universe it resolves citations against — so no
   // era turn can be pulled into the legacy block as an antecedent and read under
@@ -1979,7 +2012,6 @@ export function buildTimelineView(
     sessionTurns: legacySessionTurns,
     citations,
   });
-  const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
   const pagedTurns =
     viewKind === "turns"
@@ -2000,15 +2032,11 @@ export function buildTimelineView(
           milestoneSelection.overflowByDay,
         )
       : [];
-  const pagedPhases =
-    viewKind === "phases"
-      ? paginateItems(phases, page, pageSize)
-      : emptyPaginatedItems<Phase>(phases.length, pageSize);
-  // The spine is the arc view's business only: the turn table is a flat ledger
-  // of raw rows and the phase view is derived from turn types, so neither
-  // changes semantics at the boundary. (The turn table's G column does: era
-  // turns are absent from `effGradeByTurnId` and print `—`, which is correct —
-  // a grade is legacy semantics and an era turn must not claim one.)
+  // The spine is the arc view's business only: the turn table is a flat
+  // ledger of raw rows, so it never changes semantics at the boundary. (The
+  // turn table's G column does: era turns are absent from `effGradeByTurnId`
+  // and print `—`, which is correct — a grade is legacy semantics and an era
+  // turn must not claim one.)
   const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
   // The era side answers to the same window the legacy body does: a range view
   // shows the chapters its turns belong to and nothing else.
@@ -2037,23 +2065,13 @@ export function buildTimelineView(
     ? getSegmentMembershipForTurns(db, eraWindowTurns.map((turn) => turn.id))
     : new Map<number, number>();
   const viewItemTotal =
-    viewKind === "turns"
-      ? pagedTurns.total
-      : viewKind === "milestones"
-        ? pagedMilestones.total
-        : pagedPhases.total;
+    viewKind === "turns" ? pagedTurns.total : pagedMilestones.total;
   const pageCount =
-    viewKind === "turns"
-      ? pagedTurns.pageCount
-      : viewKind === "milestones"
-        ? pagedMilestones.pageCount
-        : pagedPhases.pageCount;
+    viewKind === "turns" ? pagedTurns.pageCount : pagedMilestones.pageCount;
   const pageAnchorEpoch =
     viewKind === "turns"
       ? (pagedTurns.items[0]?.createdAtEpoch ?? null)
-      : viewKind === "milestones"
-        ? (pagedMilestones.items[0]?.turn.createdAtEpoch ?? null)
-        : (pagedPhases.items[0]?.startEpoch ?? null);
+      : (pagedMilestones.items[0]?.turn.createdAtEpoch ?? null);
 
   return {
     view: viewKind,
@@ -2071,7 +2089,6 @@ export function buildTimelineView(
     milestonePulled: viewKind === "milestones" ? milestoneSelection.pulled : [],
     turnEffGrades: milestoneSelection.effGradeByTurnId,
     milestoneDayGroups,
-    pagedPhases: pagedPhases.items,
     viewItemTotal,
     pageAnchorEpoch,
     page,
@@ -3577,78 +3594,6 @@ function isTimelineLiveTurn(turn: TurnRecord): boolean {
   return turn.status !== "undone" && turn.status !== "skipped";
 }
 
-function renderPhases(
-  view: TimelineView,
-  titleCap: number,
-  signal?: TruncationSignal,
-): string[] {
-  if (view.pagedPhases.length === 0) {
-    return [];
-  }
-
-  const turnByPrompt = new Map(
-    view.windowTurns.map((turn) => [turn.promptNumber, turn] as const),
-  );
-  const lines = [
-    "",
-    "  phases:",
-    "  # | date | type | turns | span | work | lead title",
-  ];
-
-  let previousPhaseEpoch: number | null = null;
-  const startIndex = (view.page - 1) * view.pageSize;
-
-  for (const [index, phase] of view.pagedPhases.entries()) {
-    if (
-      previousPhaseEpoch !== null &&
-      !sameLocalDate(previousPhaseEpoch, phase.startEpoch)
-    ) {
-      lines.push(`  ${renderDayDivider(phase.startEpoch, previousPhaseEpoch)}`);
-    }
-
-    const range =
-      phase.startPromptNumber === phase.endPromptNumber
-        ? `T${phase.startPromptNumber}`
-        : `T${phase.startPromptNumber}-T${phase.endPromptNumber}`;
-    const durationLabel =
-      phase.durationMs > 0 ? `~${formatDuration(phase.durationMs)}` : "<1m";
-    const countsLabel = `${phase.turnCount} ${phase.turnCount === 1 ? "turn" : "turns"}`;
-    const stats: string[] = [];
-
-    if (phase.totalFilesRead > 0) {
-      stats.push(`📖${phase.totalFilesRead}`);
-    }
-    if (phase.totalFilesModified > 0) {
-      stats.push(`✏️${phase.totalFilesModified}`);
-    }
-    if (phase.totalToolCalls > 0) {
-      stats.push(`🔧${phase.totalToolCalls}`);
-    }
-
-    const extSuffix =
-      phase.externalInputs.length > 0
-        ? `  [ext:${phase.externalInputs.join(",")}]`
-        : "";
-    const dateLabel = sameLocalDate(phase.startEpoch, phase.endEpoch)
-      ? formatLocalMonthDayWithWeekday(phase.startEpoch)
-      : `${formatLocalMonthDay(phase.startEpoch)}→${formatLocalMonthDay(phase.endEpoch)}`;
-    const leadTurn = turnByPrompt.get(phase.startPromptNumber);
-    const leadTextCandidate =
-      leadTurn?.title ??
-      cleanPromptForLabel(leadTurn?.userPrompt ?? null);
-    const leadText =
-      leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
-    const leadTitle = sanitizeTimelineField(truncateText(leadText, { limit: titleCap, signal }));
-
-    lines.push(
-      `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type.join(",")).padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd(),
-    );
-    previousPhaseEpoch = phase.endEpoch;
-  }
-
-  return lines;
-}
-
 function renderShapeSignals(
   view: TimelineView,
 ): string[] {
@@ -3960,11 +3905,6 @@ export function renderTimeline(
       ...renderLineagePointer(view),
     ].join("\n");
 
-  if (view.view === "phases") {
-    return appendNavigationLegend(assemble(renderPhases(view, titleCap, signal)), {
-      truncated: signal.truncated,
-    });
-  }
   if (view.view !== "milestones") {
     return appendNavigationLegend(
       assemble(renderTurnTable(view, promptCap, titleCap, signal)),

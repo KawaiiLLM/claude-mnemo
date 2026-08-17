@@ -223,8 +223,10 @@ describe("recall segment selector and cross-granularity filters", () => {
     expect(ranged).not.toContain(`[E${deliveredSegmentId}]`);
   });
 
-  test("tag: hits the segment AND its member turns in one query", () => {
-    const output = recallMemory(db, { query: "tag:note-ledger" });
+  // Ticket 04: `tag:`/`type:`/`session:` move from in-query prefixes to the
+  // structured `filter` object; `query` becomes pure FTS text.
+  test("filter.tag hits the segment AND its member turns in one call", () => {
+    const output = recallMemory(db, { filter: { tag: "note-ledger" } });
 
     expect(output).toContain(`[E${segmentId}]`);
     expect(output).toContain("implement the ledger");
@@ -233,8 +235,8 @@ describe("recall segment selector and cross-granularity filters", () => {
     expect(output).not.toContain(`[E${deliveredSegmentId}]`);
   });
 
-  test("type: hits both granularities off the same vocabulary", () => {
-    const output = recallMemory(db, { query: "type:implement" });
+  test("filter.type hits both granularities off the same vocabulary", () => {
+    const output = recallMemory(db, { filter: { type: "implement" } });
 
     expect(output).toContain(`[E${segmentId}]`);
     expect(output).toContain("implement the ledger");
@@ -245,12 +247,23 @@ describe("recall segment selector and cross-granularity filters", () => {
     expect(recallMemory(db, { query: "note ledger" })).toContain(`[E${segmentId}]`);
   });
 
+  // Ticket 04, acceptance criterion 4: segment field ROWS (not just the
+  // title) remain first-class FTS hits under the purified query — a plain
+  // text query with NO filter at all must still surface a segment matched on
+  // its `content` field body.
+  test("a segment's content field row is a first-class FTS hit under a purified query", () => {
+    const output = recallMemory(db, { query: "Load-bearing" });
+
+    expect(output).toContain(`[E${segmentId}]`);
+    expect(output).not.toContain(`[E${deliveredSegmentId}]`);
+  });
+
   test("a rebuild reproduces the segment index", () => {
     rebuildSearchIndex(db);
     expect(recallMemory(db, { query: "note ledger" })).toContain(`[E${segmentId}]`);
   });
 
-  test("session: scopes segments through their members", () => {
+  test("filter.session scopes segments through their members", () => {
     const other = upsertSession(db, {
       contentSessionId: "session-other",
       project: "/tmp/project",
@@ -264,10 +277,12 @@ describe("recall segment selector and cross-granularity filters", () => {
     }).id;
 
     expect(
-      recallMemory(db, { query: `tag:note-ledger session:S${sessionId}` }),
+      recallMemory(db, {
+        filter: { tag: "note-ledger", session: `S${sessionId}` },
+      }),
     ).toContain(`[E${segmentId}]`);
     expect(
-      recallMemory(db, { query: `tag:note-ledger session:S${other}` }),
+      recallMemory(db, { filter: { tag: "note-ledger", session: `S${other}` } }),
     ).not.toContain(`[E${segmentId}]`);
   });
 });
@@ -394,14 +409,14 @@ describe("acceptance: recalling one task does not drag another task's memory alo
   });
 
   test("searching one task's tag returns only its own segment, never the other's", () => {
-    const cardHits = recallMemory(db, { query: "tag:card-extraction" });
+    const cardHits = recallMemory(db, { filter: { tag: "card-extraction" } });
     expect(cardHits).toContain(`[E${cardSegmentId}]`);
     expect(cardHits).toContain("CARD_MARKER_9f2a");
     expect(cardHits).not.toContain(`[E${harnessSegmentId}]`);
     expect(cardHits).not.toContain("HARNESS_MARKER_7c31");
     expect(cardHits).not.toContain("harness retry queue");
 
-    const harnessHits = recallMemory(db, { query: "tag:harness-retry" });
+    const harnessHits = recallMemory(db, { filter: { tag: "harness-retry" } });
     expect(harnessHits).toContain(`[E${harnessSegmentId}]`);
     expect(harnessHits).toContain("HARNESS_MARKER_7c31");
     expect(harnessHits).not.toContain(`[E${cardSegmentId}]`);

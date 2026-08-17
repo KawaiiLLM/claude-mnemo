@@ -1,8 +1,9 @@
 import type { Database } from "bun:sqlite";
 
 import { checkTool } from "./check";
+import type { MemoryFilterInput } from "./memory-filter";
 import { noteTool } from "./note";
-import { recallMemory } from "./recall";
+import { recallMemory, type RecallInput } from "./recall";
 import { rememberTool } from "./remember";
 import { timelineQuery } from "./timeline";
 import { resolveEraCutoff } from "../db/era";
@@ -30,7 +31,8 @@ export interface MnemoToolHandlers {
   check: ToolHandler;
 }
 
-export type TimelineToolView = "turns" | "milestones" | "phases";
+// Ticket 04: `phases` retired.
+export type TimelineToolView = "turns" | "milestones";
 
 export interface TimelineQueryInput {
   id: string;
@@ -38,6 +40,8 @@ export interface TimelineQueryInput {
   pageSize?: number;
   view?: TimelineToolView;
   eraCutoffEpoch?: number | null;
+  // Ticket 04 (spec "Tools"): the structured filter grammar shared with recall.
+  filter?: MemoryFilterInput;
 }
 
 export interface CreateDatabaseBackedHandlersOptions {
@@ -99,6 +103,9 @@ export function toTimelineQueryInput(args: Record<string, unknown>): TimelineQue
   if (args.view !== undefined) {
     input.view = args.view as TimelineToolView;
   }
+  if (args.filter !== undefined) {
+    input.filter = args.filter as MemoryFilterInput;
+  }
 
   return input;
 }
@@ -144,7 +151,11 @@ export function createDatabaseBackedHandlers(
         recallMemory(database, {
           id: args.id as string | undefined,
           query: args.query as string | undefined,
-          time: args.time as string | undefined,
+          // Ticket 04: `time` moved into the structured `filter` object
+          // (public schema no longer offers a top-level `time`); `truncate`
+          // still forwards for the worker audience, whose own schema
+          // (`workerRecallInputShape`) keeps accepting it.
+          filter: args.filter as RecallInput["filter"],
           depth: args.depth as "collapsed" | "expanded" | undefined,
           page: args.page as number | undefined,
           pageSize: args.pageSize as number | undefined,

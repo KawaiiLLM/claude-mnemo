@@ -13,6 +13,7 @@ import { getTurn } from "../../src/db/turns";
 import { recallInputSchema } from "../../src/mcp/definitions";
 import { NAVIGATION_LEGEND } from "../../src/mcp/format";
 import { recallMemory } from "../../src/mcp/recall";
+import { buildTimelineView } from "../../src/mcp/timeline";
 import { resolveTranscriptPath } from "../../src/shared/paths";
 import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
 
@@ -203,24 +204,26 @@ describe("recallMemory", () => {
     expect(() =>
       recallInputSchema.parse({
         id: "S1/T1",
-        query: "type:bugfix auth",
-        time: "1970-01-01",
+        // ticket 04: `query` is pure FTS text now — no in-string dialect.
+        query: "auth",
+        filter: { type: "bugfix", time: "1970-01-01" },
         depth: "expanded",
         page: 1,
         pageSize: 5,
-        truncate: 200,
       }),
     ).not.toThrow();
 
     expect(recallInputSchema.safeParse({ session: authSessionId }).success).toBe(false);
     expect(recallInputSchema.safeParse({ view: "sessions" }).success).toBe(false);
     expect(recallInputSchema.safeParse({ project: "claude-mnemo" }).success).toBe(false);
+    // ticket 04: `truncate` retired from the public surface.
+    expect(recallInputSchema.safeParse({ id: "S1", truncate: 200 }).success).toBe(false);
   });
 
   test("defaults to session listing and intersects time filters", () => {
     const defaultOutput = recallMemory(db, {});
     const filteredOutput = recallMemory(db, {
-      time: "1970-01-02",
+      filter: { time: "1970-01-02" },
     });
 
     expect(defaultOutput).not.toContain("page 1 / 1 (total 4)");
@@ -393,14 +396,14 @@ describe("recallMemory", () => {
     );
   });
 
-  test("renders mixed query results with prefix filters and time", () => {
+  test("renders mixed query results with the structured filter and time", () => {
     const typeQuery = recallMemory(db, {
-      query: "type:bugfix",
+      filter: { type: "bugfix" },
       depth: "expanded",
     });
     const timeScopedQuery = recallMemory(db, {
       query: "auth",
-      time: "1970-01-02",
+      filter: { time: "1970-01-02" },
       pageSize: 1,
     });
 
@@ -410,6 +413,35 @@ describe("recallMemory", () => {
     const hitCount = (timeScopedQuery.match(/\n- \[/g) ?? []).length + (timeScopedQuery.startsWith("- [") ? 1 : 0);
     expect(hitCount).toBe(1);
     expect(timeScopedQuery).toContain("Auth");
+  });
+
+  // Ticket 04 (spec "Tools"): the prefix dialect is CUT, not aliased — a
+  // query containing old `type:`/`tag:` syntax searches those literal
+  // characters, with no hidden filtering.
+  test("a query containing old prefix syntax searches it as literal text — no hidden filtering", () => {
+    // Neither session's stored text contains the literal string "type:bugfix"
+    // anywhere, so a query of exactly that string must find NOTHING — if the
+    // dialect were still silently parsed as a `type` filter (the pre-ticket-04
+    // behavior), this would instead return the auth-race turn (type=bugfix),
+    // the way the OLD "renders mixed query results" test used to assert.
+    const output = recallMemory(db, { query: "type:bugfix" });
+    expect(output).not.toContain("Diagnose auth race");
+    expect(output).not.toContain(`[S${authSessionId}]`);
+
+    // The same holds for every prefix the old dialect used to strip —
+    // `tag:`/`file:`/`session:`/`project:` — none of them narrow the search
+    // any more; each is now indistinguishable from any other literal text
+    // that happens not to be stored anywhere.
+    for (const dialectQuery of [
+      "tag:rolled-back",
+      "file:auth.ts",
+      "session:1",
+      "project:claude-mnemo",
+    ]) {
+      const dialectOutput = recallMemory(db, { query: dialectQuery });
+      expect(dialectOutput).not.toContain("Diagnose auth race");
+      expect(dialectOutput).not.toContain(`[S${authSessionId}]`);
+    }
   });
 
   test("applies page offsets to direct observation browsing", () => {
@@ -462,7 +494,9 @@ describe("recallMemory", () => {
   });
 
   test("rejects invalid time and unparseable ids", () => {
-    expect(recallMemory(db, { time: "yesterday" })).toContain("Parameter error:");
+    expect(recallMemory(db, { filter: { time: "yesterday" } })).toContain(
+      "Parameter error:",
+    );
     expect(recallMemory(db, { id: "Z9" })).toContain("Parameter error:");
   });
 
@@ -544,7 +578,7 @@ describe("recallMemory", () => {
 
     // query= route (the recall(query=...) path the extractor uses to find a driver).
     const byQuery = recallMemory(db, {
-      query: "type:discovery",
+      filter: { type: "discovery" },
       includeDbTurnIds: true,
     });
     // The token carries the DB id, NOT the prompt number.
@@ -564,7 +598,7 @@ describe("recallMemory", () => {
 
   test("main audience (default) keeps prompt-number labels and emits no dbid: token", () => {
     // Regression on the existing public form pinned around line 369 (`[S...][T<prompt_number>]`).
-    const byQuery = recallMemory(db, { query: "type:bugfix" });
+    const byQuery = recallMemory(db, { filter: { type: "bugfix" } });
     expect(byQuery).toContain(`[S${authSessionId}][T1:L4] Diagnose auth race`);
     expect(byQuery).not.toContain("dbid:");
 
@@ -575,29 +609,36 @@ describe("recallMemory", () => {
     expect(byPromptId).not.toContain("dbid:");
   });
 
-  test("recall tag: filter matches a bare role tag", () => {
-    const byRole = recallMemory(db, { query: "tag:rolled-back" });
+  test("filter.tag matches a bare role tag", () => {
+    const byRole = recallMemory(db, { filter: { tag: "rolled-back" } });
     expect(byRole).toContain(`[S${authSessionId}]`);
     expect(byRole).toContain("Diagnose auth race");
   });
 
-  test("recall tag: filter matches a topic:-prefixed tag, exact element only", () => {
-    expect(recallMemory(db, { query: "tag:topic:auth-race" })).toContain(
+  test("filter.tag matches a topic:-prefixed tag, exact element only", () => {
+    expect(recallMemory(db, { filter: { tag: "topic:auth-race" } })).toContain(
       "Diagnose auth race",
     );
     // The match is anchored to a whole array element: a prefix must NOT match.
-    expect(recallMemory(db, { query: "tag:topic:auth" })).not.toContain(
+    expect(recallMemory(db, { filter: { tag: "topic:auth" } })).not.toContain(
       "Diagnose auth race",
     );
   });
 
-  test("recall rejects a query that parses to no criteria", () => {
-    // A bare `tag:` (empty value) must not silently degrade to an unfiltered
-    // search that surfaces recent sessions as false hits.
-    expect(recallMemory(db, { query: "tag:" })).toContain("Parameter error");
+  test("recall rejects a query/filter combination that parses to no criteria", () => {
+    // A whitespace-only query with no filter member set must not silently
+    // degrade to an unfiltered search that surfaces recent sessions as false
+    // hits.
     expect(recallMemory(db, { query: "   " })).toContain("Parameter error");
-    // ...but a degenerate filter alongside a real criterion still searches.
-    expect(recallMemory(db, { query: "tag:rolled-back" })).not.toContain(
+    // ...but a filter criterion alongside that same degenerate query still
+    // searches — a filter member alone is a real criterion.
+    expect(
+      recallMemory(db, { query: "   ", filter: { tag: "rolled-back" } }),
+    ).not.toContain("Parameter error");
+    // A filter alone (no query at all) is likewise a real criterion, not an
+    // empty search — ticket 04's "filter alone still searches" extension of
+    // the old "query alone" rule.
+    expect(recallMemory(db, { filter: { tag: "rolled-back" } })).not.toContain(
       "Parameter error",
     );
   });
@@ -711,33 +752,53 @@ describe("recallMemory", () => {
     expect(pageCount).toBe(total); // pageSize:1 => pageCount === total
   });
 
-  test("session: filter scopes a full-text search to one session", () => {
+  test("filter.session scopes a full-text search to one session", () => {
     // 'auth' matches BOTH the baseline session and the auth-race session.
     const unscoped = recallMemory(db, { query: "auth", pageSize: 50 });
     expect(unscoped).toContain(`[S${baselineSessionId}] Auth baseline`);
     expect(unscoped).toContain(`[S${authSessionId}] Auth race fix`);
 
-    // session:S<id> narrows the same query to a single session.
+    // filter.session narrows the same query to a single session — "S<id>" form.
     const scoped = recallMemory(db, {
-      query: `auth session:S${authSessionId}`,
+      query: "auth",
+      filter: { session: `S${authSessionId}` },
       pageSize: 50,
     });
     expect(scoped).toContain(`[S${authSessionId}] Auth race fix`);
     expect(scoped).not.toContain(`[S${baselineSessionId}] Auth baseline`);
   });
 
-  test("session: filter accepts a bare numeric id without the S prefix", () => {
-    const scoped = recallMemory(db, {
-      query: `auth session:${authSessionId}`,
+  test("filter.session accepts a bare numeric id, string or number, without the S prefix", () => {
+    const scopedByString = recallMemory(db, {
+      query: "auth",
+      filter: { session: `${authSessionId}` },
       pageSize: 50,
     });
-    expect(scoped).toContain(`[S${authSessionId}] Auth race fix`);
-    expect(scoped).not.toContain(`[S${baselineSessionId}] Auth baseline`);
+    const scopedByNumber = recallMemory(db, {
+      query: "auth",
+      filter: { session: authSessionId },
+      pageSize: 50,
+    });
+    for (const scoped of [scopedByString, scopedByNumber]) {
+      expect(scoped).toContain(`[S${authSessionId}] Auth race fix`);
+      expect(scoped).not.toContain(`[S${baselineSessionId}] Auth baseline`);
+    }
   });
 
-  test("session: filter drops a malformed id instead of searching it as text", () => {
-    // A non-numeric session: token must be ignored, not applied as a filter and
-    // not OR'd into the FTS query — so the search behaves like a plain `auth`.
+  // Ticket 04: a malformed `filter.session` is a hard parameter error now —
+  // the structured filter has no in-text position to silently drop a bad
+  // token FROM, unlike the retired dialect's `session:abc` token.
+  test("a malformed filter.session is a parameter error, and plain text never sees the old dialect", () => {
+    const rejected = recallMemory(db, {
+      query: "auth",
+      filter: { session: "abc" },
+      pageSize: 50,
+    });
+    expect(rejected).toContain("Parameter error:");
+
+    // Literal dialect-shaped text with no `filter` at all is just text now —
+    // it does not narrow to one session (proving `session:` is no longer
+    // parsed out of `query`).
     const output = recallMemory(db, { query: "auth session:abc", pageSize: 50 });
     expect(output).toContain(`[S${authSessionId}] Auth race fix`);
     expect(output).toContain(`[S${baselineSessionId}] Auth baseline`);
@@ -1257,5 +1318,113 @@ describe("session semantic fields retire behind the era (ticket 09)", () => {
 
     expect(output).toContain("desc: The summary layer's compressed view");
     expect(output).toContain("- shipped the fix");
+  });
+});
+
+// Ticket 04 (spec "Tools"): "the same filter object produces the same
+// subset semantics on both tools" — recall's `S<n>/T*` id-route AND-composes
+// `filter` exactly the way timeline's window does (both consume the shared
+// `turnMatchesFilter` in mcp/memory-filter.ts). This suite proves the id
+// side of that AND-composition on recall directly, and cross-checks the
+// exact same fixture against timeline's turn table.
+describe("filter unification (ticket 04): recall's id route AND-composes filter, same as timeline", () => {
+  let db: Database;
+  let sessionId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    const session = upsertSession(db, {
+      contentSessionId: "session-filter-unification",
+      project: "claude-mnemo",
+      title: "Filter unification fixture",
+      insight: null,
+      createdAtEpoch: 500_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    sessionId = session.id;
+
+    const rows: Array<[number, string, string]> = [
+      [1, "discovery", "auth"],
+      [2, "decision", "auth"],
+      [3, "discovery", "billing"],
+      [4, "decision", "billing"],
+    ];
+    for (const [promptNumber, type, tag] of rows) {
+      saveTurn(db, {
+        sessionId,
+        promptNumber,
+        userPrompt: `prompt ${promptNumber}`,
+        assistantResponse: `response ${promptNumber}`,
+        title: `turn ${promptNumber}`,
+        content: `content ${promptNumber}`,
+        insight: null,
+        type,
+        tags: [tag],
+        filesRead: [],
+        filesModified: [],
+        createdAtEpoch: 500_000 + promptNumber,
+        updatedAtEpoch: 500_000 + promptNumber,
+        observations: [],
+      });
+    }
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("filter.type AND-composes with the S<n>/T* id route", () => {
+    const output = recallMemory(db, {
+      id: `S${sessionId}/T*`,
+      filter: { type: "decision" },
+    });
+
+    expect(output).toContain("turn 2");
+    expect(output).toContain("turn 4");
+    expect(output).not.toContain("turn 1");
+    expect(output).not.toContain("turn 3");
+  });
+
+  // Mutation-style proof: two filter members together admit strictly fewer
+  // turns than either alone (AND, never OR) — same shape as the timeline
+  // suite's own proof, run here against recall's id route instead.
+  test("filter.type + filter.tag together narrow further than either alone", () => {
+    const typeOnly = recallMemory(db, {
+      id: `S${sessionId}/T*`,
+      filter: { type: "decision" },
+    });
+    const both = recallMemory(db, {
+      id: `S${sessionId}/T*`,
+      filter: { type: "decision", tag: "auth" },
+    });
+
+    expect(typeOnly).toContain("turn 4"); // decision/billing — admitted by type alone
+    expect(both).not.toContain("turn 4"); // excluded once tag also applies
+    expect(both).toContain("turn 2"); // decision AND auth
+  });
+
+  // The acceptance criterion itself: recall and timeline, given the SAME
+  // filter over the SAME session, agree on which turns survive.
+  test("recall's S<n>/T* route and timeline's turn view agree on the same filter", () => {
+    const filter = { type: "decision" as const };
+
+    const recallOutput = recallMemory(db, { id: `S${sessionId}/T*`, filter });
+    const timelineView = buildTimelineView(db, {
+      id: `S${sessionId}`,
+      view: "turns",
+      filter,
+    });
+    const timelinePrompts = timelineView.windowTurns
+      .map((turn) => turn.promptNumber)
+      .sort((a, b) => a - b);
+
+    expect(timelinePrompts).toEqual([2, 4]);
+    expect(recallOutput).toContain("turn 2");
+    expect(recallOutput).toContain("turn 4");
+    expect(recallOutput).not.toContain("turn 1");
+    expect(recallOutput).not.toContain("turn 3");
   });
 });

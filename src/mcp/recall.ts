@@ -35,6 +35,13 @@ import {
   type FormattedTurn,
   type TruncationSignal,
 } from "./format";
+import {
+  hasFilterCriteria,
+  parseMemoryFilter,
+  turnMatchesFilter,
+  type MemoryFilterInput,
+  type ParsedMemoryFilter,
+} from "./memory-filter";
 import { renderSegmentHeaderLines } from "./segment-spine";
 import {
   chronologicalSegmentMembers,
@@ -47,11 +54,27 @@ import { resolveTurnPointers } from "./turn-pointers";
 
 export interface RecallInput {
   id?: string;
+  // Ticket 04 (spec "Tools"): pure full-text search — the in-query prefix
+  // dialect (`type:`/`tag:`/`file:`/`session:`/`project:`) is cut, not
+  // aliased. A query containing `tag:foo` searches those literal characters.
   query?: string;
-  time?: string;
+  /**
+   * Ticket 04: the structured filter grammar shared with `timeline` —
+   * {type, tag, session, time, file}, AND-composed with each other, with
+   * `id`, and with `query`. Replaces the retired top-level `time` param
+   * (folded in as `filter.time`, same grammar) — no non-schema caller in
+   * this repo used the old top-level field, so it was cut clean rather than
+   * kept as a deprecated alias.
+   */
+  filter?: MemoryFilterInput;
   depth?: "collapsed" | "expanded";
   page?: number;
   pageSize?: number;
+  // Ticket 04: retired from the PUBLIC schema (`recallInputSchema` rejects a
+  // supplied `truncate` with a message naming its replacements) — this
+  // internal field survives because the worker surface
+  // (`workerRecallInputShape`) and every test calling `recallMemory`
+  // directly still use it.
   truncate?: number;
   /**
    * Ticket 03 (spec "Budgets"): the segment card's own token budget (default
@@ -85,20 +108,6 @@ export interface RecallInput {
    * the legacy path.
    */
   eraCutoffEpoch?: number | null;
-}
-
-interface ParsedTimeRange {
-  after?: number;
-  before?: number;
-}
-
-interface QueryFilters {
-  text?: string;
-  type?: string;
-  file?: string;
-  tag?: string;
-  project?: string;
-  session?: number;
 }
 
 const CHILD_PREVIEW_SIZE = 5;
@@ -173,77 +182,6 @@ function buildSessionSummaryFields(
 
 function formatParameterError(message: string): string {
   return `Parameter error: ${message}`;
-}
-
-function parseTimeInput(time: string | undefined): {
-  range?: ParsedTimeRange;
-  error?: string;
-} {
-  if (!time) {
-    return {};
-  }
-
-  const trimmed = time.trim();
-  if (!trimmed) {
-    return {};
-  }
-
-  const rangeMatch = trimmed.match(
-    /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/,
-  );
-  if (rangeMatch) {
-    const start = parseUtcDate(rangeMatch[1]!);
-    const end = parseUtcDate(rangeMatch[2]!);
-
-    if (start === null || end === null) {
-      return { error: `invalid time selector "${time}"` };
-    }
-
-    return {
-      range: {
-        after: start,
-        before: end + 86_399,
-      },
-    };
-  }
-
-  const relativeMatch = trimmed.match(/^-([0-9]+)([dw])$/);
-  if (relativeMatch) {
-    const amount = Number(relativeMatch[1]);
-    const unit = relativeMatch[2];
-    const secondsPerUnit = unit === "d" ? 86_400 : 7 * 86_400;
-
-    return {
-      range: {
-        after: Math.floor(Date.now() / 1000) - amount * secondsPerUnit,
-      },
-    };
-  }
-
-  const dateEpoch = parseUtcDate(trimmed);
-  if (dateEpoch !== null) {
-    return {
-      range: {
-        after: dateEpoch,
-        before: dateEpoch + 86_399,
-      },
-    };
-  }
-
-  return { error: `invalid time selector "${time}"` };
-}
-
-function parseUtcDate(value: string): number | null {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) {
-    return null;
-  }
-
-  const epoch = Math.floor(
-    Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) / 1000,
-  );
-
-  return Number.isNaN(epoch) ? null : epoch;
 }
 
 function parseRoutedId(value: string): RoutedRecallId | null {
@@ -348,74 +286,6 @@ function parseRoutedId(value: string): RoutedRecallId | null {
   }
 
   return null;
-}
-
-function resolveTimeRange(
-  time: string | undefined,
-): { after?: number; before?: number; error?: string } {
-  const parsedTime = parseTimeInput(time);
-  if (parsedTime.error) {
-    return { error: parsedTime.error };
-  }
-
-  return {
-    after: parsedTime.range?.after,
-    before: parsedTime.range?.before,
-  };
-}
-
-function parseQueryFilters(query: string | undefined): QueryFilters {
-  if (!query) {
-    return {};
-  }
-
-  const filters: QueryFilters = {};
-  const textTerms: string[] = [];
-
-  for (const token of query.trim().split(/\s+/).filter(Boolean)) {
-    if (token.startsWith("type:")) {
-      filters.type = token.slice("type:".length);
-      continue;
-    }
-    if (token.startsWith("file:")) {
-      filters.file = token.slice("file:".length);
-      continue;
-    }
-    if (token.startsWith("tag:")) {
-      // Exact-match a stored tag (whole array element). Subject words are
-      // bare since the `topic:` namespace was retired (spec B6), so
-      // `tag:svg-filter` is the whole spelling; the value keeps any prefix it
-      // is given, which is how the surviving machinery namespaces
-      // (`compact:`, `invalidated:`, `delivery:`) stay reachable. An empty
-      // value (`tag:` alone) is dropped, never searched as free text.
-      const tag = token.slice("tag:".length);
-      if (tag) {
-        filters.tag = tag;
-      }
-      continue;
-    }
-    if (token.startsWith("project:")) {
-      filters.project = token.slice("project:".length);
-      continue;
-    }
-    if (token.startsWith("session:")) {
-      // Accept both the `S<id>` form users see in output and a bare `<id>`.
-      const raw = token.slice("session:".length).replace(/^[Ss]/, "");
-      const sessionId = Number(raw);
-      if (Number.isInteger(sessionId) && sessionId > 0) {
-        filters.session = sessionId;
-      }
-      // Malformed session: tokens are dropped, never searched as free text.
-      continue;
-    }
-    textTerms.push(token);
-  }
-
-  if (textTerms.length > 0) {
-    filters.text = textTerms.join(" ");
-  }
-
-  return filters;
 }
 
 function buildSessionView(
@@ -1132,12 +1002,47 @@ function listSegmentIds(db: Database, segmentIds: number[] | undefined): number[
     .map((row) => row.id);
 }
 
+/**
+ * Ticket 04 (spec "Tools"): `type`/`tag`/`file`/`session` AND-compose with a
+ * session-listing id selector (`S*`, `S1..9`, or bare `recall()`) the same
+ * way `time` already did before this ticket. A session matches when at
+ * least one of ITS turns does (`searchMemory`'s own session-facet clauses,
+ * db/search.ts) — reused rather than re-implemented here, so the two
+ * "does this session hold such a turn" answers can never drift apart. Plain
+ * `after`/`before` narrowing (no other filter member set) keeps the original
+ * simple JS-side filter, unchanged from before this ticket.
+ */
 function listSessionIds(
   db: Database,
   sessionIds: number[] | undefined,
   after?: number,
   before?: number,
+  filter?: ParsedMemoryFilter,
 ): number[] {
+  const hasExtraFilter =
+    filter !== undefined &&
+    (filter.type !== undefined ||
+      filter.tag !== undefined ||
+      filter.file !== undefined ||
+      filter.sessionId !== undefined);
+
+  if (hasExtraFilter) {
+    const matched = new Set(
+      searchMemory(db, {
+        scope: "sessions",
+        type: filter!.type,
+        tag: filter!.tag,
+        file: filter!.file,
+        sessionId: filter!.sessionId,
+        after,
+        before,
+      }).map((result) => result.sourceId),
+    );
+    const candidates =
+      sessionIds && sessionIds.length > 0 ? sessionIds : [...matched];
+    return candidates.filter((sessionId) => matched.has(sessionId));
+  }
+
   const sessions = sessionIds && sessionIds.length > 0
     ? sessionIds
         .map((sessionId) => getSession(db, sessionId))
@@ -1361,10 +1266,19 @@ function renderRoutedId(
   signal?: TruncationSignal,
   pageBudget?: number,
   turnBudget?: number,
+  // Ticket 04 (spec "Tools"): type/tag/file/session AND-compose with the id
+  // selector — wired into the two MULTI-item listing kinds (`sessions`,
+  // `turns`) alongside the pre-existing time narrowing above. A single
+  // explicit-id address (turn-by-id, one segment, one observation) stays
+  // filter-transparent, matching this codebase's existing rule that a
+  // direct address is a question about THAT record, never a listing a
+  // filter can empty out (see the segment route's own single-id comment
+  // below).
+  filter: ParsedMemoryFilter = {},
 ): string {
   if (routed.kind === "sessions") {
     const paged = paginateItems(
-      listSessionIds(db, routed.sessionIds, after, before),
+      listSessionIds(db, routed.sessionIds, after, before, filter),
       page,
       pageSize,
     );
@@ -1478,7 +1392,7 @@ function renderRoutedId(
       if (before !== undefined && turn.createdAtEpoch > before) {
         return false;
       }
-      return true;
+      return turnMatchesFilter(turn, filter);
     });
     const paged = paginateItems(turns, page, pageSize);
     return joinPage(
@@ -1632,6 +1546,11 @@ function renderBareOverview(
   signal?: TruncationSignal,
   pageBudget?: number,
   turnBudget?: number,
+  // Ticket 04: narrows the sessions section the same way the `S*` listing
+  // kind does (`listSessionIds`, shared). The segments section above is
+  // ticket 02/03/05 territory and stays unfiltered — bare `recall()`'s
+  // roster-first behavior is unchanged.
+  filter: ParsedMemoryFilter = {},
 ): string {
   const parts: string[] = [];
 
@@ -1658,7 +1577,7 @@ function renderBareOverview(
   }
 
   const paged = paginateItems(
-    listSessionIds(db, undefined, after, before),
+    listSessionIds(db, undefined, after, before, filter),
     page,
     pageSize,
   );
@@ -1689,22 +1608,24 @@ function renderBareOverview(
   return parts.join("\n");
 }
 
+// Ticket 04 (spec "Tools"): `query` is pure FTS text now (the prefix dialect
+// is cut, not aliased); every non-text criterion comes from the structured
+// `filter` object instead. `project` is deliberately absent — it left the
+// grammar along with the rest of the old dialect.
 function searchQueryResults(
   db: Database,
-  filters: QueryFilters,
-  after?: number,
-  before?: number,
+  text: string | undefined,
+  filter: ParsedMemoryFilter,
   eraCutoffEpoch: number | null = null,
 ): SearchMemoryResult[] {
   return searchMemory(db, {
-    query: filters.text,
-    type: filters.type,
-    file: filters.file,
-    tag: filters.tag,
-    project: filters.project,
-    sessionId: filters.session,
-    after,
-    before,
+    query: text,
+    type: filter.type,
+    file: filter.file,
+    tag: filter.tag,
+    sessionId: filter.sessionId,
+    after: filter.after,
+    before: filter.before,
     // Only the observation layer reads this, and only to decide whether a
     // status still means anything (db/search.ts).
     eraCutoffEpoch,
@@ -1739,10 +1660,13 @@ function recallMemoryBody(
   // "Budgets") — a caller's explicit `turn` always wins; only the DEFAULT
   // (nothing supplied) depends on depth.
   const turnBudget = input.turn ?? (depth === "collapsed" ? DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED : undefined);
-  const timeRange = resolveTimeRange(input.time);
+  // Ticket 04: the ONE structured filter, AND-composed with `id`, and (below)
+  // with `query`. Replaces the retired top-level `time` param and the
+  // in-query prefix dialect alike.
+  const { parsed: filter, error: filterError } = parseMemoryFilter(input.filter);
 
-  if (timeRange.error) {
-    return formatParameterError(timeRange.error);
+  if (filterError) {
+    return formatParameterError(filterError);
   }
 
   if (input.id) {
@@ -1758,34 +1682,34 @@ function recallMemoryBody(
       page,
       pageSize,
       truncate,
-      timeRange.after,
-      timeRange.before,
+      filter.after,
+      filter.before,
       includeDbTurnIds,
       truncateCap,
       eraCutoffEpoch,
       signal,
       pageBudget,
       turnBudget,
+      filter,
     );
   }
 
-  if (input.query) {
-    const filters = parseQueryFilters(input.query);
+  // Ticket 04: a `filter` alone (no `query`) also runs the search/listing
+  // path rather than falling through to the bare roster — mirrors the old
+  // in-query dialect's own behavior, where a filter-only string (e.g. the
+  // retired `type:discovery`) never fell back to an unfiltered overview.
+  if (input.query || hasFilterCriteria(filter)) {
+    // Ticket 04: `query` is pure FTS text — no in-string dialect. A query
+    // containing `tag:foo` searches those literal characters; scoping comes
+    // from `filter` alone now.
+    const text = (input.query ?? "").trim();
 
-    // A non-empty query that parses to nothing actionable (e.g. a bare `tag:`,
-    // `session:` with a malformed id, or whitespace) would otherwise silently
-    // run an unfiltered search and surface recent sessions as if they matched.
-    // Reject it so a typo'd filter reads as an error, not a false hit. A time
-    // range still counts as a criterion, so `tag:` + `time:` stays valid.
-    const hasCriteria =
-      Boolean(filters.text) ||
-      Boolean(filters.type) ||
-      Boolean(filters.file) ||
-      Boolean(filters.tag) ||
-      Boolean(filters.project) ||
-      filters.session !== undefined ||
-      timeRange.after !== undefined ||
-      timeRange.before !== undefined;
+    // A non-empty query that parses to nothing actionable (pure whitespace,
+    // no filter member set) would otherwise silently run an unfiltered
+    // search and surface recent sessions as if they matched. Reject it so an
+    // empty-looking query reads as an error, not a false hit. A filter
+    // member alone (no text) still counts as a criterion.
+    const hasCriteria = text.length > 0 || hasFilterCriteria(filter);
 
     if (!hasCriteria) {
       return formatParameterError(
@@ -1795,9 +1719,8 @@ function recallMemoryBody(
 
     const results = searchQueryResults(
       db,
-      filters,
-      timeRange.after,
-      timeRange.before,
+      text || undefined,
+      filter,
       input.eraCutoffEpoch ?? null,
     );
     const paged = paginateItems(results, page, pageSize);
@@ -1824,13 +1747,14 @@ function recallMemoryBody(
     page,
     pageSize,
     truncate,
-    timeRange.after,
-    timeRange.before,
+    filter.after,
+    filter.before,
     includeDbTurnIds,
     truncateCap,
     eraCutoffEpoch,
     signal,
     pageBudget,
     turnBudget,
+    filter,
   );
 }
