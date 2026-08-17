@@ -264,7 +264,10 @@ describe("recallMemory", () => {
       `raw: ${resolveTranscriptPath("claude-mnemo", "session-2")}`,
     );
     expect(sessionOutput).toContain("[T1:L4] Diagnose auth race");
-    expect(sessionOutput).not.toContain('prompt: "Why am I getting 401 errors?"');
+    // ticket 03: the turn field-set switch makes collapsed = prompt/title/
+    // content, so the session view's own collapsed turn preview now carries
+    // the prompt line too — this used to be expanded-only.
+    expect(sessionOutput).toContain('prompt: "Why am I getting 401 errors?"');
     expect(sessionOutput).not.toContain("[O1] Auth mutex");
 
     expect(turnOutput).toContain(`[T1:L4] Diagnose auth race`);
@@ -644,7 +647,7 @@ describe("recallMemory", () => {
     ).toContain("Resumed adopted turn");
   });
 
-  test("surfaces a Chinese prompt-only match though the collapsed snippet stays English", () => {
+  test("surfaces a Chinese prompt-only match, and the collapsed turn now shows the matched prompt", () => {
     const session = upsertSession(db, {
       contentSessionId: "session-prompt-only",
       project: "claude-mnemo",
@@ -675,9 +678,11 @@ describe("recallMemory", () => {
     // Findability is met: the turn's session surfaces.
     expect(output).toContain(`[S${session.id}`);
     expect(output).toContain("Cookie sync setup");
-    // Accepted limitation: the visible snippet is the English summary, not the
-    // matched Chinese prompt fragment (snippet() preview deferred).
-    expect(output).not.toContain("浏览器插件");
+    // ticket 03: collapsed now carries prompt/title/content (the turn
+    // field-set switch), so the matched Chinese prompt fragment surfaces
+    // directly on the matched turn's own collapsed row — the prior
+    // "English-summary-only" limitation this test used to pin is resolved.
+    expect(output).toContain("浏览器插件");
   });
 
   test("recall search totals exclude memory-layer FTS rows (null session_id)", () => {

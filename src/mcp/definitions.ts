@@ -12,7 +12,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall:
-    "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id=\"E<n>\"` (also `E*`, `E1..9`) recalls a segment — the accumulated impression of one arc of work, not a session or a turn — so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. Segments also surface in `query=` search (text, `tag:`, `type:`) alongside sessions and turns.",
+    "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id=\"E<n>\"` (also `E*`, `E1..9`) recalls the segment card — the accumulated impression of one arc of work, not a session or a turn — so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. `id=\"E<n>/T<m>\"` (also `E<n>/T*`, `E<n>/T3..7`) addresses the segment's own members by their 1-based EVENT-ORDER position — a navigation handle only, never a citation (cite the rendered `[S<session>][T<prompt>]` address instead, since a late-settling member shifts the ordinal). `depth` is a field-set switch: turns collapsed show prompt/title/content, expanded adds insight/response/observations; a segment collapsed shows its metadata header and counts with the newest field rows, expanded shows every row plus a member index. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=` search (text, `tag:`, `type:`) alongside sessions and turns.",
   timeline:
     "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
@@ -63,6 +63,19 @@ export const recallInputShape = {
   page: z.number().int().positive().optional(),
   pageSize: z.number().int().positive().optional(),
   truncate: z.number().int().min(1).max(2000).optional(),
+  // ticket 03 (spec "Budgets"): the segment card's own token budget, default
+  // 1000. Distinct from `page` above (still the 1-indexed page NUMBER) —
+  // `page` doubles as this render's own overflow escape: page 1 is the
+  // elided collapsed card, page ≥ 2 is the same card with every Working
+  // State row shown, uncapped — "stable page 2" (never dropping content
+  // silently), reached by asking for the next page rather than a different
+  // parameter.
+  pageBudget: z.number().int().positive().optional().describe(
+    'Token budget for a segment card (id="E<n>") — default 1000. Over budget, the collapsed card elides the largest Working State field\'s oldest rows first (newest rows always visible), marked "… +N earlier"; ask for page 2 of the same id to see every row, uncapped.',
+  ),
+  turn: z.number().int().positive().optional().describe(
+    "Per-turn token cap on every rendered turn (default: card-scale when depth is collapsed, uncapped when expanded).",
+  ),
 };
 
 // SDK workers share recall's public selector grammar, but may request long

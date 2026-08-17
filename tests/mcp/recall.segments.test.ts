@@ -156,22 +156,32 @@ describe("recall segment selector and cross-granularity filters", () => {
     );
   });
 
-  test("the drill-down puts anchors first, then the derived rank", () => {
-    const lines = recallMemory(db, { id: `E${segmentId}` }).split("\n");
-    const memberLines = lines.filter((line) => /\[S\d+\]\[T\d+\]/.test(line));
+  // ticket 03 reforms the id-addressed segment view (spec "Tools"): the card
+  // no longer inlines a ranked member listing (anchors-first/derived-rank was
+  // a SELECTION concern for that old listing) — expanded now carries a
+  // MEMBER INDEX in EVENT order instead (spec D9 user story 21), and members
+  // are read individually through `E<n>/T<m>` ordinal addressing.
+  test("the expanded card's member index lists members in event order, not anchor/rank order", () => {
+    const lines = recallMemory(db, { id: `E${segmentId}`, depth: "expanded" }).split("\n");
+    const indexLines = lines.filter((line) => /^\s*-\s+\d+\.\s+S\d+\/T\d+/.test(line));
 
-    expect(memberLines[0]).toContain("⚓1");
-    expect(memberLines[0]).toContain("[T3]");
-    // The rest fall in derived order (created_at DESC, everything else tied).
-    expect(memberLines.map((line) => /\[T(\d+)\]/.exec(line)?.[1])).toEqual([
-      "3",
-      "2",
-      "1",
-    ]);
-    expect(lines.some((line) => line.includes("anchors: S"))).toBe(true);
+    // research(T1) design(T2) implement(T3) were created in that prompt-number
+    // order, so event order — despite T3 being the body's cited anchor and
+    // therefore the OLD ranking's first slot — is 1,2,3.
+    expect(indexLines.map((line) => /T(\d+)/.exec(line)?.[1])).toEqual(["1", "2", "3"]);
   });
 
-  test("a cross-era segment drills down to its era half only", () => {
+  test("E<n>/T<m> addresses a member by its 1-based EVENT-ORDER ordinal, exposing its S/T home address", () => {
+    const first = recallMemory(db, { id: `E${segmentId}/T1` });
+    const third = recallMemory(db, { id: `E${segmentId}/T3` });
+
+    expect(first).toContain("research the ledger");
+    expect(first).toContain(`[S${sessionId}][T1]`);
+    expect(third).toContain("implement the ledger");
+    expect(third).toContain(`[S${sessionId}][T3]`);
+  });
+
+  test("a cross-era segment's member count and member index drill down to its era half only", () => {
     const legacy = makeTurn(9, {
       type: "fix",
       title: "legacy fix before the switch",
@@ -179,22 +189,24 @@ describe("recall segment selector and cross-granularity filters", () => {
     });
     addSegmentMembers(db, segmentId, [legacy], CUTOFF);
 
-    const era = recallMemory(db, { id: `E${segmentId}`, eraCutoffEpoch: CUTOFF });
+    const era = recallMemory(db, { id: `E${segmentId}`, eraCutoffEpoch: CUTOFF, depth: "expanded" });
     expect(era).toContain("3 turns");
     expect(era).not.toContain("legacy fix before the switch");
 
     // No cutoff means no partition — the whole membership is still readable,
     // which is what keeps `E<n>` usable before ticket 09 sets a cutoff.
-    const unpartitioned = recallMemory(db, { id: `E${segmentId}` });
+    const unpartitioned = recallMemory(db, { id: `E${segmentId}`, depth: "expanded" });
     expect(unpartitioned).toContain("4 turns");
     expect(unpartitioned).toContain("legacy fix before the switch");
   });
 
-  test("the render budget bounds the member list and says what it cut", () => {
-    const output = recallMemory(db, { id: `E${segmentId}`, pageSize: 2 });
+  test("E<n>/T<selector> pagination bounds a large ordinal range with pageSize", () => {
+    const output = recallMemory(db, { id: `E${segmentId}/T1..3`, pageSize: 2 });
 
-    expect(output).toContain("2/3");
-    expect(output).toContain("+1 more");
+    expect(output).toContain("page 1 / 2 (total 3)");
+    expect(output).toContain("research the ledger");
+    expect(output).toContain("design the ledger");
+    expect(output).not.toContain("implement the ledger");
   });
 
   test("an unknown segment id reads as a miss, not an error", () => {

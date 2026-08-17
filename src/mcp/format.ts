@@ -1,4 +1,5 @@
 import { renderFileTree } from "../shared/file-tree";
+import { estimateTokens } from "../utils/token-estimate";
 import { projectToolCall, type ProjectedCall } from "./tool-projection";
 
 /**
@@ -18,6 +19,77 @@ const FIELD_TRUNCATION_SUFFIX = "…";
 export const DEFAULT_TRUNCATE = 200;
 export const MAX_TRUNCATE = 2000;
 export const DEFAULT_PREVIEW_COUNT = 5;
+
+/**
+ * The default per-turn token cap for a COLLAPSED turn render (ticket 03, spec
+ * "Budgets": "a per-turn budget with... recall card-scale" default). Sized to
+ * the note contract's own field budgets (`NOTE_TOKEN_BUDGET`: title ~20 +
+ * content ~100 = ~120) plus headroom for the raw prompt line the collapsed
+ * field-set switch now always carries alongside them — "card-scale" because
+ * this is the same order of magnitude a segment card's own per-field rows
+ * are budgeted at, not the much larger expanded/uncapped default. A caller's
+ * explicit `turn` input always overrides this; EXPANDED stays uncapped
+ * (`undefined`) by default, per the same spec line.
+ */
+export const DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED = 150;
+
+/** The marker a token-budget-capped turn ends with, distinct from the character-level `…`. */
+const TURN_BUDGET_TRUNCATION_MARKER = "  … turn truncated to fit the per-turn budget";
+
+/**
+ * Cap an already-rendered turn block to a TOKEN budget (ticket 03: "use the
+ * repo's token estimation, not characters" — `truncate`/`truncateCap` above
+ * measure characters, which is the wrong unit for a budget stated in tokens,
+ * per this project's own measured CJK under-count).
+ *
+ * The label line (line 0 — `[S<n>][T<n>] title | stats`) is never dropped: it
+ * is the only thing that identifies WHICH turn this is, so a budget too small
+ * even for it still keeps it whole and drops everything else. Trailing detail
+ * lines are dropped whole, oldest-rendered-first (i.e. from the end, since
+ * the renderer already emits fields in a fixed, front-loaded order), which is
+ * the same "cut from the back, mark that something was cut" shape
+ * `truncateLines` already applies to a file tree — reused here at the
+ * turn-block granularity instead of the field granularity.
+ */
+export function capTurnRenderToTokenBudget(
+  rendered: string,
+  budgetTokens: number | undefined,
+  signal?: TruncationSignal,
+): string {
+  if (budgetTokens === undefined || !Number.isFinite(budgetTokens)) {
+    return rendered;
+  }
+
+  if (estimateTokens(rendered) <= budgetTokens) {
+    return rendered;
+  }
+
+  const lines = rendered.split("\n");
+  const markerTokens = estimateTokens(TURN_BUDGET_TRUNCATION_MARKER);
+  // Always keep the label line, however small the budget.
+  const kept = [lines[0] ?? ""];
+  let used = estimateTokens(kept[0]!);
+
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    const lineTokens = estimateTokens(line);
+    if (used + lineTokens + markerTokens > budgetTokens) {
+      break;
+    }
+    kept.push(line);
+    used += lineTokens;
+  }
+
+  if (kept.length === lines.length) {
+    // Every line fit once the marker's own cost was accounted for — nothing
+    // was actually cut, so no marker is owed.
+    return rendered;
+  }
+
+  markTruncated(signal);
+  kept.push(TURN_BUDGET_TRUNCATION_MARKER);
+  return kept.join("\n");
+}
 
 export type RenderDepth = "collapsed" | "expanded";
 
@@ -184,6 +256,16 @@ interface RenderNodeOptions {
   includeChildren?: boolean;
   includeDbTurnIds?: boolean;
   signal?: TruncationSignal;
+  /**
+   * Ticket 03: a per-TURN token cap, applied only to `type: "turn"` nodes
+   * (see `capTurnRenderToTokenBudget`) — `undefined` (the default at every
+   * pre-ticket-03 call site) leaves rendering byte-identical to before.
+   * Deliberately not applied to session/observation nodes: the spec's
+   * "per-turn budget" is stated per-tool, not per-node-kind, and `recall`'s
+   * one caller-facing knob for it (`RecallInput.turn`) is resolved once and
+   * threaded down to exactly the turn nodes it names.
+   */
+  turnBudget?: number;
 }
 
 type RenderNode =
@@ -192,7 +274,7 @@ type RenderNode =
   | { type: "observation"; value: FormattedObservation }
   | { type: "toolCall"; value: FormattedToolCall };
 
-function formatEpoch(epoch: number): string {
+export function formatEpoch(epoch: number): string {
   const date = new Date(epoch * 1000);
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
@@ -675,6 +757,22 @@ function formatTurnCollapsedWithMode(
     );
   }
 
+  // Ticket 03 (spec "Tools"): the turn field-set switch — collapsed carries
+  // exactly prompt/title/content. Suppressed when `title` is null: the label
+  // above has ALREADY fallen back to this same prompt text (see
+  // `formatTurnLabel`'s own fallback), so a second line here would repeat it
+  // rather than add a field. Expanded's own prompt line (below) covers that
+  // case instead, unconditionally on title, which is what keeps the full
+  // field-set contract true at that depth without duplicating it here.
+  if (turn.title !== null && turn.promptPreview) {
+    lines.push(
+      `${indent}  - prompt: "${truncateText(collapseToSingleLine(turn.promptPreview), {
+        limit,
+        signal,
+      })}"`,
+    );
+  }
+
   return lines.join("\n");
 }
 
@@ -821,7 +919,13 @@ function formatTurnExpandedWithMode(
   // field across four lines that no reader can attribute to it. Fixing only the
   // title slot is what left the same prompt reading differently at the two
   // depths. Collapse before measuring, so the budget buys content, not breaks.
-  if (turn.promptPreview) {
+  //
+  // Ticket 03: the embedded collapsed block above already added this exact
+  // line whenever `title !== null` (its own field-set switch). Only the
+  // complementary case — no title, so the label fell back to this same text —
+  // still owes the line here; the two conditions never both fire, so this can
+  // never duplicate the collapsed block's own.
+  if (turn.title === null && turn.promptPreview) {
     lines.push(
       `${detailIndent}- prompt: "${truncateText(collapseToSingleLine(turn.promptPreview), { limit, signal })}"`,
     );
@@ -1001,10 +1105,17 @@ export function renderNode(node: RenderNode, options: RenderNodeOptions): string
             effectiveOptions.truncateCap,
             effectiveOptions.signal,
           );
-    case "turn":
-      return effectiveOptions.depth === "collapsed"
-        ? formatTurnCollapsedWithMode(node.value, { ...effectiveOptions, mode })
-        : formatTurnExpandedWithMode(node.value, { ...effectiveOptions, mode });
+    case "turn": {
+      const rendered =
+        effectiveOptions.depth === "collapsed"
+          ? formatTurnCollapsedWithMode(node.value, { ...effectiveOptions, mode })
+          : formatTurnExpandedWithMode(node.value, { ...effectiveOptions, mode });
+      return capTurnRenderToTokenBudget(
+        rendered,
+        effectiveOptions.turnBudget,
+        effectiveOptions.signal,
+      );
+    }
     case "observation":
       return effectiveOptions.depth === "collapsed"
         ? formatObservationCollapsedWithMode(node.value, { ...effectiveOptions, mode })

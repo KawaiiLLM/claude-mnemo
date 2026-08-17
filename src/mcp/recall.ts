@@ -11,7 +11,7 @@ import {
   resolveSegmentAnchorTurnIds,
   type RankedSegmentMember,
 } from "../db/segment-rank";
-import { getSegment, type SegmentRecord } from "../db/segments";
+import { getSegment, listSegmentsByActivity, type SegmentRecord } from "../db/segments";
 import { getSession } from "../db/sessions";
 import {
   getFirstTurn,
@@ -28,6 +28,7 @@ import {
   appendNavigationLegend,
   createTruncationSignal,
   DEFAULT_TRUNCATE,
+  DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED,
   renderNode,
   type FormattedObservation,
   type FormattedSession,
@@ -35,6 +36,12 @@ import {
   type TruncationSignal,
 } from "./format";
 import { renderSegmentHeaderLines } from "./segment-spine";
+import {
+  chronologicalSegmentMembers,
+  renderSegmentCard,
+  renderSegmentMembersByOrdinal,
+  SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+} from "./segment-card";
 import { expandNumericSelector } from "./selectors";
 import { resolveTurnPointers } from "./turn-pointers";
 
@@ -46,6 +53,24 @@ export interface RecallInput {
   page?: number;
   pageSize?: number;
   truncate?: number;
+  /**
+   * Ticket 03 (spec "Budgets"): the segment card's own token budget (default
+   * `SEGMENT_CARD_DEFAULT_PAGE_BUDGET` = 1000). Named distinctly from `page`
+   * (the pre-existing 1-indexed page NUMBER, unchanged and still governing
+   * item-count pagination everywhere else) precisely so the two do not
+   * collide — `page` already has a heavily-tested numeric meaning across
+   * every other recall route, and repurposing it would silently break every
+   * caller passing `page: 2` to mean "the second page of items". `page`
+   * still selects the segment card's own overflow escape (page ≥ 2 disables
+   * elision — see `segment-card.ts`'s "stable page 2").
+   */
+  pageBudget?: number;
+  /**
+   * Ticket 03: per-turn token cap (spec "Budgets": "a per-turn budget...
+   * recall card-scale [default for collapsed], expanded default uncapped").
+   * Applies wherever a turn renders through `renderNode` (format.ts).
+   */
+  turn?: number;
   // Internal worker-only flag. When set, rendered turns append a `dbid:T<dbid>`
   // token so the memory worker can cite a turn it found via recall. NOT exposed
   // on the public `recallInputShape` (definitions.ts) — wired through the
@@ -85,7 +110,13 @@ type RoutedRecallId =
   | { kind: "session-observation-list"; sessionId: number }
   | { kind: "observation-list"; sessionId: number; promptNumber: number }
   | { kind: "observation"; observationId: number }
-  | { kind: "segments"; segmentIds?: number[] };
+  | { kind: "segments"; segmentIds?: number[] }
+  // ticket 03 (spec D9): `E<n>/T<m>` — a segment-scoped member address, `<m>`
+  // the member's 1-based EVENT-ORDER ordinal (see segment-card.ts), NOT a
+  // session prompt number. Symmetric with `S<n>/T<m>` above, one segment id
+  // only (unlike the bare `E` route, which accepts a range/wildcard) —
+  // "E31/T5..7" names members within ONE segment, never a cross-segment span.
+  | { kind: "segment-members"; segmentId: number; ordinals?: number[] };
 
 function splitInsight(insight: string | null): string[] {
   if (!insight) {
@@ -254,6 +285,25 @@ function parseRoutedId(value: string): RoutedRecallId | null {
     return {
       kind: "observation",
       observationId: Number(observationMatch[1]),
+    };
+  }
+
+  // Segment-scoped member route (ticket 03, spec D9): `E31/T5` and
+  // `E31/T3..7` — `<m>` is the member's 1-based EVENT-ORDER ordinal within
+  // the segment, a navigation handle only (see segment-card.ts). Checked
+  // BEFORE the bare segment route below, since that route's own pattern would
+  // otherwise stop at the digits and leave a trailing `/T5` unmatched instead
+  // of falling through to this one.
+  const segmentMemberMatch = /^E(\d+)\/T(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (segmentMemberMatch) {
+    const ordinals = expandNumericSelector(segmentMemberMatch[2]!);
+    if (ordinals === null) {
+      return null;
+    }
+    return {
+      kind: "segment-members",
+      segmentId: Number(segmentMemberMatch[1]),
+      ordinals,
     };
   }
 
@@ -688,6 +738,7 @@ function renderTurnScope(
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
+  turnBudget?: number,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, TurnRecord[]>();
@@ -730,6 +781,7 @@ function renderTurnScope(
             includeDbTurnIds,
             truncateCap,
             signal,
+            turnBudget,
           },
         ),
       );
@@ -1064,77 +1116,6 @@ function renderSegmentSummary(
   }).join("\n");
 }
 
-/**
- * Segment drill-down (spec D8/D11): the record, then its members — ANCHORS
- * first, then the derived rank filling the render budget. `pageSize` is that
- * budget, the same knob every other recall listing is sized by.
- */
-function renderSegmentDetail(
-  db: Database,
-  segmentId: number,
-  depth: "collapsed" | "expanded",
-  pageSize: number,
-  truncate?: number,
-  includeDbTurnIds?: boolean,
-  truncateCap?: number,
-  eraCutoffEpoch: number | null = null,
-  signal?: TruncationSignal,
-): string {
-  const segment = getSegment(db, segmentId);
-  if (!segment) {
-    return "Segment not found.";
-  }
-
-  const facts = buildSegmentFacts(db, segment, eraCutoffEpoch);
-  const lines = renderSegmentHeaderLines({
-    segment,
-    memberCount: facts.memberCount,
-    dominantType: facts.dominantType,
-    phaseTrace: facts.phaseTrace,
-    anchorRefs: facts.anchorRefs,
-    truncate: truncate ?? DEFAULT_TRUNCATE,
-  });
-
-  const shown = facts.members.slice(0, Math.max(0, pageSize));
-  if (facts.members.length > 0) {
-    lines.push(
-      `  - members (anchors first, then derived rank): ${shown.length}/${facts.members.length}`,
-    );
-  }
-
-  for (const member of shown) {
-    const turn = getTurnById(db, member.turnId);
-    if (!turn) {
-      continue;
-    }
-    const rendered = renderNode(
-      { type: "turn", value: buildTurnView(db, turn, eraCutoffEpoch) },
-      {
-        depth,
-        mode: "unified",
-        sessionId: member.sessionId,
-        truncate,
-        includeDbTurnIds,
-        truncateCap,
-        signal,
-      },
-    );
-    // An anchor keeps the ordinary turn row and swaps its bullet for `⚓<n>`,
-    // so the reader can see WHY it holds the slot it holds.
-    lines.push(
-      member.anchorPosition === null || !rendered.startsWith("  - ")
-        ? rendered
-        : `  ⚓${member.anchorPosition} ${rendered.slice(4)}`,
-    );
-  }
-
-  if (facts.members.length > shown.length) {
-    lines.push(`  +${facts.members.length - shown.length} more`);
-  }
-
-  return lines.join("\n");
-}
-
 function listSegmentIds(db: Database, segmentIds: number[] | undefined): number[] {
   // A single explicit id is a question about THAT segment, so a miss has to be
   // reported rather than silently yielding an empty page; a range or `*` is a
@@ -1378,6 +1359,8 @@ function renderRoutedId(
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
+  pageBudget?: number,
+  turnBudget?: number,
 ): string {
   if (routed.kind === "sessions") {
     const paged = paginateItems(
@@ -1407,6 +1390,28 @@ function renderRoutedId(
   }
 
   if (routed.kind === "segments") {
+    // A single explicit id (`E<n>`, not a range/wildcard): `page` is
+    // reinterpreted for THIS one segment's own card — it selects between the
+    // elided collapsed render (page 1) and the full, un-elided one (page 2+,
+    // spec "Overflow ALWAYS paginates... stable page 2") — rather than
+    // picking which of several records to show, since there is only one.
+    if (routed.segmentIds && routed.segmentIds.length === 1) {
+      return renderSegmentCard(db, routed.segmentIds[0]!, {
+        depth,
+        pageBudget,
+        page,
+        turnBudget,
+        truncate,
+        truncateCap,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+      });
+    }
+
+    // `E*` / `E1..9`: the OUTER pagination (page/pageSize) still selects
+    // WHICH segment records appear, unchanged from before ticket 03 — each
+    // one then renders its own card at (elision) page 1.
     const paged = paginateItems(
       listSegmentIds(db, routed.segmentIds),
       page,
@@ -1417,19 +1422,50 @@ function renderRoutedId(
       formatPageHeader(page, paged.pageCount, paged.total),
       paged.items
         .map((segmentId) =>
-          renderSegmentDetail(
-            db,
-            segmentId,
+          renderSegmentCard(db, segmentId, {
             depth,
-            pageSize,
+            pageBudget,
+            page: 1,
+            turnBudget,
             truncate,
-            includeDbTurnIds,
             truncateCap,
+            includeDbTurnIds,
             eraCutoffEpoch,
             signal,
-          ),
+          }),
         )
         .join("\n"),
+      paged.pageCount,
+    );
+  }
+
+  if (routed.kind === "segment-members") {
+    const segment = getSegment(db, routed.segmentId);
+    if (!segment) {
+      return "Segment not found.";
+    }
+    // Paginate by MEMBER (never mid-turn by line): resolve the requested
+    // ordinals up front — an empty selector means every member, matching the
+    // `S<n>/T*` convention — then page that ordinal list itself, so a large
+    // range (`E31/T1..80`) still respects `pageSize` the same way `S<n>/T*`
+    // does.
+    const wantedOrdinals =
+      routed.ordinals && routed.ordinals.length > 0
+        ? routed.ordinals
+        : chronologicalSegmentMembers(db, segment, eraCutoffEpoch).map((_member, index) => index + 1);
+    const paged = paginateItems(wantedOrdinals, page, pageSize);
+
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderSegmentMembersByOrdinal(db, routed.segmentId, paged.items, {
+        depth,
+        truncate,
+        truncateCap,
+        includeDbTurnIds,
+        turnBudget,
+        eraCutoffEpoch,
+        signal,
+      }),
       paged.pageCount,
     );
   }
@@ -1456,6 +1492,7 @@ function renderRoutedId(
         truncateCap,
         eraCutoffEpoch,
         signal,
+        turnBudget,
       ),
       paged.pageCount,
     );
@@ -1473,6 +1510,7 @@ function renderRoutedId(
           truncateCap,
           eraCutoffEpoch,
           signal,
+          turnBudget,
         )
       : "Turn not found.";
   }
@@ -1571,7 +1609,16 @@ function renderRoutedId(
   return formatParameterError(`unrecognized id kind`);
 }
 
-function renderSessionList(
+/**
+ * Bare `recall()` — no `id`, no `query` (ticket 03, spec user story 18):
+ * segments lead, sessions follow. Segments are recency-ordered by last
+ * member-or-state edit (`listSegmentsByActivity`, ADR-0005's roster rule)
+ * and bounded by `pageSize`, same as the roster is budget-truncated; the
+ * section only appears on page 1 — later pages are pure session-listing
+ * pagination, unchanged from before this ticket, so a caller paging through
+ * sessions never sees the segments header repeat.
+ */
+function renderBareOverview(
   db: Database,
   depth: "collapsed" | "expanded",
   page: number,
@@ -1583,31 +1630,63 @@ function renderSessionList(
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
+  pageBudget?: number,
+  turnBudget?: number,
 ): string {
+  const parts: string[] = [];
+
+  if (page === 1) {
+    const segments = listSegmentsByActivity(db, pageSize);
+    if (segments.length > 0) {
+      parts.push(`── segments (${segments.length}) ──`);
+      for (const segment of segments) {
+        parts.push(
+          renderSegmentCard(db, segment.id, {
+            depth,
+            pageBudget,
+            page: 1,
+            turnBudget,
+            truncate,
+            truncateCap,
+            includeDbTurnIds,
+            eraCutoffEpoch,
+            signal,
+          }),
+        );
+      }
+    }
+  }
+
   const paged = paginateItems(
     listSessionIds(db, undefined, after, before),
     page,
     pageSize,
   );
-
-  return joinPage(
-    formatPageHeader(page, paged.pageCount, paged.total),
-    paged.items
-      .map((sessionId) =>
-        renderSessionDetail(
-          db,
-          sessionId,
-          depth,
-          truncate,
-          includeDbTurnIds,
-          truncateCap,
-          eraCutoffEpoch,
-          signal,
-        ),
-      )
-      .join("\n"),
-    paged.pageCount,
+  if (paged.total > 0) {
+    parts.push(`── sessions ──`);
+  }
+  parts.push(
+    joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      paged.items
+        .map((sessionId) =>
+          renderSessionDetail(
+            db,
+            sessionId,
+            depth,
+            truncate,
+            includeDbTurnIds,
+            truncateCap,
+            eraCutoffEpoch,
+            signal,
+          ),
+        )
+        .join("\n"),
+      paged.pageCount,
+    ),
   );
+
+  return parts.join("\n");
 }
 
 function searchQueryResults(
@@ -1655,6 +1734,11 @@ function recallMemoryBody(
   const truncate = input.truncate ?? DEFAULT_TRUNCATE;
   const truncateCap = input.truncateCap;
   const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const pageBudget = input.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
+  // "default card-scale for collapsed, uncapped for expanded" (spec
+  // "Budgets") — a caller's explicit `turn` always wins; only the DEFAULT
+  // (nothing supplied) depends on depth.
+  const turnBudget = input.turn ?? (depth === "collapsed" ? DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED : undefined);
   const timeRange = resolveTimeRange(input.time);
 
   if (timeRange.error) {
@@ -1680,6 +1764,8 @@ function recallMemoryBody(
       truncateCap,
       eraCutoffEpoch,
       signal,
+      pageBudget,
+      turnBudget,
     );
   }
 
@@ -1732,7 +1818,7 @@ function recallMemoryBody(
     );
   }
 
-  return renderSessionList(
+  return renderBareOverview(
     db,
     depth,
     page,
@@ -1744,5 +1830,7 @@ function recallMemoryBody(
     truncateCap,
     eraCutoffEpoch,
     signal,
+    pageBudget,
+    turnBudget,
   );
 }

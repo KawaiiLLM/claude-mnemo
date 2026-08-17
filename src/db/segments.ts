@@ -471,7 +471,7 @@ function indexSegment(db: Database, segment: SegmentRecord): void {
  * must produce the same stored row, or the FTS facet and the rendered order
  * would depend on scheduling.
  */
-function compareDerivedTags(
+export function compareDerivedTags(
   left: { tag: string; count: number },
   right: { tag: string; count: number },
 ): number {
@@ -1192,4 +1192,112 @@ export function getAttachedSegmentIds(db: Database, sessionId: number): number[]
     )
     .all(sessionId)
     .map((row) => row.segmentId);
+}
+
+/**
+ * The reverse of `getAttachedSegmentIds` (ticket 03): every session that has
+ * ever attached THIS segment, oldest attachment first — the segment card's
+ * `sessions` line needs the opposite direction from what remember's own
+ * write path ever needed.
+ */
+export function getAttachedSessionIds(db: Database, segmentId: number): number[] {
+  return db
+    .query<{ sessionId: number }, [number]>(
+      `SELECT session_id AS sessionId FROM segment_attachments
+       WHERE segment_id = ? ORDER BY created_at_epoch ASC, session_id ASC`,
+    )
+    .all(segmentId)
+    .map((row) => row.sessionId);
+}
+
+export interface SegmentFacetCount {
+  word: string;
+  count: number;
+}
+
+export interface SegmentMemberFacetCounts {
+  type: SegmentFacetCount[];
+  tags: SegmentFacetCount[];
+}
+
+/**
+ * Per-word/per-tag MEMBER counts (ticket 03), era-scoped to match whatever
+ * member set the card's own member listing renders. `recomputeSegmentFacets`
+ * already computes these counts internally but discards them once the
+ * ordered word/tag arrays are derived — this is the same tally, kept, for a
+ * reader who wants to know not just "which tags" but "how many members carry
+ * each one". Ordering matches `recomputeSegmentFacets`: frequency descending,
+ * ties broken by `MEMORY_TYPES`' own order for type and by tag spelling for
+ * tags (`compareDerivedTags`), so a count line's ORDER never disagrees with
+ * the stored `segment.type`/`segment.tags` arrays it is elaborating on.
+ */
+export function computeSegmentMemberFacetCounts(
+  db: Database,
+  segmentId: number,
+  eraCutoffEpoch: number | null = null,
+): SegmentMemberFacetCounts {
+  const members = db
+    .query<{ type: string | null; tags: string | null }, number[]>(
+      `SELECT t.type AS type, t.tags AS tags
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id = ?
+         ${eraCutoffEpoch === null ? "" : "AND t.created_at_epoch >= ?"}`,
+    )
+    .all(...(eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]));
+
+  const typeCounts = new Map<string, number>();
+  const tagCounts = new Map<string, number>();
+  for (const member of members) {
+    for (const word of new Set(parseMemberFacetArray(member.type))) {
+      typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
+    }
+    for (const tag of new Set(parseMemberFacetArray(member.tags))) {
+      if (tag.includes(":") || tag.trim() === "") {
+        continue;
+      }
+      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+    }
+  }
+
+  const type = MEMORY_TYPES.filter((word) => typeCounts.has(word))
+    .map((word) => ({ word, count: typeCounts.get(word)! }))
+    .sort((left, right) => right.count - left.count);
+  const tags = [...tagCounts.entries()]
+    .map(([tag, count]) => ({ tag, count }))
+    .sort(compareDerivedTags)
+    .map(({ tag, count }) => ({ word: tag, count }));
+
+  return { type, tags };
+}
+
+/**
+ * Segments ordered by activity (ticket 03, spec ADR-0005's roster rule
+ * generalised to the bare `recall()` listing): the more recent of the
+ * segment's OWN last field edit (`updated_at_epoch`) and its most recently
+ * added member turn. Membership does not bump `updated_at_epoch` (see
+ * `addSegmentMembers`), so a segment whose Working State has gone quiet but
+ * which just gained a new member still reads as active — the roster's own
+ * "recency of last member or state edit" rule (ADR-0005), not just the
+ * column `listRecentSegments` already sorts by.
+ */
+export function listSegmentsByActivity(db: Database, limit: number): SegmentRecord[] {
+  if (limit <= 0) {
+    return [];
+  }
+  return db
+    .query<SegmentRow, [number]>(
+      `SELECT ${JOINED_SEGMENT_COLUMNS} FROM segments s
+       LEFT JOIN (
+         SELECT sm.segment_id AS segmentId, MAX(t.created_at_epoch) AS lastMemberEpoch
+         FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         GROUP BY sm.segment_id
+       ) activity ON activity.segmentId = s.id
+       ORDER BY MAX(s.updated_at_epoch, COALESCE(activity.lastMemberEpoch, 0)) DESC, s.id DESC
+       LIMIT ?`,
+    )
+    .all(limit)
+    .map((row) => mapSegmentRow(row))
+    .filter((segment): segment is SegmentRecord => segment !== null);
 }

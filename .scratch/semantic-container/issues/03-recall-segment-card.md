@@ -4,10 +4,10 @@
 
 **Blocked by:** 02 — remember tool + segment state schema.
 
-**Status:** ready-for-agent
+**Status:** done — card, ordinal addressing, budgets, and bare-listing reorder landed (`src/mcp/segment-card.ts` new; `recall.ts`/`format.ts`/`remember.ts`/`definitions.ts`/`handlers.ts`/`db/segments.ts` touched). Judgment calls flagged at review: (1) new token budget named `pageBudget`, not `page` — the existing `page` NUMBER param is heavily tested/used elsewhere in recall and repurposing it would silently break every caller; `page` still selects the card's own overflow escape (≥2 = unelided); (2) header's "last edit" renders a date only, no `<S/T addr>` — nothing on the segment row tracks which turn triggered a Working State write, and adding that would need a `schema.ts` column (out of this ticket's bounds); (3) "maintenance N turns ago" generalizes `remember`'s per-caller-session receipt to sum turns-since-last-edit across every attached session, since recall has no single caller session; (4) the old anchors-first/derived-rank inline member listing is dropped from the id-addressed view entirely, replaced by the expanded member index (event order) + `E<n>/T<m>` addressing — anchors/phase-trace no longer render on this surface; (5) per-turn budget (`turn` param) is threaded through the shared `renderNode` (applies everywhere automatically) plus explicitly through the S/T and E/T turn-listing routes; session-embedded turn previews, search-result turns, and observation-scope turn labels are NOT threaded and stay uncapped regardless of `turn`.
 
-- [ ] Segment card collapsed/expanded render per contract, top-elision demonstrated on an over-budget field
-- [ ] Turn collapsed shows exactly prompt/title/content; expanded adds the detail fields
-- [ ] Page overflow paginates with a stable page 2; per-turn budget caps each rendered turn
-- [ ] Bare recall() leads with segments; attach returns the canonical card
-- [ ] Election/tier data appears nowhere in any recall render
+- [x] Segment card collapsed/expanded render per contract, top-elision demonstrated on an over-budget field
+- [x] Turn collapsed shows exactly prompt/title/content; expanded adds the detail fields
+- [x] Page overflow paginates with a stable page 2; per-turn budget caps each rendered turn
+- [x] Bare recall() leads with segments; attach returns the canonical card
+- [x] Election/tier data appears nowhere in any recall render

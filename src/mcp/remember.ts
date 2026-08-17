@@ -14,13 +14,13 @@ import {
   findTopic,
   getSegment,
   getSegmentsForTopic,
-  getTopic,
   replaceInSegmentWorkingStateField,
   upsertTopic,
   type SegmentRecord,
 } from "../db/segments";
 import { countTurnsSince } from "../db/sessions";
 import { decodeHtmlEntities } from "./note";
+import { renderSegmentCard } from "./segment-card";
 import {
   SEGMENT_WORKING_STATE_FIELDS,
   type SegmentWorkingStateField,
@@ -186,50 +186,6 @@ function resolveSegmentTarget(db: Database, rawId: string): SegmentTargetResolut
     };
   }
   return { ok: true, segment: candidates[0]! };
-}
-
-function topicNameForSegment(db: Database, segment: SegmentRecord): string | null {
-  if (segment.topicId === null) {
-    return null;
-  }
-  return getTopic(db, segment.topicId)?.name ?? null;
-}
-
-// ---------------------------------------------------------------------------
-// The provisional plain render (ticket 02) — attach's tool result today.
-// Small and named on purpose (ticket 03's own text): swapping it for the
-// canonical card is changing this one call site, not restructuring `attach`.
-// ---------------------------------------------------------------------------
-
-export function renderSegmentWorkingStatePlain(
-  segment: SegmentRecord,
-  topicName: string | null,
-): string {
-  const lines: string[] = [
-    `E${segment.id} "${segment.title}" [${segment.status}]${
-      topicName ? ` topic:${topicName}` : ""
-    }`,
-  ];
-  if (segment.content) {
-    lines.push(`content: ${segment.content}`);
-  }
-  if (segment.insight) {
-    lines.push(`insight: ${segment.insight}`);
-  }
-
-  const workingState: ReadonlyArray<[SegmentWorkingStateField, string | null]> = [
-    ["goal", segment.goal],
-    ["constraints", segment.constraints],
-    ["decisions", segment.decisions],
-    ["done", segment.done],
-    ["next_steps", segment.nextSteps],
-    ["reference", segment.reference],
-  ];
-  for (const [field, value] of workingState) {
-    lines.push(`${field}:`);
-    lines.push(value && value.trim() !== "" ? value : "(empty)");
-  }
-  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -436,11 +392,17 @@ function handleAttach(
     attachSegmentToSession(db, callerSessionId, resolution.segment.id, nowEpoch),
   );
 
-  const topicName = topicNameForSegment(db, resolution.segment);
   const header = `Attached S${callerSessionId} to E${resolution.segment.id}${
     attached ? "" : " (already attached)"
   }.`;
-  return textResult(`${header}\n${renderSegmentWorkingStatePlain(resolution.segment, topicName)}`);
+  // Ticket 03: attach returns the canonical segment card — the same render
+  // `recall(id="E<n>")` collapsed produces — swapping ticket 02's provisional
+  // plain render for it, per this module's own note above `handleAttach`.
+  const card = renderSegmentCard(db, resolution.segment.id, {
+    depth: "collapsed",
+    eraCutoffEpoch: null,
+  });
+  return textResult(`${header}\n${card}`);
 }
 
 // ---------------------------------------------------------------------------

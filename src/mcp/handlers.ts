@@ -149,6 +149,8 @@ export function createDatabaseBackedHandlers(
           page: args.page as number | undefined,
           pageSize: args.pageSize as number | undefined,
           truncate: args.truncate as number | undefined,
+          pageBudget: args.pageBudget as number | undefined,
+          turn: args.turn as number | undefined,
           includeDbTurnIds,
           truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : undefined,
           eraCutoffEpoch: eraCutoff(),

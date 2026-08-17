@@ -200,7 +200,7 @@ describe("remember tool (ticket 02)", () => {
       return Number(/Created E(\d+)/.exec(text)![1]);
     }
 
-    test("binds the session by E id and returns the fields, provisional render", () => {
+    test("binds the session by E id and returns the fields — refuses without a caller session", () => {
       const segmentId = createViaTool("attach-by-id");
       rememberTool(db, {
         verb: "append",
@@ -221,7 +221,7 @@ describe("remember tool (ticket 02)", () => {
       expect(text).toStartWith("Parameter error:");
     });
 
-    test("binds the session by E id (with caller session) and renders Working State", () => {
+    test("binds the session by E id (with caller session) and returns the canonical segment card (ticket 03)", () => {
       const segmentId = createViaTool("attach-by-id-2");
       rememberTool(db, {
         verb: "append",
@@ -238,10 +238,13 @@ describe("remember tool (ticket 02)", () => {
         ),
       );
       expect(text).toContain(`Attached S${sessionId} to E${segmentId}`);
-      expect(text).toContain("goal:");
+      // The same canonical card `recall(id="E<n>")` collapsed renders — ticket
+      // 02's provisional plain render (`goal:` / `(empty)` placeholders) is
+      // gone; a populated field shows its row, an empty one shows "0 rows".
+      expect(text).toContain(`[E${segmentId}]`);
+      expect(text).toContain("goal: 1 row");
       expect(text).toContain("- land the tool");
-      expect(text).toContain("constraints:");
-      expect(text).toContain("(empty)");
+      expect(text).toContain("constraints: 0 rows");
 
       const attachmentCount = db
         .query<{ count: number }, [number, number]>(
