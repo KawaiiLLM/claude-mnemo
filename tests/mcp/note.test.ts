@@ -133,9 +133,12 @@ describe("note tool", () => {
     // Neither writer_model nor ride_turn is a tool parameter — the caller
     // cannot supply or forge it. type/tags ARE parameters (ticket 02, spec
     // B1/B2): the caller states them directly, no mechanical derivation.
-    // ticket 03 merged `remember`'s addressing and fields (`session`, `grade`)
-    // and the `mode` vocabulary in; `replace`/`regrade`/`status`/`cites` are
-    // gone (spec D5a, E1).
+    // ticket 03 merged `remember`'s addressing and the `mode` vocabulary in;
+    // `replace`/`regrade`/`status`/`cites` are gone (spec D5a, E1). ticket 01
+    // (ADR-0003) removed `grade`; ticket 01/09 removed the six further
+    // session-only fields (`decision`/`done`/`next_steps`/`reference`, plus
+    // `current` retired earlier still) — the session address now shares only
+    // `title` with the turn surface.
     expect(Object.keys(noteInputSchema.shape)).toEqual([
       "turn",
       "session",
@@ -144,17 +147,12 @@ describe("note tool", () => {
       "insight",
       "type",
       "tags",
-      "grade",
       "skip",
       "crossSession",
       "evidenceFor",
       "evidenceAgainst",
       "supersedes",
       "dependsOn",
-      "decision",
-      "done",
-      "next_steps",
-      "reference",
       "mode",
     ]);
     expect(note.rideTurnId).toBe(rideTurnId);
@@ -242,6 +240,108 @@ describe("note tool", () => {
     );
 
     expect(resultText(result)).not.toContain("budget:");
+  });
+
+  // ticket 01 (spec "Note contract revision"): budgets gain teeth at 2×. Below
+  // that line, over-budget is advisory only — the tests above already pin
+  // that (content 800 chars = 200 tok, exactly 2× its 100 tok budget, still
+  // lands). These pin the far side: past 2×, the write is refused outright.
+  describe("turn budget teeth at 2× (ticket 01)", () => {
+    test("title over 2x its budget is rejected, naming the field, its count and its budget; nothing stored", () => {
+      const result = noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T332`,
+          title: "x".repeat(164), // 41 tok, one over the 40 tok (2x of 20) line
+          content: "c",
+        },
+        { now: () => 900, env: {} },
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("title");
+      expect(resultText(result)).toContain("41 tok");
+      expect(resultText(result)).toContain("20 tok");
+      expect(resultText(result)).toContain("nothing stored");
+      // The whole call rolled back — content did not land either, even
+      // though content alone was well within its own budget.
+      expect(getShadowNote(db, targetTurnId)).toBeNull();
+    });
+
+    test("content over 2x its budget is rejected on a rewrite, and the prior note survives untouched", () => {
+      noteTool(
+        db,
+        { turn: `S${sessionId}/T332`, title: "first", content: "first content" },
+        { now: () => 900, env: {} },
+      );
+
+      const result = noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T332`,
+          content: "x".repeat(804), // 201 tok, one over the 200 tok (2x of 100) line
+          mode: { content: "overwrite" },
+        },
+        { now: () => 1000, env: {} },
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("content");
+      expect(resultText(result)).toContain("201 tok");
+      expect(resultText(result)).toContain("100 tok");
+      // The rejected rewrite left the earlier note exactly as it was.
+      expect(getShadowNote(db, targetTurnId)?.content).toBe("first content");
+    });
+
+    test("insight over 2x its budget is rejected; title/content in the same call do not land either", () => {
+      const result = noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T332`,
+          title: "t",
+          content: "c",
+          insight: "x".repeat(484), // 121 tok, one over the 120 tok (2x of 60) line
+        },
+        { now: () => 900, env: {} },
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("insight");
+      expect(resultText(result)).toContain("121 tok");
+      expect(resultText(result)).toContain("60 tok");
+      // Atomic: title/content in the SAME call did not land either.
+      expect(getShadowNote(db, targetTurnId)).toBeNull();
+    });
+
+    // A design decision this suite pins deliberately: the check runs only
+    // against a field THIS call resolves, not one merely inherited for
+    // stripping/bracketing purposes. Without this, a pre-existing over-budget
+    // field (legacy data written before budget teeth existed) would block
+    // every future edit to any OTHER field on the same note forever.
+    test("an inherited over-2x field (pre-existing, untouched by this call) does not block a sibling field's fresh write", () => {
+      noteTool(
+        db,
+        { turn: `S${sessionId}/T332`, title: "t", content: "c" },
+        { now: () => 900, env: {} },
+      );
+      // Simulate legacy data written before budget teeth existed — raw SQL,
+      // bypassing noteTool's own gate entirely.
+      db.query("UPDATE shadow_notes SET content = ? WHERE turn_id = ?").run(
+        "x".repeat(4000), // 1000 tok, wildly over 2x
+        targetTurnId,
+      );
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T332`, insight: "a fresh, well-sized insight" },
+        { now: () => 1000, env: {} },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(getShadowNote(db, targetTurnId)?.insight).toBe(
+        "a fresh, well-sized insight",
+      );
+    });
   });
 
   test("a repeat write for the same turn overwrites the fields it names, leaving the rest alone", () => {
@@ -1193,24 +1293,24 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07)", () => {
       { now: () => 800, env: {}, eraCutoffEpoch: 1 },
     );
 
-    // This second call touches only `grade` — no title/content/insight, so
+    // This second call touches only `type` — no title/content/insight, so
     // there is no post-state for a relation to be eligible against.
     const result = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, grade: 2, supersedes: [`S${sessionId}/T1`] },
+      { turn: `S${sessionId}/T3`, type: ["fix"], supersedes: [`S${sessionId}/T1`] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain("also touch a");
-    // The grade write did not land either — the whole call rolled back.
-    expect(getTurnById(db, targetTurnId)?.significanceGrade).toBeNull();
+    // The type write did not land either — the whole call rolled back.
+    expect(getTurnById(db, targetTurnId)?.type).toEqual([]);
   });
 
   test("a session write rejects a relation field outright", () => {
     const result = noteTool(
       db,
-      { session: `S${sessionId}`, decision: "x", supersedes: [`S${sessionId}/T1`] },
+      { session: `S${sessionId}`, title: "x", supersedes: [`S${sessionId}/T1`] },
       { now: () => 900, env: {} },
     );
 
@@ -1318,25 +1418,31 @@ describe("the merged write tool (ticket 03)", () => {
       expect(getShadowNote(db, turnId)?.insight).toBe("first insight");
     });
 
-    test("a non-empty session field errors naming the field; the same write to an empty field succeeds", () => {
-      noteTool(db, { session: `S${sessionId}`, decision: "chose X" });
-
+    // Ticket 01/09 shrank the session address to one field (`title`), so the
+    // paired "one field blocked, a DIFFERENT empty field allowed without a
+    // mode" shape this test used to show on `decision`/`done` no longer has a
+    // second field to demonstrate the "allowed" half with — the turn-side
+    // test above already covers that half generically (content vs. insight).
+    // What survives here is `title`'s own mode-required behaviour.
+    test("a non-empty session field errors naming the field", () => {
+      // The fixture already seeds a title ("Before"), so the very first
+      // session `title` write here needs a mode.
       const blocked = noteTool(db, {
         session: `S${sessionId}`,
-        decision: "chose Y",
+        title: "Second title",
       });
       expect(resultText(blocked)).toStartWith("Parameter error:");
-      expect(resultText(blocked)).toContain("decision is not empty");
-      expect(resultText(blocked)).toContain("mode.decision");
-      expect(getSession(db, sessionId)?.decision).toBe("chose X");
+      expect(resultText(blocked)).toContain("title is not empty");
+      expect(resultText(blocked)).toContain("mode.title");
+      expect(getSession(db, sessionId)?.title).toBe("Before");
 
-      // `done` is still empty — the identical shape of write needs no mode.
       const allowed = noteTool(db, {
         session: `S${sessionId}`,
-        done: "shipped it",
+        title: "Overwritten title",
+        mode: { title: "overwrite" },
       });
       expect(isNoteSuccess(allowed)).toBe(true);
-      expect(getSession(db, sessionId)?.done).toBe("shipped it");
+      expect(getSession(db, sessionId)?.title).toBe("Overwritten title");
     });
   });
 
@@ -1389,17 +1495,20 @@ describe("the merged write tool (ticket 03)", () => {
   });
 
   // Acceptance criterion 5: omission still leaves a stored value alone —
-  // ticket 02's rule, unchanged by the merge, checked here across a field
-  // from each surface.
-  test("omission leaves a stored value alone, turn and session alike", () => {
+  // ticket 02's rule, unchanged by the merge. Was pinned across a field from
+  // EACH surface (turn `grade`, session `decision`/`done`); ticket 01
+  // (ADR-0003) removed `grade` and ticket 01/09 shrank the session address to
+  // one field, `title` — with nothing left to omit while touching session
+  // (every session call necessarily touches its one field), only the turn
+  // half survives, now demonstrated with `tags` in `grade`'s old role.
+  test("omission leaves a stored value alone", () => {
     noteTool(db, {
       turn: `S${sessionId}/T1`,
       title: "t",
       content: "c",
       type: ["implement"],
-      grade: 2,
     });
-    noteTool(db, { turn: `S${sessionId}/T1`, grade: 3, mode: { grade: "overwrite" } });
+    noteTool(db, { turn: `S${sessionId}/T1`, tags: ["auth"] });
     const turn = getTurnById(db, turnId)!;
     // Omitted from the second call, on the shadow row the merged tool always
     // maintains regardless of era (turns.title/content stay untouched here
@@ -1407,13 +1516,7 @@ describe("the merged write tool (ticket 03)", () => {
     expect(getShadowNote(db, turnId)?.title).toBe("t");
     expect(getShadowNote(db, turnId)?.content).toBe("c");
     expect(turn.type).toEqual(["implement"]);
-    expect(turn.significanceGrade).toBe(3);
-
-    noteTool(db, { session: `S${sessionId}`, decision: "d" });
-    noteTool(db, { session: `S${sessionId}`, done: "done thing" });
-    const session = getSession(db, sessionId)!;
-    expect(session.decision).toBe("d");
-    expect(session.done).toBe("done thing");
+    expect(turn.tags).toEqual(["auth"]);
   });
 
   // Acceptance criterion 6: the receipt reports an accumulating field's total
@@ -1455,21 +1558,25 @@ describe("the merged write tool (ticket 03)", () => {
     test("an `<invoke` fragment in a session field is refused the same way", () => {
       const result = noteTool(db, {
         session: `S${sessionId}`,
-        decision: 'Chose X.\n<invoke name="note">',
+        title: 'Chose X.\n<invoke name="note">',
+        mode: { title: "overwrite" },
       });
 
       expect(resultText(result)).toStartWith("Parameter error:");
-      expect(resultText(result)).toContain("decision");
-      expect(getSession(db, sessionId)?.decision).toBeNull();
+      expect(resultText(result)).toContain("title");
+      // The fixture's seeded title survives the rejected call untouched.
+      expect(getSession(db, sessionId)?.title).toBe("Before");
     });
   });
 });
 
-// ticket 04 (spec D2/D7/D8/D8a/D9): the session summary describes now, and
-// says who each field is for. Seven fields split by reader, `current` deleted,
-// a guidance value reported per field and never enforced, and a cadence figure
-// that ships WITHOUT its healthy band.
-describe("the session summary (ticket 04)", () => {
+// ticket 04 (spec D2/D7/D8/D8a/D9) gave the session summary seven fields
+// split by reader and retired `current`. Ticket 01/09 (spec "Session
+// retirement") then retired six of those seven — `title` is the one field
+// left on the session address, its guidance value now enforced at 2× (ticket
+// 01's budget teeth) and reported below that, and the cadence figure still
+// ships WITHOUT its healthy band.
+describe("the session summary (ticket 04, retired further by ticket 01/09)", () => {
   let db: Database;
   let sessionId: number;
 
@@ -1506,31 +1613,33 @@ describe("the session summary (ticket 04)", () => {
       const result = noteTool(db, {
         session: `S${sessionId}`,
         current: "still writing to the retired field",
-        content: "and to the live one",
+        title: "and to the live one",
       } as never);
 
       expect(resultText(result)).toStartWith("Parameter error:");
       expect(resultText(result)).toContain("current");
-      expect(resultText(result)).toContain("Write `content`");
+      // ticket 01: the message now points at `title`, the one field left on
+      // the session address — `content` retired from this surface too.
+      expect(resultText(result)).toContain("`title`");
       expect(isNoteSuccess(result)).toBe(false);
       // Atomic: the legitimate field in the same call did NOT land.
       const session = getSession(db, sessionId)!;
-      expect(session.content).toBeNull();
+      expect(session.title).toBeNull();
       expect(session.current).toBeNull();
     });
 
     test("`mode.current` is refused the same way, on either addressing surface", () => {
       const onSession = noteTool(db, {
         session: `S${sessionId}`,
-        content: "c",
+        title: "t",
         mode: { current: "overwrite" },
       } as never);
       expect(resultText(onSession)).toStartWith("Parameter error:");
       expect(resultText(onSession)).toContain("mode.current");
       // Not the generic unknown-field answer: a caller working from the
       // retired contract is told which field replaced it.
-      expect(resultText(onSession)).toContain("Write `content`");
-      expect(getSession(db, sessionId)?.content).toBeNull();
+      expect(resultText(onSession)).toContain("`title`");
+      expect(getSession(db, sessionId)?.title).toBeNull();
 
       seedTurn(1, 120);
       const onTurn = noteTool(db, {
@@ -1548,18 +1657,18 @@ describe("the session summary (ticket 04)", () => {
         noteInputSchema.parse({ session: "S1", current: "x" }),
       ).toThrow();
       expect(() =>
-        noteInputSchema.parse({ session: "S1", content: "c", mode: { current: "overwrite" } }),
+        noteInputSchema.parse({ session: "S1", title: "t", mode: { current: "overwrite" } }),
       ).toThrow();
     });
 
-    test("a write to the live fields leaves a legacy `current` value alone rather than clearing it", () => {
+    test("a write to the live field leaves a legacy `current` value alone rather than clearing it", () => {
       db.query(`UPDATE sessions SET "current" = ? WHERE id = ?`).run(
         "written before the field was retired",
         sessionId,
       );
 
       expect(
-        isNoteSuccess(noteTool(db, { session: `S${sessionId}`, content: "now" })),
+        isNoteSuccess(noteTool(db, { session: `S${sessionId}`, title: "now" })),
       ).toBe(true);
 
       // Dead storage, not a destructive migration: retiring the column
@@ -1570,110 +1679,125 @@ describe("the session summary (ticket 04)", () => {
     });
   });
 
-  describe("seven fields, split by reader (spec D2)", () => {
-    test("`insight` is a session field a caller can write, not a legacy value the write path clears", () => {
-      expect(
-        isNoteSuccess(
-          noteTool(db, {
-            session: `S${sessionId}`,
-            insight: "A budget the receipt does not report is a budget nobody keeps",
-          }),
-        ),
-      ).toBe(true);
-      expect(getSession(db, sessionId)?.insight).toBe(
-        "A budget the receipt does not report is a budget nobody keeps",
-      );
+  // ticket 01/09 (spec "Session retirement"): the session address accepts
+  // ONE field, `title` — the other six (content/insight/next_steps/decision/
+  // done/reference) retired to `remember`'s segment layer. `content`/
+  // `insight` stay valid TURN fields (refused BY NAME on a session address,
+  // not a bare schema miss); the other four are removed from the schema
+  // outright.
+  describe("the session address accepts title only (ticket 01/09)", () => {
+    test("content and insight are refused by name on a session address, naming them as turn fields", () => {
+      const withContent = noteTool(db, {
+        session: `S${sessionId}`,
+        content: "a turn-only field now",
+      } as never);
+      expect(resultText(withContent)).toStartWith("Parameter error:");
+      expect(resultText(withContent)).toContain("content is a turn field");
+      expect(getSession(db, sessionId)?.content).toBeNull();
 
-      // …and a later write to a different field does not silently erase it.
-      expect(
-        isNoteSuccess(noteTool(db, { session: `S${sessionId}`, done: "shipped" })),
-      ).toBe(true);
-      expect(getSession(db, sessionId)?.insight).toBe(
-        "A budget the receipt does not report is a budget nobody keeps",
+      const withInsight = noteTool(db, {
+        session: `S${sessionId}`,
+        insight: "also turn-only now",
+      } as never);
+      expect(resultText(withInsight)).toStartWith("Parameter error:");
+      expect(resultText(withInsight)).toContain("insight is a turn field");
+      expect(getSession(db, sessionId)?.insight).toBeNull();
+    });
+
+    // The schema-level rejection is pinned in tests/mcp/definitions.test.ts;
+    // this pins the SAME retirement at the seam a caller bypassing the zod
+    // schema still reaches — `noteTool()` has no field left to read these
+    // four into, so they are silently ignored rather than named, same
+    // treatment as the removed `grade` parameter.
+    test("the four fully-retired session fields are ignored by a direct noteTool() call, same as grade", () => {
+      const result = noteTool(db, {
+        session: `S${sessionId}`,
+        decision: "x",
+        done: "y",
+        next_steps: "z",
+        reference: "w",
+      } as never);
+      expect(resultText(result)).toBe(
+        "Parameter error: at least one of title is required.",
       );
     });
 
-    test("all seven are writable in one call, and the empty-call error names exactly those seven", () => {
-      const result = noteTool(db, {
-        session: `S${sessionId}`,
-        title: "T",
-        content: "C",
-        insight: "I",
-        next_steps: "N",
-        decision: "D",
-        done: "O",
-        reference: "R",
-      });
+    test("title is writable alone, and the empty-call error names exactly it", () => {
+      const result = noteTool(db, { session: `S${sessionId}`, title: "T" });
       expect(isNoteSuccess(result)).toBe(true);
-
-      const session = getSession(db, sessionId)!;
-      expect([
-        session.title,
-        session.content,
-        session.insight,
-        session.nextSteps,
-        session.decision,
-        session.done,
-        session.reference,
-      ]).toEqual(["T", "C", "I", "N", "D", "O", "R"]);
+      expect(getSession(db, sessionId)?.title).toBe("T");
 
       const empty = noteTool(db, { session: `S${sessionId}` });
       expect(resultText(empty)).toBe(
-        "Parameter error: at least one of title, content, insight, next_steps, decision, done, reference is required.",
+        "Parameter error: at least one of title is required.",
       );
     });
   });
 
-  describe("guidance values are reported, never enforced (spec D7/D9)", () => {
-    test("a field far over its guidance value is stored whole, and the receipt says it is over", () => {
-      const oversized = "x".repeat(4_000); // ~1000 tok against a 250 guidance
-      const result = noteTool(db, { session: `S${sessionId}`, content: oversized });
+  // ticket 01 (spec "Note contract revision"): budgets gain teeth at 2×.
+  // Below that line the guidance value stays advisory-only, exactly as
+  // before; session `title`'s own guidance (30 tok, SESSION_FIELD_GUIDANCE)
+  // is the budget these tests measure against.
+  describe("session title's budget: advisory below 2×, teeth at 2× (ticket 01)", () => {
+    test("a field over its guidance value but at or under 2x is stored whole, and the receipt says it is over", () => {
+      const overGuidance = "x".repeat(200); // 50 tok against a 30 tok guidance, under the 60 tok (2x) line
+      const result = noteTool(db, { session: `S${sessionId}`, title: overGuidance });
 
       // The reader loses nothing: the writer's signal is not the reader's cut.
-      expect(getSession(db, sessionId)?.content).toBe(oversized);
-      expect(getSession(db, sessionId)?.content?.length).toBe(4_000);
-      expect(resultText(result)).toContain("content 1000/250 (over guidance)");
+      expect(getSession(db, sessionId)?.title).toBe(overGuidance);
+      expect(resultText(result)).toContain("title 50/30 (over guidance)");
     });
 
-    test("each written field carries its own D9 number, and an under-budget field is not flagged", () => {
-      const result = noteTool(db, {
-        session: `S${sessionId}`,
-        title: "t".repeat(40),
-        insight: "i".repeat(40),
-        decision: "d".repeat(40),
-      });
+    test("a field at exactly 2x its guidance still stores — the line is inclusive", () => {
+      const atTheLine = "x".repeat(240); // 60 tok, exactly 2x the 30 tok guidance
+      const result = noteTool(db, { session: `S${sessionId}`, title: atTheLine });
 
-      const text = resultText(result);
-      expect(text).toContain("title 10/30");
-      expect(text).toContain("insight 10/80");
-      expect(text).toContain("decision 10/300");
-      expect(text).not.toContain("(over guidance)");
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(getSession(db, sessionId)?.title).toBe(atTheLine);
+    });
+
+    // Acceptance criterion 2: a field whose token count exceeds 2x its
+    // budget is REJECTED with a receipt-style error naming the field, its
+    // count and its budget — nothing stored.
+    test("a field over 2x its guidance is rejected outright, naming the field, its count and its budget", () => {
+      const overTheLine = "x".repeat(241); // 61 tok, one over the 60 tok (2x) line
+      const result = noteTool(db, { session: `S${sessionId}`, title: overTheLine });
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("title");
+      expect(resultText(result)).toContain("61 tok");
+      expect(resultText(result)).toContain("30 tok");
+      expect(resultText(result)).toContain("nothing stored");
+      // Nothing landed at all — the session's title is untouched (still null
+      // from the fixture, never written by this rejected call).
+      expect(getSession(db, sessionId)?.title).toBeNull();
     });
 
     test("a cleared field says so rather than reporting a size", () => {
-      noteTool(db, { session: `S${sessionId}`, done: "shipped" });
+      noteTool(db, { session: `S${sessionId}`, title: "shipped" });
       const result = noteTool(db, {
         session: `S${sessionId}`,
-        done: null,
-        mode: { done: "overwrite" },
+        title: null,
+        mode: { title: "overwrite" },
       });
 
-      expect(resultText(result)).toContain("done (cleared)");
-      expect(getSession(db, sessionId)?.done).toBeNull();
+      expect(resultText(result)).toContain("title (cleared)");
+      expect(getSession(db, sessionId)?.title).toBeNull();
     });
 
     test("an appended field reports the total AFTER the write, not the delta", () => {
-      noteTool(db, { session: `S${sessionId}`, decision: "a".repeat(200) });
+      noteTool(db, { session: `S${sessionId}`, title: "a".repeat(100) });
       const result = noteTool(db, {
         session: `S${sessionId}`,
-        decision: "b".repeat(200),
-        mode: { decision: "append" },
+        title: "b".repeat(100),
+        mode: { title: "append" },
       });
 
-      // 200 + newline + 200 chars ≈ 101 tok. The delta alone would read 50.
-      expect(getSession(db, sessionId)?.decision?.length).toBe(401);
-      expect(resultText(result)).toContain("decision 101/300");
-      expect(resultText(result)).not.toContain("decision 50/300");
+      // 100 + newline + 100 chars = 51 tok — over the 30 tok guidance, under
+      // the 60 tok (2x) line, so it still lands.
+      expect(getSession(db, sessionId)?.title?.length).toBe(201);
+      expect(resultText(result)).toContain("title 51/30");
+      expect(resultText(result)).not.toContain("title 25/30");
     });
   });
 
@@ -1685,7 +1809,7 @@ describe("the session summary (ticket 04)", () => {
 
       const first = noteTool(
         db,
-        { session: `S${sessionId}`, decision: "chose X" },
+        { session: `S${sessionId}`, title: "chose X" },
         { now: () => 1_000 },
       );
       expect(resultText(first)).toContain("No previous summary update; 3 turns so far.");
@@ -1694,7 +1818,7 @@ describe("the session summary (ticket 04)", () => {
       seedTurn(5, 1_200);
       const second = noteTool(
         db,
-        { session: `S${sessionId}`, done: "shipped X" },
+        { session: `S${sessionId}`, title: "shipped X", mode: { title: "overwrite" } },
         { now: () => 1_300 },
       );
       expect(resultText(second)).toContain("2 turns since the last summary update.");
@@ -1702,7 +1826,7 @@ describe("the session summary (ticket 04)", () => {
       // Written twice inside the same turn: nothing new has passed.
       const third = noteTool(
         db,
-        { session: `S${sessionId}`, reference: "/tmp/spec.md" },
+        { session: `S${sessionId}`, title: "/tmp/spec.md", mode: { title: "overwrite" } },
         { now: () => 1_400 },
       );
       expect(resultText(third)).toContain("0 turns since the last summary update.");
@@ -1715,7 +1839,7 @@ describe("the session summary (ticket 04)", () => {
 
       expect(
         resultText(
-          noteTool(db, { session: `S${sessionId}`, done: "d" }, { now: () => 1_000 }),
+          noteTool(db, { session: `S${sessionId}`, title: "d" }, { now: () => 1_000 }),
         ),
       ).toContain("1 turn so far.");
     });
@@ -1734,13 +1858,13 @@ describe("the session summary (ticket 04)", () => {
       const text = resultText(
         noteTool(
           db,
-          { session: `S${sessionId}`, decision: "chose X" },
+          { session: `S${sessionId}`, title: "chose X", mode: { title: "overwrite" } },
           { now: () => 1_200 },
         ),
       );
 
       expect(text).toBe(
-        `Updated S${sessionId}. after write: decision 2/300. 1 turn since the last summary update.`,
+        `Updated S${sessionId}. after write: title 2/30. 1 turn since the last summary update.`,
       );
       // Structural, not just this fixture's numbers: the cadence sentence is
       // one bare count, so it can carry no target, no ratio, no verdict.

@@ -332,12 +332,11 @@ describe("era cutover write path", () => {
       expect(getShadowNote(db, legacyTurnId)).toBeNull();
     });
 
-    test("still takes a pre-cutoff turn's grade, type and tags — the rule is about the destination, not the age", () => {
+    test("still takes a pre-cutoff turn's type and tags — the rule is about the destination, not the age", () => {
       const result = noteTool(
         db,
         {
           turn: `S${sessionId}/T10`,
-          grade: 2,
           type: ["fix"],
           tags: ["era-cutover"],
         },
@@ -346,7 +345,6 @@ describe("era cutover write path", () => {
 
       expect(isNoteSuccess(result)).toBe(true);
       const turn = getTurnById(db, legacyTurnId)!;
-      expect(turn.significanceGrade).toBe(2);
       expect(turn.type).toEqual(["fix"]);
       expect(turn.tags).toEqual(["era-cutover"]);
     });
@@ -569,22 +567,24 @@ describe("era cutover write path", () => {
     });
   });
 
-  describe("grade/type/tags write turns directly regardless of era; prose stays era-gated (ticket 03 merge)", () => {
+  describe("type/tags write turns directly regardless of era; prose stays era-gated (ticket 03 merge)", () => {
     // ticket 03 merges `remember`'s turn route into `note`. Its old shape
     // wrote title/content/insight directly onto `turns` for EVERY turn,
     // bypassing note's shadow store and era gate entirely — a second,
     // unfenced writer of the exact fields note.ts already owned. The merge
     // closes that: every prose write goes through the ONE era-gated path
-    // below, whichever address form named it. `grade`/`type`/`tags` keep
-    // remember's era-independent write (spec: settlement and the main agent
-    // both need to correct a legacy turn's grade/type/tags without a note
-    // ever promoting its prose).
+    // below, whichever address form named it. `type`/`tags` keep remember's
+    // era-independent write (spec: settlement and the main agent both need
+    // to correct a legacy turn's type/tags without a note ever promoting its
+    // prose). `grade` used to share this era-independent write too, but
+    // ticket 01 (ADR-0003) removed it from `note` entirely — settlement now
+    // assigns it through its own facade (worker/note-settlement-turn-facade.ts),
+    // which this suite does not exercise.
     test("a never-noted era turn (a hole) is fully writable through the merged tool, prose included", () => {
       const result = noteTool(
         db,
         {
           turn: `S${sessionId}/T11`,
-          grade: 3,
           type: ["implement"],
           title: "observer's reconstruction",
           content: "Written from the transcript, not from the turn itself.",
@@ -604,13 +604,12 @@ describe("era cutover write path", () => {
       expect(turn.insight).toBe("A late correction reaching the record.");
       expect(turn.type).toEqual(["implement"]);
       expect(turn.tags).toEqual(["era-cutover"]);
-      expect(turn.significanceGrade).toBe(3);
       expect(turn.status).toBe("extracted");
     });
 
-    test("a settled hole given only a grade still leaves the stranded selection", () => {
+    test("a settled hole given only a type still leaves the stranded selection", () => {
       // The turn's own completion already took it out of the selection
-      // (status 'skipped', not 'active'/'provisional'); a grade-only write
+      // (status 'skipped', not 'active'/'provisional'); a type-only write
       // must not put it back there.
       expect(getStrandedTurns(db, sessionId).map((t) => t.id)).not.toContain(
         eraTurnId,
@@ -618,7 +617,7 @@ describe("era cutover write path", () => {
 
       noteTool(
         db,
-        { turn: `S${sessionId}/T11`, grade: 0 },
+        { turn: `S${sessionId}/T11`, type: ["fix"] },
         { eraCutoffEpoch: CUTOFF },
       );
 
@@ -627,7 +626,7 @@ describe("era cutover write path", () => {
       );
     });
 
-    test("a grade patches onto an era turn without restating the note the main agent already wrote", () => {
+    test("a type patches onto an era turn without restating the note the main agent already wrote", () => {
       noteTool(
         db,
         {
@@ -638,10 +637,10 @@ describe("era cutover write path", () => {
         { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
       );
 
-      // grade-only: title/content are omitted, not restated, and need no mode.
+      // type-only: title/content are omitted, not restated, and need no mode.
       const result = noteTool(
         db,
-        { turn: `S${sessionId}/T11`, grade: 2 },
+        { turn: `S${sessionId}/T11`, type: ["fix"] },
         { eraCutoffEpoch: CUTOFF },
       );
 
@@ -649,7 +648,7 @@ describe("era cutover write path", () => {
       const turn = getTurnById(db, eraTurnId)!;
       expect(turn.title).toBe("the agent's own note");
       expect(turn.content).toBe("First-person record of this turn.");
-      expect(turn.significanceGrade).toBe(2);
+      expect(turn.type).toEqual(["fix"]);
       expect(turn.status).toBe("extracted");
     });
 
@@ -665,7 +664,6 @@ describe("era cutover write path", () => {
         db,
         {
           turn: `S${sessionId}/T11`,
-          grade: 2,
           title: "late observer",
           content: "Reconstructed after the turn was settled as a hole.",
         },
@@ -682,32 +680,31 @@ describe("era cutover write path", () => {
       // Before the merge, note.ts's promoteTurnFromNote floored an 'undone'
       // row's status (a sidechain prompt is not part of the session's arc,
       // so promoting it would put it back in view), but remember.ts's
-      // era-independent write had no equivalent floor. Grade/type/tags still
-      // write directly (unconditioned on status, same as before the merge),
-      // but with only one path left for prose, the floor now applies
-      // regardless of which field a caller touches.
+      // era-independent write had no equivalent floor. Type/tags still write
+      // directly (unconditioned on status, same as before the merge), but
+      // with only one path left for prose, the floor now applies regardless
+      // of which field a caller touches.
       db.query<unknown, [number]>(
         "UPDATE turns SET status = 'undone' WHERE id = ?",
       ).run(rideTurnId);
 
       const result = noteTool(
         db,
-        { turn: `S${sessionId}/T12`, grade: 1 },
+        { turn: `S${sessionId}/T12`, type: ["fix"] },
         { eraCutoffEpoch: CUTOFF },
       );
 
       expect(isNoteSuccess(result)).toBe(true);
       const turn = getTurnById(db, rideTurnId)!;
-      expect(turn.significanceGrade).toBe(1);
+      expect(turn.type).toEqual(["fix"]);
       expect(turn.status).toBe("undone");
     });
 
-    test("extracts a pre-cutoff turn's grade/type/tags directly while its prose stays shadow-only", () => {
+    test("extracts a pre-cutoff turn's type/tags directly while its prose stays shadow-only", () => {
       const result = noteTool(
         db,
         {
           turn: `S${sessionId}/T10`,
-          grade: 2,
           type: ["implement"],
           tags: ["legacy"],
         },
@@ -718,7 +715,6 @@ describe("era cutover write path", () => {
       const turn = getTurnById(db, legacyTurnId)!;
       expect(turn.type).toEqual(["implement"]);
       expect(turn.tags).toEqual(["legacy"]);
-      expect(turn.significanceGrade).toBe(2);
       // P1 isolation is universal now: a legacy turn's official title/content
       // stay whatever the old extraction pipeline last left them (NULL in
       // this fixture), untouched by any address form.
@@ -748,12 +744,11 @@ describe("era cutover write path", () => {
       expect(getNoteDebt(db, eraTurnId)?.status).toBe("noted");
     });
 
-    test("grade/type/tags still land under a null cutoff; prose stays shadow-only", () => {
+    test("type/tags still land under a null cutoff; prose stays shadow-only", () => {
       const result = noteTool(
         db,
         {
           turn: `S${sessionId}/T11`,
-          grade: 3,
           type: ["implement"],
           tags: ["rollback"],
         },
@@ -764,7 +759,6 @@ describe("era cutover write path", () => {
       const turn = getTurnById(db, eraTurnId)!;
       expect(turn.type).toEqual(["implement"]);
       expect(turn.tags).toEqual(["rollback"]);
-      expect(turn.significanceGrade).toBe(3);
       // No cutoff means every turn is legacy — prose never reaches `turns`.
       expect(turn.title).toBeNull();
       expect(turn.content).toBeNull();
@@ -791,7 +785,7 @@ describe("era cutover write path", () => {
   });
 
   describe("handler wiring", () => {
-    test("hands note the one resolved cutoff for prose promotion; grade lands regardless of it", async () => {
+    test("hands note the one resolved cutoff for prose promotion; type lands regardless of it", async () => {
       const handlers = createDatabaseBackedHandlers(db, {
         eraCutoffEpoch: CUTOFF,
       });
@@ -805,14 +799,14 @@ describe("era cutover write path", () => {
         "implement+era-cutover: wiring",
       );
 
-      // A second, grade-only call — the same resolved cutoff governs prose
-      // promotion, but grade is era-independent and needs no mode (empty).
+      // A second, type-only call — the same resolved cutoff governs prose
+      // promotion, but type is era-independent and needs no mode (empty).
       await handlers.note!({
         turn: `S${sessionId}/T11`,
-        grade: 4,
+        type: ["fix"],
       });
-      expect(getTurnById(db, eraTurnId)!.significanceGrade).toBe(4);
-      // The first call's title survives the grade-only second call untouched.
+      expect(getTurnById(db, eraTurnId)!.type).toEqual(["fix"]);
+      // The first call's title survives the type-only second call untouched.
       expect(getTurnById(db, eraTurnId)!.title).toBe(
         "implement+era-cutover: wiring",
       );

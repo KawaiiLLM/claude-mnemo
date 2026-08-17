@@ -186,7 +186,6 @@ describe("claude-mnemo smoke test", () => {
         content: "Captured the race condition in auth refresh",
         insight: "- refresh races under parallel load",
         type: ["research"],
-        grade: 2,
         tags: ["gotcha"],
       },
       { eraCutoffEpoch: 1 },
@@ -206,7 +205,6 @@ describe("claude-mnemo smoke test", () => {
         content: "Implemented mutex and regression coverage",
         insight: "- mutex stabilizes refresh flow",
         type: ["fix"],
-        grade: 2,
         tags: ["problem-solution"],
       },
       { eraCutoffEpoch: 1 },
@@ -214,18 +212,13 @@ describe("claude-mnemo smoke test", () => {
     db.query(
       "UPDATE observations SET title = ?, content = ?, status = 'extracted' WHERE id = 2",
     ).run("Mutex added", "Refresh is serialized");
+    // ticket 01/09 (spec "Session retirement"): the session keeps one
+    // semantic field, `title` — content/insight/decision/done/next_steps/
+    // reference retired with the segment redesign (Working State and the
+    // summary layer now live on the segment, `remember`).
     noteTool(db, {
       session: `S${session.id}`,
       title: "Auth race fix",
-      content: "Diagnosed and fixed the refresh race",
-      decision: "Chose a mutex over a retry queue [T2]",
-      done: "Serialized refresh with a mutex [T2]",
-      // ticket 04 (spec D2): `current` is deleted. Sending it here refused the
-      // WHOLE call, which is the intended behaviour and is why this fixture
-      // had to change — the seven fields are title/content/insight and
-      // next_steps/decision/done/reference.
-      insight: "A refresh race hides behind a retry queue",
-      next_steps: "Backport to the release branch",
     });
 
     expect(getTurnById(db, firstTurnId)?.status).toBe("extracted");

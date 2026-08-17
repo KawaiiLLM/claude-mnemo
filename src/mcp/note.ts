@@ -38,10 +38,15 @@ import {
   formatSummaryCadence,
   RETIRED_SESSION_FIELD,
   retiredSessionFieldMessage,
+  SESSION_FIELD_GUIDANCE,
   SESSION_SUMMARY_FIELDS,
   type SessionSummaryField,
 } from "./session-summary";
-import { formatNoteBudget } from "../shared/note-budget";
+import {
+  budgetOverageRejection,
+  formatNoteBudget,
+  NOTE_TOKEN_BUDGET,
+} from "../shared/note-budget";
 import {
   findRetiredTopicTag,
   retiredTopicTagMessage,
@@ -65,24 +70,14 @@ type ToolTextResult = {
 export type FieldMode = "append" | "overwrite";
 const FIELD_MODE_VALUES: readonly FieldMode[] = ["append", "overwrite"];
 
-const TURN_MODE_FIELDS = [
-  "title",
-  "content",
-  "insight",
-  "type",
-  "tags",
-  "grade",
-] as const;
-// ticket 04 (spec D2): the seven session fields, `current` deleted and
-// `insight` promoted out of its legacy read-only corner. One list, imported
-// rather than restated, so the tool surface and the receipt's guidance values
-// cannot describe different sets of fields.
+// ticket 01 (ADR-0003): `grade` left this list along with the parameter
+// itself — the writer records facts, settlement assigns value.
+const TURN_MODE_FIELDS = ["title", "content", "insight", "type", "tags"] as const;
+// ticket 01/09 (spec "Session retirement"): one field, `title` — the other
+// six retired with the segment redesign. One list, imported rather than
+// restated, so the tool surface and the receipt's guidance values cannot
+// describe different sets of fields.
 const SESSION_MODE_FIELDS = SESSION_SUMMARY_FIELDS;
-
-/** Session fields that are NOT also turn fields — the ones a turn call must refuse. */
-const SESSION_ONLY_FIELDS = SESSION_MODE_FIELDS.filter(
-  (key) => key !== "title" && key !== "content" && key !== "insight",
-);
 
 export interface NoteToolInput {
   // Exactly one of `turn` / `session` addresses the write (D5/E1: one tool,
@@ -90,7 +85,9 @@ export interface NoteToolInput {
   turn?: unknown;
   session?: unknown;
 
-  // Turn fields.
+  // Turn fields. `title`/`content`/`insight` are shared with the session
+  // address (session accepts `title` only — `content`/`insight` are refused
+  // by name there; see `handleSessionWrite`).
   title?: unknown;
   content?: unknown;
   insight?: unknown;
@@ -98,7 +95,6 @@ export interface NoteToolInput {
   type?: unknown;
   /** Bare subject words; the `topic:` namespace is retired (spec B6). */
   tags?: unknown;
-  grade?: unknown;
   skip?: unknown;
   crossSession?: unknown;
 
@@ -109,14 +105,6 @@ export interface NoteToolInput {
   evidenceAgainst?: unknown;
   supersedes?: unknown;
   dependsOn?: unknown;
-
-  // Session fields (D2/D4). `title`, `content` and `insight` are declared
-  // above — one name each, shared by both addressing surfaces. `current` is
-  // deleted (ticket 04) and is refused by name, not silently dropped.
-  decision?: unknown;
-  done?: unknown;
-  next_steps?: unknown;
-  reference?: unknown;
 
   // D5/D5a: per-field mode, required whenever the target field is currently
   // non-empty. One object, shared vocabulary across every field of both
@@ -133,10 +121,12 @@ export interface NoteToolOptions {
    * P2 era boundary (spec D11/D12), resolved by the handler layer and never
    * read from config here. Absent or `null` = every turn is legacy, which is
    * the P1 behaviour (shadow row only) and the rollback. Governs ONLY the
-   * title/content/insight promotion onto `turns` — `type`/`tags`/`grade`
-   * write `turns` directly regardless of era, same as the retired `remember`
-   * always did (settlement and the main agent both need to correct a legacy
-   * turn's grade/type/tags without a note ever promoting its prose).
+   * title/content/insight promotion onto `turns` — `type`/`tags` write
+   * `turns` directly regardless of era, same as the retired `remember`
+   * always did (the main agent needs to correct a legacy turn's type/tags
+   * without a note ever promoting its prose; `grade` left this tool
+   * entirely, ADR-0003 — settlement now assigns it through its own facade,
+   * `worker/note-settlement-turn-facade.ts`, untouched by this option).
    */
   eraCutoffEpoch?: number | null;
   /**
@@ -397,45 +387,6 @@ function resolveClear(
     fail(`${field} cannot be cleared with mode: "append" — use "overwrite".`);
   }
   return { value: null };
-}
-
-function resolveGradeField(
-  provided: unknown,
-  existing: number | null,
-  mode: FieldMode | undefined,
-): FieldResolution<number | null> | undefined {
-  if (provided === undefined) {
-    return undefined;
-  }
-  if (provided === null) {
-    if (existing === null) {
-      return { value: null };
-    }
-    if (mode === undefined) {
-      fail(modeRequiredMessage("grade"));
-    }
-    if (mode === "append") {
-      fail('grade cannot be cleared with mode: "append" — use "overwrite".');
-    }
-    return { value: null };
-  }
-  if (
-    typeof provided !== "number" ||
-    !Number.isInteger(provided) ||
-    provided < 0 ||
-    provided > 4
-  ) {
-    fail("grade must be an integer from 0 through 4.");
-  }
-  if (existing !== null) {
-    if (mode === undefined) {
-      fail(modeRequiredMessage("grade"));
-    }
-    if (mode === "append") {
-      fail('grade has no append operation; use mode: "overwrite".');
-    }
-  }
-  return { value: provided };
 }
 
 function resolveTypeField(
@@ -710,7 +661,6 @@ interface TurnWriteTransactionResult {
   finalInsight: string | null | undefined;
   finalType: string[] | undefined;
   finalTags: string[] | undefined;
-  finalGrade: number | null | undefined;
   citations: RecomputeTurnCitedPairsResult | null;
   relations: AttachTurnRelationsResult | null;
   stripped: boolean;
@@ -754,12 +704,6 @@ function handleTurnWrite(
     return declineTurn(db, address, options, crossSession);
   }
 
-  for (const key of SESSION_ONLY_FIELDS) {
-    if ((input as Record<string, unknown>)[key] !== undefined) {
-      return parameterError(`${key} is a session field; this call addresses a turn.`);
-    }
-  }
-
   const turn = getTurn(db, address.sessionId, address.promptNumber);
   if (!turn) {
     return parameterError(
@@ -782,7 +726,7 @@ function handleTurnWrite(
   );
   if (providedFields.length === 0) {
     return parameterError(
-      "at least one of title, content, insight, type, tags, grade is required.",
+      `at least one of ${TURN_MODE_FIELDS.join(", ")} is required.`,
     );
   }
 
@@ -896,11 +840,6 @@ function handleTurnWrite(
 
       const typeResolution = resolveTypeField(input.type, freshTurn.type, modeMap.type);
       const tagsResolution = resolveTagsField(input.tags, freshTurn.tags, modeMap.tags);
-      const gradeResolution = resolveGradeField(
-        input.grade,
-        freshTurn.significanceGrade,
-        modeMap.grade,
-      );
 
       const touchedProse =
         titleResolution !== undefined ||
@@ -946,6 +885,39 @@ function handleTurnWrite(
         finalContent = bracketedContent;
         finalInsight = strippedInsight;
 
+        // ticket 01 (spec "Note contract revision"): budget teeth. Checked
+        // only against a field THIS call actually resolved (not one merely
+        // inherited above for stripping/bracketing purposes) — a pre-existing
+        // over-budget field this write never touches must not block an
+        // unrelated edit to a sibling field. The whole write fails atomically
+        // (fail() unwinds this transaction), so a rejected field's mere
+        // presence in the same call blocks the others too, same as every
+        // other whole-call validation in this function.
+        if (titleResolution !== undefined && finalTitle !== null) {
+          const rejection = budgetOverageRejection(
+            "title",
+            finalTitle,
+            NOTE_TOKEN_BUDGET.title,
+          );
+          if (rejection) fail(rejection);
+        }
+        if (contentResolution !== undefined && finalContent !== null) {
+          const rejection = budgetOverageRejection(
+            "content",
+            finalContent,
+            NOTE_TOKEN_BUDGET.content,
+          );
+          if (rejection) fail(rejection);
+        }
+        if (insightResolution !== undefined && finalInsight !== null) {
+          const rejection = budgetOverageRejection(
+            "insight",
+            finalInsight,
+            NOTE_TOKEN_BUDGET.insight,
+          );
+          if (rejection) fail(rejection);
+        }
+
         upsertShadowNote(db, {
           turnId: turn.id,
           // shadow_notes.title/content are NOT NULL — by this point both are
@@ -965,9 +937,7 @@ function handleTurnWrite(
 
       const promotesThisWrite = touchedProse && promotesTurnRecord;
       const wantsFieldsWrite =
-        typeResolution !== undefined ||
-        tagsResolution !== undefined ||
-        gradeResolution !== undefined;
+        typeResolution !== undefined || tagsResolution !== undefined;
 
       if (promotesThisWrite) {
         const promoted = promoteTurnFromNote(db, turn.id, {
@@ -984,7 +954,6 @@ function handleTurnWrite(
         const written = updateTurnById(db, turn.id, {
           type: typeResolution?.value,
           tags: tagsResolution?.value,
-          significanceGrade: gradeResolution?.value,
           updatedAtEpoch: nowEpoch,
         });
         if (written) {
@@ -1017,7 +986,6 @@ function handleTurnWrite(
         finalInsight,
         finalType: typeResolution?.value,
         finalTags: tagsResolution?.value,
-        finalGrade: gradeResolution?.value,
         citations,
         relations,
         stripped,
@@ -1068,9 +1036,6 @@ function handleTurnWrite(
   if (result.finalTags !== undefined) {
     parts.push(`tags: ${result.finalTags.length > 0 ? result.finalTags.join(", ") : "(none)"}.`);
   }
-  if (result.finalGrade !== undefined) {
-    parts.push(`grade: ${result.finalGrade === null ? "(cleared)" : result.finalGrade}.`);
-  }
 
   if (result.citations) {
     if (result.citations.written.length > 0 || result.citations.deleted.length > 0) {
@@ -1107,10 +1072,22 @@ function handleSessionWrite(
   input: NoteToolInput,
   options: NoteToolOptions,
 ): ToolTextResult {
+  // ticket 01 (spec "Session retirement"): `content`/`insight` retired from
+  // the session address specifically — they stay in `noteInputShape`'s
+  // schema because they are still valid TURN fields, so `.strict()` cannot
+  // catch a session call sending them; refused here by name instead, same
+  // pattern `current` already used. `next_steps`/`decision`/`done`/
+  // `reference` need no entry here at all: they are removed from the schema
+  // outright and already fail as a `.strict()` parse error before `noteTool`
+  // is even reached by a schema-validated caller (and a caller bypassing the
+  // schema, e.g. a direct `noteTool()` call, simply has them ignored — there
+  // is no field left on `NoteToolInput` to read them into). `grade` needs no
+  // entry either, for the identical reason (ADR-0003: it left this tool).
   for (const key of [
+    "content",
+    "insight",
     "type",
     "tags",
-    "grade",
     "skip",
     "crossSession",
     "evidenceFor",
@@ -1147,14 +1124,11 @@ function handleSessionWrite(
     return textResult(`Session S${sessionId} not found.`);
   }
 
+  // One field, `title` — SESSION_MODE_FIELDS (session-summary.ts) is the
+  // single source for what a session write may touch; this map stays keyed
+  // off it rather than a hand-kept literal so the two cannot drift apart.
   const fieldMap: ReadonlyArray<[key: SessionSummaryField, existing: string | null]> = [
     ["title", session.title],
-    ["content", session.content],
-    ["insight", session.insight],
-    ["next_steps", session.nextSteps],
-    ["decision", session.decision],
-    ["done", session.done],
-    ["reference", session.reference],
   ];
 
   let resolvedInput: UpdateSessionFieldsInput;
@@ -1169,9 +1143,22 @@ function handleSessionWrite(
       const resolution = resolveStringField(key, provided, existing, modeMap[key], {
         nullable: true,
       });
+      // ticket 01: budget teeth on the session's own field, same 2× hard
+      // line as a turn's title/content/insight — shared helper, this
+      // field's own guidance value.
+      if (resolution.value !== null) {
+        const rejection = budgetOverageRejection(
+          key,
+          resolution.value,
+          SESSION_FIELD_GUIDANCE[key],
+        );
+        if (rejection) fail(rejection);
+      }
       finals.push([key, resolution.value]);
-      const inputKey = key === "next_steps" ? "nextSteps" : key;
-      (resolvedInput as Record<string, string | null>)[inputKey] = resolution.value;
+      // `key` is `"title"` today — the one field left on the session address
+      // — which happens to need no camelCase remapping the way the retired
+      // `next_steps` -> `nextSteps` once did.
+      (resolvedInput as Record<string, string | null>)[key] = resolution.value;
     }
   } catch (error) {
     if (error instanceof NoteValidationError) {

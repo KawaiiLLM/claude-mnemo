@@ -67,3 +67,39 @@ function formatRatio(total: number, budget: number): string {
 
   return ratio < 0.05 ? "<0.1" : ratio.toFixed(1);
 }
+
+/**
+ * Ticket 01 (spec "Note contract revision"): budgets gain teeth at 2×. Below
+ * this multiple, going over budget is advisory only (`formatNoteBudget`
+ * above) — a rewrite loop costs more than the overage in that band. Past it,
+ * the write is refused outright, nothing stored, so a runaway field cannot
+ * quietly become the norm.
+ */
+export const BUDGET_REJECTION_MULTIPLE = 2;
+
+/**
+ * The one hard-rejection check, shared by every budgeted field on both
+ * addressing surfaces — turn title/content/insight against
+ * `NOTE_TOKEN_BUDGET`, session title against its own guidance value — so the
+ * multiple and the message shape cannot drift between them (same reasoning as
+ * `formatNoteBudget` being the one receipt line). Returns the receipt-style
+ * refusal message naming the field, its count and its budget when `value`
+ * exceeds `BUDGET_REJECTION_MULTIPLE × budgetTokens`, or `null` when the
+ * write may proceed — including when it is over budget but not yet over the
+ * multiple, which stays the advisory-only case above.
+ */
+export function budgetOverageRejection(
+  field: string,
+  value: string,
+  budgetTokens: number,
+): string | null {
+  const count = estimateTokens(value);
+  const limit = budgetTokens * BUDGET_REJECTION_MULTIPLE;
+  if (count <= limit) {
+    return null;
+  }
+  return (
+    `${field} is ${count} tok, over ${BUDGET_REJECTION_MULTIPLE}× its ${budgetTokens} tok ` +
+    `budget (limit ${limit}) — nothing stored.`
+  );
+}

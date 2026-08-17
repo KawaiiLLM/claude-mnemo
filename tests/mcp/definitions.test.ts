@@ -5,6 +5,7 @@ import {
   timelineInputSchema,
   recallInputSchema,
   noteInputSchema,
+  noteInputShape,
   checkInputSchema,
   workerRecallInputShape,
 } from "../../src/mcp/definitions";
@@ -88,31 +89,27 @@ describe("tool surface", () => {
     expect(recall).toContain("query=");
   });
 
-  // Single home of the note contract (user ruling, S15069 T586): the
-  // SessionStart block carries only the batch-timing digest, so everything an
-  // agent needs at note-composition time must be pinned HERE — if a clause
-  // drops out of this text it exists nowhere. The block-side test
-  // (tests/hooks/context-note-taking.test.ts) pins the timing digest and that
-  // it points at this description; the two sets are disjoint on purpose.
-  it("the note description is the single home of the note contract", () => {
+  // ticket 01 (spec "Note contract revision"): the field-level contract used
+  // to live entirely inside this one string. It now lives in each
+  // parameter's own zod `.describe()` (tested below); this text keeps only
+  // what governs the CALL as a whole. Both halves are tested here because
+  // acceptance criterion 1 is about the pair together: the tool description
+  // carries no per-field contract text, AND every parameter carries its own.
+  it("the note description carries only call-level rules — addressing, timing, skip, citation, relations, markup, the English line", () => {
     const note = MNEMO_TOOL_DESCRIPTIONS.note;
     // The address norm — the one thing the injected formats cannot teach on
     // sight (the formats themselves are undocumented by design: they explain
     // themselves when they appear).
     expect(note).toContain("never recalled or invented");
-    // Timing moved HERE (user ruling, S15069 T781). It used to live in the
-    // SessionStart block while this text ended with "goes last in its batch",
-    // and the two read as opposites at a glance — the agent kept settling
-    // owed turns in a batch of their own, after answering. Each of the three
-    // rules is pinned independently, and the phrase that caused the
-    // misreading is asserted gone.
+    // Timing (user ruling, S15069 T781): each of the three rules pinned
+    // independently.
     expect(note).toContain("note only FINISHED turns");
     expect(note).toContain("FIRST tool batch");
     expect(note).toContain("you cannot know which batch will be last");
     expect(note).toContain("a turn with no tool calls settles nothing");
     expect(note).toContain("a batch for notes alone only at 5+ owed");
     expect(note).not.toContain("Goes last in its batch");
-    // The skip contract: single criterion, its deletion-test check, the
+    // The skip test: single criterion, its deletion-test check, the
     // no-invention red line, the user-decision hard line (S15069 T577–T581).
     expect(note).toContain("a future retriever would find nothing unique");
     expect(note).toContain(
@@ -120,26 +117,9 @@ describe("tool surface", () => {
     );
     expect(note).toContain("never invented");
     expect(note).toContain("Never skip a user decision, correction, veto");
-    // Field contract essentials.
-    expect(note).toContain("the real stage");
-    // ticket 02 (spec B1/B2/B7): the writer states type/tags directly, no
-    // mechanical title-to-type derivation any more.
-    expect(note).toContain("omit or [] when none fit, never guess");
-    expect(note).toContain("bare topic words, no prefix");
-    expect(note).toContain("never restate the title, never narrate looking");
-    expect(note).toContain("claim first");
-    expect(note).toContain("token counts");
-    // ticket 03 (spec D5/D5a/E1): one mode vocabulary, one tool, two surfaces.
-    expect(note).toContain('mode.<field>');
-    expect(note).toContain('"overwrite"');
-    expect(note).toContain('"append"');
-    expect(note).toContain("session's summary");
-    expect(note).toContain("`crossSession: true` only for another session's turn");
-    // "Goes last in its batch" used to be pinned here. It is now asserted
-    // ABSENT above: read next to the SessionStart block's "first tool batch"
-    // it said the opposite thing, and "last" is undecidable at write time.
-    // Rule (2) carries what it was trying to say — last among the FIRST
-    // batch's calls.
+    // The citation norm: injected ids only, never private content.
+    expect(note).toContain("[S15069/T332]");
+    expect(note).toContain("ids seen in injected context");
     expect(note).toContain("never include <private> content");
     // spec E2: tool-call syntax is rejected, not silently stored.
     expect(note).toContain("Tool-call markup");
@@ -152,36 +132,125 @@ describe("tool surface", () => {
       "If the cited turn were wrong, would the citing turn's conclusion also be wrong?",
     );
     expect(note).toContain("(4) None → no relation");
-    // ticket 04 (spec D2): the session surface is seven fields split by
-    // reader. `current` is deleted, and this description is the contract's
-    // single home — a retired field left standing here would keep teaching it.
-    expect(note).toContain(
-      "Session — title/content/insight: a compressed view for another session browsing this one.",
-    );
-    expect(note).toContain("decision/done/next_steps/reference");
-    expect(note).not.toMatch(/\bdone\/current\b|\bcurrent\/next_steps\b/);
-    // 500 (T586) → 600 (T717, to carry C3/C4's procedure whole) → 660 (T781,
-    // to take the three timing rules over from the SessionStart block). Every
-    // number is a measurement, never a round figure: the description sits in
-    // the cached prefix of every request, so the cap is a real per-turn cost.
-    //
-    // The move was cheaper than it looks, and the pair of caps says so: this
-    // grew 599 → 660 while the block fell 152 → 85 (its own cap, in
-    // tests/hooks/context-note-taking.test.ts), so the total injected cost
-    // dropped by 6 tokens and the rules are now stated once instead of twice.
-    expect(estimateTokens(note)).toBeLessThanOrEqual(660);
+    expect(note).toContain('Never soften (3) to "used"/"built on"');
+    // Ticket 01's one line, verbatim (acceptance criterion 4).
+    expect(note).toContain("Every field is written in English.");
+
+    // Per-field contract text now lives ONLY in each parameter's own
+    // `.describe()` — none of it may still appear on the tool description,
+    // or the two homes have drifted back into one blob.
+    expect(note).not.toContain("one English claim sentence");
+    expect(note).not.toContain("Sentence deletion test");
+    expect(note).not.toContain("episode-deletion test");
+    expect(note).not.toContain("Closed vocabulary");
+    expect(note).not.toContain("coarse noun naming the project");
+    expect(note).not.toContain("mode.<field>");
+    // The grade parameter left the tool (ADR-0003) — no trace of it belongs
+    // on the surface a writer reads.
+    expect(note.toLowerCase()).not.toContain("grade");
+    // The retired session fields are gone from the tool description too —
+    // the session address now offers only `title`, stated on `session`'s own
+    // `.describe()`, not spelled out here.
+    expect(note).not.toContain("decision/done/next_steps/reference");
+
+    // The description sits in the cached prefix of every request, so the cap
+    // is a real per-turn cost. Moving the field contracts into `.describe()`
+    // shrank this text from 660 tok (its ticket-07-era cap) to well under
+    // half that — measured, not a round figure.
+    expect(estimateTokens(note)).toBeLessThanOrEqual(420);
   });
 
-  // ticket 03 (spec E1): the merged input shape covers both addressing
-  // surfaces and the mode vocabulary, `.strict()` so an unrecognised key
-  // (the retired `replace`/`regrade`/`cites`/`status`) is a parse error.
-  it("noteInputSchema accepts both addressing surfaces and rejects removed fields", () => {
+  // ticket 01 requirement: "The rendered tool schema carries a description on
+  // every note parameter" — checked at the seam the MCP SDK itself reads
+  // (server.ts's `registerTool` hands `noteInputSchema` straight to the
+  // client), not merely on the raw zod shape.
+  it("every note parameter carries a non-empty description on the rendered schema", () => {
+    const rendered = z.toJSONSchema(noteInputSchema) as {
+      properties: Record<string, { description?: string }>;
+    };
+    const keys = Object.keys(noteInputShape);
+    expect(keys.length).toBeGreaterThan(0);
+    for (const key of keys) {
+      const description = rendered.properties[key]?.description;
+      expect(description, `${key} should carry a description`).toBeTruthy();
+      expect(description!.length, `${key}'s description is too short`).toBeGreaterThan(10);
+    }
+  });
+
+  // ticket 01 requirement: "compose faithfully from the spec — these tests
+  // are load-bearing". Each admission test's distinctive wording, pinned
+  // verbatim on the field it governs.
+  it("title/content/insight carry their admission tests verbatim on their own parameter", () => {
+    const shape = noteInputSchema.shape;
+    expect(shape.title.description).toContain("one English claim sentence");
+    expect(shape.title.description).toContain(
+      "standing alone in a title-only list",
+    );
+    expect(shape.title.description).toContain("No activity/topic prefix");
+    expect(shape.title.description).toContain(
+      "Name the decider when a ruling landed",
+    );
+    expect(shape.title.description).toContain(
+      "No session-local codewords without a gloss",
+    );
+
+    expect(shape.content.description).toContain("assume the title was just read");
+    expect(shape.content.description).toContain("expand, never restate");
+    expect(shape.content.description).toContain(
+      "each rejected alternative with a one-line reason",
+    );
+    expect(shape.content.description).toContain("Sentence deletion test");
+    expect(shape.content.description).toContain(
+      "No process narration (replay stores it)",
+    );
+
+    expect(shape.insight.description).toContain(
+      "a task-scoped lesson under the episode-deletion test",
+    );
+    expect(shape.insight.description).toContain(
+      "does the sentence still teach someone useful prior knowledge?",
+    );
+
+    expect(shape.type.description).toContain("Closed vocabulary");
+    expect(shape.type.description).toContain(
+      "a design discussion with no ruling is discuss, not design",
+    );
+    expect(shape.tags.description).toContain(
+      "coarse noun naming the project",
+    );
+    expect(shape.tags.description).toContain("no -design/-fix hybrids");
+  });
+
+  // ticket 01 requirement 3 (ADR-0003): the grade parameter is removed
+  // entirely. A supplied grade is a `.strict()` parse error — checked at the
+  // exact seam the MCP SDK relies on to validate a real call, not assumed.
+  it("grade is removed entirely — the schema does not offer it, and a supplied grade is a parse error", () => {
+    expect("grade" in noteInputShape).toBe(false);
+    expect(() =>
+      noteInputSchema.parse({ turn: "S1/T1", title: "t", content: "c", grade: 2 }),
+    ).toThrow();
+    expect(() =>
+      noteInputSchema.parse({
+        turn: "S1/T1",
+        content: "c",
+        mode: { grade: "overwrite" },
+      }),
+    ).toThrow();
+  });
+
+  // ticket 01 requirement 5 (moved from ticket 09): the session address
+  // accepts title only. content/insight stay in the schema (still valid TURN
+  // fields) but the other six retired session fields — the four removed
+  // outright plus `current` (retired earlier, ticket 04) — are `.strict()`
+  // parse errors on EITHER surface, because they no longer exist anywhere in
+  // the schema.
+  it("noteInputSchema accepts both addressing surfaces and rejects every retired field", () => {
     expect(
       noteInputSchema.parse({ turn: "S1/T1", title: "t", content: "c" }),
     ).toEqual({ turn: "S1/T1", title: "t", content: "c" });
-    expect(
-      noteInputSchema.parse({ session: "S1", decision: "d" }),
-    ).toEqual({ session: "S1", decision: "d" });
+    expect(noteInputSchema.parse({ session: "S1", title: "A session title" })).toEqual(
+      { session: "S1", title: "A session title" },
+    );
     expect(() =>
       noteInputSchema.parse({ turn: "S1/T1", replace: true }),
     ).toThrow();
@@ -194,21 +263,28 @@ describe("tool surface", () => {
     expect(() =>
       noteInputSchema.parse({ turn: "S1/T1", status: "extracted" }),
     ).toThrow();
-    // ticket 04 (spec D2): the retired session field is not offered to the
-    // model at all — neither as a value nor as a mode.
+    // ticket 04 (spec D2): the retired eighth session field is not offered to
+    // the model at all — neither as a value nor as a mode.
     expect(() =>
       noteInputSchema.parse({ session: "S1", current: "x" }),
     ).toThrow();
     expect(() =>
       noteInputSchema.parse({
         session: "S1",
-        content: "c",
+        title: "t",
         mode: { current: "overwrite" },
       }),
     ).toThrow();
+    // ticket 01: the six further-retired session fields — decision/done/
+    // next_steps/reference are gone from the schema outright.
+    for (const field of ["decision", "done", "next_steps", "reference"] as const) {
+      expect(() =>
+        noteInputSchema.parse({ session: "S1", [field]: "x" }),
+      ).toThrow();
+    }
     expect(
-      noteInputSchema.parse({ session: "S1", insight: "i" }),
-    ).toEqual({ session: "S1", insight: "i" });
+      noteInputSchema.parse({ turn: "S1/T1", content: "c", insight: "i" }),
+    ).toEqual({ turn: "S1/T1", content: "c", insight: "i" });
     expect(() =>
       noteInputSchema.parse({
         turn: "S1/T1",

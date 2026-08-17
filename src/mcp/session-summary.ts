@@ -1,57 +1,48 @@
 import { estimateTokens } from "../utils/token-estimate";
 
 /**
- * The session summary's seven fields, split by reader (spec D2), each with its
- * guidance value (spec D9).
+ * The session's one remaining semantic field (ticket 01/09, spec "Session
+ * retirement"): `title`. The other six — content/insight/next_steps/decision/
+ * done/reference — retired with the segment redesign: Working State and the
+ * summary layer now live on the segment (`remember`), and a session carries
+ * no semantic memory of its own (root CONTEXT.md). `title`'s own contract
+ * lives in `noteInputShape.title`'s `.describe()` (mcp/definitions.ts), the
+ * single home for both the turn and the session reading of that one shared
+ * field.
  *
- * The split is the point: `title`/`content`/`insight` are a compressed global
- * view for ANOTHER session browsing this one; `next_steps`/`decision`/`done`/
- * `reference` are recent events for THIS session resuming itself. The retired
- * eighth field, `current`, duplicated `content` at a different compression, so
- * a writer had to guess which of the two to update — the note tool now refuses
- * it by name rather than dropping it silently.
+ * `current` retired earlier still (ticket 04) and is handled by its own
+ * named constant below — a caller sending it gets a message naming its
+ * replacement, unlike the six fields this ticket retires, which simply stop
+ * being offered: `next_steps`/`decision`/`done`/`reference` are removed from
+ * `noteInputShape` outright (a `.strict()` parse error, same treatment as the
+ * removed `grade` parameter — there is nothing left to point the caller at,
+ * the field left the session entirely); `content`/`insight` stay in the
+ * shared schema (they are still valid TURN fields) but are refused by name on
+ * a session address in `mcp/note.ts`.
  *
- * A guidance value is REPORTED, never enforced. `note`'s session receipt
- * measures each written field against its number and hands the result back;
- * nothing truncates, ever. Going over budget is a signal to the writer of the
- * NEXT write, not a loss to the reader — the reader always gets everything
- * that was written (spec D7).
- *
- * The numbers are corpus measurement, not taste (D9 records the mean/max chars
- * they came from: content 369/1473, decision 508/1371, done 392/864,
- * reference 309/746, insight 198/282, next_steps 148/611), counted in the
- * `estimateTokens` unit the receipt prints.
- *
- * Deliberately absent, and the absence is load-bearing: the update-cadence
- * band (D8a/D10). The receipt tells the writer how many turns have passed
- * since the last summary update and never what number is healthy, because a
- * writer who knows the target updates in order to reset the counter — the
- * diagnostic then reads healthy by construction and measures compliance with
- * itself instead of the thing it was built to detect. The band is
- * operator-side, which here means it does not exist in this module, in
- * `note.ts`, or in any string a writer can read.
+ * A guidance value is REPORTED, and — new in ticket 01 — enforced at 2×: a
+ * write past twice this number is refused outright
+ * (`budgetOverageRejection`, shared/note-budget.ts), the same hard line a
+ * turn's title/content/insight now carries. Below that line nothing here
+ * truncates: a write at or under 2× always stores everything it sent, over
+ * guidance or not.
  */
 export const SESSION_FIELD_GUIDANCE = {
   title: 30,
-  content: 250,
-  insight: 80,
-  next_steps: 250,
-  decision: 300,
-  done: 150,
-  reference: 100,
 } as const;
 
 export type SessionSummaryField = keyof typeof SESSION_FIELD_GUIDANCE;
 
 /**
- * One ordered list, so the tool's accepted-field set, its "at least one of…"
- * error and the receipt cannot disagree about what the seven fields are.
+ * One ordered list (today: `["title"]`), so the tool's accepted-field set,
+ * its "at least one of…" error and the receipt cannot disagree about what a
+ * session write may touch.
  */
 export const SESSION_SUMMARY_FIELDS = Object.keys(
   SESSION_FIELD_GUIDANCE,
 ) as readonly SessionSummaryField[];
 
-/** The retired eighth field (D2). Named so the refusal can say what to do instead. */
+/** The retired eighth field (D2, ticket 04) — unaffected by ticket 01's further retirement of the other six. */
 export const RETIRED_SESSION_FIELD = "current";
 
 export function retiredSessionFieldMessage(where: "field" | "mode"): string {
@@ -59,8 +50,8 @@ export function retiredSessionFieldMessage(where: "field" | "mode"): string {
   return (
     `${subject} no longer exists: the session summary's \`current\` field is deleted (spec D2).` +
     " It duplicated `content` at a different compression, so the two competed for the same" +
-    " material. Write `content` (the compressed view another session browsing this one reads)" +
-    " or `next_steps` (what this session does next) instead. Nothing was written."
+    " material. Nothing is left on the session address but `title` — the segment redesign" +
+    " moved Working State and the summary layer to `remember`. Nothing was written."
   );
 }
 

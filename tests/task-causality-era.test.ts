@@ -53,37 +53,45 @@ describe("task-causality era", () => {
     ).toBe(true);
   });
 
-  test("a grade correction leaves the creation-epoch era unchanged", () => {
+  // Was: "a grade correction leaves the creation-epoch era unchanged". Ticket
+  // 01 (ADR-0003) removed `grade` from `note` entirely — the writer records
+  // facts, settlement assigns value through its own facade
+  // (worker/note-settlement-turn-facade.ts). The concern this test actually
+  // pins — a correction to an EARLIER turn's era-independent field leaves
+  // that turn's creation-epoch era unchanged, whatever the current turn's own
+  // era — survives unchanged under `type`, still era-independent the same
+  // way `grade` used to be (spec: settlement and the main agent both need to
+  // correct a legacy turn's type/tags without a note ever promoting its
+  // prose).
+  test("a type correction leaves the creation-epoch era unchanged", () => {
     db.query(
       `INSERT INTO turns (
-         session_id, prompt_number, status, user_prompt, significance_grade,
+         session_id, prompt_number, status, user_prompt, type,
          created_at_epoch
-       ) VALUES (?, 1, 'extracted', 'Legacy premise', 3, ?),
-                (?, 2, 'active', 'Correct premise', NULL, ?)`,
+       ) VALUES (?, 1, 'extracted', 'Legacy premise', '["discuss"]', ?),
+                (?, 2, 'active', 'Correct premise', '[]', ?)`,
     ).run(sessionId, cutoffEpoch - 1, sessionId, cutoffEpoch + 1);
     const legacyTurn = getTurn(db, sessionId, 1)!;
-    const currentTurn = getTurn(db, sessionId, 2)!;
 
     noteTool(db, {
       turn: `S${sessionId}/T2`,
       title: "Correct premise",
       content: `Evidence overturned [T${legacyTurn.id}].`,
       type: ["research"],
-      grade: 2,
     });
     // spec I: `regrade` is retired — a settlement/main-agent correction of an
-    // earlier turn's grade is now just another addressed write, same as any
+    // earlier turn's type is now just another addressed write, same as any
     // other turn's.
     noteTool(db, {
       turn: `S${sessionId}/T1`,
-      grade: 1,
-      mode: { grade: "overwrite" },
+      type: ["correction"],
+      mode: { type: "overwrite" },
     });
 
-    const regraded = getTurn(db, sessionId, 1)!;
-    expect(regraded.significanceGrade).toBe(1);
-    expect(regraded.createdAtEpoch).toBe(cutoffEpoch - 1);
-    expect(isTaskCausalityEra(regraded.createdAtEpoch, cutoffEpoch)).toBe(false);
-    expect(getTurn(db, sessionId, 2)?.significanceGrade).toBe(2);
+    const corrected = getTurn(db, sessionId, 1)!;
+    expect(corrected.type).toEqual(["correction"]);
+    expect(corrected.createdAtEpoch).toBe(cutoffEpoch - 1);
+    expect(isTaskCausalityEra(corrected.createdAtEpoch, cutoffEpoch)).toBe(false);
+    expect(getTurn(db, sessionId, 2)?.type).toEqual(["research"]);
   });
 });

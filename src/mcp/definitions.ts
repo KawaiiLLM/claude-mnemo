@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { NOTE_TOKEN_BUDGET } from "../shared/note-budget";
+import { MEMORY_TYPES } from "../shared/type-vocabulary";
 
 export const MNEMO_TOOL_DESCRIPTIONS = {
   // ticket 14 (spec K1): the segment addressing and `query=` participation
@@ -13,47 +14,28 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
     "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id=\"E<n>\"` (also `E*`, `E1..9`) recalls a segment — the accumulated impression of one arc of work, not a session or a turn — so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. Segments also surface in `query=` search (text, `tag:`, `type:`) alongside sessions and turns.",
   timeline:
     "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
-  // The per-field budgets are spliced in from `NOTE_TOKEN_BUDGET`, the constant
-  // the receipt measures a write against, rather than restated as prose here.
+  // ticket 01 (spec "Note contract revision"): the field-level contract used
+  // to live entirely in this one string — title's shape, content's admission
+  // test, type's vocabulary, tags' noun order, the session's seven fields —
+  // one blob no reader could jump into at the level their own field governs.
+  // Every per-field rule now lives in that parameter's own zod `.describe()`
+  // in `noteInputShape` below; THIS text keeps only what governs the CALL as
+  // a whole — which address to use, when to call at all, what a citation may
+  // point at, the relation procedure, markup, and the one-line English rule.
+  // Capped by tests/mcp/definitions.test.ts, same as before.
   //
-  // Single home of the note contract (user ruling, S15069 T586): fields,
-  // budgets, the skip test and the mode vocabulary live HERE and nowhere else;
-  // the SessionStart block (src/hooks/handlers/context-note-taking.ts) carries
-  // only the batch-timing digest and points at this text. Capped by
-  // tests/mcp/definitions.test.ts.
-  //
-  // ticket 03 (spec E1/D5/D5a): `note` and the retired `remember` are one tool
-  // now, addressed by `turn` (a turn) XOR `session` (a session's summary).
-  // Every field takes one rule: absent leaves it alone; present on an EMPTY
-  // field just writes; present on a NON-empty field requires `mode.<field>` —
-  // `"overwrite"` (replace whole) or `"append"` (add to it) — named once for
-  // the caller, not spelled out per field below.
-  //
-  // ticket 07 (spec C7) added four relation fields, and the cap moved 500 →
-  // 600 to pay for them (user decision, S15069/T717; the estimate put to
-  // the user was +80 and the measured cost is +112, all of it procedure).
-  // C4 makes that procedure's exact wording normative — the four ordered
-  // questions, and
+  // ticket 07 (spec C7) added four relation fields, and C4 makes the
+  // procedure's exact wording normative — the four ordered questions, and
   // above all question 3's counterfactual — because the predecessor
   // vocabulary measured 61% precision at exactly the point where it was
-  // softened to "used" or "built on". A paraphrase that fits 13 tokens of
-  // headroom is therefore not a cheaper version of this text, it is the
-  // failure mode; shipping the fields undocumented instead would have left
-  // the main agent guessing in that same direction. The alternative
-  // considered and rejected was moving the procedure to the SessionStart
-  // injection, which is cheaper per turn but re-splits the contract T586
-  // had just given one home.
+  // softened to "used" or "built on". A paraphrase is not a cheaper version
+  // of this text, it is the failure mode.
   note:
-    "Write or correct a turn's note, or a session's summary. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief — never recalled or invented) or `session` (`S<session>`). Timing: (1) note only FINISHED turns, never the one in progress; (2) owed addresses settle in this turn's FIRST tool batch, last among its calls — you cannot know which batch will be last, and a turn with no tool calls settles nothing; (3) a batch for notes alone only at 5+ owed, or to fix a note already written. A non-empty field needs `mode.<field>`: `\"overwrite\"` replaces it whole, `\"append\"` adds (text: newline-joined; type/tags: unioned). Empty needs no mode; omitted stays untouched. Clearing (insight/grade/session fields) needs `null` + overwrite mode. Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored.\n" +
-    "Turn — title (~" +
-    NOTE_TOKEN_BUDGET.title +
-    " tok): `<activity>+<topic>: <what this turn covered>`, the real stage. content (~" +
-    NOTE_TOKEN_BUDGET.content +
-    " tok): the conclusion, then the evidence chain — rejected alternatives with reasons; never restate the title, never narrate looking. A first note needs both title and content. insight (~" +
-    NOTE_TOKEN_BUDGET.insight +
-    " tok, default none): long-term knowledge orthogonal to the conclusion, claim first. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction — omit or [] when none fit, never guess. tags: bare topic words, no prefix. grade: 0-4. Receipt reports token counts and each touched field's post-write total; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson. `crossSession: true` only for another session's turn. Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\n" +
+    "Write or correct a turn's note, or a session's title. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief — never recalled or invented) or `session` (`S<session>`). Timing: (1) note only FINISHED turns, never the one in progress; (2) owed addresses settle in this turn's FIRST tool batch, last among its calls — you cannot know which batch will be last, and a turn with no tool calls settles nothing; (3) a batch for notes alone only at 5+ owed, or to fix a note already written.\n" +
+    "skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\n" +
+    "Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\n" +
     "Relations — evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target this write does not cite rejects the call. Four ordered questions, first yes wins: (1) Did the citing turn overturn it? → supersedes. (2) Did it test the claim, for or against? → evidenceFor/Against. (3) If the cited turn were wrong, would the citing turn's conclusion also be wrong? → dependsOn. (4) None → no relation. Never soften (3) to \"used\"/\"built on\".\n" +
-    "Session — title/content/insight: a compressed view for another session browsing this one. decision/done/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations.",
+    "Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 08 (spec G8): the coverage predicate pulled by the agent, not the
   // Stop hook (ticket 11) or the completion gate (ticket 09) — those call the
   // same underlying predicate (db/coverage.ts's `computeCoverageGaps`)
@@ -83,6 +65,13 @@ export const workerRecallInputShape = {
 // D5/D5a: one mode vocabulary, shared by every field of both addressing
 // surfaces. `.strict()` further down means an unrecognised key (a field this
 // call's surface does not carry) is a parse error, not a silent drop.
+//
+// ticket 01 (ADR-0003): `grade` is REMOVED from this vocabulary along with
+// the parameter itself — the writer records facts, the settlement subagent
+// assigns value. A call still sending `grade` or `mode.grade` fails as a
+// `.strict()` parse error; no custom message is added for it (unlike the
+// retired session fields below), because there is nothing left to point the
+// caller at — grade simply left this tool.
 const fieldModeEnum = z.enum(["overwrite", "append"]);
 const noteModeShape = z
   .object({
@@ -91,14 +80,14 @@ const noteModeShape = z
     insight: fieldModeEnum.optional(),
     type: fieldModeEnum.optional(),
     tags: fieldModeEnum.optional(),
-    grade: fieldModeEnum.optional(),
-    decision: fieldModeEnum.optional(),
-    done: fieldModeEnum.optional(),
-    next_steps: fieldModeEnum.optional(),
-    reference: fieldModeEnum.optional(),
   })
   .strict()
-  .optional();
+  .optional()
+  .describe(
+    'Required when the target field already holds something: "overwrite" replaces it whole, "append" adds to it (text: newline-joined; type/tags: unioned). Not required when the field is empty or omitted — omitting the field itself leaves it untouched. Clearing a nullable field (insight) needs the field set to null plus its mode set to "overwrite".',
+  );
+
+const TYPE_VOCABULARY_LIST = MEMORY_TYPES.join("/");
 
 // ticket 03 (spec E1): `note` and the retired `remember` are one tool. Exactly
 // one of `turn` / `session` addresses the write — enforced in `noteTool`
@@ -118,22 +107,79 @@ const noteModeShape = z
 // recomputeTurnCitedPairs (db/citations.ts) and updateSessionFields
 // (db/sessions.ts). The earlier `cites` field (a `{id, relation}` list with no
 // prose backing it) is REMOVED, not carried into the merged tool.
+//
+// ticket 01 (spec "Note contract revision"): every field's own admission test
+// now lives in its `.describe()` here — the SINGLE home for that field's
+// contract, so a reader who has the rendered schema in front of them (not
+// just the tool description) can read a field's rule at the point they fill
+// it in. `content`/`insight` stay in this one shared shape (turn AND session
+// both used to accept them) but are now turn-only: `mcp/note.ts` refuses them
+// by name on a session address, the same pattern `current` already used.
 export const noteInputShape = {
-  turn: z.string().min(1).optional(),
-  session: z.string().min(1).optional(),
+  turn: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Address of a finished turn: `S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief — never recalled or invented (see the tool description). Exactly one of `turn`/`session` is required.",
+    ),
+  session: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Address of a session: `S<session>`. The only field this call accepts is `title` — every other session field retired with the segment redesign. Exactly one of `turn`/`session` is required.",
+    ),
 
-  // Turn fields.
-  title: z.string().nullable().optional(),
-  content: z.string().nullable().optional(),
-  insight: z.string().nullable().optional(),
-  type: z.array(z.string()).optional(),
-  tags: z.array(z.string()).optional(),
-  grade: z.number().int().min(0).max(4).nullable().optional(),
-  skip: z.boolean().optional(),
+  // Turn fields (title/session-shared with the session address).
+  title: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      `Turn (~${NOTE_TOKEN_BUDGET.title} tok): one English claim sentence — this turn's conclusion, standing alone in a title-only list. No activity/topic prefix (type/tags carry that). Name the decider when a ruling landed. No session-local codewords without a gloss. Session: a compressed label for this session, for another session browsing the roster.`,
+    ),
+  content: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      `Turn only (~${NOTE_TOKEN_BUDGET.content} tok): assume the title was just read — expand, never restate. In order: the precision that makes the conclusion usable, each rejected alternative with a one-line reason, secondary conclusions, citations. Sentence deletion test: remove a sentence — if the conclusion's derivation still holds, cut it. No process narration (replay stores it). Rejected on a session address.`,
+    ),
+  insight: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      `Turn only (~${NOTE_TOKEN_BUDGET.insight} tok, default omit): a task-scoped lesson under the episode-deletion test — delete the episode; does the sentence still teach someone useful prior knowledge? Rejected on a session address.`,
+    ),
+  type: z
+    .array(z.string())
+    .optional()
+    .describe(
+      `Closed vocabulary: ${TYPE_VOCABULARY_LIST} — omit or [] when none fit, never guess. Honesty rule: report the stage that actually happened — a design discussion with no ruling is discuss, not design.`,
+    ),
+  tags: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "At least one coarse noun naming the project, then fine nouns for subsystems/artifacts. Never activities (type carries those), no -design/-fix hybrids. Reuse exact spellings already in use.",
+    ),
+  skip: z
+    .boolean()
+    .optional()
+    .describe(
+      "true to decline noting this turn instead of writing one — see the tool description's skip test. Valid only together with `turn`.",
+    ),
   // spec D4: declares intent to write a turn outside the caller's own
   // session. No legitimate use exists today (every address a caller is ever
   // handed is its own session's) — this is a pure guardrail.
-  crossSession: z.boolean().optional(),
+  crossSession: z
+    .boolean()
+    .optional()
+    .describe(
+      "true to confirm a write addressed at a turn outside the caller's own session; required whenever the address's session differs from the caller's, refused otherwise.",
+    ),
 
   // ticket 07 (spec C1/C5/C7): one named field per relation, not a generic
   // `{turn, relation}` list — an illegal relation is structurally
@@ -144,21 +190,30 @@ export const noteInputShape = {
   // title/tags/type there is no PRIOR value at this layer to append to or
   // overwrite, and `writeMemoryEdges`'s upsert (spec C14) already governs
   // replacing a relation the pair carries from an earlier write.
-  evidenceFor: z.array(z.string()).optional(),
-  evidenceAgainst: z.array(z.string()).optional(),
-  supersedes: z.array(z.string()).optional(),
-  dependsOn: z.array(z.string()).optional(),
-
-  // Session fields (D2/D4). Seven in total: `title`/`content`/`insight` are
-  // declared above and shared with the turn surface, and these four are the
-  // session's own. `current` is DELETED (ticket 04) and deliberately absent
-  // from the schema, so the model is never offered a field that no longer
-  // exists; a call that sends it anyway is refused by name in mcp/note.ts
-  // rather than having the field dropped in silence.
-  decision: z.string().nullable().optional(),
-  done: z.string().nullable().optional(),
-  next_steps: z.string().nullable().optional(),
-  reference: z.string().nullable().optional(),
+  evidenceFor: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses this write's own body tests FOR its claim — see the tool description's four-question relation procedure.",
+    ),
+  evidenceAgainst: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses this write's own body tests AGAINST its claim — see the tool description's four-question relation procedure.",
+    ),
+  supersedes: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses this write's own body overturns — see the tool description's four-question relation procedure.",
+    ),
+  dependsOn: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses this write's own conclusion depends on — see the tool description's four-question relation procedure.",
+    ),
 
   mode: noteModeShape,
 };

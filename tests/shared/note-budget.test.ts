@@ -6,7 +6,7 @@ import {
   formatNoteBudget,
 } from "../../src/shared/note-budget";
 import { NOTE_TAKING_INSTRUCTIONS } from "../../src/hooks/handlers/context-note-taking";
-import { MNEMO_TOOL_DESCRIPTIONS } from "../../src/mcp/definitions";
+import { noteInputSchema } from "../../src/mcp/definitions";
 
 describe("note budget line", () => {
   test("reports each field against its own budget, then the total", () => {
@@ -72,29 +72,26 @@ describe("note budget line", () => {
   });
 
   test("every surface that states the budget reads it from the constant", () => {
-    // Two surfaces say these numbers now: the receipt and the `note` tool
-    // description — the T586 single-home split removed them from the
-    // session-start block entirely, which must therefore NOT mention them (a
-    // budget stated there would be a second copy, the exact drift this test
-    // exists to prevent). The description once held them as literal prose, so
-    // changing NOTE_TOKEN_BUDGET would have left the agent told one budget
-    // and measured against another. Asserted on the source text because the
-    // rendered strings agree either way — the literals are exactly what a
-    // value check cannot see.
+    // Two surfaces say these numbers now: the receipt and each budgeted
+    // parameter's own `.describe()` (title/content/insight) — the T586
+    // single-home split removed them from the session-start block entirely,
+    // which must therefore NOT mention them (a budget stated there would be a
+    // second copy, the exact drift this test exists to prevent). Ticket 01
+    // moved the numbers out of the tool description's own prose and onto each
+    // field's parameter — spliced from the same constant, not restated as a
+    // literal, so changing NOTE_TOKEN_BUDGET would have left the agent told
+    // one budget and measured against another. Asserted on the source text
+    // because the rendered strings agree either way — the literals are
+    // exactly what a value check cannot see.
     const source = readFileSync("src/mcp/definitions.ts", "utf8");
     expect(source).toContain("NOTE_TOKEN_BUDGET.title");
     expect(source).toContain("NOTE_TOKEN_BUDGET.content");
     expect(source).toContain("NOTE_TOKEN_BUDGET.insight");
 
-    expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
-      `(~${NOTE_TOKEN_BUDGET.title} tok)`,
-    );
-    expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
-      `(~${NOTE_TOKEN_BUDGET.content} tok)`,
-    );
-    expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
-      `(~${NOTE_TOKEN_BUDGET.insight} tok`,
-    );
+    const shape = noteInputSchema.shape;
+    expect(shape.title.description).toContain(`~${NOTE_TOKEN_BUDGET.title} tok`);
+    expect(shape.content.description).toContain(`~${NOTE_TOKEN_BUDGET.content} tok`);
+    expect(shape.insight.description).toContain(`~${NOTE_TOKEN_BUDGET.insight} tok`);
 
     expect(NOTE_TAKING_INSTRUCTIONS).not.toContain("tokens)");
   });

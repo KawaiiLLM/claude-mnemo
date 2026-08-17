@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done — per-parameter contracts landed, grade removed, 2× teeth on turn and session fields, session address title-only. Reviewer re-added the first-note-needs-title+content line the worker had silently dropped from the tool description (call-level cross-field rule).
 
 - [ ] The rendered tool schema carries a description on every note parameter, and the tool description contains no per-field contract text
 - [ ] A write with any field over 2× its budget is rejected naming the budget; at ≤2× it stores and the receipt reports overage
