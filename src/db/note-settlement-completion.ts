@@ -1,10 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-import {
-  computeCoverageGaps,
-  isEligibleCoverageTurn,
-  type CoverageGap,
-} from "./coverage";
+import { computeCoverageGaps, type CoverageGap } from "./coverage";
 import { runWriteTransaction } from "./database";
 import {
   ELECTION_A_SEAT_SHARE,
@@ -20,39 +16,45 @@ import {
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
   type NoteSettlementJob,
 } from "./note-settlement";
+import { getAttachedSegmentIds } from "./segments";
 
 /**
  * The segmentation completion gate and the ownership fence it runs under
- * (spec G6/G7, ticket 09).
+ * (spec G6/G7, ticket 09; RE-KEYED by ticket 08, ADR-0002).
  *
- * G7's problem: a window whose per-turn fields are all written but which
- * crashed before the segment tool has no EMPTY field anywhere, so a naive
- * "does every turn have a note" recheck sees nothing owed and would mark it
- * done, permanently unsegmented. What has to be proven is a state predicate
- * over the window, not a recorded event — and specifically NOT a
- * `segmentation_complete` flag, because a flag is the agent's own
- * attestation and G2's rule is that the completion gate trusts nobody.
+ * TICKET 08'S RE-KEY. The old gate proved a per-TURN state predicate: every
+ * segmentation-eligible turn in the window had to be either a segment member
+ * or carry a job-scoped `note_settlement_segment_exclusions` row (the
+ * negative verdict "reviewed, belongs to no segment"). That machinery rode
+ * the retired segment facade's `create`/`extend`/`exclude` duty, which owned
+ * the whole arc-partition judgement. Ticket 08 shrinks settlement's segment
+ * authority to membership within the session's ATTACHED segments plus text
+ * proposals (ADR-0002) — and "turns fitting nothing stay homeless — legal,
+ * never forced" means a per-turn negative verdict is no longer a thing any
+ * caller can even produce, so the old anti-join has no fact left to read.
  *
- * The positive fact (segment membership) is already persisted and add-only.
- * The one fact the data model could not express was the NEGATIVE verdict —
- * this turn was reviewed and belongs to no segment — so
- * `note_settlement_segment_exclusions` (schema.ts) records only that
- * exception, and `computeNoteSettlementSegmentationGaps` below is the
- * anti-join over it. Crash-after-membership semantics fall out rather than
- * being designed: membership written, the exclusion not yet, leaves the
- * anti-join short until a retry fills it.
+ * The re-keyed predicate is coarser, at the JOB level: a window whose
+ * session has ZERO attached segments needs no membership action at all — a
+ * window can complete with an empty attached set, always. A window whose
+ * session has ONE OR MORE attached segments must have engaged the
+ * membership tool (`remember` assign or propose) at least once —
+ * `note_settlement_membership_activity` (schema.ts) records that fact the
+ * instant a real assign/propose call lands inside `commit`'s own
+ * transaction, the same "a real write, not a self-attested flag" discipline
+ * the retired exclusion table kept (G2: the completion gate trusts nobody).
+ * `computeNoteSettlementMembershipGapSegmentIds` below is that check.
  *
- * `completeNoteSettlementJobIfSegmented` is the second half: the anti-join,
- * the coverage recheck and the completion compare-and-set all run inside ONE
- * `runWriteTransaction` — G7's "run inside the same transaction as the
- * completion compare-and-set and therefore under G6's generation fence".
- * Splitting those into separate transactions would let the window between
- * them be exactly where a stale attempt's now-invalid check gets used to
- * justify a write nothing re-verifies; keeping the CAS as the LAST statement
- * of the same transaction that computed the check is what closes that gap,
- * because SQLite's `BEGIN IMMEDIATE` (via `runWriteTransaction`) holds the
- * write lock for the whole block, so nothing else can commit anything about
- * this job while it is open.
+ * `completeNoteSettlementJobIfSegmented` is the second half: the membership
+ * check, the note/coverage rechecks and the completion compare-and-set all
+ * run inside ONE `runWriteTransaction` — G7's "run inside the same
+ * transaction as the completion compare-and-set and therefore under G6's
+ * generation fence". Splitting those into separate transactions would let
+ * the window between them be exactly where a stale attempt's now-invalid
+ * check gets used to justify a write nothing re-verifies; keeping the CAS as
+ * the LAST statement of the same transaction that computed the check is what
+ * closes that gap, because SQLite's `BEGIN IMMEDIATE` (via
+ * `runWriteTransaction`) holds the write lock for the whole block, so
+ * nothing else can commit anything about this job while it is open.
  */
 
 export type NoteSettlementJobFenceReason = "not-claimed" | "generation-mismatch";
@@ -123,86 +125,65 @@ export function assertNoteSettlementJobClaimed(
 }
 
 /**
- * Record the negative verdict (spec G7): this turn was reviewed under THIS
- * job and deliberately assigned to no segment. `ON CONFLICT DO NOTHING`
- * matches `addSegmentMembers`' idempotent-assertion convention (db/
- * segments.ts) — a retry restating the same verdict is not a second fact.
+ * Record the membership-activity fact (ticket 08): this job actually
+ * engaged the membership tool (an assign or a propose landed). `ON CONFLICT
+ * DO NOTHING` matches `addSegmentMembers`' idempotent-assertion convention
+ * (db/segments.ts) — a second call in the same job, or a retried commit
+ * after a refusal, is not a second fact.
  *
  * Deliberately does not itself call `assertNoteSettlementJobClaimed`: like
- * `addSegmentMembers`, this is a plain write meant to compose inside a
- * caller's own transaction, and the caller (ticket 10's write tool) is where
- * the fence belongs — checking it here too would just be a second place the
- * same check could drift from the first.
+ * the retired `recordNoteSettlementSegmentExclusion`, this is a plain write
+ * meant to compose inside a caller's own transaction, and the caller (the
+ * membership facade, called from `commit`'s replay) is where the fence
+ * belongs — checking it here too would just be a second place the same
+ * check could drift from the first.
  */
-export function recordNoteSettlementSegmentExclusion(
+export function recordNoteSettlementMembershipActivity(
   db: Database,
   jobId: number,
-  turnId: number,
   nowEpoch: number,
 ): void {
-  db.query<unknown, [number, number, number]>(
-    `INSERT INTO note_settlement_segment_exclusions (job_id, turn_id, created_at_epoch)
-     VALUES (?, ?, ?)
-     ON CONFLICT (job_id, turn_id) DO NOTHING`,
-  ).run(jobId, turnId, nowEpoch);
+  db.query<unknown, [number, number]>(
+    `INSERT INTO note_settlement_membership_activity (job_id, recorded_at_epoch)
+     VALUES (?, ?)
+     ON CONFLICT (job_id) DO NOTHING`,
+  ).run(jobId, nowEpoch);
 }
 
-/** Bulk form of `recordNoteSettlementSegmentExclusion` for a batch verdict. */
-export function recordNoteSettlementSegmentExclusions(
+/** Whether `recordNoteSettlementMembershipActivity` has ever fired for this job. */
+export function hasNoteSettlementMembershipActivity(
   db: Database,
   jobId: number,
-  turnIds: readonly number[],
-  nowEpoch: number,
-): void {
-  for (const turnId of turnIds) {
-    recordNoteSettlementSegmentExclusion(db, jobId, turnId, nowEpoch);
-  }
+): boolean {
+  return (
+    db
+      .query<{ jobId: number }, [number]>(
+        `SELECT job_id AS jobId FROM note_settlement_membership_activity WHERE job_id = ?`,
+      )
+      .get(jobId) !== null
+  );
 }
 
-/** This job's excluded turn ids — a test/inspection helper, not on the hot path. */
-export function listNoteSettlementSegmentExclusions(
+/**
+ * The re-keyed segmentation check (ticket 08): the session's currently
+ * attached segment ids when the set is non-empty AND this job has not yet
+ * recorded membership activity — empty (no gap) when the attached set is
+ * empty, or once an assign/propose has landed for this job. The returned
+ * ids are informational only (what `describeGateRefusal`, worker/
+ * note-settlement-staging.ts, quotes back), not a per-id checklist: a
+ * single membership call anywhere discharges the whole job's duty, matching
+ * "never forced" — no per-turn or per-segment coverage is required.
+ */
+export function computeNoteSettlementMembershipGapSegmentIds(
   db: Database,
   jobId: number,
-): number[] {
-  return db
-    .query<{ turnId: number }, [number]>(
-      `SELECT turn_id AS turnId FROM note_settlement_segment_exclusions
-       WHERE job_id = ? ORDER BY turn_id ASC`,
-    )
-    .all(jobId)
-    .map((row) => row.turnId);
-}
-
-export interface NoteSettlementSegmentationGap {
-  turnId: number;
-  sessionId: number;
-  promptNumber: number;
-}
-
-interface WindowTurnEligibilityRow {
-  id: number;
-  sessionId: number;
-  promptNumber: number;
-  type: string;
-  userPrompt: string | null;
-  status: string;
-}
-
-function getWindowTurnRows(
-  db: Database,
   sessionId: number,
-  windowStart: number,
-  windowEnd: number,
-): WindowTurnEligibilityRow[] {
-  return db
-    .query<WindowTurnEligibilityRow, [number, number, number]>(
-      `SELECT id, session_id AS sessionId, prompt_number AS promptNumber,
-              type, user_prompt AS userPrompt, status
-       FROM turns
-       WHERE session_id = ? AND prompt_number BETWEEN ? AND ?
-       ORDER BY prompt_number ASC`,
-    )
-    .all(sessionId, windowStart, windowEnd);
+): number[] {
+  const attachedSegmentIds = getAttachedSegmentIds(db, sessionId);
+  if (attachedSegmentIds.length === 0) {
+    return [];
+  }
+  return hasNoteSettlementMembershipActivity(db, jobId) ? [] : attachedSegmentIds;
 }
 
 function getWindowTurnIds(
@@ -218,82 +199,6 @@ function getWindowTurnIds(
     )
     .all(sessionId, windowStart, windowEnd)
     .map((row) => row.id);
-}
-
-/**
- * The anti-join itself (spec G7): every segmentation-eligible turn in the
- * frozen window must be a segment member, carry a no-segment exclusion FOR
- * THIS JOB, or already be `status = 'skipped'`. Eligibility is
- * `isEligibleCoverageTurn` (db/coverage.ts), reused rather than re-derived —
- * G7's "segmentation-eligible" turn is the same set G4 already defines as
- * coverage-eligible, and the spec's whole reason for factoring that predicate
- * out is that a second copy is the one that drifts loosest.
- *
- * A turn absent from BOTH `segment_members` and
- * `note_settlement_segment_exclusions` is a GAP, never a pass — there is no
- * branch here that reads a missing row as a positive verdict, in either
- * direction. That is also why crash-after-membership falls out for free
- * rather than needing its own case: membership written, the exclusion not
- * yet, leaves this turn absent from both sets, which is exactly a gap.
- */
-export function computeNoteSettlementSegmentationGaps(
-  db: Database,
-  jobId: number,
-  sessionId: number,
-  windowStart: number,
-  windowEnd: number,
-): NoteSettlementSegmentationGap[] {
-  const windowTurns = getWindowTurnRows(db, sessionId, windowStart, windowEnd);
-  const eligible = windowTurns.filter((turn) =>
-    isEligibleCoverageTurn({
-      type: JSON.parse(turn.type) as string[],
-      userPrompt: turn.userPrompt,
-    }),
-  );
-  if (eligible.length === 0) {
-    return [];
-  }
-
-  const turnIds = eligible.map((turn) => turn.id);
-  const placeholders = turnIds.map(() => "?").join(", ");
-
-  const memberIds = new Set(
-    db
-      .query<{ turnId: number }, number[]>(
-        `SELECT DISTINCT turn_id AS turnId FROM segment_members
-         WHERE turn_id IN (${placeholders})`,
-      )
-      .all(...turnIds)
-      .map((row) => row.turnId),
-  );
-  // job-SCOPED (spec G7: "must not become a column on the turn"). This is the
-  // one lookup in the whole predicate that is not just "does a row exist for
-  // this turn" — it also has to be THIS job's row, so an exclusion some
-  // OTHER job recorded over the same turn (a later repair job re-adjudicating
-  // it, the case job-scoping exists to allow) never silently counts as this
-  // job's verdict.
-  const excludedIds = new Set(
-    db
-      .query<{ turnId: number }, [number, ...number[]]>(
-        `SELECT turn_id AS turnId FROM note_settlement_segment_exclusions
-         WHERE job_id = ? AND turn_id IN (${placeholders})`,
-      )
-      .all(jobId, ...turnIds)
-      .map((row) => row.turnId),
-  );
-
-  return eligible
-    .filter(
-      (turn) =>
-        turn.status !== "skipped" &&
-        !memberIds.has(turn.id) &&
-        !excludedIds.has(turn.id),
-    )
-    .map((turn) => ({
-      turnId: turn.id,
-      sessionId: turn.sessionId,
-      promptNumber: turn.promptNumber,
-    }));
 }
 
 export interface NoteSettlementNoteGap {
@@ -362,8 +267,7 @@ export function computeNoteSettlementNoteGaps(
 /**
  * ADR-0003's ceiling validator: seats are ceilings, never targets. Checked
  * over the FROZEN window (`job.windowStart`..`job.windowEnd`), the same scope
- * `computeNoteSettlementSegmentationGaps`/`computeNoteSettlementNoteGaps`
- * already use — a tier correction to a turn OUTSIDE this window (duty 1
+ * `computeNoteSettlementNoteGaps` already uses — a tier correction to a turn OUTSIDE this window (duty 1
  * explicitly allows revising an earlier window's verdict) affects that
  * EARLIER window's own ceiling, already settled, not this one's; re-checking
  * a closed window retroactively is out of this ticket's scope, the same way
@@ -455,8 +359,13 @@ export type NoteSettlementCompletionReason =
 export interface NoteSettlementCompletionResult {
   completed: boolean;
   reason: NoteSettlementCompletionReason | null;
-  /** Populated only when `reason === "segmentation-incomplete"`. */
-  segmentationGaps: NoteSettlementSegmentationGap[];
+  /**
+   * Populated only when `reason === "segmentation-incomplete"` (ticket 08
+   * re-key): the session's attached segment ids still awaiting this job's
+   * first membership call (assign or propose) — informational, not a
+   * per-id checklist (see `computeNoteSettlementMembershipGapSegmentIds`).
+   */
+  segmentationGaps: number[];
   /** Populated only when `reason === "note-incomplete"` (spec G1a, duty 2). */
   noteGaps: NoteSettlementNoteGap[];
   /** Populated only when `reason === "coverage-incomplete"`. */
@@ -504,12 +413,13 @@ export function completeNoteSettlementJobIfSegmentedCore(
 ): NoteSettlementCompletionResult {
   const job = assertNoteSettlementJobClaimed(db, jobId, claimGeneration);
 
-  const segmentationGaps = computeNoteSettlementSegmentationGaps(
+  // Ticket 08's re-key: a JOB-level check, not a per-turn anti-join — see
+  // the module doc comment. Empty when the session has no attached segments
+  // (nothing to do) or once this job has recorded membership activity.
+  const segmentationGaps = computeNoteSettlementMembershipGapSegmentIds(
     db,
     job.id,
     job.sessionId,
-    job.windowStart,
-    job.windowEnd,
   );
   if (segmentationGaps.length > 0) {
     return {

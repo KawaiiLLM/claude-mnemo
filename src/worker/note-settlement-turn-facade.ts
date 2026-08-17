@@ -86,15 +86,16 @@ export interface SettlementTurnFacadeContext {
   /** The write-back's own review-scope check (window plus rendered lookback). */
   reviewableTurnIds: ReadonlySet<number>;
   /**
-   * Open segment ids this dispatch's prompt actually showed (ticket 10b) —
-   * the same scoping discipline `reviewableTurnIds` already applies to a
-   * turn review, extended to `extend`'s segment address for the identical
-   * reason: an id that merely happens to resolve is not the same thing as an
-   * id this run was shown, and `extend` is a destructive rewrite the way a
-   * turn review is. Segment `create` needs no such gate — it mints, it does
-   * not address.
+   * The session's currently ATTACHED segment ids (ticket 08, ADR-0002) — the
+   * membership facade's own scope gate: `assign` may only target a segment
+   * in this set, matching "membership within attached segments" exactly.
+   * Renamed from the retired segment facade's `exposedSegmentIds` (which
+   * gated `extend` against the 50 most recently active segments, whatever
+   * their attachment); this is narrower and semantically different — the
+   * session's OWN attachment rows (`db/segments.ts`'s `getAttachedSegmentIds`),
+   * not a global recency window.
    */
-  exposedSegmentIds: ReadonlySet<number>;
+  attachedSegmentIds: ReadonlySet<number>;
   /** When this dispatch's context was read — the note-timestamp fence's boundary. */
   contextBuiltAtEpoch: number;
   /** Recorded on a reconstruction note, same as the write-back's own `rideTurnId`. */

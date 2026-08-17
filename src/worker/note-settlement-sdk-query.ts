@@ -21,9 +21,9 @@ import type {
   NoteSettlementQueryResult,
 } from "./note-settlement-dispatch";
 import {
-  settlementSegmentWriteInputShape,
-  type SettlementSegmentWriteInput,
-} from "./note-settlement-segment-facade";
+  settlementMembershipWriteInputShape,
+  type SettlementMembershipWriteInput,
+} from "./note-settlement-membership-facade";
 import { createSettlementStagingEngine } from "./note-settlement-staging";
 import { createSettlementStopHook } from "./note-settlement-stop-hook";
 import {
@@ -47,7 +47,7 @@ const SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__recall",
   "mcp__mnemo__timeline",
   "mcp__mnemo__note",
-  "mcp__mnemo__segment",
+  "mcp__mnemo__remember",
   "mcp__mnemo__commit",
 ] as const;
 
@@ -83,41 +83,33 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "call earlier in this SAME run just created, or on one the main agent has " +
   "since stopped citing.";
 
-/** Ticket 10b/10d (spec A7/A3-amended, A7a): the segment tool's call contract. */
-const SETTLEMENT_SEGMENT_TOOL_DESCRIPTION =
-  "STAGE a segment write — create a new chapter, extend an open one, or " +
-  "record that a turn belongs to no segment — validated now, written only " +
-  "when you call `commit`. action: \"create\", \"extend\" or \"exclude\". " +
-  "create: title (required), handle (required — a short id YOU choose, " +
-  "e.g. \"lease-fencing\"; letters/digits/hyphens/underscores only; this is " +
-  "this call's KEY, so re-staging the same handle REPLACES this create " +
-  "rather than minting a second one), noCandidateReason (required — what " +
-  "you searched in the topic registry and open segments, and why nothing " +
-  "fit), topic/topicAliases/content/insight/status/members (optional). " +
-  "extend: segmentId + expectedRevision naming an already-existing, OPEN " +
-  "segment (this is this call's KEY — re-staging the same segmentId " +
-  "replaces the earlier call; a handle from THIS run can never be an " +
-  "extend target — it has no real id yet, use it only as a citation, see " +
-  "below); every other field overwrites whole when present, omit to leave " +
-  "alone. exclude: turn (\"S<session>/T<prompt>\", also this call's KEY) — " +
-  "records that this turn was reviewed and belongs to no segment; use it " +
-  "for a turn that genuinely fits no chapter, instead of inventing one. " +
-  "members: \"S<session>/T<prompt>\" turn addresses (never a handle — a " +
-  "member is always a turn); an address that does not resolve is dropped, " +
-  "not a failure of the call. This tool takes NO type and NO tags (spec " +
-  "K5a): both are derived from the members — type is the union of their " +
-  "activities, tags are their tags ordered by frequency — and a call that " +
-  "names either is refused. insight: the arc's most reusable conclusion, " +
-  "including the routes ruled out and why. Cite member turns inline in " +
-  "content or insight as " +
-  "[S<session>/T<prompt>] and other segments as [E<n>] — those citations " +
-  "become the segment's anchors automatically, no separate step; an address " +
-  "that does not resolve is likewise dropped and reported, not a failure. A " +
-  "successful create's receipt states its handle as \"E#<handle>\", scoped " +
-  "to THIS run only — cite it as [E#<handle>] in a LATER segment's content or insight " +
-  "to refer to the segment you just created before it has a real id (never " +
-  "in members, never as an extend target); `commit` resolves every handle " +
-  "to a real id, in the order you staged them.";
+/**
+ * Ticket 08 (ADR-0002/0007): the `remember` tool's settlement-side call
+ * contract — narrowed from the retired segment facade's create/extend/
+ * exclude down to exactly the two duties ADR-0002's Ownership table grants
+ * settlement: membership within the session's ATTACHED segments, and text
+ * proposals when nothing fits. Registered under the SAME tool name the main
+ * agent's own `remember` uses (ADR-0007's "same tool quartet"), a
+ * settlement-specific shape, the same relationship the `note` facade already
+ * has to the main agent's `note` tool.
+ */
+const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
+  "STAGE a membership decision — validated now, written only when you call " +
+  "`commit`. action: \"assign\" or \"propose\". assign: turn " +
+  "(\"S<session>/T<prompt>\") + segmentId, the real id of one of THIS " +
+  "SESSION'S ATTACHED segments (see the attached segments list below — a " +
+  "segment merely recalled or recently active is not a legal target). This " +
+  "call's KEY is the (turn, segment) pair: re-staging the SAME pair " +
+  "REPLACES the earlier call; a turn may legitimately belong to more than " +
+  "one attached segment via two separate assign calls. A turn fitting no " +
+  "attached segment is left alone — do not call this tool for it; homeless " +
+  "is legal, never forced. propose: addresses (at least two " +
+  "\"S<session>/T<prompt>\" turn addresses forming ONE coherent cluster) + " +
+  "title (a short suggested name) — stores a text-only suggestion for the " +
+  "user to confirm next session. This call's KEY is the address SET " +
+  "(order-independent): re-staging the same set replaces the earlier " +
+  "proposal. NEVER creates a segment and is never auto-adopted — do not " +
+  "propose a single turn or an incoherent grab-bag.";
 
 /** Ticket 10b (spec A7): the completion gate exposed as commit's own precondition — settlement gets no separate `check` tool (spec G8 amended). */
 const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
@@ -182,7 +174,7 @@ export function createNoteSettlementSdkQuery(
 
     // Job identity (spec G6, ticket 10a): built HERE, inside the per-request
     // closure, from the dispatch's own job record — never from anything the
-    // model supplied. `settlementTurnWriteInputShape`/`settlementSegmentWriteInputShape`
+    // model supplied. `settlementTurnWriteInputShape`/`settlementMembershipWriteInputShape`
     // declare no `jobId`/`claimGeneration` field at all, so the SDK's own
     // arg-parsing (built from that same shape, ahead of the handler) never
     // delivers one even if a model tried to state one; and neither facade's
@@ -200,7 +192,7 @@ export function createNoteSettlementSdkQuery(
       sessionId: request.sessionId,
       reconstructableTurnIds: request.reconstructableTurnIds,
       reviewableTurnIds: request.reviewableTurnIds,
-      exposedSegmentIds: request.exposedSegmentIds,
+      attachedSegmentIds: request.attachedSegmentIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
       rideTurnId: request.rideTurnId,
       writerModel: request.writerModel,
@@ -257,10 +249,10 @@ export function createNoteSettlementSdkQuery(
           async (args: SettlementTurnWriteInput) => staging.stageNoteWrite(args),
         ),
         toolImpl(
-          "segment",
-          SETTLEMENT_SEGMENT_TOOL_DESCRIPTION,
-          settlementSegmentWriteInputShape,
-          async (args: SettlementSegmentWriteInput) => staging.stageSegmentWrite(args),
+          "remember",
+          SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
+          settlementMembershipWriteInputShape,
+          async (args: SettlementMembershipWriteInput) => staging.stageMembershipWrite(args),
         ),
         toolImpl(
           "commit",

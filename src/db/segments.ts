@@ -1195,6 +1195,23 @@ export function getAttachedSegmentIds(db: Database, sessionId: number): number[]
 }
 
 /**
+ * The full records behind `getAttachedSegmentIds`, same ordering (ticket 08)
+ * — settlement's own membership scope needs the title/status to RENDER a
+ * pickable list, not just the ids `SettlementTurnFacadeContext.attachedSegmentIds`
+ * validates against. A row whose segment has since been deleted (no
+ * production writer does this today, but the FK has no ON DELETE guarantee
+ * of its own beyond CASCADE on the attachment row itself) is silently
+ * skipped rather than surfaced as a null gap — the same "a stale id is not
+ * this reader's problem to explain" discipline `listRecentSegments` already
+ * keeps.
+ */
+export function listAttachedSegments(db: Database, sessionId: number): SegmentRecord[] {
+  return getAttachedSegmentIds(db, sessionId)
+    .map((segmentId) => getSegment(db, segmentId))
+    .filter((segment): segment is SegmentRecord => segment !== null);
+}
+
+/**
  * The reverse of `getAttachedSegmentIds` (ticket 03): every session that has
  * ever attached THIS segment, oldest attachment first — the segment card's
  * `sessions` line needs the opposite direction from what remember's own

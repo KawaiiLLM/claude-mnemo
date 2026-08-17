@@ -6,6 +6,10 @@ import {
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
   type NoteSettlementJob,
 } from "../db/note-settlement";
+import {
+  computeSettlementSummaryFlags,
+  type NoteSettlementSummaryFlag,
+} from "../db/note-settlement-summary-flags";
 import type { MnemoConfig } from "../shared/config";
 import { DEFAULT_CONFIG } from "../shared/config";
 import {
@@ -84,8 +88,8 @@ export interface NoteSettlementQueryRequest {
   sessionId: number;
   reconstructableTurnIds: ReadonlySet<number>;
   reviewableTurnIds: ReadonlySet<number>;
-  /** Open segment ids this dispatch's prompt shows — the scope `segment`'s `extend` may address (ticket 10b). */
-  exposedSegmentIds: ReadonlySet<number>;
+  /** The session's currently attached segment ids — `remember`'s `assign` scope gate (ticket 08, ADR-0002). */
+  attachedSegmentIds: ReadonlySet<number>;
   contextBuiltAtEpoch: number;
   rideTurnId: number | null;
   writerModel: string | null;
@@ -149,6 +153,16 @@ export interface NoteSettlementWindowMetrics {
    * returned to the agent at any point before this line runs.
    */
   commit: NoteSettlementCommitCounts | null;
+  /**
+   * ADR-0004's settlement flagging (ticket 08) — the settlement report's own
+   * section: attached-segment summary-layer claims (content/insight) this
+   * window's own material contradicts (a citation-less claim, or a cited
+   * turn superseded by a member of THIS window). Flags only, never
+   * rewrites — a flagged summary is repaired by the main agent through
+   * `remember`, the single writer (ADR-0002) stands. Always `[]` when the
+   * run did not commit — nothing new landed to check against.
+   */
+  summaryFlags: NoteSettlementSummaryFlag[];
 }
 
 export type NoteSettlementMetricsSink = (
@@ -251,7 +265,7 @@ export function createNoteSettlementDispatch(
           context.interiorHoles.map((turn) => turn.turnId),
         ),
         reviewableTurnIds: context.reviewableTurnIds,
-        exposedSegmentIds: context.exposedSegmentIds,
+        attachedSegmentIds: context.attachedSegmentIds,
         contextBuiltAtEpoch: context.builtAtEpoch,
         rideTurnId,
         writerModel: options.writerModel ?? model,
@@ -279,6 +293,21 @@ export function createNoteSettlementDispatch(
     const settled = getNoteSettlementJob(db, job.id);
     const committed = settled?.status === "done";
 
+    // ADR-0004's flagging half (ticket 08): the settlement report's own
+    // section for attached-segment summary claims the JUST-SETTLED window
+    // contradicts. Computed AFTER commit, over what actually landed — a
+    // refused/uncommitted run has nothing new to flag, and re-reading a
+    // stale segment row against a window that never applied would be
+    // reporting a contradiction settlement itself never got the chance to
+    // create. Never a rewrite (ADR-0004): this is read-only.
+    const summaryFlags: NoteSettlementSummaryFlag[] = committed
+      ? computeSettlementSummaryFlags(
+          db,
+          [...context.attachedSegmentIds],
+          new Set(context.windowTurns.map((turn) => turn.turnId)),
+        )
+      : [];
+
     metrics({
       jobId: job.id,
       sessionId: job.sessionId,
@@ -297,6 +326,7 @@ export function createNoteSettlementDispatch(
       // incremented before this dispatch ran.
       attemptsExhausted: !committed && job.attempts >= maxAttempts,
       commit: committed ? queryResult.commitMetrics : null,
+      summaryFlags,
     });
 
     if (!committed) {

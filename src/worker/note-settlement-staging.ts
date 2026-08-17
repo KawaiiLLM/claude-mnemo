@@ -17,11 +17,10 @@ import {
   type ElectionTier,
 } from "../election";
 import {
-  evaluateSettlementSegmentWrite,
-  renderSettlementSegmentWriteReceipt,
-  type SettlementHandleMap,
-  type SettlementSegmentWriteInput,
-} from "./note-settlement-segment-facade";
+  evaluateSettlementMembershipWrite,
+  renderSettlementMembershipWriteReceipt,
+  type SettlementMembershipWriteInput,
+} from "./note-settlement-membership-facade";
 import {
   evaluateSettlementTurnWrite,
   renderSettlementTurnWriteReceipt,
@@ -171,10 +170,10 @@ export interface NoteSettlementCommitCounts {
    */
   tierCounts: Record<ElectionTier, number>;
   relationsWritten: number;
-  segmentsCreated: number;
-  segmentsExtended: number;
-  segmentsExcluded: number;
+  /** Ticket 08: an `assign` call that actually added a NEW membership row (idempotent re-assigns are not counted twice). */
   membersAdded: number;
+  /** Ticket 08: a `propose` call that landed a stored proposal. */
+  proposalsCreated: number;
 }
 
 function emptyCommitCounts(): NoteSettlementCommitCounts {
@@ -192,10 +191,8 @@ function emptyCommitCounts(): NoteSettlementCommitCounts {
     // A fresh object per call, same reasoning as the histogram array above.
     tierCounts: { A: 0, B: 0, C: 0 },
     relationsWritten: 0,
-    segmentsCreated: 0,
-    segmentsExtended: 0,
-    segmentsExcluded: 0,
     membersAdded: 0,
+    proposalsCreated: 0,
   };
 }
 
@@ -208,50 +205,57 @@ export interface CreateSettlementStagingEngineOptions {
 
 type StagedEntry =
   | { kind: "note"; input: SettlementTurnWriteInput }
-  | { kind: "segment"; handle: string | null; input: SettlementSegmentWriteInput };
+  | { kind: "membership"; input: SettlementMembershipWriteInput };
 
 // ---------------------------------------------------------------------------
 // Staging keys (spec A7a) — one canonical, kind-prefixed key per staged call
-// shape, so a `note` on turn S3/T5 and a `segment exclude` on the SAME turn
+// shape, so a `note` on turn S3/T5 and a membership `assign` on the SAME turn
 // (a legitimate, unrelated pair of facts) never collide, while two calls of
-// the SAME shape naming the SAME address/handle/id always do.
+// the SAME shape naming the SAME address/pair/address-set always do.
 // ---------------------------------------------------------------------------
 
 /**
- * The staging key of a segment call, from the RAW input — no validation, so a
- * partial correction can find the entry it is correcting. `null` when the
- * call is malformed enough that no key exists; evaluation refuses it a moment
- * later, and the key is never used.
+ * The staging key of a membership call, from the RAW input — no validation,
+ * so a partial correction can find the entry it is correcting. `null` when
+ * the call is malformed enough that no key exists; evaluation refuses it a
+ * moment later, and the key is never used.
+ *
+ * `assign` keys on the (turn, segment) PAIR, not the turn alone (ticket 08):
+ * a turn may legitimately belong to more than one segment (db/segments.ts's
+ * own many-to-many precedent), so two `assign` calls naming the SAME turn
+ * but DIFFERENT segments are two distinct facts that must coexist, while
+ * restating the SAME pair is a correction (e.g. a title-only re-send) that
+ * replaces cleanly. `propose` keys on its address SET (sorted, so order
+ * never matters) — a restated set (even with a different title) corrects the
+ * same proposal; a different set is a different cluster.
  */
-function segmentStagingKeyOf(
-  rawInput: SettlementSegmentWriteInput,
+function membershipStagingKeyOf(
+  rawInput: SettlementMembershipWriteInput,
 ): string | null {
-  if (rawInput.action === "create") {
-    const handle = rawInput.handle?.trim();
-    return handle ? segmentCreateStagingKey(`E#${handle}`) : null;
+  if (rawInput.action === "assign") {
+    if (!rawInput.turn || rawInput.segmentId === undefined) {
+      return null;
+    }
+    const address = parseTurnAddress(rawInput.turn);
+    return address
+      ? assignStagingKey(`S${address.sessionId}/T${address.promptNumber}`, rawInput.segmentId)
+      : null;
   }
-  if (rawInput.action === "extend") {
-    return rawInput.segmentId === undefined
-      ? null
-      : segmentExtendStagingKey(rawInput.segmentId);
+  if (!rawInput.addresses || rawInput.addresses.length === 0) {
+    return null;
   }
-  const address = parseTurnAddress(rawInput.turn ?? "");
-  return address
-    ? segmentExcludeStagingKey(`S${address.sessionId}/T${address.promptNumber}`)
-    : null;
+  return proposeStagingKey(rawInput.addresses);
 }
 
 function noteStagingKey(ref: string): string {
   return `note:${ref}`;
 }
-function segmentCreateStagingKey(handle: string): string {
-  return `segment-create:${handle}`;
+function assignStagingKey(ref: string, segmentId: number): string {
+  return `assign:${ref}:E${segmentId}`;
 }
-function segmentExtendStagingKey(segmentId: number): string {
-  return `segment-extend:${segmentId}`;
-}
-function segmentExcludeStagingKey(ref: string): string {
-  return `segment-exclude:${ref}`;
+function proposeStagingKey(addresses: readonly string[]): string {
+  const normalized = [...addresses].map((raw) => raw.trim()).sort();
+  return `propose:${JSON.stringify(normalized)}`;
 }
 
 type ToolTextResult = {
@@ -340,7 +344,7 @@ export interface SettlementCommitPreview {
 
 export interface SettlementStagingEngine {
   stageNoteWrite(rawInput: SettlementTurnWriteInput): ToolTextResult;
-  stageSegmentWrite(rawInput: SettlementSegmentWriteInput): ToolTextResult;
+  stageMembershipWrite(rawInput: SettlementMembershipWriteInput): ToolTextResult;
   commit(): ToolTextResult;
   /**
    * `commit` without the commit (ticket 11) — the same replay and the same
@@ -407,9 +411,9 @@ function describeGateRefusal(result: NoteSettlementCompletionResult): string {
   switch (result.reason) {
     case "segmentation-incomplete":
       return (
-        `${result.segmentationGaps.length} turn(s) still need a segment (member or explicit ` +
-        `no-segment verdict): ` +
-        result.segmentationGaps.map((gap) => `S${gap.sessionId}/T${gap.promptNumber}`).join(", ")
+        `this session has ${result.segmentationGaps.length} attached segment(s) ` +
+        `(${result.segmentationGaps.map((id) => `E${id}`).join(", ")}) and this window has not yet ` +
+        "engaged remember(assign)/remember(propose) — stage at least one membership call, then commit again."
       );
     case "note-incomplete":
       return (
@@ -446,8 +450,6 @@ export function createSettlementStagingEngine(
   // the value without moving its position, so a same-key restage lands
   // exactly where it was first staged, not at the end of the run.
   const staged = new Map<string, StagedEntry>();
-  /** Handles assigned so far, every value `null` until `commit` resolves them for real. */
-  let knownHandles: SettlementHandleMap = new Map();
   /** `commit`'s own last landed result (ticket 10c) — see `getLastCommitMetrics`. */
   let lastCommitMetrics: NoteSettlementCommitCounts | null = null;
 
@@ -482,54 +484,35 @@ export function createSettlementStagingEngine(
     );
   }
 
-  function stageSegmentWrite(rawInput: SettlementSegmentWriteInput): ToolTextResult {
+  function stageMembershipWrite(rawInput: SettlementMembershipWriteInput): ToolTextResult {
     const nowEpoch = now();
     // Same field-level merge as `stageNoteWrite`, and merged before
     // validation for the same two reasons. The key has to be derivable from
-    // the raw input alone — `action` plus the handle, the segment id or the
-    // turn address — because a partial correction (a title alone, say) is
-    // exactly what a merge exists to allow, and would not survive being
-    // validated on its own first.
-    const priorSegmentKey = segmentStagingKeyOf(rawInput);
-    const priorSegment =
-      priorSegmentKey === null ? undefined : staged.get(priorSegmentKey);
-    const mergedInput: SettlementSegmentWriteInput =
-      priorSegment?.kind === "segment"
-        ? { ...priorSegment.input, ...rawInput }
-        : rawInput;
+    // the raw input alone — the (turn, segment) pair for assign, the address
+    // set for propose — because a partial correction is exactly what a merge
+    // exists to allow, and would not survive being validated on its own
+    // first.
+    const priorKey = membershipStagingKeyOf(rawInput);
+    const prior = priorKey === null ? undefined : staged.get(priorKey);
+    const mergedInput: SettlementMembershipWriteInput =
+      prior?.kind === "membership" ? { ...prior.input, ...rawInput } : rawInput;
 
-    const evaluation = evaluateSettlementSegmentWrite(db, context, mergedInput, nowEpoch, {
+    const evaluation = evaluateSettlementMembershipWrite(db, context, mergedInput, nowEpoch, {
       apply: false,
-      handleMap: knownHandles,
     });
     if (!evaluation.ok) {
       return parameterError(evaluation.message);
     }
 
-    let key: string;
-    let handle: string | null = null;
-    if (rawInput.action === "create") {
-      // Model-named (spec A7a) — see note-settlement-segment-facade.ts's
-      // own required-field check; `rawInput.handle` is guaranteed present
-      // and valid here because `evaluation.ok` is true.
-      handle = `E#${rawInput.handle!.trim()}`;
-      key = segmentCreateStagingKey(handle);
-      if (!knownHandles.has(handle)) {
-        const grown = new Map(knownHandles);
-        grown.set(handle, null);
-        knownHandles = grown;
-      }
-    } else if (rawInput.action === "extend") {
-      key = segmentExtendStagingKey(rawInput.segmentId!);
-    } else {
-      // exclude
-      key = segmentExcludeStagingKey(evaluation.outcome.excludedTurnRef!);
-    }
+    const key =
+      rawInput.action === "assign"
+        ? assignStagingKey(evaluation.outcome.ref!, evaluation.outcome.segmentId!)
+        : proposeStagingKey(rawInput.addresses ?? []);
 
     const replaced = staged.has(key);
-    staged.set(key, { kind: "segment", handle, input: mergedInput });
+    staged.set(key, { kind: "membership", input: mergedInput });
     return textResult(
-      renderSettlementSegmentWriteReceipt(evaluation.outcome, { staged: true, handle, replaced }),
+      renderSettlementMembershipWriteReceipt(evaluation.outcome, { staged: true, replaced }),
     );
   }
 
@@ -562,7 +545,6 @@ export function createSettlementStagingEngine(
         // commit throws here, before any staged write can land.
         assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
 
-        const handleMap = new Map<string, number | null>();
         // Ticket 10c: counted from what this replay ACTUALLY does below, not
         // from a payload the model sends — see `NoteSettlementCommitCounts`'s
         // own doc comment and the module doc comment's "TICKET 10C'S
@@ -570,28 +552,23 @@ export function createSettlementStagingEngine(
         // envelope-sourced counters.
         const counts = emptyCommitCounts();
         for (const entry of snapshot) {
-          if (entry.kind === "segment") {
-            const evaluation = evaluateSettlementSegmentWrite(db, context, entry.input, nowEpoch, {
+          if (entry.kind === "membership") {
+            const evaluation = evaluateSettlementMembershipWrite(db, context, entry.input, nowEpoch, {
               apply: true,
-              handleMap,
             });
             if (!evaluation.ok) {
               throw new CommitReplayRefused(
-                `segment ${entry.handle ?? entry.input.segmentId ?? entry.input.turn}: ${evaluation.message}`,
+                `${entry.input.action} ${entry.input.turn ?? entry.input.addresses?.join(",") ?? ""}: ${evaluation.message}`,
               );
             }
-            if (entry.handle) {
-              handleMap.set(entry.handle, evaluation.outcome.segmentId);
-            }
             const outcome = evaluation.outcome;
-            if (outcome.action === "create") {
-              counts.segmentsCreated += 1;
-            } else if (outcome.action === "extend") {
-              counts.segmentsExtended += 1;
+            if (outcome.action === "assign") {
+              if (outcome.added) {
+                counts.membersAdded += 1;
+              }
             } else {
-              counts.segmentsExcluded += 1;
+              counts.proposalsCreated += 1;
             }
-            counts.membersAdded += outcome.membersAdded;
           } else {
             const evaluation = evaluateSettlementTurnWrite(db, context, entry.input, nowEpoch, {
               apply: true,
@@ -702,13 +679,13 @@ export function createSettlementStagingEngine(
 
     if (attempt.kind === "landed") {
       // Only a transaction that actually committed clears the staging —
-      // everything the replay did is now durable, so replaying it again
-      // on a later `commit` call would be redundant (and, for a `create`,
-      // wrong: it would mint a second segment). The counts are kept, not
-      // cleared: they describe what THIS commit did, for a caller that reads
-      // them only after this call returns.
+      // everything the replay did is now durable, so replaying it again on a
+      // later `commit` call would be redundant (and, for an `assign`,
+      // pointless: `addSegmentMembers` is already idempotent, but there is
+      // nothing left to re-land). The counts are kept, not cleared: they
+      // describe what THIS commit did, for a caller that reads them only
+      // after this call returns.
       staged.clear();
-      knownHandles = new Map();
       lastCommitMetrics = attempt.counts;
       return textResult(
         `Committed. S${context.sessionId} window settled — job complete.`,
@@ -833,7 +810,7 @@ export function createSettlementStagingEngine(
 
   return {
     stageNoteWrite,
-    stageSegmentWrite,
+    stageMembershipWrite,
     commit,
     previewCommit,
     pendingCount: () => staged.size,

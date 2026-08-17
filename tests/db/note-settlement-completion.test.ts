@@ -13,11 +13,10 @@ import {
   assertNoteSettlementJobClaimed,
   completeNoteSettlementJobIfSegmented,
   computeElectionCeilingViolations,
-  computeNoteSettlementSegmentationGaps,
-  listNoteSettlementSegmentExclusions,
+  computeNoteSettlementMembershipGapSegmentIds,
+  hasNoteSettlementMembershipActivity,
   NoteSettlementJobFenceError,
-  recordNoteSettlementSegmentExclusion,
-  recordNoteSettlementSegmentExclusions,
+  recordNoteSettlementMembershipActivity,
 } from "../../src/db/note-settlement-completion";
 import {
   claimNextNoteSettlementJob,
@@ -27,7 +26,7 @@ import {
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
-import { addSegmentMembers, createSegment } from "../../src/db/segments";
+import { addSegmentMembers, attachSegmentToSession, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
@@ -125,70 +124,71 @@ function markNoted(turnIds: readonly number[]): void {
   }
 }
 
-describe("note_settlement_segment_exclusions — the record itself", () => {
-  test("records a job-scoped no-segment verdict, idempotently", () => {
+describe("note_settlement_membership_activity — the record itself (ticket 08)", () => {
+  test("records a job-scoped membership-engaged fact, idempotently", () => {
     const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
-    recordNoteSettlementSegmentExclusion(db, job.id, t1, NOW);
-    recordNoteSettlementSegmentExclusion(db, job.id, t1, NOW + 5);
+    recordNoteSettlementMembershipActivity(db, job.id, NOW);
+    recordNoteSettlementMembershipActivity(db, job.id, NOW + 5);
 
-    expect(listNoteSettlementSegmentExclusions(db, job.id)).toEqual([t1]);
-  });
-
-  test("cascades when the excluded turn is deleted", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    recordNoteSettlementSegmentExclusion(db, job.id, t1, NOW);
-
-    db.query<unknown, [number]>("DELETE FROM turns WHERE id = ?").run(t1);
-
-    expect(listNoteSettlementSegmentExclusions(db, job.id)).toEqual([]);
+    expect(hasNoteSettlementMembershipActivity(db, job.id)).toBe(true);
+    expect(
+      db
+        .query<{ count: number }, []>(
+          "SELECT COUNT(*) AS count FROM note_settlement_membership_activity",
+        )
+        .get()?.count,
+    ).toBe(1);
   });
 
   test("cascades when the job is deleted", () => {
     const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    recordNoteSettlementSegmentExclusion(db, job.id, t1, NOW);
+    recordNoteSettlementMembershipActivity(db, job.id, NOW);
 
     db.query<unknown, [number]>("DELETE FROM note_settlement_jobs WHERE id = ?").run(job.id);
 
-    expect(
-      db
-        .query<{ count: number }, []>(
-          "SELECT COUNT(*) AS count FROM note_settlement_segment_exclusions",
-        )
-        .get()?.count,
-    ).toBe(0);
+    expect(hasNoteSettlementMembershipActivity(db, job.id)).toBe(false);
   });
 });
 
-describe("computeNoteSettlementSegmentationGaps — the anti-join", () => {
-  test("a segment member is covered", () => {
+describe("computeNoteSettlementMembershipGapSegmentIds — the re-keyed segmentation check (ticket 08)", () => {
+  test("a session with zero attached segments needs no membership call — always satisfied", () => {
     const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    expect(computeNoteSettlementMembershipGapSegmentIds(db, job.id, sessionDbId)).toEqual([]);
+  });
+
+  test("a session with an attached segment and NO membership activity yet is a gap, naming the attached segment", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
     const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
-    addSegmentMembers(db, segment.id, [t1], NOW);
+    attachSegmentToSession(db, sessionDbId, segment.id, NOW);
 
-    expect(computeNoteSettlementSegmentationGaps(db, job.id, sessionDbId, 1, 1)).toEqual([]);
+    expect(computeNoteSettlementMembershipGapSegmentIds(db, job.id, sessionDbId)).toEqual([
+      segment.id,
+    ]);
   });
 
-  test("a no-segment exclusion recorded FOR THIS JOB is covered", () => {
+  test("recording membership activity for THIS job clears the gap", () => {
     const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
+    seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    recordNoteSettlementSegmentExclusion(db, job.id, t1, NOW);
+    const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
+    attachSegmentToSession(db, sessionDbId, segment.id, NOW);
 
-    expect(computeNoteSettlementSegmentationGaps(db, job.id, sessionDbId, 1, 1)).toEqual([]);
+    recordNoteSettlementMembershipActivity(db, job.id, NOW);
+
+    expect(computeNoteSettlementMembershipGapSegmentIds(db, job.id, sessionDbId)).toEqual([]);
   });
 
-  test("an exclusion recorded by a DIFFERENT job does not cover — job-scoped, not turn-scoped", () => {
+  test("membership activity recorded for a DIFFERENT job does not clear this job's gap — job-scoped, not session-scoped", () => {
     const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
+    seedTurn(sessionDbId, 1);
     const jobA = enqueueNoteSettlementWindows(
       db,
       [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 1, triggerType: "consecutive" }],
@@ -201,56 +201,27 @@ describe("computeNoteSettlementSegmentationGaps — the anti-join", () => {
       NOW,
       SETTLEMENT_ERA_CUTOFF_EPOCH,
     )[0]!;
+    const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
+    attachSegmentToSession(db, sessionDbId, segment.id, NOW);
 
-    // The exclusion belongs to jobB's window, never jobA's — a turn-scoped
-    // (rather than job-scoped) predicate would wrongly read this as covering
-    // jobA too, which is exactly the design mistake spec G7 forbids.
-    recordNoteSettlementSegmentExclusion(db, jobB.id, t1, NOW);
+    recordNoteSettlementMembershipActivity(db, jobB.id, NOW);
 
-    expect(computeNoteSettlementSegmentationGaps(db, jobA.id, sessionDbId, 1, 1)).toEqual([
-      { turnId: t1, sessionId: sessionDbId, promptNumber: 1 },
+    expect(computeNoteSettlementMembershipGapSegmentIds(db, jobA.id, sessionDbId)).toEqual([
+      segment.id,
     ]);
   });
 
-  test("status = skipped is covered without any recorded fact", () => {
+  test("a homeless-everything window (no calls at all) with zero attachments is not blocked — homeless stays legal", () => {
+    // The whole point of ticket 08's re-key: a window whose turns fit
+    // nothing is legal WITHOUT any per-turn or per-job record, as long as
+    // the session attached nothing to begin with — there is nothing to
+    // engage.
     const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    updateTurnById(db, t1, { status: "skipped" });
-    const job = claimWindow(sessionDbId, 1, 1);
+    seedTurn(sessionDbId, 1);
+    seedTurn(sessionDbId, 2);
+    const job = claimWindow(sessionDbId, 1, 2);
 
-    expect(computeNoteSettlementSegmentationGaps(db, job.id, sessionDbId, 1, 1)).toEqual([]);
-  });
-
-  test("a compact-marker turn needs no covering fact — ineligible, same set as coverage's G4", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    updateTurnById(db, t1, { type: ["compact"] });
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    expect(computeNoteSettlementSegmentationGaps(db, job.id, sessionDbId, 1, 1)).toEqual([]);
-  });
-
-  test("a no-reply slash-command turn needs no covering fact — ineligible", () => {
-    const sessionDbId = seedSession();
-    const t1 = db
-      .query<{ id: number }, [number, number, string, number]>(
-        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
-         VALUES (?, ?, 'active', ?, ?) RETURNING id`,
-      )
-      .get(sessionDbId, 1, "<local-command-stdout>ok</local-command-stdout>", NOW)!.id;
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    expect(computeNoteSettlementSegmentationGaps(db, job.id, sessionDbId, 1, 1)).toEqual([]);
-  });
-
-  test("an eligible turn with none of the three is a gap — absence is not coverage", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    expect(computeNoteSettlementSegmentationGaps(db, job.id, sessionDbId, 1, 1)).toEqual([
-      { turnId: t1, sessionId: sessionDbId, promptNumber: 1 },
-    ]);
+    expect(computeNoteSettlementMembershipGapSegmentIds(db, job.id, sessionDbId)).toEqual([]);
   });
 });
 
@@ -262,10 +233,11 @@ describe("assertNoteSettlementJobClaimed — the ownership fence", () => {
 
     runWriteTransaction(db, () => {
       assertNoteSettlementJobClaimed(db, job.id, job.claimGeneration);
-      recordNoteSettlementSegmentExclusion(db, job.id, t1, NOW);
+      recordNoteSettlementMembershipActivity(db, job.id, NOW);
     });
 
-    expect(listNoteSettlementSegmentExclusions(db, job.id)).toEqual([t1]);
+    expect(hasNoteSettlementMembershipActivity(db, job.id)).toBe(true);
+    void t1;
   });
 
   test("a stale claim generation, bumped from outside before the transaction opens, cannot commit a write past the fence", () => {
@@ -287,11 +259,12 @@ describe("assertNoteSettlementJobClaimed — the ownership fence", () => {
         // exactly the contract ticket 10's write tools must follow.
         assertNoteSettlementJobClaimed(db, job.id, staleGeneration);
         // Never reached: a write a real settlement write tool would perform.
-        recordNoteSettlementSegmentExclusion(db, job.id, t1, NOW);
+        recordNoteSettlementMembershipActivity(db, job.id, NOW);
       }),
     ).toThrow(NoteSettlementJobFenceError);
 
-    expect(listNoteSettlementSegmentExclusions(db, job.id)).toEqual([]);
+    expect(hasNoteSettlementMembershipActivity(db, job.id)).toBe(false);
+    void t1;
   });
 
   test("a job that is no longer claimed refuses the fence the same way", () => {
@@ -493,19 +466,17 @@ describe("completeNoteSettlementJobIfSegmented — the completion gate", () => {
     expect(getNoteSettlementJob(db, job.id)?.status).toBe("claimed");
   });
 
-  test("crash-after-membership: partial membership leaves the window incomplete; filling the remaining exclusions then completes it", () => {
+  test("crash-before-membership-activity (ticket 08): an attached session with no recorded activity leaves the window incomplete; recording activity on retry completes it", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    const t3 = seedTurn(sessionDbId, 3);
-    const job = claimWindow(sessionDbId, 1, 3);
-    markTyped([t1, t2, t3]);
-    markNoted([t1, t2, t3]);
+    const job = claimWindow(sessionDbId, 1, 1);
+    markTyped([t1]);
+    markNoted([t1]);
 
-    // The agent wrote segment membership for t1 and then crashed — t2/t3
-    // never got their exclusion (or membership) recorded.
+    // This session has an ATTACHED segment (the re-keyed gate's own trigger
+    // condition) but the run crashed before any assign/propose landed.
     const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
-    addSegmentMembers(db, segment.id, [t1], NOW);
+    attachSegmentToSession(db, sessionDbId, segment.id, NOW);
 
     const firstAttempt = completeNoteSettlementJobIfSegmented(
       db,
@@ -516,17 +487,14 @@ describe("completeNoteSettlementJobIfSegmented — the completion gate", () => {
 
     expect(firstAttempt.completed).toBe(false);
     expect(firstAttempt.reason).toBe("segmentation-incomplete");
-    expect(firstAttempt.segmentationGaps.map((gap) => gap.turnId).sort()).toEqual(
-      [t2, t3].sort(),
-    );
+    expect(firstAttempt.segmentationGaps).toEqual([segment.id]);
     // G2: the job stays claimed. It does NOT go to `failed` or `pending`.
     expect(getNoteSettlementJob(db, job.id)?.status).toBe("claimed");
     expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
 
-    // A retry reviews the remaining turns and records the negative verdict
-    // for both — the exact scenario spec G7 names.
-    recordNoteSettlementSegmentExclusion(db, job.id, t2, NOW + 1);
-    recordNoteSettlementSegmentExclusion(db, job.id, t3, NOW + 1);
+    // A retry engages the membership tool — the exact scenario the re-keyed
+    // gate exists to require.
+    recordNoteSettlementMembershipActivity(db, job.id, NOW + 1);
 
     const secondAttempt = completeNoteSettlementJobIfSegmented(
       db,
@@ -544,7 +512,7 @@ describe("completeNoteSettlementJobIfSegmented — the completion gate", () => {
       electionCeilingViolations: [],
     });
     expect(getNoteSettlementJob(db, job.id)?.status).toBe("done");
-    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(3);
+    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(1);
   });
 });
 
@@ -717,7 +685,13 @@ describe("computeElectionCeilingViolations — the ceiling validator (ADR-0003)"
 });
 
 describe("completeNoteSettlementJobIfSegmented — the election ceiling gate refuses commit (ADR-0003)", () => {
-  /** Every OTHER duty satisfied for a 10-turn window: typed, noted, explicitly excluded. */
+  /**
+   * Every OTHER duty satisfied for a 10-turn window: typed, noted. This
+   * fixture's session attaches no segment, so the re-keyed segmentation
+   * check (ticket 08) is trivially satisfied without any membership call —
+   * the ONLY gap this whole describe block ever probes is the election
+   * ceiling.
+   */
   function satisfyEveryDutyExceptElection(
     sessionDbId: number,
     job: NoteSettlementJob,
@@ -728,7 +702,6 @@ describe("completeNoteSettlementJobIfSegmented — the election ceiling gate ref
     }
     markTyped(turnIds);
     markNoted(turnIds);
-    recordNoteSettlementSegmentExclusions(db, job.id, turnIds, NOW);
     return turnIds;
   }
 

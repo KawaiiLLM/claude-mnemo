@@ -531,6 +531,45 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_note_settlement_segment_exclusions_turn
     ON note_settlement_segment_exclusions(turn_id);
 
+  -- Membership review activity (ticket 08, ADR-0002): the re-keyed
+  -- segmentation completion gate's own positive fact. A window with at least
+  -- one ATTACHED segment must have engaged settlement's membership tool
+  -- (remember assign or propose) at least once before it may complete; a
+  -- window with zero attached segments needs no row here at all (the gate
+  -- reads an empty attachment set as trivially satisfied). ONE row per job,
+  -- written the instant a real assign/propose call lands in commit's own
+  -- transaction — the same "a real write, not a self-attested flag" fact
+  -- note_settlement_segment_exclusions used to be for the retired per-turn
+  -- exclude verb, coarsened from per-turn to per-job because "turns fitting
+  -- nothing stay homeless — legal, never forced" means there is no longer a
+  -- per-turn positive-or-negative fact to anti-join against.
+  CREATE TABLE IF NOT EXISTS note_settlement_membership_activity (
+    job_id INTEGER PRIMARY KEY REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    recorded_at_epoch INTEGER NOT NULL
+  );
+
+  -- Homeless-cluster proposals (ticket 08, spec "Proposal"): settlement's
+  -- text-only suggestion that several homeless turns form one new segment.
+  -- NEVER a segment row and never auto-adopted — addresses/title are plain
+  -- text, rendered to the next session (at most three, newest first) and
+  -- handed to remember(create)'s own members field verbatim on approval
+  -- (ticket 02's seed-address path). addresses is a JSON array of
+  -- "S<session>/T<prompt>" strings, not a foreign key: a proposal survives
+  -- even if this project later reshapes turn identity, and validating the
+  -- addresses is the READER's job (they are re-validated by remember(create)
+  -- itself at adoption time regardless).
+  CREATE TABLE IF NOT EXISTS note_settlement_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    addresses TEXT NOT NULL CHECK (json_valid(addresses)),
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_proposals_created
+    ON note_settlement_proposals(created_at_epoch);
+
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
 

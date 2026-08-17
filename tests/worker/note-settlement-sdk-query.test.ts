@@ -116,14 +116,14 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         sessionId: sessionDbId,
         reconstructableTurnIds: new Set([t1]),
         reviewableTurnIds: new Set([t1]),
-        exposedSegmentIds: new Set(),
+        attachedSegmentIds: new Set(),
         contextBuiltAtEpoch: NOW,
         rideTurnId: null,
         writerModel: "claude-sonnet-5",
         eligibleRelationPairKeys: new Set(),
       });
 
-      expect([...handlers.keys()].sort()).toEqual(["commit", "note", "recall", "segment", "timeline"]);
+      expect([...handlers.keys()].sort()).toEqual(["commit", "note", "recall", "remember", "timeline"]);
       expect(handlers.has("check")).toBe(false);
     } finally {
       db?.close();
@@ -162,7 +162,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         sessionId: sessionDbId,
         reconstructableTurnIds: new Set([t1]),
         reviewableTurnIds: new Set([t1]),
-        exposedSegmentIds: new Set(),
+        attachedSegmentIds: new Set(),
         contextBuiltAtEpoch: NOW,
         rideTurnId: null,
         writerModel: "claude-sonnet-5",
@@ -200,14 +200,10 @@ describe("staging isolation holds through the real registered handlers (ticket 0
           })) as { content: Array<{ text: string }> };
           expect(noteReceipt.content[0]!.text).toContain("Staged");
 
-          // Completion gate satisfaction (spec G7): t1 must also be a
-          // segment member or explicitly excluded — unrelated to the note
-          // isolation claim this test is about, so a plain exclude verdict.
-          const segmentReceipt = (await handlers.get("segment")!({
-            action: "exclude",
-            turn: `S${sessionDbId}/T1`,
-          })) as { content: Array<{ text: string }> };
-          expect(segmentReceipt.content[0]!.text).toContain("Staged");
+          // Completion gate satisfaction (ticket 08's re-key): this
+          // fixture's session attaches no segment, so the segmentation
+          // check is trivially satisfied without any `remember` call —
+          // unrelated to the note isolation claim this test is about.
 
           // The load-bearing assertion: nothing landed yet, through the ACTUAL
           // registered handler, not the engine called directly.
@@ -241,7 +237,7 @@ describe("staging isolation holds through the real registered handlers (ticket 0
         sessionId: sessionDbId,
         reconstructableTurnIds: new Set([t1]),
         reviewableTurnIds: new Set([t1]),
-        exposedSegmentIds: new Set(),
+        attachedSegmentIds: new Set(),
         contextBuiltAtEpoch: NOW,
         rideTurnId: null,
         writerModel: "claude-sonnet-5",

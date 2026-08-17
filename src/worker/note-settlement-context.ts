@@ -3,10 +3,9 @@ import type { Database } from "bun:sqlite";
 import { listOwedNoteTurnsInRange } from "../db/note-debt";
 import type { NoteSettlementJob } from "../db/note-settlement";
 import {
-  listRecentSegments,
-  listTopicsByFrequency,
-  type SegmentWithTopic,
-  type TopicFrequency,
+  getAttachedSegmentIds,
+  listAttachedSegments,
+  type SegmentRecord,
 } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getShadowNote, type ShadowNoteRecord } from "../db/shadow-notes";
@@ -44,15 +43,6 @@ import { stripPrivateTags } from "../shared/tag-stripping";
 
 /** Turns of context BEFORE the window, rendered as recall renders them. */
 export const NOTE_SETTLEMENT_PRIOR_TURNS = 50;
-
-/**
- * How many segments the anti-fragmentation surface shows (ticket 14, spec D9).
- * Most recently active first, whatever their status: `noCandidateReason` has
- * always asked the model to say what it searched before minting a new topic,
- * and until this ticket the only thing it could search was the OPEN list —
- * which hides exactly the delivered segments that prove a name is established.
- */
-export const NOTE_SETTLEMENT_RECENT_SEGMENTS = 50;
 
 /**
  * Raw-material budget for a hole (裁决 20's ~1000 token/turn). The model has to
@@ -126,13 +116,18 @@ export interface NoteSettlementContext {
    * the shared entry point both surfaces call (ticket 11, spec A4).
    */
   sessionStateRendering: string;
-  /** The 50 most recently active segments with their topic names (ticket 14). */
-  recentSegments: SegmentWithTopic[];
-  /** The topic registry ordered by how many segments carry each name (ticket 14). */
-  topicRegistry: TopicFrequency[];
+  /**
+   * The session's currently ATTACHED segments, full records (ticket 08,
+   * ADR-0002) — replaces the retired anti-fragmentation surface
+   * (`recentSegments`/`topicRegistry`, 50 most-recently-active + the topic
+   * registry): that surface served the retired facade's create/extend
+   * duty, which no longer exists. Membership now targets ONLY these — never
+   * a segment merely recalled or recently active.
+   */
+  attachedSegments: SegmentRecord[];
   milestoneRendering: string;
-  /** Segment ids shown — the exposure gate for `[E<n>]` citations. */
-  exposedSegmentIds: Set<number>;
+  /** `attachedSegments`' own ids, as a Set — `remember`'s `assign` scope gate. */
+  attachedSegmentIds: Set<number>;
   /**
    * Turn ids THIS prompt put in front of the model — window plus the rendered
    * lookback — and therefore the only turns its review may revise.
@@ -321,15 +316,19 @@ export function buildNoteSettlementContext(
     .filter((turn) => priorPromptNumbers.has(turn.promptNumber))
     .map((turn) => turn.id);
 
-  const recentSegments = listRecentSegments(db, NOTE_SETTLEMENT_RECENT_SEGMENTS);
+  // Ticket 08 (ADR-0002): the session's own attachment rows — never a global
+  // recency window. `getAttachedSegmentIds` (rather than re-deriving the id
+  // set from `attachedSegments`) is the SAME source `listAttachedSegments`
+  // itself reads from, so the two can never disagree about which ids are
+  // attached even if a segment row vanished between the two reads.
+  const attachedSegments = listAttachedSegments(db, job.sessionId);
   const context: NoteSettlementContext = {
     job,
     session,
     windowTurns,
     interiorHoles: windowTurns.filter((turn) => turn.kind === "hole"),
     priorTurnsRendering,
-    recentSegments,
-    topicRegistry: listTopicsByFrequency(db, "active"),
+    attachedSegments,
     milestoneRendering: renderSessionMilestoneInjection(db, job.sessionId),
     // Spec A4, ticket 11: the SAME entry point the SessionStart hook calls,
     // minus the corpus header — the settlement agent has recall and timeline
@@ -345,9 +344,7 @@ export function buildNoteSettlementContext(
       session,
       fields: "global-view",
     }),
-    exposedSegmentIds: new Set(
-      recentSegments.map((entry) => entry.segment.id),
-    ),
+    attachedSegmentIds: new Set(getAttachedSegmentIds(db, job.sessionId)),
     reviewableTurnIds: new Set([
       ...windowTurns.map((turn) => turn.turnId),
       ...priorTurnIds,

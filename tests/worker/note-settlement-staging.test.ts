@@ -12,12 +12,15 @@ import {
   getNoteSettlementJob,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import {
-  listNoteSettlementSegmentExclusions,
-  recordNoteSettlementSegmentExclusion,
-} from "../../src/db/note-settlement-completion";
+import { hasNoteSettlementMembershipActivity } from "../../src/db/note-settlement-completion";
+import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { initializeSchema } from "../../src/db/schema";
-import { createSegment, getSegment, getSegmentMemberTurnIds } from "../../src/db/segments";
+import {
+  attachSegmentToSession,
+  createSegment,
+  getSegment,
+  getSegmentMemberTurnIds,
+} from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
@@ -108,7 +111,7 @@ function baseContext(
     sessionId: job.sessionId,
     reconstructableTurnIds: new Set(),
     reviewableTurnIds: new Set(),
-    exposedSegmentIds: new Set(),
+    attachedSegmentIds: new Set(),
     contextBuiltAtEpoch: NOW,
     rideTurnId: null,
     writerModel: "claude-sonnet-5",
@@ -140,21 +143,21 @@ function markNoted(turnIds: readonly number[]): void {
   }
 }
 
-// Ticket 10d test-gap finding: this counted shadow_notes/segments/
-// segment_members/memory_edges but not `topics`, and the fixture never
-// created one — so a topic minted at STAGE time (before commit) would have
-// gone unnoticed by every "nothing moved" assertion below. `topics` is
-// counted here and the fixture (acceptance criterion 1) now mints one via a
-// real `topic` field on its staged create.
+/**
+ * Ticket 08: `topics`/`segments` creation is no longer something settlement's
+ * membership facade can do at all (that authority retired to `remember`'s
+ * create verb, main-agent-only) — this now counts `segment_members` and
+ * `note_settlement_proposals` instead, the two tables the new facade
+ * actually writes.
+ */
 function tableCounts(target: Database) {
   const count = (sql: string) =>
     target.query<{ count: number }, []>(sql).get()?.count ?? 0;
   return {
     shadowNotes: count("SELECT COUNT(*) AS count FROM shadow_notes"),
-    segments: count("SELECT COUNT(*) AS count FROM segments"),
     segmentMembers: count("SELECT COUNT(*) AS count FROM segment_members"),
     memoryEdges: count("SELECT COUNT(*) AS count FROM memory_edges"),
-    topics: count("SELECT COUNT(*) AS count FROM topics"),
+    proposals: count("SELECT COUNT(*) AS count FROM note_settlement_proposals"),
   };
 }
 
@@ -163,13 +166,20 @@ function tableCounts(target: Database) {
 // ---------------------------------------------------------------------------
 
 describe("acceptance criterion 1 — a staged write reaches no live table before commit", () => {
-  test("note and segment calls change no row anywhere; commit lands them all", () => {
+  test("note and remember (assign) calls change no row anywhere; commit lands them all", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(db, sessionDbId, 1, 1);
+    const existing = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
+    // A REAL attachment row, not just the frozen context set — the
+    // completion gate (unlike the facade's own scope check) reads
+    // segment_attachments directly, so a genuine "the gate requires this"
+    // demonstration needs both.
+    attachSegmentToSession(db, sessionDbId, existing.id, NOW - 1000);
     const context = baseContext(job, {
       reviewableTurnIds: new Set([t1]),
       reconstructableTurnIds: new Set([t1]),
+      attachedSegmentIds: new Set([existing.id]),
     });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
@@ -185,20 +195,14 @@ describe("acceptance criterion 1 — a staged write reaches no live table before
       type: ["design"],
       tags: ["lease"],
     });
-    const segmentReceipt = engine.stageSegmentWrite({
-      action: "create",
-      handle: "chapter",
-      title: "design+lease: staged chapter",
-      content: "Body.",
-      noCandidateReason: "nothing open covers this",
-      topic: "lease fencing",
-      type: ["design"],
-      tags: ["lease"],
-      members: [`S${sessionDbId}/T1`],
+    const membershipReceipt = engine.stageMembershipWrite({
+      action: "assign",
+      turn: `S${sessionDbId}/T1`,
+      segmentId: existing.id,
     });
 
     expect(noteReceipt.content[0]!.text).toContain("Staged");
-    expect(segmentReceipt.content[0]!.text).toContain("Staged");
+    expect(membershipReceipt.content[0]!.text).toContain("Staged");
     expect(engine.pendingCount()).toBe(2);
 
     // Inspecting the TABLES, not the code: nothing moved.
@@ -206,17 +210,17 @@ describe("acceptance criterion 1 — a staged write reaches no live table before
     expect(getTurnById(db, t1)!).toEqual(beforeTurn);
 
     // commit's completion gate also needs coverage/notes on t1 to be
-    // satisfied; the staged writes above already carry those, but t1's
-    // segmentation coverage is the SAME staged segment write.
+    // satisfied; the staged writes above already carry those, and the
+    // attached segment's own membership duty is discharged by the staged
+    // assign call.
     const commitReceipt = engine.commit();
 
     expect(commitReceipt.content[0]!.text).toContain("Committed");
     expect(getTurnById(db, t1)!.significanceGrade).toBe(3);
     const after = tableCounts(db);
     expect(after.shadowNotes).toBe(before.shadowNotes + 1);
-    expect(after.segments).toBe(before.segments + 1);
     expect(after.segmentMembers).toBe(before.segmentMembers + 1);
-    expect(after.topics).toBe(before.topics + 1);
+    expect(getSegmentMemberTurnIds(db, existing.id)).toEqual([t1]);
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
   });
 });
@@ -261,123 +265,132 @@ describe("acceptance criterion 2 — a staged write validates fully and returns 
 });
 
 // ---------------------------------------------------------------------------
-// Acceptance criterion 3: the segment tool stages every field
+// Acceptance criterion 3 (ticket 08 re-scope): remember stages assign and
+// propose — membership within attached segments, plus text proposals. The
+// retired segment facade's create/extend/insight/body/handle machinery has
+// no successor here: that authority moved to the main agent's own
+// `remember` create/attach/append/replace verbs (ADR-0002), untouched by
+// settlement.
 // ---------------------------------------------------------------------------
 
-describe("acceptance criterion 3 — the segment tool stages create, extend, members, insight, body", () => {
-  test("create carries body/insight/members; extend rewrites them, all staged and landed only at commit", () => {
+describe("acceptance criterion 3 — remember stages assign (within attached segments) and propose", () => {
+  test("assign lands membership only at commit, and a turn may join two DIFFERENT attached segments", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    markTyped([t1]);
+    markNoted([t1]);
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const segmentA = createSegment(db, { title: "chapter A", nowEpoch: NOW - 1000 });
+    const segmentB = createSegment(db, { title: "chapter B", nowEpoch: NOW - 1000 });
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      attachedSegmentIds: new Set([segmentA.id, segmentB.id]),
+    });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    engine.stageMembershipWrite({ action: "assign", turn: `S${sessionDbId}/T1`, segmentId: segmentA.id });
+    engine.stageMembershipWrite({ action: "assign", turn: `S${sessionDbId}/T1`, segmentId: segmentB.id });
+    expect(engine.pendingCount()).toBe(2);
+    expect(getSegmentMemberTurnIds(db, segmentA.id)).toEqual([]);
+    expect(getSegmentMemberTurnIds(db, segmentB.id)).toEqual([]);
+
+    const commitReceipt = engine.commit();
+    expect(commitReceipt.content[0]!.text).toContain("Committed");
+    expect(getSegmentMemberTurnIds(db, segmentA.id)).toEqual([t1]);
+    expect(getSegmentMemberTurnIds(db, segmentB.id)).toEqual([t1]);
+  });
+
+  test("assign refuses a segment not in the attached set — the load-bearing scope gate", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const notAttached = createSegment(db, { title: "elsewhere", nowEpoch: NOW - 1000 });
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      attachedSegmentIds: new Set(), // deliberately empty — notAttached is a real segment, just not attached
+    });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    const receipt = engine.stageMembershipWrite({
+      action: "assign",
+      turn: `S${sessionDbId}/T1`,
+      segmentId: notAttached.id,
+    });
+
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    expect(receipt.content[0]!.text).toContain("not attached");
+    expect(engine.pendingCount()).toBe(0);
+    expect(getSegmentMemberTurnIds(db, notAttached.id)).toEqual([]);
+  });
+
+  test("a homeless turn is legal — a window with no membership calls at all still completes when nothing is attached", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    markTyped([t1]);
+    markNoted([t1]);
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      attachedSegmentIds: new Set(), // nothing attached — never forced to assign or propose
+    });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    expect(engine.pendingCount()).toBe(0);
+    const commitReceipt = engine.commit();
+
+    expect(commitReceipt.content[0]!.text).toContain("Committed");
+    expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+  });
+
+  test("propose stores a text cluster and creates NO segment row; addresses are usable turn addresses", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
     markTyped([t1, t2]);
     markNoted([t1, t2]);
     const job = claimWindow(db, sessionDbId, 1, 2);
-    const context = baseContext(job, {});
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1, t2]),
+      attachedSegmentIds: new Set(),
+    });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    engine.stageSegmentWrite({
-      action: "create",
-      handle: "chapter",
-      title: "implement+lease: chapter",
-      content: "First body.",
-      noCandidateReason: "nothing open covers this",
-      insight: "the lease route was ruled out: a fence outlives its claim",
-      members: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
+    const before = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM segments").get()!.count;
+    engine.stageMembershipWrite({
+      action: "propose",
+      addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
+      title: "the lease-fencing cluster",
     });
-    expect(engine.pendingCount()).toBe(1);
-
     const commitReceipt = engine.commit();
+
     expect(commitReceipt.content[0]!.text).toContain("Committed");
-
-    const created = db
-      .query<{ id: number }, []>("SELECT id FROM segments ORDER BY id DESC LIMIT 1")
-      .get()!.id;
-    // Ticket 14: `insight` has to survive the stage -> replay round trip, and
-    // type is DERIVED from the members `markTyped` gave `discuss` (spec K5a) —
-    // nothing in the staged call states it.
-    expect(getSegment(db, created)!.insight).toBe(
-      "the lease route was ruled out: a fence outlives its claim",
+    expect(
+      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM segments").get()!.count,
+    ).toBe(before);
+    const proposals = listRecentSettlementProposals(db, 3);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.title).toBe("the lease-fencing cluster");
+    expect(proposals[0]!.addresses.sort()).toEqual(
+      [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`].sort(),
     );
-    expect(getSegment(db, created)!.type).toEqual(["discuss"]);
-    expect(getSegmentMemberTurnIds(db, created).sort()).toEqual([t1, t2].sort());
-
-    // A second staging run on the same job would find it already `done`;
-    // this test's own point is field coverage, so extend is exercised as a
-    // fresh, separately-claimed job over a segment already exposed as open.
-    const secondJob = claimWindow(db, sessionDbId, 3, 3);
-    const t3 = seedTurn(sessionDbId, 3);
-    markTyped([t3]);
-    markNoted([t3]);
-    const extendContext = baseContext(secondJob, {
-      exposedSegmentIds: new Set([created]),
-    });
-    const extendEngine = createSettlementStagingEngine({ db, context: extendContext, now: () => NOW + 10 });
-    const current = getSegment(db, created)!;
-    extendEngine.stageSegmentWrite({
-      action: "extend",
-      segmentId: created,
-      expectedRevision: current.revision,
-      insight: "and the fence has to be renewed, not re-taken",
-      members: [`S${sessionDbId}/T2`, `S${sessionDbId}/T3`],
-    });
-    const extendCommit = extendEngine.commit();
-    expect(extendCommit.content[0]!.text).toContain("Committed");
-    const extended = getSegment(db, created)!;
-    expect(extended.insight).toBe("and the fence has to be renewed, not re-taken");
-    expect(extended.type).toEqual(["discuss"]);
-    expect(getSegmentMemberTurnIds(db, created).sort()).toEqual([t1, t2, t3].sort());
   });
-});
 
-// ---------------------------------------------------------------------------
-// Acceptance criterion 4: E#n handles resolve in staging order at commit
-// ---------------------------------------------------------------------------
-
-describe("acceptance criterion 4 — E#n handles resolve to real ids at commit, in staging order", () => {
-  test("a member and an anchor edge naming a segment the same run creates both resolve", () => {
+  test("propose refuses a single address — a proposal is a cluster, not one turn", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    markTyped([t1]);
-    markNoted([t1]);
     const job = claimWindow(db, sessionDbId, 1, 1);
-    const context = baseContext(job, {});
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    // Entry 1: creates a segment, addressable within this run as E#fenced
-    // (spec A7a: MODEL-named, not server-issued).
-    const first = engine.stageSegmentWrite({
-      action: "create",
-      handle: "fenced",
-      title: "implement+lease: the fenced chapter",
-      content: "First chapter body.",
-      noCandidateReason: "nothing open covers this",
-      members: [`S${sessionDbId}/T1`], // an ordinary member, resolved through the same replay path
-    });
-    expect(first.content[0]!.text).toContain("E#fenced");
-
-    // Entry 2: a second segment whose body cites the FIRST by handle,
-    // before the first has any real id at all.
-    engine.stageSegmentWrite({
-      action: "create",
-      handle: "followup",
-      title: "design+lease: the follow-up chapter",
-      content: "Builds on the fencing in [E#fenced].",
-      noCandidateReason: "nothing open covers this",
+    const receipt = engine.stageMembershipWrite({
+      action: "propose",
+      addresses: [`S${sessionDbId}/T1`],
+      title: "not a cluster",
     });
 
-    const commitReceipt = engine.commit();
-    expect(commitReceipt.content[0]!.text).toContain("Committed");
-
-    const rows = db
-      .query<{ id: number; title: string }, []>("SELECT id, title FROM segments ORDER BY id ASC")
-      .all();
-    expect(rows).toHaveLength(2);
-    const firstId = rows.find((row) => row.title.includes("fenced chapter"))!.id;
-    const secondId = rows.find((row) => row.title.includes("follow-up chapter"))!.id;
-
-    expect(getSegmentMemberTurnIds(db, firstId)).toEqual([t1]);
-    const anchors = getOutgoingEdges(db, { kind: "segment", id: secondId });
-    expect(anchors.map((edge) => edge.cited)).toEqual([{ kind: "segment", id: firstId }]);
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    expect(receipt.content[0]!.text).toContain("at least two");
+    expect(listRecentSettlementProposals(db, 3)).toEqual([]);
   });
 });
 
@@ -394,11 +407,9 @@ describe("acceptance criterion 5 — commit re-validates inside its own transact
     const job = claimWindow(db, sessionDbId, 1, 2);
     markTyped([t2]);
     markNoted([t2]);
-    // No segment tool call in this test — its subject is the review yield,
-    // not segmentation — so both turns are explicitly excluded, matching a
-    // settlement job's own "reviewed, joins no segment" verdict (spec G7).
-    recordNoteSettlementSegmentExclusion(db, job.id, t1, NOW);
-    recordNoteSettlementSegmentExclusion(db, job.id, t2, NOW);
+    // No remember call in this test — its subject is the review yield, not
+    // membership — and this session attaches no segment, so the re-keyed
+    // segmentation check (ticket 08) is trivially satisfied either way.
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
@@ -504,13 +515,9 @@ describe("acceptance criterion 6 — the gate runs inside commit's transaction, 
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
     engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 2, type: ["discuss"], tags: [] });
-    engine.stageSegmentWrite({
-      action: "create",
-      handle: "chapter",
-      title: "discuss+lease: chapter",
-      noCandidateReason: "nothing open covers this",
-      members: [`S${sessionDbId}/T1`],
-    });
+    // This session attaches no segment, so the re-keyed segmentation check
+    // (ticket 08) is trivially satisfied and needs no remember call — the
+    // note write above is the only staged intent this test's fence needs.
 
     let competingBumpLanded = false;
     fireAfterNextJobsRead(db, () => {
@@ -549,77 +556,68 @@ describe("acceptance criterion 7 — a refused commit reports what is missing an
   test("a gate refusal (segmentation gap) keeps every staged write; filling the gap and committing again succeeds", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    markNoted([t1, t2]);
-    const job = claimWindow(db, sessionDbId, 1, 2);
-    const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
+    markNoted([t1]);
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const segment = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
+    // A REAL attachment row — the completion gate reads segment_attachments
+    // directly, independent of the facade's own (context-scoped) check.
+    attachSegmentToSession(db, sessionDbId, segment.id, NOW - 1000);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      attachedSegmentIds: new Set([segment.id]),
+    });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    // Both turns typed, but only t1 is segmented — t2 is a genuine
-    // segmentation gap when commit's gate runs.
+    // A segment IS attached, but nothing has engaged it yet — a genuine
+    // segmentation gap when commit's gate runs (ticket 08's re-key).
     engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 2, type: ["discuss"], tags: [] });
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T2`, grade: 2, type: ["discuss"], tags: [] });
-    engine.stageSegmentWrite({
-      action: "create",
-      handle: "first-chapter",
-      title: "discuss+lease: chapter",
-      noCandidateReason: "nothing open covers this",
-      members: [`S${sessionDbId}/T1`],
-    });
-    expect(engine.pendingCount()).toBe(3);
+    expect(engine.pendingCount()).toBe(1);
 
     const refusal = engine.commit();
     expect(refusal.content[0]!.text).toContain("Commit refused");
     expect(refusal.content[0]!.text).toContain("Staging kept");
     // Nothing landed — this is the load-bearing half of the requirement.
     expect(getTurnById(db, t1)!.significanceGrade).toBeNull();
-    expect(db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM segments").get()!.count).toBe(0);
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([]);
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
-    expect(engine.pendingCount()).toBe(3);
+    expect(engine.pendingCount()).toBe(1);
 
-    // Fill the gap with one more staged call — t2 explicitly joins the same
-    // segment — and commit again: the WHOLE staged list (old and new)
-    // replays together.
-    engine.stageSegmentWrite({
-      action: "create",
-      handle: "second-chapter",
-      title: "discuss+lease: second gap turn",
-      noCandidateReason: "nothing open covers this",
-      members: [`S${sessionDbId}/T2`],
-    });
-    expect(engine.pendingCount()).toBe(4);
+    // Fill the gap with one more staged call — an assign — and commit
+    // again: the WHOLE staged list (old and new) replays together.
+    engine.stageMembershipWrite({ action: "assign", turn: `S${sessionDbId}/T1`, segmentId: segment.id });
+    expect(engine.pendingCount()).toBe(2);
 
     const success = engine.commit();
     expect(success.content[0]!.text).toContain("Committed");
     expect(getTurnById(db, t1)!.significanceGrade).toBe(2);
-    expect(getTurnById(db, t2)!.significanceGrade).toBe(2);
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([t1]);
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     expect(engine.pendingCount()).toBe(0);
   });
 
-  test("a replay conflict (a segment extend whose revision moved) refuses the whole commit and keeps every staged write, including the unrelated ones", () => {
+  test("a replay conflict (the attached segment vanishes between stage and commit) refuses the whole commit and keeps every staged write, including the unrelated ones", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(db, sessionDbId, 1, 1);
     const existing = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
-    // The world moves between staging and commit: another writer bumps the
-    // revision this staged extend was composed against.
-    db.query<unknown, [number]>("UPDATE segments SET revision = revision + 1 WHERE id = ?").run(
-      existing.id,
-    );
 
     const context = baseContext(job, {
       reviewableTurnIds: new Set([t1]),
-      exposedSegmentIds: new Set([existing.id]),
+      attachedSegmentIds: new Set([existing.id]),
     });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
     engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 1, type: ["discuss"], tags: [] });
-    engine.stageSegmentWrite({
-      action: "extend",
+    engine.stageMembershipWrite({
+      action: "assign",
+      turn: `S${sessionDbId}/T1`,
       segmentId: existing.id,
-      expectedRevision: existing.revision,
-      members: [`S${sessionDbId}/T1`],
     });
+
+    // The world moves between staging and commit: the segment this staged
+    // assign targets no longer exists (no application code deletes a
+    // segment today; this simulates the general "world moved" case the
+    // real CAS-backed extend used to demonstrate with a revision bump).
+    db.query<unknown, [number]>("DELETE FROM segments WHERE id = ?").run(existing.id);
 
     const refusal = engine.commit();
     expect(refusal.content[0]!.text).toContain("Commit refused");
@@ -643,7 +641,7 @@ describe("acceptance criterion 8 — the staging engine exposes no check", () =>
     // `getLastCommitMetrics` (ticket 10c) and `previewCommit` (ticket 11)
     // widen this list but not the MODEL-FACING one:
     // `note-settlement-sdk-query.ts` never registers either with the SDK's
-    // `tool()` the way `note`/`segment`/`commit` are — this assertion is
+    // `tool()` the way `note`/`remember`/`commit` are — this assertion is
     // about the engine's own JS surface, and a `check`-shaped tool would show
     // up in `note-settlement-sdk-query.ts`'s tool list, not here.
     // `previewCommit` is spec G8's folded check reached from the Stop hook,
@@ -655,7 +653,7 @@ describe("acceptance criterion 8 — the staging engine exposes no check", () =>
         "pendingCount",
         "previewCommit",
         "stageNoteWrite",
-        "stageSegmentWrite",
+        "stageMembershipWrite",
       ].sort(),
     );
   });
@@ -689,16 +687,8 @@ describe("ticket 10c — commit's own result feeds the job log, never the agent"
       type: ["design"],
       tags: ["lease"],
     });
-    engine.stageSegmentWrite({
-      action: "create",
-      handle: "chapter",
-      title: "design+lease: staged chapter",
-      content: "Body.",
-      noCandidateReason: "nothing open covers this",
-      type: ["design"],
-      tags: ["lease"],
-      members: [`S${sessionDbId}/T1`],
-    });
+    // No remember call: this session attaches no segment, so the re-keyed
+    // segmentation check (ticket 08) is trivially satisfied already.
 
     const commitReceipt = engine.commit();
     // Exact-string, not "does not contain" — a substring check could miss a
@@ -711,7 +701,7 @@ describe("ticket 10c — commit's own result feeds the job log, never the agent"
     );
   });
 
-  test("getLastCommitMetrics reflects exactly what commit's replay landed, including the grade histogram", () => {
+  test("getLastCommitMetrics reflects exactly what commit's replay landed, including the grade histogram, membersAdded and proposalsCreated (ticket 08)", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
@@ -720,8 +710,6 @@ describe("ticket 10c — commit's own result feeds the job log, never the agent"
     const existing = createSegment(db, {
       title: "existing chapter",
       content: "Prior body.",
-      type: ["design"],
-      tags: [],
       nowEpoch: NOW - 5_000,
     });
     // T1/T3 are reviewed but not reconstructed (not owed a note) — pre-seed
@@ -729,14 +717,15 @@ describe("ticket 10c — commit's own result feeds the job log, never the agent"
     // note-coverage clause (G1a) is satisfied without adding to `commit`'s
     // OWN counted metrics, which is exactly the distinction this test is
     // checking. T4 needs no review at all — typed and noted directly, and
-    // covered by the segment `extend` below.
+    // covered by the `assign` below.
     markNoted([t1, t3]);
     markTyped([t4]);
     markNoted([t4]);
     const job = claimWindow(db, sessionDbId, 1, 4);
     const context = baseContext(job, {
-      reviewableTurnIds: new Set([t1, t2, t3]),
+      reviewableTurnIds: new Set([t1, t2, t3, t4]),
       reconstructableTurnIds: new Set([t2]),
+      attachedSegmentIds: new Set([existing.id]),
     });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
@@ -755,22 +744,14 @@ describe("ticket 10c — commit's own result feeds the job log, never the agent"
     // Same grade as T1, to prove the histogram ACCUMULATES rather than
     // overwriting per turn.
     engine.stageNoteWrite({ turn: `S${sessionDbId}/T3`, grade: 2, type: ["discuss"], tags: [] });
-    engine.stageSegmentWrite({
-      action: "create",
-      handle: "chapter",
-      title: "new chapter",
-      content: "Body.",
-      noCandidateReason: "nothing open fits",
-      type: ["discuss"],
-      tags: [],
-      members: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
-    });
-    engine.stageSegmentWrite({ action: "exclude", turn: `S${sessionDbId}/T3` });
-    engine.stageSegmentWrite({
-      action: "extend",
-      segmentId: existing.id,
-      expectedRevision: existing.revision,
-      members: [`S${sessionDbId}/T4`],
+    // Membership: T4 joins the one attached segment (membersAdded), T1/T3
+    // are proposed as a homeless cluster (proposalsCreated) — T2 stays
+    // homeless, untouched by either.
+    engine.stageMembershipWrite({ action: "assign", turn: `S${sessionDbId}/T4`, segmentId: existing.id });
+    engine.stageMembershipWrite({
+      action: "propose",
+      addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T3`],
+      title: "a homeless cluster",
     });
 
     const commitReceipt = engine.commit();
@@ -784,10 +765,8 @@ describe("ticket 10c — commit's own result feeds the job log, never the agent"
       gradeHistogram: [0, 1, 2, 0, 0],
       tierCounts: { A: 0, B: 0, C: 0 },
       relationsWritten: 0,
-      segmentsCreated: 1,
-      segmentsExtended: 1,
-      segmentsExcluded: 1,
-      membersAdded: 3,
+      membersAdded: 1,
+      proposalsCreated: 1,
     });
   });
 });
@@ -843,8 +822,8 @@ describe("ticket 10d finding 1 — commit-time relation eligibility is frozen �
       dependsOn: [`S${sessionDbId}/T1`],
     });
     expect(staged.content[0]!.text).toContain("Staged");
-    engine.stageSegmentWrite({ action: "exclude", turn: `S${sessionDbId}/T1` });
-    engine.stageSegmentWrite({ action: "exclude", turn: `S${sessionDbId}/T2` });
+    // No remember call needed: this session attaches no segment, so the
+    // re-keyed segmentation check (ticket 08) is trivially satisfied.
 
     // BEFORE commit, the main agent rewrites T2's body and its own
     // `reconcileCitedPairs` call (mcp/note.ts's live write path) drops the
@@ -867,38 +846,52 @@ describe("ticket 10d finding 1 — commit-time relation eligibility is frozen �
 });
 
 // ---------------------------------------------------------------------------
-// Ticket 10d finding 3 — `segment` gains `action: "exclude"`, the only
-// model-facing path to the job-scoped no-segment verdict. Full failure
-// sequence: a window with one legitimately unsegmented turn could not
-// complete before this ticket (no caller of
-// `recordNoteSettlementSegmentExclusion` existed on the model-facing side).
+// Ticket 08 — a window whose session has an attached segment, and one turn
+// genuinely fits it while a SECOND turn stays homeless, completes through
+// the tool path only: homeless is legal, never forced, and the single
+// assign discharges the WHOLE job's membership duty (ticket 08's re-key —
+// no per-turn coverage is required any more).
 // ---------------------------------------------------------------------------
 
-describe("ticket 10d finding 3 — a window holding one legitimately unsegmented turn now completes", () => {
-  test("segment exclude + commit lands the exclusion and the window completes, through the tool path only", () => {
+describe("ticket 08 — one assign discharges the job's whole membership duty; a second turn stays legally homeless", () => {
+  test("assign + commit lands membership and the window completes, through the tool path only", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(db, sessionDbId, 1, 1);
-    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const t2 = seedTurn(sessionDbId, 2);
+    const job = claimWindow(db, sessionDbId, 1, 2);
+    const segment = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
+    // A REAL attachment row: the completion gate reads segment_attachments
+    // directly, so this is what actually MAKES the membership duty exist.
+    attachSegmentToSession(db, sessionDbId, segment.id, NOW - 1000);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1, t2]),
+      attachedSegmentIds: new Set([segment.id]),
+    });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    // Duty 1 (type) and duty 2 (note) satisfied normally; segmentation is
-    // the ONLY thing left, and this turn genuinely belongs to no segment.
+    // Duty 1 (type) and duty 2 (note) satisfied normally for both turns.
+    // T1 genuinely fits the attached segment; T2 fits nothing and is simply
+    // never named in any remember call — legal, never forced.
     engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 1, type: ["discuss"], tags: [] });
-    markNoted([t1]);
-    const excludeReceipt = engine.stageSegmentWrite({
-      action: "exclude",
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T2`, grade: 1, type: ["discuss"], tags: [] });
+    markNoted([t1, t2]);
+    const assignReceipt = engine.stageMembershipWrite({
+      action: "assign",
       turn: `S${sessionDbId}/T1`,
+      segmentId: segment.id,
     });
-    expect(excludeReceipt.content[0]!.text).toContain("Staged");
-    expect(excludeReceipt.content[0]!.text).toContain(`S${sessionDbId}/T1`);
+    expect(assignReceipt.content[0]!.text).toContain("Staged");
+    expect(assignReceipt.content[0]!.text).toContain(`S${sessionDbId}/T1`);
     // Nothing landed yet — this is still staged.
-    expect(listNoteSettlementSegmentExclusions(db, job.id)).toEqual([]);
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([]);
+    expect(hasNoteSettlementMembershipActivity(db, job.id)).toBe(false);
 
     const commitReceipt = engine.commit();
 
     expect(commitReceipt.content[0]!.text).toContain("Committed");
-    expect(listNoteSettlementSegmentExclusions(db, job.id)).toEqual([t1]);
+    // Only T1 is a member — T2 is homeless by design, not by a gap.
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([t1]);
+    expect(hasNoteSettlementMembershipActivity(db, job.id)).toBe(true);
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
   });
 });
@@ -934,7 +927,8 @@ describe("spec A7a — re-staging a key replaces its entry rather than appending
     engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tags: [] });
     expect(engine.pendingCount()).toBe(1);
 
-    engine.stageSegmentWrite({ action: "exclude", turn: `S${sessionDbId}/T1` });
+    // This session attaches no segment, so commit's re-keyed segmentation
+    // check (ticket 08) is trivially satisfied without a remember call.
     expect(engine.commit().content[0]!.text).toContain("Committed");
 
     const turn = getTurnById(db, t1)!;
@@ -968,99 +962,100 @@ describe("spec A7a — re-staging a key replaces its entry rather than appending
     expect(engine.pendingCount()).toBe(1); // replaced, not appended
     expect(secondReceipt.content[0]!.text).toContain("replaces");
 
-    engine.stageSegmentWrite({
-      action: "exclude",
-      turn: `S${sessionDbId}/T1`,
-    });
+    // This session attaches no segment, so commit's re-keyed segmentation
+    // check (ticket 08) is trivially satisfied without a remember call.
     const commitReceipt = engine.commit();
     expect(commitReceipt.content[0]!.text).toContain("Committed");
     expect(getTurnById(db, t1)!.significanceGrade).toBe(4);
     expect(getTurnById(db, t1)!.type).toEqual(["design"]);
   });
 
-  test("restaging the same create handle does not grow pendingCount, and only ONE segment lands, with the latest title", () => {
+  test("restaging the same (turn, segment) assign pair does not grow pendingCount, and lands membership once", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     markTyped([t1]);
     markNoted([t1]);
     const job = claimWindow(db, sessionDbId, 1, 1);
-    const context = baseContext(job, {});
+    const segment = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      attachedSegmentIds: new Set([segment.id]),
+    });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    engine.stageSegmentWrite({
-      action: "create",
-      handle: "chapter",
-      title: "implement+lease: first draft",
-      noCandidateReason: "nothing open covers this",
-      members: [`S${sessionDbId}/T1`],
-    });
+    engine.stageMembershipWrite({ action: "assign", turn: `S${sessionDbId}/T1`, segmentId: segment.id });
     expect(engine.pendingCount()).toBe(1);
 
-    const secondReceipt = engine.stageSegmentWrite({
-      action: "create",
-      handle: "chapter",
-      title: "implement+lease: corrected title",
-      noCandidateReason: "nothing open covers this",
-      members: [`S${sessionDbId}/T1`],
+    const secondReceipt = engine.stageMembershipWrite({
+      action: "assign",
+      turn: `S${sessionDbId}/T1`,
+      segmentId: segment.id,
     });
-    expect(engine.pendingCount()).toBe(1); // replaced, not a second segment
+    expect(engine.pendingCount()).toBe(1); // replaced, not a second entry
     expect(secondReceipt.content[0]!.text).toContain("replaces");
 
     const commitReceipt = engine.commit();
     expect(commitReceipt.content[0]!.text).toContain("Committed");
-    const rows = db.query<{ id: number; title: string }, []>("SELECT id, title FROM segments").all();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.title).toBe("implement+lease: corrected title");
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([t1]);
   });
 
-  test("restaging the same extend segmentId does not grow pendingCount", () => {
+  test("assigning the SAME turn to a DIFFERENT attached segment is a distinct key and coexists (many-to-many)", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
+    markTyped([t1]);
+    markNoted([t1]);
     const job = claimWindow(db, sessionDbId, 1, 1);
-    const existing = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
-    const context = baseContext(job, { exposedSegmentIds: new Set([existing.id]) });
+    const segmentA = createSegment(db, { title: "chapter A", nowEpoch: NOW - 1000 });
+    const segmentB = createSegment(db, { title: "chapter B", nowEpoch: NOW - 1000 });
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      attachedSegmentIds: new Set([segmentA.id, segmentB.id]),
+    });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    engine.stageSegmentWrite({
-      action: "extend",
-      segmentId: existing.id,
-      expectedRevision: existing.revision,
-      tags: ["lease"],
-    });
+    engine.stageMembershipWrite({ action: "assign", turn: `S${sessionDbId}/T1`, segmentId: segmentA.id });
     expect(engine.pendingCount()).toBe(1);
-
-    engine.stageSegmentWrite({
-      action: "extend",
-      segmentId: existing.id,
-      expectedRevision: existing.revision,
-      tags: ["lease", "fencing"],
-    });
-    expect(engine.pendingCount()).toBe(1);
-    void t1;
+    engine.stageMembershipWrite({ action: "assign", turn: `S${sessionDbId}/T1`, segmentId: segmentB.id });
+    expect(engine.pendingCount()).toBe(2); // a different pair, not a replacement
   });
 
-  test("restaging the same exclude turn does not grow pendingCount", () => {
+  test("restaging the same propose address set does not grow pendingCount", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(db, sessionDbId, 1, 1);
-    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const t2 = seedTurn(sessionDbId, 2);
+    const job = claimWindow(db, sessionDbId, 1, 2);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
     const engine = createSettlementStagingEngine({ db, context });
 
-    engine.stageSegmentWrite({ action: "exclude", turn: `S${sessionDbId}/T1` });
+    engine.stageMembershipWrite({
+      action: "propose",
+      addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
+      title: "first title",
+    });
     expect(engine.pendingCount()).toBe(1);
-    engine.stageSegmentWrite({ action: "exclude", turn: `S${sessionDbId}/T1` });
+    const secondReceipt = engine.stageMembershipWrite({
+      action: "propose",
+      // Same set, different ORDER — the key is order-independent.
+      addresses: [`S${sessionDbId}/T2`, `S${sessionDbId}/T1`],
+      title: "corrected title",
+    });
     expect(engine.pendingCount()).toBe(1);
+    expect(secondReceipt.content[0]!.text).toContain("replaces");
   });
 
-  test("a note and a segment exclude on the SAME turn are different staged keys and coexist", () => {
+  test("a note and a remember assign on the SAME turn are different staged keys and coexist", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(db, sessionDbId, 1, 1);
-    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const segment = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      attachedSegmentIds: new Set([segment.id]),
+    });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
     engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 1, type: ["discuss"], tags: [] });
-    engine.stageSegmentWrite({ action: "exclude", turn: `S${sessionDbId}/T1` });
+    engine.stageMembershipWrite({ action: "assign", turn: `S${sessionDbId}/T1`, segmentId: segment.id });
     expect(engine.pendingCount()).toBe(2);
   });
 });

@@ -11,8 +11,9 @@ import {
   getNoteSettlementJob,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import { listNoteSettlementSegmentExclusions } from "../../src/db/note-settlement-completion";
+import { hasNoteSettlementMembershipActivity } from "../../src/db/note-settlement-completion";
 import { initializeSchema } from "../../src/db/schema";
+import { attachSegmentToSession, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
@@ -112,7 +113,7 @@ function baseContext(
     sessionId: job.sessionId,
     reconstructableTurnIds: new Set(),
     reviewableTurnIds: new Set(),
-    exposedSegmentIds: new Set(),
+    attachedSegmentIds: new Set(),
     contextBuiltAtEpoch: NOW,
     rideTurnId: null,
     writerModel: "claude-sonnet-5",
@@ -137,25 +138,36 @@ function markNoted(turnIds: readonly number[]): void {
 interface Run {
   sessionDbId: number;
   turnId: number;
+  segmentId: number;
   job: NoteSettlementJob;
   engine: SettlementStagingEngine;
 }
 
-/** One window, one turn, already noted — so the only gate clauses in play are type and segmentation. */
+/**
+ * One window, one turn, already noted, ONE segment attached to the session
+ * (ticket 08) — so the only gate clauses in play are type and the re-keyed
+ * segmentation check (which, with a nonempty attached set, needs at least
+ * one `remember` call).
+ */
 function startRun(): Run {
   const sessionDbId = seedSession();
   const turnId = seedTurn(sessionDbId, 1);
   markNoted([turnId]);
+  const segment = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
+  attachSegmentToSession(db, sessionDbId, segment.id, NOW - 1000);
   const job = claimWindow(sessionDbId, 1, 1);
   const engine = createSettlementStagingEngine({
     db,
-    context: baseContext(job, { reviewableTurnIds: new Set([turnId]) }),
+    context: baseContext(job, {
+      reviewableTurnIds: new Set([turnId]),
+      attachedSegmentIds: new Set([segment.id]),
+    }),
     now: () => NOW,
   });
-  return { sessionDbId, turnId, job, engine };
+  return { sessionDbId, turnId, segmentId: segment.id, job, engine };
 }
 
-/** Stage exactly what a complete window needs: a review and a segmentation verdict. */
+/** Stage exactly what a complete window needs: a review and a membership verdict. */
 function stageCompleteWindow(run: Run): void {
   run.engine.stageNoteWrite({
     turn: `S${run.sessionDbId}/T1`,
@@ -163,9 +175,10 @@ function stageCompleteWindow(run: Run): void {
     type: ["discuss"],
     tags: [],
   });
-  run.engine.stageSegmentWrite({
-    action: "exclude",
+  run.engine.stageMembershipWrite({
+    action: "assign",
     turn: `S${run.sessionDbId}/T1`,
+    segmentId: run.segmentId,
   });
 }
 
@@ -191,11 +204,12 @@ describe("ticket 11 — an agent stopping without commit is told it has produced
     expect(reason).toContain("Nothing you staged is written");
     expect(reason).toContain("1 staged call");
     expect(reason).toContain("produced NOTHING");
-    // And what `commit` would refuse, quoted from the gate itself — the one
-    // turn that has no segmentation verdict yet.
+    // And what `commit` would refuse, quoted from the gate itself — the
+    // attached segment ticket 08's re-keyed check has not been engaged yet.
     expect(reason).toContain("A `commit` right now would refuse");
-    expect(reason).toContain("still need a segment");
-    expect(reason).toContain(`S${run.sessionDbId}/T1`);
+    expect(reason).toContain("attached segment");
+    expect(reason).toContain(`E${run.segmentId}`);
+    expect(reason).toContain("remember(assign)");
     expect(reason).toContain("then call `commit`");
   });
 
@@ -227,7 +241,7 @@ describe("ticket 11 — an agent stopping without commit is told it has produced
     expect(getNoteSettlementJob(db, run.job.id)!.status).toBe("claimed");
     expect(getTurnById(db, run.turnId)!.significanceGrade).toBeNull();
     expect(getTurnById(db, run.turnId)!.type).toEqual([]);
-    expect(listNoteSettlementSegmentExclusions(db, run.job.id)).toEqual([]);
+    expect(hasNoteSettlementMembershipActivity(db, run.job.id)).toBe(false);
     expect(run.engine.pendingCount()).toBe(2);
     expect(run.engine.getLastCommitMetrics()).toBeNull();
 
@@ -297,6 +311,8 @@ describe("ticket 11 — the hook is registered on the run the tools stage into",
     const sessionDbId = seedSession();
     const turnId = seedTurn(sessionDbId, 1);
     markNoted([turnId]);
+    const segment = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
+    attachSegmentToSession(db, sessionDbId, segment.id, NOW - 1000);
     const job = claimWindow(sessionDbId, 1, 1);
 
     const toolHandlers = new Map<string, (args: never) => Promise<unknown>>();
@@ -357,7 +373,7 @@ describe("ticket 11 — the hook is registered on the run the tools stage into",
       sessionId: sessionDbId,
       reconstructableTurnIds: new Set(),
       reviewableTurnIds: new Set([turnId]),
-      exposedSegmentIds: new Set(),
+      attachedSegmentIds: new Set([segment.id]),
       contextBuiltAtEpoch: NOW,
       rideTurnId: null,
       writerModel: "claude-sonnet-5",
@@ -367,7 +383,8 @@ describe("ticket 11 — the hook is registered on the run the tools stage into",
     expect(stopDecision).toBe("block");
     // It saw the staged call the tool handler made — same engine, same run.
     expect(stopReason).toContain("1 staged call");
-    expect(stopReason).toContain("still need a segment");
+    expect(stopReason).toContain("attached segment");
+    expect(stopReason).toContain("remember(assign)");
     // And the preview it ran left the job exactly as it found it.
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
     expect(getTurnById(db, turnId)!.significanceGrade).toBeNull();
