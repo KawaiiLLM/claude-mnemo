@@ -5,7 +5,8 @@
 **用户裁决：** T819「允许 turn 无归属的情况」；后续确认 propose ≥1 即可、以及「按设计，skip 的 turn／非 skill 斜杠命令，是不会进入结算的」。
 
 **三处证据：**
-- `src/worker/note-settlement-membership-facade.ts:201-208` 硬性要求 ≥2 个地址，错误文案还写着「a lone homeless turn simply stays homeless」。而 `src/db/note-settlement.ts:469` 允许 sessionend 窗口只有 1 个 turn。于是「末尾单 turn 属于新任务」的窗口：assign 是撒谎、propose 结构上不可能、门永远判 `segmentation-incomplete`，三次 attempt 后转 terminal。
+- `src/worker/note-settlement-membership-facade.ts:201-208` 硬性要求 ≥2 个地址，错误文案还写着「a lone homeless turn simply stays homeless」。于是只要窗口里**恰好只有一个**无家可归的 turn：assign 是撒谎、propose 结构上不可能、门永远判 `segmentation-incomplete`，三次 attempt 后转 terminal。
+  > 票 10 把最小结算窗口提到 10 turn 之后，「1 个 turn 的 sessionend 窗口」这个极端例子消失，但本条不受影响——10 turn 的窗口里同样可以只有一个 turn 不属于任何挂靠段。
 - `src/worker/note-settlement-membership-facade.ts:169-174` 在 apply 分支无条件调用 `recordNoteSettlementMembershipActivity`，`added` 算了却不用。对早已是成员的 turn 再 assign 一次是空转，门却过了。
 - `src/db/note-settlement-completion.ts:177-187` 只查「有挂靠 + 无活动」，不查窗口里有没有合格 turn。而 `src/db/coverage.ts:95` 的 `isEligibleCoverageTurn`（spec G4）已经定义了「排除 compact 标记与无回复斜杠命令」，覆盖检查一直在用它，归属门没用。
 
