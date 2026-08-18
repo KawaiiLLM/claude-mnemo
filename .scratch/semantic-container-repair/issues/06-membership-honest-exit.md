@@ -20,3 +20,5 @@
 - [ ] 空转 assign（`added=false`）不再满足门
 - [ ] 门在窗口无合格 turn 时放行，判据复用 `isEligibleCoverageTurn`
 - [ ] 构造「1 个 turn、属于新任务、会话已挂靠」的窗口，证明它能诚实完成
+
+> **⚠ 部分失效**：`.scratch/ownership-and-note-cadence/spec.md` 把归属与笔记重建移出结算，本票的立论已被取代，实施前先读该 spec 的 Further Notes。

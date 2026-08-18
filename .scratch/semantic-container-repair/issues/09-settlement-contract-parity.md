@@ -19,3 +19,5 @@
 - [ ] 恰好 2× 被拒绝
 - [ ] 结算提示的 tags 段落引用同一份词汇表文本，不再自己复述
 - [ ] 已退役的 `segment` 工具名从所有提示文案中清除
+
+> **⚠ 部分失效**：`.scratch/ownership-and-note-cadence/spec.md` 把归属与笔记重建移出结算，本票的立论已被取代，实施前先读该 spec 的 Further Notes。

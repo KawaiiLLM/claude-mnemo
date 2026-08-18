@@ -19,3 +19,5 @@
 - [ ] `milestoneRendering` 与 `sessionStateRendering` 两个已退役块从结算上下文移除
 - [ ] 结算 agent 能看到段的 decisions/next_steps/constraints
 - [ ] 描述性注释与实际组装一致，不再声称与 SessionStart 相同而实际不同
+
+> **⚠ 部分失效**：`.scratch/ownership-and-note-cadence/spec.md` 把归属与笔记重建移出结算，本票的立论已被取代，实施前先读该 spec 的 Further Notes。
