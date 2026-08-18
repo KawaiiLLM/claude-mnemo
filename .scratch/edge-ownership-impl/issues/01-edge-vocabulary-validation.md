@@ -9,6 +9,7 @@
 - **阶段派生一处成文**(取证=research/measure;决策=design/discuss/correction;落地=implement/refactor/fix/delegate/review/ops),供校验与票 07 计分共用。
 - **校验**:一条边合法 iff 存在(来源阶段,目标阶段)对在关系表中允许该关系;多 type 用阶段集 exists-规则([S15069/T926]);拒绝时说明缺哪半(如「refines 需要来源含决策阶段 type,补 design」)。
 - override/encodes 的**判别问句**进参数描述(「前驱任一子结论仍成立 → refines」;「只点名可推出最终结论的最小集」),声明为软断言,不机检。
+- **校验器是共享域层**(peer 讨论定案,[S15069/T939]):闭集常量+阶段映射+合法性判定住一个共享模块,**不内联于 note 工具**;note 面与票 08 的结算纠错面必须消费同一校验器与同一常量——「主 agent 被拒、结算能绕」的双标准由构造排除。schema enum、reader 分支、提示词表都从这一个常量派生或由守卫测试同步。
 
 **Blocked by:** None — can start immediately.
 
@@ -19,3 +20,4 @@
 - [ ] 双 type turn 在 exists-规则下两端各自合法(`design`+`ops` 轮可被 refines 亦可发 encodes)
 - [ ] 旧 `supersedes` 边的读取路径不变(timeline 注记照旧渲染)
 - [ ] 参数描述含两条判别问句,definitions 的既有 token-cap 测试不超
+- [ ] 校验器从 note 面之外可直接调用且拒绝语义一致(为票 08 的共享消费铺路的种子测试)
