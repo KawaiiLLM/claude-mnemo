@@ -1,6 +1,22 @@
 # ADR-0003 — Grading is a three-tier election at settlement, seats as ceilings
 
-**Status:** accepted · 2026-08-17 · source: S15069 T816–T818
+**Status:** superseded 2026-08-19 (was accepted · 2026-08-17) · source: S15069 T816–T818
+
+> **Superseded** by the ownership-and-note-cadence spec + the turn-edge-
+> mechanism spec (edge-ownership-impl tickets 05/06). Settlement's duty 1
+> (election/grading) retired outright — settlement no longer assigns a tier
+> OR a grade to any turn (ticket 05, "所有权归位": settlement's structured-
+> field authority is exactly type/tags/membership/edges, none of them a
+> value judgement). The election storage half (the `turns.election_tier`
+> column, `src/election.ts`, `src/election-era.ts`, the seat-ceiling
+> completion check) is deleted (ticket 06, "选举机器拆除") — the era cutoff
+> was never pinned in production, so the tier this ADR designed never
+> carried real data. `significance_grade` and its legacy rendering are
+> UNRELATED to this ADR's own tier mechanism and stay exactly as they were,
+> byte-identical — see `.scratch/turn-edge-mechanism/spec.md`'s "Legacy 政
+> 策". Importance, where it is judged at all going forward, comes from the
+> turn-edge mechanism (`.scratch/turn-edge-mechanism/spec.md`) — edges, not
+> an election.
 
 ## Context
 

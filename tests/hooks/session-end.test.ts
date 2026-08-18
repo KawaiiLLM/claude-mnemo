@@ -521,7 +521,7 @@ describe("handleSessionEndHook — note settlement boundary", () => {
     }
   }
 
-  test("a tail of 1-19 turns still opens a window — the 20-turn floor is exempt", async () => {
+  test("a tail under the 20-turn floor opens NO window — the sessionend exemption is dead (ticket 05)", async () => {
     seedTurns(1, 7);
     const handler = createSessionEndHandler({
       db,
@@ -531,19 +531,19 @@ describe("handleSessionEndHook — note settlement boundary", () => {
 
     await handler(createInput({ sessionId: "session-boundary-1" }));
 
-    const jobs = listNoteSettlementJobs(db, sessionId);
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.triggerType).toBe("sessionend");
-    expect(jobs[0]!.windowStart).toBe(1);
-    expect(jobs[0]!.windowEnd).toBe(7);
-    expect(jobs[0]!.status).toBe("pending");
-    // Well under NOTE_SETTLEMENT_MIN_WINDOW_TURNS — a compact or a below-floor
-    // consecutive trigger would have written nothing at all.
+    // Well under NOTE_SETTLEMENT_MIN_WINDOW_TURNS — ticket 05 kills the old
+    // "sessionend is exempt from the floor" carve-out, so this tail leaves
+    // no trace at all; it waits to accumulate into a later window.
     expect(7).toBeLessThan(NOTE_SETTLEMENT_MIN_WINDOW_TURNS);
+    const jobs = listNoteSettlementJobs(db, sessionId);
+    expect(jobs).toHaveLength(0);
   });
 
   test("a repeat SessionEnd with no new activity is idempotent", async () => {
-    seedTurns(1, 5);
+    // Over the floor (ticket 05: sessionend is no longer exempt), so this
+    // still exercises a REAL window's idempotency, not merely "nothing
+    // happened three times".
+    seedTurns(1, 22);
     const handler = createSessionEndHandler({
       db,
       eraCutoffEpoch: ERA_CUTOFF_EPOCH,
@@ -557,11 +557,13 @@ describe("handleSessionEndHook — note settlement boundary", () => {
     const jobs = listNoteSettlementJobs(db, sessionId);
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.windowStart).toBe(1);
-    expect(jobs[0]!.windowEnd).toBe(5);
+    expect(jobs[0]!.windowEnd).toBe(22);
   });
 
   test("end then resume with new turns opens a SECOND window; the first job is untouched", async () => {
-    seedTurns(1, 5);
+    // Both phases over the floor (ticket 05: sessionend is no longer
+    // exempt), so each end event genuinely opens its own window.
+    seedTurns(1, 22);
     const handler = createSessionEndHandler({
       db,
       eraCutoffEpoch: ERA_CUTOFF_EPOCH,
@@ -572,17 +574,17 @@ describe("handleSessionEndHook — note settlement boundary", () => {
     const firstJob = listNoteSettlementJobs(db, sessionId)[0]!;
 
     // Resume is a normal shape (spec D7): new turns belong to the NEXT window.
-    seedTurns(6, 4);
+    seedTurns(23, 20);
     await handler(createInput({ sessionId: "session-boundary-1" }));
 
     const jobs = listNoteSettlementJobs(db, sessionId);
     expect(jobs).toHaveLength(2);
     expect(jobs[0]!.id).toBe(firstJob.id);
     expect(jobs[0]!.windowStart).toBe(1);
-    expect(jobs[0]!.windowEnd).toBe(5);
+    expect(jobs[0]!.windowEnd).toBe(22);
     expect(jobs[0]!.status).toBe("pending"); // untouched by the second end event
-    expect(jobs[1]!.windowStart).toBe(6);
-    expect(jobs[1]!.windowEnd).toBe(9);
+    expect(jobs[1]!.windowStart).toBe(23);
+    expect(jobs[1]!.windowEnd).toBe(42);
     expect(jobs[1]!.triggerType).toBe("sessionend");
   });
 

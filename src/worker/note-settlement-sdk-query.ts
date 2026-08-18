@@ -12,7 +12,6 @@ import {
   workerRecallInputShape,
 } from "../mcp/definitions";
 import { createDatabaseBackedHandlers } from "../mcp/handlers";
-import { ELECTION_ERA_CUTOFF_EPOCH } from "../election-era";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type {
@@ -52,29 +51,27 @@ const SETTLEMENT_ALLOWED_TOOLS = [
 ] as const;
 
 /**
- * Ticket 10a/10b: the restricted write facade's own description, separate
- * from `MNEMO_TOOL_DESCRIPTIONS.note` (mcp/definitions.ts) because the
- * surface really is smaller — no `skip`, no session addressing, no
- * `crossSession`, no append mode, and prose/review are each gated to a scope
- * this dispatch alone defines. The duty-level instructions (which turns are
- * holes, which are reviewable, the grading rubric) live in the settlement
- * prompt, not here — this text states the CALL contract only.
+ * The restricted write facade's own description, separate from
+ * `MNEMO_TOOL_DESCRIPTIONS.note` (mcp/definitions.ts) because the surface
+ * really is smaller — no `skip`, no session addressing, no `crossSession`,
+ * no append mode, no prose (title/content/insight — retired with duty 2,
+ * ticket 05), and review is gated to a scope this dispatch alone defines.
+ * The duty-level instructions (which turns are reviewable) live in the
+ * settlement prompt, not here — this text states the CALL contract only.
  *
  * "Staged" (spec A7): this call validates fully right now and tells you
  * exactly what it found, but nothing reaches a stored row until you call
  * `commit`.
  */
 const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
-  "STAGE one turn's reconstruction note and/or its grade/type/tags/relations " +
-  "— validated now, written only when you call `commit`. `turn`: " +
-  "\"S<session>/T<prompt>\", from the window or preceding-turns section " +
-  "below — this is also this call's KEY: staging the same turn again " +
-  "REPLACES what you staged for it before, so a lost-receipt retry or a " +
-  "same-run correction is just another call, not a new problem. " +
-  "title/content/insight: all three together, only for a turn this window " +
-  "lists as owing a note (insight may be null, but must be named). " +
-  "grade (0-4, a legacy-era turn) OR tier (A/B/C, a new-era turn — ADR-0003; " +
-  "never both)/type/tags: only for a turn shown in this prompt (window or " +
+  "STAGE a turn's grade/type/tags and/or relations — validated now, " +
+  "written only when you call `commit`. `turn`: \"S<session>/T<prompt>\", " +
+  "from the window or preceding-turns section below — this is also this " +
+  "call's KEY: staging the same turn again REPLACES what you staged for it " +
+  "before, so a lost-receipt retry or a same-run correction is just " +
+  "another call, not a new problem. Does NOT accept title/content/insight " +
+  "— turn prose is the main agent's alone to write. " +
+  "grade (0-4)/type/tags: only for a turn shown in this prompt (window or " +
   "preceding turns); each overwrites whole when present, omit to leave " +
   "alone — there is no append. " +
   "evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target " +
@@ -84,49 +81,33 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "since stopped citing.";
 
 /**
- * Ticket 08 (ADR-0002/0007): the `remember` tool's settlement-side call
- * contract — narrowed from the retired segment facade's create/extend/
- * exclude down to exactly the two duties ADR-0002's Ownership table grants
- * settlement: membership within the session's ATTACHED segments, and text
- * proposals when nothing fits. Registered under the SAME tool name the main
- * agent's own `remember` uses (ADR-0007's "same tool quartet"), a
- * settlement-specific shape, the same relationship the `note` facade already
- * has to the main agent's `note` tool.
+ * The `remember` tool's settlement-side call contract — `propose` is the
+ * only surviving verb (ticket 05: `assign` is dead, membership is no longer
+ * settlement's to change here). Registered under the SAME tool name the main
+ * agent's own `remember` uses, a settlement-specific shape, the same
+ * relationship the `note` facade already has to the main agent's `note`
+ * tool.
  */
 const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
-  "STAGE a membership decision — validated now, written only when you call " +
-  "`commit`. action: \"assign\" or \"propose\". assign: turn " +
-  "(\"S<session>/T<prompt>\") + segmentId, the real id of one of THIS " +
-  "SESSION'S ATTACHED segments (see the attached segments list below — a " +
-  "segment merely recalled or recently active is not a legal target). This " +
-  "call's KEY is the (turn, segment) pair: re-staging the SAME pair " +
-  "REPLACES the earlier call; a turn may legitimately belong to more than " +
-  "one attached segment via two separate assign calls. A turn fitting no " +
-  "attached segment is left alone — do not call this tool for it; homeless " +
-  "is legal, never forced. propose: addresses (at least two " +
-  "\"S<session>/T<prompt>\" turn addresses forming ONE coherent cluster) + " +
-  "title (a short suggested name) — stores a text-only suggestion for the " +
-  "user to confirm next session. This call's KEY is the address SET " +
+  "STAGE a text-only task proposal — validated now, written only when you " +
+  "call `commit`. action: \"propose\" (the only legal value). addresses " +
+  "(one or more \"S<session>/T<prompt>\" turn addresses — a single homeless " +
+  "turn may open its own proposal, or name a cluster forming ONE coherent " +
+  "task) + title (a short suggested name) — stores a text-only suggestion " +
+  "for the user to confirm next session. This call's KEY is the address SET " +
   "(order-independent): re-staging the same set replaces the earlier " +
   "proposal. NEVER creates a segment and is never auto-adopted — do not " +
-  "propose a single turn or an incoherent grab-bag.";
+  "propose an incoherent grab-bag. Never required — this window may commit " +
+  "without ever calling this tool.";
 
-/** Ticket 10b (spec A7): the completion gate exposed as commit's own precondition — settlement gets no separate `check` tool (spec G8 amended). */
+/** The completion gate exposed as commit's own precondition — settlement gets no separate `check` tool. */
 const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
-  "Land every staged `note`/`segment` write in one transaction, THEN check " +
-  "this window is complete (every eligible turn typed or skipped, every one " +
-  "segmented or explicitly excluded, no turn still owing a note). Call this " +
-  "once you believe the window is done — it is the only way any of your " +
-  "work becomes durable. If the window is not actually complete, this " +
-  "tells you exactly what is still missing; every staged write is kept, so " +
-  "you fill the gap with more `note`/`segment` calls and call `commit` " +
-  "again. If instead a specific staged call has gone stale (the world " +
-  "moved under it — a revision, a relation pair the main agent stopped " +
-  "citing, ...), re-stage that SAME key with corrected input — that " +
-  "replaces the stale entry — and call `commit` again; blindly retrying " +
-  "the same input will fail the same way. If your job lease has been " +
-  "reclaimed, no commit from this run will ever succeed again — stop " +
-  "making tool calls.";
+  "Land every staged `note`/`remember` write in one transaction. Call this " +
+  "once you believe the window is done — whether or not you staged " +
+  "anything; a window with nothing to propose or relate commits cleanly — " +
+  "it is the only way any of your work becomes durable. If your job lease " +
+  "has been reclaimed, commit refuses and no further commit from this run " +
+  "will ever succeed — stop making tool calls.";
 
 export interface CreateNoteSettlementSdkQueryOptions {
   db: Database;
@@ -190,19 +171,9 @@ export function createNoteSettlementSdkQuery(
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
       sessionId: request.sessionId,
-      reconstructableTurnIds: request.reconstructableTurnIds,
       reviewableTurnIds: request.reviewableTurnIds,
-      attachedSegmentIds: request.attachedSegmentIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
-      rideTurnId: request.rideTurnId,
-      writerModel: request.writerModel,
       eligibleRelationPairKeys: request.eligibleRelationPairKeys,
-      // ADR-0003: not threaded through `NoteSettlementQueryRequest` — the
-      // election-era boundary is a deterministic constant
-      // (`src/election-era.ts`), not a per-request fact the dispatch layer
-      // computes, so it is read here directly, the same way every other
-      // pure constant this module needs would be.
-      eraCutoffEpoch: ELECTION_ERA_CUTOFF_EPOCH,
     };
     const staging = createSettlementStagingEngine({
       db: options.db,

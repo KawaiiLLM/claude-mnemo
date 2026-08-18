@@ -18,10 +18,11 @@ import { renderNoteSettlementPrompt } from "../../src/worker/note-settlement-pro
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
- * Ticket 08 (ADR-0002/0007): what the settlement prompt has to SAY about
- * membership and proposals, and what the context has to put in front of it
- * (the session's attached segments — never a global roster or topic
- * registry, both retired with the segment facade).
+ * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"): what
+ * the settlement prompt has to SAY now that duty 1 (grading), duty 2 (note
+ * reconstruction) and `assign` are all gone — only PROPOSALS (floor 1, never
+ * required) and RELATIONS remain, plus a bare segment ROSTER
+ * (id/title/topic — never a segment's own fields).
  *
  * Every assertion here is a sentence the ticket names as a deliverable, so it
  * is pinned as a substring of the rendered prompt: the prompt IS the
@@ -102,56 +103,46 @@ function renderPrompt(): string {
   return renderNoteSettlementPrompt(context);
 }
 
-describe("duty 3 — membership within attached segments, never forced (ticket 08, ADR-0002)", () => {
-  test("the prompt states assign, the attached-only scope, and that homeless is legal, never forced", () => {
+describe("duty 1 — proposals, never assign, never forced (ticket 05)", () => {
+  test("the prompt states propose, the homeless-cluster criterion, and that a single turn may open one", () => {
     const prompt = renderPrompt();
 
-    expect(prompt).toContain("MEMBERSHIP & PROPOSALS, via the `remember` tool");
-    expect(prompt).toContain("action=\"assign\"");
-    expect(prompt).toContain("session's ATTACHED segments");
-    expect(prompt).toContain("NOT a legal target");
-    expect(prompt).toContain("HOMELESS");
-    expect(prompt).toContain("LEGAL and NEVER FORCED");
-    // The retired arc-partition/body/lifecycle instructions must be gone,
-    // not merely contradicted somewhere else in the same prompt.
-    expect(prompt).not.toContain("A SEGMENT IS ONE ARC");
-    expect(prompt).not.toContain("SEGMENT LIFECYCLE");
-    expect(prompt).not.toContain("noCandidateReason");
-  });
-
-  test("the prompt states propose — a cluster of at least two, text-only, never a segment", () => {
-    const prompt = renderPrompt();
-
+    expect(prompt).toContain("PROPOSALS, via the `remember` tool");
     expect(prompt).toContain("action=\"propose\"");
-    expect(prompt).toContain("at least two");
+    expect(prompt).toContain("this session's attached");
     expect(prompt).toContain("TEXT-ONLY suggestion");
     expect(prompt).toContain("creates NO segment");
     expect(prompt).toContain("never auto-adopted");
-    expect(prompt).toContain("propose a single turn or an incoherent grab-bag");
-  });
-
-  test("segment creation/naming/Working State is stated as NOT this dispatch's to do", () => {
-    const prompt = renderPrompt();
-
-    expect(prompt).toContain("is NOT this dispatch's to do");
-    expect(prompt).toContain("user/main agent's, through");
-  });
-});
-
-describe("duty 5 — commit's completion rule matches the re-keyed gate (ticket 08)", () => {
-  test("the prompt states the attached-set-dependent membership requirement", () => {
-    const prompt = renderPrompt();
-
-    expect(prompt).toContain(
-      "if this session has any attached segments — you",
-    );
-    expect(prompt).toContain("called `remember` (assign or propose) at least once");
-    expect(prompt).toContain("A session with NO attached segments needs no");
-    expect(prompt).toContain("membership call at all");
+    expect(prompt).toContain("A single");
+    expect(prompt).toContain("homeless turn may open its own proposal");
+    expect(prompt).toContain("never required — a window may propose nothing");
+    // `assign` and the retired arc-partition/body/lifecycle instructions
+    // must be gone, not merely contradicted somewhere else in the prompt.
+    expect(prompt).not.toContain("action=\"assign\"");
+    expect(prompt).not.toContain("A SEGMENT IS ONE ARC");
+    expect(prompt).not.toContain("SEGMENT LIFECYCLE");
+    expect(prompt).not.toContain("noCandidateReason");
+    // Duty 1 (grading) and duty 2 (reconstruction) left the prompt entirely.
+    expect(prompt).not.toContain("TURN REVIEW");
+    expect(prompt).not.toContain("RECONSTRUCTION");
+    expect(prompt).not.toContain("tier:");
+    expect(prompt).not.toContain("grade:");
   });
 });
 
-describe("the attached-segments surface (ticket 08) — the ONLY legal assign targets", () => {
+describe("commit is never gated on membership (ticket 05)", () => {
+  test("the prompt states commit lands whatever is staged, including nothing", () => {
+    const prompt = renderPrompt();
+
+    expect(prompt).toContain("Call `commit` once you believe this window is done");
+    expect(prompt).toContain("or nothing, if you staged nothing");
+    // The retired re-keyed gate's own wording must not survive.
+    expect(prompt).not.toContain("attached segments — you");
+    expect(prompt).not.toContain("membership call at all");
+  });
+});
+
+describe("the segment roster (ticket 05) — id/title/topic only, never a segment's own fields", () => {
   test("an unattached segment does not render, whatever its recency", () => {
     const sessionDbId = seedSession();
     seedTurn(sessionDbId, 1);
@@ -159,14 +150,14 @@ describe("the attached-segments surface (ticket 08) — the ONLY legal assign ta
     const notAttached = createSegment(db, { title: "elsewhere, never attached", nowEpoch: NOW });
 
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
-    expect(context.attachedSegments).toEqual([]);
+    expect(context.segmentRoster).toEqual([]);
 
     const prompt = renderNoteSettlementPrompt(context);
     expect(prompt).toContain("(no segments attached to this session)");
     expect(prompt).not.toContain(`E${notAttached.id}`);
   });
 
-  test("an attached segment renders with its id, status, title, and a content/insight preview", () => {
+  test("an attached segment renders id and title but NOT content/insight", () => {
     const sessionDbId = seedSession();
     seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
@@ -179,13 +170,15 @@ describe("the attached-segments surface (ticket 08) — the ONLY legal assign ta
     attachSegmentToSession(db, sessionDbId, segment.id, NOW - 4_000);
 
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
-    expect(context.attachedSegments.map((entry) => entry.id)).toEqual([segment.id]);
+    expect(context.segmentRoster).toEqual([{ id: segment.id, title: "fencing the claim", topic: null }]);
 
     const prompt = renderNoteSettlementPrompt(context);
-    const attached = prompt.slice(prompt.indexOf("## Attached segments"));
-    expect(attached).toContain(`[E${segment.id}] [open] fencing the claim`);
-    expect(attached).toContain("content: the working state");
-    expect(attached).toContain("insight: a generation check beats a timestamp");
+    const roster = prompt.slice(prompt.indexOf("## Segment roster"));
+    expect(roster).toContain(`[E${segment.id}] fencing the claim`);
+    // The old full-field render is gone — content/insight never reach this prompt.
+    expect(roster).not.toContain("the working state");
+    expect(roster).not.toContain("a generation check beats a timestamp");
+    expect(prompt).not.toContain("content: the working state");
   });
 });
 
@@ -220,9 +213,11 @@ describe("ticket 11 — window turns go through recall's collapsed view (spec A5
     // The settlement-only facts survive as annotations under that line, and
     // the QUALIFIED address stays in front of the model — recall labels a turn
     // `[S<n>][T<n>]`, and every write tool takes `S<n>/T<n>`.
-    expect(window).toContain(`[S${sessionDbId}/T1] kind=`);
+    expect(window).toContain(`[S${sessionDbId}/T1]`);
     // The private renderer's own duplicate of a count recall already prints.
     expect(window).not.toContain("tools=");
+    // The retired hole/kind classification (ticket 05) has no fact line any more.
+    expect(window).not.toContain("kind=");
   });
 
   test("a note only `shadow_notes` carries still reaches the model, through the same renderer", () => {

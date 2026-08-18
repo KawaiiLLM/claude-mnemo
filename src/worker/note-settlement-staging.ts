@@ -7,15 +7,8 @@ import {
   assertNoteSettlementJobClaimed,
   completeNoteSettlementJobIfSegmentedCore,
   NoteSettlementJobFenceError,
-  type ElectionCeilingViolation,
   type NoteSettlementCompletionResult,
 } from "../db/note-settlement-completion";
-import {
-  ELECTION_A_SEAT_SHARE,
-  ELECTION_B_SEAT_SHARE,
-  ELECTION_TIERS,
-  type ElectionTier,
-} from "../election";
 import {
   evaluateSettlementMembershipWrite,
   renderSettlementMembershipWriteReceipt,
@@ -138,6 +131,16 @@ import {
  * `commit` is unaffected — it keeps `runWriteTransaction` and still
  * propagates `SQLITE_BUSY` as a tool-call error the model can see and retry,
  * which is out of this finding's scope.
+ *
+ * TICKET 05'S DEMOLITION (ownership-and-note-cadence spec): the completion
+ * gate `attemptCommit` runs (`db/note-settlement-completion.ts`) is now an
+ * empty shell — fence plus CAS, no segmentation/note/coverage/election-
+ * ceiling checks — so a `CommitGateRefused` here is always fence-shaped
+ * (see `describeGateRefusal` below). `assign` retired from the membership
+ * facade (`propose` is the only action), so the membership branch of the
+ * replay loop no longer counts `membersAdded`, and the turn-facade's prose
+ * (title/content/insight) path is gone, so `notesReconstructed`/
+ * `notesYielded` are no longer counted either.
  */
 
 /**
@@ -147,9 +150,6 @@ import {
  * guess about what the model said it would do.
  */
 export interface NoteSettlementCommitCounts {
-  notesReconstructed: number;
-  /** A reconstruction that yielded to an agent note landing first (spec D7's race) — still a real outcome, not a failure. */
-  notesYielded: number;
   /** Turns a `note` call actually carried a review (grade/type/tags) for, landed or yielded. */
   turnsReviewed: number;
   /** Of `turnsReviewed`, how many had their type/tags step aside because an agent note landed after this dispatch's context was read — grade still lands either way. */
@@ -162,36 +162,20 @@ export interface NoteSettlementCommitCounts {
    * is enforced, not merely intended.
    */
   gradeHistogram: number[];
-  /**
-   * Election tier counts (ADR-0003), same "always lands regardless of
-   * written/yielded" reasoning as `gradeHistogram` — a landed review counted
-   * here whenever it carried a tier, because tier (like grade) is judged from
-   * raw material, not the note, so the note-derived yield never touches it.
-   */
-  tierCounts: Record<ElectionTier, number>;
   relationsWritten: number;
-  /** Ticket 08: an `assign` call that actually added a NEW membership row (idempotent re-assigns are not counted twice). */
-  membersAdded: number;
-  /** Ticket 08: a `propose` call that landed a stored proposal. */
+  /** A `propose` call that landed a stored proposal. */
   proposalsCreated: number;
 }
 
 function emptyCommitCounts(): NoteSettlementCommitCounts {
-  // A fresh array every call — the same reason the retired write-back's
-  // EMPTY_COUNTS spread its histogram per use rather than sharing one
-  // reference: this object is mutated in place below, and a shared array
-  // would let every window this process ever commits corrupt every other
-  // window's histogram.
+  // A fresh array/object every call: this is mutated in place below, and a
+  // shared reference would let every window this process ever commits
+  // corrupt every other window's counts.
   return {
-    notesReconstructed: 0,
-    notesYielded: 0,
     turnsReviewed: 0,
     reviewsYieldedToLateNote: 0,
     gradeHistogram: [0, 0, 0, 0, 0],
-    // A fresh object per call, same reasoning as the histogram array above.
-    tierCounts: { A: 0, B: 0, C: 0 },
     relationsWritten: 0,
-    membersAdded: 0,
     proposalsCreated: 0,
   };
 }
@@ -220,27 +204,14 @@ type StagedEntry =
  * the call is malformed enough that no key exists; evaluation refuses it a
  * moment later, and the key is never used.
  *
- * `assign` keys on the (turn, segment) PAIR, not the turn alone (ticket 08):
- * a turn may legitimately belong to more than one segment (db/segments.ts's
- * own many-to-many precedent), so two `assign` calls naming the SAME turn
- * but DIFFERENT segments are two distinct facts that must coexist, while
- * restating the SAME pair is a correction (e.g. a title-only re-send) that
- * replaces cleanly. `propose` keys on its address SET (sorted, so order
- * never matters) — a restated set (even with a different title) corrects the
- * same proposal; a different set is a different cluster.
+ * `assign` is dead (ticket 05) — `propose` is the only action, keyed on its
+ * address SET (sorted, so order never matters): a restated set (even with a
+ * different title) corrects the same proposal; a different set is a
+ * different cluster.
  */
 function membershipStagingKeyOf(
   rawInput: SettlementMembershipWriteInput,
 ): string | null {
-  if (rawInput.action === "assign") {
-    if (!rawInput.turn || rawInput.segmentId === undefined) {
-      return null;
-    }
-    const address = parseTurnAddress(rawInput.turn);
-    return address
-      ? assignStagingKey(`S${address.sessionId}/T${address.promptNumber}`, rawInput.segmentId)
-      : null;
-  }
   if (!rawInput.addresses || rawInput.addresses.length === 0) {
     return null;
   }
@@ -249,9 +220,6 @@ function membershipStagingKeyOf(
 
 function noteStagingKey(ref: string): string {
   return `note:${ref}`;
-}
-function assignStagingKey(ref: string, segmentId: number): string {
-  return `assign:${ref}:E${segmentId}`;
 }
 function proposeStagingKey(addresses: readonly string[]): string {
   const normalized = [...addresses].map((raw) => raw.trim()).sort();
@@ -396,47 +364,15 @@ function runPreviewTransaction<T>(db: Database, fn: () => T): T {
   }
 }
 
-/** ADR-0003: names the ceiling and the count, never a demotion — the model re-ranks. */
-function describeElectionCeilingViolation(violation: ElectionCeilingViolation): string {
-  const sharePercent = Math.round(
-    (violation.tier === "A" ? ELECTION_A_SEAT_SHARE : ELECTION_B_SEAT_SHARE) * 100,
-  );
-  return (
-    `tier ${violation.tier}: ${violation.count} elected exceeds the ceiling ` +
-    `floor(${sharePercent}%·${violation.windowTurns})=${violation.ceiling}`
-  );
-}
-
+/**
+ * The completion gate is an EMPTY SHELL after ticket 05 (see
+ * `db/note-settlement-completion.ts`'s module doc comment) — every reason it
+ * can return is fence-shaped. `commit()`/`previewCommit()` below already
+ * special-case the fence reasons on their own terms; this renders the same
+ * fact in prose for the `CommitGateRefused` path.
+ */
 function describeGateRefusal(result: NoteSettlementCompletionResult): string {
-  switch (result.reason) {
-    case "segmentation-incomplete":
-      return (
-        `this session has ${result.segmentationGaps.length} attached segment(s) ` +
-        `(${result.segmentationGaps.map((id) => `E${id}`).join(", ")}) and this window has not yet ` +
-        "engaged remember(assign)/remember(propose) — stage at least one membership call, then commit again."
-      );
-    case "note-incomplete":
-      return (
-        `${result.noteGaps.length} turn(s) still owe a note: ` +
-        result.noteGaps.map((gap) => `S${gap.sessionId}/T${gap.promptNumber}`).join(", ")
-      );
-    case "coverage-incomplete":
-      return (
-        `${result.coverageGaps.length} turn(s) still have no stated type: ` +
-        result.coverageGaps.map((gap) => `S${gap.sessionId}/T${gap.promptNumber}`).join(", ")
-      );
-    case "election-ceiling-exceeded":
-      return (
-        result.electionCeilingViolations
-          .map(describeElectionCeilingViolation)
-          .join("; ") + " — re-rank and re-stage rather than expecting a mechanical demotion."
-      );
-    case "not-claimed":
-    case "generation-mismatch":
-      return "this dispatch's job lease was reclaimed; no further work will land. Stop making tool calls.";
-    default:
-      return "the window is not yet complete.";
-  }
+  return "this dispatch's job lease was reclaimed; no further work will land. Stop making tool calls.";
 }
 
 export function createSettlementStagingEngine(
@@ -488,10 +424,9 @@ export function createSettlementStagingEngine(
     const nowEpoch = now();
     // Same field-level merge as `stageNoteWrite`, and merged before
     // validation for the same two reasons. The key has to be derivable from
-    // the raw input alone — the (turn, segment) pair for assign, the address
-    // set for propose — because a partial correction is exactly what a merge
-    // exists to allow, and would not survive being validated on its own
-    // first.
+    // the raw input alone — the address set — because a partial correction
+    // is exactly what a merge exists to allow, and would not survive being
+    // validated on its own first.
     const priorKey = membershipStagingKeyOf(rawInput);
     const prior = priorKey === null ? undefined : staged.get(priorKey);
     const mergedInput: SettlementMembershipWriteInput =
@@ -504,10 +439,7 @@ export function createSettlementStagingEngine(
       return parameterError(evaluation.message);
     }
 
-    const key =
-      rawInput.action === "assign"
-        ? assignStagingKey(evaluation.outcome.ref!, evaluation.outcome.segmentId!)
-        : proposeStagingKey(rawInput.addresses ?? []);
+    const key = proposeStagingKey(rawInput.addresses ?? []);
 
     const replaced = staged.has(key);
     staged.set(key, { kind: "membership", input: mergedInput });
@@ -545,11 +477,9 @@ export function createSettlementStagingEngine(
         // commit throws here, before any staged write can land.
         assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
 
-        // Ticket 10c: counted from what this replay ACTUALLY does below, not
-        // from a payload the model sends — see `NoteSettlementCommitCounts`'s
-        // own doc comment and the module doc comment's "TICKET 10C'S
-        // ADDITION" paragraph for why this replaces the retired write-back's
-        // envelope-sourced counters.
+        // Counted from what this replay ACTUALLY does below, not from a
+        // payload the model sends — see `NoteSettlementCommitCounts`'s own
+        // doc comment.
         const counts = emptyCommitCounts();
         for (const entry of snapshot) {
           if (entry.kind === "membership") {
@@ -558,17 +488,10 @@ export function createSettlementStagingEngine(
             });
             if (!evaluation.ok) {
               throw new CommitReplayRefused(
-                `${entry.input.action} ${entry.input.turn ?? entry.input.addresses?.join(",") ?? ""}: ${evaluation.message}`,
+                `propose ${entry.input.addresses?.join(",") ?? ""}: ${evaluation.message}`,
               );
             }
-            const outcome = evaluation.outcome;
-            if (outcome.action === "assign") {
-              if (outcome.added) {
-                counts.membersAdded += 1;
-              }
-            } else {
-              counts.proposalsCreated += 1;
-            }
+            counts.proposalsCreated += 1;
           } else {
             const evaluation = evaluateSettlementTurnWrite(db, context, entry.input, nowEpoch, {
               apply: true,
@@ -577,30 +500,19 @@ export function createSettlementStagingEngine(
               throw new CommitReplayRefused(`note ${entry.input.turn}: ${evaluation.message}`);
             }
             const outcome = evaluation.outcome;
-            if (outcome.prose) {
-              if (outcome.prose.kind === "written") {
-                counts.notesReconstructed += 1;
-              } else {
-                counts.notesYielded += 1;
-              }
-            }
             if (outcome.review) {
               counts.turnsReviewed += 1;
               if (outcome.review.kind === "yielded") {
                 counts.reviewsYieldedToLateNote += 1;
               }
-              // Grade/tier always land regardless of written/yielded — only
-              // the note-derived half (type/tags) stands down on a late agent
+              // Grade always lands regardless of written/yielded — only the
+              // note-derived half (type/tags) stands down on a late agent
               // note (see evaluateSettlementTurnWrite) — so the histogram
               // counts it unconditionally, same as the retired write-back did
               // when grade was a required field on every review directive.
               if (outcome.review.grade !== undefined) {
                 counts.gradeHistogram[outcome.review.grade] =
                   (counts.gradeHistogram[outcome.review.grade] ?? 0) + 1;
-              }
-              if (outcome.review.tier !== undefined) {
-                const tier = outcome.review.tier as ElectionTier;
-                counts.tierCounts[tier] = (counts.tierCounts[tier] ?? 0) + 1;
               }
             }
             if (outcome.relations) {
@@ -692,19 +604,11 @@ export function createSettlementStagingEngine(
       );
     }
 
-    // Ticket 10d: the message must not tell the model to do the
-    // impossible. A GATE GAP (segmentation/note/coverage-incomplete) is
-    // genuinely fixable by staging MORE calls — nothing already staged was
-    // wrong, the window just does not cover itself yet. A FENCE-shaped
-    // refusal (the job's lease is gone — `not-claimed`/`generation-
-    // mismatch`, whether it reaches here as a thrown `NoteSettlementJobFenceError`
-    // or, defensively, as a `CommitGateRefused` whose OWN reason is one of
-    // those two) is different in kind: THIS dispatch's `claimGeneration`
-    // is fixed for its whole life and can never match a newer one, so no
-    // amount of re-staging or re-committing from THIS run will ever
-    // succeed — telling the model to "fill the gap and commit again" here
-    // would be the exact self-contradiction the review found (saying
-    // "commit again" and "stop making tool calls" in the same breath).
+    // The gate is an empty shell after ticket 05 (see db/note-settlement-
+    // completion.ts's module doc comment) — every `CommitGateRefused` it can
+    // throw is fence-shaped (the job's lease is gone), so there is no
+    // "genuinely fixable by staging more" gate refusal left to word
+    // differently from a lost lease.
     if (attempt.kind === "indeterminate") {
       // Never actually reached: `attemptCommit`'s busy-catch only fires for
       // `preview === true` (see its own comment), and `commit()` always
@@ -716,14 +620,7 @@ export function createSettlementStagingEngine(
     }
     const { refusal } = attempt;
     if (refusal.kind === "gate") {
-      if (refusal.result.reason === "not-claimed" || refusal.result.reason === "generation-mismatch") {
-        return textResult(
-          `Commit refused — ${describeGateRefusal(refusal.result)}`,
-        );
-      }
-      return textResult(
-        `Commit refused — ${describeGateRefusal(refusal.result)} Staging kept: fill the gap and call commit again.`,
-      );
+      return textResult(`Commit refused — ${describeGateRefusal(refusal.result)}`);
     }
     if (refusal.kind === "replay") {
       // A REPLAY conflict is a specific staged entry disagreeing with the

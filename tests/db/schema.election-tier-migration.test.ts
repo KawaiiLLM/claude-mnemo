@@ -8,26 +8,24 @@ import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 
 /**
- * ADR-0003 (ticket 06): `turns.election_tier`, the third grading semantics.
+ * `turns.election_tier` (ADR-0003) is RETIRED (ownership-and-note-cadence
+ * spec, ticket 06, "选举机器拆除") — the column no longer appears in
+ * `SCHEMA_SQL`, `ensureTurnElectionTierColumn` is deleted, and neither
+ * `TurnRecord` nor `updateTurnById`'s input carries the field any more. A
+ * fresh database never gets the column.
  *
- * Unlike the `note_settlement_jobs.trigger_type` CHECK-widening family this
- * ticket's own background pointed at (schema.note-settlement-migration.test.ts,
- * the 12-step rebuild + its cascade-delete lesson), `election_tier` is a
- * BRAND NEW column whose CHECK references only itself — the exact shape
- * `significance_grade` already has (`ensureTurnSignificanceGradeColumn`).
- * SQLite's `ALTER TABLE … ADD COLUMN` accepts a self-referencing CHECK
- * without a rebuild, so there is no rename-away step and therefore no
- * cascade-delete hazard to demonstrate for THIS migration specifically — the
- * dependent-row test below exists to prove that claim on real foreign-key
- * shaped data, not to exercise a rebuild that never runs.
- *
- * What DOES rebuild `turns` on a real database — `ensureTurnTypeMultiValueColumn`
- * and `retireTurnCitesRecordedColumn`, both hardcoded column-list rebuilds —
- * had to be taught about `election_tier` too (schema.ts), or
- * `assertNoUnexpectedTurnsColumns` would throw the moment either fires on a
- * database that already carries it (which is every database, since
- * `ensureTurnElectionTierColumn` runs first in `initializeSchema`). The last
- * two tests below force that path and prove the column survives it.
+ * What THIS file exists to prove is the migration-safety half: a database
+ * migrated under a PRE-06 install may still physically carry the column
+ * (added by the now-deleted `ensureTurnElectionTierColumn`), and `turns`'s
+ * two hardcoded-column-list rebuilds (`ensureTurnTypeMultiValueColumn`,
+ * `retireTurnCitesRecordedColumn`) must not throw when they find it — the
+ * `assertNoUnexpectedTurnsColumns` guard those rebuilds run under would
+ * otherwise treat an unlisted-but-present column as a silent-drop hazard and
+ * refuse to proceed (see schema.ts's own doc comment on that guard). Ticket
+ * 06 added `election_tier` to both rebuilds' `droppedColumns` allowlist
+ * specifically so this case is a KNOWN, INTENTIONAL drop rather than an
+ * unaccounted-for column; these tests are the regression coverage for that
+ * fix.
  */
 
 const NOW = 1_800_000_000;
@@ -65,144 +63,26 @@ function seedTurn(sessionDbId: number, promptNumber: number): number {
     .get(sessionDbId, promptNumber, `prompt ${promptNumber}`, NOW)!.id;
 }
 
-describe("a fresh database carries election_tier from creation", () => {
-  test("the column exists, nullable, defaulting to NULL on a new row", () => {
+/** Simulate a pre-06 install: add back the column `ensureTurnElectionTierColumn` used to add. */
+function addStrayElectionTierColumn(target: Database): void {
+  target.exec(
+    `ALTER TABLE turns ADD COLUMN election_tier TEXT CHECK (election_tier IS NULL OR election_tier IN ('A', 'B', 'C'))`,
+  );
+}
+
+describe("a fresh database never carries election_tier", () => {
+  test("the column does not exist, and TurnRecord has no field for it", () => {
     const sessionDbId = seedSession();
     const turnId = seedTurn(sessionDbId, 1);
 
-    expect(getTurnById(db, turnId)!.electionTier).toBeNull();
-  });
-
-  test("the CHECK constraint accepts A/B/C and NULL, and rejects anything else", () => {
-    const sessionDbId = seedSession();
-    const turnId = seedTurn(sessionDbId, 1);
-
-    for (const tier of ["A", "B", "C"]) {
-      expect(() =>
-        db
-          .query<unknown, [string, number]>(
-            "UPDATE turns SET election_tier = ? WHERE id = ?",
-          )
-          .run(tier, turnId),
-      ).not.toThrow();
-    }
-    expect(() =>
-      db
-        .query<unknown, [number]>("UPDATE turns SET election_tier = NULL WHERE id = ?")
-        .run(turnId),
-    ).not.toThrow();
-
-    expect(() =>
-      db
-        .query<unknown, [string, number]>(
-          "UPDATE turns SET election_tier = ? WHERE id = ?",
-        )
-        .run("D", turnId),
-    ).toThrow();
-    expect(() =>
-      db
-        .query<unknown, [string, number]>(
-          "UPDATE turns SET election_tier = ? WHERE id = ?",
-        )
-        .run("a", turnId),
-    ).toThrow();
-  });
-
-  test("updateTurnById writes and clears election_tier independently of significance_grade", () => {
-    const sessionDbId = seedSession();
-    const turnId = seedTurn(sessionDbId, 1);
-
-    updateTurnById(db, turnId, { electionTier: "B" });
-    let turn = getTurnById(db, turnId)!;
-    expect(turn.electionTier).toBe("B");
-    expect(turn.significanceGrade).toBeNull();
-
-    updateTurnById(db, turnId, { significanceGrade: 2 });
-    turn = getTurnById(db, turnId)!;
-    // Omitted field (electionTier) leaves the existing value alone — the
-    // same "undefined = leave alone" contract every other field here has.
-    expect(turn.electionTier).toBe("B");
-    expect(turn.significanceGrade).toBe(2);
-
-    updateTurnById(db, turnId, { electionTier: null });
-    expect(getTurnById(db, turnId)!.electionTier).toBeNull();
-  });
-});
-
-describe("a pre-existing database missing election_tier is migrated without row loss", () => {
-  /**
-   * Simulate a database from before this ticket: the column simply is not
-   * there yet. `ALTER TABLE … DROP COLUMN` is itself the tool being trusted
-   * here, so this fixture goes the other direction from the rename-based
-   * downgrades in schema.note-settlement-migration.test.ts — there is no
-   * rebuild to reverse, only a column to remove.
-   */
-  function downgradeToPreElectionTierSchema(target: Database): void {
-    target.exec("ALTER TABLE turns DROP COLUMN election_tier");
-  }
-
-  test("initializeSchema adds the column back, keeping every existing row and its FK-dependent rows intact", () => {
-    const sessionDbId = seedSession();
-    const turnId = seedTurn(sessionDbId, 1);
-    updateTurnById(db, turnId, { significanceGrade: 3, type: ["design"], tags: ["lease"] });
-
-    // A dependent row via the two live foreign keys onto `turns(id)` this
-    // migration must not disturb: segment membership (segment_members) and
-    // the segment it points at.
-    const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
-    addSegmentMembers(db, segment.id, [turnId], NOW);
-
-    downgradeToPreElectionTierSchema(db);
-    expect(() =>
-      db
-        .query<unknown, [string, number]>(
-          "UPDATE turns SET election_tier = ? WHERE id = ?",
-        )
-        .run("A", turnId),
-    ).toThrow();
-
-    initializeSchema(db);
-
-    // The turn survived, verbatim, with every OTHER field untouched — this
-    // is not a rebuild, so there is no column list that could have silently
-    // dropped anything.
-    const turn = getTurnById(db, turnId)!;
-    expect(turn.electionTier).toBeNull();
-    expect(turn.significanceGrade).toBe(3);
-    expect(turn.type).toEqual(["design"]);
-    expect(turn.tags).toEqual(["lease"]);
-
-    // …and so did the dependent row a cascade would have eaten had this been
-    // a rename-based rebuild instead of a plain ADD COLUMN.
     expect(
-      db
-        .query<{ count: number }, [number]>(
-          "SELECT COUNT(*) AS count FROM segment_members WHERE turn_id = ?",
-        )
-        .get(turnId)!.count,
-    ).toBe(1);
-
-    // The widened column now accepts a real write.
-    updateTurnById(db, turnId, { electionTier: "A" });
-    expect(getTurnById(db, turnId)!.electionTier).toBe("A");
-  });
-
-  test("is idempotent — running the migration twice changes nothing further", () => {
-    const sessionDbId = seedSession();
-    const turnId = seedTurn(sessionDbId, 1);
-    downgradeToPreElectionTierSchema(db);
-
-    initializeSchema(db);
-    const afterFirst = getTurnById(db, turnId);
-
-    initializeSchema(db);
-    initializeSchema(db);
-
-    expect(getTurnById(db, turnId)).toEqual(afterFirst);
+      db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('turns')").all(),
+    ).not.toEqual(expect.arrayContaining([{ name: "election_tier" }]));
+    expect(getTurnById(db, turnId)!).not.toHaveProperty("electionTier");
   });
 });
 
-describe("election_tier survives the turns table's own hardcoded-column-list rebuilds", () => {
+describe("an orphaned election_tier column (a pre-06 install) survives the turns table's own hardcoded-column-list rebuilds without throwing", () => {
   /**
    * Force `ensureTurnTypeMultiValueColumn`'s rebuild to fire by putting
    * `type` back on its pre-ticket-02 scalar shape — the same downgrade
@@ -220,10 +100,14 @@ describe("election_tier survives the turns table's own hardcoded-column-list reb
     target.exec("PRAGMA foreign_keys = ON;");
   }
 
-  test("ensureTurnTypeMultiValueColumn's rebuild carries election_tier through untouched", () => {
+  test("ensureTurnTypeMultiValueColumn's rebuild drops the stray column silently — no throw, every other field and dependent row survives", () => {
     const sessionDbId = seedSession();
     const turnId = seedTurn(sessionDbId, 1);
-    updateTurnById(db, turnId, { electionTier: "C", significanceGrade: 1 });
+    addStrayElectionTierColumn(db);
+    db.query<unknown, [string, number]>(
+      "UPDATE turns SET election_tier = ? WHERE id = ?",
+    ).run("C", turnId);
+    updateTurnById(db, turnId, { significanceGrade: 1 });
     const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
     addSegmentMembers(db, segment.id, [turnId], NOW);
 
@@ -237,11 +121,15 @@ describe("election_tier survives the turns table's own hardcoded-column-list reb
       )
       .get()!.sql;
     expect(staleDdl).not.toContain("CHECK (json_type(type) = 'array')");
+    expect(staleDdl).toContain("election_tier");
 
-    initializeSchema(db);
+    // The load-bearing assertion: no throw. Before ticket 06 added
+    // `election_tier` to `droppedColumns`, this would have thrown
+    // "turns carries column(s) this rebuild does not know about".
+    expect(() => initializeSchema(db)).not.toThrow();
 
     const turn = getTurnById(db, turnId)!;
-    expect(turn.electionTier).toBe("C");
+    expect(turn).not.toHaveProperty("electionTier");
     expect(turn.significanceGrade).toBe(1);
     expect(
       db
@@ -250,21 +138,23 @@ describe("election_tier survives the turns table's own hardcoded-column-list reb
         )
         .get(turnId)!.count,
     ).toBe(1);
-    // The rebuilt table's own DDL states the CHECK this ticket added — proof
-    // the rebuild's hardcoded column list was actually taught about it,
-    // not merely that data happened to survive by accident.
+    // The rebuilt table's own DDL no longer states the retired column — the
+    // drop actually happened, not merely "didn't crash".
     const rebuiltDdl = db
       .query<{ sql: string }, []>(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'turns'",
       )
       .get()!.sql;
-    expect(rebuiltDdl).toContain("election_tier");
+    expect(rebuiltDdl).not.toContain("election_tier");
   });
 
-  test("retireTurnCitesRecordedColumn's rebuild carries election_tier through untouched", () => {
+  test("retireTurnCitesRecordedColumn's rebuild drops the stray column silently — no throw, every other field and dependent row survives", () => {
     const sessionDbId = seedSession();
     const turnId = seedTurn(sessionDbId, 1);
-    updateTurnById(db, turnId, { electionTier: "B" });
+    addStrayElectionTierColumn(db);
+    db.query<unknown, [string, number]>(
+      "UPDATE turns SET election_tier = ? WHERE id = ?",
+    ).run("B", turnId);
     const segment = createSegment(db, { title: "chapter", nowEpoch: NOW });
     addSegmentMembers(db, segment.id, [turnId], NOW);
 
@@ -274,12 +164,14 @@ describe("election_tier survives the turns table's own hardcoded-column-list reb
     db.exec("ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0");
     expect(
       db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('turns')").all(),
-    ).toEqual(expect.arrayContaining([{ name: "cites_recorded" }]));
+    ).toEqual(
+      expect.arrayContaining([{ name: "cites_recorded" }, { name: "election_tier" }]),
+    );
 
-    initializeSchema(db);
+    expect(() => initializeSchema(db)).not.toThrow();
 
     const turn = getTurnById(db, turnId)!;
-    expect(turn.electionTier).toBe("B");
+    expect(turn).not.toHaveProperty("electionTier");
     expect(
       db
         .query<{ count: number }, [number]>(
@@ -287,8 +179,10 @@ describe("election_tier survives the turns table's own hardcoded-column-list reb
         )
         .get(turnId)!.count,
     ).toBe(1);
-    expect(
-      db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('turns')").all(),
-    ).not.toEqual(expect.arrayContaining([{ name: "cites_recorded" }]));
+    const columns = db
+      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('turns')")
+      .all();
+    expect(columns).not.toEqual(expect.arrayContaining([{ name: "cites_recorded" }]));
+    expect(columns).not.toEqual(expect.arrayContaining([{ name: "election_tier" }]));
   });
 });

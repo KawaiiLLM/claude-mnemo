@@ -48,7 +48,6 @@ interface MemberRankFactsRow {
   citedBy: number;
   isDeliveryMember: number;
   filesModifiedCount: number;
-  electionTier: string | null;
 }
 
 /** The fact columns the ORDER BY reads, carried out so a caller can print them. */
@@ -70,14 +69,6 @@ export interface MemberRankFacts {
   /** 1 when this turn belongs to at least one `delivered` segment. */
   isDeliveryMember: number;
   filesModifiedCount: number;
-  /**
-   * Ticket 05 (spec "Judging"/ADR-0003): the settlement election's A/B/C tier,
-   * era-gated at write time — `null` before settlement reaches the turn, or for
-   * a pre-segment-era turn that will never carry one. Read alongside a
-   * segment's state-cited set (`getSegmentCitedTurnIds` below) to admit a
-   * segment's milestone rows: state-cited ∪ A always, B fills remaining budget.
-   */
-  electionTier: string | null;
 }
 
 export interface RankedSegmentMember extends MemberRankFacts {
@@ -127,8 +118,7 @@ const RANK_FACT_COLUMNS = `
      WHERE dm.turn_id = t.id AND ds.status = 'delivered'
    )) AS isDeliveryMember,
   (CASE WHEN json_valid(t.files_modified)
-        THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount,
-  t.election_tier AS electionTier
+        THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount
 `;
 
 /** `RANK_FACT_COLUMNS`' raw `type` text, parsed once for every reader (ticket 02, spec B5). */

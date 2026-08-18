@@ -18,17 +18,27 @@ import {
 } from "../../src/mcp/timeline";
 
 /**
- * Ticket 05 (spec "Tools"/ADR-0006, S15069 T838-T839): `timeline(id="E<n>")`
- * addressing a segment directly, in both views, plus the pure admission
- * function (`selectSegmentMilestoneRows`) both views share with the S<n>
- * era spine's nested rows (see tests/mcp/timeline.era-milestones.test.ts).
+ * `timeline(id="E<n>")` addressing a segment directly, in both views, plus
+ * the pure admission function (`selectSegmentMilestoneRows`) both views
+ * share with the S<n> era spine's nested rows
+ * (see tests/mcp/timeline.era-milestones.test.ts).
+ *
+ * TICKET 06 (ownership-and-note-cadence spec, "选举机器拆除"): the election
+ * A/B-tier half of the admission rule (`election_tier`, `src/election.ts`)
+ * is GONE — dead code cleanup, not a rendering redesign, since tier never
+ * carried real production data. State-citation is the only admission
+ * mechanism left; the tier-specific unit tests below (A-tier admission, the
+ * B-tier budget filler) are removed along with the mechanism, not merely
+ * adjusted — there is nothing left to assert about them. The budget-demote
+ * sweep survives unchanged: it always ran over the SAME `keptAlways` list
+ * this ticket leaves in place, just without a second B-tier list feeding
+ * into it any more.
  */
 
 // ---------------------------------------------------------------------------
 // selectSegmentMilestoneRows — the pure admission mechanism, mutation-tested
-// directly (no DB): state-cited ∪ A-tier admits unconditionally, B-tier fills
-// remaining budget in event order, overflow demotes (drops outright) rather
-// than paginating.
+// directly (no DB): state-cited admits unconditionally; overflow demotes
+// (drops outright) rather than paginating.
 // ---------------------------------------------------------------------------
 
 function fakeMember(
@@ -47,36 +57,28 @@ function fakeMember(
     citedBy: overrides.citedBy ?? 0,
     isDeliveryMember: overrides.isDeliveryMember ?? 0,
     filesModifiedCount: overrides.filesModifiedCount ?? 0,
-    electionTier: overrides.electionTier ?? null,
   };
 }
 
 const FLAT_COST = (): number => 10;
 
 describe("selectSegmentMilestoneRows", () => {
-  test("admits a state-cited member even with no election tier", () => {
+  test("admits a state-cited member", () => {
     const m1 = fakeMember({ turnId: 1 });
     const selection = selectSegmentMilestoneRows([m1], new Set([1]), 1000, FLAT_COST);
     expect(selection.kept.map((row) => row.member.turnId)).toEqual([1]);
     expect(selection.demotedCount).toBe(0);
   });
 
-  test("admits an A-tier member even when not cited", () => {
-    const m1 = fakeMember({ turnId: 1, electionTier: "A" });
-    const selection = selectSegmentMilestoneRows([m1], new Set(), 1000, FLAT_COST);
-    expect(selection.kept.map((row) => row.member.turnId)).toEqual([1]);
-  });
-
-  test("a member with neither citation nor A/B tier is excluded — C-tier and untiered alike", () => {
-    const cTier = fakeMember({ turnId: 1, electionTier: "C" });
-    const untiered = fakeMember({ turnId: 2, electionTier: null });
-    const selection = selectSegmentMilestoneRows([cTier, untiered], new Set(), 1000, FLAT_COST);
+  test("a member with no citation is excluded", () => {
+    const uncited = fakeMember({ turnId: 1 });
+    const selection = selectSegmentMilestoneRows([uncited], new Set(), 1000, FLAT_COST);
     expect(selection.kept).toHaveLength(0);
     expect(selection.demotedCount).toBe(0); // never eligible, so not "demoted" either
   });
 
-  test("a corrector with no citation and no tier is still excluded — correction alone is not an admission signal here", () => {
-    const corrector = fakeMember({ turnId: 1, isCorrector: 1, electionTier: null });
+  test("a corrector with no citation is still excluded — correction alone is not an admission signal here", () => {
+    const corrector = fakeMember({ turnId: 1, isCorrector: 1 });
     const selection = selectSegmentMilestoneRows([corrector], new Set(), 1000, FLAT_COST);
     expect(selection.kept).toHaveLength(0);
   });
@@ -87,40 +89,6 @@ describe("selectSegmentMilestoneRows", () => {
     expect(withCited.kept).toHaveLength(1);
     const withoutCited = selectSegmentMilestoneRows([m1], new Set(), 1000, FLAT_COST);
     expect(withoutCited.kept).toHaveLength(0);
-  });
-
-  test("mutation: disabling the tier branch drops an A-tier-only row (red without it)", () => {
-    const m1 = fakeMember({ turnId: 1, electionTier: "A" });
-    const withTier = selectSegmentMilestoneRows([m1], new Set(), 1000, FLAT_COST);
-    expect(withTier.kept).toHaveLength(1);
-    const withoutTier = selectSegmentMilestoneRows(
-      [{ ...m1, electionTier: null }],
-      new Set(),
-      1000,
-      FLAT_COST,
-    );
-    expect(withoutTier.kept).toHaveLength(0);
-  });
-
-  test("B-tier rows fill only remaining budget, admitted in event order", () => {
-    const always = fakeMember({ turnId: 1, electionTier: "A" }); // cost 10
-    const b1 = fakeMember({ turnId: 2, electionTier: "B" }); // earliest B
-    const b2 = fakeMember({ turnId: 3, electionTier: "B" });
-    const b3 = fakeMember({ turnId: 4, electionTier: "B" }); // latest B
-    // budget 30: always(10) + b1(10) + b2(10) = 30 fits; b3 does not.
-    const selection = selectSegmentMilestoneRows([always, b1, b2, b3], new Set(), 30, FLAT_COST);
-    expect(selection.kept.map((row) => row.member.turnId)).toEqual([1, 2, 3]);
-    expect(selection.demotedCount).toBe(1);
-  });
-
-  test("mutation: the B-filler stops respecting the budget bound if the fill loop ignores it (sanity: a larger budget admits strictly more)", () => {
-    const always = fakeMember({ turnId: 1, electionTier: "A" });
-    const b1 = fakeMember({ turnId: 2, electionTier: "B" });
-    const b2 = fakeMember({ turnId: 3, electionTier: "B" });
-    const tight = selectSegmentMilestoneRows([always, b1, b2], new Set(), 20, FLAT_COST);
-    const loose = selectSegmentMilestoneRows([always, b1, b2], new Set(), 30, FLAT_COST);
-    expect(tight.kept.length).toBeLessThan(loose.kept.length);
-    expect(loose.kept).toHaveLength(3);
   });
 
   test("an over-budget always-admitted set demotes the OLDEST row first — overflow demotes, never paginates", () => {
@@ -138,13 +106,29 @@ describe("selectSegmentMilestoneRows", () => {
     // which is built precisely so every item DOES turn up on some page.
   });
 
-  test("kept rows render in event order, not tier/citation order", () => {
-    const b = fakeMember({ turnId: 1, electionTier: "B" });
-    const a = fakeMember({ turnId: 2, electionTier: "A" });
-    const cited = fakeMember({ turnId: 3 });
-    const selection = selectSegmentMilestoneRows([b, a, cited], new Set([3]), 1000, FLAT_COST);
-    expect(selection.kept.map((row) => row.member.turnId)).toEqual([1, 2, 3]);
-    expect(selection.kept.map((row) => row.ordinal)).toEqual([1, 2, 3]);
+  test("mutation: a larger budget admits strictly more of an over-budget cited set", () => {
+    const m1 = fakeMember({ turnId: 1 });
+    const m2 = fakeMember({ turnId: 2 });
+    const m3 = fakeMember({ turnId: 3 });
+    const cited = new Set([1, 2, 3]);
+    const tight = selectSegmentMilestoneRows([m1, m2, m3], cited, 20, FLAT_COST);
+    const loose = selectSegmentMilestoneRows([m1, m2, m3], cited, 30, FLAT_COST);
+    expect(tight.kept.length).toBeLessThan(loose.kept.length);
+    expect(loose.kept).toHaveLength(3);
+  });
+
+  test("kept rows render in event order, not citation-check order", () => {
+    const uncited = fakeMember({ turnId: 1 });
+    const citedA = fakeMember({ turnId: 2 });
+    const citedB = fakeMember({ turnId: 3 });
+    const selection = selectSegmentMilestoneRows(
+      [uncited, citedA, citedB],
+      new Set([2, 3]),
+      1000,
+      FLAT_COST,
+    );
+    expect(selection.kept.map((row) => row.member.turnId)).toEqual([2, 3]);
+    expect(selection.kept.map((row) => row.ordinal)).toEqual([2, 3]);
   });
 });
 
@@ -163,7 +147,6 @@ describe("timeline(id=\"E<n>\") segment views", () => {
     promptNumber: number,
     options: {
       title?: string | null;
-      electionTier?: "A" | "B" | "C" | null;
       promptText?: string;
       type?: string;
     } = {},
@@ -171,12 +154,12 @@ describe("timeline(id=\"E<n>\") segment views", () => {
     return db
       .query<
         { id: number },
-        [number, number, string, string | null, string | null, number, string]
+        [number, number, string, string | null, number, string]
       >(
         `INSERT INTO turns (
-           session_id, prompt_number, status, type, title, election_tier, created_at_epoch,
+           session_id, prompt_number, status, type, title, created_at_epoch,
            user_prompt, assistant_response, content, files_read, files_modified, tags
-         ) VALUES (?, ?, 'extracted', ?, ?, ?, ?, ?,
+         ) VALUES (?, ?, 'extracted', ?, ?, ?, ?,
                    'assistant response text', 'turn body', '[]', '[]', '[]')
          RETURNING id`,
       )
@@ -185,7 +168,6 @@ describe("timeline(id=\"E<n>\") segment views", () => {
         promptNumber,
         options.type ? JSON.stringify([options.type]) : "[]",
         options.title === undefined ? `title ${promptNumber}` : options.title,
-        options.electionTier ?? null,
         CUTOFF + promptNumber,
         options.promptText ?? `user prompt text ${promptNumber}`,
       )!.id;
@@ -234,12 +216,12 @@ describe("timeline(id=\"E<n>\") segment views", () => {
   });
 
   describe("milestones view", () => {
-    test("minimal row: no tier label, no prompt excerpt, no antecedent counters; the corrector flag and overflow pointer survive", () => {
+    test("minimal row: no grade label, no prompt excerpt, no antecedent counters; the corrector flag and overflow pointer survive", () => {
       const cited = makeTurn(1, { title: "cited state row" });
-      const aTier = makeTurn(2, { title: "an A-tier row", electionTier: "A" });
-      const corrector = makeTurn(3, { title: "corrects an earlier approach", electionTier: "A" });
-      const victim = makeTurn(4, { title: "the superseded attempt" }); // neither cited nor tiered
-      addSegmentMembers(db, segmentId, [cited, aTier, corrector, victim], CUTOFF);
+      const secondCited = makeTurn(2, { title: "a second cited row" });
+      const corrector = makeTurn(3, { title: "corrects an earlier approach" });
+      const victim = makeTurn(4, { title: "the superseded attempt" }); // never cited
+      addSegmentMembers(db, segmentId, [cited, secondCited, corrector, victim], CUTOFF);
       writeMemoryEdges(
         db,
         [
@@ -259,7 +241,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           {
             segmentId,
             expectedRevision: getSegment(db, segmentId)!.revision,
-            content: `Load-bearing: [S${sessionId}/T1].`,
+            content: `Load-bearing: [S${sessionId}/T1], [S${sessionId}/T2], [S${sessionId}/T3].`,
           },
         ],
         { nowEpoch: CUTOFF },
@@ -268,10 +250,10 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       const output = timelineQuery(db, { id: `E${segmentId}`, view: "milestones" });
 
       expect(output).toContain("cited state row");
-      expect(output).toContain("an A-tier row");
+      expect(output).toContain("a second cited row");
       expect(output).toContain("corrects an earlier approach");
-      // Never admitted (no state citation, no election tier) — and there is
-      // no ↳ pull-through mechanism any more to surface it as an antecedent.
+      // Never admitted (no state citation) — and there is no ↳ pull-through
+      // mechanism any more to surface it as an antecedent.
       expect(output).not.toContain("the superseded attempt");
       // No tier/grade label anywhere on a milestone row.
       expect(output).not.toMatch(/G[0-4]/);
@@ -286,7 +268,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(correctorLine).toContain("⚑");
       const nonCorrectorLine = output
         .split("\n")
-        .find((line) => line.includes("an A-tier row"))!;
+        .find((line) => line.includes("a second cited row"))!;
       expect(nonCorrectorLine).not.toContain("⚑");
     });
 
@@ -312,18 +294,18 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(row).toMatch(/\d{2}:\d{2}/);
     });
 
-    test("overflow demotes B-tier rows under a tight budget — never paginates", () => {
-      const always = makeTurn(1, { title: "always admitted row" });
-      const b1 = makeTurn(2, { title: "b row one", electionTier: "B" });
-      const b2 = makeTurn(3, { title: "b row two", electionTier: "B" });
-      addSegmentMembers(db, segmentId, [always, b1, b2], CUTOFF);
+    test("overflow demotes cited rows under a tight budget, oldest first — never paginates", () => {
+      const citedOne = makeTurn(1, { title: "cited row one" }); // oldest, demoted first
+      const citedTwo = makeTurn(2, { title: "cited row two" });
+      const citedThree = makeTurn(3, { title: "cited row three" }); // newest, survives a one-row budget
+      addSegmentMembers(db, segmentId, [citedOne, citedTwo, citedThree], CUTOFF);
       applySegmentWrites(
         db,
         [
           {
             segmentId,
             expectedRevision: getSegment(db, segmentId)!.revision,
-            content: `[S${sessionId}/T1].`,
+            content: `[S${sessionId}/T1], [S${sessionId}/T2], [S${sessionId}/T3].`,
           },
         ],
         { nowEpoch: CUTOFF },
@@ -338,7 +320,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
 
       const oneRowLine = renderSegmentTimeline(roomyView)
         .split("\n")
-        .find((line) => line.includes("always admitted row"))!;
+        .find((line) => line.includes("cited row three"))!;
       const oneRowCost = estimateDiaryTokens(oneRowLine);
 
       const tightView = buildSegmentTimelineView(db, {
@@ -346,13 +328,13 @@ describe("timeline(id=\"E<n>\") segment views", () => {
         view: "milestones",
         pageBudget: oneRowCost + 2,
       });
-      expect(tightView.keptMilestones.map((row) => row.member.turnId)).toEqual([always]);
+      expect(tightView.keptMilestones.map((row) => row.member.turnId)).toEqual([citedThree]);
       expect(tightView.demotedCount).toBe(2);
 
       const rendered = renderSegmentTimeline(tightView);
       expect(rendered).toMatch(/… \+2 more/);
-      expect(rendered).not.toContain("b row one");
-      expect(rendered).not.toContain("b row two");
+      expect(rendered).not.toContain("cited row one");
+      expect(rendered).not.toContain("cited row two");
       // No `page` field on `SegmentTimelineInput` changes this outcome — the
       // milestones view has no pagination parameter to reach the demoted rows.
     });

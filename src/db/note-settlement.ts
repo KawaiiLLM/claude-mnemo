@@ -398,9 +398,10 @@ export interface NoteSettlementWindowOptions {
  *
  * Full 50-turn blocks are cut for EVERY trigger — a backfill that lands 130
  * decided turns at once produces two 50-turn windows plus (at a compact or a
- * sessionend) the 30-turn remainder, rather than one 130-turn payload. Only the
- * remainder is subject to the minimum-window floor, and only `compact`/
- * `sessionend` may take it — `consecutive` never cuts a partial block.
+ * sessionend) the 30-turn remainder, rather than one 130-turn payload. The
+ * remainder is subject to the minimum-window floor with NO exception — see
+ * `remainderFloor` below — and only `compact`/`sessionend` may take it —
+ * `consecutive` never cuts a partial block.
  *
  * `compact` and `sessionend` each narrow the shared decided-prefix default with
  * their OWN frozen boundary (spec D10, ticket 05 — the three trigger types are
@@ -422,9 +423,16 @@ export interface NoteSettlementWindowOptions {
  *     NOT excluded. The frozen value survives only inside the enqueued job's
  *     `window_end`; nothing else persists it, and nothing needs to.
  *
- * `sessionend`'s remainder is additionally EXEMPT from the minimum-window floor
- * (spec D7, 用户定案 T570): a session may end after a single turn, and without
- * the exemption the tail would never be settled at all.
+ * `sessionend`'s remainder exemption from the minimum-window floor is DEAD
+ * (ownership-and-note-cadence spec, ticket 05: "sessionend 豁免死"). A session
+ * ending after fewer than `minWindowTurns` decided turns simply leaves that
+ * tail unsettled — not lost, just left to accumulate: the NEXT trigger for
+ * this session (a later `consecutive`/`compact`, or the residual scan once
+ * the session reads as closed) starts from the same `getNoteSettlementWindowStart`
+ * bound and picks the tail up as part of a larger window. This is the same
+ * "不足者留待累积" acceptance the spec states for every other short tail —
+ * settling six turns cost a whole inference for almost no arc regardless of
+ * WHY the session stopped.
  */
 export function planNoteSettlementWindows(
   db: Database,
@@ -466,7 +474,9 @@ export function planNoteSettlementWindows(
     windowStart = windowEnd + 1;
   }
 
-  const remainderFloor = trigger === "sessionend" ? 1 : minWindowTurns;
+  // Ticket 05: no more per-trigger exemption — every remainder, sessionend
+  // included, is subject to the SAME floor.
+  const remainderFloor = minWindowTurns;
   if (
     (trigger === "compact" || trigger === "sessionend") &&
     prefixEnd - windowStart + 1 >= remainderFloor

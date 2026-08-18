@@ -11,13 +11,10 @@ import {
   getNoteSettlementJob,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import { hasNoteSettlementMembershipActivity } from "../../src/db/note-settlement-completion";
 import { initializeSchema } from "../../src/db/schema";
-import { attachSegmentToSession, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
-import { ELECTION_ERA_CUTOFF_EPOCH } from "../../src/election-era";
 import { createNoteSettlementSdkQuery } from "../../src/worker/note-settlement-sdk-query";
 import {
   createSettlementStagingEngine,
@@ -31,14 +28,23 @@ import type { SettlementTurnFacadeContext } from "../../src/worker/note-settleme
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
- * Ticket 11 (spec G2's first layer, spec A7's accepted cost 2) — the Stop
- * hook an agent meets when it tries to end a settlement run.
+ * The Stop hook an agent meets when it tries to end a settlement run (spec
+ * G2's first layer, A7's accepted cost 2).
  *
  * Under staged commit an agent that stops without calling `commit` has
- * produced literally nothing, so these tests pin the two things that makes
- * load-bearing: the message says so and quotes what `commit` would refuse,
- * and the block is CAPPED — a hook that can refuse a stop forever is a hang,
- * not a safeguard.
+ * produced literally nothing, so these tests pin the two things that make it
+ * load-bearing: the message says so, and the block is CAPPED — a hook that
+ * can refuse a stop forever is a hang, not a safeguard.
+ *
+ * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"): the
+ * completion gate is now an empty shell (fence + CAS only — see
+ * `db/note-settlement-completion.ts`'s module doc comment), so a window with
+ * even ONE staged review call now previews as "would land" — there is no
+ * more "would refuse because the window is incomplete" scenario to
+ * construct (no segmentation/note/coverage/election gap exists any more).
+ * The one remaining "would refuse" shape is a REPLAY conflict (a staged
+ * call's target moved between stage time and the preview), covered in its
+ * own describe block below.
  */
 
 const NOW = 1_800_000_000;
@@ -111,19 +117,14 @@ function baseContext(
     jobId: job.id,
     claimGeneration: job.claimGeneration,
     sessionId: job.sessionId,
-    reconstructableTurnIds: new Set(),
     reviewableTurnIds: new Set(),
-    attachedSegmentIds: new Set(),
     contextBuiltAtEpoch: NOW,
-    rideTurnId: null,
-    writerModel: "claude-sonnet-5",
     eligibleRelationPairKeys: new Set(),
-    eraCutoffEpoch: ELECTION_ERA_CUTOFF_EPOCH,
     ...overrides,
   };
 }
 
-/** Duty 2 (a note on file) without going through the note tool. */
+/** Not required for gate purposes any more (ticket 05) — still a realistic fixture. */
 function markNoted(turnIds: readonly number[]): void {
   for (const turnId of turnIds) {
     upsertShadowNote(db, {
@@ -138,55 +139,26 @@ function markNoted(turnIds: readonly number[]): void {
 interface Run {
   sessionDbId: number;
   turnId: number;
-  segmentId: number;
   job: NoteSettlementJob;
   engine: SettlementStagingEngine;
 }
 
-/**
- * One window, one turn, already noted, ONE segment attached to the session
- * (ticket 08) — so the only gate clauses in play are type and the re-keyed
- * segmentation check (which, with a nonempty attached set, needs at least
- * one `remember` call).
- */
 function startRun(): Run {
   const sessionDbId = seedSession();
   const turnId = seedTurn(sessionDbId, 1);
   markNoted([turnId]);
-  const segment = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
-  attachSegmentToSession(db, sessionDbId, segment.id, NOW - 1000);
   const job = claimWindow(sessionDbId, 1, 1);
   const engine = createSettlementStagingEngine({
     db,
-    context: baseContext(job, {
-      reviewableTurnIds: new Set([turnId]),
-      attachedSegmentIds: new Set([segment.id]),
-    }),
+    context: baseContext(job, { reviewableTurnIds: new Set([turnId]) }),
     now: () => NOW,
   });
-  return { sessionDbId, turnId, segmentId: segment.id, job, engine };
+  return { sessionDbId, turnId, job, engine };
 }
 
-/** Stage exactly what a complete window needs: a review and a membership verdict. */
-function stageCompleteWindow(run: Run): void {
-  run.engine.stageNoteWrite({
-    turn: `S${run.sessionDbId}/T1`,
-    grade: 2,
-    type: ["discuss"],
-    tags: [],
-  });
-  run.engine.stageMembershipWrite({
-    action: "assign",
-    turn: `S${run.sessionDbId}/T1`,
-    segmentId: run.segmentId,
-  });
-}
-
-describe("ticket 11 — an agent stopping without commit is told it has produced nothing (spec A7, G2)", () => {
-  test("the first stop is blocked, and the reason leads with the loss, not with an inventory", async () => {
+describe("an agent stopping without commit is told it has produced nothing (spec A7, G2)", () => {
+  test("the first stop is blocked, the reason leads with the loss, and states commit would LAND it — the gate no longer has an incompleteness reason to name (ticket 05)", async () => {
     const run = startRun();
-    // A review staged and nothing else: real work, none of it durable, and a
-    // window that does not yet cover itself.
     run.engine.stageNoteWrite({
       turn: `S${run.sessionDbId}/T1`,
       grade: 2,
@@ -204,32 +176,37 @@ describe("ticket 11 — an agent stopping without commit is told it has produced
     expect(reason).toContain("Nothing you staged is written");
     expect(reason).toContain("1 staged call");
     expect(reason).toContain("produced NOTHING");
-    // And what `commit` would refuse, quoted from the gate itself — the
-    // attached segment ticket 08's re-keyed check has not been engaged yet.
-    expect(reason).toContain("A `commit` right now would refuse");
-    expect(reason).toContain("attached segment");
-    expect(reason).toContain(`E${run.segmentId}`);
-    expect(reason).toContain("remember(assign)");
-    expect(reason).toContain("then call `commit`");
+    // The empty-shell gate (ticket 05): even a single staged review is
+    // already a committable window — there is no gap to name.
+    expect(reason).toContain("A `commit` right now would land this window. Call it.");
+    expect(reason).not.toContain("would refuse");
   });
 
-  test("when the staged work covers the window, the block says commit would LAND it, and names no gap", async () => {
+  test("a window with a staged propose also previews as landable", async () => {
     const run = startRun();
-    stageCompleteWindow(run);
+    run.engine.stageMembershipWrite({
+      action: "propose",
+      addresses: [`S${run.sessionDbId}/T1`],
+      title: "a lone turn's own task",
+    });
 
     const stop = createSettlementStopHook({ engine: run.engine });
     const decision = await stop();
 
     expect(decision.decision).toBe("block");
     const reason = decision.reason ?? "";
-    expect(reason).toContain("2 staged calls");
+    expect(reason).toContain("1 staged call");
     expect(reason).toContain("A `commit` right now would land this window. Call it.");
-    expect(reason).not.toContain("would refuse");
   });
 
   test("the preview writes NOTHING: the job stays claimed, no staged effect lands, and a real commit still works after it", async () => {
     const run = startRun();
-    stageCompleteWindow(run);
+    run.engine.stageNoteWrite({
+      turn: `S${run.sessionDbId}/T1`,
+      grade: 2,
+      type: ["discuss"],
+      tags: [],
+    });
 
     const stop = createSettlementStopHook({ engine: run.engine });
     const decision = await stop();
@@ -241,8 +218,7 @@ describe("ticket 11 — an agent stopping without commit is told it has produced
     expect(getNoteSettlementJob(db, run.job.id)!.status).toBe("claimed");
     expect(getTurnById(db, run.turnId)!.significanceGrade).toBeNull();
     expect(getTurnById(db, run.turnId)!.type).toEqual([]);
-    expect(hasNoteSettlementMembershipActivity(db, run.job.id)).toBe(false);
-    expect(run.engine.pendingCount()).toBe(2);
+    expect(run.engine.pendingCount()).toBe(1);
     expect(run.engine.getLastCommitMetrics()).toBeNull();
 
     // And the run is not spoiled by having been previewed.
@@ -253,7 +229,12 @@ describe("ticket 11 — an agent stopping without commit is told it has produced
 
   test("a run that already committed is never blocked", async () => {
     const run = startRun();
-    stageCompleteWindow(run);
+    run.engine.stageNoteWrite({
+      turn: `S${run.sessionDbId}/T1`,
+      grade: 2,
+      type: ["discuss"],
+      tags: [],
+    });
     expect(run.engine.commit().content[0]!.text).toContain("Committed");
 
     const stop = createSettlementStopHook({ engine: run.engine });
@@ -264,7 +245,12 @@ describe("ticket 11 — an agent stopping without commit is told it has produced
 
   test("a reclaimed lease is not blocked — no commit from this run could ever succeed", async () => {
     const run = startRun();
-    stageCompleteWindow(run);
+    run.engine.stageNoteWrite({
+      turn: `S${run.sessionDbId}/T1`,
+      grade: 2,
+      type: ["discuss"],
+      tags: [],
+    });
     db.query<unknown, [number]>(
       "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
     ).run(run.job.id);
@@ -276,7 +262,31 @@ describe("ticket 11 — an agent stopping without commit is told it has produced
   });
 });
 
-describe("ticket 11 — the block is capped at two, and the third stop is allowed through (spec G2)", () => {
+describe("the one remaining 'would refuse' shape: a replay conflict (ticket 05 — the gate itself never refuses)", () => {
+  test("a staged review whose turn vanishes before the preview reports commit would REFUSE, quoting the conflict", async () => {
+    const run = startRun();
+    run.engine.stageNoteWrite({
+      turn: `S${run.sessionDbId}/T1`,
+      grade: 2,
+      type: ["discuss"],
+      tags: [],
+    });
+    // The world moves: the staged call's own turn is gone by the time the
+    // preview replays it (a rollback, in production).
+    db.query<unknown, [number]>("DELETE FROM turns WHERE id = ?").run(run.turnId);
+
+    const stop = createSettlementStopHook({ engine: run.engine });
+    const decision = await stop();
+
+    expect(decision.decision).toBe("block");
+    const reason = decision.reason ?? "";
+    expect(reason).toContain("A `commit` right now would refuse");
+    expect(reason).toContain("no turn at");
+    expect(reason).toContain("then call `commit`");
+  });
+});
+
+describe("the block is capped at two, and the third stop is allowed through (spec G2)", () => {
   test("stop 1 and 2 block; stop 3 passes, and so does every stop after it", async () => {
     const run = startRun();
     run.engine.stageNoteWrite({
@@ -290,8 +300,8 @@ describe("ticket 11 — the block is capped at two, and the third stop is allowe
     expect((await stop()).decision).toBe("block");
     expect((await stop()).decision).toBe("block");
     // The cap. Nothing about the run changed between stop 2 and stop 3 — the
-    // window is still uncommitted and still incomplete — so a hook that
-    // decided on state alone would block here forever, which is a hang.
+    // window is still uncommitted — so a hook that decided on state alone
+    // would block here forever, which is a hang.
     expect(await stop()).toEqual({ continue: true });
     expect(await stop()).toEqual({ continue: true });
   });
@@ -306,13 +316,11 @@ describe("ticket 11 — the block is capped at two, and the third stop is allowe
   });
 });
 
-describe("ticket 11 — the hook is registered on the run the tools stage into", () => {
+describe("the hook is registered on the run the tools stage into", () => {
   test("createNoteSettlementSdkQuery passes a Stop hook that sees this request's own staging", async () => {
     const sessionDbId = seedSession();
     const turnId = seedTurn(sessionDbId, 1);
     markNoted([turnId]);
-    const segment = createSegment(db, { title: "chapter", nowEpoch: NOW - 1000 });
-    attachSegmentToSession(db, sessionDbId, segment.id, NOW - 1000);
     const job = claimWindow(sessionDbId, 1, 1);
 
     const toolHandlers = new Map<string, (args: never) => Promise<unknown>>();
@@ -371,20 +379,15 @@ describe("ticket 11 — the hook is registered on the run the tools stage into",
       jobId: job.id,
       claimGeneration: job.claimGeneration,
       sessionId: sessionDbId,
-      reconstructableTurnIds: new Set(),
       reviewableTurnIds: new Set([turnId]),
-      attachedSegmentIds: new Set([segment.id]),
       contextBuiltAtEpoch: NOW,
-      rideTurnId: null,
-      writerModel: "claude-sonnet-5",
       eligibleRelationPairKeys: new Set(),
     });
 
     expect(stopDecision).toBe("block");
     // It saw the staged call the tool handler made — same engine, same run.
     expect(stopReason).toContain("1 staged call");
-    expect(stopReason).toContain("attached segment");
-    expect(stopReason).toContain("remember(assign)");
+    expect(stopReason).toContain("A `commit` right now would land this window. Call it.");
     // And the preview it ran left the job exactly as it found it.
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
     expect(getTurnById(db, turnId)!.significanceGrade).toBeNull();

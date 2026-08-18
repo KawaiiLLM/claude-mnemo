@@ -39,12 +39,6 @@ export interface TurnRecord {
    */
   type: string[];
   significanceGrade: number | null;
-  /**
-   * Election tier A/B/C (ADR-0003, ticket 06) — the third grading semantics,
-   * era-gated against `significanceGrade` above (src/election-era.ts): a
-   * legacy turn carries a grade, a new-era one carries a tier, never both.
-   */
-  electionTier: string | null;
   tags: string[];
   filesRead: string[];
   filesModified: string[];
@@ -77,7 +71,6 @@ interface TurnRow {
   insight: string | null;
   type: string;
   significanceGrade: number | null;
-  electionTier: string | null;
   tags: string | null;
   filesRead: string | null;
   filesModified: string | null;
@@ -106,7 +99,6 @@ const TURN_SELECT = `
     insight,
     type,
     significance_grade AS significanceGrade,
-    election_tier AS electionTier,
     tags,
     files_read AS filesRead,
     files_modified AS filesModified,
@@ -185,8 +177,6 @@ export interface UpdateTurnByIdInput {
    */
   type?: string[];
   significanceGrade?: number | null;
-  /** Undefined = leave alone; `null` = explicit clear; otherwise the new tier (ADR-0003). */
-  electionTier?: string | null;
   transcriptLineStart?: number | null;
   /**
    * Undefined = leave the stored list alone; a defined array (including `[]`)
@@ -245,10 +235,6 @@ export function updateTurnById(
     input.significanceGrade,
     existing.significanceGrade,
   );
-  const mergedElectionTier = resolveNullable(
-    input.electionTier,
-    existing.electionTier,
-  );
   const hasSubstance = mergedTitle !== null || mergedContent !== null;
   const nextStatus =
     input.status ??
@@ -270,7 +256,6 @@ export function updateTurnById(
           string | null,
           string,
           number | null,
-          string | null,
           number | null,
           string,
           string,
@@ -291,7 +276,6 @@ export function updateTurnById(
             insight = ?,
             type = ?,
             significance_grade = ?,
-            election_tier = ?,
             transcript_line_start = ?,
             tags = ?,
             files_read = ?,
@@ -315,7 +299,6 @@ export function updateTurnById(
             insight,
             type,
             significance_grade AS significanceGrade,
-            election_tier AS electionTier,
             transcript_line_start AS transcriptLineStart,
             tags,
             files_read AS filesRead,
@@ -336,7 +319,6 @@ export function updateTurnById(
         mergedInsight,
         stringifyArray(mergedType),
         mergedGrade,
-        mergedElectionTier,
         input.transcriptLineStart ?? existing.transcriptLineStart,
         stringifyArray(nextTags),
         stringifyArray(input.filesRead ?? existing.filesRead),

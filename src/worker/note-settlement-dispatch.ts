@@ -6,10 +6,6 @@ import {
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
   type NoteSettlementJob,
 } from "../db/note-settlement";
-import {
-  computeSettlementSummaryFlags,
-  type NoteSettlementSummaryFlag,
-} from "../db/note-settlement-summary-flags";
 import type { MnemoConfig } from "../shared/config";
 import { DEFAULT_CONFIG } from "../shared/config";
 import {
@@ -27,42 +23,40 @@ import type {
 } from "./note-settlement";
 
 /**
- * The real settlement payload (spec D9, ticket 07; staged by ticket 10b,
- * spec A7): assemble the window's context, run ONE stateless Sonnet call in
- * a subprocess against the staged write tools (`note`/`segment`/`commit`,
- * note-settlement-sdk-query.ts), and read back whatever the run actually
- * landed.
+ * The real settlement payload: assemble the window's context, run ONE
+ * stateless Sonnet call in a subprocess against the staged write tools
+ * (`remember`/`note`/`commit`, note-settlement-sdk-query.ts), and read back
+ * whatever the run actually landed.
  *
- * It plugs into ticket 05's dispatch seam unchanged — `(job) => verdict` — so
- * every scheduling property (lease, generation fence, backoff, cursor) stays
+ * It plugs into the dispatch seam unchanged — `(job) => verdict` — so every
+ * scheduling property (lease, generation fence, backoff, cursor) stays
  * exactly where it was proved. What this module adds is the payload, and its
  * only contract with the machine is the verdict it returns: `ok:false` means the
  * window is unsettled and may be retried, `ok:true` means the window's effects
  * are already durable.
  *
- * TICKET 10B'S CHANGE (spec A7 requirement 9 — "the dispatch stops routing
- * through the write-back"): this module used to parse the model's final
- * reply as a structured envelope and apply it in one write-back transaction.
- * Neither exists any more (ticket 10c deleted `note-settlement-response.ts`
- * and `note-settlement-writeback.ts` outright, on expand-contract — 10b had
- * already made them unreached, 10c is the change that removes them), and
- * this module reads no envelope of any kind — the settlement agent's WORK
+ * This module reads no envelope of any kind — the settlement agent's WORK
  * lands as it happens, one staged tool call at a time, and durability is
  * decided entirely by whether the agent's own `commit` call succeeded
  * (note-settlement-staging.ts), inside the subprocess. This function's whole
  * job after `runQuery` returns is to look: `commit`'s completion gate is the
- * ONLY path that can move a job to `done` (requirement 9), so re-reading the
- * job row is a complete answer to "did this run settle its window" — no
- * parsing, no reconciliation, no replay.
+ * ONLY path that can move a job to `done`, so re-reading the job row is a
+ * complete answer to "did this run settle its window" — no parsing, no
+ * reconciliation, no replay.
  *
- * TICKET 10C'S OWN CHANGE: `metrics()` below used to source
- * `turnsReviewed`/`notesReconstructed`/etc. from that write-back's result —
- * a payload the model has not produced since ticket 10a, so the sink had
- * been reporting zero while real work landed through calls nothing counted.
- * It now reads `commit`'s own replay counts, returned by `runQuery` itself
- * (`NoteSettlementQueryResult.commitMetrics`, sourced from
+ * `metrics()` below reads `commit`'s own replay counts, returned by
+ * `runQuery` itself (`NoteSettlementQueryResult.commitMetrics`, sourced from
  * `note-settlement-staging.ts`'s `getLastCommitMetrics`), which is a fact
  * about what THIS run's `commit` actually landed, never a guess.
+ *
+ * TICKET 05'S DEMOLITION (ownership-and-note-cadence spec): the
+ * summary-contradiction check (`db/note-settlement-summary-flags.ts`) is
+ * DELETED along with the segment-field reading it depended on — settlement
+ * no longer reads a segment's content/insight at all. `reconstructableTurnIds`/
+ * `rideTurnId`/`writerModel` (duty 2's own plumbing) and `attachedSegmentIds`
+ * (the retired `assign` action's scope gate) are gone from the query request
+ * for the same reason: nothing on the other side of the subprocess boundary
+ * reads them any more.
  */
 
 /** Spec D9: settlement runs on Sonnet, by user decision (裁决 10). */
@@ -86,13 +80,8 @@ export interface NoteSettlementQueryRequest {
   jobId: number;
   claimGeneration: number;
   sessionId: number;
-  reconstructableTurnIds: ReadonlySet<number>;
   reviewableTurnIds: ReadonlySet<number>;
-  /** The session's currently attached segment ids — `remember`'s `assign` scope gate (ticket 08, ADR-0002). */
-  attachedSegmentIds: ReadonlySet<number>;
   contextBuiltAtEpoch: number;
-  rideTurnId: number | null;
-  writerModel: string | null;
   /** Relation eligibility, snapshotted ONCE before this call's model run starts (spec C7, requirement 4). */
   eligibleRelationPairKeys: ReadonlySet<string>;
 }
@@ -130,7 +119,6 @@ export interface NoteSettlementWindowMetrics {
   windowEnd: number;
   triggerType: NoteSettlementJob["triggerType"];
   windowTurns: number;
-  interiorHoles: number;
   /** Did the run's own `commit` call land the window (job status read back `done`)? */
   committed: boolean;
   /** This dispatch's own attempt number against the job row (1 = first claim). */
@@ -153,16 +141,6 @@ export interface NoteSettlementWindowMetrics {
    * returned to the agent at any point before this line runs.
    */
   commit: NoteSettlementCommitCounts | null;
-  /**
-   * ADR-0004's settlement flagging (ticket 08) — the settlement report's own
-   * section: attached-segment summary-layer claims (content/insight) this
-   * window's own material contradicts (a citation-less claim, or a cited
-   * turn superseded by a member of THIS window). Flags only, never
-   * rewrites — a flagged summary is repaired by the main agent through
-   * `remember`, the single writer (ADR-0002) stands. Always `[]` when the
-   * run did not commit — nothing new landed to check against.
-   */
-  summaryFlags: NoteSettlementSummaryFlag[];
 }
 
 export type NoteSettlementMetricsSink = (
@@ -176,7 +154,6 @@ export interface CreateNoteSettlementDispatchOptions {
   /** Epoch seconds. */
   now?: () => number;
   model?: string;
-  writerModel?: string | null;
   metrics?: NoteSettlementMetricsSink;
   logger?: NoteSettlementDispatchLogger;
   /**
@@ -243,8 +220,6 @@ export function createNoteSettlementDispatch(
       return { ok: true };
     }
 
-    const rideTurnId =
-      context.windowTurns[context.windowTurns.length - 1]?.turnId ?? null;
     // Requirement 4 (spec C7/C14): taken ONCE, here, before the model run
     // starts — not inside each tool call's own transaction. A pair this
     // dispatch's own tool calls mint during the run must stay ineligible for
@@ -261,14 +236,8 @@ export function createNoteSettlementDispatch(
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: job.sessionId,
-        reconstructableTurnIds: new Set(
-          context.interiorHoles.map((turn) => turn.turnId),
-        ),
         reviewableTurnIds: context.reviewableTurnIds,
-        attachedSegmentIds: context.attachedSegmentIds,
         contextBuiltAtEpoch: context.builtAtEpoch,
-        rideTurnId,
-        writerModel: options.writerModel ?? model,
         eligibleRelationPairKeys,
       });
     } catch (error) {
@@ -293,21 +262,6 @@ export function createNoteSettlementDispatch(
     const settled = getNoteSettlementJob(db, job.id);
     const committed = settled?.status === "done";
 
-    // ADR-0004's flagging half (ticket 08): the settlement report's own
-    // section for attached-segment summary claims the JUST-SETTLED window
-    // contradicts. Computed AFTER commit, over what actually landed — a
-    // refused/uncommitted run has nothing new to flag, and re-reading a
-    // stale segment row against a window that never applied would be
-    // reporting a contradiction settlement itself never got the chance to
-    // create. Never a rewrite (ADR-0004): this is read-only.
-    const summaryFlags: NoteSettlementSummaryFlag[] = committed
-      ? computeSettlementSummaryFlags(
-          db,
-          [...context.attachedSegmentIds],
-          new Set(context.windowTurns.map((turn) => turn.turnId)),
-        )
-      : [];
-
     metrics({
       jobId: job.id,
       sessionId: job.sessionId,
@@ -315,18 +269,16 @@ export function createNoteSettlementDispatch(
       windowEnd: job.windowEnd,
       triggerType: job.triggerType,
       windowTurns: context.windowTurns.length,
-      interiorHoles: context.interiorHoles.length,
       committed,
       attempt: job.attempts,
-      // Abandonment, not convergence (spec A2a, ticket 10c): this attempt
-      // consumed the job's LAST life and still did not commit. The
-      // scheduler's own cursor advance is what actually walks past the
-      // window (db/note-settlement.ts) — this flag only reports that fact
-      // for the operator, from the same `job.attempts` the claim already
+      // Abandonment, not convergence (spec A2a): this attempt consumed the
+      // job's LAST life and still did not commit. The scheduler's own
+      // cursor advance is what actually walks past the window
+      // (db/note-settlement.ts) — this flag only reports that fact for the
+      // operator, from the same `job.attempts` the claim already
       // incremented before this dispatch ran.
       attemptsExhausted: !committed && job.attempts >= maxAttempts,
       commit: committed ? queryResult.commitMetrics : null,
-      summaryFlags,
     });
 
     if (!committed) {

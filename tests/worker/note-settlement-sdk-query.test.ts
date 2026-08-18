@@ -9,7 +9,6 @@ import {
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { getShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
 import { settlementNoteInputShape } from "../../src/mcp/definitions";
 import { createNoteSettlementSdkQuery } from "../../src/worker/note-settlement-sdk-query";
@@ -17,17 +16,22 @@ import { settlementTurnWriteInputShape } from "../../src/worker/note-settlement-
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
- * Ticket 07 (ADR-0007, semantic-container) — the settlement subagent's SDK
- * tool registration (`createNoteSettlementSdkQuery`) had no dedicated test
- * before this file: `note-settlement-call.test.ts` drives the dispatch
- * seam with a directly-supplied `runQuery`, never through this module's own
- * `toolImpl`/`createSdkMcpServerImpl` wiring. This file proves, at the ACTUAL
- * registration seam rather than against the staging engine alone: no `check`
- * tool ever reaches the SDK; the registered `note` tool's shape is the SAME
- * object `mcp/definitions.ts` exports (not a look-alike copy); and a staged
- * write through the real registered handler is invisible until `commit`,
- * exactly like `note-settlement-staging.test.ts`'s acceptance criterion 1,
- * now proven one layer further out.
+ * The settlement subagent's SDK tool registration
+ * (`createNoteSettlementSdkQuery`): `note-settlement-call.test.ts` drives
+ * the dispatch seam with a directly-supplied `runQuery`, never through this
+ * module's own `toolImpl`/`createSdkMcpServerImpl` wiring. This file proves,
+ * at the ACTUAL registration seam rather than against the staging engine
+ * alone: no `check` tool ever reaches the SDK; the registered `note` tool's
+ * shape is the SAME object `mcp/definitions.ts` exports (not a look-alike
+ * copy); and a staged write through the real registered handler is
+ * invisible until `commit`, exactly like `note-settlement-staging.test.ts`'s
+ * acceptance criterion 1, now proven one layer further out.
+ *
+ * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"): the
+ * `NoteSettlementQueryRequest` fixtures below drop `reconstructableTurnIds`/
+ * `attachedSegmentIds`/`rideTurnId`/`writerModel` (all retired), and the
+ * staging-isolation demonstration stages a plain REVIEW call instead of a
+ * reconstruction — title/content/insight are refused outright now.
  */
 
 const NOW = 1_800_000_000;
@@ -114,12 +118,8 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        reconstructableTurnIds: new Set([t1]),
         reviewableTurnIds: new Set([t1]),
-        attachedSegmentIds: new Set(),
         contextBuiltAtEpoch: NOW,
-        rideTurnId: null,
-        writerModel: "claude-sonnet-5",
         eligibleRelationPairKeys: new Set(),
       });
 
@@ -160,12 +160,8 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        reconstructableTurnIds: new Set([t1]),
         reviewableTurnIds: new Set([t1]),
-        attachedSegmentIds: new Set(),
         contextBuiltAtEpoch: NOW,
-        rideTurnId: null,
-        writerModel: "claude-sonnet-5",
         eligibleRelationPairKeys: new Set(),
       });
 
@@ -191,24 +187,19 @@ describe("staging isolation holds through the real registered handlers (ticket 0
         (async function* () {
           const noteReceipt = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T1`,
-            title: "reconstructed via the real tool",
-            content: "Filled in from raw material.",
-            insight: null,
             grade: 2,
             type: ["design"],
             tags: ["lease"],
           })) as { content: Array<{ text: string }> };
           expect(noteReceipt.content[0]!.text).toContain("Staged");
 
-          // Completion gate satisfaction (ticket 08's re-key): this
-          // fixture's session attaches no segment, so the segmentation
-          // check is trivially satisfied without any `remember` call —
-          // unrelated to the note isolation claim this test is about.
+          // The completion gate is an empty shell after ticket 05 (fence +
+          // CAS only) — no membership/coverage call is required for commit
+          // to land this window.
 
           // The load-bearing assertion: nothing landed yet, through the ACTUAL
           // registered handler, not the engine called directly.
           expect(getTurnById(capturedDb, t1)!.significanceGrade).toBeNull();
-          expect(getShadowNote(capturedDb, t1)).toBeNull();
 
           const commitReceipt = (await handlers.get("commit")!({})) as {
             content: Array<{ text: string }>;
@@ -235,18 +226,14 @@ describe("staging isolation holds through the real registered handlers (ticket 0
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        reconstructableTurnIds: new Set([t1]),
         reviewableTurnIds: new Set([t1]),
-        attachedSegmentIds: new Set(),
         contextBuiltAtEpoch: NOW,
-        rideTurnId: null,
-        writerModel: "claude-sonnet-5",
         eligibleRelationPairKeys: new Set(),
       });
 
       // After commit: the write landed for real.
       expect(getTurnById(db, t1)!.significanceGrade).toBe(2);
-      expect(getShadowNote(db, t1)!.title).toBe("reconstructed via the real tool");
+      expect(getTurnById(db, t1)!.type).toEqual(["design"]);
     } finally {
       db?.close();
     }

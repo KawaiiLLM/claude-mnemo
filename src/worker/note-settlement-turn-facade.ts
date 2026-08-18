@@ -2,7 +2,6 @@ import { z } from "zod";
 import type { Database } from "bun:sqlite";
 
 import { isCitationRelation, type CitationRelation } from "../db/citations";
-import { isElectionEra } from "../election-era";
 import {
   getOutgoingEdges,
   pairKey,
@@ -12,7 +11,7 @@ import {
   type WriteEdgeInput,
 } from "../db/memory-edges";
 import { parseBareAddressReference, validateReferences } from "../db/references";
-import { getShadowNote, upsertReconstructedShadowNote } from "../db/shadow-notes";
+import { getShadowNote } from "../db/shadow-notes";
 import { getTurn, updateTurnById } from "../db/turns";
 import { findRetiredTopicTag, retiredTopicTagMessage } from "../shared/tag-stripping";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
@@ -20,56 +19,66 @@ import { settlementNoteInputShape } from "../mcp/definitions";
 import { parseTurnAddress } from "../mcp/note";
 
 /**
- * The settlement turn-write facade (ticket 10a, spec G6/G7/D5/D5a; staged by
- * ticket 10b, spec A7).
+ * The settlement turn-write facade (spec G6/G7/D5/D5a; staged commit per
+ * spec A7).
  *
- * This is "the restricted facade over the shared primitive" 10a's ticket asked
- * for, not the main-agent schema (`mcp/note.ts`) reused raw. Handing
- * settlement that schema would silently grant it `skip`, session fields,
- * `crossSession`, append modes and the main agent's own relation authority —
- * none of which the retiring write-back ever had. What settlement is granted
- * here is deliberately no more than what
- * `worker/note-settlement-writeback.ts` already proved it needed:
+ * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"): duty 2
+ * — turn prose reconstruction (title/content/insight) — retires OUTRIGHT.
+ * "结算不再重建笔记": the prose write path this file used to carry
+ * (`context.reconstructableTurnIds`, `upsertReconstructedShadowNote`,
+ * `context.rideTurnId`, `context.writerModel`) is GONE, not merely unused —
+ * a call naming title/content/insight is now refused loudly rather than
+ * silently ignored, the same "never silent" discipline the retired `topic:`
+ * tag namespace already gets. Grade/type/tags stay reachable through this
+ * same facade — the STRUCTURED correction path (type/tags/relations, and
+ * membership through the sibling `remember` facade) survives; only the
+ * PROSE path is what duty 2 took with it.
  *
- *   - prose (title/content/insight) ONLY for a turn `context.reconstructableTurnIds`
- *     names — the write-back's own reconstruction loop's hole scope — and it
- *     yields to a note the agent landed after the window's context was read,
- *     the exact race `upsertReconstructedShadowNote`'s WHERE clause resolves;
- *   - grade/type/tags ONLY for a turn `context.reviewableTurnIds` names — the
- *     write-back's review-scope check against the window plus its rendered
- *     lookback — and the same "yield to a late agent note" rule for the
- *     note-derived half (type/tags; grade always lands, judged from raw
+ * TICKET 06 (ownership-and-note-cadence spec, "选举机器拆除"): the election
+ * tier (ADR-0003) — the third grading semantics this facade used to accept
+ * alongside `grade`, era-gated by `src/election-era.ts` — is GONE. Settlement
+ * assigns neither grade nor tier as of ticket 05's duty 1 removal; ticket 06
+ * is the storage half, deleting the write surface a model could still
+ * technically reach. `grade` stays reachable (ADR-0003's "significance_grade
+ * 与旧读法保留" — old grade data and its read path are UNRELATED to tier and
+ * are untouched), but era-gating and the tier field itself are gone.
+ *
+ * What is granted here, post-ticket-06:
+ *
+ *   - grade/type/tags ONLY for a turn `context.reviewableTurnIds`
+ *     names — the window plus its rendered lookback — and yields the
+ *     note-derived half (type/tags) to an agent note that landed after this
+ *     dispatch's context was read (grade always lands: judged from raw
  *     material, not from the note);
- *   - a relation ONLY on a pair already present in `context.eligibleRelationPairKeys`
- *     — a snapshot the caller takes ONCE before the model run starts (spec
- *     C7/C14, ticket 07's "a reply cannot create its own eligibility" rule,
- *     generalised from a single transaction's pre-state to a whole run's,
- *     because a run is now many small transactions rather than one).
+ *   - a relation ONLY on a pair already present in
+ *     `context.eligibleRelationPairKeys` — a snapshot the caller takes ONCE
+ *     before the model run starts (spec C7/C14: "a reply cannot create its
+ *     own eligibility", generalised from a single transaction's pre-state to
+ *     a whole run's, because a run is many small transactions rather than
+ *     one).
  *
  * Every field is whole-overwrite when present, omitted-leaves-alone
  * otherwise (spec D5a) — there is no `mode`, because there is no append: a
  * writer that could accumulate onto a field this project cannot audit inside
- * one live agentic run is exactly the G5 replay hazard segment `extend` and
+ * one live agentic run is exactly the replay hazard segment `extend` and
  * session `append` already carry, and this facade does not need to invent a
  * third case of it.
  *
- * TICKET 10B'S CHANGE: this module used to open its own `runWriteTransaction`
- * per call and write immediately. It no longer does. `evaluateSettlementTurnWrite`
- * below is now a plain decision function — every READ it needs (turn lookup,
- * shadow-note freshness, reference resolution) still runs live against the
- * database, because spec A7 requires a staged call to "still validate fully
- * and return a real receipt"; only the WRITES (`updateTurnById`,
- * `upsertReconstructedShadowNote`, `writeMemoryEdges`) are now conditional on
- * `apply: true`. The staging engine (`note-settlement-staging.ts`) calls this
- * function twice for the same intent: once at stage time with `apply: false`
- * (a dry run, for the immediate receipt — A1's actual benefit, preserved),
- * and once inside `commit`'s own transaction with `apply: true` (the write
- * that actually lands, re-evaluated fresh against whatever the database says
- * at that later moment — spec A7's "stage-time validation is feedback,
- * commit-time validation is truth"). There is deliberately no third,
- * separate "apply-only" code path: replaying the SAME evaluation function
- * rather than a cached stage-time decision is what makes commit-time
- * re-validation real rather than cosmetic.
+ * STAGED COMMIT (spec A7): `evaluateSettlementTurnWrite` below is a plain
+ * decision function — every READ it needs (turn lookup, shadow-note
+ * freshness, reference resolution) always runs live against the database,
+ * because a staged call must "still validate fully and return a real
+ * receipt"; only the WRITES (`updateTurnById`, `writeMemoryEdges`) are
+ * conditional on `apply: true`. The staging engine
+ * (`note-settlement-staging.ts`) calls this function twice for the same
+ * intent: once at stage time with `apply: false` (a dry run, for the
+ * immediate receipt), and once inside `commit`'s own transaction with
+ * `apply: true` (the write that actually lands, re-evaluated fresh against
+ * whatever the database says at that later moment — "stage-time validation
+ * is feedback, commit-time validation is truth"). There is deliberately no
+ * third, separate "apply-only" code path: replaying the SAME evaluation
+ * function rather than a cached stage-time decision is what makes
+ * commit-time re-validation real rather than cosmetic.
  */
 
 // ---------------------------------------------------------------------------
@@ -79,28 +88,12 @@ import { parseTurnAddress } from "../mcp/note";
 export interface SettlementTurnFacadeContext {
   jobId: number;
   claimGeneration: number;
-  /** For reference resolution's drop-log prefix only; not an authority gate (ticket 07 retired the exposure ledger). */
+  /** For reference resolution's drop-log prefix only; not an authority gate. */
   sessionId: number;
-  /** The write-back's own reconstruction-loop hole scope. */
-  reconstructableTurnIds: ReadonlySet<number>;
-  /** The write-back's own review-scope check (window plus rendered lookback). */
+  /** The review-scope check (window plus rendered lookback). */
   reviewableTurnIds: ReadonlySet<number>;
-  /**
-   * The session's currently ATTACHED segment ids (ticket 08, ADR-0002) — the
-   * membership facade's own scope gate: `assign` may only target a segment
-   * in this set, matching "membership within attached segments" exactly.
-   * Renamed from the retired segment facade's `exposedSegmentIds` (which
-   * gated `extend` against the 50 most recently active segments, whatever
-   * their attachment); this is narrower and semantically different — the
-   * session's OWN attachment rows (`db/segments.ts`'s `getAttachedSegmentIds`),
-   * not a global recency window.
-   */
-  attachedSegmentIds: ReadonlySet<number>;
   /** When this dispatch's context was read — the note-timestamp fence's boundary. */
   contextBuiltAtEpoch: number;
-  /** Recorded on a reconstruction note, same as the write-back's own `rideTurnId`. */
-  rideTurnId: number | null;
-  writerModel: string | null;
   /**
    * Pair keys (`memory-edges.ts`'s `pairKey`) eligible for a relation on THIS
    * dispatch's whole model run — taken ONCE, before the run starts, by the
@@ -113,14 +106,6 @@ export interface SettlementTurnFacadeContext {
    * writes never enter this set either way.
    */
   eligibleRelationPairKeys: ReadonlySet<string>;
-  /**
-   * The election-era cutoff (ADR-0003, `src/election-era.ts`) this dispatch
-   * runs under — a turn at or after it takes `tier`, a turn before it keeps
-   * `grade`, and a call naming the wrong one for a turn's era is refused.
-   * Threaded explicitly, like every other per-request fact this context
-   * carries, rather than defaulted inside the decision function below.
-   */
-  eraCutoffEpoch: number;
   logger?: Pick<Console, "warn">;
 }
 
@@ -168,8 +153,8 @@ export function parameterError(message: string): ToolTextResult {
 // tags and the four relation fields are the SAME zod objects `noteInputShape`
 // declares, so a contract change to one of those reaches both surfaces from
 // a single edit in `mcp/definitions.ts` — see that shape's own doc comment
-// for which fields are shared and which (title/content, turn, grade/tier)
-// are declared fresh because they describe an operation the main `note` tool
+// for which fields are shared and which (title/content, turn, grade) are
+// declared fresh because they describe an operation the main `note` tool
 // does not have.
 export const settlementTurnWriteInputShape = settlementNoteInputShape;
 
@@ -193,14 +178,9 @@ const RELATION_FIELD_ENTRIES: ReadonlyArray<
   ["dependsOn", "depends-on"],
 ];
 
-export interface ProseOutcome {
-  kind: "written" | "yielded";
-}
-
 export interface ReviewOutcome {
   kind: "written" | "yielded";
   grade?: number;
-  tier?: string;
   type?: string[];
   tags?: string[];
 }
@@ -212,7 +192,6 @@ export interface RelationOutcome {
 export interface SettlementTurnWriteOutcome {
   ref: string;
   turnId: number;
-  prose: ProseOutcome | null;
   review: ReviewOutcome | null;
   relations: RelationOutcome | null;
 }
@@ -353,53 +332,40 @@ export function evaluateSettlementTurnWrite(
   }
   const ref = `S${address.sessionId}/T${address.promptNumber}`;
 
-  const touchesProse =
+  // Ticket 05 (ownership-and-note-cadence spec, "settlement demolition"):
+  // duty 2 — turn prose reconstruction — retires OUTRIGHT. title/content/
+  // insight are refused LOUDLY here rather than silently ignored: the main
+  // agent is the note's sole first-hand writer now, and a settlement call
+  // still naming these fields is a caller running against a contract that no
+  // longer exists, not a no-op.
+  if (
     rawInput.title !== undefined ||
     rawInput.content !== undefined ||
-    rawInput.insight !== undefined;
+    rawInput.insight !== undefined
+  ) {
+    return {
+      ok: false,
+      message:
+        "title/content/insight are no longer settlement's to write — turn " +
+        "prose reconstruction retired with duty 2; the main agent is the " +
+        "note's sole writer. This call may only carry grade/type/tags " +
+        "and/or a relation field.",
+    };
+  }
+
   const touchesReview =
     rawInput.grade !== undefined ||
-    rawInput.tier !== undefined ||
     rawInput.type !== undefined ||
     rawInput.tags !== undefined;
   const relationFields = RELATION_FIELD_ENTRIES.filter(
     ([key]) => (rawInput[key]?.length ?? 0) > 0,
   );
 
-  if (!touchesProse && !touchesReview && relationFields.length === 0) {
+  if (!touchesReview && relationFields.length === 0) {
     return {
       ok: false,
-      message:
-        "at least one of title/content/insight, grade/type/tags, or a relation field is required.",
+      message: "at least one of grade/type/tags, or a relation field is required.",
     };
-  }
-
-  // Requirement 7 (ticket 10a): a reconstruction is a WHOLE-REWRITE write —
-  // this dispatch is filling a hole that has no prior note for the caller to
-  // leave alone — so there is no "omitted means leave alone" reading
-  // available the way `mcp/note.ts`'s own per-field update has for an
-  // EXISTING row. `insight` must still be NAMED, even as `null`, to state
-  // "no insight".
-  if (touchesProse) {
-    if (
-      rawInput.title === undefined ||
-      rawInput.content === undefined ||
-      rawInput.insight === undefined
-    ) {
-      return {
-        ok: false,
-        message:
-          "a reconstruction note requires title, content and insight all named " +
-          "together in one call (insight may be null) — an omitted field is " +
-          "refused, never defaulted to empty.",
-      };
-    }
-    if (rawInput.title.trim() === "") {
-      return { ok: false, message: "title must not be empty." };
-    }
-    if (rawInput.content.trim() === "") {
-      return { ok: false, message: "content must not be empty." };
-    }
   }
 
   let normalizedType: string[] | undefined;
@@ -439,40 +405,6 @@ export function evaluateSettlementTurnWrite(
     return { ok: false, message: `${ref} is a compact marker, not a turn.` };
   }
 
-  let prose: ProseOutcome | null = null;
-  if (touchesProse) {
-    if (!context.reconstructableTurnIds.has(turn.id)) {
-      return {
-        ok: false,
-        message:
-          `${ref} is not a reconstructable hole of this dispatch — prose may ` +
-          "only be written for a turn this window's own backfill scope names.",
-      };
-    }
-    if (options.apply) {
-      const written = upsertReconstructedShadowNote(db, {
-        turnId: turn.id,
-        title: rawInput.title!,
-        content: rawInput.content!,
-        insight: rawInput.insight ?? null,
-        writerModel: context.writerModel,
-        writerOrigin: "settlement",
-        rideTurnId: context.rideTurnId,
-        nowEpoch,
-      });
-      // `upsertReconstructedShadowNote`'s own `WHERE writer_origin != 'agent'`
-      // is the yield: the main agent's own note can land between this job
-      // being claimed and this call landing, and that note wins — a
-      // hindsight reconstruction of the same turn never outranks it.
-      prose = { kind: written ? "written" : "yielded" };
-    } else {
-      // Dry run: mirror the upsert's own WHERE clause by reading the row it
-      // guards against, rather than writing and rolling the effect back.
-      const current = getShadowNote(db, turn.id);
-      prose = { kind: current !== null && current.writerOrigin === "agent" ? "yielded" : "written" };
-    }
-  }
-
   let review: ReviewOutcome | null = null;
   if (touchesReview) {
     if (!context.reviewableTurnIds.has(turn.id)) {
@@ -480,36 +412,8 @@ export function evaluateSettlementTurnWrite(
         ok: false,
         message:
           `${ref} is outside this dispatch's reviewable window (the window ` +
-          "plus its rendered lookback) — grade/tier/type/tags may only be " +
+          "plus its rendered lookback) — grade/type/tags may only be " +
           "written for a turn this prompt actually showed.",
-      };
-    }
-    // ADR-0003: grade and tier are the SAME slot under two different eras'
-    // rules, never both at once, and never the one that does not match this
-    // turn's own era (src/election-era.ts) — checked before either value
-    // touches a row, staged or applied alike.
-    if (rawInput.grade !== undefined && rawInput.tier !== undefined) {
-      return {
-        ok: false,
-        message:
-          `${ref}: grade and tier are mutually exclusive — a turn carries ` +
-          "one or the other, decided by its own era, never both in the same call.",
-      };
-    }
-    const turnIsElectionEra = isElectionEra(
-      turn.createdAtEpoch,
-      context.eraCutoffEpoch,
-    );
-    if (rawInput.tier !== undefined && !turnIsElectionEra) {
-      return {
-        ok: false,
-        message: `${ref} predates this session's election era — state grade (0-4), not tier.`,
-      };
-    }
-    if (rawInput.grade !== undefined && turnIsElectionEra) {
-      return {
-        ok: false,
-        message: `${ref} is in this session's election era — state tier (A/B/C), not grade.`,
       };
     }
     // Re-read fresh, right here, right before the write it guards (the
@@ -519,8 +423,8 @@ export function evaluateSettlementTurnWrite(
     //   2. yield-when-the-document-changed — `type`/`tags` are facts
     //      ABOUT the note, so a review of a turn whose note arrived
     //      during the async gap between claim and this call is a review
-    //      of a document the model never saw. Grade/tier still land: they
-    //      judge what the turn DID, read off raw material no later note
+    //      of a document the model never saw. Grade still lands: it
+    //      judges what the turn DID, read off raw material no later note
     //      can change; only the note-derived half stands down.
     const currentNote = getShadowNote(db, turn.id);
     const noteSupersedesReview =
@@ -529,22 +433,17 @@ export function evaluateSettlementTurnWrite(
       currentNote.updatedAtEpoch >= context.contextBuiltAtEpoch;
 
     if (noteSupersedesReview) {
-      if (
-        options.apply &&
-        (rawInput.grade !== undefined || rawInput.tier !== undefined)
-      ) {
+      if (options.apply && rawInput.grade !== undefined) {
         updateTurnById(db, turn.id, {
           significanceGrade: rawInput.grade,
-          electionTier: rawInput.tier,
           updatedAtEpoch: nowEpoch,
         });
       }
-      review = { kind: "yielded", grade: rawInput.grade, tier: rawInput.tier };
+      review = { kind: "yielded", grade: rawInput.grade };
     } else {
       if (options.apply) {
         updateTurnById(db, turn.id, {
           significanceGrade: rawInput.grade,
-          electionTier: rawInput.tier,
           type: normalizedType,
           tags: rawInput.tags,
           updatedAtEpoch: nowEpoch,
@@ -553,7 +452,6 @@ export function evaluateSettlementTurnWrite(
       review = {
         kind: "written",
         grade: rawInput.grade,
-        tier: rawInput.tier,
         type: normalizedType,
         tags: rawInput.tags,
       };
@@ -613,7 +511,7 @@ export function evaluateSettlementTurnWrite(
     }
   }
 
-  return { ok: true, outcome: { ref, turnId: turn.id, prose, review, relations } };
+  return { ok: true, outcome: { ref, turnId: turn.id, review, relations } };
 }
 
 /**
@@ -632,26 +530,18 @@ export function renderSettlementTurnWriteReceipt(
   if (options.replaced) {
     parts.push(`(replaces the earlier staged call for ${outcome.ref})`);
   }
-  if (outcome.prose) {
-    parts.push(
-      outcome.prose.kind === "written"
-        ? `${verb} reconstruction for ${outcome.ref}${options.staged ? " (pending commit)" : ""}.`
-        : `${outcome.ref} reconstruction ${options.staged ? "would yield" : "yielded"}: an agent note has landed first.`,
-    );
-  }
   if (outcome.review) {
     if (outcome.review.kind === "yielded") {
       parts.push(
-        outcome.review.grade !== undefined || outcome.review.tier !== undefined
+        outcome.review.grade !== undefined
           ? `${outcome.ref} review ${options.staged ? "would yield" : "yielded"} (an agent note landed after this dispatch's ` +
-              `context was read) — ${outcome.review.tier !== undefined ? "tier" : "grade"} recorded, type/tags left as the agent's own.`
+              "context was read) — grade recorded, type/tags left as the agent's own."
           : `${outcome.ref} review ${options.staged ? "would yield" : "yielded"} (an agent note landed after this dispatch's ` +
               "context was read) — nothing to write.",
       );
     } else {
       const bits: string[] = [];
       if (outcome.review.grade !== undefined) bits.push(`grade ${outcome.review.grade}`);
-      if (outcome.review.tier !== undefined) bits.push(`tier ${outcome.review.tier}`);
       if (outcome.review.type !== undefined)
         bits.push(`type ${outcome.review.type.length > 0 ? outcome.review.type.join(",") : "(none)"}`);
       if (outcome.review.tags !== undefined)

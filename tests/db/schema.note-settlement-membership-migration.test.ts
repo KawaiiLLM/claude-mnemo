@@ -8,10 +8,6 @@ import {
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import {
-  hasNoteSettlementMembershipActivity,
-  recordNoteSettlementMembershipActivity,
-} from "../../src/db/note-settlement-completion";
-import {
   listRecentSettlementProposals,
   recordNoteSettlementProposal,
 } from "../../src/db/note-settlement-proposals";
@@ -20,16 +16,45 @@ import { upsertSession } from "../../src/db/sessions";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
- * Ticket 08 (ADR-0002): two brand-new tables — `note_settlement_membership_activity`
- * (the re-keyed completion gate's own positive fact) and
- * `note_settlement_proposals` (homeless-cluster proposals). Both are new
+ * `note_settlement_membership_activity` and `note_settlement_proposals`: two
  * tables reached through `CREATE TABLE IF NOT EXISTS`, the same migration
- * shape `segment_attachments`/`note_settlement_segment_exclusions` used
- * (see schema.segment-working-state-migration.test.ts) — no 12-step rebuild,
- * because nothing existing is altered.
+ * shape `segment_attachments` used — no 12-step rebuild, because nothing
+ * existing is altered.
+ *
+ * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"): the
+ * CODE that read/wrote `note_settlement_membership_activity`
+ * (`recordNoteSettlementMembershipActivity`/`hasNoteSettlementMembershipActivity`,
+ * `db/note-settlement-completion.ts`) is gone — the re-keyed completion gate
+ * it served retired along with `assign` and duty 1/2. The table's DDL itself
+ * is deliberately left in schema.ts (out of this ticket's authorised
+ * territory: schema.ts is scoped to the turns-table `election_tier` region
+ * only) — an orphaned, harmless table, exercised here directly through SQL
+ * rather than through the deleted convenience functions, so this file still
+ * proves the migration itself (creation, idempotency, cascade) rather than
+ * asserting on code that no longer exists. `note_settlement_proposals`
+ * (`propose`'s own storage) is UNCHANGED by ticket 05 and keeps its real
+ * reader/writer functions.
  */
 
 const NOW = 1_800_000_000;
+
+function recordMembershipActivity(db: Database, jobId: number, nowEpoch: number): void {
+  db.query<unknown, [number, number]>(
+    `INSERT INTO note_settlement_membership_activity (job_id, recorded_at_epoch)
+     VALUES (?, ?)
+     ON CONFLICT (job_id) DO NOTHING`,
+  ).run(jobId, nowEpoch);
+}
+
+function hasMembershipActivity(db: Database, jobId: number): boolean {
+  return (
+    db
+      .query<{ jobId: number }, [number]>(
+        "SELECT job_id AS jobId FROM note_settlement_membership_activity WHERE job_id = ?",
+      )
+      .get(jobId) !== null
+  );
+}
 
 function downgrade(db: Database): void {
   db.exec(`
@@ -48,7 +73,7 @@ function tableExists(db: Database, name: string): boolean {
   );
 }
 
-describe("note_settlement_membership_activity / note_settlement_proposals migration (ticket 08)", () => {
+describe("note_settlement_membership_activity / note_settlement_proposals migration", () => {
   let db: Database;
   let sessionId: number;
   let job: NoteSettlementJob;
@@ -92,9 +117,9 @@ describe("note_settlement_membership_activity / note_settlement_proposals migrat
     expect(tableExists(db, "note_settlement_membership_activity")).toBe(true);
     expect(tableExists(db, "note_settlement_proposals")).toBe(true);
 
-    // Idempotent: writing through both new surfaces, then re-running the
+    // Idempotent: writing through both surfaces, then re-running the
     // migration twice more, changes nothing.
-    recordNoteSettlementMembershipActivity(db, job.id, NOW);
+    recordMembershipActivity(db, job.id, NOW);
     recordNoteSettlementProposal(db, {
       jobId: job.id,
       sessionId,
@@ -106,7 +131,7 @@ describe("note_settlement_membership_activity / note_settlement_proposals migrat
     initializeSchema(db);
     initializeSchema(db);
 
-    expect(hasNoteSettlementMembershipActivity(db, job.id)).toBe(true);
+    expect(hasMembershipActivity(db, job.id)).toBe(true);
     expect(listRecentSettlementProposals(db, 3)).toHaveLength(1);
   });
 
@@ -119,7 +144,7 @@ describe("note_settlement_membership_activity / note_settlement_proposals migrat
   });
 
   test("both rows cascade-delete when their job is deleted", () => {
-    recordNoteSettlementMembershipActivity(db, job.id, NOW);
+    recordMembershipActivity(db, job.id, NOW);
     recordNoteSettlementProposal(db, {
       jobId: job.id,
       sessionId,
@@ -130,7 +155,7 @@ describe("note_settlement_membership_activity / note_settlement_proposals migrat
 
     db.query<unknown, [number]>("DELETE FROM note_settlement_jobs WHERE id = ?").run(job.id);
 
-    expect(hasNoteSettlementMembershipActivity(db, job.id)).toBe(false);
+    expect(hasMembershipActivity(db, job.id)).toBe(false);
     expect(listRecentSettlementProposals(db, 3)).toHaveLength(0);
   });
 });

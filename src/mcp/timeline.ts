@@ -3754,23 +3754,24 @@ function sumRowTokens(
 }
 
 /**
- * Ticket 05 (spec "Tools"/ADR-0006, S15069 T838-T839): the segment milestone
- * view's admission rule — the lossy skeleton, where "every row matters,
- * overflow demotes, never paginates" (as opposed to the turn view's lossless
- * ledger, which paginates and never filters).
+ * The segment milestone view's admission rule — the lossy skeleton, where
+ * "every row matters, overflow demotes, never paginates" (as opposed to the
+ * turn view's lossless ledger, which paginates and never filters).
  *
  * State-cited (a turn the segment's own Working State/summary fields cite —
- * `citedTurnIds`, from `getSegmentCitedTurnIds`) and A-tier rows are admitted
- * UNCONDITIONALLY, in event order. B-tier rows fill whatever budget remains,
- * also in event order — settlement's election carries no finer intra-tier
- * rank than A/B/C (ADR-0003), so event order is the one deterministic
- * ordering available to fall back on ("election order").
+ * `citedTurnIds`, from `getSegmentCitedTurnIds`) rows are admitted
+ * UNCONDITIONALLY, in event order. Overflow demotes rather than paginates:
+ * once the budget is exceeded, rows give way oldest first ("lowest-value...
+ * by recency" — the newest cited row is the one most likely to still
+ * matter).
  *
- * Overflow demotes rather than paginates: a B-tier row that does not fit is
- * simply never admitted (nowhere else to find it — this is the skeleton, not
- * the ledger), and only once every B-tier candidate is gone does the
- * always-admitted set itself give way, oldest first ("lowest-value... by
- * recency" — the newest cited/A row is the one most likely to still matter).
+ * TICKET 06 (ownership-and-note-cadence spec, "选举机器拆除"): the election
+ * A/B tier admission this function used to layer on top of state-citation
+ * (A always-admitted, B fills remaining budget) is DEAD CODE CLEANUP, not a
+ * rendering redesign — `election_tier` never carried real production data
+ * (the era cutoff was never pinned), so the tier-filtered sets were always
+ * empty and this function's OUTPUT for every real row is unchanged. What
+ * remains is state-citation alone.
  *
  * Pure and rendering-agnostic: `measureRow` is the caller's own token cost for
  * one rendered row (title-cap-dependent, a render-time concern — see
@@ -3786,12 +3787,7 @@ export function selectSegmentMilestoneRows(
     member,
     ordinal: index + 1,
   }));
-  const always = rows.filter(
-    (row) => citedTurnIds.has(row.member.turnId) || row.member.electionTier === "A",
-  );
-  const bTier = rows.filter(
-    (row) => row.member.electionTier === "B" && !citedTurnIds.has(row.member.turnId),
-  );
+  const always = rows.filter((row) => citedTurnIds.has(row.member.turnId));
 
   let demoted = 0;
   const keptAlways = [...always];
@@ -3805,19 +3801,7 @@ export function selectSegmentMilestoneRows(
     demoted += 1;
   }
 
-  let used = sumRowTokens(keptAlways, measureRow);
-  const keptB: SegmentMilestoneRow[] = [];
-  for (const row of bTier) {
-    const cost = measureRow(row);
-    if (used + cost <= budgetTokens) {
-      keptB.push(row);
-      used += cost;
-    } else {
-      demoted += 1;
-    }
-  }
-
-  const keptOrdinals = new Set([...keptAlways, ...keptB].map((row) => row.ordinal));
+  const keptOrdinals = new Set(keptAlways.map((row) => row.ordinal));
   const kept = rows.filter((row) => keptOrdinals.has(row.ordinal));
   return { kept, demotedCount: demoted };
 }

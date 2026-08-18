@@ -17,11 +17,11 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
-import { ELECTION_ERA_CUTOFF_EPOCH } from "../../src/election-era";
 import {
   evaluateSettlementTurnWrite,
   renderSettlementTurnWriteReceipt,
   settlementTurnWriteInputShape,
+  settlementTurnWriteInputSchema,
   type SettlementTurnFacadeContext,
   type SettlementTurnWriteEvaluation,
   type SettlementTurnWriteInput,
@@ -29,15 +29,18 @@ import {
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
- * Ticket 10a (spec G6/G7, D5/D5a, C7/C14), staged by ticket 10b (spec A7) —
- * the settlement turn-write facade's DECISION function,
- * `evaluateSettlementTurnWrite`. This file used to drive the facade's own
- * write tool directly, which wrote immediately; ticket 10b removed that tool
- * (staging now owns the actual write, in `note-settlement-staging.ts`) and
- * split the facade into a pure decision function called twice — once with
+ * The settlement turn-write facade's DECISION function,
+ * `evaluateSettlementTurnWrite` (spec G6/G7, D5/D5a, C7/C14; staged by spec
+ * A7). Split into a pure decision function called twice — once with
  * `apply: false` (a dry run, exercised by the "stage vs apply" describe
- * block below) and once with `apply: true` (everywhere else in this file,
- * which is the direct descendant of what the old immediate-write tool did).
+ * block below) and once with `apply: true` (everywhere else in this file).
+ *
+ * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"): duty
+ * 2 (turn prose reconstruction) retired outright. The old
+ * `reconstructableTurnIds`/`rideTurnId`/`writerModel` context fields and the
+ * whole "prose is writable only for reconstructable holes" describe block
+ * are gone; a call naming title/content/insight is now refused outright
+ * (see the "title/content/insight are refused outright" describe block).
  *
  * The ownership-fence test that used to live here moved to
  * `note-settlement-staging.test.ts`: the fence is no longer this function's
@@ -115,19 +118,9 @@ function baseContext(
     jobId: job.id,
     claimGeneration: job.claimGeneration,
     sessionId: job.sessionId,
-    reconstructableTurnIds: new Set(),
     reviewableTurnIds: new Set(),
-    exposedSegmentIds: new Set(),
     contextBuiltAtEpoch: NOW,
-    rideTurnId: null,
-    writerModel: "claude-sonnet-5",
     eligibleRelationPairKeys: new Set(),
-    // Every fixture turn in this file is seeded around NOW (~1.8B), well
-    // below the placeholder election-era constant (~1.95B) — so the DEFAULT
-    // here keeps every pre-existing grade-based test on the legacy side,
-    // unchanged. The "election tier" describe block below overrides this
-    // directly to move individual turns to either side of the boundary.
-    eraCutoffEpoch: ELECTION_ERA_CUTOFF_EPOCH,
     ...overrides,
   };
 }
@@ -257,25 +250,6 @@ describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A
     expect(turn.tags).toEqual([]);
   });
 
-  test("a reconstruction dry run reports it would write without creating a shadow note", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const context = baseContext(job, { reconstructableTurnIds: new Set([t1]) });
-
-    const evaluation = evaluateSettlementTurnWrite(
-      db,
-      context,
-      { turn: `S${sessionDbId}/T1`, title: "a title", content: "some content", insight: null },
-      NOW,
-      { apply: false },
-    );
-
-    expect(evaluation.ok).toBe(true);
-    expect(evaluation.ok && evaluation.outcome.prose).toEqual({ kind: "written" });
-    expect(getShadowNote(db, t1)).toBeNull();
-  });
-
   test("a relation dry run reports what would be attached without writing an edge", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
@@ -335,59 +309,52 @@ describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A
 });
 
 // ---------------------------------------------------------------------------
-// Requirement 4: prose only for reconstructable holes, yields to a late note
+// Ticket 05 (ownership-and-note-cadence spec, "settlement demolition"): duty
+// 2 (turn prose reconstruction) is gone. title/content/insight are refused
+// LOUDLY — never silently ignored — and nothing lands.
 // ---------------------------------------------------------------------------
 
-describe("prose is writable only for this dispatch's reconstructable holes (requirement 4)", () => {
-  test("refuses a title/content/insight write for a turn outside reconstructableTurnIds", () => {
+describe("title/content/insight are refused outright (duty 2 retired, ticket 05)", () => {
+  test("refuses a call naming all three prose fields, and nothing lands", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
     const result = write(
-      baseContext(job, { reconstructableTurnIds: new Set() }),
+      baseContext(job),
       {
         turn: `S${sessionDbId}/T1`,
         title: "should be refused",
-        content: "not an owed hole",
+        content: "prose reconstruction is retired",
         insight: null,
       },
       NOW,
     );
 
     expect(resultText(result)).toContain("Parameter error");
-    expect(resultText(result)).toContain("not a reconstructable hole");
+    expect(resultText(result)).toContain("no longer settlement's to write");
     expect(getShadowNote(db, t1)).toBeNull();
   });
 
-  test("writes a reconstruction note for a turn the dispatch names as a hole", () => {
+  test("refuses a call naming just one prose field, even alongside a legal review field", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
     const result = write(
-      baseContext(job, { reconstructableTurnIds: new Set([t1]) }),
-      {
-        turn: `S${sessionDbId}/T1`,
-        title: "research+lease: reconstructed from raw material",
-        content: "Backfilled by settlement.",
-        insight: null,
-      },
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { turn: `S${sessionDbId}/T1`, title: "a lone title", grade: 2 },
       NOW,
     );
 
-    expect(resultText(result)).toContain("reconstruction");
-    const note = getShadowNote(db, t1)!;
-    expect(note.writerOrigin).toBe("settlement");
-    expect(note.title).toContain("reconstructed from raw material");
+    expect(resultText(result)).toContain("Parameter error");
+    expect(getTurnById(db, t1)!.significanceGrade).toBeNull();
   });
 
-  test("yields to a note the main agent landed after this dispatch's context was read", () => {
+  test("an existing agent note is left untouched by a refused prose call", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    // The agent's own note lands (writer_origin='agent') — the exact race
-    // spec D7 requires a winner for.
     upsertShadowNote(db, {
       turnId: t1,
       title: "agent's own title",
@@ -396,19 +363,13 @@ describe("prose is writable only for this dispatch's reconstructable holes (requ
     });
 
     const result = write(
-      baseContext(job, { reconstructableTurnIds: new Set([t1]) }),
-      {
-        turn: `S${sessionDbId}/T1`,
-        title: "settlement's reconstruction, too late",
-        content: "The agent already answered.",
-        insight: null,
-      },
+      baseContext(job),
+      { turn: `S${sessionDbId}/T1`, title: "settlement trying to overwrite", content: "x", insight: null },
       NOW,
     );
 
-    expect(resultText(result)).toContain("yielded");
+    expect(resultText(result)).toContain("Parameter error");
     const note = getShadowNote(db, t1)!;
-    expect(note.writerOrigin).toBe("agent");
     expect(note.title).toBe("agent's own title");
   });
 });
@@ -685,58 +646,6 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
 });
 
 // ---------------------------------------------------------------------------
-// Requirement 7: an omitted whole-rewrite field is refused, never defaulted
-// ---------------------------------------------------------------------------
-
-describe("an omitted whole-rewrite field is refused, never defaulted to empty (requirement 7)", () => {
-  test("refuses a prose write missing insight, even though title and content are present", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    const result = write(
-      baseContext(job, { reconstructableTurnIds: new Set([t1]) }),
-      { turn: `S${sessionDbId}/T1`, title: "a title", content: "some content" },
-      NOW,
-    );
-
-    expect(resultText(result)).toContain("Parameter error");
-    expect(resultText(result)).toContain("omitted field is refused");
-    expect(getShadowNote(db, t1)).toBeNull();
-  });
-
-  test("refuses a prose write missing content", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    const result = write(
-      baseContext(job, { reconstructableTurnIds: new Set([t1]) }),
-      { turn: `S${sessionDbId}/T1`, title: "a title", insight: null },
-      NOW,
-    );
-
-    expect(resultText(result)).toContain("Parameter error");
-    expect(getShadowNote(db, t1)).toBeNull();
-  });
-
-  test("accepts insight explicitly null — naming 'no insight' is not the same as omitting the key", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    const result = write(
-      baseContext(job, { reconstructableTurnIds: new Set([t1]) }),
-      { turn: `S${sessionDbId}/T1`, title: "a title", content: "some content", insight: null },
-      NOW,
-    );
-
-    expect(resultText(result)).not.toContain("Parameter error");
-    expect(getShadowNote(db, t1)!.insight).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
 // A parameter-shape sanity check independent of the acceptance criteria list
 // ---------------------------------------------------------------------------
 
@@ -762,101 +671,26 @@ describe("call shape", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0003: election tier is the third grading semantics, era-gated against
-// grade — never both on the same turn, and never the one that does not
-// match this turn's own era.
+// Ticket 06 (ownership-and-note-cadence spec, "选举机器拆除"): the election
+// tier (ADR-0003) is retired outright — `tier` is no longer a field this
+// facade accepts, there is no more era-gating, and `grade` alone survives.
+// The describe block that used to live here (era-gated tier election,
+// grade/tier mutual exclusivity) tested a mechanism that no longer exists;
+// ordinary grade writing is already covered by "writes grade/type/tags whole
+// for a reviewable turn" above.
 // ---------------------------------------------------------------------------
 
-describe("election tier is era-gated against grade (ADR-0003)", () => {
-  /** Below every seeded turn's createdAtEpoch (NOW - 1000 + promptNumber), so the turn reads as new-era. */
-  const NEW_ERA_CUTOFF = NOW - 2_000;
-
-  test("elects a tier for a new-era turn and persists it", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const context = baseContext(job, {
-      reviewableTurnIds: new Set([t1]),
-      eraCutoffEpoch: NEW_ERA_CUTOFF,
-    });
-
-    const result = write(
-      context,
-      { turn: `S${sessionDbId}/T1`, tier: "A", type: ["design"], tags: ["widgets"] },
-      NOW,
-    );
-
-    expect(resultText(result)).not.toContain("Parameter error");
-    expect(resultText(result)).toContain("tier A");
-    const turn = getTurnById(db, t1)!;
-    expect(turn.electionTier).toBe("A");
-    expect(turn.significanceGrade).toBeNull();
+describe("tier is not a field this facade accepts any more (ticket 06)", () => {
+  test("a call naming tier is refused as an unknown field by the strict schema", () => {
+    expect(
+      settlementTurnWriteInputSchema.safeParse({
+        turn: "S1/T1",
+        tier: "A",
+      }).success,
+    ).toBe(false);
   });
 
-  test("refuses a tier on a legacy-era turn, naming the era", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    // Default context: eraCutoffEpoch is the placeholder constant, well above
-    // this fixture's NOW — the turn is legacy.
-    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
-
-    const result = write(context, { turn: `S${sessionDbId}/T1`, tier: "B" }, NOW);
-
-    expect(resultText(result)).toContain("Parameter error");
-    expect(resultText(result)).toContain("predates this session's election era");
-    expect(getTurnById(db, t1)!.electionTier).toBeNull();
-  });
-
-  test("refuses a grade on a new-era turn, naming the era", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const context = baseContext(job, {
-      reviewableTurnIds: new Set([t1]),
-      eraCutoffEpoch: NEW_ERA_CUTOFF,
-    });
-
-    const result = write(context, { turn: `S${sessionDbId}/T1`, grade: 3 }, NOW);
-
-    expect(resultText(result)).toContain("Parameter error");
-    expect(resultText(result)).toContain("state tier (A/B/C), not grade");
-    expect(getTurnById(db, t1)!.significanceGrade).toBeNull();
-  });
-
-  test("refuses grade and tier together on the same call, whatever the turn's era", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const context = baseContext(job, {
-      reviewableTurnIds: new Set([t1]),
-      eraCutoffEpoch: NEW_ERA_CUTOFF,
-    });
-
-    const result = write(
-      context,
-      { turn: `S${sessionDbId}/T1`, grade: 2, tier: "A" },
-      NOW,
-    );
-
-    expect(resultText(result)).toContain("Parameter error");
-    expect(resultText(result)).toContain("mutually exclusive");
-    const turn = getTurnById(db, t1)!;
-    expect(turn.significanceGrade).toBeNull();
-    expect(turn.electionTier).toBeNull();
-  });
-
-  test("keeps grading a legacy-era turn exactly as before — the default path is unchanged", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
-
-    const result = write(context, { turn: `S${sessionDbId}/T1`, grade: 2 }, NOW);
-
-    expect(resultText(result)).not.toContain("Parameter error");
-    const turn = getTurnById(db, t1)!;
-    expect(turn.significanceGrade).toBe(2);
-    expect(turn.electionTier).toBeNull();
+  test("settlementTurnWriteInputShape declares no tier field", () => {
+    expect(Object.keys(settlementTurnWriteInputShape)).not.toContain("tier");
   });
 });

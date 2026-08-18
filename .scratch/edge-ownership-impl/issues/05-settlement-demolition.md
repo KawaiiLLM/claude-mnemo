@@ -12,9 +12,11 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 一个只含检查语义的窗口能正常完成;<20 turn 不唤起
-- [ ] propose 单 turn 可提;渲染为文本,无库对象
-- [ ] 段字段三件套删除后全套件绿(既有 bundle 守卫除外)
-- [ ] 结算上下文含名册、不含任何段字段
+**Implementation record:** 完成门缩为 fence+CAS 空壳(`db/note-settlement-completion.ts` 512 行→约 190 行),移除 segmentation/note/coverage/election-ceiling 四类拒绝原因。duty1(ELECTION_RANKING_RUBRIC)、duty2(reconstruction,title/content/insight 现被显式拒绝而非静默忽略)整体移出 prompt 与 context(`interiorHoles`/`rawMaterial`/`NoteSettlementTurnKind` 删除)。`assign` 从 membership facade 退役,`propose` 门槛 2→1、不再记录 completion 活动。段字段读面(`note-settlement-summary-flags.ts`+测试)删除,`attachedSegments` 换成 `segmentRoster`(id/title/topic,经 `getTopic` 解析,不含 content/insight)。`sessionend` 窗口豁免死(`db/note-settlement.ts` `remainderFloor` 恒为 `minWindowTurns`)。`note_settlement_membership_activity` 表 DDL 因越界(schema.ts 仅授权 election_tier 区)保留为孤儿表,代码侧读写面已清空。
+
+- [x] 一个只含检查语义的窗口能正常完成;<20 turn 不唤起 — `bun test tests/db/note-settlement-completion.test.ts -t "NOTHING to correct"`; sessionend 见 `bun test tests/hooks/session-end.test.ts -t "opens NO window"`
+- [x] propose 单 turn 可提;渲染为文本,无库对象(段) — `bun test tests/worker/note-settlement-membership-facade.test.ts -t "floor drops from 2 to 1"`
+- [x] 段字段三件套删除后全套件绿(既有 bundle 守卫除外) — `bun test tests/worker/ tests/db/note-settlement-*.test.ts`(484 pass/0 fail)
+- [x] 结算上下文含名册、不含任何段字段 — `bun test tests/worker/note-settlement-prompt.test.ts -t "id/title/topic only"`

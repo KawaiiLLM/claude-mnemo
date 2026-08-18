@@ -375,7 +375,6 @@ describe("capture repairs", () => {
         content: null,
         insight: null,
         significanceGrade: null,
-        electionTier: null,
         assistantResponse: null,
         assistantTranscript: null,
         filesRead: [],

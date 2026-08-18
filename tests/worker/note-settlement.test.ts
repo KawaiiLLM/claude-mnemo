@@ -1263,19 +1263,25 @@ describe("note settlement prompt clock vs. sidechain rows (P1-1)", () => {
 
   test("a sessionend plan does not reach into a sidechain row's borrowed prompt number (P1-1)", () => {
     const sessionDbId = seedSession(db, "content-sessionend-sidechain");
-    seedRawTurn(sessionDbId, 1, "active");
-    seedRawTurn(sessionDbId, 2, "undone");
+    // 20 decided turns to clear the floor (ticket 05: sessionend's exemption
+    // is dead), then the root turn still running plus its sidechain's
+    // pending row — the P1-1 property this test is actually about.
+    for (let promptNumber = 1; promptNumber <= 20; promptNumber += 1) {
+      seedRawTurn(sessionDbId, promptNumber, "trivial");
+    }
+    seedRawTurn(sessionDbId, 21, "active"); // the root's own turn, still running
+    seedRawTurn(sessionDbId, 22, "undone"); // the sidechain's pending row
 
     const plans = planNoteSettlementWindows(db, sessionDbId, "sessionend", {
       eraCutoffEpoch: ERA,
     });
 
     // `sessionend`'s prefixEnd is the live max prompt number (spec D7) — which
-    // must be 1 (the root turn's own number), not 2 (the sidechain's borrowed
-    // one). The window still cuts (sessionend's tail-window floor exemption),
-    // but its end must stop at the real turn.
+    // must be 21 (the root turn's own number), not 22 (the sidechain's
+    // borrowed one). The window clears the floor at 21 turns and its end
+    // stops at the real turn.
     expect(plans).toEqual([
-      { sessionId: sessionDbId, windowStart: 1, windowEnd: 1, triggerType: "sessionend" },
+      { sessionId: sessionDbId, windowStart: 1, windowEnd: 21, triggerType: "sessionend" },
     ]);
   });
 });
@@ -1334,7 +1340,10 @@ describe("note settlement sessionend/compact race (P1-4)", () => {
 
   test("the atomic sessionend enqueue recomputes fresh and stays gap-free against an already-landed compact job", () => {
     const sessionDbId = seedSession(db, "content-race-fixed");
-    seedTurns(db, sessionDbId, 1, 40, "trivial");
+    // 60 turns, not 40 (ticket 05: sessionend's floor exemption is dead) — the
+    // remainder after the compact job's 35 must itself clear the 20-turn
+    // floor for this test to still exercise a REAL second window.
+    seedTurns(db, sessionDbId, 1, 60, "trivial");
 
     // The compact job already committed — the only interleaving SQLite's
     // mutual exclusion between writers can produce once plan+enqueue is one
@@ -1351,14 +1360,14 @@ describe("note settlement sessionend/compact race (P1-4)", () => {
 
     expect(created).toHaveLength(1);
     expect(created[0]!.windowStart).toBe(36);
-    expect(created[0]!.windowEnd).toBe(40);
+    expect(created[0]!.windowEnd).toBe(60);
 
     const jobs = listNoteSettlementJobs(db, sessionDbId)
       .sort((left, right) => left.windowStart - right.windowStart)
       .map((job) => [job.windowStart, job.windowEnd]);
     expect(jobs).toEqual([
       [1, 35],
-      [36, 40],
+      [36, 60],
     ]);
   });
 });
