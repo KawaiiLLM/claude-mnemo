@@ -40,6 +40,7 @@
 - **提案降级为例外通道**：结算发现一簇无归属 turn 像一个任务时仍可留一条文本提案，供后续会话决定；它不是常规职责，也不是完成条件。
 - **结算不再重建笔记**：duty 2、完成门里的笔记缺口检查、结算 turn facade 的写入路径整体移除。
 - **结算窗口 20–50 turn，不处理短尾巴**。不足者留待下次累积。
+- **结算完全不接触段**（[S15069/T906]）：段字段的摘要矛盾核对退役，结算上下文不再渲染挂靠段。维护边不需要段。连带可删：`db/note-settlement-summary-flags.ts`、`worker/note-settlement-prompt.ts` 的 `renderAttachedSegments`、上下文里的 `attachedSegments`；ADR-0004 的 flagging 半边需标注退役。
 
 ### 笔记节奏
 

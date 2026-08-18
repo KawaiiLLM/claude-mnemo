@@ -21,3 +21,5 @@
 - [ ] 描述性注释与实际组装一致，不再声称与 SessionStart 相同而实际不同
 
 > **⚠ 部分失效**：`.scratch/ownership-and-note-cadence/spec.md` 把归属与笔记重建移出结算，本票的立论已被取代，实施前先读该 spec 的 Further Notes。
+
+> **⚠ 已整体失效**：本票原立论（结算判归属时看不见段字段）随所有权变更作废，残余立论（服务票 13 的摘要矛盾核对）随票 13 撤销而作废。结算维护边不涉及段，故 `renderAttachedSegments` 与 `attachedSegments` 上下文字段可整体删除。
