@@ -1,0 +1,242 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
+
+import { createDatabase } from "../../src/db/database";
+import {
+  getTurnEdgeSignals,
+  getTurnEdgeSignalsForTurn,
+  RELATION_IS_SCORED,
+  type TurnEdgeSignals,
+} from "../../src/db/edge-signals";
+import { writeMemoryEdges, type CitationRelation } from "../../src/db/memory-edges";
+import { initializeSchema } from "../../src/db/schema";
+import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
+import { upsertSession } from "../../src/db/sessions";
+
+/**
+ * Ticket 07 (turn-edge-mechanism spec) — the pure read layer that derives a
+ * turn's scoring signal tuple from `memory_edges`. No rendering, no numeric
+ * weight, no combined scalar score is tested here (none exists): only the
+ * three signals (override, refines-excess-by-phase, encodes) and the guard
+ * that every OTHER relation in the closed set (plus legacy `supersedes`)
+ * moves none of them.
+ */
+describe("edge scoring signals", () => {
+  let db: Database;
+  let sessionId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-edge-signals",
+      project: "/tmp/project",
+      title: null,
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function addTurn(
+    promptNumber: number,
+    options: { type?: string[]; wasRolledBack?: boolean } = {},
+  ): number {
+    return db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, type, was_rolled_back, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?, ?, 100)
+         RETURNING id`,
+      )
+      .get(
+        sessionId,
+        promptNumber,
+        JSON.stringify(options.type ?? []),
+        options.wasRolledBack ? 1 : 0,
+      )!.id;
+  }
+
+  /** Direct edge writer — bypasses mcp/note.ts's phase validation on purpose: this module is a
+   * READER and must handle whatever shape the graph carries, ticket-01-legal or not (e.g. a
+   * `refines` edge whose source phase drifted after the edge was written). */
+  function edge(
+    citingId: number,
+    citedId: number,
+    relation: CitationRelation,
+    createdAtEpoch: number,
+  ): void {
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citingId },
+          cited: { kind: "turn", id: citedId },
+          relation,
+          provenance: "asserted",
+        },
+      ],
+      createdAtEpoch,
+      { eligibleForRelation: "unrestricted" },
+    );
+  }
+
+  const ZERO: TurnEdgeSignals = { overridden: false, refinesExcess: { decision: 0, delivery: 0 }, encodesCount: 0 };
+
+  test("linked-list baseline graph: everyone reads all-zero signals", () => {
+    // T1 <- T2 <- T3 <- T4 <- T5, each `refines` its immediate predecessor.
+    // Every node's live refines in-degree is at most 1 — the baseline.
+    const t1 = addTurn(1, { type: ["design"] });
+    const t2 = addTurn(2, { type: ["design"] });
+    const t3 = addTurn(3, { type: ["design"] });
+    const t4 = addTurn(4, { type: ["design"] });
+    const t5 = addTurn(5, { type: ["design"] });
+    edge(t2, t1, "refines", 1000);
+    edge(t3, t2, "refines", 1000);
+    edge(t4, t3, "refines", 1000);
+    edge(t5, t4, "refines", 1000);
+
+    const signals = getTurnEdgeSignals(db, [t1, t2, t3, t4, t5]);
+    for (const id of [t1, t2, t3, t4, t5]) {
+      expect(signals.get(id)).toEqual(ZERO);
+    }
+  });
+
+  test("one leapfrog refines on top of the baseline chain: only that node rises", () => {
+    const t1 = addTurn(1, { type: ["design"] });
+    const t2 = addTurn(2, { type: ["design"] });
+    const t3 = addTurn(3, { type: ["design"] });
+    const t4 = addTurn(4, { type: ["design"] });
+    const t5 = addTurn(5, { type: ["design"] });
+    edge(t2, t1, "refines", 1000);
+    edge(t3, t2, "refines", 1000);
+    edge(t4, t3, "refines", 1000);
+    edge(t5, t4, "refines", 1000);
+    // T5 leapfrogs all the way back to T1, arriving strictly AFTER T1's
+    // baseline edge (from T2).
+    edge(t5, t1, "refines", 2000);
+
+    const signals = getTurnEdgeSignals(db, [t1, t2, t3, t4, t5]);
+    expect(signals.get(t1)).toEqual({
+      overridden: false,
+      refinesExcess: { decision: 1, delivery: 0 },
+      encodesCount: 0,
+    });
+    for (const id of [t2, t3, t4, t5]) {
+      expect(signals.get(id)).toEqual(ZERO);
+    }
+  });
+
+  test("refines source-phase bucketing: decision-sourced, delivery-sourced, and a dual-phase source counted once as decision", () => {
+    const target = addTurn(1, { type: ["design"] });
+    const baseline = addTurn(2, { type: ["design"] });
+    const decisionLeapfrog = addTurn(3, { type: ["design"] });
+    const deliveryLeapfrog = addTurn(4, { type: ["ops"] });
+    const dualPhaseLeapfrog = addTurn(5, { type: ["review", "design"] });
+
+    edge(baseline, target, "refines", 1000); // baseline, excluded
+    edge(decisionLeapfrog, target, "refines", 2000); // decision bucket
+    edge(deliveryLeapfrog, target, "refines", 3000); // delivery bucket
+    edge(dualPhaseLeapfrog, target, "refines", 4000); // decision bucket (counted once)
+
+    const signal = getTurnEdgeSignalsForTurn(db, target);
+    expect(signal.refinesExcess).toEqual({ decision: 2, delivery: 1 });
+    expect(signal.overridden).toBe(false);
+    expect(signal.encodesCount).toBe(0);
+  });
+
+  test("override victim: overridden is true only from a LIVE override source", () => {
+    const victim = addTurn(1, { type: ["design"] });
+    const liveAttacker = addTurn(2, { type: ["design"] });
+    edge(liveAttacker, victim, "override", 1000);
+
+    const rolledBackVictim = addTurn(3, { type: ["design"] });
+    const rolledBackAttacker = addTurn(4, { type: ["design"], wasRolledBack: true });
+    edge(rolledBackAttacker, rolledBackVictim, "override", 1000);
+
+    const signals = getTurnEdgeSignals(db, [victim, rolledBackVictim]);
+    expect(signals.get(victim)!.overridden).toBe(true);
+    // A rolled-back source's override does not count — the target reads clean.
+    expect(signals.get(rolledBackVictim)!.overridden).toBe(false);
+  });
+
+  test("encodes count: raw in-degree, live sources only", () => {
+    const decisionA = addTurn(1, { type: ["design"] });
+    const decisionB = addTurn(2, { type: ["design"] });
+    const deliveryX = addTurn(3, { type: ["implement"] });
+    const deliveryY = addTurn(4, { type: ["ops"] });
+    const rolledBackDelivery = addTurn(5, { type: ["implement"], wasRolledBack: true });
+
+    edge(deliveryX, decisionA, "encodes", 1000);
+    edge(deliveryY, decisionA, "encodes", 1000);
+    edge(deliveryX, decisionB, "encodes", 1000);
+    edge(rolledBackDelivery, decisionB, "encodes", 1000);
+
+    const signals = getTurnEdgeSignals(db, [decisionA, decisionB]);
+    expect(signals.get(decisionA)!.encodesCount).toBe(2);
+    // decisionB has 2 incoming encodes edges but one source is rolled back.
+    expect(signals.get(decisionB)!.encodesCount).toBe(1);
+  });
+
+  test("unscored relations (grounded-on, evidence-for/against, depends-on, legacy supersedes) contribute nothing", () => {
+    const target = addTurn(1, { type: ["design"] });
+    const groundedOnSource = addTurn(2, { type: ["design"] });
+    const evidenceForSource = addTurn(3, { type: ["research"] });
+    const evidenceAgainstSource = addTurn(4, { type: ["measure"] });
+    const dependsOnCiter = addTurn(5, { type: ["implement"] });
+    const dependsOnTarget = addTurn(6, { type: ["implement"] });
+    const supersedesSource = addTurn(7, { type: ["design"] });
+
+    edge(groundedOnSource, target, "grounded-on", 1000);
+    edge(evidenceForSource, target, "evidence-for", 1000);
+    edge(evidenceAgainstSource, target, "evidence-against", 1000);
+    edge(dependsOnCiter, dependsOnTarget, "depends-on", 1000);
+    edge(supersedesSource, target, "supersedes", 1000);
+
+    const signals = getTurnEdgeSignals(db, [target, dependsOnTarget]);
+    expect(signals.get(target)).toEqual(ZERO);
+    expect(signals.get(dependsOnTarget)).toEqual(ZERO);
+  });
+
+  test("guard: RELATION_IS_SCORED classifies exactly refines/override/encodes as scored, everything else in the seven-word closed set as not — compile-time exhaustive over EDGE_RELATIONS", () => {
+    expect(RELATION_IS_SCORED).toEqual({
+      "evidence-for": false,
+      "evidence-against": false,
+      "grounded-on": false,
+      refines: true,
+      override: true,
+      encodes: true,
+      "depends-on": false,
+    });
+    // Every current closed-set word has an entry (TypeScript already enforces
+    // this at compile time via the Record type; this is the runtime mirror).
+    for (const relation of EDGE_RELATIONS) {
+      expect(RELATION_IS_SCORED[relation]).toBeDefined();
+    }
+  });
+
+  test("empty graph: all-zero signals, no crash on dangling or edgeless ids", () => {
+    const lonely = addTurn(1, { type: ["design"] });
+    const signals = getTurnEdgeSignals(db, [lonely, 999_999]);
+    expect(signals.get(lonely)).toEqual(ZERO);
+    expect(signals.get(999_999)).toEqual(ZERO);
+    expect(getTurnEdgeSignals(db, [])).toEqual(new Map());
+  });
+
+  test("getTurnEdgeSignalsForTurn matches the batched result for a single id", () => {
+    const t1 = addTurn(1, { type: ["design"] });
+    const t2 = addTurn(2, { type: ["design"] });
+    edge(t2, t1, "override", 1000);
+
+    expect(getTurnEdgeSignalsForTurn(db, t1)).toEqual(
+      getTurnEdgeSignals(db, [t1]).get(t1)!,
+    );
+    expect(getTurnEdgeSignalsForTurn(db, t1).overridden).toBe(true);
+  });
+});
