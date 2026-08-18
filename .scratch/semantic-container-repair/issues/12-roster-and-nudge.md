@@ -15,12 +15,12 @@
 
 **Blocked by:** None
 
-**Status:** roster half done (2026-08-18); nudge half NOT started — left to the other worker per task scope
+**Status:** done (2026-08-18; roster half by worker, nudge half by main agent)
 
 - [x] 花名册每行渲染 type 频次与 tags 频次
 - [x] tags 上限按预算裁剪，不再是固定 3 个
-- [ ] 20 轮提醒出现在会话侧（段块 header 或 note 收据），不依赖用户先写 remember — 未做，属另一 worker 领地
-- [ ] 「不足 10 轮」的过度维护提示仍留在写回执上，两者分开 — 未做，属另一 worker 领地
+- [x] 20 轮提醒出现在会话侧（段块 header 或 note 收据），不依赖用户先写 remember
+- [x] 「不足 10 轮」的过度维护提示仍留在写回执上，两者分开
 
 **实现记录（花名册半，2026-08-18）：** `src/hooks/session-composition.ts` 的 `renderSegmentRoster`。`type`
 用 `computeSegmentMemberFacetCounts` 已算好的 `facets.type`（此前算完即弃），渲染方式复用
@@ -32,3 +32,11 @@
 留给用户裁决，未擅自改，见报告）。20 轮维护提醒（`mcp/remember.ts`/`mcp/definitions.ts`）按指示完全未碰。
 测试：`tests/hooks/session-composition.test.ts`（新增 describe 块
 `renderSegmentRoster: type/tag facets (ticket 12)`）。
+
+**实现记录（提醒半，2026-08-18）：** 20 轮提醒挂到段卡片 header（`segment-card.ts` 的
+`maintenance N turns ago` 行，≥20 追加 `— consider a maintenance pass`）——该 header 在
+SessionStart 段块与 recall 里渲染，零 `remember` 调用也能看见；`remember` 回执的 ≥20 分支删除，
+「不足 10 轮」过度维护提示原地保留。`MAINTENANCE_CADENCE` 迁至 `src/shared/segment-cadence.ts`
+（remember 已 import segment-card，反向引用会成环）。顺带修票 14 #10：`maintenanceTurnsAgo`
+从跨会话求和改为取最大值，使数字与 10/20 阈值同单位可比。工具描述（`definitions.ts`）改述提醒
+所在地，且守住 380 token 预算。

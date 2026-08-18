@@ -13,6 +13,7 @@ import {
 } from "../db/segments";
 import { countTurnsSince, getSession } from "../db/sessions";
 import { getTurnById } from "../db/turns";
+import { MAINTENANCE_CADENCE } from "../shared/segment-cadence";
 import { SEGMENT_WORKING_STATE_FIELDS, type SegmentWorkingStateField } from "../shared/segment-fields";
 import { typeWordGlyph } from "../shared/type-vocabulary";
 import { estimateTokens } from "../utils/token-estimate";
@@ -277,9 +278,11 @@ function buildAttachedSessionRows(
  * "maintenance N turns ago" (spec "Injection": "maintenance distance"), read
  * without a caller session — `remember`'s own receipt (ADR-0002) counts turns
  * in the ONE session writing at that moment; recall has no such session, so
- * this generalises the same measure over every session that has the segment
- * loaded: turns any of them produced since this segment's own last field
- * edit. Zero attached sessions reads as zero — nothing to count turns in.
+ * this generalises the same measure as the busiest attached session's own
+ * distance: the MAX across sessions, not the sum (ticket 14 #10 — summing
+ * made five attached sessions read five-fold, incomparable to the 10/20
+ * thresholds the receipt counts in single-session units). Zero attached
+ * sessions reads as zero — nothing to count turns in.
  */
 function maintenanceTurnsAgo(
   db: Database,
@@ -287,7 +290,7 @@ function maintenanceTurnsAgo(
   attachedSessionIds: readonly number[],
 ): number {
   return attachedSessionIds.reduce(
-    (sum, sessionId) => sum + countTurnsSince(db, sessionId, segment.updatedAtEpoch),
+    (max, sessionId) => Math.max(max, countTurnsSince(db, sessionId, segment.updatedAtEpoch)),
     0,
   );
 }
@@ -376,7 +379,15 @@ export function renderSegmentCardRecord(
     `${members.length} ${members.length === 1 ? "turn" : "turns"}`,
     `created ${formatEpoch(segment.createdAtEpoch)}`,
     `last edit ${formatEpoch(segment.updatedAtEpoch)}`,
-    `maintenance ${maintenance} ${maintenance === 1 ? "turn" : "turns"} ago`,
+    // Ticket 12's nudge half (T825 "每 20 轮还没更新，提醒一次"): the 20-turn
+    // nudge lives HERE, session-side — this header renders at SessionStart
+    // and in recall, so it reaches a session that never calls `remember`;
+    // the write receipt only ever reached whoever was already maintaining.
+    `maintenance ${maintenance} ${maintenance === 1 ? "turn" : "turns"} ago${
+      maintenance >= MAINTENANCE_CADENCE.nudgeAtOrAbove
+        ? " — consider a maintenance pass"
+        : ""
+    }`,
   ];
   headerLines.push(`  ${metaParts.join(" · ")}`);
 

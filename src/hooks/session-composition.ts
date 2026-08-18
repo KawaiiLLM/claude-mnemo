@@ -5,6 +5,7 @@ import {
   countLiveSegments,
   getTopic,
   listLiveSegmentsByActivity,
+  SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
   type SegmentRecord,
 } from "../db/segments";
 import {
@@ -197,6 +198,14 @@ function budgetedFacetText<T>(
 
 export interface SegmentRosterOptions {
   eraCutoffEpoch?: number | null;
+  /**
+   * Ticket 02: the roster's segment-era freeze. `undefined` (every production
+   * caller) applies `SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH` — a pre-redesign
+   * legacy arc-segment never reaches the roster, whatever its status; an
+   * explicit `null` is era-blind (status-only), for tests probing other
+   * roster properties with synthetic epochs.
+   */
+  segmentEraCutoffEpoch?: number | null;
   /** Segments attached to the CURRENT session but past the block-slot pool — annotated with a recall pointer instead of getting their own block. */
   overflowAttachedSegmentIds?: ReadonlySet<number>;
   /** Roster candidate cap, exposed for tests; production leaves the default. */
@@ -219,10 +228,14 @@ export function renderSegmentRoster(
   options: SegmentRosterOptions = {},
 ): string {
   const eraCutoffEpoch = options.eraCutoffEpoch ?? null;
+  const segmentEraCutoffEpoch =
+    options.segmentEraCutoffEpoch === undefined
+      ? SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH
+      : options.segmentEraCutoffEpoch;
   const limit = options.limit ?? ROSTER_MAX_SEGMENTS;
   const overflow = options.overflowAttachedSegmentIds ?? new Set<number>();
-  const totalLive = countLiveSegments(db);
-  const candidates = listLiveSegmentsByActivity(db, limit);
+  const totalLive = countLiveSegments(db, segmentEraCutoffEpoch);
+  const candidates = listLiveSegmentsByActivity(db, limit, segmentEraCutoffEpoch);
 
   const lines: string[] = [`${ROSTER_HEADER} (${totalLive} live)`];
 

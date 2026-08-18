@@ -108,7 +108,7 @@ Go here only for what the database does not store: exact verbatim bytes, the pre
 ~/.claude/projects/<encoded-project-path>/<content-session-id>.jsonl
 ```
 
-The encoded project path replaces `/` with `-` (e.g. `/Users/alice/code/my-app` → `~/.claude/projects/-Users-alice-code-my-app/<uuid>.jsonl`); mnemo worker sessions use the project path `~/.claude-mnemo`. The exact absolute path is the `raw:` line in `recall(id="S12", depth="expanded")` output — copy-paste it.
+The encoded project path replaces `/` with `-` (e.g. `/Users/alice/code/my-app` → `~/.claude/projects/-Users-alice-code-my-app/<uuid>.jsonl`); mnemo worker sessions use the project path `~/.claude-mnemo`. The exact absolute path is the `raw:` line in `recall(id="S12", view="expanded")` output — copy-paste it.
 
 ### Parse it with the bundled script
 

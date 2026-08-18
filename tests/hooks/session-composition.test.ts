@@ -8,8 +8,14 @@ import {
   appendSegmentWorkingStateRows,
   attachSegmentToSession,
   createSegment,
+  SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
   upsertTopic,
 } from "../../src/db/segments";
+
+// Ticket 02: the roster now applies the segment-era freeze BY DEFAULT, so
+// every fixture segment that should be visible must be minted inside the
+// container era. Small offsets stay readable; the base moves past the cutoff.
+const ERA = SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH;
 import { upsertSession } from "../../src/db/sessions";
 import { recallMemory } from "../../src/mcp/recall";
 import { timelineQuery } from "../../src/mcp/timeline";
@@ -184,11 +190,11 @@ describe("renderAttachedSegmentBlock", () => {
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
     const segment = createSegment(db, {
       title: "Ship the wiring test",
       topicId: topic.id,
-      nowEpoch: 1_000,
+      nowEpoch: ERA + 1_000,
     });
     const turn = db
       .query<{ id: number }, [number]>(
@@ -284,23 +290,23 @@ describe("renderSegmentRoster", () => {
   test("excludes frozen (non-open) segments — the only source of a non-open status under this redesign is the pre-redesign legacy rows", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
     const open = createSegment(db, {
       title: "Live open segment",
       topicId: topic.id,
-      nowEpoch: 1_000,
+      nowEpoch: ERA + 1_000,
     });
     createSegment(db, {
       title: "Legacy arc-segment",
       topicId: topic.id,
       status: "delivered",
-      nowEpoch: 900,
+      nowEpoch: ERA + 900,
     });
     createSegment(db, {
       title: "Abandoned legacy segment",
       topicId: topic.id,
       status: "abandoned",
-      nowEpoch: 800,
+      nowEpoch: ERA + 800,
     });
 
     const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
@@ -312,14 +318,39 @@ describe("renderSegmentRoster", () => {
     db.close();
   });
 
+  test("ticket 02, the production default: a pre-cutoff OPEN segment never reaches the roster — excluded from rows and the live count alike, with no option passed", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
+    const live = createSegment(db, {
+      title: "Container-era lane",
+      topicId: topic.id,
+      nowEpoch: ERA + 1_000,
+    });
+    // Open status, pre-cutoff creation — the exact leak ticket 02 froze:
+    // status alone cannot tell a legacy arc-segment from a live one.
+    createSegment(db, {
+      title: "Legacy open arc-segment",
+      topicId: topic.id,
+      nowEpoch: 1_000,
+    });
+
+    const roster = renderSegmentRoster(db);
+
+    expect(roster).toContain(`E${live.id} Container-era lane`);
+    expect(roster).not.toContain("Legacy open arc-segment");
+    expect(roster).toContain("(1 live)");
+    db.close();
+  });
+
   test("groups segments under their topic as a coarse project header", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const mnemo = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
-    const other = upsertTopic(db, { name: "side-project", nowEpoch: 1_000 });
-    createSegment(db, { title: "Mnemo lane one", topicId: mnemo.id, nowEpoch: 1_001 });
-    createSegment(db, { title: "Mnemo lane two", topicId: mnemo.id, nowEpoch: 1_002 });
-    createSegment(db, { title: "Side lane", topicId: other.id, nowEpoch: 1_003 });
+    const mnemo = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
+    const other = upsertTopic(db, { name: "side-project", nowEpoch: ERA + 1_000 });
+    createSegment(db, { title: "Mnemo lane one", topicId: mnemo.id, nowEpoch: ERA + 1_001 });
+    createSegment(db, { title: "Mnemo lane two", topicId: mnemo.id, nowEpoch: ERA + 1_002 });
+    createSegment(db, { title: "Side lane", topicId: other.id, nowEpoch: ERA + 1_003 });
 
     const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
 
@@ -331,12 +362,12 @@ describe("renderSegmentRoster", () => {
   test("truncates on budget with a recall() pointer for the remainder", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
     for (let index = 1; index <= 5; index += 1) {
       createSegment(db, {
         title: `Lane ${index}`,
         topicId: topic.id,
-        nowEpoch: 1_000 + index,
+        nowEpoch: ERA + 1_000 + index,
       });
     }
 
@@ -351,11 +382,11 @@ describe("renderSegmentRoster", () => {
   test("annotates an attached segment past the block-slot pool with a recall pointer instead of dropping it", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
     const overflowSegment = createSegment(db, {
       title: "Attached overflow lane",
       topicId: topic.id,
-      nowEpoch: 1_000,
+      nowEpoch: ERA + 1_000,
     });
 
     const roster = renderSegmentRoster(db, {
@@ -372,9 +403,9 @@ describe("renderSegmentRoster", () => {
   test("mutation check: dropping the (2 live) count would silently misreport roster completeness — pinned here", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
-    createSegment(db, { title: "One", topicId: topic.id, nowEpoch: 1_000 });
-    createSegment(db, { title: "Two", topicId: topic.id, nowEpoch: 1_001 });
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
+    createSegment(db, { title: "One", topicId: topic.id, nowEpoch: ERA + 1_000 });
+    createSegment(db, { title: "Two", topicId: topic.id, nowEpoch: ERA + 1_001 });
 
     const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
     expect(roster.startsWith("## Segment roster (2 live)")).toBe(true);
@@ -420,8 +451,8 @@ describe("renderSegmentRoster: type/tag facets (ticket 12)", () => {
   test("each roster row now carries a type frequency string — previously computed and discarded", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
-    const segment = createSegment(db, { title: "Typed lane", topicId: topic.id, nowEpoch: 1_000 });
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
+    const segment = createSegment(db, { title: "Typed lane", topicId: topic.id, nowEpoch: ERA + 1_000 });
     const session = upsertSession(db, {
       contentSessionId: "roster-type-session",
       project: "/tmp/project",
@@ -442,8 +473,8 @@ describe("renderSegmentRoster: type/tag facets (ticket 12)", () => {
   test("tags are no longer hard-capped at a fixed count of 3 — many short tags render more than 3", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
-    const segment = createSegment(db, { title: "Many-tag lane", topicId: topic.id, nowEpoch: 1_000 });
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
+    const segment = createSegment(db, { title: "Many-tag lane", topicId: topic.id, nowEpoch: ERA + 1_000 });
     const session = upsertSession(db, {
       contentSessionId: "roster-manytag-session",
       project: "/tmp/project",
@@ -471,8 +502,8 @@ describe("renderSegmentRoster: type/tag facets (ticket 12)", () => {
   test("a handful of long tags is still bounded — by BUDGET, not by a raw count", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
-    const segment = createSegment(db, { title: "Long-tag lane", topicId: topic.id, nowEpoch: 1_000 });
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
+    const segment = createSegment(db, { title: "Long-tag lane", topicId: topic.id, nowEpoch: ERA + 1_000 });
     const session = upsertSession(db, {
       contentSessionId: "roster-longtag-session",
       project: "/tmp/project",
@@ -516,7 +547,7 @@ describe("renderProposalsBlock", () => {
       sessionId: sessionDbId,
       title: "Investigate the flaky retry path",
       addresses: ["S1/T3", "S1/T5"],
-      nowEpoch: 1_000,
+      nowEpoch: ERA + 1_000,
     });
 
     const block = renderProposalsBlock(db);
@@ -539,7 +570,7 @@ describe("renderProposalsBlock", () => {
         sessionId: sessionDbId,
         title: `Proposal ${index}`,
         addresses: [`S1/T${index}`],
-        nowEpoch: 1_000 + index,
+        nowEpoch: ERA + 1_000 + index,
       });
     }
 

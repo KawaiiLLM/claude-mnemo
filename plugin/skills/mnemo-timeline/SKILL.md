@@ -63,7 +63,7 @@ Views:
 
 Range produces the full candidate set with no truncation; `pageSize` then slices it for display.
 
-`timeline(id="S42/T10")` is an error. Use `recall(id="S42/T10", depth="expanded")` for single-turn detail.
+`timeline(id="S42/T10")` is an error. Use `recall(id="S42/T10", view="expanded")` for single-turn detail.
 
 ## Output structure
 
@@ -112,7 +112,7 @@ Shape signals are computed over the returned window only and include:
 ```text
 recall()
 timeline(id="S42")
-recall(id="S42/T19", depth="expanded")
+recall(id="S42/T19", view="expanded")
 # Raw: use mnemo-replay on the path from the timeline header
 ```
 

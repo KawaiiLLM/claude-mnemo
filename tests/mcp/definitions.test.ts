@@ -15,17 +15,17 @@ import { estimateTokens } from "../../src/utils/token-estimate";
 import { z } from "zod";
 
 describe("recallInputSchema", () => {
-  it("accepts page + pageSize and rejects limit + depth=full", () => {
+  it("accepts page + pageSize and rejects limit + the retired `depth` key (ticket 14 #9: the public key is `view`)", () => {
     const ok = recallInputSchema.parse({
       id: "S1",
-      depth: "expanded",
+      view: "expanded",
       page: 2,
       pageSize: 10,
     });
 
     expect(ok).toEqual({
       id: "S1",
-      depth: "expanded",
+      view: "expanded",
       page: 2,
       pageSize: 10,
     });
@@ -34,7 +34,11 @@ describe("recallInputSchema", () => {
       recallInputSchema.parse({ id: "S1", limit: 10 }),
     ).toThrow();
     expect(() =>
-      recallInputSchema.parse({ id: "S1", depth: "full" }),
+      recallInputSchema.parse({ id: "S1", view: "full" }),
+    ).toThrow();
+    // The implementer's old name is gone, not aliased — `.strict()` rejects it.
+    expect(() =>
+      recallInputSchema.parse({ id: "S1", depth: "expanded" }),
     ).toThrow();
   });
 
@@ -357,7 +361,11 @@ describe("tool surface", () => {
     expect(remember).toContain("Tool-call markup");
     expect(remember).toContain("Every field is written in English.");
     expect(remember).toContain("under 10 turns draws a too-soon reminder");
-    expect(remember).toContain("20+ turns without a touch draws a nudge");
+    // Ticket 12's nudge half: the 20-turn nudge left the write receipt for
+    // the segment card's header; the description must say where it lives
+    // now, not promise it on the next write.
+    expect(remember).not.toContain("draws a nudge on the next write");
+    expect(remember).toContain("rides the segment card's own header");
     expect(remember).toContain("`decisions` append is exempt");
     expect(estimateTokens(remember)).toBeLessThanOrEqual(380);
   });

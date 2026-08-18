@@ -380,7 +380,7 @@ describe("remember tool (ticket 02)", () => {
       expect(text).toContain("since this segment's last maintenance");
     });
 
-    test("20+ turns since the last touch draws the nudge, even for decisions", () => {
+    test("20+ turns since the last touch no longer draws a receipt nudge — the nudge rides the segment card, session-side (ticket 12)", () => {
       const segmentId = createSegmentId("append-nudge");
       seedTurnsSince(100, 20, 1);
       const text = resultText(
@@ -390,7 +390,11 @@ describe("remember tool (ticket 02)", () => {
           { callerSessionId: sessionId, now: () => 500 },
         ),
       );
-      expect(text).toContain("consider a maintenance pass");
+      // A receipt only ever reached whoever was already maintaining; the
+      // 20-turn nudge moved to the segment card's header (segment-card.ts),
+      // which renders without any write. The receipt keeps the plain figure.
+      expect(text).not.toContain("consider a maintenance pass");
+      expect(text).toContain("since this segment's last maintenance");
     });
 
     test("a row containing a newline is rejected — one row, one line", () => {

@@ -207,7 +207,7 @@ describe("recallMemory", () => {
         // ticket 04: `query` is pure FTS text now — no in-string dialect.
         query: "auth",
         filter: { type: "bugfix", time: "1970-01-01" },
-        depth: "expanded",
+        view: "expanded",
         page: 1,
         pageSize: 5,
       }),

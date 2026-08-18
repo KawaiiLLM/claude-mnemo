@@ -88,8 +88,8 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
   remember:
-    `Maintain a segment — claude-mnemo's per-topic, long-lived semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Five verbs: \`create\` mints a new segment from the roster you have in view — deliberate, never automatic, never a near-duplicate of an existing topic; \`attach\` binds the current session to a segment (by \`id="E<n>"\` or an existing topic name) and returns its full fields; \`append\` adds rows to one named field; \`replace\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous (matches more than once) or missing rejects loudly naming which, and \`newString: ""\` deletes the matched row; \`close\` toggles the segment off the roster (still \`recall\`-able) or, called again on an already-closed one, back on. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. A closed segment refuses append/replace, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\` or \`[E<n>]\`, ids seen in injected context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
-    "Maintenance is advisory, never a gate: every append/replace reports turns since this segment was last touched — under 10 turns draws a too-soon reminder (a `decisions` append is exempt — a lost ruling is the costliest loss), 20+ turns without a touch draws a nudge on the next write.",
+    `Maintain a segment — claude-mnemo's per-topic, long-lived semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Five verbs: \`create\` mints a new segment from the roster you have in view — deliberate, never automatic, never a near-duplicate of an existing topic; \`attach\` binds the current session to a segment (by \`id="E<n>"\` or an existing topic name) and returns its collapsed card; \`append\` adds rows to one named field; \`replace\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous (matches more than once) or missing rejects loudly naming which, and \`newString: ""\` deletes the matched row; \`close\` toggles the segment off the roster (still \`recall\`-able) or, called again on an already-closed one, back on. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. A closed segment refuses append/replace, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\` or \`[E<n>]\`, ids seen in injected context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
+    "Maintenance is advisory, never a gate: every append/replace reports turns since this segment was last touched — under 10 turns draws a too-soon reminder (a `decisions` append is exempt — a lost ruling is the costliest loss). The 20-turn nudge rides the segment card's own header, not this receipt.",
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
   // Stop hook and the completion gate already call the coverage predicate
   // (db/coverage.ts's `computeCoverageGaps`) directly, and this self-service
@@ -115,7 +115,10 @@ export const recallInputShape = {
   filter: memoryFilterSchema.optional().describe(
     "Structured scoping — {type, tag, session, time, file} — AND-composed with each other, with `id`, and with `query`.",
   ),
-  depth: z.enum(["collapsed", "expanded"]).optional(),
+  // Ticket 14 #9: the ruling and spec both name this `view`; `depth` was the
+  // implementer's word and, with `.strict()` on this shape, calling by the
+  // ruled name was a hard parse error. Internal option objects keep `depth`.
+  view: z.enum(["collapsed", "expanded"]).optional(),
   page: z.number().int().positive().optional(),
   pageSize: z.number().int().positive().optional(),
   // Ticket 04: `truncate` retires from the public surface. The field stays

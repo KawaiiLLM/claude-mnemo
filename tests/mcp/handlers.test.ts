@@ -30,13 +30,13 @@ describe("database-backed MCP handlers", () => {
     expect(
       recallInputSchema.parse({
         id: "S1/T2",
-        depth: "expanded",
+        view: "expanded",
         page: 2,
         pageSize: 10,
       }),
     ).toEqual({
       id: "S1/T2",
-      depth: "expanded",
+      view: "expanded",
       page: 2,
       pageSize: 10,
     });
@@ -50,7 +50,7 @@ describe("database-backed MCP handlers", () => {
     expect(() =>
       recallInputSchema.parse({
         id: "S1",
-        depth: "full",
+        view: "full",
       }),
     ).toThrow();
     // Ticket 04: `truncate` retires from the public surface.
@@ -183,7 +183,7 @@ describe("database-backed MCP handlers", () => {
     const worker = createDatabaseBackedHandlers(db, { audience: "worker" });
     const longResult = await worker.recall?.({
       id: `S${session.id}`,
-      depth: "expanded",
+      view: "expanded",
       truncate: 5_000,
     });
     expect(longResult?.content[0]?.text).toContain(visible);
@@ -195,7 +195,7 @@ describe("database-backed MCP handlers", () => {
     );
     const capped = await worker.recall?.({
       id: `S${session.id}`,
-      depth: "expanded",
+      view: "expanded",
       truncate: WORKER_TOOL_RESULT_MAX_CHARS + 10_000,
     });
     expect(capped?.content[0]?.text.length).toBe(WORKER_TOOL_RESULT_MAX_CHARS);

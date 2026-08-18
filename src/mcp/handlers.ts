@@ -161,7 +161,9 @@ export function createDatabaseBackedHandlers(
           // still forwards for the worker audience, whose own schema
           // (`workerRecallInputShape`) keeps accepting it.
           filter: args.filter as RecallInput["filter"],
-          depth: args.depth as "collapsed" | "expanded" | undefined,
+          // Ticket 14 #9: the public key is `view` (the ruled name); `depth`
+          // survives only as the internal option the renderers already use.
+          depth: args.view as "collapsed" | "expanded" | undefined,
           page: args.page as number | undefined,
           pageSize: args.pageSize as number | undefined,
           truncate: args.truncate as number | undefined,

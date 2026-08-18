@@ -6,7 +6,7 @@
 
 **2. 每段两块的上限是 3。** `src/hooks/session-composition.ts:68` `ATTACHED_SEGMENT_BLOCK_SLOTS = 3`，hooks.json 注册 6 条槽位命令，第 4 个及以后的挂靠段只在花名册里得到一个指针。T825 的原话是「注入块数取决于挂靠段的数量」，没有上限。票 10 自陈「no number was pinned」。上限本身可能是对的，但**花名册的溢出提示没说明原因**，用户看不出为什么这个段没有块。
 
-**3. `decisions` 的豁免被收窄。** ADR-0002 与 spec:98 说 `decisions` 的追加「完全在节奏之外」；`src/mcp/remember.ts:486-493` 的注释自陈只豁免「过于频繁」提示，20 轮提醒仍然适用。二选一：改实现或改 ADR，别两头挂着。
+**3. `decisions` 的豁免被收窄。** ✅ 已随票 12 提醒搬家消解（2026-08-18）：≥20 提醒离开写回执后，回执仅剩「过于频繁」一项节奏判断，而 `decisions` 本就豁免于它——实现与 ADR-0002 恢复一致，无须改文档。原文： ADR-0002 与 spec:98 说 `decisions` 的追加「完全在节奏之外」；`src/mcp/remember.ts:486-493` 的注释自陈只豁免「过于频繁」提示，20 轮提醒仍然适用。二选一：改实现或改 ADR，别两头挂着。
 
 **4. 花名册按 topic 分组，裁决说的是粗粒度项目 tag。** spec:130「coarse project tag as group header」；`session-composition.ts:193/203` 用 `topicName`。真实数据上两者不是一回事,而 `topic` 是 `remember(create)` 的必填人工输入,与自动派生的项目 tag 并存为两套项目键。用户已判为「初版不需要,以后的优化项」。**注意与票 02 不同**——票 02 是遗留段泄漏,即使加了项目维度也仍然存在。
 
@@ -18,11 +18,11 @@
 
 **8. 声明的块顺序与 ADR 相反。** ADR-0006:28-29「Roster follows the segment blocks, proposals last」;hooks.json 声明的是 roster → persona → digest → notes → proposals → segment1..3。CC 按完成序拼接故顺序本就不保证,但声明序是唯一可控信号,现在表达的是相反意图。二选一:调整声明,或在 ADR 里记明顺序不可控。
 
-**9. recall 的字段集参数叫 `depth`,裁决与 spec 都叫 `view`。** `definitions.ts:108`;`recallInputSchema` 是 `.strict()`,所以按裁决的名字调用会直接解析报错。
+**9. recall 的字段集参数叫 `depth`,裁决与 spec 都叫 `view`。** ✅ 已修（2026-08-18）：公开 schema 键改名 `view`（内部选项对象保留 `depth` 词），handlers 映射同步，三份 skill 文档同步改名。原文： `definitions.ts:108`;`recallInputSchema` 是 `.strict()`,所以按裁决的名字调用会直接解析报错。
 
-**10. `maintenanceTurnsAgo` 把每个挂靠会话的距离相加。** `src/mcp/segment-card.ts:263-272`;挂 5 个会话就报 5 倍,与 10/20 阈值不可比。
+**10. `maintenanceTurnsAgo` 把每个挂靠会话的距离相加。** ✅ 已修（2026-08-18）：改为跨会话取最大值——与回执按单会话计数同单位，可与 10/20 阈值直接比较。原文： `src/mcp/segment-card.ts:263-272`;挂 5 个会话就报 5 倍,与 10/20 阈值不可比。
 
-**11. `attach` 的描述说返回「full fields」,实际返回折叠卡。** `definitions.ts:81` vs `remember.ts:401-404`。按 T830「默认折叠表示 1000 token 截断」,**代码对、描述错**。
+**11. `attach` 的描述说返回「full fields」,实际返回折叠卡。** ✅ 已修（2026-08-18）：描述改为 collapsed card。原文： `definitions.ts:81` vs `remember.ts:401-404`。按 T830「默认折叠表示 1000 token 截断」,**代码对、描述错**。
 
 **12. `remember(create)` 不自动挂靠。** `remember.ts:276-365`;而结算只能向已挂靠段派成员(`membership-facade.ts:155`)。刚建的段在本会话拿不到任何成员,除非同时传 `members` 种子。
 

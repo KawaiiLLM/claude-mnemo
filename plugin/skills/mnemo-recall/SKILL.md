@@ -71,10 +71,10 @@ These return paginated, collapsed results by default. Use `page` to move through
 recall(id="S12")                                # session summary + collapsed turn preview
 recall(id="S12/T*")                             # all turns in a session
 recall(id="S12/T3..7")                          # turn range
-recall(id="S12", depth="expanded")              # session content + raw transcript path
+recall(id="S12", view="expanded")              # session content + raw transcript path
 ```
 
-At expanded session depth, the output includes a `raw:` path pointing at the source JSONL. `mnemo-replay` reads a turn's full text and tool I/O straight from the database; that `raw:` path is the handoff only when you need exact bytes the database does not mirror.
+At expanded session view, the output includes a `raw:` path pointing at the source JSONL. `mnemo-replay` reads a turn's full text and tool I/O straight from the database; that `raw:` path is the handoff only when you need exact bytes the database does not mirror.
 
 ### Step 3 — Read the arc, not the session
 
@@ -92,10 +92,10 @@ search alongside sessions and turns, and answer `tag:` and `type:` there.
 ### Step 4 — Turn detail and observations
 
 ```text
-recall(id="S12/T3", depth="expanded")           # one turn with prompt + response + file lists
+recall(id="S12/T3", view="expanded")           # one turn with prompt + response + file lists
 recall(id="S12/T3/O*")                          # observations for one turn
 recall(id="S12/T*/O*")                          # observations across the session
-recall(id="O87", depth="expanded")              # one observation with full stored fields
+recall(id="O87", view="expanded")              # one observation with full stored fields
 ```
 
 ### Step 5 — Escalate only when needed
@@ -103,7 +103,7 @@ recall(id="O87", depth="expanded")              # one observation with full stor
 If a field is truncated, raise `truncate` first:
 
 ```text
-recall(id="S12/T3", depth="expanded", truncate=2000)
+recall(id="S12/T3", view="expanded", truncate=2000)
 ```
 
 If the result still is not enough, or you need exact wording, the full response, or full tool output, switch to the `mnemo-replay` skill. There is no unlimited `recall` mode.
@@ -115,7 +115,7 @@ If the result still is not enough, or you need exact wording, the full response,
 | `id` | string | Selector. Supports wildcards (`*`), ranges (`5..10`), and nested paths (`S12/T3/O*`). |
 | `query` | string | Free text + optional prefixes `type:` / `file:` / `tag:` / `project:` / `session:`. Free-text terms are OR'd and ranked by relevance (bm25); the typed filters are AND'd with the text and each other. |
 | `time` | string | `-7d` / `-2w` (relative), `YYYY-MM-DD` (single UTC day), `YYYY-MM-DD..YYYY-MM-DD` (inclusive UTC range). |
-| `depth` | string | `collapsed` (default) or `expanded`. |
+| `view` | string | `collapsed` (default) or `expanded`. |
 | `page` | number | 1-indexed page number for the target level. Default `1`. |
 | `pageSize` | number | Item count for the target level page. Default `10`. |
 | `truncate` | number | Character cap per rendered field. Default `200`, max `2000`. |
@@ -150,14 +150,14 @@ In the `S12/T3` form the turn id is a session-scoped prompt number. Bare `T418` 
 
 Free words become an FTS query (terms OR'd, bm25-ranked) over indexed text. Use `session:` to scope that search to a single session — the one thing the `id` selector cannot combine with free text.
 
-## Depth Guidance
+## View Guidance
 
-| Depth | Use when |
+| View | Use when |
 |---|---|
 | `collapsed` | Browsing and list navigation. |
 | `expanded` | You have a specific target and need stored fields inline. |
 
-There is no `full` depth anymore.
+There is no `full` view anymore.
 
 ## Common Patterns
 
@@ -165,7 +165,7 @@ There is no `full` depth anymore.
 ```text
 recall(query="auth race")
 # → sees [S12/T3] "Fixed auth mutex"
-recall(id="S12/T3", depth="expanded")
+recall(id="S12/T3", view="expanded")
 ```
 
 **"Did we already try X, and why did it not work?"**
@@ -180,7 +180,7 @@ recall(id="E47")
 ```text
 recall(query="file:src/login.ts", time="2026-04-03")
 # → picks out [S8/T2]
-recall(id="S8", depth="expanded")
+recall(id="S8", view="expanded")
 # → session shows raw: /Users/...jsonl
 # → switch to mnemo-replay for exact transcript bytes
 ```
@@ -189,6 +189,6 @@ recall(id="S8", depth="expanded")
 
 - Prefer `recall` for search, browsing, and structured answers.
 - Before starting a task that may already have been done, look for its segment: `[delivered]` says it was finished, `[open]` says it is in flight and gives you its working state.
-- Narrow with `id`, `query`, or `time` before raising `depth`, `pageSize`, or `truncate`.
+- Narrow with `id`, `query`, or `time` before raising `view`, `pageSize`, or `truncate`.
 - Use `project:<path>` when the question is project-local.
 - When `recall` shows a `raw:` path or a truncation hint, that is your signal to switch to `mnemo-replay`.

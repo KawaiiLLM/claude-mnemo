@@ -346,6 +346,44 @@ describe("recall(id=\"E<n>\") segment card", () => {
     expect(output).not.toContain("Overflow session 2");
   });
 
+  test("ticket 12 nudge half: 20+ turns since the last edit draw the nudge on the card header, with no remember call anywhere", () => {
+    // The fixture already carries 2 member turns after the segment's last
+    // edit; 20 more takes the attached session's distance to 22.
+    for (let prompt = 3; prompt <= 22; prompt += 1) {
+      makeTurn(prompt);
+    }
+    const output = recallMemory(db, { id: `E${segmentId}` });
+    expect(output).toMatch(/maintenance 22 turns ago — consider a maintenance pass/);
+  });
+
+  test("maintenance distance is the busiest attached session's distance, not the sum (ticket 14 #10)", () => {
+    const other = upsertSession(db, {
+      contentSessionId: "maintenance-max-session",
+      project: "/tmp/project",
+      title: "Second attached session",
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: CUTOFF,
+      updatedAtEpoch: CUTOFF,
+      completedAtEpoch: null,
+    }).id;
+    attachSegmentToSession(db, other, segmentId, CUTOFF);
+    const main = sessionId;
+    sessionId = other;
+    for (let prompt = 1; prompt <= 25; prompt += 1) {
+      makeTurn(prompt);
+    }
+    sessionId = main;
+
+    const output = recallMemory(db, { id: `E${segmentId}` });
+    // main: 2 turns since the last edit; other: 25. The sum (27) made the
+    // figure incomparable to the 10/20 thresholds the receipt counts in
+    // single-session units; the max is that same unit.
+    expect(output).toMatch(/maintenance 25 turns ago/);
+    expect(output).not.toMatch(/maintenance 27 turns/);
+  });
+
   test("mutation demo (ticket 08 checklist item 4): a large attachment count no longer starves the field budget to zero", () => {
     appendSegmentWorkingStateRows(db, segmentId, "goal", ["ship the fix"], CUTOFF);
     // 300 attachments comfortably exceeds the default 1000-token page budget

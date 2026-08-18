@@ -48,17 +48,7 @@ const REMEMBER_VERBS: readonly RememberVerb[] = [
   "close",
 ];
 
-/**
- * The maintenance cadence's two thresholds (ADR-0002): under this many turns
- * since the segment's last touch, a fresh write draws the too-soon reminder;
- * at or beyond the second, it draws the nudge. One pair, not a caller-tunable
- * knob — same reasoning as `NOTE_TOKEN_BUDGET` being one shared constant
- * rather than a value each call site restates.
- */
-export const MAINTENANCE_CADENCE = {
-  tooSoonUnder: 10,
-  nudgeAtOrAbove: 20,
-} as const;
+import { MAINTENANCE_CADENCE } from "../shared/segment-cadence";
 
 export interface RememberToolInput {
   verb?: unknown;
@@ -208,9 +198,11 @@ function formatMaintenanceCadence(
   if (turnsSince < MAINTENANCE_CADENCE.tooSoonUnder && !exemptFromTooSoon) {
     return `${label} since this segment's last maintenance — you may be over-maintaining; consider batching small edits.`;
   }
-  if (turnsSince >= MAINTENANCE_CADENCE.nudgeAtOrAbove) {
-    return `${label} since this segment's last maintenance — consider a maintenance pass.`;
-  }
+  // Ticket 12's nudge half: the 20-turn nudge left this receipt. A receipt
+  // only reaches whoever is ALREADY maintaining the segment — the session
+  // that has gone 20 turns without touching it never sees a receipt at all.
+  // The nudge rides the segment card's header instead (segment-card.ts),
+  // which renders at SessionStart and in recall without any write.
   return `${label} since this segment's last maintenance.`;
 }
 

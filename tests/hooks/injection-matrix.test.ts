@@ -12,8 +12,13 @@ import {
   addSegmentMembers,
   attachSegmentToSession,
   createSegment,
+  SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
   upsertTopic,
 } from "../../src/db/segments";
+
+// Ticket 02: the roster applies the segment-era freeze by default, so every
+// fixture segment that should be visible must be minted inside the era.
+const ERA = SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH;
 import { upsertSession } from "../../src/db/sessions";
 import {
   createContextHandler,
@@ -74,11 +79,11 @@ describe("SessionStart injection matrix", () => {
 
       // An attached segment — the fixed pool's slot 1 should render it when
       // the section is unblocked, and stay silent otherwise.
-      const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_700_000_000 });
+      const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
       const segment = createSegment(db, {
         title: `Ship the matrix ${source}`,
         topicId: topic.id,
-        nowEpoch: 1_700_000_000,
+        nowEpoch: ERA + 1_000,
       });
       addSegmentMembers(db, segment.id, [memberTurn.id], 1_700_000_000);
       attachSegmentToSession(db, current.id, segment.id, 1_700_000_050);
@@ -97,7 +102,7 @@ describe("SessionStart injection matrix", () => {
         sessionId: current.id,
         title: `Adopt the ${source} cluster`,
         addresses: [`S${current.id}/T1`],
-        nowEpoch: 1_700_000_200,
+        nowEpoch: ERA + 1_200,
       });
 
       const input: NormalizedHookInput = {
@@ -177,14 +182,14 @@ describe("SessionStart injection matrix", () => {
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
     // One attached segment beyond the fixed pool's slot count.
     const attachedIds: number[] = [];
     for (let index = 1; index <= 4; index += 1) {
       const segment = createSegment(db, {
         title: `Attached lane ${index}`,
         topicId: topic.id,
-        nowEpoch: 1_000 + index,
+        nowEpoch: ERA + 1_000 + index,
       });
       attachSegmentToSession(db, current.id, segment.id, 1_000 + index);
       attachedIds.push(segment.id);
