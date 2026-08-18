@@ -2,7 +2,8 @@
 
 Persistent memory for Claude Code sessions: an episodic layer of recorded turns and
 a semantic layer of task containers, maintained by the agents that do the work.
-Vocabulary pinned by the 2026-08-17 segment redesign (ADR-0001…0006).
+Vocabulary pinned by the 2026-08-17 segment redesign and the 2026-08-19
+edge-ownership redesign (ADR-0001…0007).
 
 ## Language
 
@@ -54,13 +55,21 @@ database object, never auto-adopted.
 ### Judging
 
 **Settlement**:
-The asynchronous pass that judges a finished window of turns: election, edge
-reconciliation, membership assignment.
+The asynchronous re-check pass over a finished window of turns: corrects the four
+structured fields (type, tags, membership, edges) against the Memory Rubric, keeps
+the session narrative, and proposes segments for homeless turns. Never a first
+writer; a window with nothing to correct completes empty-handed.
 
-**Election (差额选举)**:
-Settlement's competitive three-tier ranking (A/B/C) of a window's turns under seat
-ceilings.
+**Election (差额选举)** — _retired_:
+The competitive three-tier ranking settlement once ran. Machinery deleted
+(edge-ownership redesign); old grades stay stored and readable, old-era turns exit
+milestone rendering.
 _Avoid_: grading, scoring (the legacy absolute 0–4 semantics)
+
+**ops (type word)**:
+Delivery (release, commit, publishing a spec or tickets) plus operations (health
+probes, restarts, data repair). Pure spec transcription is ops; carrying a new
+ruling too makes it design+ops.
 
 **Citation floor**:
 The rule that a summary-layer claim exists only with a turn citation.
@@ -68,10 +77,21 @@ The rule that a summary-layer claim exists only with a turn citation.
 **Era**:
 A semantics boundary in stored data; reads never mix the two sides.
 
+### Addressing
+
+**Turn address (`S<n>/T<m>`)**:
+The only legal citation form for a turn — stable, render-independent.
+
+**Ordinal T (`E31/T3`)**:
+A turn's position in a segment's chronological render. Selection-only: attaching an
+earlier turn later shifts every ordinal after it.
+_Avoid_: citing an ordinal
+
 ### Tools
 
 **note**:
-The main agent's episodic write surface (记录): turn notes and the session title.
+The main agent's episodic write surface (记录): turn notes. The session's title and
+content belong to settlement.
 
 **remember**:
 The main agent's semantic write surface (记住): segment creation, attachment, and

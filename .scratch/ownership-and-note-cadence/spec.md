@@ -1,5 +1,7 @@
 # 所有权归位与笔记节奏
 
+**Status:** implemented(edge-ownership-impl 票 02/03/04/05/08/09,2026-08-19)——assign 搬家、积压节奏、session 字段退役、结算拆除与四字段纠错、会话叙事均已落地。
+
 ## Problem Statement
 
 结算 subagent 被压了四件事：打等级、维护边、判归属、重建笔记。四件里有三件它做不好，而且原因是结构性的，不是模型不够强。

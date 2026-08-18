@@ -1,6 +1,6 @@
 # ADR-0004 — The summary layer is grounded by citations and flagged by settlement
 
-**Status:** accepted · 2026-08-17 · source: S15069 T824 (grill round 1)
+**Status:** amended 2026-08-19 (flagging half retired, see below) · accepted 2026-08-17 · source: S15069 T824 (grill round 1)
 
 ## Context
 
@@ -28,3 +28,12 @@ Two guards, neither adds a writer:
   staleness via `supersedes` edges.
 - A flagged summary is repaired by the main agent through `remember` — the single
   writer stands.
+
+## Amendment (2026-08-19)
+
+Decision 2 (settlement flagging) is **retired** by the edge-ownership redesign
+([S15069/T906]): settlement now reads only the segment roster (id/title/topic),
+never a segment's summary layer, so it has nothing to check `content`/`insight`
+against. Decision 1 (the citation floor) stands, mechanically enforced as before.
+Note ADR-0003's grading arm is itself superseded — the citation discipline's
+remaining load is summary grounding and edge-derived staleness.

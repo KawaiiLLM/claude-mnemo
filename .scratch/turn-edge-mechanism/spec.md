@@ -1,5 +1,7 @@
 # turn 边机制：重要性从赋值改为推导
 
+**Status:** implemented(edge-ownership-impl 票 01/06/07/11,2026-08-19)——词表、阶段校验、选举拆除、信号层、统一 rubric 均已落地;里程碑准入与计分渲染的**消费侧**归视图 spec 验收。
+
 ## Problem Statement
 
 turn 的重要性一直靠**赋值**得到，而每一种赋值机制都漂了：
