@@ -1,13 +1,23 @@
 import type { OwedNoteTurn } from "../db/note-debt";
 
 /**
- * Rendering for the prompt-clock ledger's owed set (spec D3/D4).
+ * Rendering for the prompt-clock ledger's owed set (spec D3/D4; ticket 03
+ * note-cadence-backlog).
  *
  * Everything here is a pure function over `listOwedNoteTurns`'s result — no
  * database access, no state of its own. `session-init` calls these inside the
  * same write transaction that creates the current turn (spec D9: it is the
  * one process that knows the new turn's number without racing) and is the
  * ONLY caller; `prompt-dispatch` renders none of this any more.
+ *
+ * Ticket 03 retired the per-prompt owed SUFFIX this file used to render onto
+ * the current-turn line (`formatOwedSuffix`, gone) — the backlog-relief block
+ * below is the only owed-set rendering left. A structural fact killed it, not
+ * a preference: `listOwedNoteTurns` defines "ended" as "a later prompt
+ * exists", and the contract forbids noting a turn still in progress, so the
+ * turn immediately before this one is unconditionally owed the instant a new
+ * prompt lands — a suffix that appears every single time restates the
+ * contract, not the state.
  */
 
 /** Display cap for the backlog relief — a queue may hold more than this shows. */
@@ -85,28 +95,6 @@ function pendingSuffix(pendingTurns: number): string {
  */
 function formatDebtLine(turn: OwedNoteTurn): string {
   return `  [${formatTurnAddress(turn)}] ${formatPromptPrefix(turn.userPrompt)} ${pendingSuffix(turn.pendingTurns)}`;
-}
-
-/**
- * The current-turn line's owed suffix (spec D3, byte-level):
- *
- *   0 owed   ""                              (the line is unchanged)
- *   1 owed   " · owed: S<session>/T<n>"
- *   ≥2 owed  " · owed: S<session>/T<n> +<count-1> older"
- *
- * `owed` is `listOwedNoteTurns`'s own oldest-first order, so the NEWEST debt —
- * the one worth naming — is the last element.
- */
-export function formatOwedSuffix(owed: readonly OwedNoteTurn[]): string {
-  if (owed.length === 0) {
-    return "";
-  }
-
-  const newest = owed[owed.length - 1]!;
-  const address = formatTurnAddress(newest);
-  return owed.length === 1
-    ? ` · owed: ${address}`
-    : ` · owed: ${address} +${owed.length - 1} older`;
 }
 
 /**

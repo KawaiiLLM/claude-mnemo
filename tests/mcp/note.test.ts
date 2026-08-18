@@ -5,6 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { getNoteDebt, listOwedNoteTurns } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
+import { createSegment } from "../../src/db/segments";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
@@ -151,7 +152,10 @@ describe("note tool", () => {
       "crossSession",
       "evidenceFor",
       "evidenceAgainst",
-      "supersedes",
+      "groundedOn",
+      "refines",
+      "override",
+      "encodes",
       "dependsOn",
       "mode",
     ]);
@@ -1162,12 +1166,24 @@ describe("note tool citations (spec C6)", () => {
   });
 });
 
-describe("note tool relation attach (spec C1/C5/C7, ticket 07)", () => {
+describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket 01)", () => {
   let db: Database;
   let sessionId: number;
   let earlierTurnId: number;
   let anotherEarlierTurnId: number;
   let targetTurnId: number;
+
+  // Ticket 01 (turn-edge-mechanism spec): every relation is now phase-gated,
+  // so a fixture turn needs an explicit `type` matching the phase the test is
+  // exercising — the default (no type at all) carries NO phase and would be
+  // rejected by the phase gate before ever reaching the checks these tests
+  // actually target.
+  function setType(turnId: number, types: readonly string[]): void {
+    db.query<unknown, [string, number]>("UPDATE turns SET type = ? WHERE id = ?").run(
+      JSON.stringify(types),
+      turnId,
+    );
+  }
 
   beforeEach(() => {
     db = createDatabase(":memory:");
@@ -1198,15 +1214,20 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07)", () => {
   });
 
   // Requirement 4: the main agent may attach a relation to a pair its own
-  // write is creating — it authored the prose in the same call.
+  // write is creating — it authored the prose in the same call. `override`
+  // replaces the retired `supersedes` for this "reverses whole" scenario —
+  // decision-phase turns on both ends.
   test("attaches a relation to a pair this write's own body cites", () => {
+    setType(earlierTurnId, ["design"]);
+    setType(targetTurnId, ["correction"]);
+
     const result = noteTool(
       db,
       {
         turn: `S${sessionId}/T3`,
-        title: "design+routing: reverses the earlier call",
+        title: "correction+routing: reverses the earlier call",
         content: `Overturns [S${sessionId}/T1].`,
-        supersedes: [`S${sessionId}/T1`],
+        override: [`S${sessionId}/T1`],
       },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
@@ -1216,7 +1237,7 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07)", () => {
     const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
     expect(edges).toHaveLength(1);
     expect(edges[0]?.cited).toEqual({ kind: "turn", id: earlierTurnId });
-    expect(edges[0]?.relation).toBe("supersedes");
+    expect(edges[0]?.relation).toBe("override");
     // The main agent's own classification — distinct from a bare textual
     // reference (`text-ref`) and a settlement attribution (`judged`).
     expect(edges[0]?.provenance).toBe("asserted");
@@ -1224,13 +1245,19 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07)", () => {
 
   // Requirement 1: named fields, one per relation — two different fields
   // naming two different targets in the SAME call land two distinct
-  // relations, not a shared guess.
+  // relations, not a shared guess. The citing turn is DUAL-typed
+  // (evidence + delivery) so it satisfies BOTH evidenceAgainst's source
+  // requirement and dependsOn's, in the one call — the exists-rule.
   test("distinct fields for distinct targets land distinct relations in one call", () => {
+    setType(targetTurnId, ["measure", "implement"]);
+    setType(earlierTurnId, ["design"]);
+    setType(anotherEarlierTurnId, ["fix"]);
+
     const result = noteTool(
       db,
       {
         turn: `S${sessionId}/T3`,
-        title: "design+routing: two claims at once",
+        title: "measure+implement: two claims at once",
         content: `Tested [S${sessionId}/T1] and depends on [S${sessionId}/T2].`,
         evidenceAgainst: [`S${sessionId}/T1`],
         dependsOn: [`S${sessionId}/T2`],
@@ -1246,15 +1273,20 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07)", () => {
   });
 
   // Requirement 2: a relation naming a turn the body does not cite is
-  // rejected — the whole call fails, nothing at all is written.
+  // rejected — the whole call fails, nothing at all is written. Both turns
+  // are decision-phase so the phase gate passes and this test isolates the
+  // not-cited rejection specifically.
   test("rejects a relation naming a turn the body does not cite (requirement 2)", () => {
+    setType(targetTurnId, ["correction"]);
+    setType(anotherEarlierTurnId, ["design"]);
+
     const result = noteTool(
       db,
       {
         turn: `S${sessionId}/T3`,
-        title: "design+routing: mentions one, claims another",
+        title: "correction+routing: mentions one, claims another",
         content: `Mentions [S${sessionId}/T1].`,
-        supersedes: [`S${sessionId}/T2`],
+        override: [`S${sessionId}/T2`],
       },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
@@ -1268,15 +1300,20 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07)", () => {
   });
 
   // Requirement 3: the same target under two relation fields is rejected.
+  // The citing turn is dual-typed (evidence + decision) to satisfy BOTH
+  // evidenceFor's and override's source requirement at once.
   test("rejects the same target claimed by two relation fields (requirement 3)", () => {
+    setType(targetTurnId, ["measure", "correction"]);
+    setType(earlierTurnId, ["design"]);
+
     const result = noteTool(
       db,
       {
         turn: `S${sessionId}/T3`,
-        title: "design+routing: conflicting claims",
+        title: "measure+correction: conflicting claims",
         content: `Cites [S${sessionId}/T1].`,
         evidenceFor: [`S${sessionId}/T1`],
-        supersedes: [`S${sessionId}/T1`],
+        override: [`S${sessionId}/T1`],
       },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
@@ -1287,6 +1324,7 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07)", () => {
   });
 
   test("a relation field with no citation-bearing field in the same call is rejected, atomically", () => {
+    setType(earlierTurnId, ["design"]);
     noteTool(
       db,
       { turn: `S${sessionId}/T3`, title: "design+routing: first pass", content: "c" },
@@ -1294,10 +1332,12 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07)", () => {
     );
 
     // This second call touches only `type` — no title/content/insight, so
-    // there is no post-state for a relation to be eligible against.
+    // there is no post-state for a relation to be eligible against. `type`
+    // here also happens to be decision-phase, so this isolates the
+    // "no citation-bearing field" rejection from the phase gate.
     const result = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, type: ["fix"], supersedes: [`S${sessionId}/T1`] },
+      { turn: `S${sessionId}/T3`, type: ["correction"], override: [`S${sessionId}/T1`] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
@@ -1310,12 +1350,306 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07)", () => {
   test("a session write rejects a relation field outright", () => {
     const result = noteTool(
       db,
-      { session: `S${sessionId}`, title: "x", supersedes: [`S${sessionId}/T1`] },
+      { session: `S${sessionId}`, title: "x", override: [`S${sessionId}/T1`] },
       { now: () => 900, env: {} },
     );
 
     expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain("supersedes is a turn field");
+    expect(resultText(result)).toContain("override is a turn field");
+  });
+
+  // ---------------------------------------------------------------------
+  // Ticket 01 (turn-edge-mechanism spec): phase-pair legality. Each of the
+  // spec's four phase-pair rows gets at least one legal and one illegal
+  // example (acceptance criterion 2).
+  // ---------------------------------------------------------------------
+
+  test("evidence -> decision: evidence-for is legal with an evidence-phase source, illegal with a decision-phase source", () => {
+    setType(earlierTurnId, ["design"]); // decision-phase target
+    setType(targetTurnId, ["research"]); // evidence-phase source
+
+    const legal = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "research+routing: measured the claim directly",
+        content: `Tests [S${sessionId}/T1].`,
+        evidenceFor: [`S${sessionId}/T1`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(legal)).toContain("Attached 1 relation(s).");
+
+    // A fourth, decision-phase-only turn cannot supply evidenceFor's source
+    // requirement (evidence).
+    const fourthTurnId = db
+      .query<{ id: number }, [number, number, string]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, type, created_at_epoch)
+         VALUES (?, 4, 'extracted', 'A fourth turn', ?, 115) RETURNING id`,
+      )
+      .get(sessionId, JSON.stringify(["design"]))!.id;
+
+    const illegal = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T4`,
+        title: "design+routing: a decision-only turn",
+        content: `Tests [S${sessionId}/T1].`,
+        evidenceFor: [`S${sessionId}/T1`],
+      },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(illegal)).toStartWith("Parameter error:");
+    expect(resultText(illegal)).toContain("evidence-phase");
+    expect(getOutgoingEdges(db, { kind: "turn", id: fourthTurnId })).toEqual([]);
+  });
+
+  test("decision -> decision: refines is legal between two decision-phase turns, illegal when the citing turn is delivery-only", () => {
+    setType(earlierTurnId, ["design"]);
+    setType(targetTurnId, ["discuss"]);
+
+    const legal = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "discuss+routing: revises part of the earlier decision",
+        content: `Refines [S${sessionId}/T1].`,
+        refines: [`S${sessionId}/T1`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(legal)).toContain("Attached 1 relation(s).");
+  });
+
+  // The pure-review case is its own acceptance criterion: rejected, told to
+  // add `design`, admitted once added.
+  test("a pure-review turn attempting refines is rejected and told to add a decision-phase type; passes once design is added", () => {
+    setType(earlierTurnId, ["design"]);
+    setType(targetTurnId, ["review"]);
+
+    const rejected = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "review+routing: a pure review turn",
+        content: `Refines [S${sessionId}/T1].`,
+        refines: [`S${sessionId}/T1`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(rejected)).toStartWith("Parameter error:");
+    expect(resultText(rejected)).toContain("decision-phase");
+    expect(resultText(rejected)).toContain("design");
+    // The whole call rolled back — no note landed from the rejected attempt.
+    expect(getShadowNote(db, targetTurnId)).toBeNull();
+
+    // Self-forcing the double type (spec's own point): `review` alone
+    // cannot carry `refines`, but `["review","design"]` can — the SAME
+    // multi-type turn is now legal because its phase SET admits decision.
+    // `mode.type: "overwrite"` because the turn already carries a `type`
+    // (set directly for the fixture above) — the ordinary non-empty-field
+    // rule, unrelated to the phase gate this test targets.
+    const passed = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "design+review: reviewing this also revised the design",
+        content: `Refines [S${sessionId}/T1].`,
+        type: ["review", "design"],
+        mode: { type: "overwrite" },
+        refines: [`S${sessionId}/T1`],
+      },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(isNoteSuccess(passed)).toBe(true);
+    expect(resultText(passed)).toContain("Attached 1 relation(s).");
+  });
+
+  test("delivery -> decision: encodes is legal from a delivery-phase turn, illegal from a decision-phase-only turn", () => {
+    setType(earlierTurnId, ["design"]); // decision-phase target
+    setType(targetTurnId, ["implement"]); // delivery-phase source
+
+    const legal = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "implement+routing: ships the ticket carrying the decision",
+        content: `Encodes [S${sessionId}/T1].`,
+        encodes: [`S${sessionId}/T1`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(legal)).toContain("Attached 1 relation(s).");
+
+    const fifthTurnId = db
+      .query<{ id: number }, [number, number, string]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, type, created_at_epoch)
+         VALUES (?, 5, 'extracted', 'A fifth turn', ?, 120) RETURNING id`,
+      )
+      .get(sessionId, JSON.stringify(["design"]))!.id;
+
+    const illegal = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T5`,
+        title: "design+routing: a decision-only turn",
+        content: `Encodes [S${sessionId}/T1].`,
+        encodes: [`S${sessionId}/T1`],
+      },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(illegal)).toStartWith("Parameter error:");
+    expect(resultText(illegal)).toContain("delivery-phase");
+    expect(getOutgoingEdges(db, { kind: "turn", id: fifthTurnId })).toEqual([]);
+  });
+
+  test("delivery -> delivery: depends-on is legal between two delivery-phase turns, illegal when the target is decision-phase", () => {
+    setType(anotherEarlierTurnId, ["implement"]);
+    setType(targetTurnId, ["fix"]);
+
+    const legal = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "fix+routing: depends on the earlier build",
+        content: `Depends on [S${sessionId}/T2].`,
+        dependsOn: [`S${sessionId}/T2`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(legal)).toContain("Attached 1 relation(s).");
+
+    setType(earlierTurnId, ["design"]); // decision-phase — illegal dependsOn target
+    const illegal = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "fix+routing: revised, now depends on a decision instead",
+        content: `Depends on [S${sessionId}/T1].`,
+        dependsOn: [`S${sessionId}/T1`],
+        mode: { title: "overwrite", content: "overwrite" },
+      },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(illegal)).toStartWith("Parameter error:");
+    expect(resultText(illegal)).toContain("delivery-phase");
+  });
+
+  // [S15069/T935] mid-flight amendment: `grounded-on` — decision source,
+  // evidence OR delivery target (an OR the other relations do not have).
+  test("decision -> {evidence, delivery}: groundedOn is legal against either phase, illegal against a decision-phase target", () => {
+    setType(earlierTurnId, ["research"]); // evidence-phase
+    setType(anotherEarlierTurnId, ["implement"]); // delivery-phase
+    setType(targetTurnId, ["design"]); // decision-phase source, both calls
+
+    const groundedOnEvidence = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "design+routing: rests on the earlier finding",
+        content: `Grounded on [S${sessionId}/T1].`,
+        groundedOn: [`S${sessionId}/T1`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(groundedOnEvidence)).toContain("Attached 1 relation(s).");
+
+    const groundedOnDelivery = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "design+routing: rests on the earlier finding, revised",
+        content: `Grounded on [S${sessionId}/T2].`,
+        groundedOn: [`S${sessionId}/T2`],
+        mode: { title: "overwrite", content: "overwrite" },
+      },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(groundedOnDelivery)).toContain("Attached 1 relation(s).");
+    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    expect(edges.every((edge) => edge.relation === "grounded-on")).toBe(true);
+
+    // Illegal: a decision-phase target satisfies neither of groundedOn's two
+    // pairs (evidence, delivery).
+    const decisionTargetId = db
+      .query<{ id: number }, [number, number, string]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, type, created_at_epoch)
+         VALUES (?, 4, 'extracted', 'A decision-only turn', ?, 118) RETURNING id`,
+      )
+      .get(sessionId, JSON.stringify(["discuss"]))!.id;
+    const illegal = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "design+routing: tries to ground on another decision",
+        content: `Grounded on [S${sessionId}/T4].`,
+        groundedOn: [`S${sessionId}/T4`],
+        mode: { title: "overwrite", content: "overwrite" },
+      },
+      { now: () => 1000, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(illegal)).toStartWith("Parameter error:");
+    expect(resultText(illegal)).toContain("evidence-phase");
+    expect(resultText(illegal)).toContain("delivery-phase");
+    expect(getOutgoingEdges(db, { kind: "turn", id: decisionTargetId })).toEqual([]);
+  });
+
+  // Ticket 01: the exists-rule for a MULTI-type turn — legal on BOTH ends at
+  // once for two DIFFERENT relations, matching the spec's own worked example
+  // ("design+ops 轮可被 refines 亦可发 encodes").
+  test("a dual-type (design+ops) turn is legal on both ends under the exists-rule — refines' target and encodes' source", () => {
+    // anotherEarlierTurnId carries BOTH a decision phase (design) and a
+    // delivery phase (ops) — legal as refines' TARGET (needs decision) and,
+    // in a separate write, as encodes' SOURCE (needs delivery).
+    setType(anotherEarlierTurnId, ["design", "ops"]);
+    setType(targetTurnId, ["correction"]);
+
+    const refinesResult = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "correction+routing: revises part of the earlier decision",
+        content: `Refines [S${sessionId}/T2].`,
+        refines: [`S${sessionId}/T2`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(refinesResult)).toContain("Attached 1 relation(s).");
+
+    setType(earlierTurnId, ["design"]);
+    const encodesResult = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T2`,
+        title: "design+ops: ships the ticket that carries the earlier decision",
+        content: `Encodes [S${sessionId}/T1].`,
+        encodes: [`S${sessionId}/T1`],
+      },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(encodesResult)).toContain("Attached 1 relation(s).");
+  });
+
+  // Ticket 01: relations are turn-only — an `E<n>` target is a parameter
+  // error naming the ownership/cites alternative, never a silent drop.
+  test("a relation target naming a segment is rejected — relations are turn-only", () => {
+    const segment = createSegment(db, { title: "Some segment", nowEpoch: 200 });
+    setType(targetTurnId, ["correction"]);
+
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "correction+routing: tries to relate to a segment",
+        content: `Related to [E${segment.id}].`,
+        override: [`E${segment.id}`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("segment address");
+    expect(resultText(result)).toContain("turn-only");
   });
 });
 

@@ -112,9 +112,11 @@ describe("handleSessionInitHook", () => {
     );
 
     // T1 exists, has no note and no skip, so it is owed the moment T2 is
-    // created (spec D1) — the owed suffix rides the very same line.
+    // created (spec D1) — but ticket 03 retired the owed suffix, so a single
+    // below-threshold debt leaves the line bare; the number itself is what
+    // this test pins.
     expect(result.hookSpecificOutput).toBe(
-      `mnemo current turn: S${session.id}/T2 · owed: S${session.id}/T1`,
+      `mnemo current turn: S${session.id}/T2`,
     );
   });
 
@@ -569,13 +571,19 @@ describe("handleSessionInitHook", () => {
 });
 
 /**
- * The owed suffix and the backlog relief (note-prompt-clock spec D1/D3/D4/D9):
- * computed and rendered by THIS entry, inside the same transaction that
- * creates the current turn — there is no separate reminder pass, no
- * classification, and (per D9) no second UserPromptSubmit process that
- * touches any of it.
+ * The backlog-relief block (note-prompt-clock spec D1/D3/D4/D9; ticket 03
+ * note-cadence-backlog): computed and rendered by THIS entry, inside the same
+ * transaction that creates the current turn — there is no separate reminder
+ * pass, no classification, and (per D9) no second UserPromptSubmit process
+ * that touches any of it.
+ *
+ * Ticket 03 retired the current-turn line's owed SUFFIX outright (see
+ * src/hooks/note-reminder.ts's doc comment: it was structurally present
+ * every single time, so it carried zero information). Below threshold
+ * (< 5), an owed turn now produces NO visible signal at all — the relief
+ * block at >= 5 is the only owed-set rendering left, unchanged from before.
  */
-describe("owed-notes injection (spec D3/D4/D9)", () => {
+describe("owed-notes injection (spec D3/D4/D9, ticket 03)", () => {
   let db: Database;
   let sessionId: number;
 
@@ -631,7 +639,7 @@ describe("owed-notes injection (spec D3/D4/D9)", () => {
     );
   });
 
-  test("one owed turn: the address is appended", async () => {
+  test("one owed turn: no signal at all — the current-turn line stays bare", async () => {
     addOwedTurn(1);
 
     const result = await createSessionInitHandler({ db })(
@@ -639,24 +647,28 @@ describe("owed-notes injection (spec D3/D4/D9)", () => {
     );
 
     expect(result.hookSpecificOutput).toBe(
-      `mnemo current turn: S${sessionId}/T2 · owed: S${sessionId}/T1`,
+      `mnemo current turn: S${sessionId}/T2`,
     );
   });
 
-  test("two owed turns: the newest address plus the older count", async () => {
-    addOwedTurn(1);
-    addOwedTurn(2);
+  // Ticket 03 acceptance criterion: "0 条、4 条积压无提醒" — four owed turns,
+  // one short of the threshold, produce no visible signal anywhere: no owed
+  // suffix (retired) and no relief block (below NOTE_RELIEF_PENDING_THRESHOLD).
+  test("four owed turns (one short of the threshold): no signal at all", async () => {
+    for (let promptNumber = 1; promptNumber <= 4; promptNumber += 1) {
+      addOwedTurn(promptNumber);
+    }
 
     const result = await createSessionInitHandler({ db })(
-      createInput({ prompt: "third" }),
+      createInput({ prompt: "fifth" }),
     );
 
     expect(result.hookSpecificOutput).toBe(
-      `mnemo current turn: S${sessionId}/T3 · owed: S${sessionId}/T2 +1 older`,
+      `mnemo current turn: S${sessionId}/T5`,
     );
   });
 
-  test("five or more owed turns: the owed suffix AND a relief block listing the oldest five", async () => {
+  test("five or more owed turns: the current-turn line stays bare, and a relief block lists the oldest five", async () => {
     for (let promptNumber = 1; promptNumber <= 5; promptNumber += 1) {
       addOwedTurn(promptNumber, `prompt number ${promptNumber}`);
     }
@@ -667,7 +679,7 @@ describe("owed-notes injection (spec D3/D4/D9)", () => {
 
     expect(result.hookSpecificOutput).toBe(
       [
-        `mnemo current turn: S${sessionId}/T6 · owed: S${sessionId}/T5 +4 older`,
+        `mnemo current turn: S${sessionId}/T6`,
         [
           "mnemo pending notes (backlog relief):",
           `  [S${sessionId}/T1] "prompt number 1" (pending 5 turns)`,
@@ -716,11 +728,11 @@ describe("owed-notes injection (spec D3/D4/D9)", () => {
       createInput({ prompt: "sixth" }),
     );
 
-    // Four left — below the five-turn threshold, so no relief block, and the
-    // owed suffix names only what remains.
+    // Four left — below the five-turn threshold, so no relief block, and (per
+    // ticket 03) no owed suffix either: the current-turn line is bare.
     expect(result.hookSpecificOutput).not.toContain("backlog relief");
     expect(result.hookSpecificOutput).toBe(
-      `mnemo current turn: S${sessionId}/T6 · owed: S${sessionId}/T5 +3 older`,
+      `mnemo current turn: S${sessionId}/T6`,
     );
   });
 
@@ -791,7 +803,7 @@ describe("owed-notes injection (spec D3/D4/D9)", () => {
     );
   });
 
-  test("a subagent prompt gets no owed suffix and no relief block — suppressOutput wins outright", async () => {
+  test("a subagent prompt gets no relief block — suppressOutput wins outright", async () => {
     for (let promptNumber = 1; promptNumber <= 6; promptNumber += 1) {
       addOwedTurn(promptNumber);
     }
@@ -817,27 +829,31 @@ describe("owed-notes injection (spec D3/D4/D9)", () => {
     expect(result.hookSpecificOutput ?? "").not.toContain("mnemo current turn");
   });
 
-  test("no N/N-1 race: session-init alone creates the turn and computes owed from the number it just took", async () => {
+  test("no N/N-1 race: session-init alone creates the turn and computes the relief block from the number it just took", async () => {
     // Both UserPromptSubmit entries run in Claude Code's Promise.all; the old
     // relief handler used to read `getLatestTurn` independently and could
     // therefore disagree with session-init about which turn was "current".
     // prompt-dispatch touches no database at all now (see the test above), so
     // there is nothing left for it to disagree with — session-init's own
     // count is authoritative by construction, not by a race it wins.
-    addOwedTurn(1);
-    addOwedTurn(2);
+    for (let promptNumber = 1; promptNumber <= 5; promptNumber += 1) {
+      addOwedTurn(promptNumber);
+    }
 
     const sessionInitResult = await createSessionInitHandler({ db })(
-      createInput({ prompt: "third" }),
+      createInput({ prompt: "sixth" }),
     );
     const promptDispatchResult = await createPromptDispatchHandler()(
-      createInput({ prompt: "third" }),
+      createInput({ prompt: "sixth" }),
     );
 
-    expect(sessionInitResult.hookSpecificOutput).toBe(
-      `mnemo current turn: S${sessionId}/T3 · owed: S${sessionId}/T2 +1 older`,
+    expect(sessionInitResult.hookSpecificOutput).toContain(
+      `mnemo current turn: S${sessionId}/T6`,
     );
-    expect(promptDispatchResult.hookSpecificOutput ?? "").not.toContain("owed");
+    expect(sessionInitResult.hookSpecificOutput).toContain("backlog relief");
+    expect(promptDispatchResult.hookSpecificOutput ?? "").not.toContain(
+      "backlog relief",
+    );
   });
 });
 

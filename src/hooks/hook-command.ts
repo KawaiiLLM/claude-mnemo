@@ -239,9 +239,10 @@ function getDefaultDigestContextHandler(): HookHandler {
 // The `prompt-dispatch` UserPromptSubmit entry — the rule digest only (spec
 // note-prompt-clock D9). It opens no database: `session-init`, the sibling
 // UserPromptSubmit registration, is the sole writer and sole reader of the
-// owed-notes state (turn creation, the owed suffix, the backlog relief), all
-// inside its own transaction, so there is nothing left here that a write lock
-// could contend with.
+// owed-notes state (turn creation, the backlog relief — ticket 03 retired
+// the current-turn line's owed SUFFIX outright, see hooks/note-reminder.ts),
+// all inside its own transaction, so there is nothing left here that a write
+// lock could contend with.
 function getDefaultUserPromptSubmitDispatcher(): HookHandler {
   if (!defaultUserPromptSubmitDispatcher) {
     defaultUserPromptSubmitDispatcher = createPromptDispatchHandler();

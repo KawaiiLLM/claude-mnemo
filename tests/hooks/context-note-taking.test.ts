@@ -4,6 +4,7 @@ import {
   createNoteTakingContextHandler,
   NOTE_TAKING_INSTRUCTIONS,
 } from "../../src/hooks/handlers/context-note-taking";
+import { MNEMO_TOOL_DESCRIPTIONS } from "../../src/mcp/definitions";
 import { estimateTokens } from "../../src/utils/token-estimate";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
@@ -43,12 +44,15 @@ describe("note-taking instructions injection", () => {
     // own, after answering, which rule 3 forbids. A tool description is in
     // context whenever the tool is, so timing never needed a second home.
     //
-    // What cannot move is the address NORM: the injected formats (owed
-    // suffix, relief block) teach themselves on sight, but "these lines are
-    // the only legitimate source" cannot be read off a format, and it belongs
-    // where the formats appear. The contract clauses are pinned in
-    // tests/mcp/definitions.test.ts; the two pin sets stay disjoint, because
-    // a clause stated on both surfaces is how they diverged before.
+    // What cannot move is the address NORM: the injected formats (the
+    // current-turn line, the relief block) teach themselves on sight, but
+    // "these lines are the only legitimate source" cannot be read off a
+    // format, and it belongs where the formats appear. The contract clauses
+    // are pinned in tests/mcp/definitions.test.ts; the two pin sets stay
+    // disjoint, because a clause stated on both surfaces is how they
+    // diverged before. Ticket 03 retired the owed SUFFIX itself (see the
+    // "timing contract has exactly one home" test below) — this comment no
+    // longer names it as a format this block documents.
     expect(NOTE_TAKING_INSTRUCTIONS).toStartWith("<mnemo-note-taking>");
     expect(NOTE_TAKING_INSTRUCTIONS).toEndWith("</mnemo-note-taking>");
     // Asserted against a whitespace-collapsed copy: the block is hard-wrapped
@@ -85,6 +89,38 @@ describe("note-taking instructions injection", () => {
     // with headroom; the description's own token cap lives in
     // tests/mcp/definitions.test.ts.
     expect(estimateTokens(NOTE_TAKING_INSTRUCTIONS)).toBeLessThanOrEqual(110);
+  });
+
+  // Ticket 03 (note-cadence-backlog): "the note timing wording exists in
+  // exactly ONE home" as a cross-file assertion, not a trust exercise between
+  // two doc comments that both claim it — the 0.11.1 incident was exactly two
+  // files each stating a timing rule, disagreeing with each other. Every
+  // distinguishing phrase of the CURRENT timing contract (spec's rule 1
+  // unchanged, rule 2 rewritten to the backlog-relief trigger) must appear on
+  // the note tool's own description and must NOT appear on the SessionStart
+  // block.
+  test("timing contract has exactly one home: the note tool's description, never the SessionStart block", () => {
+    const note = MNEMO_TOOL_DESCRIPTIONS.note;
+    const flat = NOTE_TAKING_INSTRUCTIONS.replace(/\s+/gu, " ");
+
+    const timingSignatures = [
+      "note only FINISHED turns",
+      "never the one in progress",
+      "backlog relief appears",
+      "never just to write one turn's note early",
+    ];
+
+    for (const signature of timingSignatures) {
+      expect(note, `note description should state: ${signature}`).toContain(signature);
+      expect(
+        flat,
+        `SessionStart block must not restate: ${signature}`,
+      ).not.toContain(signature);
+    }
+
+    // The SessionStart block's own text: a pointer at the single home, not a
+    // second copy of what the home says.
+    expect(flat).toContain("Timing, fields, budgets, the skip test and replace live in the note tool's description");
   });
 
   test("it stays out of other events", async () => {

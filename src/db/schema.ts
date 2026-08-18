@@ -112,6 +112,17 @@ const NOTE_SETTLEMENT_JOBS_INDEX_DDL = `
 `;
 
 const SCHEMA_SQL = `
+  -- ownership-and-note-cadence spec, "session 字段" ([S15069/T910]-[T913]):
+  -- insight/next_steps/decision/done/current/reference are retired from
+  -- EVERY read surface (injection, recall's session header, summary
+  -- queries, tool-facing output) unconditionally — title and content are
+  -- the session's only two remaining semantic fields. The physical columns
+  -- stay: db/sessions.ts's write paths (upsertSession,
+  -- updateSessionSummaryRewrite, updateSessionFields) still read/write them
+  -- and are out of this ticket's scope (a settlement-side writer for
+  -- content lands in a later ticket) — dropping the columns would break
+  -- those INSERT/UPDATE statements. Existing rows keep whatever they have;
+  -- nothing reads it back.
   CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content_session_id TEXT UNIQUE NOT NULL,
@@ -168,15 +179,15 @@ const SCHEMA_SQL = `
     significance_grade INTEGER CHECK (
       significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
     ),
-    -- Election tier (ADR-0003, ticket 06) — the third grading semantics, era-
-    -- gated against significance_grade above (src/election-era.ts): a legacy
-    -- turn carries a grade, a new-era one carries a tier, never both. Added by
-    -- ensureTurnElectionTierColumn below on a pre-existing database; declared
-    -- here too so a FRESH database gets it at creation without waiting on that
-    -- migration to run.
-    election_tier TEXT CHECK (
-      election_tier IS NULL OR election_tier IN ('A', 'B', 'C')
-    ),
+    -- election_tier (ADR-0003) is RETIRED (ownership-and-note-cadence spec,
+    -- ticket 06, "选举机器拆除"): the election-tier third grading semantics
+    -- never carried real data in production (the era cutoff was never
+    -- pinned), and settlement no longer assigns grade or tier at all (ticket
+    -- 05). A database migrated under a pre-06 install may still carry the
+    -- physical column — harmless and orphaned, never read or written by any
+    -- code from here on; a fresh database never gets it. ADR-0003 is marked
+    -- superseded; significance_grade above is UNRELATED and stays exactly as
+    -- it was, old grade reads intact.
     tags TEXT,
     files_read TEXT,
     files_modified TEXT,
@@ -462,7 +473,7 @@ const SCHEMA_SQL = `
     -- (ADR-0002's one-writer-per-layer split). Plain nullable TEXT with no
     -- CHECK referencing another column, so a bare ALTER TABLE ... ADD COLUMN
     -- is legal SQLite on an existing database (ensureSegmentWorkingStateColumns
-    -- below) — same shape of migration as election_tier on turns, no
+    -- below) — same shape of migration as significance_grade on turns, no
     -- 12-step rebuild needed.
     goal TEXT,
     constraints TEXT,
@@ -930,6 +941,19 @@ const SCHEMA_SQL = `
 // the legacy table is dropped. "The table did not exist before this open" is
 // still the gate a fresh install uses to skip that fold — the same idiom as
 // ensureForkLineageColumns' one-time backfill.
+//
+// Ticket 01 (turn-edge-mechanism spec): the `relation` CHECK below widens with
+// `refines`/`override`/`encodes`/`grounded-on` alongside the four legacy
+// values. `supersedes` stays IN the CHECK — existing rows are frozen-readable and
+// settlement's own facade may still write it — even though mcp/note.ts no
+// longer offers it as a parameter (see db/citations.ts's CITATION_RELATIONS).
+// NOTE: "CREATE TABLE IF NOT EXISTS" only applies this widened list to a
+// FRESH database — an existing installation's physical CHECK constraint
+// predates this change and needs its own widening migration (the
+// ensureSegmentStatusVocabulary rebuild-and-copy idiom) before it can accept
+// an insert carrying one of the four new words; none exists yet, tracked as
+// a known gap. (No backticks inside the DDL template literal below — it is a
+// JS template string, and a stray backtick in a SQL comment would close it.)
 const MEMORY_EDGES_DDL = `
   CREATE TABLE IF NOT EXISTS memory_edges (
     citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
@@ -938,7 +962,10 @@ const MEMORY_EDGES_DDL = `
     cited_id INTEGER NOT NULL,
     relation TEXT CHECK (
       relation IS NULL OR
-      relation IN ('evidence-for', 'evidence-against', 'supersedes', 'depends-on')
+      relation IN (
+        'evidence-for', 'evidence-against', 'supersedes', 'depends-on',
+        'refines', 'override', 'encodes', 'grounded-on'
+      )
     ),
     provenance TEXT NOT NULL CHECK (
       provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
@@ -1433,7 +1460,6 @@ export function initializeSchema(db: Database): void {
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureTurnSignificanceGradeColumn(db);
-  ensureTurnElectionTierColumn(db);
   ensureSegmentInsightColumn(db);
   ensureSegmentWorkingStateColumns(db);
   ensureSegmentDerivedFacets(db);
@@ -1953,8 +1979,8 @@ function ensureSegmentInsightColumn(db: Database): void {
 
 /**
  * Working State (ADR-0001, ticket 02): the six columns that reach an EXISTING
- * database. Same shape of migration as `ensureTurnElectionTierColumn` right
- * above it in `initializeSchema`'s call list — every one of these six is a
+ * database. Same shape of migration as `ensureTurnSignificanceGradeColumn` —
+ * every one of these six is a
  * plain nullable `TEXT` whose (absent) CHECK references only itself, so
  * `ALTER TABLE … ADD COLUMN` is legal SQLite and no 12-step rebuild is
  * needed. A database created fresh from `SCHEMA_SQL` already carries all six
@@ -2197,26 +2223,6 @@ function ensureTurnSignificanceGradeColumn(db: Database): void {
     "turns",
     "significance_grade",
     "INTEGER CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)",
-  );
-}
-
-/**
- * Election tier (ADR-0003, ticket 06) — same shape of migration as
- * `ensureTurnSignificanceGradeColumn` immediately above: a plain nullable
- * column whose CHECK references only itself, so `ALTER TABLE … ADD COLUMN`
- * is legal SQLite (no rebuild needed — a CHECK constraint only blocks a bare
- * ADD COLUMN when it references OTHER columns or forbids NULL without a
- * default, neither of which applies here). Every existing row reads NULL,
- * which is correct: a turn already on disk when this migration runs predates
- * the election-era cutoff by construction, so it was never going to carry a
- * tier anyway (src/election-era.ts).
- */
-function ensureTurnElectionTierColumn(db: Database): void {
-  addColumnIfMissing(
-    db,
-    "turns",
-    "election_tier",
-    "TEXT CHECK (election_tier IS NULL OR election_tier IN ('A', 'B', 'C'))",
   );
 }
 
@@ -2569,7 +2575,7 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
         "id", "session_id", "prompt_number", "content_prompt_id",
         "was_interrupted", "was_rolled_back", "status", "user_prompt",
         "assistant_response", "assistant_transcript", "title", "content",
-        "insight", "type", "significance_grade", "election_tier", "tags",
+        "insight", "type", "significance_grade", "tags",
         "files_read", "files_modified", "tool_call_count",
         "transcript_line_start",
         "consulted_memories", "compact_boundary_uuid", "parent_turn_id",
@@ -2582,7 +2588,14 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
         // `retireTurnCitesRecordedColumn` runs right after this one in
         // `initializeSchema` and owns it exclusively — present here or not,
         // it is accounted for, not unexpected.
-        ["cites_recorded"],
+        //
+        // `election_tier`: retired outright (ownership-and-note-cadence spec,
+        // ticket 06) — a database migrated under a pre-06 install may still
+        // physically carry it (added by the now-removed
+        // `ensureTurnElectionTierColumn`), and this rebuild deliberately does
+        // NOT carry it forward. Listed here so the guard reads that omission
+        // as an intentional drop rather than an unaccounted-for column.
+        ["cites_recorded", "election_tier"],
         "ensureTurnTypeMultiValueColumn",
       );
 
@@ -2605,9 +2618,6 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
           significance_grade INTEGER CHECK (
             significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
           ),
-          election_tier TEXT CHECK (
-            election_tier IS NULL OR election_tier IN ('A', 'B', 'C')
-          ),
           tags TEXT,
           files_read TEXT,
           files_modified TEXT,
@@ -2628,7 +2638,7 @@ ${stallColumnDdl}
           id, session_id, prompt_number, content_prompt_id, was_interrupted,
           was_rolled_back, status, user_prompt, assistant_response,
           assistant_transcript, title, content, insight, type,
-          significance_grade, election_tier, tags, files_read, files_modified,
+          significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
           ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
@@ -2643,7 +2653,7 @@ ${stallColumnDdl}
             WHEN json_valid(type) AND json_type(type) = 'array' THEN type
             ELSE json_array(type)
           END,
-          significance_grade, election_tier, tags, files_read, files_modified,
+          significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
           ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
@@ -2783,7 +2793,7 @@ function retireTurnCitesRecordedColumn(db: Database): void {
         "id", "session_id", "prompt_number", "content_prompt_id",
         "was_interrupted", "was_rolled_back", "status", "user_prompt",
         "assistant_response", "assistant_transcript", "title", "content",
-        "insight", "type", "significance_grade", "election_tier", "tags",
+        "insight", "type", "significance_grade", "tags",
         "files_read", "files_modified", "tool_call_count",
         "transcript_line_start",
         "consulted_memories", "compact_boundary_uuid", "parent_turn_id",
@@ -2792,7 +2802,11 @@ function retireTurnCitesRecordedColumn(db: Database): void {
       assertNoUnexpectedTurnsColumns(
         db,
         [...canonicalColumns, ...stallColumns.map((c) => c.name)],
-        ["cites_recorded"],
+        // `election_tier`: retired outright (ownership-and-note-cadence spec,
+        // ticket 06) — see `ensureTurnTypeMultiValueColumn`'s own copy of
+        // this comment; this rebuild deliberately does not carry it forward
+        // either.
+        ["cites_recorded", "election_tier"],
         "retireTurnCitesRecordedColumn",
       );
 
@@ -2815,9 +2829,6 @@ function retireTurnCitesRecordedColumn(db: Database): void {
           significance_grade INTEGER CHECK (
             significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
           ),
-          election_tier TEXT CHECK (
-            election_tier IS NULL OR election_tier IN ('A', 'B', 'C')
-          ),
           tags TEXT,
           files_read TEXT,
           files_modified TEXT,
@@ -2838,7 +2849,7 @@ ${stallColumnDdl}
           id, session_id, prompt_number, content_prompt_id, was_interrupted,
           was_rolled_back, status, user_prompt, assistant_response,
           assistant_transcript, title, content, insight, type,
-          significance_grade, election_tier, tags, files_read, files_modified,
+          significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
           ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
@@ -2848,7 +2859,7 @@ ${stallColumnDdl}
           id, session_id, prompt_number, content_prompt_id, was_interrupted,
           was_rolled_back, status, user_prompt, assistant_response,
           assistant_transcript, title, content, insight, type,
-          significance_grade, election_tier, tags, files_read, files_modified,
+          significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
           ${stallColumnNames ? `${stallColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,

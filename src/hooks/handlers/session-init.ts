@@ -10,7 +10,6 @@ import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { reindexTurnFromDb } from "../../db/search";
 import { getMaxPromptNumber } from "../../db/turns";
 import {
-  formatOwedSuffix,
   NOTE_RELIEF_PENDING_THRESHOLD,
   renderNoteBacklogRelief,
 } from "../note-reminder";
@@ -225,23 +224,32 @@ export function createSessionInitHandler(
         isSubagent,
       );
 
-      // The owed set and its rendering (spec D1/D3/D9) — computed and injected
-      // in this SAME transaction, against the promptNumber this call just
-      // took. A subagent gets neither: it has no authority over the root
-      // session's notes (see the suppressOutput branch below), so showing it
-      // an owed address would be an instruction it cannot act on.
-      let owedSuffix = "";
+      // The backlog-relief block (spec note-prompt-clock D3/D4/D9, ticket 03)
+      // — computed and injected in this SAME transaction, against the
+      // promptNumber this call just took. A subagent gets none of this: it
+      // has no authority over the root session's notes (see the
+      // suppressOutput branch below), so showing it a relief block would be
+      // an instruction it cannot act on.
+      //
+      // Ticket 03 (note-cadence-backlog): the current-turn line's owed SUFFIX
+      // is retired — `listOwedNoteTurns` defines "ended" as "a later prompt
+      // exists", and the contract forbids noting a turn still in progress, so
+      // the immediately-preceding turn is STRUCTURALLY always owed the
+      // instant this line renders (measured: shift-0 occurs 0 times across
+      // the whole database). A suffix that fires every single time restates
+      // the contract rather than informing anything — the address below is
+      // for the CURRENT turn's own ownership/edge bookkeeping, not a debt
+      // ledger.
       let reliefText: string | null = null;
       if (!isSubagent && turnId !== null) {
         const owed = listOwedNoteTurns(dependencies.db, session.id, promptNumber);
-        owedSuffix = formatOwedSuffix(owed);
 
         if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
           reliefText = renderNoteBacklogRelief(owed);
         }
       }
 
-      return { sessionDbId: session.id, promptNumber, owedSuffix, reliefText };
+      return { sessionDbId: session.id, promptNumber, reliefText };
     });
 
     if (isSubagent) {
@@ -257,12 +265,14 @@ export function createSessionInitHandler(
     // UserPromptSubmit process would be racing it. Data only; the protocol for
     // what to do with the address lives in the session-start framework text.
     //
-    // The owed suffix and the backlog-relief block (spec D3/D9) ride the same
-    // line and the same process: `prompt-dispatch`, the sibling
-    // UserPromptSubmit entry, renders neither any more, so there is exactly
-    // one writer and no N/N-1 race between them to resolve.
+    // The backlog-relief block (spec D3/D9) rides the same line and the same
+    // process: `prompt-dispatch`, the sibling UserPromptSubmit entry, renders
+    // none of this any more, so there is exactly one writer. Ticket 03
+    // retired the owed SUFFIX this line used to carry — see the comment above
+    // `reliefText`'s computation for why it was structurally always present
+    // and therefore zero-information.
     const sections = [
-      `mnemo current turn: S${created.sessionDbId}/T${created.promptNumber}${created.owedSuffix}`,
+      `mnemo current turn: S${created.sessionDbId}/T${created.promptNumber}`,
     ];
     if (created.reliefText) {
       sections.push(created.reliefText);

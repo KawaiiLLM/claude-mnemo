@@ -21,15 +21,26 @@ import type { HookResult, NormalizedHookInput } from "../types";
  * wrong; timing now lives with the fields, stated once.
  *
  * What stays is the only thing the description cannot carry: the address
- * NORM. The injection formats (owed suffix, relief block) are documented
- * nowhere on purpose — they explain themselves on sight — but "these lines are
- * the only legitimate source" cannot be read off a format, so it is stated
- * here, where the formats appear.
+ * NORM. The injection formats (the current-turn line, the relief block) are
+ * documented nowhere on purpose — they explain themselves on sight — but
+ * "these lines are the only legitimate source" cannot be read off a format,
+ * so it is stated here, where the formats appear.
+ *
+ * Ticket 03 (note-cadence-backlog): the current-turn line's owed SUFFIX
+ * retired (structurally always present, so zero information — see
+ * `hooks/note-reminder.ts`'s doc comment) — this text no longer names it as
+ * a source. The single-home rule this ticket exists to enforce is the SAME
+ * one the paragraph above already states: timing lives ONLY in the note
+ * tool's description, never restated here — see
+ * `tests/hooks/context-note-taking.test.ts`'s "timing contract has exactly
+ * one home" test, which cross-checks this string against
+ * `MNEMO_TOOL_DESCRIPTIONS.note` directly rather than trusting either file's
+ * own comment.
  */
 export const NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
-You keep notes on your own turns. The injected "mnemo current turn" line,
-its owed suffix, and the backlog-relief block are the ONLY sources of a
-note address — never recall one from memory, never invent one.
+You keep notes on your own turns. The injected "mnemo current turn" line
+and the backlog-relief block are the ONLY sources of a note address —
+never recall one from memory, never invent one.
 Timing, fields, budgets, the skip test and replace live in the note
 tool's description.
 </mnemo-note-taking>`;

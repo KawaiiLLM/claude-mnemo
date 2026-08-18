@@ -626,4 +626,180 @@ describe("remember tool (ticket 02)", () => {
       ).toStartWith("Parameter error:");
     });
   });
+
+  // Ticket 02 (ownership-and-note-cadence spec, [S15069/T926]): `assign`
+  // revives the retired verb to carry ownership — the main agent's own
+  // channel, single ownership enforced by the write path.
+  describe("assign (ticket 02)", () => {
+    function createViaTool(topic: string, title = `Segment for ${topic}`): number {
+      const text = resultText(rememberTool(db, { verb: "create", title, topic }));
+      return Number(/Created E(\d+)/.exec(text)![1]);
+    }
+
+    function turnAddress(promptNumber: number): string {
+      return `S${sessionId}/T${promptNumber}`;
+    }
+
+    test("interval form: one call places every turn in the range", () => {
+      const t1 = seedTurn(1, 100);
+      const t2 = seedTurn(2, 101);
+      const t3 = seedTurn(3, 102);
+      seedTurn(4, 103); // deliberately NOT in the interval
+      const segmentId = createViaTool("assign-interval");
+
+      const text = resultText(
+        rememberTool(db, {
+          verb: "assign",
+          id: `E${segmentId}`,
+          turns: [`${turnAddress(1)}..T3`],
+        }),
+      );
+
+      expect(text).toContain(`Assigned 3 turn(s) to E${segmentId}`);
+      expect(getSegmentMemberTurnIds(db, segmentId).sort()).toEqual(
+        [t1, t2, t3].sort(),
+      );
+    });
+
+    test("list form: one call places exactly the named, non-contiguous turns", () => {
+      const t1 = seedTurn(1, 100);
+      seedTurn(2, 101); // not named
+      const t3 = seedTurn(3, 102);
+      const segmentId = createViaTool("assign-list");
+
+      const text = resultText(
+        rememberTool(db, {
+          verb: "assign",
+          id: `E${segmentId}`,
+          turns: [turnAddress(1), turnAddress(3)],
+        }),
+      );
+
+      expect(text).toContain(`Assigned 2 turn(s) to E${segmentId}`);
+      expect(getSegmentMemberTurnIds(db, segmentId).sort()).toEqual(
+        [t1, t3].sort(),
+      );
+    });
+
+    test("id omitted: clears ownership — the named turns become homeless", () => {
+      const t1 = seedTurn(1, 100);
+      const segmentId = createViaTool("assign-homeless");
+      rememberTool(db, {
+        verb: "assign",
+        id: `E${segmentId}`,
+        turns: [turnAddress(1)],
+      });
+      expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([t1]);
+
+      const text = resultText(
+        rememberTool(db, { verb: "assign", turns: [turnAddress(1)] }),
+      );
+
+      expect(text).toContain("Cleared ownership on 1 turn(s) — now homeless");
+      expect(text).toContain(`Removed from prior segment(s): E${segmentId}`);
+      expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([]);
+    });
+
+    // Peer finding 3's own named gap: a turn moved from E_a to E_b must stop
+    // counting toward E_a's DERIVED facets, not just its membership list.
+    test("mutation fixture: a turn moved from E_a to E_b no longer counts toward E_a's facets", () => {
+      const t1 = seedTurn(1, 100);
+      db.query<unknown, [string, number]>("UPDATE turns SET type = ? WHERE id = ?").run(
+        JSON.stringify(["research"]),
+        t1,
+      );
+      const segmentA = createViaTool("assign-facet-a");
+      const segmentB = createViaTool("assign-facet-b");
+
+      rememberTool(db, { verb: "assign", id: `E${segmentA}`, turns: [turnAddress(1)] });
+      expect(getSegment(db, segmentA)?.type).toEqual(["research"]);
+
+      rememberTool(db, { verb: "assign", id: `E${segmentB}`, turns: [turnAddress(1)] });
+
+      expect(getSegmentMemberTurnIds(db, segmentA)).toEqual([]);
+      // The facet derivation follows membership: E_a has no members left, so
+      // its derived `type` empties out — it does NOT still read ["research"].
+      expect(getSegment(db, segmentA)?.type).toEqual([]);
+      expect(getSegment(db, segmentB)?.type).toEqual(["research"]);
+    });
+
+    // Ticket 02 checklist: "create+members 与 assign 走同一写入路径的断言" —
+    // asserted BEHAVIORALLY, not by reaching into internals: if `create`'s
+    // `members` seed used a DIFFERENT (looser) path than `assign`, a turn
+    // already owned by E_a would end up a member of BOTH E_a and the new
+    // E_b. Sharing `reassignSegmentMembers` means E_a loses it instead.
+    test("create's members seed shares assign's write path — single ownership, not duplicate membership", () => {
+      const t1 = seedTurn(1, 100);
+      const segmentA = createViaTool("shared-path-a");
+      rememberTool(db, { verb: "assign", id: `E${segmentA}`, turns: [turnAddress(1)] });
+      expect(getSegmentMemberTurnIds(db, segmentA)).toEqual([t1]);
+
+      const text = resultText(
+        rememberTool(db, {
+          verb: "create",
+          title: "Steals the turn via members",
+          topic: "shared-path-b",
+          members: [turnAddress(1)],
+        }),
+      );
+      const segmentB = Number(/Created E(\d+)/.exec(text)![1]);
+
+      expect(getSegmentMemberTurnIds(db, segmentB)).toEqual([t1]);
+      // Single ownership: E_a no longer has it — NOT duplicated across both.
+      expect(getSegmentMemberTurnIds(db, segmentA)).toEqual([]);
+    });
+
+    test("an interval spanning a missing turn rejects the WHOLE call, naming which turn — zero partial writes", () => {
+      seedTurn(1, 100);
+      seedTurn(2, 101);
+      // T3 deliberately does not exist.
+      seedTurn(4, 103);
+      const segmentId = createViaTool("assign-gap");
+
+      const text = resultText(
+        rememberTool(db, {
+          verb: "assign",
+          id: `E${segmentId}`,
+          turns: [`${turnAddress(1)}..T4`],
+        }),
+      );
+
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("turns rejected");
+      expect(text).toContain(turnAddress(3));
+      expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([]);
+    });
+
+    test("an unresolved individual address rejects the WHOLE call — zero partial writes", () => {
+      const t1 = seedTurn(1, 100);
+      const segmentId = createViaTool("assign-unresolved");
+
+      const text = resultText(
+        rememberTool(db, {
+          verb: "assign",
+          id: `E${segmentId}`,
+          turns: [turnAddress(1), turnAddress(999)],
+        }),
+      );
+
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain(turnAddress(999));
+      expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([]);
+      // T1 was a perfectly good address — proves this is all-or-nothing, not
+      // "assign what resolved and complain about the rest".
+      void t1;
+    });
+
+    test("rejects a missing turns list, and an id naming a segment that does not exist", () => {
+      expect(
+        resultText(rememberTool(db, { verb: "assign", id: "E1" })),
+      ).toStartWith("Parameter error:");
+      seedTurn(1, 100);
+      expect(
+        resultText(
+          rememberTool(db, { verb: "assign", id: "E999999", turns: [turnAddress(1)] }),
+        ),
+      ).toStartWith("Parameter error:");
+    });
+  });
 });

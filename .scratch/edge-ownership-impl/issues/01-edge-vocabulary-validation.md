@@ -13,11 +13,66 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 六词闭集是唯一可写关系集;`supersedes` 与 `E<n>` 目标以显式报错拒绝
-- [ ] 每个阶段对的合法/非法关系各至少一例;纯 review 记 `refines` 被拒且提示补 `design`,补后放行
-- [ ] 双 type turn 在 exists-规则下两端各自合法(`design`+`ops` 轮可被 refines 亦可发 encodes)
-- [ ] 旧 `supersedes` 边的读取路径不变(timeline 注记照旧渲染)
-- [ ] 参数描述含两条判别问句,definitions 的既有 token-cap 测试不超
-- [ ] 校验器从 note 面之外可直接调用且拒绝语义一致(为票 08 的共享消费铺路的种子测试)
+- [x] 七词闭集是唯一可写关系集(六词起步,[S15069/T935] 补入 `groundedOn`);`supersedes` 与 `E<n>` 目标以显式报错拒绝
+- [x] 每个阶段对的合法/非法关系各至少一例;纯 review 记 `refines` 被拒且提示补 `design`,补后放行
+- [x] 双 type turn 在 exists-规则下两端各自合法(`design`+`ops` 轮可被 refines 亦可发 encodes)
+- [x] 旧 `supersedes` 边的读取路径不变(timeline 注记照旧渲染)
+- [x] 参数描述含两条判别问句,definitions 的既有 token-cap 测试不超
+- [x] 校验器从 note 面之外可直接调用且拒绝语义一致(为票 08 的共享消费铺路的种子测试)
+
+## Implementation record
+
+Shared domain module `src/shared/turn-phase.ts` (new): `TYPE_PHASE`
+(type→phase, three phases), `EDGE_RELATIONS` (seven-word closed set —
+`evidence-for`/`evidence-against`/`grounded-on`/`refines`/`override`/
+`encodes`/`depends-on`), `RELATION_PHASE_REQUIREMENT` (relation → one OR
+more legal (source,target) phase pairs — `grounded-on` alone carries two),
+`isRelationLegalForPhases`, `explainRelationPhaseRejection` (names the
+missing half), `validateRelationTarget` (THE shared judgment: segment-target
+refusal + phase-pair legality, called by `mcp/note.ts` today and available
+for ticket 08's settlement correction surface unchanged), `RELATION_FIELD_NAME`
+(relation → camelCase parameter name, exhaustive `Record` so drift is a
+compile error), `UNSCORED_RELATIONS` (`grounded-on` excluded from ticket 07
+scoring).
+
+`db/citations.ts`: `CITATION_RELATIONS` widened to eight storage-legal values
+(seven new-vocabulary + `supersedes`, kept for frozen reads/settlement).
+`attachTurnRelations` itself is UNTOUCHED — the ticket-01 narrowing
+(segment-target refusal, phase gate) lives one layer up in `mcp/note.ts`,
+so `tests/db/citations.test.ts`'s existing segment-target-eligible test
+needed no change.
+
+`db/schema.ts`: `memory_edges.relation` CHECK widened to the eight values
+(comment-only elsewhere). KNOWN GAP: no `ensureSegmentStatusVocabulary`-style
+rebuild migration for an EXISTING database's physical CHECK constraint —
+`CREATE TABLE IF NOT EXISTS` only applies the widened list on first creation.
+
+`mcp/note.ts`: `RELATION_FIELD_ENTRIES` now DERIVED from `EDGE_RELATIONS`/
+`RELATION_FIELD_NAME` (compile-time exhaustiveness, not a second literal).
+`checkRelationTargetPhase` resolves an address/DB lookup locally, then
+delegates the judgment to `validateRelationTarget`.
+
+`mcp/definitions.ts`: `noteInputShape` gained `groundedOn`/`refines`/
+`override`/`encodes`; `supersedes` field OBJECT stays defined (unexported
+from the schema) only because `settlementNoteInputShape` still reuses it by
+reference — `noteInputSchema` is built via `.omit({ supersedes: true
+}).strict()`, which is what actually retires it from the wire. Tool
+description's relation ladder is now six ordered questions (dependsOn moved
+question 3→5); note cap held at 420 unchanged.
+
+Tests: `tests/shared/turn-phase.test.ts` (new, direct-validator seed tests
+included), `tests/mcp/note.test.ts` (relation-attach block rewritten with
+phase fixtures + one test per phase pair + dual-type + pure-review + segment-
+target), `tests/mcp/definitions.test.ts` (guard test pinning
+`RELATION_FIELD_ENTRIES` against `EDGE_RELATIONS`), `tests/db/memory-edges.test.ts`
+(frozen-read regression + storage-legality of the four new words).
+
+Mutation demos (both restored after verifying red):
+1. `isRelationLegalForPhases` forced to always return `true` →
+   `tests/mcp/note.test.ts` 86→81 pass (5 phase-gate tests red).
+2. `validateRelationTarget`'s segment-target branch disabled →
+   `tests/shared/turn-phase.test.ts` AND `tests/mcp/note.test.ts` both go
+   red on the identical assertion, proving the ticket-08 hand-off is real
+   (one shared function, not two copies that happen to agree today).

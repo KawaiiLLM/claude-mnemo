@@ -76,10 +76,10 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // softened to "used" or "built on". A paraphrase is not a cheaper version
   // of this text, it is the failure mode.
   note:
-    "Write or correct a turn's note, or a session's title. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief — never recalled or invented) or `session` (`S<session>`). Timing: (1) note only FINISHED turns, never the one in progress; (2) owed addresses settle in this turn's FIRST tool batch, last among its calls — you cannot know which batch will be last, and a turn with no tool calls settles nothing; (3) a batch for notes alone only at 5+ owed, or to fix a note already written.\n" +
+    "Write or correct a turn's note, or a session's title. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented) or `session` (`S<session>`). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written — never just to write one turn's note early.\n" +
     "skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\n" +
     "Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\n" +
-    "Relations — evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target this write does not cite rejects the call. Four ordered questions, first yes wins: (1) Did the citing turn overturn it? → supersedes. (2) Did it test the claim, for or against? → evidenceFor/Against. (3) If the cited turn were wrong, would the citing turn's conclusion also be wrong? → dependsOn. (4) None → no relation. Never soften (3) to \"used\"/\"built on\".\n" +
+    "Relations — evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn: turn-only address lists; an uncited target rejects the call. Six ordered questions, first yes wins: (1) Did it test the claim, for or against? → evidenceFor/Against. (2) Rests on an earlier finding? → groundedOn. (3) Overturns the cited decision whole? → override; continues/revises part of it? → refines. (4) Does this write's own artifact carry the cited decision? → encodes. (5) If the cited turn were wrong, would the citing turn's conclusion also be wrong? → dependsOn. (6) None → no relation. Never soften (5) to \"used\"/\"built on\".\n" +
     "Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
@@ -88,7 +88,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
   remember:
-    `Maintain a segment — claude-mnemo's per-topic, long-lived semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Five verbs: \`create\` mints a new segment from the roster you have in view — deliberate, never automatic, never a near-duplicate of an existing topic; \`attach\` binds the current session to a segment (by \`id="E<n>"\` or an existing topic name) and returns its collapsed card; \`append\` adds rows to one named field; \`replace\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous (matches more than once) or missing rejects loudly naming which, and \`newString: ""\` deletes the matched row; \`close\` toggles the segment off the roster (still \`recall\`-able) or, called again on an already-closed one, back on. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. A closed segment refuses append/replace, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\` or \`[E<n>]\`, ids seen in injected context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
+    `Maintain a segment — claude-mnemo's per-topic, long-lived semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Six verbs: \`create\` mints a new segment from the roster you have in view — never a near-duplicate of an existing topic; \`attach\` binds the current session to a segment (\`id="E<n>"\` or an existing topic name) and returns its collapsed card; \`append\` adds rows to one named field; \`replace\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched row; \`close\` toggles the segment off the roster (still \`recall\`-able), or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership — or clears ownership if \`id\` is omitted. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. A closed segment refuses append/replace, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
     "Maintenance is advisory, never a gate: every append/replace reports turns since this segment was last touched — under 10 turns draws a too-soon reminder (a `decisions` append is exempt — a lost ruling is the costliest loss). The 20-turn nudge rides the segment card's own header, not this receipt.",
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
   // Stop hook and the completion gate already call the coverage predicate
@@ -215,7 +215,7 @@ export const noteInputShape = {
     .min(1)
     .optional()
     .describe(
-      "Address of a finished turn: `S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief — never recalled or invented (see the tool description). Exactly one of `turn`/`session` is required.",
+      "Address of a finished turn: `S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented (see the tool description). Exactly one of `turn`/`session` is required.",
     ),
   session: z
     .string()
@@ -288,25 +288,74 @@ export const noteInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Addresses this write's own body tests FOR its claim — see the tool description's four-question relation procedure.",
+      "Addresses this write's own body tests FOR its claim — see the tool description's relation procedure. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target.",
     ),
   evidenceAgainst: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses this write's own body tests AGAINST its claim — see the tool description's four-question relation procedure.",
+      "Addresses this write's own body tests AGAINST its claim — see the tool description's relation procedure. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target.",
     ),
-  supersedes: z
+  // ticket 01 (turn-edge-mechanism spec, [S15069/T935] mid-flight amendment):
+  // `groundedOn` — a decision rests on an earlier finding, evidence-phase OR
+  // delivery-phase (a review/audit finding grounds a decision the same as a
+  // research finding). Recorded but excluded from every scoring surface —
+  // see `shared/turn-phase.ts`'s `UNSCORED_RELATIONS`.
+  groundedOn: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses this write's own body overturns — see the tool description's four-question relation procedure.",
+      "Addresses the earlier finding this write's own decision rests on — counterfactual: if that finding were false, this decision would fall. Decision-phase (design/discuss/correction) source; evidence-phase (research/measure) OR delivery-phase (implement/refactor/fix/delegate/review/ops) target. Recorded, never scored.",
+    ),
+  // ticket 01 (turn-edge-mechanism spec): `refines`/`override` replace the
+  // retired `supersedes` — a decision-phase turn's relation to a
+  // decision-phase predecessor, split by whether the predecessor's
+  // conclusion survives IN PART (`refines`) or not AT ALL (`override`).
+  // `supersedes` itself is REMOVED from this shape outright: a caller still
+  // sending it gets `.strict()`'s parse error, naming the unrecognised key —
+  // existing `supersedes` EDGES stay frozen-readable (db/citations.ts), only
+  // the write parameter is gone.
+  refines: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses a predecessor decision this write's own body continues or partially revises — decision-phase turns only (design/discuss/correction) on both ends; the predecessor is not wholly wrong. See `override`'s own description for the boundary between the two.",
+    ),
+  override: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses a predecessor decision this write's own body overturns WHOLE — decision-phase turns only (design/discuss/correction) on both ends. Discriminator: if the predecessor's any sub-conclusion still holds, use `refines` instead; override is reserved for when the whole predecessor is wrong.",
+    ),
+  // ticket 01: `encodes` — a delivery-phase turn (spec/ADR/ticket/commit/
+  // release) naming the decision(s) it carries.
+  encodes: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses the decision(s) this write's own artifact (spec/ADR/ticket/commit/release) carries — a delivery-phase turn (implement/refactor/fix/delegate/review/ops) citing a decision-phase (design/discuss/correction) target. Discriminator: name only the minimal set that can derive the final conclusion, trimming dead ends and redundant paths — self-asserted, not mechanically checked.",
     ),
   dependsOn: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses this write's own conclusion depends on — see the tool description's four-question relation procedure.",
+      "Addresses this write's own conclusion depends on — see the tool description's relation procedure. Turn-only; requires a delivery-phase (implement/refactor/fix/delegate/review/ops) source and target.",
+    ),
+  // ticket 01 (turn-edge-mechanism spec): `supersedes` retired from the NOTE
+  // TOOL's own surface — `noteInputSchema` below `.omit()`s this key, so a
+  // caller sending it gets `.strict()`'s parse error naming the unrecognised
+  // key, same as any other retired field. The field OBJECT stays defined
+  // here, unexported from the schema, ONLY because `settlementNoteInputShape`
+  // still reuses it verbatim (settlement's own facade keeps writing
+  // `supersedes` — that surface is untouched by this ticket) — the same
+  // "declared in this shared shape, refused by name/omission on the surface
+  // that does not want it" pattern `content`/`insight` already use for the
+  // session address.
+  supersedes: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Retired on the note tool (ticket 01) — use refines/override instead. Present here only for settlement's own surface.",
     ),
 
   mode: noteModeShape,
@@ -326,16 +375,16 @@ export const noteInputShape = {
 // declared above `MNEMO_TOOL_DESCRIPTIONS`, which quotes the latter too.
 export const rememberInputShape = {
   verb: z
-    .enum(["create", "attach", "append", "replace", "close"])
+    .enum(["create", "attach", "append", "replace", "close", "assign"])
     .describe(
-      "create: mint a new segment. attach: bind the current session to one. append: add rows to a field. replace: find/replace text within one field. close: toggle the segment off the roster (or, called again, back on).",
+      "create: mint a new segment. attach: bind the current session to one. append: add rows to a field. replace: find/replace text within one field. close: toggle the segment off the roster (or, called again, back on). assign: place turns into a segment (id set) or clear their ownership (id omitted).",
     ),
   id: z
     .string()
     .min(1)
     .optional()
     .describe(
-      'attach/append/replace/close: the target segment — an "E<n>" address, or a topic name resolved through the topic registry (ambiguous — more than one segment on that topic — rejects, asking for the explicit "E<n>" address instead). Not used by create.',
+      'attach/append/replace/close: the target segment — an "E<n>" address, or a topic name resolved through the topic registry (ambiguous — more than one segment on that topic — rejects, asking for the explicit "E<n>" address instead). assign: the same, but OPTIONAL — omit entirely to clear ownership on `turns` instead of placing them. Not used by create.',
     ),
   title: z
     .string()
@@ -381,6 +430,14 @@ export const rememberInputShape = {
     .string()
     .optional()
     .describe('replace only (required): the replacement text; "" deletes the matched text.'),
+  // ticket 02 (ownership-and-note-cadence spec): `assign`'s own turn
+  // selector — an interval OR a list, one array parameter for both shapes.
+  turns: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'assign only (required): turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>", inclusive) — as seen in context, never recalled or invented. An interval spanning even one missing turn rejects the whole call, naming which; nothing is assigned.',
+    ),
 };
 
 export const timelineInputShape = {
@@ -416,17 +473,18 @@ export const timelineInputShape = {
 // reconstruction is a whole-rewrite with no append mode and no null-clear
 // (see that module's own doc comment), so `noteInputShape`'s nullable,
 // append-aware pair does not describe the same operation and must not be
-// shared. `turn`/`grade`/`tier` have no main-agent analogue at all (ADR-0003:
-// grade/tier are settlement's alone to assign) and are declared fresh.
+// shared. `turn`/`grade` have no main-agent analogue at all (grade is
+// settlement's alone to assign) and are declared fresh.
+//
+// Ticket 06 (ownership-and-note-cadence spec, "选举机器拆除"): `tier`
+// (ADR-0003's election A/B/C) is RETIRED — settlement no longer assigns a
+// tier to any turn. `grade` stays; ADR-0003 is marked superseded.
 export const settlementNoteInputShape = {
   turn: z.string().min(1),
   title: z.string().optional(),
   content: z.string().optional(),
   insight: noteInputShape.insight,
-  /** A legacy-era turn only (`src/election-era.ts`); mutually exclusive with `tier`. */
   grade: z.number().int().min(0).max(4).optional(),
-  /** Election tier (ADR-0003) — a new-era turn only; mutually exclusive with `grade`. */
-  tier: z.enum(["A", "B", "C"]).optional(),
   type: noteInputShape.type,
   tags: noteInputShape.tags,
   evidenceFor: noteInputShape.evidenceFor,
@@ -455,5 +513,16 @@ export const recallInputSchema = z
     }
   });
 export const timelineInputSchema = z.object(timelineInputShape).strict();
-export const noteInputSchema = z.object(noteInputShape).strict();
+// Ticket 01 (turn-edge-mechanism spec): `.omit({ supersedes: true })` is
+// what actually retires the field from the note tool's WIRE schema — see
+// `noteInputShape.supersedes`'s own doc comment for why the field object
+// still exists (settlement's own surface reuses it) even though no caller
+// of THIS schema may send it. A supplied `supersedes` is then `.strict()`'s
+// ordinary unrecognised-key parse error, not a bespoke message: there is
+// nothing left on this schema to point the caller at, the same reasoning
+// `grade`'s retirement (ADR-0003) already settled for this file.
+export const noteInputSchema = z
+  .object(noteInputShape)
+  .omit({ supersedes: true })
+  .strict();
 export const rememberInputSchema = z.object(rememberInputShape).strict();

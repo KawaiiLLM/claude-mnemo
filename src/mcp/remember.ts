@@ -7,13 +7,13 @@ import {
   type ParsedReference,
 } from "../db/references";
 import {
-  addSegmentMembers,
   appendSegmentWorkingStateRows,
   attachSegmentToSession,
   createSegment,
   findTopic,
   getSegment,
   getSegmentsForTopic,
+  reassignSegmentMembers,
   replaceInSegmentWorkingStateField,
   toggleSegmentStatus,
   upsertTopic,
@@ -39,13 +39,20 @@ type ToolTextResult = {
   }>;
 };
 
-export type RememberVerb = "create" | "attach" | "append" | "replace" | "close";
+export type RememberVerb =
+  | "create"
+  | "attach"
+  | "append"
+  | "replace"
+  | "close"
+  | "assign";
 const REMEMBER_VERBS: readonly RememberVerb[] = [
   "create",
   "attach",
   "append",
   "replace",
   "close",
+  "assign",
 ];
 
 import { MAINTENANCE_CADENCE } from "../shared/segment-cadence";
@@ -57,9 +64,10 @@ export interface RememberToolInput {
   topic?: unknown;
   goal?: unknown;
   members?: unknown;
-  // attach / append / replace / close share `id` — a segment's `E<n>`
-  // address, or (attach/close only in practice, but resolved identically
-  // everywhere) a topic name.
+  // attach / append / replace / close / assign share `id` — a segment's
+  // `E<n>` address, or (attach/close/assign in practice, but resolved
+  // identically everywhere) a topic name. `assign` alone treats `id` as
+  // OPTIONAL: omitted means "clear ownership" (ticket 02).
   id?: unknown;
   // append / replace
   field?: unknown;
@@ -68,6 +76,9 @@ export interface RememberToolInput {
   // replace
   oldString?: unknown;
   newString?: unknown;
+  // assign (ticket 02, ownership-and-note-cadence spec): a turn interval
+  // ("S<session>/T<a>..T<b>") or a list of turn addresses.
+  turns?: unknown;
 }
 
 export interface RememberToolOptions {
@@ -316,8 +327,15 @@ function handleCreate(
         nowEpoch,
       });
 
+      // Ticket 02 (ownership-and-note-cadence spec): `members` seeding goes
+      // through the SAME write path `assign` uses — `reassignSegmentMembers`,
+      // not `addSegmentMembers` directly — so single ownership is enforced
+      // uniformly. A fresh segment has no prior members of its own, but a
+      // named turn may already belong to ANOTHER segment; seeding it here
+      // evicts it from that segment the identical way an explicit `assign`
+      // would, rather than opening a second, looser path around the rule.
       if (turnIds.length > 0) {
-        addSegmentMembers(db, segment.id, turnIds, nowEpoch);
+        reassignSegmentMembers(db, turnIds, segment.id, nowEpoch);
       }
 
       let goalSeeded = false;
@@ -612,16 +630,206 @@ function handleClose(
 }
 
 // ---------------------------------------------------------------------------
+// assign
+// ---------------------------------------------------------------------------
+
+/**
+ * Ticket 02 (ownership-and-note-cadence spec): `assign`'s own turn-token
+ * grammar — an interval (`S<session>/T<a>..T<b>`, inclusive, EVERY prompt
+ * number in range must resolve) or a list of individual turn addresses. Both
+ * shapes share one array parameter (`turns`); a caller mixing the two forms
+ * in one array is not rejected, just unusual — each element is parsed on its
+ * own.
+ */
+const ASSIGN_RANGE_PATTERN = /^S(\d+)\/T(\d+)\.\.T(\d+)$/i;
+
+interface AssignTokenRejection {
+  raw: string;
+  reason: "malformed" | "not-a-turn" | "unresolved";
+  /** Present for a range whose span names a specific missing turn. */
+  detail?: string;
+}
+
+const ASSIGN_TOKEN_REJECTION_TEXT: Record<AssignTokenRejection["reason"], string> = {
+  malformed:
+    'is not a valid turn address ("S<session>/T<prompt>") or interval ("S<session>/T<a>..T<b>")',
+  "not-a-turn": "names a segment, not a turn",
+  unresolved: "does not resolve to a turn",
+};
+
+function formatAssignRejections(rejections: readonly AssignTokenRejection[]): string {
+  return (
+    "turns rejected: " +
+    rejections
+      .map(
+        (entry) =>
+          `"${entry.raw}" ${entry.detail ?? ASSIGN_TOKEN_REJECTION_TEXT[entry.reason]}`,
+      )
+      .join("; ") +
+    " — the whole call is rejected, zero turns assigned."
+  );
+}
+
+/**
+ * Resolves `assign`'s `turns` tokens to database turn ids, de-duplicated,
+ * first-seen order. Zero partial writes (ticket 02 acceptance criterion): an
+ * interval spanning even one missing prompt number, or a malformed/
+ * unresolved individual address, rejects the WHOLE list — the caller gets
+ * every problem found, not just the first, so it can fix them in one pass.
+ */
+function resolveAssignTurns(
+  db: Database,
+  tokens: readonly string[],
+): { turnIds: number[]; rejections: AssignTokenRejection[] } {
+  const rejections: AssignTokenRejection[] = [];
+  const turnIds: number[] = [];
+  const seen = new Set<number>();
+
+  for (const raw of tokens) {
+    const trimmed = raw.trim();
+    const rangeMatch = ASSIGN_RANGE_PATTERN.exec(trimmed);
+    if (rangeMatch) {
+      const sessionId = Number.parseInt(rangeMatch[1]!, 10);
+      const start = Number.parseInt(rangeMatch[2]!, 10);
+      const end = Number.parseInt(rangeMatch[3]!, 10);
+      if (
+        !Number.isSafeInteger(sessionId) ||
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(end) ||
+        end < start
+      ) {
+        rejections.push({ raw, reason: "malformed" });
+        continue;
+      }
+      for (let promptNumber = start; promptNumber <= end; promptNumber += 1) {
+        // A bare id lookup — the only thing an interval needs is existence
+        // and the row id, the same minimal query `db/references.ts`'s
+        // `validateReferences` already uses for a single address, rather
+        // than the fuller `getTurn` (db/turns.ts) this module has no other
+        // reason to depend on.
+        const row = db
+          .query<{ id: number }, [number, number]>(
+            "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
+          )
+          .get(sessionId, promptNumber);
+        if (!row) {
+          rejections.push({
+            raw,
+            reason: "unresolved",
+            detail: `spans a missing turn S${sessionId}/T${promptNumber}`,
+          });
+          continue;
+        }
+        if (!seen.has(row.id)) {
+          seen.add(row.id);
+          turnIds.push(row.id);
+        }
+      }
+      continue;
+    }
+
+    const parsed = parseBareAddressReference(trimmed);
+    if (!parsed) {
+      rejections.push({ raw, reason: "malformed" });
+      continue;
+    }
+    if (parsed.kind !== "turn") {
+      rejections.push({ raw, reason: "not-a-turn" });
+      continue;
+    }
+    const { accepted, rejected } = validateReferences(db, [parsed]);
+    if (rejected.length > 0) {
+      rejections.push({ raw, reason: "unresolved" });
+      continue;
+    }
+    const id = accepted[0]!.node.id;
+    if (!seen.has(id)) {
+      seen.add(id);
+      turnIds.push(id);
+    }
+  }
+
+  return { turnIds, rejections };
+}
+
+/**
+ * `remember`'s `assign` verb (ticket 02, ownership-and-note-cadence spec):
+ * the main agent's own ownership channel. `id="E<n>"` (or a topic name)
+ * places the named turns in that segment; `id` OMITTED clears ownership —
+ * the named turns become homeless. Single ownership is the WRITE path's own
+ * invariant (`reassignSegmentMembers`, db/segments.ts): a turn already
+ * belonging elsewhere is moved, not duplicated, in the same transaction.
+ */
+function handleAssign(
+  db: Database,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  let targetSegment: SegmentRecord | null = null;
+  if (input.id !== undefined) {
+    if (typeof input.id !== "string" || input.id.trim() === "") {
+      return parameterError(
+        'id must be a non-empty "E<n>" address or topic name when present — omit id entirely to clear ownership.',
+      );
+    }
+    const resolution = resolveSegmentTarget(db, input.id);
+    if (!resolution.ok) {
+      return parameterError(resolution.message);
+    }
+    targetSegment = resolution.segment;
+  }
+
+  if (
+    !Array.isArray(input.turns) ||
+    input.turns.length === 0 ||
+    !input.turns.every((value) => typeof value === "string")
+  ) {
+    return parameterError(
+      'turns is required for assign — an array of turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>").',
+    );
+  }
+
+  const { turnIds, rejections } = resolveAssignTurns(db, input.turns as string[]);
+  if (rejections.length > 0) {
+    return parameterError(formatAssignRejections(rejections));
+  }
+  if (turnIds.length === 0) {
+    return parameterError("turns resolved to zero addresses.");
+  }
+
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const result = writeTransaction(db, () =>
+    reassignSegmentMembers(db, turnIds, targetSegment?.id ?? null, nowEpoch),
+  );
+
+  const parts: string[] = [
+    targetSegment
+      ? `Assigned ${result.addedTurnIds.length} turn(s) to E${targetSegment.id}.`
+      : `Cleared ownership on ${turnIds.length} turn(s) — now homeless.`,
+  ];
+  if (result.vacatedSegmentIds.length > 0) {
+    parts.push(
+      `Removed from prior segment(s): ${result.vacatedSegmentIds
+        .map((id) => `E${id}`)
+        .join(", ")}.`,
+    );
+  }
+  return textResult(parts.join(" "));
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 /**
  * `remember` — the segment (semantic) write surface, revived beside `note`
- * (episodic) per ADR-0002. Five verbs, one tool: `create` mints a segment
+ * (episodic) per ADR-0002. Six verbs, one tool: `create` mints a segment
  * from the roster the caller has in view; `attach` binds the current session
  * to one and returns its fields; `append`/`replace` maintain one named
  * field (Working State, or content/insight); `close` toggles the segment off
- * (or back onto) the roster.
+ * (or back onto) the roster; `assign` (ticket 02) places or clears turn
+ * ownership.
  */
 export function rememberTool(
   db: Database,
@@ -643,5 +851,7 @@ export function rememberTool(
       return handleReplace(db, rawInput, options);
     case "close":
       return handleClose(db, rawInput, options);
+    case "assign":
+      return handleAssign(db, rawInput, options);
   }
 }

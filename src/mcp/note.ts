@@ -17,6 +17,7 @@ import {
   getNoteDebt,
   recordDeclinedNoteDebt,
 } from "../db/note-debt";
+import { parseBareAddressReference } from "../db/references";
 import {
   countTurnsSince,
   getSession,
@@ -57,6 +58,15 @@ import {
   toolCallSyntaxMessage,
 } from "../shared/tool-call-syntax";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
+import {
+  EDGE_RELATIONS,
+  isTurnEdgeRelation,
+  phasesForTypes,
+  RELATION_FIELD_NAME,
+  validateRelationTarget,
+  type TurnEdgeRelation,
+  type TurnPhase,
+} from "../shared/turn-phase";
 
 type ToolTextResult = {
   content: Array<{
@@ -101,9 +111,15 @@ export interface NoteToolInput {
   // ticket 07 (spec C1/C5/C7): one named field per relation. Targets are
   // address tokens this write's OWN title/content/insight post-state must
   // already name — see `RELATION_FIELD_ENTRIES` / `resolveRelationFields`.
+  // ticket 01 (turn-edge-mechanism spec): `supersedes` retired from this
+  // list — `refines`/`override`/`encodes`/`groundedOn` take its place in the
+  // seven-word closed set ([S15069/T935] added `groundedOn` mid-flight).
   evidenceFor?: unknown;
   evidenceAgainst?: unknown;
-  supersedes?: unknown;
+  groundedOn?: unknown;
+  refines?: unknown;
+  override?: unknown;
+  encodes?: unknown;
   dependsOn?: unknown;
 
   // D5/D5a: per-field mode, required whenever the target field is currently
@@ -464,21 +480,25 @@ function resolveTagsField(
   return { value: decoded };
 }
 
-// ticket 07 (spec C1): the four named relation fields, field name -> the
-// relation it means. One list, so the field-shape loop and the "which turn
-// keys are relation fields" checks below (`handleSessionWrite`'s guard) stay
-// in sync by construction rather than by two hand-kept literals agreeing.
-const RELATION_FIELD_ENTRIES: ReadonlyArray<
-  readonly [
-    key: "evidenceFor" | "evidenceAgainst" | "supersedes" | "dependsOn",
-    relation: CitationRelation,
-  ]
-> = [
-  ["evidenceFor", "evidence-for"],
-  ["evidenceAgainst", "evidence-against"],
-  ["supersedes", "supersedes"],
-  ["dependsOn", "depends-on"],
-];
+// ticket 01/07 (spec C1; turn-edge-mechanism spec): the seven named relation
+// fields, field name -> the relation it means — DERIVED from
+// `shared/turn-phase.ts`'s `EDGE_RELATIONS`/`RELATION_FIELD_NAME` rather than
+// a second hand-kept literal, so the closed set and its parameter spelling
+// cannot drift apart ([S15069/T939]: the shared module, not this file, is
+// where the seven-word set and its judgment live — this list is only the
+// note surface's OWN wiring of field name -> relation onto that constant).
+// `supersedes` is gone (ticket 01): a caller still sending it is a
+// `.strict()` parse error at the schema layer (`noteInputSchema` omits the
+// field even though `noteInputShape` keeps it for `settlementNoteInputShape`
+// to reuse) rather than something this list needs to reject by hand.
+//
+// Exported so a guard test can pin that this list's relation VALUES equal
+// `EDGE_RELATIONS` exactly and that every key names a real `noteInputShape`
+// parameter — the derivation above already makes drift a compile error for
+// the relation half, this closes the loop on the parameter-name half too.
+export const RELATION_FIELD_ENTRIES: ReadonlyArray<
+  readonly [key: string, relation: TurnEdgeRelation]
+> = EDGE_RELATIONS.map((relation) => [RELATION_FIELD_NAME[relation], relation] as const);
 
 const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
   malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
@@ -499,6 +519,62 @@ function formatRelationRejections(
 }
 
 /**
+ * Ticket 01 (turn-edge-mechanism spec) / [S15069/T939]: two checks
+ * `attachTurnRelations` itself does NOT make, because that function is
+ * shared plumbing settlement's own facade also calls with `supersedes` and
+ * segment targets (spec: "既有 segment 端点的旧边冻结可读" — that history
+ * stays legible through the generic path). `note`'s own seven-word surface
+ * is narrower, so the narrowing lives here, one layer up, rather than
+ * inside the shared function.
+ *
+ * The JUDGMENT itself — segment targets refused, phase-pair legality, which
+ * half is missing — is `shared/turn-phase.ts`'s `validateRelationTarget`,
+ * not reimplemented here: this function's own job is strictly address
+ * parsing and the DB lookup that turns a raw token into the phase-set input
+ * that shared judgment needs, so a future caller (ticket 08's settlement
+ * correction surface) can supply the SAME judgment from its own address
+ * resolution without duplicating the rules.
+ *
+ * Returns `null` (legal) or the rejection message; a malformed or unresolved
+ * address is left for `attachTurnRelations`' own pass to report — this
+ * function only has an opinion once an address actually resolves to a node.
+ */
+function checkRelationTargetPhase(
+  db: Database,
+  relation: string,
+  raw: string,
+  citingPhases: ReadonlySet<TurnPhase>,
+): string | null {
+  if (!isTurnEdgeRelation(relation)) {
+    return null;
+  }
+  const reference = parseBareAddressReference(raw);
+  if (!reference) {
+    return null;
+  }
+  if (reference.kind === "segment") {
+    const result = validateRelationTarget({
+      relation,
+      citingPhases,
+      targetKind: "segment",
+      citedPhases: new Set(),
+    });
+    return result.ok ? null : `${relation} "${raw}" ${result.detail}`;
+  }
+  const cited = getTurn(db, reference.sessionId, reference.promptNumber);
+  if (!cited) {
+    return null;
+  }
+  const result = validateRelationTarget({
+    relation,
+    citingPhases,
+    targetKind: "turn",
+    citedPhases: phasesForTypes(cited.type),
+  });
+  return result.ok ? null : `${relation} "${raw}" ${result.detail}`;
+}
+
+/**
  * Spec C7 (ticket 07): the main agent may attach a relation to a pair its OWN
  * write is creating, never to one this call did not itself cite — so this
  * only has an answer once `citations` (the same write's post-state, from
@@ -511,6 +587,7 @@ function formatRelationRejections(
 function resolveRelationFields(
   db: Database,
   citingTurnId: number,
+  citingTurnType: readonly string[],
   input: NoteToolInput,
   citations: RecomputeTurnCitedPairsResult | null,
   nowEpoch: number,
@@ -533,10 +610,29 @@ function resolveRelationFields(
   }
   if (citations === null) {
     fail(
-      "evidenceFor/evidenceAgainst/supersedes/dependsOn require this write to also touch a " +
+      "evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn require this write to also touch a " +
         "citation-bearing field (title, content or insight) whose post-state names the " +
         "target — a relation cannot attach to a pair this call is not itself citing (spec C7).",
     );
+  }
+
+  // Ticket 01: phase/segment-target legality, checked BEFORE `attachTurnRelations`'
+  // own citation/duplicate checks — a structurally illegal relation (wrong
+  // phase pair, a segment target) is rejected atomically with every other
+  // one found in the same call, the same all-or-nothing shape
+  // `attachTurnRelations` already gives its own rejections.
+  const citingPhases = phasesForTypes(citingTurnType);
+  const phaseIssues: string[] = [];
+  for (const field of fields) {
+    for (const raw of field.targets) {
+      const issue = checkRelationTargetPhase(db, field.relation, raw, citingPhases);
+      if (issue) {
+        phaseIssues.push(issue);
+      }
+    }
+  }
+  if (phaseIssues.length > 0) {
+    fail(`relation field rejected: ${phaseIssues.join("; ")}.`);
   }
 
   const result = attachTurnRelations(db, citingTurnId, fields, citations.written, nowEpoch);
@@ -979,7 +1075,14 @@ function handleTurnWrite(
         );
       }
 
-      const relations = resolveRelationFields(db, turn.id, input, citations, nowEpoch);
+      const relations = resolveRelationFields(
+        db,
+        turn.id,
+        updatedTurn.type,
+        input,
+        citations,
+        nowEpoch,
+      );
 
       return {
         turn: updatedTurn,
@@ -1096,7 +1199,10 @@ function handleSessionWrite(
     "crossSession",
     "evidenceFor",
     "evidenceAgainst",
-    "supersedes",
+    "groundedOn",
+    "refines",
+    "override",
+    "encodes",
     "dependsOn",
   ] as const) {
     if ((input as Record<string, unknown>)[key] !== undefined) {

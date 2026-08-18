@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import type { OwedNoteTurn } from "../../src/db/note-debt";
+import * as NoteReminderModule from "../../src/hooks/note-reminder";
 import {
-  formatOwedSuffix,
   formatPromptPrefix,
   formatTurnAddress,
   NOTE_REMINDER_DISPLAY_LIMIT,
@@ -27,39 +27,24 @@ function owedTurn(promptNumber: number, overrides: Partial<OwedNoteTurn> = {}): 
   };
 }
 
-describe("formatOwedSuffix (spec D3 byte-level)", () => {
-  test("zero owed turns adds nothing", () => {
-    expect(formatOwedSuffix([])).toBe("");
+// Ticket 03 (note-cadence-backlog): `formatOwedSuffix` retired outright — the
+// current-turn line no longer carries an owed suffix at all (structurally
+// always present the instant a new prompt lands, so zero information; see
+// src/hooks/note-reminder.ts's doc comment). This is a regression guard for
+// that retirement rather than a behaviour test: the current-turn line must be
+// the bare address, with nothing appended.
+describe("current-turn line carries no owed suffix (ticket 03)", () => {
+  test("formatOwedSuffix no longer exists on the module", () => {
+    expect(
+      (NoteReminderModule as Record<string, unknown>).formatOwedSuffix,
+    ).toBeUndefined();
   });
 
-  test("one owed turn names its address", () => {
-    expect(formatOwedSuffix([owedTurn(560)])).toBe(" · owed: S15069/T560");
-  });
-
-  test("two or more owed turns name the newest address plus the older count", () => {
-    // listOwedNoteTurns orders oldest-first, so the newest is the last element.
-    const owed = [owedTurn(547), owedTurn(560)];
-    expect(formatOwedSuffix(owed)).toBe(" · owed: S15069/T560 +1 older");
-  });
-
-  test("thirteen older turns behind the newest", () => {
-    const owed = Array.from({ length: 13 }, (_, i) => owedTurn(547 + i));
-    owed.push(owedTurn(560));
-
-    expect(formatOwedSuffix(owed)).toBe(" · owed: S15069/T560 +13 older");
-  });
-
-  test("assembled onto the current-turn line reproduces the spec's three forms", () => {
-    const base = "mnemo current turn: S15069/T561";
-    expect(`${base}${formatOwedSuffix([])}`).toBe(base);
-    expect(`${base}${formatOwedSuffix([owedTurn(560)])}`).toBe(
-      "mnemo current turn: S15069/T561 · owed: S15069/T560",
-    );
-    const thirteenOlder = Array.from({ length: 13 }, (_, i) => owedTurn(547 + i));
-    thirteenOlder.push(owedTurn(560));
-    expect(`${base}${formatOwedSuffix(thirteenOlder)}`).toBe(
-      "mnemo current turn: S15069/T561 · owed: S15069/T560 +13 older",
-    );
+  test("the current-turn line is the bare address — no trailing owed annotation", () => {
+    const base = `mnemo current turn: ${formatTurnAddress({ sessionId: 15069, promptNumber: 561 })}`;
+    expect(base).toBe("mnemo current turn: S15069/T561");
+    expect(base).not.toContain("owed");
+    expect(base).not.toContain("·");
   });
 });
 

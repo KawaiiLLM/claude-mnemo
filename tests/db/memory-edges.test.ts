@@ -10,6 +10,7 @@ import {
   getExistingEdgePairKeys,
   getIncomingEdges,
   getOutgoingEdges,
+  isCitationRelation,
   pairKey,
   parseNodeRef,
   writeMemoryEdges,
@@ -811,5 +812,100 @@ describe("universal memory edges", () => {
         });
       });
     });
+  });
+});
+
+// Ticket 01 (turn-edge-mechanism spec): `supersedes` retires from the WRITE
+// vocabulary `mcp/note.ts` offers, but existing edges must stay
+// frozen-readable and storage-legal — no migration, no remap to `override`
+// (spec: "局部替换 ≠ 整体作废"). This is a regression guard at the layer
+// underneath `note.ts`, independent of the tool surface: the storage CHECK
+// constraint and `isCitationRelation` both still admit it, and the four new
+// words (`refines`/`override`/`encodes`/`grounded-on`) are storage-legal too.
+describe("supersedes stays frozen-readable; the new relation words are storage-legal (ticket 01)", () => {
+  let db: Database;
+  let sessionId: number;
+
+  function addTurn(promptNumber: number): number {
+    return db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, title, created_at_epoch)
+         VALUES (?, ?, 'extracted', 'fixture', 100) RETURNING id`,
+      )
+      .get(sessionId, promptNumber)!.id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "supersedes-frozen",
+      project: "claude-mnemo",
+      title: "A",
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("isCitationRelation still admits supersedes", () => {
+    expect(isCitationRelation("supersedes")).toBe(true);
+  });
+
+  test("a supersedes edge (e.g. settlement's own facade) still writes and reads back unchanged", () => {
+    const citing = addTurn(1);
+    const cited = addTurn(2);
+
+    const { written } = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: cited },
+          relation: "supersedes",
+          provenance: "judged",
+        },
+      ],
+      500,
+      { eligibleForRelation: "unrestricted" },
+    );
+
+    expect(written).toHaveLength(1);
+    expect(written[0]?.relation).toBe("supersedes");
+    expect(getOutgoingEdges(db, { kind: "turn", id: citing })[0]?.relation).toBe(
+      "supersedes",
+    );
+  });
+
+  test("refines/override/encodes/grounded-on each pass the storage CHECK constraint", () => {
+    const citing = addTurn(1);
+    let promptNumber = 2;
+    for (const relation of ["refines", "override", "encodes", "grounded-on"] as const) {
+      const cited = addTurn(promptNumber);
+      promptNumber += 1;
+
+      const { written, rejected } = writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation,
+            provenance: "asserted",
+          },
+        ],
+        600,
+        { eligibleForRelation: "unrestricted" },
+      );
+
+      expect(rejected).toEqual([]);
+      expect(written).toHaveLength(1);
+      expect(written[0]?.relation).toBe(relation);
+    }
   });
 });

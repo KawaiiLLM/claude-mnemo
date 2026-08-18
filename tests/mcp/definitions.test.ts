@@ -11,6 +11,8 @@ import {
   settlementNoteInputShape,
   workerRecallInputShape,
 } from "../../src/mcp/definitions";
+import { RELATION_FIELD_ENTRIES } from "../../src/mcp/note";
+import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import { estimateTokens } from "../../src/utils/token-estimate";
 import { z } from "zod";
 
@@ -140,14 +142,18 @@ describe("tool surface", () => {
     // sight (the formats themselves are undocumented by design: they explain
     // themselves when they appear).
     expect(note).toContain("never recalled or invented");
-    // Timing (user ruling, S15069 T781): each of the three rules pinned
-    // independently.
+    // Timing (ticket 03, note-cadence-backlog): rule 1 unchanged (S15069
+    // T781); rule 2 rewritten from "owed addresses settle in this turn's
+    // FIRST tool batch" (0.11.1's contradiction with the SessionStart block)
+    // to the backlog-relief trigger — the owed suffix that rule used to name
+    // no longer exists (see hooks/note-reminder.ts).
     expect(note).toContain("note only FINISHED turns");
-    expect(note).toContain("FIRST tool batch");
-    expect(note).toContain("you cannot know which batch will be last");
-    expect(note).toContain("a turn with no tool calls settles nothing");
-    expect(note).toContain("a batch for notes alone only at 5+ owed");
+    expect(note).toContain("never the one in progress");
+    expect(note).toContain("backlog relief appears");
+    expect(note).toContain("never just to write one turn's note early");
+    expect(note).not.toContain("FIRST tool batch");
     expect(note).not.toContain("Goes last in its batch");
+    expect(note).not.toContain("its owed suffix");
     // The skip test: single criterion, its deletion-test check, the
     // no-invention red line, the user-decision hard line (S15069 T577–T581).
     expect(note).toContain("a future retriever would find nothing unique");
@@ -163,15 +169,22 @@ describe("tool surface", () => {
     // spec E2: tool-call syntax is rejected, not silently stored.
     expect(note).toContain("Tool-call markup");
     // ticket 07 (spec C3/C4): the relation fields' decision procedure is
-    // normative down to question 3's counterfactual wording, so it is here
-    // verbatim rather than paraphrased — a paraphrase that fit the old cap
-    // would be the exact softening the predecessor vocabulary measured at
-    // 61% precision.
+    // normative down to the dependsOn question's counterfactual wording, so
+    // it is here verbatim rather than paraphrased — a paraphrase that fit the
+    // old cap would be the exact softening the predecessor vocabulary
+    // measured at 61% precision. Ticket 01 (turn-edge-mechanism spec) widened
+    // the ladder from four to six questions (supersedes retired; override/
+    // refines/encodes replace and extend it; [S15069/T935] mid-flight added
+    // groundedOn right after the evidence question) — dependsOn moved from
+    // question 3 to question 5, and the wording shifted with it.
     expect(note).toContain(
       "If the cited turn were wrong, would the citing turn's conclusion also be wrong?",
     );
-    expect(note).toContain("(4) None → no relation");
-    expect(note).toContain('Never soften (3) to "used"/"built on"');
+    expect(note).toContain("(6) None → no relation");
+    expect(note).toContain('Never soften (5) to "used"/"built on"');
+    // `supersedes` retired from the relation vocabulary outright (ticket 01)
+    // — no trace of it belongs on the surface a writer reads.
+    expect(note).not.toContain("supersedes");
     // Ticket 01's one line, verbatim (acceptance criterion 4).
     expect(note).toContain("Every field is written in English.");
 
@@ -207,8 +220,14 @@ describe("tool surface", () => {
     const rendered = z.toJSONSchema(noteInputSchema) as {
       properties: Record<string, { description?: string }>;
     };
-    const keys = Object.keys(noteInputShape);
+    // Ticket 01: driven by `noteInputSchema.shape`, NOT the raw
+    // `noteInputShape` object — the shape carries one key the schema itself
+    // omits (`supersedes`, kept only for `settlementNoteInputShape` to
+    // reuse; see its own doc comment), so a caller-reachable-parameter test
+    // must walk what the SCHEMA actually renders.
+    const keys = Object.keys(noteInputSchema.shape);
     expect(keys.length).toBeGreaterThan(0);
+    expect(keys).not.toContain("supersedes");
     for (const key of keys) {
       const description = rendered.properties[key]?.description;
       expect(description, `${key} should carry a description`).toBeTruthy();
@@ -258,6 +277,80 @@ describe("tool surface", () => {
       "coarse noun naming the project",
     );
     expect(shape.tags.description).toContain("no -design/-fix hybrids");
+  });
+
+  // ticket 01 (turn-edge-mechanism spec): `supersedes` retires from the note
+  // tool's WIRE schema outright — a caller still sending it is a `.strict()`
+  // parse error, not a silently dropped field. Existing `supersedes` EDGES
+  // stay frozen-readable (db/citations.ts's `CITATION_RELATIONS` keeps the
+  // word for storage/reads); only the write PARAMETER is gone from the
+  // surface a caller can actually reach. `noteInputShape.supersedes` itself
+  // still exists as a raw field OBJECT — `settlementNoteInputShape` reuses
+  // it verbatim (see the later describe block) — but `noteInputSchema`
+  // `.omit()`s the key, so nothing that goes through the real schema can
+  // ever see or send it.
+  it("supersedes is removed from the note tool's own schema, and a supplied supersedes is a parse error", () => {
+    expect("supersedes" in noteInputSchema.shape).toBe(false);
+    expect(() =>
+      noteInputSchema.parse({
+        turn: "S1/T1",
+        title: "t",
+        content: "c",
+        supersedes: ["S1/T2"],
+      }),
+    ).toThrow();
+  });
+
+  // ticket 01: the seven-word closed set — refines/override/encodes/
+  // groundedOn replace supersedes; evidenceFor/evidenceAgainst/dependsOn are
+  // untouched by name.
+  it("refines/override/encodes carry the two discriminator questions on their own parameter (ticket 01)", () => {
+    const shape = noteInputSchema.shape;
+    expect(Object.keys(noteInputShape)).toContain("refines");
+    expect(Object.keys(noteInputShape)).toContain("override");
+    expect(Object.keys(noteInputShape)).toContain("encodes");
+    expect(Object.keys(noteInputShape)).toContain("groundedOn");
+
+    // Discriminator 1 (spec's own worked example): override vs refines.
+    expect(shape.override.description).toContain(
+      "if the predecessor's any sub-conclusion still holds",
+    );
+    expect(shape.override.description.toLowerCase()).toContain("refines");
+
+    // Discriminator 2: encodes' minimal-set rule, self-asserted not checked.
+    expect(shape.encodes.description).toContain(
+      "name only the minimal set that can derive the final conclusion",
+    );
+    expect(shape.encodes.description).toContain("not mechanically checked");
+  });
+
+  // [S15069/T935] mid-flight amendment to ticket 01: `groundedOn` joined the
+  // closed set (now seven words) after this ticket was already underway —
+  // its own counterfactual discriminator and its "recorded, never scored"
+  // exclusion (ticket 07 must not read it as a scoring signal).
+  it("groundedOn carries its own counterfactual discriminator and states it is never scored (S15069/T935)", () => {
+    const shape = noteInputSchema.shape;
+    expect(shape.groundedOn.description).toContain(
+      "if that finding were false, this decision would fall",
+    );
+    expect(shape.groundedOn.description.toLowerCase()).toContain("never scored");
+  });
+
+  // [S15069/T939] mid-flight amendment: schema enums and prompt vocabulary
+  // lists must derive from (or be guard-tested against) the ONE shared
+  // constant (`shared/turn-phase.ts`'s `EDGE_RELATIONS`) — this pins that
+  // `mcp/note.ts`'s `RELATION_FIELD_ENTRIES` (the field-name -> relation
+  // wiring) covers exactly `EDGE_RELATIONS`, in the same currency, and that
+  // every one of its parameter names is a real key on `noteInputSchema`.
+  it("RELATION_FIELD_ENTRIES covers EDGE_RELATIONS exactly, and every field name is a real schema parameter", () => {
+    const relations = RELATION_FIELD_ENTRIES.map(([, relation]) => relation).sort();
+    expect(relations).toEqual([...EDGE_RELATIONS].sort());
+
+    const fieldNames = RELATION_FIELD_ENTRIES.map(([key]) => key);
+    expect(fieldNames.length).toBe(EDGE_RELATIONS.length);
+    for (const key of fieldNames) {
+      expect(key in noteInputSchema.shape, `${key} should be a schema parameter`).toBe(true);
+    }
   });
 
   // ticket 01 requirement 3 (ADR-0003): the grade parameter is removed
@@ -348,14 +441,16 @@ describe("tool surface", () => {
 
   // Ticket 02 (ADR-0001/0002): `remember` revives the retired tool name as
   // the segment write surface, distinct from `note`. Ticket 05 adds `close`
-  // as a fifth verb and widens the field list to content/insight.
-  it("the remember description names all five verbs, the field list, markup/citation/English rules and stays capped", () => {
+  // as a fifth verb and widens the field list to content/insight. Ticket 02
+  // (ownership-and-note-cadence spec) adds `assign` as a sixth.
+  it("the remember description names all six verbs, the field list, markup/citation/English rules and stays capped", () => {
     const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
     expect(remember).toContain("`create`");
     expect(remember).toContain("`attach`");
     expect(remember).toContain("`append`");
     expect(remember).toContain("`replace`");
     expect(remember).toContain("`close`");
+    expect(remember).toContain("`assign`");
     expect(remember).toContain("goal, constraints, decisions, done, next_steps, reference");
     expect(remember).toContain("content, insight");
     expect(remember).toContain("Tool-call markup");
@@ -367,7 +462,15 @@ describe("tool surface", () => {
     expect(remember).not.toContain("draws a nudge on the next write");
     expect(remember).toContain("rides the segment card's own header");
     expect(remember).toContain("`decisions` append is exempt");
-    expect(estimateTokens(remember)).toBeLessThanOrEqual(380);
+    // Ticket 02: `assign`'s own clause, trimmed to fit — single ownership
+    // and the clear-ownership form are both load-bearing on sight.
+    expect(remember).toContain("single ownership");
+    expect(remember).toContain("clears ownership if `id` is omitted");
+    // Cap raised 380 -> 400 for the sixth verb's own clause (measured: the
+    // trimmed five-verb text alone already sat at 376, leaving no room for
+    // a real new capability without either cutting an EXISTING pinned
+    // assertion above or widening the cap slightly).
+    expect(estimateTokens(remember)).toBeLessThanOrEqual(400);
   });
 
   // Ticket 07 (user ruling: "从没说过要别名表，就不要乱加机制"): the alias

@@ -28,11 +28,26 @@ import type { TurnRecord } from "./turns";
  * forms stay in prose for human readers and remain the only signal for turns
  * extracted before the edge table existed.
  */
+// Ticket 01 (turn-edge-mechanism spec): `refines`/`override`/`encodes`/
+// `grounded-on` join the storage vocabulary alongside the original four.
+// `supersedes` STAYS — existing edges are frozen-readable (10 measured
+// `supersedes` edges, none of which actually invalidated a predecessor's
+// whole conclusion, so it is not remapped to `override` either) — but it is
+// no longer a relation a NEW write may request: `mcp/note.ts` dropped it from
+// its own parameter list, so the only surviving writer of `supersedes` is
+// settlement's own facade (`worker/note-settlement-turn-facade.ts`, outside
+// this ticket). The seven-word CLOSED set a fresh write may carry lives in
+// `shared/turn-phase.ts`'s `EDGE_RELATIONS` — narrower than this storage-level
+// list on purpose.
 export const CITATION_RELATIONS = [
   "evidence-for",
   "evidence-against",
   "supersedes",
   "depends-on",
+  "refines",
+  "override",
+  "encodes",
+  "grounded-on",
 ] as const;
 
 export type CitationRelation = (typeof CITATION_RELATIONS)[number];

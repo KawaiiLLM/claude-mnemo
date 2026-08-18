@@ -883,6 +883,72 @@ export function addSegmentMembers(
   return added;
 }
 
+export interface ReassignSegmentMembersResult {
+  /** The segment(s) these turns were removed FROM, distinct, excluding `targetSegmentId` itself. */
+  vacatedSegmentIds: number[];
+  /** Turn ids actually (re-)linked to `targetSegmentId` — empty when `targetSegmentId` is `null`. */
+  addedTurnIds: number[];
+  targetSegmentId: number | null;
+}
+
+/**
+ * Ticket 02 (ownership-and-note-cadence spec, [S15069/T926], peer finding 3):
+ * the ONE write path for "these turns belong here now" — single ownership
+ * enforced by the WRITE, not a retroactive schema constraint (a legacy
+ * segment may still share a turn with another; this function does not touch
+ * that history, only what a NEW assignment does going forward). Every turn
+ * named is first removed from EVERY segment it currently belongs to, then
+ * (if `targetSegmentId` is not `null`) added to the target — one
+ * transaction, so a turn is never observably a member of two segments at
+ * once between the two halves.
+ *
+ * `targetSegmentId: null` is `remember`'s `assign` with no `id` — place the
+ * named turns in NO segment (homeless). `remember`'s `create` seeds its
+ * `members` through this SAME function (not `addSegmentMembers` directly):
+ * a turn named in a fresh segment's `members` is evicted from wherever it
+ * used to live, the identical single-ownership rule `assign` enforces, not a
+ * second, looser path a caller could use to sidestep it.
+ *
+ * Facets are recomputed for every segment whose membership actually
+ * changed — every vacated segment, and the target if anything landed there
+ * (`addSegmentMembers` already does the target's own recomputation). A
+ * segment reassigned to the SAME segment it already belonged to is a no-op
+ * for `vacatedSegmentIds` (filtered out) but still exercises the delete+
+ * re-insert cycle, which is harmless.
+ */
+export function reassignSegmentMembers(
+  db: Database,
+  turnIds: readonly number[],
+  targetSegmentId: number | null,
+  nowEpoch: number,
+): ReassignSegmentMembersResult {
+  if (turnIds.length === 0) {
+    return { vacatedSegmentIds: [], addedTurnIds: [], targetSegmentId };
+  }
+
+  const placeholders = turnIds.map(() => "?").join(",");
+  const priorSegmentIds = db
+    .query<{ segmentId: number }, number[]>(
+      `SELECT DISTINCT segment_id AS segmentId FROM segment_members WHERE turn_id IN (${placeholders})`,
+    )
+    .all(...turnIds)
+    .map((row) => row.segmentId);
+
+  db.query<unknown, number[]>(
+    `DELETE FROM segment_members WHERE turn_id IN (${placeholders})`,
+  ).run(...turnIds);
+
+  const addedTurnIds =
+    targetSegmentId === null ? [] : addSegmentMembers(db, targetSegmentId, turnIds, nowEpoch);
+
+  const vacatedSegmentIds = priorSegmentIds.filter((id) => id !== targetSegmentId);
+  for (const segmentId of vacatedSegmentIds) {
+    recomputeSegmentFacets(db, segmentId);
+  }
+
+  return { vacatedSegmentIds, addedTurnIds, targetSegmentId };
+}
+
 export function getSegmentMemberTurnIds(
   db: Database,
   segmentId: number,
