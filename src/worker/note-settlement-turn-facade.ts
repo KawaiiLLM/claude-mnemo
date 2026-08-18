@@ -1,7 +1,6 @@
 import { z } from "zod";
 import type { Database } from "bun:sqlite";
 
-import { isCitationRelation, type CitationRelation } from "../db/citations";
 import {
   getOutgoingEdges,
   pairKey,
@@ -13,7 +12,7 @@ import {
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import { getSession, updateSessionFields } from "../db/sessions";
 import { getShadowNote } from "../db/shadow-notes";
-import { getTurn, updateTurnById } from "../db/turns";
+import { getTurn, getTurnById, updateTurnById } from "../db/turns";
 import { settlementNoteInputShape } from "../mcp/definitions";
 import { parseSessionAddress, parseTurnAddress } from "../mcp/note";
 import {
@@ -22,6 +21,14 @@ import {
 } from "../mcp/session-summary";
 import { findRetiredTopicTag, retiredTopicTagMessage } from "../shared/tag-stripping";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
+import {
+  EDGE_RELATIONS,
+  phasesForTypes,
+  RELATION_FIELD_NAME,
+  validateRelationTarget,
+  type TurnEdgeRelation,
+  type TurnPhase,
+} from "../shared/turn-phase";
 
 /**
  * The settlement turn-write facade (spec G6/G7/D5/D5a; staged commit per
@@ -84,6 +91,22 @@ import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
  * third, separate "apply-only" code path: replaying the SAME evaluation
  * function rather than a cached stage-time decision is what makes
  * commit-time re-validation real rather than cosmetic.
+ *
+ * TICKET 08 (edge-ownership-impl, "settlement four-field check-and-
+ * correct"): the relation half now consumes THE SAME validator the main
+ * agent's `note` tool uses — `shared/turn-phase.ts`'s `validateRelationTarget`
+ * / `isRelationLegalForPhases` / `explainRelationPhaseRejection`, driven by
+ * the SAME `EDGE_RELATIONS`/`RELATION_FIELD_NAME` constants — rather than the
+ * narrower pre-ticket-01 four-relation set (`evidenceFor`/`evidenceAgainst`/
+ * `supersedes`/`dependsOn`) this file used to accept with no phase check at
+ * all. One validator, both write paths: a phase-illegal relation is rejected
+ * here with the identical "which half is missing" message `mcp/note.ts`
+ * produces, not a second, independently-worded rule. `supersedes` is retired
+ * from this write surface too — frozen legacy, readable on old rows
+ * (`db/citations.ts`), never written by either path any more. The same-run
+ * eligibility fence (`context.eligibleRelationPairKeys`, spec C7) is
+ * untouched — the phase check is an ADDITIONAL gate, not a replacement for
+ * it.
  */
 
 // ---------------------------------------------------------------------------
@@ -111,6 +134,16 @@ export interface SettlementTurnFacadeContext {
    * writes never enter this set either way.
    */
   eligibleRelationPairKeys: ReadonlySet<string>;
+  /**
+   * Ticket 08 (edge-ownership-impl): the legal DOMAIN for a membership
+   * correction — this session's currently attached segment ids
+   * (`NoteSettlementContext.segmentRoster`, projected down to bare ids).
+   * `db/segments.ts`'s `listAttachedSegments` doc comment anticipates this
+   * exact field name. A membership reassign naming any other segment, or
+   * attaching a NEW one, is out of settlement's authority — the main agent
+   * alone grows a session's attachment set.
+   */
+  attachedSegmentIds: ReadonlySet<number>;
   logger?: Pick<Console, "warn">;
 }
 
@@ -171,17 +204,13 @@ export type SettlementTurnWriteInput = z.infer<
   typeof settlementTurnWriteInputSchema
 >;
 
+// Ticket 08: derived from `EDGE_RELATIONS`/`RELATION_FIELD_NAME` — the SAME
+// derivation `mcp/note.ts`'s own `RELATION_FIELD_ENTRIES` uses — so the
+// seven-word closed set and its parameter spelling cannot drift apart
+// between the two write paths.
 const RELATION_FIELD_ENTRIES: ReadonlyArray<
-  readonly [
-    key: "evidenceFor" | "evidenceAgainst" | "supersedes" | "dependsOn",
-    relation: CitationRelation,
-  ]
-> = [
-  ["evidenceFor", "evidence-for"],
-  ["evidenceAgainst", "evidence-against"],
-  ["supersedes", "supersedes"],
-  ["dependsOn", "depends-on"],
-];
+  readonly [key: string, relation: TurnEdgeRelation]
+> = EDGE_RELATIONS.map((relation) => [RELATION_FIELD_NAME[relation], relation] as const);
 
 export interface ReviewOutcome {
   kind: "written" | "yielded";
@@ -273,16 +302,16 @@ export interface EvaluateSettlementTurnWriteOptions {
 function evaluateRelationCandidates(
   db: Database,
   citing: CitingNode,
-  candidates: ReadonlyArray<{ key: string; relation: CitationRelation; node: EdgeNode }>,
+  candidates: ReadonlyArray<{ key: string; relation: TurnEdgeRelation; node: EdgeNode }>,
   eligiblePairKeys: ReadonlySet<string>,
 ): { accepted: WriteEdgeInput[]; rejections: string[] } {
   const currentPairKeys = new Set(
     getOutgoingEdges(db, citing).map((edge) => pairKey({ citing, cited: edge.cited })),
   );
-  const relationsByPair = new Map<string, Set<CitationRelation>>();
+  const relationsByPair = new Map<string, Set<TurnEdgeRelation>>();
   for (const candidate of candidates) {
     const key = pairKey({ citing, cited: candidate.node });
-    const set = relationsByPair.get(key) ?? new Set<CitationRelation>();
+    const set = relationsByPair.get(key) ?? new Set<TurnEdgeRelation>();
     set.add(candidate.relation);
     relationsByPair.set(key, set);
   }
@@ -341,7 +370,10 @@ const SESSION_ONLY_FORBIDDEN_FIELDS = [
   "tags",
   "evidenceFor",
   "evidenceAgainst",
-  "supersedes",
+  "groundedOn",
+  "refines",
+  "override",
+  "encodes",
   "dependsOn",
 ] as const;
 
@@ -502,7 +534,8 @@ export function evaluateSettlementTurnWrite(
     rawInput.type !== undefined ||
     rawInput.tags !== undefined;
   const relationFields = RELATION_FIELD_ENTRIES.filter(
-    ([key]) => (rawInput[key]?.length ?? 0) > 0,
+    ([key]) =>
+      (((rawInput as Record<string, unknown>)[key] as string[] | undefined)?.length ?? 0) > 0,
   );
 
   if (!touchesReview && relationFields.length === 0) {
@@ -605,10 +638,18 @@ export function evaluateSettlementTurnWrite(
   let relations: RelationOutcome | null = null;
   if (relationFields.length > 0) {
     const citing: CitingNode = { kind: "turn", id: turn.id };
-    const candidates: Array<{ key: string; relation: CitationRelation; node: EdgeNode }> = [];
+    // Ticket 08: the citing turn's phase set reflects THIS SAME call's own
+    // type correction when present — mirrors `mcp/note.ts`'s
+    // `resolveRelationFields`, which checks relation legality against
+    // `updatedTurn.type` (the post-write type), not the pre-write one. A
+    // turn corrected to `["design"]` in the same call that also attaches
+    // `refines` must be judged as a decision-phase turn, not by whatever it
+    // carried before this write.
+    const citingPhases = phasesForTypes(normalizedType ?? turn.type);
+    const candidates: Array<{ key: string; relation: TurnEdgeRelation; node: EdgeNode }> = [];
     const rejections: string[] = [];
     for (const [key, relation] of relationFields) {
-      for (const raw of rawInput[key] ?? []) {
+      for (const raw of (rawInput as Record<string, unknown>)[key] as string[] | undefined ?? []) {
         const reference = parseBareAddressReference(raw);
         if (!reference) {
           rejections.push(`${key} "${raw}" is not a valid address`);
@@ -621,6 +662,26 @@ export function evaluateSettlementTurnWrite(
         const node = accepted[0]?.node;
         if (!node) {
           rejections.push(`${key} "${raw}" does not resolve to a turn or segment`);
+          continue;
+        }
+        // Ticket 08 (requirement 1 — one validator, both write paths): the
+        // SAME `validateRelationTarget` the main agent's `note` tool calls
+        // (`mcp/note.ts`'s `checkRelationTargetPhase`) — segment targets
+        // refused, phase-pair legality checked, the rejection naming which
+        // half is missing (`explainRelationPhaseRejection`, wrapped inside
+        // `validateRelationTarget`'s own `detail`).
+        const citedPhases =
+          node.kind === "turn"
+            ? phasesForTypes(getTurnById(db, node.id)?.type ?? [])
+            : (new Set<TurnPhase>() as ReadonlySet<TurnPhase>);
+        const legality = validateRelationTarget({
+          relation,
+          citingPhases,
+          targetKind: node.kind,
+          citedPhases,
+        });
+        if (!legality.ok) {
+          rejections.push(`${key} "${raw}" ${legality.detail}`);
           continue;
         }
         candidates.push({ key, relation, node });

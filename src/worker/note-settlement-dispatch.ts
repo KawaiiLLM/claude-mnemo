@@ -84,6 +84,8 @@ export interface NoteSettlementQueryRequest {
   contextBuiltAtEpoch: number;
   /** Relation eligibility, snapshotted ONCE before this call's model run starts (spec C7, requirement 4). */
   eligibleRelationPairKeys: ReadonlySet<string>;
+  /** Ticket 08: the legal domain for a membership `reassign` — this session's currently attached segment ids. */
+  attachedSegmentIds: ReadonlySet<number>;
 }
 
 /**
@@ -239,6 +241,7 @@ export function createNoteSettlementDispatch(
         reviewableTurnIds: context.reviewableTurnIds,
         contextBuiltAtEpoch: context.builtAtEpoch,
         eligibleRelationPairKeys,
+        attachedSegmentIds: context.attachedSegmentIds,
       });
     } catch (error) {
       return {

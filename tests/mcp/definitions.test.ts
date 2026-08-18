@@ -225,9 +225,10 @@ describe("tool surface", () => {
     };
     // Ticket 01: driven by `noteInputSchema.shape`, NOT the raw
     // `noteInputShape` object — the shape carries one key the schema itself
-    // omits (`supersedes`, kept only for `settlementNoteInputShape` to
-    // reuse; see its own doc comment), so a caller-reachable-parameter test
-    // must walk what the SCHEMA actually renders.
+    // omits (`supersedes`, kept declared only as frozen documentation of a
+    // retired word — ticket 08 dropped its last reuser, see its own doc
+    // comment), so a caller-reachable-parameter test must walk what the
+    // SCHEMA actually renders.
     const keys = Object.keys(noteInputSchema.shape);
     expect(keys.length).toBeGreaterThan(0);
     expect(keys).not.toContain("supersedes");
@@ -288,10 +289,10 @@ describe("tool surface", () => {
   // stay frozen-readable (db/citations.ts's `CITATION_RELATIONS` keeps the
   // word for storage/reads); only the write PARAMETER is gone from the
   // surface a caller can actually reach. `noteInputShape.supersedes` itself
-  // still exists as a raw field OBJECT — `settlementNoteInputShape` reuses
-  // it verbatim (see the later describe block) — but `noteInputSchema`
-  // `.omit()`s the key, so nothing that goes through the real schema can
-  // ever see or send it.
+  // still exists as a raw field OBJECT, unexported from either schema now
+  // (ticket 08 retired settlement's own reuse of it too) — but
+  // `noteInputSchema` `.omit()`s the key, so nothing that goes through the
+  // real schema can ever see or send it.
   it("supersedes is removed from the note tool's own schema, and a supplied supersedes is a parse error", () => {
     expect("supersedes" in noteInputSchema.shape).toBe(false);
     expect(() =>
@@ -530,14 +531,27 @@ describe("rememberInputShape", () => {
 // would still pass on two objects that happen to agree today and silently
 // drift tomorrow.
 describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)", () => {
-  it("type, tags and all four relation fields are the SAME zod object as noteInputShape's", () => {
+  // Ticket 08 (edge-ownership-impl, "settlement four-field check-and-
+  // correct"): the relation half widened from the pre-ticket-01 four-field
+  // set to the full seven-word vocabulary `noteInputShape` itself exposes —
+  // groundedOn/refines/override join evidenceFor/evidenceAgainst/dependsOn,
+  // and `supersedes` (the field this test used to assert reference-equality
+  // for) is DROPPED from this shape outright, not merely left unequal.
+  it("type, tags and all seven relation fields are the SAME zod object as noteInputShape's", () => {
     expect(settlementNoteInputShape.type).toBe(noteInputShape.type);
     expect(settlementNoteInputShape.tags).toBe(noteInputShape.tags);
     expect(settlementNoteInputShape.insight).toBe(noteInputShape.insight);
     expect(settlementNoteInputShape.evidenceFor).toBe(noteInputShape.evidenceFor);
     expect(settlementNoteInputShape.evidenceAgainst).toBe(noteInputShape.evidenceAgainst);
-    expect(settlementNoteInputShape.supersedes).toBe(noteInputShape.supersedes);
+    expect(settlementNoteInputShape.groundedOn).toBe(noteInputShape.groundedOn);
+    expect(settlementNoteInputShape.refines).toBe(noteInputShape.refines);
+    expect(settlementNoteInputShape.override).toBe(noteInputShape.override);
+    expect(settlementNoteInputShape.encodes).toBe(noteInputShape.encodes);
     expect(settlementNoteInputShape.dependsOn).toBe(noteInputShape.dependsOn);
+  });
+
+  it("supersedes is not part of this shape any more (ticket 08) — frozen legacy, no writer on either surface", () => {
+    expect(Object.keys(settlementNoteInputShape)).not.toContain("supersedes");
   });
 
   it("declares no skip, crossSession, mode, or job-identity field", () => {

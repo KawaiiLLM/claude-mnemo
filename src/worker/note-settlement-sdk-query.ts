@@ -64,8 +64,11 @@ const SETTLEMENT_ALLOWED_TOOLS = [
  * `commit`.
  */
 const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
-  "STAGE a turn's grade/type/tags and/or relations, OR this session's " +
-  "narrative — validated now, written only when you call `commit`. " +
+  "STAGE a CORRECTION to a turn's grade/type/tags/relations, OR this " +
+  "session's narrative — validated now, written only when you call " +
+  "`commit`. This is a RE-CHECK, not a first write: the main agent already " +
+  "wrote every field below for this window's turns; call this only when " +
+  "the Memory Rubric says a stored value is wrong. " +
   "Exactly one of `turn` (\"S<session>/T<prompt>\", from the window or " +
   "preceding-turns section) or `session` (\"S<session>\", this session). " +
   "Either is also this call's KEY: staging the same turn or session again " +
@@ -76,34 +79,46 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "grade (0-4)/type/tags: only for a turn shown in this prompt (window or " +
   "preceding turns); each overwrites whole when present, omit to leave " +
   "alone — there is no append. " +
-  "evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target " +
-  "must already be a pair that existed before this run started AND still " +
-  "exist when `commit` lands it — you cannot license a relation on a pair a " +
-  "call earlier in this SAME run just created, or on one the main agent has " +
-  "since stopped citing. " +
+  "evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/" +
+  "dependsOn: address lists — the SAME seven relations and phase-legality " +
+  "validator the main agent's own `note` tool uses; a target must already " +
+  "be a pair that existed before this run started AND still exist when " +
+  "`commit` lands it, and its two ends' `type` must satisfy the relation's " +
+  "phase pair (a structurally illegal pair is rejected, naming which half " +
+  "is missing). Which relation, if any, is the Memory Rubric's own 关系 " +
+  "checklist above — this call only enforces address/eligibility/phase " +
+  "shape. " +
   "On `session`: `title`/`content` only, each overwritten whole when " +
   "present (no append — compose the incremented text yourself from what " +
   "you can already see) — grade/type/tags/relations are refused.";
 
 /**
- * The `remember` tool's settlement-side call contract — `propose` is the
- * only surviving verb (ticket 05: `assign` is dead, membership is no longer
- * settlement's to change here). Registered under the SAME tool name the main
- * agent's own `remember` uses, a settlement-specific shape, the same
- * relationship the `note` facade already has to the main agent's `note`
- * tool.
+ * The `remember` tool's settlement-side call contract — `propose` and
+ * `reassign` (ticket 08) are the two legal verbs; `assign` stays dead
+ * (ticket 05). Registered under the SAME tool name the main agent's own
+ * `remember` uses, a settlement-specific shape, the same relationship the
+ * `note` facade already has to the main agent's `note` tool.
  */
 const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
-  "STAGE a text-only task proposal — validated now, written only when you " +
-  "call `commit`. action: \"propose\" (the only legal value). addresses " +
-  "(one or more \"S<session>/T<prompt>\" turn addresses — a single homeless " +
-  "turn may open its own proposal, or name a cluster forming ONE coherent " +
-  "task) + title (a short suggested name) — stores a text-only suggestion " +
-  "for the user to confirm next session. This call's KEY is the address SET " +
-  "(order-independent): re-staging the same set replaces the earlier " +
-  "proposal. NEVER creates a segment and is never auto-adopted — do not " +
-  "propose an incoherent grab-bag. Never required — this window may commit " +
-  "without ever calling this tool.";
+  "STAGE a text-only task proposal, OR a membership CORRECTION — validated " +
+  "now, written only when you call `commit`. action: \"propose\" or " +
+  "\"reassign\". " +
+  "propose: addresses (one or more \"S<session>/T<prompt>\" turn " +
+  "addresses — a single homeless turn may open its own proposal, or name a " +
+  "cluster forming ONE coherent task) + title (a short suggested name) — " +
+  "stores a text-only suggestion for the user to confirm next session. " +
+  "This call's KEY is the address SET (order-independent): re-staging the " +
+  "same set replaces the earlier proposal. NEVER creates a segment and is " +
+  "never auto-adopted — do not propose an incoherent grab-bag. " +
+  "reassign: turns (one or more \"S<session>/T<prompt>\" addresses to " +
+  "correct) + id (an \"E<n>\" already on this session's segment roster) or " +
+  "id omitted to clear ownership (homeless). This is a RE-CHECK, not a " +
+  "first assignment — the main agent already placed these turns; correct " +
+  "only a DISPLAYED mismatch. A segment not on the roster is refused, " +
+  "naming it as not attached — attaching a NEW segment to this session is " +
+  "the main agent's call alone. This call's KEY is the turns SET " +
+  "(order-independent): re-staging it replaces the earlier reassignment. " +
+  "Never required — this window may commit without ever calling this tool.";
 
 /** The completion gate exposed as commit's own precondition — settlement gets no separate `check` tool. */
 const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
@@ -179,6 +194,7 @@ export function createNoteSettlementSdkQuery(
       reviewableTurnIds: request.reviewableTurnIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
       eligibleRelationPairKeys: request.eligibleRelationPairKeys,
+      attachedSegmentIds: request.attachedSegmentIds,
     };
     const staging = createSettlementStagingEngine({
       db: options.db,

@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { recordNoteSettlementProposal } from "../db/note-settlement-proposals";
 import { parseBareAddressReference, validateReferences } from "../db/references";
+import { reassignSegmentMembers } from "../db/segments";
 import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade";
 
 /**
@@ -19,7 +20,7 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  * turn-write facade's staged-commit channel once it exists, not through a
  * revived `remember(assign)` on this facade.
  *
- * `propose` is the one surviving verb (spec: "propose 在退役潮里唯一存活的形
+ * `propose` is one surviving verb (spec: "propose 在退役潮里唯一存活的形
  * 态") — several homeless turns that read as one task become a TEXT-ONLY
  * suggestion (`db/note-settlement-proposals.ts`) for the user to confirm next
  * session; never a segment row, never auto-adopted, and — as of this ticket —
@@ -29,6 +30,24 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  * `addresses`' floor drops from 2 to 1 (spec: "最小簇 1，修订现行 ≥2——孤立
  * turn 独自开启新任务是合法情形") — a single homeless turn opening its own
  * proposed task is now legal, not just a multi-turn cluster.
+ *
+ * TICKET 08 (edge-ownership-impl, "settlement four-field check-and-correct"):
+ * `reassign` joins `propose` as the second (and last) legal `action` — the
+ * MEMBERSHIP-CORRECTION path the ownership-and-note-cadence spec's own
+ * "所有权" section reserves for settlement ([S15069/T912]/[T913]): "纠错走既
+ * 有 staged-commit 通道…值域=该会话已挂靠段 ∪ 无归属，越界拒绝并报出该段不在
+ * 挂靠集合". `reassign` is deliberately NOT named `assign` — that verb is
+ * retired (ticket 05) and stays retired; this is a narrower, RE-CHECK-only
+ * primitive with a restricted domain, not its revival. It reuses `db/
+ * segments.ts`'s `reassignSegmentMembers` (ticket 02's single-home write
+ * primitive) directly: every turn named is first evicted from wherever it
+ * currently lives, then (if `id` is given) added to the target — one
+ * transaction, single ownership enforced by the write. The legal domain is
+ * `context.attachedSegmentIds` (this session's own roster) ∪ homeless (`id`
+ * omitted) — naming any OTHER segment is refused, naming the segment as not
+ * attached; attaching a brand-new segment to the session stays the main
+ * agent's call alone (`remember`'s own `assign` verb, a different tool
+ * registration entirely).
  *
  * Registered under the tool name `remember` (not `segment`) in
  * note-settlement-sdk-query.ts — the settlement subagent uses the same tool
@@ -45,16 +64,21 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
 
 export const settlementMembershipWriteInputShape = {
   /**
-   * `assign` is dead (ticket 05) — kept as a single-member enum rather than
-   * dropped outright so a stale caller gets zod's own "invalid enum value"
-   * rejection instead of an unknown-key `.strict()` failure with no useful
-   * message. `propose` is the only legal value.
+   * `assign` is dead (ticket 05) and stays dead — kept out of this enum
+   * entirely (not merely refused downstream) so a stale caller gets zod's
+   * own "invalid enum value" rejection naming the two legal verbs. `propose`
+   * is the text-only exception channel; `reassign` (ticket 08) is the
+   * restricted membership-CORRECTION primitive.
    */
-  action: z.enum(["propose"]),
-  /** required — at least one "S<session>/T<prompt>" turn address; this call's staging key. */
+  action: z.enum(["propose", "reassign"]),
+  /** propose only, required — at least one "S<session>/T<prompt>" turn address; this call's staging key. */
   addresses: z.array(z.string()).optional(),
-  /** required — a short suggested title for the cluster, shown to the user next session. */
+  /** propose only, required — a short suggested title for the cluster, shown to the user next session. */
   title: z.string().optional(),
+  /** reassign only, required — one or more "S<session>/T<prompt>" turn addresses to correct; this call's staging key. */
+  turns: z.array(z.string()).optional(),
+  /** reassign only, optional — the target segment ("E<n>"), drawn from this session's roster; omit to clear ownership (homeless). */
+  id: z.string().min(1).optional(),
 };
 
 export const settlementMembershipWriteInputSchema = z
@@ -70,8 +94,23 @@ export type SettlementMembershipWriteInput = z.infer<
 // ---------------------------------------------------------------------------
 
 export interface SettlementMembershipWriteOutcome {
+  /** `propose`: the stored proposal's id. `null` for a dry run or a `reassign` outcome. */
   proposalId: number | null;
+  /** `propose`: addresses accepted. `reassign`: turns accepted — same "how many address tokens resolved" meaning either way. */
   addressesResolved: number;
+  /**
+   * Present ONLY for a `reassign` outcome (ticket 08) — `undefined` for
+   * `propose`, so every existing `propose` fixture/receipt (pre-ticket-08)
+   * stays exactly as it was rather than gaining a phantom field.
+   */
+  reassign?: {
+    /** `null` = reassigned to no segment (homeless). */
+    targetSegmentId: number | null;
+    /** The segment(s) these turns were removed from, excluding the target itself — empty on a dry run. */
+    vacatedSegmentIds: number[];
+    /** Turn ids actually linked to the target — empty when `targetSegmentId` is null, or on a dry run. */
+    addedTurnIds: number[];
+  };
 }
 
 export type SettlementMembershipWriteEvaluation =
@@ -169,10 +208,129 @@ function evaluatePropose(
 }
 
 /**
- * The settlement membership facade's whole decision. `action` has exactly
- * one legal value (`propose`) since `assign` retired (ticket 05) — the zod
- * shape already refuses anything else before this runs, so there is no
- * dispatch left to do here beyond calling the one evaluator.
+ * `reassign` (ticket 08): a RE-CHECK, not a first assignment — the main
+ * agent already placed every turn, this only corrects a mis-homing. Reuses
+ * `db/segments.ts`'s `reassignSegmentMembers` (ticket 02's single-home write
+ * primitive) directly, so a corrected turn is evicted from wherever it
+ * currently lives and (if `id` is given) added to the target in one
+ * transaction — the identical single-ownership guarantee the main agent's
+ * own `remember(assign)` verb gets, on a narrower domain.
+ *
+ * Domain: `context.attachedSegmentIds` (this session's own roster) ∪
+ * homeless (`id` omitted). Any other segment id is refused, naming it as not
+ * attached — settlement cannot grow a session's attachment set, only the
+ * main agent can.
+ */
+function evaluateReassign(
+  db: Database,
+  context: SettlementTurnFacadeContext,
+  rawInput: SettlementMembershipWriteInput,
+  nowEpoch: number,
+  options: EvaluateSettlementMembershipWriteOptions,
+): SettlementMembershipWriteEvaluation {
+  const rawTurns = rawInput.turns ?? [];
+  if (rawTurns.length < 1) {
+    return {
+      ok: false,
+      message: "reassign requires turns, at least one turn address to correct.",
+    };
+  }
+
+  let targetSegmentId: number | null = null;
+  if (rawInput.id !== undefined) {
+    const parsedTarget = parseBareAddressReference(rawInput.id);
+    if (!parsedTarget || parsedTarget.kind !== "segment") {
+      return {
+        ok: false,
+        message: `id must be an "E<n>" segment address; got "${rawInput.id}".`,
+      };
+    }
+    if (!context.attachedSegmentIds.has(parsedTarget.segmentId)) {
+      return {
+        ok: false,
+        message:
+          `E${parsedTarget.segmentId} is not attached to this session — settlement may only ` +
+          "reassign a turn to a segment already on this session's roster, or to no segment " +
+          "(omit id); attaching a NEW segment to this session is the main agent's call alone.",
+      };
+    }
+    targetSegmentId = parsedTarget.segmentId;
+  }
+
+  const rejections: string[] = [];
+  const turnIds: number[] = [];
+  const seen = new Set<number>();
+  for (const raw of rawTurns) {
+    const parsed = parseBareAddressReference(raw);
+    if (!parsed || parsed.kind !== "turn") {
+      rejections.push(`"${raw}" is not a valid turn address`);
+      continue;
+    }
+    const { accepted } = validateReferences(db, [parsed], {
+      writerSessionId: context.sessionId,
+      logger: context.logger,
+    });
+    const node = accepted[0]?.node;
+    if (!node) {
+      rejections.push(`"${raw}" does not resolve to a turn`);
+      continue;
+    }
+    if (!context.reviewableTurnIds.has(node.id)) {
+      rejections.push(`"${raw}" is outside this dispatch's reviewable window`);
+      continue;
+    }
+    if (!seen.has(node.id)) {
+      seen.add(node.id);
+      turnIds.push(node.id);
+    }
+  }
+
+  if (rejections.length > 0) {
+    return {
+      ok: false,
+      message:
+        `turns rejected: ${rejections.join("; ")} — a reassignment is recorded for exactly ` +
+        "the turns given, so a call naming even one bad address reassigns none.",
+    };
+  }
+  if (turnIds.length < 1) {
+    return {
+      ok: false,
+      message: "reassign requires at least one DISTINCT turn address after de-duplication.",
+    };
+  }
+
+  if (!options.apply) {
+    return {
+      ok: true,
+      outcome: {
+        proposalId: null,
+        addressesResolved: turnIds.length,
+        reassign: { targetSegmentId, vacatedSegmentIds: [], addedTurnIds: [] },
+      },
+    };
+  }
+
+  const result = reassignSegmentMembers(db, turnIds, targetSegmentId, nowEpoch);
+  return {
+    ok: true,
+    outcome: {
+      proposalId: null,
+      addressesResolved: turnIds.length,
+      reassign: {
+        targetSegmentId,
+        vacatedSegmentIds: result.vacatedSegmentIds,
+        addedTurnIds: result.addedTurnIds,
+      },
+    },
+  };
+}
+
+/**
+ * The settlement membership facade's whole decision — dispatches on
+ * `action` (ticket 08 widens this from `propose`-only to `propose` |
+ * `reassign`; the zod shape already refuses any third value before this
+ * runs).
  */
 export function evaluateSettlementMembershipWrite(
   db: Database,
@@ -181,6 +339,9 @@ export function evaluateSettlementMembershipWrite(
   nowEpoch: number,
   options: EvaluateSettlementMembershipWriteOptions,
 ): SettlementMembershipWriteEvaluation {
+  if (rawInput.action === "reassign") {
+    return evaluateReassign(db, context, rawInput, nowEpoch, options);
+  }
   return evaluatePropose(db, context, rawInput, nowEpoch, options);
 }
 
@@ -197,6 +358,19 @@ export function renderSettlementMembershipWriteReceipt(
   const replacedSuffix = options.replaced
     ? " — replaces the earlier staged call for this same key"
     : "";
+  if (outcome.reassign) {
+    const { targetSegmentId, vacatedSegmentIds, addedTurnIds } = outcome.reassign;
+    const destination = targetSegmentId !== null ? `E${targetSegmentId}` : "homeless (no segment)";
+    const vacatedNote =
+      vacatedSegmentIds.length > 0
+        ? `, vacated ${vacatedSegmentIds.map((id) => `E${id}`).join(",")}`
+        : "";
+    const landedNote = options.staged ? "" : `, ${addedTurnIds.length} linked`;
+    return (
+      `${verb} reassign: ${outcome.addressesResolved} turn(s) -> ${destination}` +
+      `${options.staged ? " (pending commit)" : ""}${vacatedNote}${landedNote}.${replacedSuffix}`
+    );
+  }
   return (
     `${verb} propose: ${outcome.addressesResolved} address(es)${options.staged ? " (pending commit)" : ""}` +
     `${outcome.proposalId !== null ? ` as proposal #${outcome.proposalId}` : ""} — creates no segment.${replacedSuffix}`

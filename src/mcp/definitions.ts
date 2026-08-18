@@ -375,13 +375,12 @@ export const noteInputShape = {
   // ticket 01 (turn-edge-mechanism spec): `supersedes` retired from the NOTE
   // TOOL's own surface — `noteInputSchema` below `.omit()`s this key, so a
   // caller sending it gets `.strict()`'s parse error naming the unrecognised
-  // key, same as any other retired field. The field OBJECT stays defined
-  // here, unexported from the schema, ONLY because `settlementNoteInputShape`
-  // still reuses it verbatim (settlement's own facade keeps writing
-  // `supersedes` — that surface is untouched by this ticket) — the same
-  // "declared in this shared shape, refused by name/omission on the surface
-  // that does not want it" pattern `content`/`insight` already use for the
-  // session address.
+  // key, same as any other retired field. Ticket 08 (edge-ownership-impl)
+  // retired settlement's own write of it too — `settlementNoteInputShape` no
+  // longer reuses this field object, so it now has NO reuser at all. It stays
+  // declared, unexported from the schema, purely as frozen documentation of
+  // the word this project once wrote and no longer does; `db/citations.ts`'s
+  // `CITATION_RELATIONS` is where the READ-side legacy value actually lives.
   supersedes: z
     .array(z.string())
     .optional()
@@ -496,7 +495,7 @@ export const timelineInputShape = {
 // Ticket 07 (ADR-0007, semantic-container): the settlement subagent's
 // note-write surface. Reuses THIS shape's own field objects for every rule
 // that is genuinely identical on both surfaces — type, tags, insight, and
-// the four relation fields — so a contract change to one of those (a budget,
+// the relation fields — so a contract change to one of those (a budget,
 // a vocabulary word, a description) reaches both surfaces from a single
 // edit here rather than needing a second, independently hand-kept copy
 // (worker/note-settlement-turn-facade.ts used to carry exactly that copy).
@@ -518,6 +517,17 @@ export const timelineInputShape = {
 // `content` are what a `session`-addressed call writes (settlement's own
 // whole-rewrite semantics, unchanged) — grade/type/tags/relations stay
 // turn-only, refused by `evaluateSettlementTurnWrite`'s session branch.
+//
+// Ticket 08 (edge-ownership-impl, "settlement four-field check-and-
+// correct"): the relation half moves onto the SAME seven-word vocabulary
+// `noteInputShape` exposes (evidenceFor/evidenceAgainst/groundedOn/refines/
+// override/encodes/dependsOn — `shared/turn-phase.ts`'s `EDGE_RELATIONS`),
+// replacing the narrower pre-ticket-01 four-field set this shape used to
+// carry. `supersedes` is dropped from THIS shape too — it is frozen legacy
+// (readable on old rows, `db/citations.ts`'s `CITATION_RELATIONS`) but not
+// writable on either surface any more; `noteInputShape.supersedes` stays
+// declared only for its own `.omit()` comment's sake, with no remaining
+// reuser.
 export const settlementNoteInputShape = {
   turn: z.string().min(1).optional(),
   session: z.string().min(1).optional(),
@@ -529,7 +539,10 @@ export const settlementNoteInputShape = {
   tags: noteInputShape.tags,
   evidenceFor: noteInputShape.evidenceFor,
   evidenceAgainst: noteInputShape.evidenceAgainst,
-  supersedes: noteInputShape.supersedes,
+  groundedOn: noteInputShape.groundedOn,
+  refines: noteInputShape.refines,
+  override: noteInputShape.override,
+  encodes: noteInputShape.encodes,
   dependsOn: noteInputShape.dependsOn,
 };
 

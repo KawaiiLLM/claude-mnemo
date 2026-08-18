@@ -16,7 +16,7 @@ import {
 import { initializeSchema } from "../../src/db/schema";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
-import { getTurnById } from "../../src/db/turns";
+import { getTurnById, updateTurnById } from "../../src/db/turns";
 import {
   evaluateSettlementTurnWrite,
   renderSettlementTurnWriteReceipt,
@@ -121,6 +121,7 @@ function baseContext(
     reviewableTurnIds: new Set(),
     contextBuiltAtEpoch: NOW,
     eligibleRelationPairKeys: new Set(),
+    attachedSegmentIds: new Set(),
     ...overrides,
   };
 }
@@ -257,6 +258,11 @@ describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
+    // Ticket 08: `dependsOn` is phase-gated (delivery -> delivery) — both
+    // ends need a delivery-phase type for the relation to clear the new
+    // legality check before this test's own eligibility assertion runs.
+    updateTurnById(db, t1, { type: ["implement"] });
+    updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
     // The frozen snapshot names a pair only ever taken from a real row in
     // THIS same database — a real pre-existing bare pair, so the fixture
@@ -481,6 +487,9 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
+    // Ticket 08: dependsOn needs delivery-phase on both ends.
+    updateTurnById(db, t1, { type: ["implement"] });
+    updateTurnById(db, t2, { type: ["implement"] });
     // A pre-existing bare pair (a prior note's citation, in production).
     writeMemoryEdges(
       db,
@@ -508,6 +517,11 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
+    // Ticket 08: `override` needs decision-phase on both ends (also proves
+    // `supersedes` — the field this test used to name — is gone from this
+    // surface: it retired to a read-only legacy value, ticket 08).
+    updateTurnById(db, t1, { type: ["design"] });
+    updateTurnById(db, t2, { type: ["correction"] });
     const job = claimWindow(sessionDbId, 1, 2);
     // The snapshot was taken before the run started — no pair exists yet.
     const snapshot = new Set<string>();
@@ -524,7 +538,7 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
 
     const result = write(
       baseContext(job, { eligibleRelationPairKeys: snapshot }),
-      { turn: `S${sessionDbId}/T2`, supersedes: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
 
@@ -542,6 +556,10 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
+    // Ticket 08: evidenceFor needs an evidence-phase citing turn and a
+    // decision-phase cited turn.
+    updateTurnById(db, t1, { type: ["design"] });
+    updateTurnById(db, t2, { type: ["research"] });
     const job = claimWindow(sessionDbId, 1, 2);
 
     const result = write(
@@ -558,6 +576,9 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
+    // Ticket 08: dependsOn needs delivery-phase on both ends.
+    updateTurnById(db, t1, { type: ["implement"] });
+    updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
     // A real pre-existing bare pair — what the pre-run snapshot builder only
     // ever takes a key FROM (ticket 10d: frozen alone is never enough).
@@ -614,6 +635,9 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
+    // Ticket 08: dependsOn needs delivery-phase on both ends.
+    updateTurnById(db, t1, { type: ["implement"] });
+    updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
     // T2's body cites T1 at snapshot time — a real, pre-existing bare pair.
     writeMemoryEdges(

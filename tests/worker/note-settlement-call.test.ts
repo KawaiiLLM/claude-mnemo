@@ -230,6 +230,7 @@ function queryThatStages(
       reviewableTurnIds: request.reviewableTurnIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
       eligibleRelationPairKeys: request.eligibleRelationPairKeys,
+      attachedSegmentIds: request.attachedSegmentIds,
     };
     const engine = createSettlementStagingEngine({ db, context });
     build(engine, request);
@@ -311,49 +312,56 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain("TURN REVIEW");
     expect(prompt).not.toContain("RECONSTRUCTION");
 
-    // Ticket 09 (edge-ownership-impl) inserted duty 3 (SESSION NARRATIVE)
-    // between RELATIONS and COMMIT, so COMMIT renumbered from "3." to "4.".
+    // Ticket 08 (edge-ownership-impl) folded the old duty 2 (RELATIONS) into
+    // a wider CORRECTION duty (type/tags/membership/edges); ticket 09
+    // inserted duty 3 (SESSION NARRATIVE) between it and COMMIT, so COMMIT
+    // stays numbered "4.".
     const proposalsIndex = prompt.indexOf("1. PROPOSALS");
-    const relationsIndex = prompt.indexOf("RELATIONS,");
+    const correctionIndex = prompt.indexOf("2. CORRECTION");
     const narrativeIndex = prompt.indexOf("3. SESSION NARRATIVE");
     const commitIndex = prompt.indexOf("4. COMMIT");
     expect(proposalsIndex).toBeGreaterThan(-1);
-    expect(relationsIndex).toBeGreaterThan(proposalsIndex);
-    expect(narrativeIndex).toBeGreaterThan(relationsIndex);
+    expect(correctionIndex).toBeGreaterThan(proposalsIndex);
+    expect(narrativeIndex).toBeGreaterThan(correctionIndex);
     expect(commitIndex).toBeGreaterThan(narrativeIndex);
-    expect(prompt).toContain("via the `note` tool's evidenceFor");
+    expect(prompt).toContain("evidenceFor");
+    expect(prompt).toContain("dependsOn");
   });
 
-  // The four ordered questions, first-yes-wins, and specifically question
-  // 3's exact counterfactual wording, must reach the prompt verbatim — the
-  // note tool description cannot carry it (limited token headroom; see
-  // mcp/definitions.ts), so this is the ONE place the decision procedure is
-  // stated in full. Unaffected by ticket 05 — relations never depended on
-  // grading, reconstruction or membership.
-  test("the relation decision procedure reaches the prompt verbatim", () => {
+  // Ticket 08 (edge-ownership-impl, "settlement four-field check-and-
+  // correct"): the old pre-ticket-01 four-question relation ladder
+  // (supersedes-first) is DELETED from the prompt — judgment lives only in
+  // the Memory Rubric now, and this duty is a pointer at it, not a second
+  // restatement. What survives verbatim is the FORMAT/fence facts a rubric
+  // pointer cannot carry: the seven-word field list and the same-run
+  // eligibility fence (spec C7).
+  test("the relation half is a rubric pointer, not a restated ladder", () => {
     const fixture = seedFourTurnWindow();
     const context = buildNoteSettlementContext(db, fixture.job, {
       nowEpoch: NOW,
     })!;
     const prompt = renderNoteSettlementPrompt(context);
 
-    expect(prompt.toLowerCase()).toContain("first yes wins");
-    expect(prompt).toContain("(1) Did the citing turn overturn it? -> supersedes.");
-    expect(prompt).toContain(
+    // The retired four-question ladder must not survive anywhere in the
+    // prompt, not merely be absent from duty 2's own text.
+    expect(prompt).not.toContain("(1) Did the citing turn overturn it? -> supersedes.");
+    expect(prompt).not.toContain(
       "(2) Did the citing turn test its claim, supporting or undermining it?",
     );
-    // Question 3's wording, verbatim and on ONE line — forbids softening it
-    // to "used" or "built on".
-    expect(prompt).toContain(
-      "If the cited turn were wrong, would the citing turn's conclusion also be wrong? -> depends-on.",
-    );
-    expect(prompt).toContain("(4) None of the above -> no relation");
-    expect(prompt).toContain('"used"');
-    expect(prompt).toContain('"built on"');
-    // The pre-state eligibility rule (spec C7) is also stated, so the model
-    // is told the constraint rather than only discovering it by rejection.
-    expect(prompt).toContain("already existed before this");
+    expect(prompt).not.toContain("(4) None of the above -> no relation");
+    expect(prompt).not.toContain('"used"');
+    expect(prompt).not.toContain('"built on"');
+
+    // The pointer + fence + phase-rejection facts a rubric pointer cannot
+    // itself state.
+    expect(prompt).toContain("Which relation, if any, is the Memory Rubric's");
+    expect(prompt).toContain("must already be a pair that existed");
+    expect(prompt).toContain("before this run started");
     expect(prompt).toContain("you cannot invent a relation for a pair a call earlier");
+    expect(prompt).toContain("rejected, naming which half is missing");
+    expect(prompt).toContain(
+      "note`'s evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn fields",
+    );
   });
 });
 
@@ -362,8 +370,11 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const fixture = seedFourTurnWindow();
     // A judged relation is legal only on a pair present BEFORE this window's
     // run (spec C7) — seed the T3->T1 pair here (a prior bare citation, in
-    // production) so the `dependsOn` relation below is attaching to an
-    // existing pair, not minting one.
+    // production) so the `encodes` relation below is attaching to an
+    // existing pair, not minting one. `encodes` (not `dependsOn`) because T1
+    // is staged decision-phase (`design`) and T3 delivery+decision
+    // (`implement`+`correction`) — the phase pair `encodes` requires
+    // (ticket 08's phase-legality gate, `shared/turn-phase.ts`).
     writeMemoryEdges(
       db,
       [
@@ -377,6 +388,13 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       NOW - 4_000,
       { eligibleForRelation: "unrestricted" },
     );
+    // The CITED side of a phase check reads the LIVE database (both at stage
+    // time's dry run and inside commit's own replay) — a sibling stage call
+    // that also corrects T1's type is not yet applied when T3's phase check
+    // runs against it, so T1 needs its decision-phase type seeded directly
+    // rather than relying on this same run's own T1 correction landing
+    // first (ticket 08's phase-legality gate).
+    updateTurnById(db, fixture.turnIds[0]!, { type: ["design"] });
 
     const metricsSeen: NoteSettlementWindowMetrics[] = [];
     const outcome = await dispatchWith(
@@ -387,7 +405,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
           grade: 3,
           type: ["implement", "correction"],
           tags: ["lease"],
-          dependsOn: ["S1/T1"],
+          encodes: ["S1/T1"],
         });
         engine.stageNoteWrite({ turn: "S1/T2", grade: 1, type: ["research"], tags: ["lease"] });
         engine.stageMembershipWrite({
@@ -403,7 +421,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
 
     // The judged relation (spec C7's pre-state gate).
     const judged = getOutgoingEdges(db, { kind: "turn", id: fixture.turnIds[2]! });
-    expect(judged.some((edge) => edge.relation === "depends-on" && edge.provenance === "judged")).toBe(true);
+    expect(judged.some((edge) => edge.relation === "encodes" && edge.provenance === "judged")).toBe(true);
 
     // The proposal — text only, never a segment.
     const proposals = listRecentSettlementProposals(db, 3);
@@ -432,6 +450,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       relationsWritten: 1,
       proposalsCreated: 1,
       sessionNarrativeWritten: 0,
+      membersReassigned: 0,
     });
     // Attempt bookkeeping (spec A2a): a first-attempt success is convergence,
     // never abandonment.
@@ -462,6 +481,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       relationsWritten: 0,
       proposalsCreated: 0,
       sessionNarrativeWritten: 0,
+      membersReassigned: 0,
     });
   });
 
@@ -791,6 +811,7 @@ describe("settlement payload at the scheduler seam", () => {
       relationsWritten: 0,
       proposalsCreated: 0,
       sessionNarrativeWritten: 0,
+      membersReassigned: 0,
     });
   });
 });

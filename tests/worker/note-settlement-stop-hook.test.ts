@@ -120,6 +120,7 @@ function baseContext(
     reviewableTurnIds: new Set(),
     contextBuiltAtEpoch: NOW,
     eligibleRelationPairKeys: new Set(),
+    attachedSegmentIds: new Set(),
     ...overrides,
   };
 }
@@ -382,6 +383,7 @@ describe("the hook is registered on the run the tools stage into", () => {
       reviewableTurnIds: new Set([turnId]),
       contextBuiltAtEpoch: NOW,
       eligibleRelationPairKeys: new Set(),
+      attachedSegmentIds: new Set(),
     });
 
     expect(stopDecision).toBe("block");

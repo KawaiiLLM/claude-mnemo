@@ -100,6 +100,14 @@ export interface NoteSettlementContext {
    * `propose` and the model's own orientation.
    */
   segmentRoster: NoteSettlementSegmentRosterEntry[];
+  /**
+   * Ticket 08 (edge-ownership-impl): `segmentRoster`, projected down to bare
+   * ids — the legal DOMAIN for a membership correction
+   * (`SettlementTurnFacadeContext.attachedSegmentIds`). Kept alongside the
+   * rendered roster rather than derived by each reader, same split
+   * `reviewableTurnIds` already has against its own rendered lookback.
+   */
+  attachedSegmentIds: Set<number>;
   milestoneRendering: string;
   /**
    * Turn ids THIS prompt put in front of the model — window plus the rendered
@@ -233,6 +241,7 @@ export function buildNoteSettlementContext(
     windowTurns,
     priorTurnsRendering,
     segmentRoster,
+    attachedSegmentIds: new Set(segmentRoster.map((segment) => segment.id)),
     milestoneRendering: renderSessionMilestoneInjection(db, job.sessionId),
     // The SAME entry point the SessionStart hook calls, minus the corpus
     // header — the settlement agent has recall and timeline and no skills,

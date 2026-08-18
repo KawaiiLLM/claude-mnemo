@@ -14,6 +14,13 @@ import {
 } from "../../src/db/note-settlement";
 import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { initializeSchema } from "../../src/db/schema";
+import {
+  addSegmentMembers,
+  attachSegmentToSession,
+  createSegment,
+  getSegment,
+  getSegmentMemberTurnIds,
+} from "../../src/db/segments";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
@@ -109,6 +116,7 @@ function baseContext(
     reviewableTurnIds: new Set(),
     contextBuiltAtEpoch: NOW,
     eligibleRelationPairKeys: new Set(),
+    attachedSegmentIds: new Set(),
     ...overrides,
   };
 }
@@ -566,6 +574,7 @@ describe("commit's own result feeds the job log, never the agent", () => {
       relationsWritten: 0,
       proposalsCreated: 1,
       sessionNarrativeWritten: 0,
+      membersReassigned: 0,
     });
   });
 });
@@ -600,11 +609,18 @@ describe("commit-time relation eligibility is frozen ∩ current, never frozen a
     });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 1, type: ["discuss"], tags: [] });
+    // Ticket 08: dependsOn needs delivery-phase on both ends (was
+    // discuss/research — decision/evidence-phase — before the phase gate).
+    // The CITED side's phase check reads the LIVE database, so T1's
+    // delivery-phase type has to be seeded directly — a sibling stage call
+    // that also sets it is not yet applied when T2's dry-run phase check
+    // runs against T1.
+    updateTurnById(db, t1, { type: ["implement"] });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 1, type: ["implement"], tags: [] });
     const staged = engine.stageNoteWrite({
       turn: `S${sessionDbId}/T2`,
       grade: 2,
-      type: ["research"],
+      type: ["implement"],
       tags: [],
       dependsOn: [`S${sessionDbId}/T1`],
     });
@@ -807,5 +823,208 @@ describe("session-addressed narrative writes stage through the same commit chann
     expect(receipt.content[0]!.text).toContain("Parameter error");
     expect(receipt.content[0]!.text).toContain("not this dispatch's own session");
     expect(engine.pendingCount()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 08 (edge-ownership-impl, "settlement four-field check-and-correct")
+// — one end-to-end "wrong -> corrected -> landed in DB via commit" test per
+// field (the ticket's own checklist), plus the membership out-of-domain
+// boundary and the edge phase-legality validator's legal/illegal cases,
+// mirroring `tests/mcp/note.test.ts`'s own phase-pair tests on the note path.
+// ---------------------------------------------------------------------------
+
+describe("ticket 08 — type correction", () => {
+  test("a wrong type is corrected and lands via commit", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    updateTurnById(db, t1, { type: ["fix"] }); // wrong: this turn was actually a design call
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["design"] });
+    // Nothing landed yet — still staged.
+    expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
+
+    expect(engine.commit().content[0]!.text).toContain("Committed");
+    expect(getTurnById(db, t1)!.type).toEqual(["design"]);
+  });
+});
+
+describe("ticket 08 — tags correction", () => {
+  test("a wrong tag is corrected and lands via commit", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    updateTurnById(db, t1, { tags: ["wrong-project"] });
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, tags: ["claude-mnemo"] });
+    expect(getTurnById(db, t1)!.tags).toEqual(["wrong-project"]);
+
+    expect(engine.commit().content[0]!.text).toContain("Committed");
+    // Whole overwrite, not a union — the wrong tag is gone, not merely joined.
+    expect(getTurnById(db, t1)!.tags).toEqual(["claude-mnemo"]);
+  });
+});
+
+describe("ticket 08 — membership correction", () => {
+  test("a mis-homed turn is reassigned to a different attached segment and lands via commit", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const wrongSegment = createSegment(db, { title: "wrong task", nowEpoch: NOW });
+    const rightSegment = createSegment(db, { title: "right task", nowEpoch: NOW });
+    attachSegmentToSession(db, sessionDbId, wrongSegment.id, NOW);
+    attachSegmentToSession(db, sessionDbId, rightSegment.id, NOW);
+    addSegmentMembers(db, wrongSegment.id, [t1], NOW);
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      attachedSegmentIds: new Set([wrongSegment.id, rightSegment.id]),
+    });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    const receipt = engine.stageMembershipWrite({
+      action: "reassign",
+      turns: [`S${sessionDbId}/T1`],
+      id: `E${rightSegment.id}`,
+    });
+    expect(receipt.content[0]!.text).toContain("Staged");
+    // Nothing landed yet.
+    expect(getSegmentMemberTurnIds(db, wrongSegment.id)).toEqual([t1]);
+    expect(getSegmentMemberTurnIds(db, rightSegment.id)).toEqual([]);
+
+    expect(engine.commit().content[0]!.text).toContain("Committed");
+    expect(getSegmentMemberTurnIds(db, wrongSegment.id)).toEqual([]);
+    expect(getSegmentMemberTurnIds(db, rightSegment.id)).toEqual([t1]);
+  });
+
+  test("an out-of-domain segment (not attached to this session) is refused, and nothing lands", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const notAttached = createSegment(db, { title: "another session's task", nowEpoch: NOW });
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      attachedSegmentIds: new Set(),
+    });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    const receipt = engine.stageMembershipWrite({
+      action: "reassign",
+      turns: [`S${sessionDbId}/T1`],
+      id: `E${notAttached.id}`,
+    });
+
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    expect(receipt.content[0]!.text).toContain(`E${notAttached.id}`);
+    expect(receipt.content[0]!.text).toContain("not attached to this session");
+    expect(engine.pendingCount()).toBe(0);
+    expect(getSegmentMemberTurnIds(db, notAttached.id)).toEqual([]);
+  });
+
+  // Ticket 02's own fixture shape (tests/db/segments.test.ts, "type and tags
+  // are DERIVED from the members"): assert the segment's own derived
+  // type/tags directly after the membership change, no separate
+  // recomputation call — `reassignSegmentMembers` recomputes the vacated
+  // segment's facets synchronously.
+  test("a mis-homed turn corrected to homeless leaves the old segment's derived facets excluding it", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    updateTurnById(db, t1, { type: ["design"], tags: ["lease"] });
+    const segment = createSegment(db, { title: "lease fencing", nowEpoch: NOW });
+    attachSegmentToSession(db, sessionDbId, segment.id, NOW);
+    addSegmentMembers(db, segment.id, [t1], NOW);
+    expect(getSegment(db, segment.id)?.type).toEqual(["design"]);
+    expect(getSegment(db, segment.id)?.tags).toEqual(["lease"]);
+
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      attachedSegmentIds: new Set([segment.id]),
+    });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    // `id` omitted: reassign to no segment (homeless).
+    engine.stageMembershipWrite({ action: "reassign", turns: [`S${sessionDbId}/T1`] });
+    expect(engine.commit().content[0]!.text).toContain("Committed");
+
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([]);
+    // The load-bearing assertion (ticket 02's own fixture shape): the
+    // segment's DERIVED facets no longer count the departed member at all.
+    expect(getSegment(db, segment.id)?.type).toEqual([]);
+    expect(getSegment(db, segment.id)?.tags).toEqual([]);
+  });
+});
+
+describe("ticket 08 — edge correction through the shared phase validator (requirement: one validator, both write paths)", () => {
+  test("a legal phase pair (decision -> decision, refines) is classified and lands via commit", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    // Both decision-phase, seeded directly — the CITED side's phase check
+    // reads the live database, so it must already be there before staging.
+    updateTurnById(db, t1, { type: ["design"] });
+    updateTurnById(db, t2, { type: ["correction"] });
+    // A pre-existing bare pair — settlement fills in the missing
+    // classification with hindsight, exactly like a `note` path correction.
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
+      NOW - 500,
+      { eligibleForRelation: "unrestricted" },
+    );
+    const job = claimWindow(db, sessionDbId, 1, 2);
+    const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
+    const context = baseContext(job, { eligibleRelationPairKeys: snapshot });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    const receipt = engine.stageNoteWrite({
+      turn: `S${sessionDbId}/T2`,
+      refines: [`S${sessionDbId}/T1`],
+    });
+    expect(receipt.content[0]!.text).toContain("Staged");
+
+    expect(engine.commit().content[0]!.text).toContain("Committed");
+    const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.relation).toBe("refines");
+    expect(edges[0]!.provenance).toBe("judged");
+  });
+
+  test("an illegal phase pair (delivery-only citing turn attempting refines) is rejected, naming which half is missing — mirrors the note path's own case", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["design"] }); // decision-phase target: fine
+    updateTurnById(db, t2, { type: ["implement"] }); // delivery-ONLY citing turn: refines needs decision
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
+      NOW - 500,
+      { eligibleForRelation: "unrestricted" },
+    );
+    const job = claimWindow(db, sessionDbId, 1, 2);
+    const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
+    const context = baseContext(job, { eligibleRelationPairKeys: snapshot });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    const receipt = engine.stageNoteWrite({
+      turn: `S${sessionDbId}/T2`,
+      refines: [`S${sessionDbId}/T1`],
+    });
+
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    // explainRelationPhaseRejection: which HALF is missing, same wording the
+    // note tool's own phase-pair test asserts.
+    expect(receipt.content[0]!.text).toContain("decision-phase");
+    expect(engine.pendingCount()).toBe(0);
+    // Nothing landed — not even the bare pair's relation moved.
+    const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.relation).toBeNull();
   });
 });

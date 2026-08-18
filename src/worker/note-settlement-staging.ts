@@ -137,10 +137,21 @@ import {
  * empty shell — fence plus CAS, no segmentation/note/coverage/election-
  * ceiling checks — so a `CommitGateRefused` here is always fence-shaped
  * (see `describeGateRefusal` below). `assign` retired from the membership
- * facade (`propose` is the only action), so the membership branch of the
- * replay loop no longer counts `membersAdded`, and the turn-facade's prose
- * (title/content/insight) path is gone, so `notesReconstructed`/
- * `notesYielded` are no longer counted either.
+ * facade, so the membership branch of the replay loop no longer counts
+ * `membersAdded`, and the turn-facade's prose (title/content/insight) path
+ * is gone, so `notesReconstructed`/`notesYielded` are no longer counted
+ * either.
+ *
+ * TICKET 08'S ADDITION (edge-ownership-impl, "settlement four-field check-
+ * and-correct"): the membership facade's `action` widens from `propose`-only
+ * to `propose` | `reassign` — `reassign` is the restricted membership-
+ * CORRECTION primitive (domain = this session's attached segments ∪
+ * homeless), keyed on its own `turns` set the same way `propose` keys on its
+ * `addresses` set. This module's own job is unaffected: it still stages
+ * either shape as one `{kind: "membership"}` entry and replays it inside
+ * `commit`'s transaction exactly like before — only the replay's own label
+ * and count (`membersReassigned` vs. `proposalsCreated`) branch on which
+ * action a given entry carries.
  */
 
 /**
@@ -167,6 +178,8 @@ export interface NoteSettlementCommitCounts {
   proposalsCreated: number;
   /** Ticket 09: a `session`-addressed `note` call that landed (title and/or content). */
   sessionNarrativeWritten: number;
+  /** Ticket 08: a `reassign` call that landed a membership correction. */
+  membersReassigned: number;
 }
 
 function emptyCommitCounts(): NoteSettlementCommitCounts {
@@ -180,6 +193,7 @@ function emptyCommitCounts(): NoteSettlementCommitCounts {
     relationsWritten: 0,
     proposalsCreated: 0,
     sessionNarrativeWritten: 0,
+    membersReassigned: 0,
   };
 }
 
@@ -207,14 +221,23 @@ type StagedEntry =
  * the call is malformed enough that no key exists; evaluation refuses it a
  * moment later, and the key is never used.
  *
- * `assign` is dead (ticket 05) — `propose` is the only action, keyed on its
- * address SET (sorted, so order never matters): a restated set (even with a
- * different title) corrects the same proposal; a different set is a
- * different cluster.
+ * `assign` is dead (ticket 05) — `propose` and `reassign` (ticket 08) are
+ * the two actions, each keyed on its own address SET (sorted, so order
+ * never matters): a restated set corrects the same proposal/reassignment —
+ * for `propose`, even with a different title; for `reassign`, even with a
+ * different target `id` (a "actually, homeless instead" correction of a
+ * correction replaces the earlier staged target rather than adding a
+ * second, conflicting reassignment for the same turns).
  */
 function membershipStagingKeyOf(
   rawInput: SettlementMembershipWriteInput,
 ): string | null {
+  if (rawInput.action === "reassign") {
+    if (!rawInput.turns || rawInput.turns.length === 0) {
+      return null;
+    }
+    return reassignStagingKey(rawInput.turns);
+  }
   if (!rawInput.addresses || rawInput.addresses.length === 0) {
     return null;
   }
@@ -227,6 +250,10 @@ function noteStagingKey(ref: string): string {
 function proposeStagingKey(addresses: readonly string[]): string {
   const normalized = [...addresses].map((raw) => raw.trim()).sort();
   return `propose:${JSON.stringify(normalized)}`;
+}
+function reassignStagingKey(turns: readonly string[]): string {
+  const normalized = [...turns].map((raw) => raw.trim()).sort();
+  return `reassign:${JSON.stringify(normalized)}`;
 }
 
 type ToolTextResult = {
@@ -447,7 +474,11 @@ export function createSettlementStagingEngine(
       return parameterError(evaluation.message);
     }
 
-    const key = proposeStagingKey(rawInput.addresses ?? []);
+    // Ticket 08: derived the same way `priorKey` was — action-aware, not a
+    // hardcoded `propose` key — so a `reassign` call keys on its `turns` set
+    // rather than colliding with (or silently mis-keying against) `propose`'s
+    // `addresses` set.
+    const key = priorKey ?? membershipStagingKeyOf(mergedInput)!;
 
     const replaced = staged.has(key);
     staged.set(key, { kind: "membership", input: mergedInput });
@@ -495,11 +526,21 @@ export function createSettlementStagingEngine(
               apply: true,
             });
             if (!evaluation.ok) {
-              throw new CommitReplayRefused(
-                `propose ${entry.input.addresses?.join(",") ?? ""}: ${evaluation.message}`,
-              );
+              // Ticket 08: action-aware label — `reassign` names its `turns`
+              // set, `propose` its `addresses` set, so a replay refusal
+              // points at the right staged call rather than always reading
+              // "propose" for a reassignment that failed.
+              const label =
+                entry.input.action === "reassign"
+                  ? `reassign ${entry.input.turns?.join(",") ?? ""}`
+                  : `propose ${entry.input.addresses?.join(",") ?? ""}`;
+              throw new CommitReplayRefused(`${label}: ${evaluation.message}`);
             }
-            counts.proposalsCreated += 1;
+            if (entry.input.action === "reassign") {
+              counts.membersReassigned += 1;
+            } else {
+              counts.proposalsCreated += 1;
+            }
           } else {
             const evaluation = evaluateSettlementTurnWrite(db, context, entry.input, nowEpoch, {
               apply: true,

@@ -9,6 +9,13 @@ import {
 } from "../../src/db/note-settlement";
 import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { initializeSchema } from "../../src/db/schema";
+import {
+  addSegmentMembers,
+  attachSegmentToSession,
+  createSegment,
+  getSegment,
+  getSegmentMemberTurnIds,
+} from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import {
   evaluateSettlementMembershipWrite,
@@ -111,6 +118,7 @@ function baseContext(
     reviewableTurnIds: new Set(),
     contextBuiltAtEpoch: NOW,
     eligibleRelationPairKeys: new Set(),
+    attachedSegmentIds: new Set(),
     ...overrides,
   };
 }
@@ -330,6 +338,135 @@ describe("propose — never creates a segment row, and is no longer a completion
 });
 
 // ---------------------------------------------------------------------------
+// reassign (ticket 08, edge-ownership-impl: "settlement four-field
+// check-and-correct") — the membership-CORRECTION verb. Domain = this
+// session's attached segments (`context.attachedSegmentIds`) ∪ homeless.
+// ---------------------------------------------------------------------------
+
+describe("reassign — domain boundary (ticket 08)", () => {
+  test("naming a segment NOT on this session's attached-segment domain is rejected, and names it as not attached", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const notAttached = createSegment(db, { title: "elsewhere, never attached", nowEpoch: NOW });
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]), attachedSegmentIds: new Set() }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${notAttached.id}` },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain(`E${notAttached.id}`);
+    expect(!result.ok && result.message).toContain("not attached to this session");
+    expect(getSegmentMemberTurnIds(db, notAttached.id)).toEqual([]);
+  });
+
+  test("naming a segment ON the attached-segment domain is accepted", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const attached = createSegment(db, { title: "this session's own segment", nowEpoch: NOW });
+    attachSegmentToSession(db, sessionDbId, attached.id, NOW);
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, {
+        reviewableTurnIds: new Set([t1]),
+        attachedSegmentIds: new Set([attached.id]),
+      }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${attached.id}` },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(getSegmentMemberTurnIds(db, attached.id)).toEqual([t1]);
+  });
+
+  test("id omitted clears ownership (homeless) without naming any segment domain", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const attached = createSegment(db, { title: "was home", nowEpoch: NOW });
+    attachSegmentToSession(db, sessionDbId, attached.id, NOW);
+    addSegmentMembers(db, attached.id, [t1], NOW);
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, {
+        reviewableTurnIds: new Set([t1]),
+        attachedSegmentIds: new Set([attached.id]),
+      }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`] },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.outcome.reassign?.targetSegmentId).toBeNull();
+    expect(getSegmentMemberTurnIds(db, attached.id)).toEqual([]);
+  });
+
+  test("requires at least one turn address", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job),
+      { action: "reassign", turns: [] },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("at least one turn address");
+  });
+
+  test("apply:false validates and reports without writing", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const attached = createSegment(db, { title: "target", nowEpoch: NOW });
+    attachSegmentToSession(db, sessionDbId, attached.id, NOW);
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, {
+        reviewableTurnIds: new Set([t1]),
+        attachedSegmentIds: new Set([attached.id]),
+      }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${attached.id}` },
+      NOW,
+      { apply: false },
+    );
+
+    expect(result.ok).toBe(true);
+    // The load-bearing assertion: nothing landed.
+    expect(getSegmentMemberTurnIds(db, attached.id)).toEqual([]);
+  });
+
+  test("settlementMembershipWriteInputSchema accepts reassign", () => {
+    expect(
+      settlementMembershipWriteInputSchema.safeParse({
+        action: "reassign",
+        turns: ["S1/T1"],
+        id: "E1",
+      }).success,
+    ).toBe(true);
+    expect(
+      settlementMembershipWriteInputSchema.safeParse({
+        action: "reassign",
+        turns: ["S1/T1"],
+      }).success,
+    ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Receipt rendering
 // ---------------------------------------------------------------------------
 
@@ -351,5 +488,32 @@ describe("renderSettlementMembershipWriteReceipt", () => {
     );
     expect(text).toContain("1 address(es)");
     expect(text).not.toContain("as proposal #");
+  });
+
+  test("a reassign outcome renders the target and vacated segments, not the propose wording (ticket 08)", () => {
+    const text = renderSettlementMembershipWriteReceipt(
+      {
+        proposalId: null,
+        addressesResolved: 1,
+        reassign: { targetSegmentId: 7, vacatedSegmentIds: [3], addedTurnIds: [42] },
+      },
+      { staged: false },
+    );
+    expect(text).toContain("reassign");
+    expect(text).toContain("E7");
+    expect(text).toContain("vacated E3");
+    expect(text).not.toContain("creates no segment");
+  });
+
+  test("a homeless reassign (no target) renders explicitly, not as a silently-empty destination", () => {
+    const text = renderSettlementMembershipWriteReceipt(
+      {
+        proposalId: null,
+        addressesResolved: 1,
+        reassign: { targetSegmentId: null, vacatedSegmentIds: [3], addedTurnIds: [] },
+      },
+      { staged: true },
+    );
+    expect(text).toContain("homeless");
   });
 });

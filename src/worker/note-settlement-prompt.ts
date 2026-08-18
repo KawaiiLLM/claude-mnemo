@@ -1,5 +1,5 @@
-import { CITATION_RELATIONS } from "../db/citations";
 import { renderMemoryRubricBlock } from "../shared/memory-rubric";
+import { EDGE_RELATIONS, RELATION_FIELD_NAME } from "../shared/turn-phase";
 import type {
   NoteSettlementContext,
   NoteSettlementWindowTurn,
@@ -30,11 +30,9 @@ import type {
  *     replaced by a bare ROSTER (id/title/topic — ticket 05's "结算不读段的
  *     字段" [S15069/T906]) — and `propose`'s minimum cluster drops from 2 to
  *     1 (spec: "孤立 turn 独自开启新任务是合法情形").
- *   - Duty 4 (RELATIONS) is UNCHANGED — it never depended on grading,
- *     reconstruction or membership, and keeps its own tool-matched ladder
- *     (the four relations `settlementTurnWriteInputShape` actually accepts —
- *     evidence-for/against, supersedes, depends-on — a narrower, pre-ticket-
- *     01 vocabulary this ticket does not widen).
+ *   - Duty 4 (RELATIONS) is UNCHANGED by ticket 05 — it never depended on
+ *     grading, reconstruction or membership. Ticket 08 (below) later widens
+ *     its vocabulary; see that paragraph for the current shape.
  *
  * What is left is deliberately an EMPTY correction channel (spec: "完成门重
  * 写为纠错语义的空位") — a window this run finds nothing to propose or relate
@@ -51,16 +49,29 @@ import type {
  * (`hooks/session-composition.ts`'s `renderRubricAndRosterBlock`) — so the
  * main agent's own type/tags/关系/归属 judgment is the settlement pass's
  * reference too, one source rather than two independently drifting copies.
- * It is additive: duty 4's own relation ladder above is untouched (it
- * governs a narrower, tool-matched vocabulary the rubric's 关系 section does
- * not fully cover — see this file's own duty-4 comment).
  *
  * TICKET 09'S ADDITION (edge-ownership-impl, "结算顺手维护 session 叙事"):
- * duty 5 (SESSION NARRATIVE) — settlement is the session's sole writer now
+ * duty 3 (SESSION NARRATIVE) — settlement is the session's sole writer now
  * (ADR-0006 superseded by [S15069/T910]–[T913]); `note`'s own session
  * address retired (worker/note-settlement-turn-facade.ts's
  * `evaluateSettlementTurnWrite` gained a `session`-addressed branch, staged
  * through the SAME `note`/`commit` channel as everything else here).
+ *
+ * TICKET 08'S REFILL (edge-ownership-impl, "settlement four-field check-
+ * and-correct"): duty 2 grows from a bare RELATIONS ladder into CORRECTION —
+ * type/tags/membership/edges, the four structured fields
+ * `.scratch/ownership-and-note-cadence/spec.md` hands settlement as its
+ * whole remaining scope. The old duty-4-era four-question relation ladder
+ * (supersedes-first, ticket 11's own single-home migration had already
+ * pulled its JUDGMENT into the rubric but left a narrower FOUR-relation,
+ * tool-matched vocabulary behind) is gone: the relation half now names the
+ * SAME seven words `noteInputShape` exposes and points at the rubric's own
+ * 关系 three-step checklist for which one, rather than restating a
+ * discriminator here. `remember` gains `reassign` alongside `propose` — the
+ * membership-CORRECTION verb, domain = this session's attached-segment
+ * roster ∪ homeless. Every correction in this duty is RE-CHECK, never
+ * first-write (spec: "纠错是复核不是首写") — a window with nothing to
+ * correct completes exactly as emptily as one with nothing to propose.
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -162,23 +173,32 @@ export function renderNoteSettlementPrompt(
     "   homeless turn may open its own proposal; do not propose an incoherent",
     "   grab-bag. This is never required — a window may propose nothing.",
     "",
-    `2. RELATIONS, via the \`note\` tool's evidenceFor/evidenceAgainst/supersedes/`,
-    `dependsOn fields (${CITATION_RELATIONS.join(" / ")}). Decide with four`,
-    "   ordered questions, first yes wins:",
-    "   (1) Did the citing turn overturn it? -> supersedes.",
-    "   (2) Did the citing turn test its claim, supporting or undermining it? -> evidence-for / evidence-against.",
-    "   (3) If the cited turn were wrong, would the citing turn's conclusion also be wrong? -> depends-on.",
-    "   (4) None of the above -> no relation; do not record one.",
-    "   This must not be softened to \"used\" or \"built on\" — a direct",
-    "   continuation whose predecessor could be entirely wrong without",
-    "   changing what the later turn actually did is NO relation, not",
-    "   depends-on. A pair can also already carry a relation from a retrieval",
-    "   hit, a citation in a note body, a rollback and retry pair, or the main",
-    "   agent naming a relation itself when it wrote the pair; you may correct",
-    "   one of those with hindsight, but ONLY on a pair that already existed before this",
-    "   run started — you cannot invent a relation for a pair a call earlier",
-    "   in this SAME run just created. A retry that replaces an abandoned",
-    "   attempt is `supersedes`.",
+    "2. CORRECTION (type/tags/membership/edges), via the `note` and",
+    "   `remember` tools. This is a RE-CHECK, not a first write — the main",
+    "   agent already wrote every turn's type, tags, membership and edges;",
+    "   step in only when the Memory Rubric above says a stored value is",
+    "   wrong. A window with nothing to correct is the common case, not an",
+    "   error.",
+    "   - type/tags: `note` with `turn` plus `type` and/or `tags` — each",
+    "     overwrites the field whole (there is no append here). Judge with",
+    "     the Memory Rubric's own type/tags sections above.",
+    "   - membership: `remember` with `action=\"reassign\"`, `turns` (one or",
+    "     more \"S<session>/T<prompt>\" addresses) and `id` (an \"E<n>\"",
+    "     already on the roster below) or `id` omitted for homeless. A",
+    "     segment not on the roster is refused, naming it as not attached —",
+    "     you may only reassign within this session's already-attached",
+    "     segments or to no segment; attaching a NEW segment to this session",
+    "     is the main agent's own call. Judge with the Memory Rubric's 归属",
+    "     section: only correct a DISPLAYED mismatch, leave a merely-uncertain",
+    "     case alone.",
+    `   - edges: \`note\`'s ${EDGE_RELATIONS.map((relation) => RELATION_FIELD_NAME[relation]).join("/")} fields — the`,
+    "     SAME seven relations and phase-legality validator the main agent's",
+    "     own `note` tool uses. A target must already be a pair that existed",
+    "     before this run started AND still exist when `commit` lands it —",
+    "     you cannot invent a relation for a pair a call earlier in this SAME",
+    "     run just created. Which relation, if any, is the Memory Rubric's",
+    "     own 关系 checklist above; a structurally illegal phase pair is",
+    "     rejected, naming which half is missing.",
     "",
     "3. SESSION NARRATIVE, via the `note` tool's `session` field (this " +
       `session, "S${job.sessionId}") instead of \`turn\`. \`content\` is a` +
