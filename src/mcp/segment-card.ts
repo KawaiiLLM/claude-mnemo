@@ -18,11 +18,10 @@ import { typeWordGlyph } from "../shared/type-vocabulary";
 import { estimateTokens } from "../utils/token-estimate";
 
 import {
-  DEFAULT_TRUNCATE,
+  DEFAULT_PREVIEW_COUNT,
   formatEpoch,
   renderNode,
   splitBulletField,
-  truncateText,
   type FormattedTurn,
   type TruncationSignal,
 } from "./format";
@@ -94,20 +93,31 @@ export function resolveSegmentMembersByOrdinal(
 }
 
 // ---------------------------------------------------------------------------
-// Field elision (spec "Tools"/"Injection"): collapsed shows each field's
-// NEWEST rows that fit a token budget; over budget, the LARGEST field's
-// OLDEST rows go first. Pure and exported — this is exactly the mechanism
-// ticket 03's mutation checks target.
+// Field elision (spec "Tools"/"Injection", ticket 08): collapsed shows each
+// field's NEWEST rows that fit a token budget; over budget, the LARGEST
+// field's OLDEST rows go first — and (ticket 08) the summary layer
+// (title/content/insight) competes in this SAME ladder as the six Working
+// State fields, rather than rendering first, unconditionally, ahead of it.
+// That is what lets Working State survive budget pressure first (spec user
+// story 17) as an emergent property of "biggest field gives way first":
+// title/content/insight are typically the largest single blobs on the card,
+// so they are usually what yields under a tight budget, but nothing here
+// hard-codes a layer priority — a bloated Working State field can just as
+// well be the one that gives way. Pure and exported — this is exactly the
+// mechanism ticket 03/08's mutation checks target.
 // ---------------------------------------------------------------------------
 
-export interface WorkingStateFieldRows {
-  field: SegmentWorkingStateField;
-  /** Oldest-first — the field's own storage order (`appendSegmentWorkingStateRows` appends at the bottom). */
+/** The summary trio (each a single-row field: there is exactly one title, one content blob, one insight blob — never a bulleted list) plus the six Working State fields — every field competing in the card's one elision ladder. */
+export type SegmentCardFieldKey = "title" | "content" | "insight" | SegmentWorkingStateField;
+
+export interface SegmentCardFieldRows {
+  field: SegmentCardFieldKey;
+  /** Oldest-first — the field's own storage order (`appendSegmentWorkingStateRows` appends at the bottom; title/content/insight carry at most one row). */
   rows: readonly string[];
 }
 
-export interface ElidedWorkingStateField {
-  field: SegmentWorkingStateField;
+export interface ElidedSegmentCardField {
+  field: SegmentCardFieldKey;
   totalRows: number;
   /** Newest-first-preserved (oldest-first among what's kept) — the rows that survived elision. */
   keptRows: readonly string[];
@@ -118,14 +128,15 @@ export interface ElidedWorkingStateField {
  * Trim `fields` to fit `budgetTokens`, dropping the OLDEST row of whichever
  * field currently holds the MOST tokens, one row at a time, until the whole
  * set fits (or nothing is left to drop). Ties on "largest" break by
- * `fields`' own array order — `SEGMENT_WORKING_STATE_FIELDS`' declared order
- * at every real call site — so two fields of equal size trim deterministically
- * rather than by scheduling.
+ * `fields`' own array order — title/content/insight then
+ * `SEGMENT_WORKING_STATE_FIELDS`' declared order at every real call site —
+ * so two fields of equal size trim deterministically rather than by
+ * scheduling.
  */
-export function elideWorkingStateFields(
-  fields: readonly WorkingStateFieldRows[],
+export function elideSegmentCardFields(
+  fields: readonly SegmentCardFieldRows[],
   budgetTokens: number,
-): ElidedWorkingStateField[] {
+): ElidedSegmentCardField[] {
   const rowTokens = fields.map((entry) => entry.rows.map((row) => estimateTokens(row)));
   const dropped = fields.map(() => 0);
   let total = rowTokens.reduce((sum, tokens) => sum + tokens.reduce((s, t) => s + t, 0), 0);
@@ -177,14 +188,24 @@ const WORKING_STATE_PROPERTY: Record<
   reference: "reference",
 };
 
-function segmentWorkingStateRows(segment: SegmentRecord): WorkingStateFieldRows[] {
+function segmentWorkingStateRows(segment: SegmentRecord): SegmentCardFieldRows[] {
   return SEGMENT_WORKING_STATE_FIELDS.map((field) => ({
     field,
     rows: splitBulletField(segment[WORKING_STATE_PROPERTY[field]]),
   }));
 }
 
-function renderElidedField(entry: ElidedWorkingStateField): string[] {
+/**
+ * A single-row summary-layer field (title/content/insight) as a
+ * `SegmentCardFieldRows` entry — null/empty renders as zero rows, same as an
+ * unset Working State field, so it competes in the ladder but never forces a
+ * phantom row.
+ */
+function summaryFieldRows(field: "title" | "content" | "insight", value: string | null): SegmentCardFieldRows {
+  return { field, rows: value ? [value] : [] };
+}
+
+function renderElidedField(entry: ElidedSegmentCardField): string[] {
   const lines = [`  - ${entry.field}: ${entry.totalRows} ${entry.totalRows === 1 ? "row" : "rows"}`];
   if (entry.droppedCount > 0) {
     // The ellipsis sits at the TOP of the field (spec pinned decision): the
@@ -296,6 +317,20 @@ export interface RenderSegmentCardOptions {
   signal?: TruncationSignal;
 }
 
+/**
+ * Attached-session rows shown in full on the card (ticket 08): ADR-0005
+ * binding rows accumulate forever — no detach, no expiry — so an unbounded
+ * per-row render lets attachment count alone push the header past the page
+ * budget and starve every other field to zero. Capped at the same "preview
+ * N, fold the rest into a count" scale this renderer's own turn/observation
+ * previews already use (`DEFAULT_PREVIEW_COUNT`, format.ts) rather than
+ * inventing a second constant for the same shape. Gated by `elides` below —
+ * page 2 / expanded still show every row, the same "elision is skipped,
+ * nothing drops silently" contract Working State's own fields already carry
+ * there.
+ */
+export const MAX_ATTACHED_SESSION_ROWS = DEFAULT_PREVIEW_COUNT;
+
 export function renderSegmentCard(
   db: Database,
   segmentId: number,
@@ -317,7 +352,6 @@ export function renderSegmentCardRecord(
   const eraCutoffEpoch = options.eraCutoffEpoch ?? null;
   const pageBudget = options.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
   const page = Math.max(1, options.page ?? 1);
-  const truncate = options.truncate ?? DEFAULT_TRUNCATE;
   const elides = depth === "collapsed" && page <= 1;
 
   const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
@@ -327,7 +361,14 @@ export function renderSegmentCardRecord(
   const sessionRows = buildAttachedSessionRows(db, segment, members);
   const maintenance = maintenanceTurnsAgo(db, segment, attachedSessionIds);
 
-  const lines: string[] = [`- [E${segment.id}] ${truncateText(segment.title, { limit: truncate })}`];
+  // -----------------------------------------------------------------------
+  // The fixed header: meta line, tag/type facets, attached sessions (row
+  // count capped — see MAX_ATTACHED_SESSION_ROWS). Never elided — what's
+  // left of `pageBudget` after this is what the field ladder below competes
+  // for. The `[E<n>]` id marker itself is added when `lines` opens, after
+  // the title survives (or doesn't) elision.
+  // -----------------------------------------------------------------------
+  const headerLines: string[] = [];
 
   const metaParts = [
     `#${topicName ?? "(no topic)"}`,
@@ -337,59 +378,107 @@ export function renderSegmentCardRecord(
     `last edit ${formatEpoch(segment.updatedAtEpoch)}`,
     `maintenance ${maintenance} ${maintenance === 1 ? "turn" : "turns"} ago`,
   ];
-  lines.push(`  ${metaParts.join(" · ")}`);
+  headerLines.push(`  ${metaParts.join(" · ")}`);
 
   if (facetCounts.tags.length > 0) {
-    lines.push(
+    headerLines.push(
       `  - tags: ${facetCounts.tags.map((entry) => `#${entry.word}×${entry.count}`).join(" ")}`,
     );
   }
   if (facetCounts.type.length > 0) {
-    lines.push(
+    headerLines.push(
       `  - type: ${facetCounts.type
         .map((entry) => `${typeWordGlyph(entry.word)}${entry.word}×${entry.count}`)
         .join(" ")}`,
     );
   }
 
-  lines.push(`  - sessions: ${sessionRows.length === 0 ? "(none attached)" : ""}`.trimEnd());
-  for (const row of sessionRows) {
-    const label = `S${row.sessionId}${row.title ? ` "${truncateText(row.title, { limit: truncate })}"` : ""}`;
+  // Newest-active first, capped (ticket 08 checklist item 3): a session's
+  // own row survives in preference to an older, colder one; the remainder
+  // folds into one count line instead of vanishing or growing the header
+  // without bound.
+  const sessionsByRecency = [...sessionRows].sort(
+    (left, right) => right.lastActiveEpoch - left.lastActiveEpoch,
+  );
+  const visibleSessionRows = elides
+    ? sessionsByRecency.slice(0, MAX_ATTACHED_SESSION_ROWS)
+    : sessionsByRecency;
+  const overflowSessionCount = sessionsByRecency.length - visibleSessionRows.length;
+
+  headerLines.push(`  - sessions: ${sessionRows.length === 0 ? "(none attached)" : ""}`.trimEnd());
+  for (const row of visibleSessionRows) {
+    const label = `S${row.sessionId}${row.title ? ` "${row.title}"` : ""}`;
     const stats = row.consultedOnly
       ? "consulted only"
       : `${row.memberCount} ${row.memberCount === 1 ? "turn" : "turns"}`;
-    lines.push(`    - ${label}: ${stats}, last active ${formatEpoch(row.lastActiveEpoch)}`);
+    headerLines.push(`    - ${label}: ${stats}, last active ${formatEpoch(row.lastActiveEpoch)}`);
+  }
+  if (overflowSessionCount > 0) {
+    headerLines.push(
+      `    - … +${overflowSessionCount} more ${overflowSessionCount === 1 ? "session" : "sessions"}`,
+    );
   }
 
-  // The summary trio's own two prose fields (title above, content/insight
-  // here) — unchanged in spirit from the pre-ticket-03 render (spec K5):
-  // still the segment's browsable half, still rendered whenever non-empty.
-  if (segment.content) {
-    lines.push(`  - desc: ${truncateText(segment.content, { limit: truncate })}`);
-  }
-  if (segment.insight) {
-    lines.push(`  - insight: ${truncateText(segment.insight, { limit: truncate })}`);
-  }
+  // -----------------------------------------------------------------------
+  // The elision ladder (ticket 08): the summary trio (title/content/
+  // insight) and the six Working State fields all compete for what's left
+  // of the budget after the fixed header above — no character-level
+  // `truncate` anywhere in this card any more (spec "Tools": "The character
+  // `truncate` knob retires"). The largest field gives way first, its
+  // oldest rows first; ellipsis at the top of what remains (T829/T830).
+  // -----------------------------------------------------------------------
+  const cardFieldRows: SegmentCardFieldRows[] = [
+    summaryFieldRows("title", segment.title),
+    summaryFieldRows("content", segment.content),
+    summaryFieldRows("insight", segment.insight),
+    ...segmentWorkingStateRows(segment),
+  ];
 
-  // Working State — the six fields, elided on collapsed page 1 only.
-  const fieldRows = segmentWorkingStateRows(segment);
-  const headerTokens = estimateTokens(lines.join("\n"));
+  const headerTokens = estimateTokens(headerLines.join("\n"));
   const fieldsBudget = Math.max(0, pageBudget - headerTokens);
-  const elided = elides
-    ? elideWorkingStateFields(fieldRows, fieldsBudget)
-    : fieldRows.map((entry) => ({
+  const elidedFields = elides
+    ? elideSegmentCardFields(cardFieldRows, fieldsBudget)
+    : cardFieldRows.map((entry) => ({
         field: entry.field,
         totalRows: entry.rows.length,
         keptRows: entry.rows,
         droppedCount: 0,
       }));
 
-  if (elides && elided.some((entry) => entry.droppedCount > 0) && options.signal) {
+  if (
+    elides &&
+    (elidedFields.some((entry) => entry.droppedCount > 0) || overflowSessionCount > 0) &&
+    options.signal
+  ) {
     options.signal.truncated = true;
   }
 
-  for (const entry of elided) {
-    lines.push(...renderElidedField(entry));
+  const fieldByKey = new Map(elidedFields.map((entry) => [entry.field, entry] as const));
+  const titleField = fieldByKey.get("title")!;
+  const contentField = fieldByKey.get("content")!;
+  const insightField = fieldByKey.get("insight")!;
+
+  const titleText = titleField.keptRows[0];
+  const lines: string[] = [`- [E${segment.id}]${titleText ? ` ${titleText}` : ""}`];
+  lines.push(...headerLines);
+
+  // The summary trio's own two prose fields — unchanged in spirit from the
+  // pre-ticket-03 render (spec K5): still the segment's browsable half,
+  // rendered whenever a row survived the ladder above (empty/elided both
+  // read as "nothing to show" — the overall truncation signal, not a
+  // per-field marker, is what tells a reader something was cut, same as
+  // every other renderer in this codebase).
+  const contentText = contentField.keptRows[0];
+  if (contentText) {
+    lines.push(`  - desc: ${contentText}`);
+  }
+  const insightText = insightField.keptRows[0];
+  if (insightText) {
+    lines.push(`  - insight: ${insightText}`);
+  }
+
+  for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+    lines.push(...renderElidedField(fieldByKey.get(field)!));
   }
 
   if (depth === "expanded") {
@@ -400,11 +489,7 @@ export function renderSegmentCardRecord(
     for (const [index, member] of members.entries()) {
       const turn = getTurnById(db, member.turnId);
       const title = turn?.title ?? turn?.userPrompt ?? "untitled";
-      lines.push(
-        `    - ${index + 1}. S${member.sessionId}/T${member.promptNumber} "${truncateText(title, {
-          limit: truncate,
-        })}"`,
-      );
+      lines.push(`    - ${index + 1}. S${member.sessionId}/T${member.promptNumber} "${title}"`);
     }
   }
 

@@ -13,9 +13,21 @@
 
 **Blocked by:** 05（`content`/`insight` 有写入者后，摘要层才会真正占预算）
 
-**Status:** ready-for-agent
+**Status:** done (2026-08-18)
 
-- [ ] 卡片自身渲染不再使用字符级 `truncate`
-- [ ] 摘要层与 Working State 同在一个省略阶梯里，按占用最多优先省略
-- [ ] 挂靠会话行有上限，溢出给计数
-- [ ] 构造一个挂靠数很大的段，证明字段预算不被 header 吃光
+- [x] 卡片自身渲染不再使用字符级 `truncate`
+- [x] 摘要层与 Working State 同在一个省略阶梯里，按占用最多优先省略
+- [x] 挂靠会话行有上限，溢出给计数
+- [x] 构造一个挂靠数很大的段，证明字段预算不被 header 吃光
+
+**实现记录：** `src/mcp/segment-card.ts`。`elideWorkingStateFields`/`WorkingStateFieldRows`/`ElidedWorkingStateField`
+重命名为 `elideSegmentCardFields`/`SegmentCardFieldRows`/`ElidedSegmentCardField`（同一纯函数，字段并集从 6 个
+Working State 扩到 title/content/insight + 6 = 9 个，逻辑未变）。title/content/insight 各自作为一个最多 1 行的
+"字段"参与同一阶梯；header（meta/tags/type/挂靠会话行）先渲染、其 token 数从 pageBudget 里扣除，剩余预算才给
+9 个字段的阶梯竞争。挂靠会话行按 `lastActiveEpoch` 降序排列，只在 `elides`（collapsed 且 page 1）时截到
+`MAX_ATTACHED_SESSION_ROWS`（= `DEFAULT_PREVIEW_COUNT` = 5，复用 format.ts 既有的"预览N+计数"惯例，未新造常量），
+溢出折成一行 `… +N more sessions`；expanded / page 2 不截断，和 Working State 字段的"从不省略"约定一致。
+卡片自身的 expanded member index（`renderSegmentCardRecord` 内联渲染的成员列表）与挂靠会话行标题同样去掉了字符
+截断，改为整段渲染。唯一保留字符截断的是 `renderSegmentMembersByOrdinal`（`E<n>/T<m>` 寻址，走全系统共享的
+`renderNode`/format.ts 渲染器，非"卡片自身"代码）——见报告中的裁量判断记录。测试：
+`tests/mcp/recall-segment-card.test.ts`。

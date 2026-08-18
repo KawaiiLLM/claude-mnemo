@@ -15,9 +15,20 @@
 
 **Blocked by:** None
 
-**Status:** ready-for-agent
+**Status:** roster half done (2026-08-18); nudge half NOT started — left to the other worker per task scope
 
-- [ ] 花名册每行渲染 type 频次与 tags 频次
-- [ ] tags 上限按预算裁剪，不再是固定 3 个
-- [ ] 20 轮提醒出现在会话侧（段块 header 或 note 收据），不依赖用户先写 remember
-- [ ] 「不足 10 轮」的过度维护提示仍留在写回执上，两者分开
+- [x] 花名册每行渲染 type 频次与 tags 频次
+- [x] tags 上限按预算裁剪，不再是固定 3 个
+- [ ] 20 轮提醒出现在会话侧（段块 header 或 note 收据），不依赖用户先写 remember — 未做，属另一 worker 领地
+- [ ] 「不足 10 轮」的过度维护提示仍留在写回执上，两者分开 — 未做，属另一 worker 领地
+
+**实现记录（花名册半，2026-08-18）：** `src/hooks/session-composition.ts` 的 `renderSegmentRoster`。`type`
+用 `computeSegmentMemberFacetCounts` 已算好的 `facets.type`（此前算完即弃），渲染方式复用
+`segment-card.ts` 的 glyph+word+count 惯例，不加预算上限（闭合词表，天然有界，见 `MEMORY_TYPES`）。`tags`
+从 `facets.tags.slice(0, 3)` 改为新写的 `budgetedFacetText`（token 预算贪心取，首项必进，其余按
+`ROSTER_TAG_FACET_BUDGET_TOKENS = 20` 停止取用），复用 `mcp/format.ts` 的 `truncateLines`「首项必留、
+其余按预算」惯例而非另造规则。`ROSTER_TITLE_TRUNCATE`（标题字符截断）与 `:151` 一带的花名册段数上限 40
+均未动——不在票 12 或票 08 的字面范围内，属另一渲染面/另一裁决（T819 的「所有段」与现有 40 段截断的张力
+留给用户裁决，未擅自改，见报告）。20 轮维护提醒（`mcp/remember.ts`/`mcp/definitions.ts`）按指示完全未碰。
+测试：`tests/hooks/session-composition.test.ts`（新增 describe 块
+`renderSegmentRoster: type/tag facets (ticket 12)`）。

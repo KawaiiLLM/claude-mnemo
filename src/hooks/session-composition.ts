@@ -14,6 +14,8 @@ import {
 import { truncateText } from "../mcp/format";
 import { recallMemory } from "../mcp/recall";
 import { timelineQuery } from "../mcp/timeline";
+import { typeWordGlyph } from "../shared/type-vocabulary";
+import { estimateTokens } from "../utils/token-estimate";
 
 /**
  * SessionStart's per-attached-segment blocks and the fixed roster/proposals
@@ -150,7 +152,48 @@ export function renderAttachedSegmentBlock(
 const ROSTER_HEADER = "## Segment roster";
 const ROSTER_MAX_SEGMENTS = 40;
 const ROSTER_TITLE_TRUNCATE = 80;
-const ROSTER_FACETS_SHOWN = 3;
+
+/**
+ * Ticket 12 (T819: "注入时给出所有段的 title 和 type/tags，方便挂靠"): a
+ * roster row's tags are no longer hard-capped at a fixed count — that cut a
+ * segment with eight one-word tags down to three and let three-verbose-words
+ * eat the same three slots a differently-tagged segment would spend on ten.
+ * Tags already arrive count-desc, alpha-tiebroken (`compareDerivedTags`,
+ * db/segments.ts — "which is also the natural truncation under a budget"),
+ * so the greedy take here is that ordering's own intended consumer, not a
+ * new rule. `type` gets no such cap: the vocabulary is closed and small
+ * (`MEMORY_TYPES`), so every stated type for a segment already fits in a
+ * roster line's worth of tokens — the pattern segment-card.ts's own type
+ * line already uses, reused here rather than invented twice.
+ */
+const ROSTER_TAG_FACET_BUDGET_TOKENS = 20;
+
+/**
+ * Greedily render `entries` (already sorted, most-significant first) via
+ * `render`, stopping once the running token cost would exceed
+ * `budgetTokens` — except the first entry always renders, so a single
+ * over-budget item degrades to "one item, not zero" rather than an empty
+ * facet line. Mirrors `truncateLines`' own "always keep the first, budget
+ * the rest" shape (mcp/format.ts) instead of a second ad hoc cutoff rule.
+ */
+function budgetedFacetText<T>(
+  entries: readonly T[],
+  render: (entry: T) => string,
+  budgetTokens: number,
+): string {
+  const parts: string[] = [];
+  let used = 0;
+  for (const entry of entries) {
+    const rendered = render(entry);
+    const cost = estimateTokens(rendered) + (parts.length > 0 ? 1 : 0); // +1 for the joining space
+    if (parts.length > 0 && used + cost > budgetTokens) {
+      break;
+    }
+    parts.push(rendered);
+    used += cost;
+  }
+  return parts.join(" ");
+}
 
 export interface SegmentRosterOptions {
   eraCutoffEpoch?: number | null;
@@ -165,9 +208,11 @@ export interface SegmentRosterOptions {
  * the segment roster in view"; ADR-0005: "the roster's own... recency
  * ordering"). Every LIVE segment (frozen legacy arc-segments excluded — see
  * `listLiveSegmentsByActivity`), grouped under its topic as a coarse project
- * header, each row the title plus its derived tag facets with counts,
- * recency-ordered, truncated on budget with a `recall()` pointer for the
- * remainder.
+ * header, each row the title plus its derived type and tag facets with
+ * counts (ticket 12, T819: "给出所有段的 title 和 type/tags，方便挂靠" — type
+ * unbounded, tags budget-trimmed, see `ROSTER_TAG_FACET_BUDGET_TOKENS`),
+ * recency-ordered, truncated on segment COUNT with a `recall()` pointer for
+ * the remainder.
  */
 export function renderSegmentRoster(
   db: Database,
@@ -203,10 +248,15 @@ export function renderSegmentRoster(
     lines.push(`### ${topicName} (${entries.length})`);
     for (const { segment } of entries) {
       const facets = computeSegmentMemberFacetCounts(db, segment.id, eraCutoffEpoch);
-      const facetText = facets.tags
-        .slice(0, ROSTER_FACETS_SHOWN)
-        .map((entry) => `#${entry.word}×${entry.count}`)
+      const typeText = facets.type
+        .map((entry) => `${typeWordGlyph(entry.word)}${entry.word}×${entry.count}`)
         .join(" ");
+      const tagsText = budgetedFacetText(
+        facets.tags,
+        (entry) => `#${entry.word}×${entry.count}`,
+        ROSTER_TAG_FACET_BUDGET_TOKENS,
+      );
+      const facetText = [typeText, tagsText].filter(Boolean).join(" ");
       const attachedNote = overflow.has(segment.id)
         ? ` (attached, not rendered here — recall(id="E${segment.id}"))`
         : "";

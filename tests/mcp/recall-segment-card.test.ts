@@ -15,8 +15,9 @@ import { upsertSession } from "../../src/db/sessions";
 import { capTurnRenderToTokenBudget, DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED } from "../../src/mcp/format";
 import { recallMemory } from "../../src/mcp/recall";
 import {
-  elideWorkingStateFields,
-  type WorkingStateFieldRows,
+  elideSegmentCardFields,
+  MAX_ATTACHED_SESSION_ROWS,
+  type SegmentCardFieldRows,
 } from "../../src/mcp/segment-card";
 import { estimateTokens } from "../../src/utils/token-estimate";
 
@@ -31,16 +32,16 @@ import { estimateTokens } from "../../src/utils/token-estimate";
 // Field elision — the pure mechanism, tested directly (mutation target 1/3).
 // ---------------------------------------------------------------------------
 
-describe("elideWorkingStateFields", () => {
+describe("elideSegmentCardFields", () => {
   test("drops the LARGEST field's rows before a smaller field's, even when the smaller field alone would need trimming", () => {
     // constraints: 4 rows x 1 token each = 4 tokens (the larger field).
     // goal: 1 row x 1 token = 1 token (the smaller field).
-    const fields: WorkingStateFieldRows[] = [
+    const fields: SegmentCardFieldRows[] = [
       { field: "goal", rows: ["EEEE"] },
       { field: "constraints", rows: ["AAAA", "BBBB", "CCCC", "DDDD"] },
     ];
 
-    const result = elideWorkingStateFields(fields, 3);
+    const result = elideSegmentCardFields(fields, 3);
     const goal = result.find((entry) => entry.field === "goal")!;
     const constraints = result.find((entry) => entry.field === "constraints")!;
 
@@ -53,32 +54,69 @@ describe("elideWorkingStateFields", () => {
   });
 
   test("ties on size break by the fields' own declared order — the first-listed field trims first", () => {
-    const fields: WorkingStateFieldRows[] = [
+    const fields: SegmentCardFieldRows[] = [
       { field: "goal", rows: ["AAAA"] },
       { field: "constraints", rows: ["BBBB"] },
     ];
 
     // Budget 1: exactly one row's worth of the total 2 tokens must go — the
     // tie is broken, not the whole set drained to zero.
-    const result = elideWorkingStateFields(fields, 1);
+    const result = elideSegmentCardFields(fields, 1);
     expect(result.find((entry) => entry.field === "goal")!.droppedCount).toBe(1);
     expect(result.find((entry) => entry.field === "constraints")!.droppedCount).toBe(0);
   });
 
   test("never drops below the budget once every field is exhausted, and never loops forever on a zero budget", () => {
-    const fields: WorkingStateFieldRows[] = [{ field: "done", rows: ["one row"] }];
-    const result = elideWorkingStateFields(fields, 0);
+    const fields: SegmentCardFieldRows[] = [{ field: "done", rows: ["one row"] }];
+    const result = elideSegmentCardFields(fields, 0);
     expect(result[0]!.droppedCount).toBe(1);
     expect(result[0]!.keptRows).toEqual([]);
   });
 
   test("under budget, nothing is dropped at all", () => {
-    const fields: WorkingStateFieldRows[] = [
+    const fields: SegmentCardFieldRows[] = [
       { field: "goal", rows: ["a", "b"] },
       { field: "decisions", rows: ["c"] },
     ];
-    const result = elideWorkingStateFields(fields, 1000);
+    const result = elideSegmentCardFields(fields, 1000);
     expect(result.every((entry) => entry.droppedCount === 0)).toBe(true);
+  });
+
+  // ---- ticket 08: the summary layer (title/content/insight) now competes
+  // in the SAME ladder as Working State, not a privileged, never-elided
+  // layer rendered ahead of it. ----
+  test("a summary-layer field (e.g. content) is evicted before a smaller Working State field, purely on size", () => {
+    const fields: SegmentCardFieldRows[] = [
+      { field: "content", rows: ["x".repeat(400)] }, // ~100 tokens, one row
+      { field: "goal", rows: ["small goal row"] }, // a handful of tokens
+    ];
+
+    const result = elideSegmentCardFields(fields, 10);
+    const content = result.find((entry) => entry.field === "content")!;
+    const goal = result.find((entry) => entry.field === "goal")!;
+
+    expect(content.droppedCount).toBe(1);
+    expect(content.keptRows).toEqual([]);
+    expect(goal.droppedCount).toBe(0);
+    expect(goal.keptRows).toEqual(["small goal row"]);
+  });
+
+  test("the reverse also holds: a Working State field larger than a summary-layer field is the one that gives way", () => {
+    const fields: SegmentCardFieldRows[] = [
+      { field: "content", rows: ["short desc"] },
+      {
+        field: "decisions",
+        rows: Array.from({ length: 20 }, (_, i) => `decision row ${i} ${"y".repeat(40)}`),
+      },
+    ];
+
+    const result = elideSegmentCardFields(fields, 15);
+    const content = result.find((entry) => entry.field === "content")!;
+    const decisions = result.find((entry) => entry.field === "decisions")!;
+
+    expect(content.droppedCount).toBe(0);
+    expect(content.keptRows).toEqual(["short desc"]);
+    expect(decisions.droppedCount).toBeGreaterThan(0);
   });
 });
 
@@ -244,6 +282,93 @@ describe("recall(id=\"E<n>\") segment card", () => {
     expect(ellipsisIndex).toBeLessThan(newestRowIndex);
     // The newest row survives; an old one does not.
     expect(decisionsBlock).not.toContain("decision number 0");
+  });
+
+  // ---- ticket 08: no character-level truncate, summary layer joins the
+  // elision ladder, attached-session rows are capped ----
+
+  test("no character-level truncation: a long title survives whole under an ample budget (spec: the `truncate` knob retires)", () => {
+    const longTitle = Array.from({ length: 60 }, (_, index) => `word${index}`).join(" ");
+    expect(longTitle.length).toBeGreaterThan(200); // would have hit the old 200-char DEFAULT_TRUNCATE
+    const longSegment = createSegment(db, { title: longTitle, nowEpoch: CUTOFF });
+
+    const output = recallMemory(db, { id: `E${longSegment.id}` });
+    expect(output).toContain(longTitle);
+    expect(output).not.toContain("…");
+  });
+
+  test("the summary layer competes on SIZE, not privilege — a big `content` yields to a small Working State row under tight budget", () => {
+    const segment = createSegment(db, {
+      title: "budget priority segment",
+      content: "z".repeat(4000), // ~1000 tokens, dwarfs everything else on the card
+      nowEpoch: CUTOFF,
+    });
+    appendSegmentWorkingStateRows(db, segment.id, "goal", ["ship the priority fix"], CUTOFF);
+
+    // Big enough for the header + the tiny goal row, nowhere near big enough
+    // to also carry the content blob.
+    const output = recallMemory(db, { id: `E${segment.id}`, pageBudget: 100 });
+    expect(output).toContain("ship the priority fix");
+    expect(output).not.toContain("desc:");
+    // Pre-ticket-08 behaviour: content rendered unconditionally, unelided,
+    // ahead of Working State — this proves the reversal, not just that
+    // *something* got cut.
+  });
+
+  test("attached-session rows are capped with overflow folded into a count — the header no longer grows unbounded with attachment count", () => {
+    const extra = MAX_ATTACHED_SESSION_ROWS + 3;
+    for (let index = 0; index < extra; index += 1) {
+      const other = upsertSession(db, {
+        contentSessionId: `session-overflow-${index}`,
+        project: "/tmp/project",
+        title: `Overflow session ${index}`,
+        content: null,
+        insight: null,
+        nextSteps: null,
+        createdAtEpoch: CUTOFF + index,
+        updatedAtEpoch: CUTOFF + index,
+        completedAtEpoch: null,
+      }).id;
+      attachSegmentToSession(db, other, segmentId, CUTOFF + index);
+    }
+
+    const output = recallMemory(db, { id: `E${segmentId}` });
+    const sessionLines = output.split("\n").filter((line) => /^\s+- S\d+/.test(line));
+    expect(sessionLines.length).toBe(MAX_ATTACHED_SESSION_ROWS);
+    expect(output).toMatch(/… \+\d+ more sessions?/);
+    // The cap keeps the FRESHEST rows, not merely five rows: with 8 overflow
+    // sessions at ascending lastActive, the survivors are exactly the top
+    // five (indices 3..7) and the colder tail folds into the count line.
+    // An implementation that capped in attachment order (or sorted the wrong
+    // way) passes the two counts above and fails here.
+    expect(output).toContain("Overflow session 7");
+    expect(output).toContain("Overflow session 3");
+    expect(output).not.toContain("Overflow session 2");
+  });
+
+  test("mutation demo (ticket 08 checklist item 4): a large attachment count no longer starves the field budget to zero", () => {
+    appendSegmentWorkingStateRows(db, segmentId, "goal", ["ship the fix"], CUTOFF);
+    // 300 attachments comfortably exceeds the default 1000-token page budget
+    // on their own if rendered uncapped (each row costs tens of tokens) —
+    // large enough that the pre-fix behavior (one row per attachment, no
+    // cap) reliably starves the field ladder to zero, not just "shrinks it".
+    for (let index = 0; index < 300; index += 1) {
+      const other = upsertSession(db, {
+        contentSessionId: `session-mutate-${index}`,
+        project: "/tmp/project",
+        title: `Session ${index}`,
+        content: null,
+        insight: null,
+        nextSteps: null,
+        createdAtEpoch: CUTOFF + index,
+        updatedAtEpoch: CUTOFF + index,
+        completedAtEpoch: null,
+      }).id;
+      attachSegmentToSession(db, other, segmentId, CUTOFF + index);
+    }
+
+    const output = recallMemory(db, { id: `E${segmentId}` }); // default pageBudget: 1000
+    expect(output).toContain("ship the fix");
   });
 
   test("expanded never elides — all rows render regardless of the page budget", () => {

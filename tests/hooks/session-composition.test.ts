@@ -391,6 +391,117 @@ describe("renderSegmentRoster", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Roster type/tags facets (ticket 12's roster half — T819: "注入时给出所有段
+// 的 title 和 type/tags，方便挂靠"). `type` was computed and discarded;
+// `tags` was hard-sliced to a fixed count of 3 regardless of length.
+// ---------------------------------------------------------------------------
+
+describe("renderSegmentRoster: type/tag facets (ticket 12)", () => {
+  /** A minimal turn carrying a stated type + tags, member-added to a segment — the roster's own facet aggregation source (`computeSegmentMemberFacetCounts`). */
+  function makeTurnWithFacets(
+    db: Database,
+    sessionId: number,
+    promptNumber: number,
+    type: string,
+    tags: string[],
+    epoch: number,
+  ): number {
+    return db
+      .query<{ id: number }, [number, number, string, string, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, type, tags, created_at_epoch,
+           user_prompt, assistant_response
+         ) VALUES (?, ?, 'extracted', ?, ?, ?, 'p', 'r')
+         RETURNING id`,
+      )
+      .get(sessionId, promptNumber, JSON.stringify([type]), JSON.stringify(tags), epoch)!.id;
+  }
+
+  test("each roster row now carries a type frequency string — previously computed and discarded", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
+    const segment = createSegment(db, { title: "Typed lane", topicId: topic.id, nowEpoch: 1_000 });
+    const session = upsertSession(db, {
+      contentSessionId: "roster-type-session",
+      project: "/tmp/project",
+      title: "session",
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const t1 = makeTurnWithFacets(db, session.id, 1, "implement", ["card"], 1_000);
+    addSegmentMembers(db, segment.id, [t1], 1_000);
+
+    const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
+    expect(roster).toMatch(/implement×1/);
+    db.close();
+  });
+
+  test("tags are no longer hard-capped at a fixed count of 3 — many short tags render more than 3", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
+    const segment = createSegment(db, { title: "Many-tag lane", topicId: topic.id, nowEpoch: 1_000 });
+    const session = upsertSession(db, {
+      contentSessionId: "roster-manytag-session",
+      project: "/tmp/project",
+      title: "session",
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    // 8 distinct one-letter tags, one turn each — every tag's own count is 1,
+    // so the pre-ticket-12 `.slice(0, 3)` would show exactly three no matter
+    // how short each tag is.
+    const tags = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    tags.forEach((tag, index) => {
+      const turn = makeTurnWithFacets(db, session.id, index + 1, "implement", [tag], 1_000 + index);
+      addSegmentMembers(db, segment.id, [turn], 1_000 + index);
+    });
+
+    const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
+    const shownTags = tags.filter((tag) => roster.includes(`#${tag}×1`));
+    expect(shownTags.length).toBeGreaterThan(3);
+    db.close();
+  });
+
+  test("a handful of long tags is still bounded — by BUDGET, not by a raw count", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
+    const segment = createSegment(db, { title: "Long-tag lane", topicId: topic.id, nowEpoch: 1_000 });
+    const session = upsertSession(db, {
+      contentSessionId: "roster-longtag-session",
+      project: "/tmp/project",
+      title: "session",
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const longTags = Array.from(
+      { length: 10 },
+      (_, index) => `verylongtagname${index}withpadding${"x".repeat(20)}`,
+    );
+    longTags.forEach((tag, index) => {
+      const turn = makeTurnWithFacets(db, session.id, index + 1, "implement", [tag], 1_000 + index);
+      addSegmentMembers(db, segment.id, [turn], 1_000 + index);
+    });
+
+    const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
+    const shownTags = longTags.filter((tag) => roster.includes(`#${tag}×1`));
+    // Some survive (budget, not an outright ban on long tags)...
+    expect(shownTags.length).toBeGreaterThan(0);
+    // ...but not all ten — the budget bites well before a raw count of 3 would.
+    expect(shownTags.length).toBeLessThan(longTags.length);
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Proposals: at most three, newest first, with the render-time ask-user
 // boilerplate ticket 08 deliberately left unstored.
 // ---------------------------------------------------------------------------
