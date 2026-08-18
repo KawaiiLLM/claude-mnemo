@@ -1,4 +1,5 @@
 import { CITATION_RELATIONS } from "../db/citations";
+import { renderMemoryRubricBlock } from "../shared/memory-rubric";
 import type {
   NoteSettlementContext,
   NoteSettlementWindowTurn,
@@ -30,7 +31,10 @@ import type {
  *     字段" [S15069/T906]) — and `propose`'s minimum cluster drops from 2 to
  *     1 (spec: "孤立 turn 独自开启新任务是合法情形").
  *   - Duty 4 (RELATIONS) is UNCHANGED — it never depended on grading,
- *     reconstruction or membership, and keeps its own mature rubric.
+ *     reconstruction or membership, and keeps its own tool-matched ladder
+ *     (the four relations `settlementTurnWriteInputShape` actually accepts —
+ *     evidence-for/against, supersedes, depends-on — a narrower, pre-ticket-
+ *     01 vocabulary this ticket does not widen).
  *
  * What is left is deliberately an EMPTY correction channel (spec: "完成门重
  * 写为纠错语义的空位") — a window this run finds nothing to propose or relate
@@ -40,6 +44,23 @@ import type {
  * write facade still ACCEPTS grade/tier/type/tags (ADR-0003 handles grade/
  * tier's own separate retirement), this prompt just does not instruct any of
  * it.
+ *
+ * TICKET 11'S ADDITION (edge-ownership-impl, "统一 Memory Rubric"): the
+ * `## Memory Rubric` section below renders `renderMemoryRubricBlock()` —
+ * the SAME function, same bytes, the SessionStart injection uses
+ * (`hooks/session-composition.ts`'s `renderRubricAndRosterBlock`) — so the
+ * main agent's own type/tags/关系/归属 judgment is the settlement pass's
+ * reference too, one source rather than two independently drifting copies.
+ * It is additive: duty 4's own relation ladder above is untouched (it
+ * governs a narrower, tool-matched vocabulary the rubric's 关系 section does
+ * not fully cover — see this file's own duty-4 comment).
+ *
+ * TICKET 09'S ADDITION (edge-ownership-impl, "结算顺手维护 session 叙事"):
+ * duty 5 (SESSION NARRATIVE) — settlement is the session's sole writer now
+ * (ADR-0006 superseded by [S15069/T910]–[T913]); `note`'s own session
+ * address retired (worker/note-settlement-turn-facade.ts's
+ * `evaluateSettlementTurnWrite` gained a `session`-addressed branch, staged
+ * through the SAME `note`/`commit` channel as everything else here).
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -115,6 +136,11 @@ export function renderNoteSettlementPrompt(
       "every field in English; keep quoted user phrases in their original " +
       "language.",
     "",
+    "## Memory Rubric (shared with the main agent's own SessionStart " +
+      "injection — the same judgment, byte-identical; ticket 11)",
+    "",
+    renderMemoryRubricBlock(),
+    "",
     "## Duties",
     "",
     "Everything below is a TOOL CALL — `remember` (proposals) and `note`",
@@ -154,7 +180,17 @@ export function renderNoteSettlementPrompt(
     "   in this SAME run just created. A retry that replaces an abandoned",
     "   attempt is `supersedes`.",
     "",
-    "3. COMMIT. Call `commit` once you believe this window is done — whether",
+    "3. SESSION NARRATIVE, via the `note` tool's `session` field (this " +
+      `session, "S${job.sessionId}") instead of \`turn\`. \`content\` is a` +
+      " CONVERSATIONAL increment — what happened in this window, never task",
+    "   state (task state belongs to the segment, not the session) — write",
+    "   the increment as new text; do not re-paste what the session summary",
+    "   below already shows. `title` is set only when it is still empty" ,
+    "   (a one-line label for the whole session) and otherwise left alone —",
+    "   it changes rarely, not every window. Always legal, never required:",
+    "   a window with nothing narratively new may skip this duty entirely.",
+    "",
+    "4. COMMIT. Call `commit` once you believe this window is done — whether",
     "   or not you have staged anything. `commit` lands whatever you staged",
     "   (or nothing, if you staged nothing) and completes the job. Nothing",
     "   about this window is durable until a `commit` call succeeds.",

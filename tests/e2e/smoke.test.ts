@@ -14,6 +14,7 @@ import { createSessionInitHandler } from "../../src/hooks/handlers/session-init"
 import { createStopHandler } from "../../src/hooks/handlers/stop";
 import { recallMemory } from "../../src/mcp/recall";
 import { noteTool } from "../../src/mcp/note";
+import { evaluateSettlementTurnWrite } from "../../src/worker/note-settlement-turn-facade";
 
 function writeTranscript(lines: unknown[]): { directory: string; path: string } {
   const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-e2e-"));
@@ -212,14 +213,27 @@ describe("claude-mnemo smoke test", () => {
     db.query(
       "UPDATE observations SET title = ?, content = ?, status = 'extracted' WHERE id = 2",
     ).run("Mutex added", "Refresh is serialized");
-    // ticket 01/09 (spec "Session retirement"): the session keeps one
-    // semantic field, `title` — content/insight/decision/done/next_steps/
-    // reference retired with the segment redesign (Working State and the
-    // summary layer now live on the segment, `remember`).
-    noteTool(db, {
-      session: `S${session.id}`,
-      title: "Auth race fix",
-    });
+    // ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): the
+    // session's title/content are settlement's alone to write now —
+    // `note`'s own session address retired outright. Exercised here through
+    // the settlement facade directly (not the scheduler/dispatch machinery,
+    // out of scope for this smoke test) — the same decision function a real
+    // settlement run's staged `note` call would reach.
+    const settled = evaluateSettlementTurnWrite(
+      db,
+      {
+        jobId: 1,
+        claimGeneration: 1,
+        sessionId: session.id,
+        reviewableTurnIds: new Set([firstTurnId, secondTurnId]),
+        contextBuiltAtEpoch: 0,
+        eligibleRelationPairKeys: new Set(),
+      },
+      { session: `S${session.id}`, title: "Auth race fix" },
+      Math.floor(Date.now() / 1000),
+      { apply: true },
+    );
+    expect(settled.ok).toBe(true);
 
     expect(getTurnById(db, firstTurnId)?.status).toBe("extracted");
     expect(getTurnById(db, secondTurnId)?.status).toBe("extracted");

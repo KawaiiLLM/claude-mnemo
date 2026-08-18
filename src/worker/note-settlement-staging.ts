@@ -165,6 +165,8 @@ export interface NoteSettlementCommitCounts {
   relationsWritten: number;
   /** A `propose` call that landed a stored proposal. */
   proposalsCreated: number;
+  /** Ticket 09: a `session`-addressed `note` call that landed (title and/or content). */
+  sessionNarrativeWritten: number;
 }
 
 function emptyCommitCounts(): NoteSettlementCommitCounts {
@@ -177,6 +179,7 @@ function emptyCommitCounts(): NoteSettlementCommitCounts {
     gradeHistogram: [0, 0, 0, 0, 0],
     relationsWritten: 0,
     proposalsCreated: 0,
+    sessionNarrativeWritten: 0,
   };
 }
 
@@ -398,9 +401,14 @@ export function createSettlementStagingEngine(
     // turn this dispatch may not write prose for, arriving in a second call
     // that only names a grade — has to be refused here rather than at commit,
     // which is A7's whole "the agent learns while it can still act" rule.
-    const address = parseTurnAddress(rawInput.turn);
+    // Ticket 09: `rawInput.turn` is optional now (a `session`-addressed call
+    // carries `rawInput.session` instead) — the staging key falls back to
+    // whichever raw address token the call actually supplied.
+    const address = rawInput.turn !== undefined ? parseTurnAddress(rawInput.turn) : null;
     const priorKey = noteStagingKey(
-      address ? `S${address.sessionId}/T${address.promptNumber}` : rawInput.turn,
+      address
+        ? `S${address.sessionId}/T${address.promptNumber}`
+        : (rawInput.session ?? rawInput.turn ?? ""),
     );
     const prior = staged.get(priorKey);
     const merged: SettlementTurnWriteInput =
@@ -517,6 +525,13 @@ export function createSettlementStagingEngine(
             }
             if (outcome.relations) {
               counts.relationsWritten += outcome.relations.written;
+            }
+            // Ticket 09: a `session`-addressed entry carries neither
+            // `review` nor `relations` — its own count is separate, not
+            // folded into `turnsReviewed` (a session narrative write is not
+            // a turn review).
+            if (outcome.session) {
+              counts.sessionNarrativeWritten += 1;
             }
           }
         }

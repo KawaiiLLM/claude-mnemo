@@ -13,6 +13,8 @@ import { upsertSession } from "../../src/db/sessions";
 import { formatTurnCollapsed } from "../../src/mcp/format";
 import { buildCollapsedTurnsForSession } from "../../src/mcp/recall";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
+import { renderRubricAndRosterBlock } from "../../src/hooks/session-composition";
+import { MEMORY_RUBRIC_TEXT, renderMemoryRubricBlock } from "../../src/shared/memory-rubric";
 import { buildNoteSettlementContext } from "../../src/worker/note-settlement-context";
 import { renderNoteSettlementPrompt } from "../../src/worker/note-settlement-prompt";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
@@ -246,5 +248,110 @@ describe("ticket 11 — window turns go through recall's collapsed view (spec A5
     // stay annotations — the two facts settlement adds, and only those.
     expect(window).toContain("insight: the lease is the fence");
     expect(window).toContain("(note reconstructed by an earlier settlement pass)");
+  });
+});
+
+/**
+ * Ticket 11 (edge-ownership-impl, "统一 Memory Rubric") — the hash guard
+ * this ticket's own checklist names: the settlement prompt and the
+ * SessionStart injection (`hooks/session-composition.ts`'s
+ * `renderRubricAndRosterBlock`) must render the rubric byte-identical.
+ * Exercised HERE, against a real settlement prompt (this file's own
+ * fixture), rather than only comparing each side to the shared constant in
+ * isolation — a future edit that wrapped one side differently would still
+ * fail this specific cross-check.
+ */
+describe("ticket 11 — the Memory Rubric renders byte-identical in both consumers", () => {
+  test("the settlement prompt embeds the exact same rubric block SessionStart injects", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionDbId = upsertSession(db, {
+      contentSessionId: "rubric-hash-session",
+      project: "/tmp/project-rubric-hash",
+      title: "rubric hash fixture",
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW - 10_000,
+      updatedAtEpoch: NOW - 10_000,
+      completedAtEpoch: null,
+    }).id;
+    db.query<{ id: number }, [number, number, string, string, number]>(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, user_prompt, assistant_response,
+         tool_call_count, created_at_epoch
+       ) VALUES (?, 1, 'active', ?, ?, 1, ?) RETURNING id`,
+    ).get(sessionDbId, "prompt 1", "response 1", NOW - 1_000);
+
+    enqueueNoteSettlementWindows(
+      db,
+      [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 1, triggerType: "consecutive" }],
+      NOW,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+    const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000)!;
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const prompt = renderNoteSettlementPrompt(context);
+
+    const sessionStartBlock = renderRubricAndRosterBlock(db, {});
+    const rubricOnly = renderMemoryRubricBlock();
+
+    // The settlement prompt carries the SAME rendered rubric block…
+    expect(prompt).toContain(rubricOnly);
+    // …and so does the SessionStart injection (the roster follows it there
+    // instead of the settlement duties, but the rubric substring itself is
+    // identical).
+    expect(sessionStartBlock).toContain(rubricOnly);
+    // Byte-for-byte: extract each consumer's own copy and compare.
+    const promptRubric = prompt.slice(
+      prompt.indexOf("<mnemo-memory-rubric"),
+      prompt.indexOf("</mnemo-memory-rubric>") + "</mnemo-memory-rubric>".length,
+    );
+    const sessionStartRubric = sessionStartBlock.slice(
+      sessionStartBlock.indexOf("<mnemo-memory-rubric"),
+      sessionStartBlock.indexOf("</mnemo-memory-rubric>") + "</mnemo-memory-rubric>".length,
+    );
+    expect(promptRubric).toBe(sessionStartRubric);
+    expect(promptRubric).toBe(rubricOnly);
+    expect(promptRubric).toContain(MEMORY_RUBRIC_TEXT);
+
+    db.close();
+  });
+
+  test("duty 3 (SESSION NARRATIVE, ticket 09) instructs the session-addressed note call, distinct from duty 4 (COMMIT)", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const seededSessionId = upsertSession(db, {
+      contentSessionId: "duty-3-session",
+      project: "/tmp/project-duty-3",
+      title: "duty 3 fixture",
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW - 10_000,
+      updatedAtEpoch: NOW - 10_000,
+      completedAtEpoch: null,
+    }).id;
+    db.query<{ id: number }, [number, number, string, string, number]>(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, user_prompt, assistant_response,
+         tool_call_count, created_at_epoch
+       ) VALUES (?, 1, 'active', ?, ?, 1, ?) RETURNING id`,
+    ).get(seededSessionId, "prompt 1", "response 1", NOW - 1_000);
+    enqueueNoteSettlementWindows(
+      db,
+      [{ sessionId: seededSessionId, windowStart: 1, windowEnd: 1, triggerType: "consecutive" }],
+      NOW,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+    const job = claimNextNoteSettlementJob(db, seededSessionId, NOW, NOW * 1000)!;
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const prompt = renderNoteSettlementPrompt(context);
+
+    expect(prompt).toContain("SESSION NARRATIVE");
+    expect(prompt).toContain(`"S${seededSessionId}"`);
+    expect(prompt).toContain("never task");
+    expect(prompt).toContain("still empty");
+    expect(prompt.indexOf("SESSION NARRATIVE")).toBeLessThan(prompt.indexOf("4. COMMIT"));
+
+    db.close();
   });
 });

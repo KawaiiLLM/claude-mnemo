@@ -311,12 +311,16 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain("TURN REVIEW");
     expect(prompt).not.toContain("RECONSTRUCTION");
 
+    // Ticket 09 (edge-ownership-impl) inserted duty 3 (SESSION NARRATIVE)
+    // between RELATIONS and COMMIT, so COMMIT renumbered from "3." to "4.".
     const proposalsIndex = prompt.indexOf("1. PROPOSALS");
     const relationsIndex = prompt.indexOf("RELATIONS,");
-    const commitIndex = prompt.indexOf("3. COMMIT");
+    const narrativeIndex = prompt.indexOf("3. SESSION NARRATIVE");
+    const commitIndex = prompt.indexOf("4. COMMIT");
     expect(proposalsIndex).toBeGreaterThan(-1);
     expect(relationsIndex).toBeGreaterThan(proposalsIndex);
-    expect(commitIndex).toBeGreaterThan(relationsIndex);
+    expect(narrativeIndex).toBeGreaterThan(relationsIndex);
+    expect(commitIndex).toBeGreaterThan(narrativeIndex);
     expect(prompt).toContain("via the `note` tool's evidenceFor");
   });
 
@@ -427,6 +431,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       gradeHistogram: [0, 1, 1, 1, 0],
       relationsWritten: 1,
       proposalsCreated: 1,
+      sessionNarrativeWritten: 0,
     });
     // Attempt bookkeeping (spec A2a): a first-attempt success is convergence,
     // never abandonment.
@@ -456,6 +461,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       gradeHistogram: [0, 0, 0, 0, 0],
       relationsWritten: 0,
       proposalsCreated: 0,
+      sessionNarrativeWritten: 0,
     });
   });
 
@@ -784,6 +790,7 @@ describe("settlement payload at the scheduler seam", () => {
       gradeHistogram: [0, 0, 0, 0, 0],
       relationsWritten: 0,
       proposalsCreated: 0,
+      sessionNarrativeWritten: 0,
     });
   });
 });

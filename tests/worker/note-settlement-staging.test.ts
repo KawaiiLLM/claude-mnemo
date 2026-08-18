@@ -14,7 +14,7 @@ import {
 } from "../../src/db/note-settlement";
 import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { initializeSchema } from "../../src/db/schema";
-import { upsertSession } from "../../src/db/sessions";
+import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { createSettlementStagingEngine } from "../../src/worker/note-settlement-staging";
@@ -565,6 +565,7 @@ describe("commit's own result feeds the job log, never the agent", () => {
       gradeHistogram: [0, 1, 2, 0, 0],
       relationsWritten: 0,
       proposalsCreated: 1,
+      sessionNarrativeWritten: 0,
     });
   });
 });
@@ -721,5 +722,90 @@ describe("spec A7a — re-staging a key replaces its entry rather than appending
       title: "the same turn, proposed on its own",
     });
     expect(engine.pendingCount()).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): the
+// session-addressed narrative write goes through the SAME staging engine as
+// every turn/membership call — staged, validated, invisible to a live table
+// until `commit`.
+// ---------------------------------------------------------------------------
+
+describe("session-addressed narrative writes stage through the same commit channel (ticket 09)", () => {
+  test("stages without writing, then lands on commit", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job);
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    const stageReceipt = engine.stageNoteWrite({
+      session: `S${sessionDbId}`,
+      title: "the window's story",
+      content: "what happened",
+    });
+    expect(stageReceipt.content[0]!.text).toContain("pending commit");
+    // Nothing landed yet.
+    expect(getSession(db, sessionDbId)?.title).toBe("settlement staging fixture");
+    expect(getSession(db, sessionDbId)?.content).toBeNull();
+
+    const commitReceipt = engine.commit();
+    expect(commitReceipt.content[0]!.text).toContain("Committed");
+    expect(getSession(db, sessionDbId)?.title).toBe("the window's story");
+    expect(getSession(db, sessionDbId)?.content).toBe("what happened");
+  });
+
+  test("re-staging the same session address REPLACES the earlier staged call, not appends a second one", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job);
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    engine.stageNoteWrite({ session: `S${sessionDbId}`, content: "first draft" });
+    expect(engine.pendingCount()).toBe(1);
+    const secondReceipt = engine.stageNoteWrite({ session: `S${sessionDbId}`, content: "corrected draft" });
+    expect(engine.pendingCount()).toBe(1);
+    expect(secondReceipt.content[0]!.text).toContain("replaces");
+
+    engine.commit();
+    expect(getSession(db, sessionDbId)?.content).toBe("corrected draft");
+  });
+
+  test("a turn note and a session narrative in the same window are different staged keys and coexist", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 2, type: ["fix"], tags: [] });
+    engine.stageNoteWrite({ session: `S${sessionDbId}`, title: "session title" });
+    expect(engine.pendingCount()).toBe(2);
+
+    engine.commit();
+    expect(getTurnById(db, t1)!.significanceGrade).toBe(2);
+    expect(getSession(db, sessionDbId)?.title).toBe("session title");
+  });
+
+  test("a session-addressed stage against a different session is refused, and the fence stays intact", () => {
+    const sessionDbId = seedSession();
+    const otherSessionDbId = upsertSession(db, {
+      contentSessionId: "settlement-staging-other-session",
+      project: "/tmp/project-settlement-staging",
+      title: "a different session",
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW - 5_000,
+      updatedAtEpoch: NOW - 5_000,
+      completedAtEpoch: null,
+    }).id;
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job);
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    const receipt = engine.stageNoteWrite({ session: `S${otherSessionDbId}`, title: "not mine" });
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    expect(receipt.content[0]!.text).toContain("not this dispatch's own session");
+    expect(engine.pendingCount()).toBe(0);
   });
 });

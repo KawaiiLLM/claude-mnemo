@@ -75,11 +75,29 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // vocabulary measured 61% precision at exactly the point where it was
   // softened to "used" or "built on". A paraphrase is not a cheaper version
   // of this text, it is the failure mode.
+  //
+  // ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): `session`
+  // retired from this call outright — session has no main-agent writer any
+  // more (three layers, three writers: turn/segment stay the main agent's,
+  // session moved to settlement's staged-commit channel, [S15069/T910]–
+  // [T913]). The opening sentence and address clause below no longer
+  // mention it.
+  //
+  // ticket 11 (edge-ownership-impl, "统一 Memory Rubric"): the six ordered
+  // relation questions this string used to inline ARE judgment — [S15069/
+  // T933]/[T937]–[T939] peer discussion settled a three-way split (format on
+  // each parameter's own `.describe()`, timing/frequency here, judgment in
+  // the Memory Rubric alone) and this was the one piece of judgment still
+  // sitting on the call-level description rather than the rubric. What
+  // remains here is the call-level POINTER plus the FORMAT facts a rubric
+  // cannot state (turn-only, an uncited target rejects the call) — the
+  // single-home grep guard (tests/shared/memory-rubric.test.ts) asserts the
+  // judgment prose itself appears nowhere on this surface.
   note:
-    "Write or correct a turn's note, or a session's title. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented) or `session` (`S<session>`). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written — never just to write one turn's note early.\n" +
+    "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written — never just to write one turn's note early.\n" +
     "skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\n" +
     "Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\n" +
-    "Relations — evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn: turn-only address lists; an uncited target rejects the call. Six ordered questions, first yes wins: (1) Did it test the claim, for or against? → evidenceFor/Against. (2) Rests on an earlier finding? → groundedOn. (3) Overturns the cited decision whole? → override; continues/revises part of it? → refines. (4) Does this write's own artifact carry the cited decision? → encodes. (5) If the cited turn were wrong, would the citing turn's conclusion also be wrong? → dependsOn. (6) None → no relation. Never soften (5) to \"used\"/\"built on\".\n" +
+    "Relations — evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn: turn-only address lists; an uncited target rejects the call. Which relation, if any — the judgment — lives in the Memory Rubric (SessionStart injection); this call only enforces the address/citation shape.\n" +
     "Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
@@ -206,46 +224,50 @@ const TYPE_VOCABULARY_LIST = MEMORY_TYPES.join("/");
 // now lives in its `.describe()` here — the SINGLE home for that field's
 // contract, so a reader who has the rendered schema in front of them (not
 // just the tool description) can read a field's rule at the point they fill
-// it in. `content`/`insight` stay in this one shared shape (turn AND session
-// both used to accept them) but are now turn-only: `mcp/note.ts` refuses them
-// by name on a session address, the same pattern `current` already used.
+// it in.
+//
+// ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): the `session`
+// address RETIRES from this shape outright — session has no main-agent
+// writer any more (three layers, three writers: turn/segment = main agent,
+// session = settlement, [S15069/T910]–[T913]). A caller still sending
+// `session` is `.strict()`'s ordinary unrecognised-key parse error at the
+// schema layer (there is nothing left on THIS schema to point it at — same
+// treatment ADR-0003's retired `grade` already gets); `mcp/note.ts`'s
+// `noteTool()` entry point additionally names settlement as the field's new
+// writer for a caller that bypasses the schema (the same belt-and-braces
+// pattern `current`/`RETIRED_SESSION_FIELD` used before this ticket retired
+// that check along with the rest of the session address).
 export const noteInputShape = {
   turn: z
     .string()
     .min(1)
-    .optional()
     .describe(
-      "Address of a finished turn: `S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented (see the tool description). Exactly one of `turn`/`session` is required.",
-    ),
-  session: z
-    .string()
-    .min(1)
-    .optional()
-    .describe(
-      "Address of a session: `S<session>`. The only field this call accepts is `title` — every other session field retired with the segment redesign. Exactly one of `turn`/`session` is required.",
+      "Address of a finished turn: `S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented (see the tool description).",
     ),
 
-  // Turn fields (title/session-shared with the session address).
+  // Turn fields. (ticket 09: `title` is turn-only now — the session address
+  // this describe used to also govern retired outright; settlement writes
+  // the session's own title/content through its own staged-commit channel.)
   title: z
     .string()
     .nullable()
     .optional()
     .describe(
-      `Turn (~${NOTE_TOKEN_BUDGET.title} tok): one English claim sentence — this turn's conclusion, standing alone in a title-only list. No activity/topic prefix (type/tags carry that). Name the decider when a ruling landed. No session-local codewords without a gloss. Session: a compressed label for this session, for another session browsing the roster.`,
+      `Turn (~${NOTE_TOKEN_BUDGET.title} tok): one English claim sentence — this turn's conclusion, standing alone in a title-only list. No activity/topic prefix (type/tags carry that). Name the decider when a ruling landed. No session-local codewords without a gloss.`,
     ),
   content: z
     .string()
     .nullable()
     .optional()
     .describe(
-      `Turn only (~${NOTE_TOKEN_BUDGET.content} tok): assume the title was just read — expand, never restate. In order: the precision that makes the conclusion usable, each rejected alternative with a one-line reason, secondary conclusions, citations. Sentence deletion test: remove a sentence — if the conclusion's derivation still holds, cut it. No process narration (replay stores it). Rejected on a session address.`,
+      `Turn only (~${NOTE_TOKEN_BUDGET.content} tok): assume the title was just read — expand, never restate. In order: the precision that makes the conclusion usable, each rejected alternative with a one-line reason, secondary conclusions, citations. Sentence deletion test: remove a sentence — if the conclusion's derivation still holds, cut it. No process narration (replay stores it).`,
     ),
   insight: z
     .string()
     .nullable()
     .optional()
     .describe(
-      `Turn only (~${NOTE_TOKEN_BUDGET.insight} tok, default omit): a task-scoped lesson under the episode-deletion test — delete the episode; does the sentence still teach someone useful prior knowledge? Rejected on a session address.`,
+      `Turn only (~${NOTE_TOKEN_BUDGET.insight} tok, default omit): a task-scoped lesson under the episode-deletion test — delete the episode; does the sentence still teach someone useful prior knowledge?`,
     ),
   type: z
     .array(z.string())
@@ -315,25 +337,34 @@ export const noteInputShape = {
   // sending it gets `.strict()`'s parse error, naming the unrecognised key —
   // existing `supersedes` EDGES stay frozen-readable (db/citations.ts), only
   // the write parameter is gone.
+  // ticket 11 (edge-ownership-impl): `refines`/`override`'s own discriminator
+  // — "if the predecessor's any sub-conclusion still holds, use refines" —
+  // moved to the Memory Rubric's 关系 section (single home for judgment;
+  // [S15069/T933]/[T939]). What stays here is FORMAT only: the phase pair
+  // both ends require, and a pointer to where the choice between the two is
+  // actually made.
   refines: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses a predecessor decision this write's own body continues or partially revises — decision-phase turns only (design/discuss/correction) on both ends; the predecessor is not wholly wrong. See `override`'s own description for the boundary between the two.",
+      "Addresses a predecessor decision this write's own body continues or partially revises — decision-phase turns only (design/discuss/correction) on both ends; the predecessor is not wholly wrong. Judgment (refines vs. override) lives in the Memory Rubric.",
     ),
   override: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses a predecessor decision this write's own body overturns WHOLE — decision-phase turns only (design/discuss/correction) on both ends. Discriminator: if the predecessor's any sub-conclusion still holds, use `refines` instead; override is reserved for when the whole predecessor is wrong.",
+      "Addresses a predecessor decision this write's own body overturns WHOLE — decision-phase turns only (design/discuss/correction) on both ends. Judgment (refines vs. override) lives in the Memory Rubric.",
     ),
   // ticket 01: `encodes` — a delivery-phase turn (spec/ADR/ticket/commit/
-  // release) naming the decision(s) it carries.
+  // release) naming the decision(s) it carries. Ticket 11: the minimal-set
+  // discriminator moved to the Memory Rubric (关系, question ④) — this
+  // describe keeps the format fact (self-asserted, not mechanically checked)
+  // and a pointer, not the rule itself.
   encodes: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses the decision(s) this write's own artifact (spec/ADR/ticket/commit/release) carries — a delivery-phase turn (implement/refactor/fix/delegate/review/ops) citing a decision-phase (design/discuss/correction) target. Discriminator: name only the minimal set that can derive the final conclusion, trimming dead ends and redundant paths — self-asserted, not mechanically checked.",
+      "Addresses the decision(s) this write's own artifact (spec/ADR/ticket/commit/release) carries — a delivery-phase turn (implement/refactor/fix/delegate/review/ops) citing a decision-phase (design/discuss/correction) target. Self-asserted, not mechanically checked; which decisions to name (the minimal set) is judgment — see the Memory Rubric.",
     ),
   dependsOn: z
     .array(z.string())
@@ -479,8 +510,17 @@ export const timelineInputShape = {
 // Ticket 06 (ownership-and-note-cadence spec, "选举机器拆除"): `tier`
 // (ADR-0003's election A/B/C) is RETIRED — settlement no longer assigns a
 // tier to any turn. `grade` stays; ADR-0003 is marked superseded.
+//
+// Ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): `turn`
+// becomes OPTIONAL and `session` joins it — exactly one of the two
+// addresses a call, the same shape `noteInputShape` used to give the main
+// tool before ticket 09 retired `session` from THAT surface. `title`/
+// `content` are what a `session`-addressed call writes (settlement's own
+// whole-rewrite semantics, unchanged) — grade/type/tags/relations stay
+// turn-only, refused by `evaluateSettlementTurnWrite`'s session branch.
 export const settlementNoteInputShape = {
-  turn: z.string().min(1),
+  turn: z.string().min(1).optional(),
+  session: z.string().min(1).optional(),
   title: z.string().optional(),
   content: z.string().optional(),
   insight: noteInputShape.insight,

@@ -168,20 +168,20 @@ describe("tool surface", () => {
     expect(note).toContain("never include <private> content");
     // spec E2: tool-call syntax is rejected, not silently stored.
     expect(note).toContain("Tool-call markup");
-    // ticket 07 (spec C3/C4): the relation fields' decision procedure is
-    // normative down to the dependsOn question's counterfactual wording, so
-    // it is here verbatim rather than paraphrased — a paraphrase that fit the
-    // old cap would be the exact softening the predecessor vocabulary
-    // measured at 61% precision. Ticket 01 (turn-edge-mechanism spec) widened
-    // the ladder from four to six questions (supersedes retired; override/
-    // refines/encodes replace and extend it; [S15069/T935] mid-flight added
-    // groundedOn right after the evidence question) — dependsOn moved from
-    // question 3 to question 5, and the wording shifted with it.
-    expect(note).toContain(
+    // ticket 11 (edge-ownership-impl, "统一 Memory Rubric"): the six ordered
+    // relation questions this text used to inline are JUDGMENT — they moved
+    // to the Memory Rubric wholesale ([S15069/T933]/[T937]–[T939]). What
+    // stays here is the call-level pointer plus the format facts a rubric
+    // cannot state.
+    expect(note).toContain("turn-only address lists");
+    expect(note).toContain("an uncited target rejects the call");
+    expect(note.toLowerCase()).toContain("memory rubric");
+    expect(note).not.toContain(
       "If the cited turn were wrong, would the citing turn's conclusion also be wrong?",
     );
-    expect(note).toContain("(6) None → no relation");
-    expect(note).toContain('Never soften (5) to "used"/"built on"');
+    expect(note).not.toContain("Six ordered questions");
+    expect(note).not.toContain("(6) None → no relation");
+    expect(note).not.toContain('Never soften (5) to "used"/"built on"');
     // `supersedes` retired from the relation vocabulary outright (ticket 01)
     // — no trace of it belongs on the surface a writer reads.
     expect(note).not.toContain("supersedes");
@@ -200,15 +200,18 @@ describe("tool surface", () => {
     // The grade parameter left the tool (ADR-0003) — no trace of it belongs
     // on the surface a writer reads.
     expect(note.toLowerCase()).not.toContain("grade");
-    // The retired session fields are gone from the tool description too —
-    // the session address now offers only `title`, stated on `session`'s own
-    // `.describe()`, not spelled out here.
+    // The retired session fields are gone from the tool description too.
     expect(note).not.toContain("decision/done/next_steps/reference");
+    // Ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): `session`
+    // retired from `note` outright — no address clause names it any more.
+    expect(note).not.toContain("or `session`");
+    expect(note).not.toContain("or a session's title");
 
     // The description sits in the cached prefix of every request, so the cap
-    // is a real per-turn cost. Moving the field contracts into `.describe()`
-    // shrank this text from 660 tok (its ticket-07-era cap) to well under
-    // half that — measured, not a round figure.
+    // is a real per-turn cost. Moving the field contracts into `.describe()`,
+    // then the relation judgment into the Memory Rubric (ticket 11), shrank
+    // this text well under its ticket-07-era cap — measured, not a round
+    // figure.
     expect(estimateTokens(note)).toBeLessThanOrEqual(420);
   });
 
@@ -304,24 +307,29 @@ describe("tool surface", () => {
   // ticket 01: the seven-word closed set — refines/override/encodes/
   // groundedOn replace supersedes; evidenceFor/evidenceAgainst/dependsOn are
   // untouched by name.
-  it("refines/override/encodes carry the two discriminator questions on their own parameter (ticket 01)", () => {
+  it("refines/override/encodes/groundedOn are present, and carry FORMAT only — the discriminators moved to the Memory Rubric (ticket 11)", () => {
     const shape = noteInputSchema.shape;
     expect(Object.keys(noteInputShape)).toContain("refines");
     expect(Object.keys(noteInputShape)).toContain("override");
     expect(Object.keys(noteInputShape)).toContain("encodes");
     expect(Object.keys(noteInputShape)).toContain("groundedOn");
 
-    // Discriminator 1 (spec's own worked example): override vs refines.
-    expect(shape.override.description).toContain(
+    // Format survives: the phase-pair facts a rubric cannot state.
+    expect(shape.override.description).toContain("decision-phase turns only");
+    expect(shape.encodes.description).toContain("delivery-phase turn");
+    expect(shape.encodes.description).toContain("not mechanically checked");
+
+    // Ticket 11: the two discriminator questions (override vs. refines,
+    // encodes' minimal-set rule) are judgment — single home is the Memory
+    // Rubric now, never restated on the describe().
+    expect(shape.override.description).not.toContain(
       "if the predecessor's any sub-conclusion still holds",
     );
-    expect(shape.override.description.toLowerCase()).toContain("refines");
-
-    // Discriminator 2: encodes' minimal-set rule, self-asserted not checked.
-    expect(shape.encodes.description).toContain(
+    expect(shape.encodes.description).not.toContain(
       "name only the minimal set that can derive the final conclusion",
     );
-    expect(shape.encodes.description).toContain("not mechanically checked");
+    expect(shape.override.description.toLowerCase()).toContain("memory rubric");
+    expect(shape.encodes.description.toLowerCase()).toContain("memory rubric");
   });
 
   // [S15069/T935] mid-flight amendment to ticket 01: `groundedOn` joined the
@@ -370,22 +378,22 @@ describe("tool surface", () => {
     ).toThrow();
   });
 
-  // ticket 01 requirement 5 (moved from ticket 09): the session address
-  // accepts title only. content/insight stay in the schema (still valid TURN
-  // fields) but the other six retired session fields — the four removed
-  // outright plus `current` (retired earlier, ticket 04) — are `.strict()`
-  // parse errors on EITHER surface, because they no longer exist anywhere in
-  // the schema.
-  it("noteInputSchema accepts both addressing surfaces and rejects every retired field", () => {
+  // ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): the session
+  // address retires from `note` OUTRIGHT — `turn` is the only address this
+  // schema accepts, and `session` (with every field that used to travel
+  // with it — title/decision/done/next_steps/reference/current) is a bare
+  // `.strict()` unrecognised-key parse error now, same treatment `grade`
+  // (ADR-0003) already gets: there is nothing left on this schema to point
+  // the caller at.
+  it("noteInputSchema is turn-only — session is a `.strict()` parse error, whatever else rides with it", () => {
     expect(
       noteInputSchema.parse({ turn: "S1/T1", title: "t", content: "c" }),
     ).toEqual({ turn: "S1/T1", title: "t", content: "c" });
-    expect(noteInputSchema.parse({ session: "S1", title: "A session title" })).toEqual(
-      { session: "S1", title: "A session title" },
-    );
+    expect(() => noteInputSchema.parse({ turn: "S1/T1", replace: true })).toThrow();
     expect(() =>
-      noteInputSchema.parse({ turn: "S1/T1", replace: true }),
+      noteInputSchema.parse({ session: "S1", title: "A session title" }),
     ).toThrow();
+    expect(() => noteInputSchema.parse({ session: "S1" })).toThrow();
     expect(() =>
       noteInputSchema.parse({
         turn: "S1/T1",
@@ -395,21 +403,10 @@ describe("tool surface", () => {
     expect(() =>
       noteInputSchema.parse({ turn: "S1/T1", status: "extracted" }),
     ).toThrow();
-    // ticket 04 (spec D2): the retired eighth session field is not offered to
-    // the model at all — neither as a value nor as a mode.
-    expect(() =>
-      noteInputSchema.parse({ session: "S1", current: "x" }),
-    ).toThrow();
-    expect(() =>
-      noteInputSchema.parse({
-        session: "S1",
-        title: "t",
-        mode: { current: "overwrite" },
-      }),
-    ).toThrow();
-    // ticket 01: the six further-retired session fields — decision/done/
-    // next_steps/reference are gone from the schema outright.
-    for (const field of ["decision", "done", "next_steps", "reference"] as const) {
+    // Every field that used to ride on a session address — including the
+    // eighth, `current` (ticket 04) — is equally gone: there is no session
+    // address left for any of them to attach to.
+    for (const field of ["current", "decision", "done", "next_steps", "reference"] as const) {
       expect(() =>
         noteInputSchema.parse({ session: "S1", [field]: "x" }),
       ).toThrow();
@@ -543,11 +540,10 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
     expect(settlementNoteInputShape.dependsOn).toBe(noteInputShape.dependsOn);
   });
 
-  it("declares no skip, session, crossSession, mode, or job-identity field", () => {
+  it("declares no skip, crossSession, mode, or job-identity field", () => {
     const keys = Object.keys(settlementNoteInputShape);
     for (const forbidden of [
       "skip",
-      "session",
       "crossSession",
       "mode",
       "jobId",
@@ -562,6 +558,19 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
       turn: "S1/T1",
       title: null,
     })).toThrow();
+  });
+
+  // Ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): `turn`
+  // becomes optional and `session` joins it — settlement's own session-
+  // narrative write, exactly one of the two addressing a call (enforced by
+  // `evaluateSettlementTurnWrite`, not by this shape's own zod union — same
+  // reasoning `noteInputShape`'s turn/session dispatch used before ticket 09
+  // retired that surface's own `session`).
+  it("turn is optional and session joins it (ticket 09) — both are legal on the wire schema", () => {
+    const schema = z.object(settlementNoteInputShape).strict();
+    expect(() => schema.parse({ turn: "S1/T1", grade: 2 })).not.toThrow();
+    expect(() => schema.parse({ session: "S1", title: "t", content: "c" })).not.toThrow();
+    expect(() => schema.parse({})).not.toThrow();
   });
 });
 

@@ -14,7 +14,7 @@ import {
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
-import { upsertSession } from "../../src/db/sessions";
+import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
 import {
@@ -145,11 +145,14 @@ function resultText(evaluation: SettlementTurnWriteEvaluation): string {
 // ---------------------------------------------------------------------------
 
 describe("settlementTurnWriteInputShape — the restricted surface (requirement 3)", () => {
-  test("declares no skip, session, crossSession, mode, or job-identity field", () => {
+  // Ticket 09 (edge-ownership-impl): `session` JOINS this surface now —
+  // settlement's own session-narrative write, exclusive with `turn`. See
+  // the "session-addressed narrative writes" describe block further down
+  // for its own behaviour.
+  test("declares no skip, crossSession, mode, or job-identity field", () => {
     const keys = Object.keys(settlementTurnWriteInputShape);
     for (const forbidden of [
       "skip",
-      "session",
       "crossSession",
       "mode",
       "jobId",
@@ -692,5 +695,158 @@ describe("tier is not a field this facade accepts any more (ticket 06)", () => {
 
   test("settlementTurnWriteInputShape declares no tier field", () => {
     expect(Object.keys(settlementTurnWriteInputShape)).not.toContain("tier");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): the
+// session-addressed branch — settlement's own session narrative write,
+// exclusive with `turn`, through the SAME evaluate/stage/commit shape as
+// every turn write above.
+// ---------------------------------------------------------------------------
+
+describe("session-addressed narrative writes (ticket 09)", () => {
+  test("writes title and content whole, and reports which fields landed", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = write(
+      baseContext(job),
+      { session: `S${sessionDbId}`, title: "a session title", content: "what happened this window" },
+      NOW,
+    );
+
+    expect(result.ok).toBe(true);
+    const session = getSession(db, sessionDbId)!;
+    expect(session.title).toBe("a session title");
+    expect(session.content).toBe("what happened this window");
+    expect(resultText(result)).toContain("session narrative");
+    expect(resultText(result)).toContain("title");
+    expect(resultText(result)).toContain("content");
+  });
+
+  test("content alone lands without touching an existing title (whole-overwrite, no append)", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+    write(baseContext(job), { session: `S${sessionDbId}`, title: "first title" }, NOW);
+
+    const result = write(baseContext(job), { session: `S${sessionDbId}`, content: "increment one" }, NOW + 1);
+
+    expect(result.ok).toBe(true);
+    const session = getSession(db, sessionDbId)!;
+    expect(session.title).toBe("first title");
+    expect(session.content).toBe("increment one");
+
+    // A second content-only call REPLACES rather than appending — the model
+    // is expected to compose the incremented text itself.
+    write(baseContext(job), { session: `S${sessionDbId}`, content: "increment two" }, NOW + 2);
+    expect(getSession(db, sessionDbId)?.content).toBe("increment two");
+  });
+
+  test("rejects a call naming neither title nor content", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = write(baseContext(job), { session: `S${sessionDbId}` }, NOW);
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("at least one of title, content");
+  });
+
+  test("rejects grade/type/tags/relations on a session address, naming them turn fields", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    for (const extra of [
+      { grade: 2 },
+      { type: ["design"] },
+      { tags: ["auth"] },
+      { evidenceFor: ["S1/T1"] },
+      { dependsOn: ["S1/T1"] },
+    ]) {
+      const result = write(
+        baseContext(job),
+        { session: `S${sessionDbId}`, title: "x", ...extra },
+        NOW,
+      );
+      expect(result.ok).toBe(false);
+      expect(!result.ok && result.message).toContain("is a turn field");
+    }
+  });
+
+  test("rejects a session address outside this dispatch's own session", () => {
+    const sessionDbId = seedSession();
+    const otherSessionDbId = upsertSession(db, {
+      contentSessionId: "settlement-turn-facade-other-session",
+      project: "/tmp/project-settlement-turn-facade",
+      title: "a different session",
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW - 5_000,
+      updatedAtEpoch: NOW - 5_000,
+      completedAtEpoch: null,
+    }).id;
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = write(
+      baseContext(job),
+      { session: `S${otherSessionDbId}`, title: "not mine to write" },
+      NOW,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("not this dispatch's own session");
+    expect(getSession(db, otherSessionDbId)?.title).toBe("a different session");
+  });
+
+  test("rejects a malformed session address", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = write(baseContext(job), { session: "not-an-address", title: "x" }, NOW);
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain('"S<session>" address');
+  });
+
+  test("turn and session together are refused, not silently resolved to one", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { turn: `S${sessionDbId}/T1`, session: `S${sessionDbId}`, title: "x", grade: 1 },
+      NOW,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("not both");
+  });
+
+  test("neither turn nor session is refused", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = write(baseContext(job), { grade: 1 } as unknown as SettlementTurnWriteInput, NOW);
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("exactly one of turn or session");
+  });
+
+  test("apply:false stages the receipt without writing — the mirror of the turn-write dry-run behaviour", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const dryRun = evaluateSettlementTurnWrite(
+      db,
+      baseContext(job),
+      { session: `S${sessionDbId}`, title: "would-be title" },
+      NOW,
+      { apply: false },
+    );
+
+    expect(dryRun.ok).toBe(true);
+    expect(getSession(db, sessionDbId)?.title).toBe("settlement turn facade fixture");
   });
 });

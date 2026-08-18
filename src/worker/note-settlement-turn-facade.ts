@@ -11,12 +11,17 @@ import {
   type WriteEdgeInput,
 } from "../db/memory-edges";
 import { parseBareAddressReference, validateReferences } from "../db/references";
+import { getSession, updateSessionFields } from "../db/sessions";
 import { getShadowNote } from "../db/shadow-notes";
 import { getTurn, updateTurnById } from "../db/turns";
+import { settlementNoteInputShape } from "../mcp/definitions";
+import { parseSessionAddress, parseTurnAddress } from "../mcp/note";
+import {
+  formatSessionFieldUsage,
+  SESSION_SUMMARY_FIELDS,
+} from "../mcp/session-summary";
 import { findRetiredTopicTag, retiredTopicTagMessage } from "../shared/tag-stripping";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
-import { settlementNoteInputShape } from "../mcp/definitions";
-import { parseTurnAddress } from "../mcp/note";
 
 /**
  * The settlement turn-write facade (spec G6/G7/D5/D5a; staged commit per
@@ -189,11 +194,32 @@ export interface RelationOutcome {
   written: number;
 }
 
+/**
+ * Ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): the outcome of
+ * a `session`-addressed call — `title`/`content` written whole (settlement's
+ * usual "no append, no null-clear" reconstruction semantics, same as the
+ * retired main-agent prose path used to give a turn). `titleWritten`/
+ * `contentWritten` distinguish "field present in the call" from "field
+ * landed", since `title` is expected to be a no-op on most windows (it is
+ * set once, when still empty — the session row itself is not visible to this
+ * facade's caller, so "was it actually empty" is answered by
+ * `evaluateSettlementSessionWrite` at read time, not assumed here).
+ */
+export interface SessionNarrativeOutcome {
+  sessionId: number;
+  titleWritten: boolean;
+  contentWritten: boolean;
+  usage: string[];
+}
+
 export interface SettlementTurnWriteOutcome {
   ref: string;
-  turnId: number;
+  /** `null` for a `session`-addressed outcome — there is no turn row. */
+  turnId: number | null;
   review: ReviewOutcome | null;
   relations: RelationOutcome | null;
+  /** `null` for a `turn`-addressed outcome. */
+  session: SessionNarrativeOutcome | null;
 }
 
 export type SettlementTurnWriteEvaluation =
@@ -308,6 +334,110 @@ function evaluateRelationCandidates(
   return { accepted, rejections };
 }
 
+const SESSION_ONLY_FORBIDDEN_FIELDS = [
+  "insight",
+  "grade",
+  "type",
+  "tags",
+  "evidenceFor",
+  "evidenceAgainst",
+  "supersedes",
+  "dependsOn",
+] as const;
+
+/**
+ * The session-narrative branch (ticket 09, edge-ownership-impl: "结算顺手维
+ * 护 session 叙事"). Settlement is the session's SOLE writer now — `note`'s
+ * own session address retired outright (`mcp/note.ts`). `title`/`content`
+ * are whole-overwrite, no append, no null-clear — the same reconstruction
+ * semantics the retired main-agent prose path used to give a turn, reused
+ * here for the one address kind that still wants it: `title` set once (this
+ * function does not special-case "already non-empty" — a repeat call simply
+ * overwrites, so the PROMPT is what tells the model to leave it alone once
+ * set), `content` incremented by the model composing old-plus-new text
+ * itself (it can already see the current session summary in its own
+ * context) and submitting the whole result.
+ */
+function evaluateSettlementSessionWrite(
+  db: Database,
+  context: SettlementTurnFacadeContext,
+  rawInput: SettlementTurnWriteInput,
+  nowEpoch: number,
+  options: EvaluateSettlementTurnWriteOptions,
+): SettlementTurnWriteEvaluation {
+  const sessionId = parseSessionAddress(rawInput.session!);
+  if (sessionId === null) {
+    return {
+      ok: false,
+      message: `session must be a "S<session>" address; got "${rawInput.session}".`,
+    };
+  }
+  const ref = `S${sessionId}`;
+
+  if (sessionId !== context.sessionId) {
+    return {
+      ok: false,
+      message:
+        `${ref} is not this dispatch's own session (S${context.sessionId}) — ` +
+        "settlement may only write its own session's narrative.",
+    };
+  }
+
+  for (const key of SESSION_ONLY_FORBIDDEN_FIELDS) {
+    if (rawInput[key] !== undefined) {
+      return { ok: false, message: `${key} is a turn field; this call addresses a session.` };
+    }
+  }
+
+  if (rawInput.title === undefined && rawInput.content === undefined) {
+    return {
+      ok: false,
+      message: `at least one of ${SESSION_SUMMARY_FIELDS.join(", ")} is required.`,
+    };
+  }
+
+  const session = getSession(db, sessionId);
+  if (!session) {
+    return { ok: false, message: `no session at ${ref}.` };
+  }
+
+  if (options.apply) {
+    updateSessionFields(
+      db,
+      sessionId,
+      {
+        title: rawInput.title,
+        content: rawInput.content,
+      },
+      nowEpoch,
+    );
+  }
+
+  const usage: string[] = [];
+  if (rawInput.title !== undefined) {
+    usage.push(formatSessionFieldUsage("title", rawInput.title));
+  }
+  if (rawInput.content !== undefined) {
+    usage.push(formatSessionFieldUsage("content", rawInput.content));
+  }
+
+  return {
+    ok: true,
+    outcome: {
+      ref,
+      turnId: null,
+      review: null,
+      relations: null,
+      session: {
+        sessionId,
+        titleWritten: rawInput.title !== undefined,
+        contentWritten: rawInput.content !== undefined,
+        usage,
+      },
+    },
+  };
+}
+
 /**
  * The settlement turn-write facade's whole decision (spec A7's staged split).
  * Every read below runs unconditionally; every write is gated on
@@ -315,6 +445,10 @@ function evaluateRelationCandidates(
  * the caller (staging engine) decides what a failure means at its own layer
  * (a parameter error at stage time, a thrown commit-replay refusal at commit
  * time), which is not this function's business.
+ *
+ * Ticket 09: `session` (exclusive with `turn`) routes to
+ * `evaluateSettlementSessionWrite` above — the rest of this function is
+ * unchanged, turn-addressed behaviour.
  */
 export function evaluateSettlementTurnWrite(
   db: Database,
@@ -323,6 +457,16 @@ export function evaluateSettlementTurnWrite(
   nowEpoch: number,
   options: EvaluateSettlementTurnWriteOptions,
 ): SettlementTurnWriteEvaluation {
+  if (rawInput.session !== undefined) {
+    if (rawInput.turn !== undefined) {
+      return { ok: false, message: "exactly one of turn or session is required, not both." };
+    }
+    return evaluateSettlementSessionWrite(db, context, rawInput, nowEpoch, options);
+  }
+  if (rawInput.turn === undefined) {
+    return { ok: false, message: "exactly one of turn or session is required." };
+  }
+
   const address = parseTurnAddress(rawInput.turn);
   if (!address) {
     return {
@@ -511,7 +655,7 @@ export function evaluateSettlementTurnWrite(
     }
   }
 
-  return { ok: true, outcome: { ref, turnId: turn.id, review, relations } };
+  return { ok: true, outcome: { ref, turnId: turn.id, review, relations, session: null } };
 }
 
 /**
@@ -552,6 +696,17 @@ export function renderSettlementTurnWriteReceipt(
   if (outcome.relations) {
     parts.push(
       `${verb} ${outcome.relations.written} relation(s)${options.staged ? " (pending commit)" : ""}.`,
+    );
+  }
+  if (outcome.session) {
+    const fields = [
+      outcome.session.titleWritten ? "title" : null,
+      outcome.session.contentWritten ? "content" : null,
+    ].filter((field): field is string => field !== null);
+    parts.push(
+      `${verb} session narrative for ${outcome.ref} (${fields.join(", ")})` +
+        `${options.staged ? " (pending commit)" : ""}` +
+        `${outcome.session.usage.length > 0 ? `: ${outcome.session.usage.join(", ")}` : ""}.`,
     );
   }
   if (parts.length === 0) {

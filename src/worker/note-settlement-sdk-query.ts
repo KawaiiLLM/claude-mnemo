@@ -64,13 +64,15 @@ const SETTLEMENT_ALLOWED_TOOLS = [
  * `commit`.
  */
 const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
-  "STAGE a turn's grade/type/tags and/or relations — validated now, " +
-  "written only when you call `commit`. `turn`: \"S<session>/T<prompt>\", " +
-  "from the window or preceding-turns section below — this is also this " +
-  "call's KEY: staging the same turn again REPLACES what you staged for it " +
-  "before, so a lost-receipt retry or a same-run correction is just " +
-  "another call, not a new problem. Does NOT accept title/content/insight " +
-  "— turn prose is the main agent's alone to write. " +
+  "STAGE a turn's grade/type/tags and/or relations, OR this session's " +
+  "narrative — validated now, written only when you call `commit`. " +
+  "Exactly one of `turn` (\"S<session>/T<prompt>\", from the window or " +
+  "preceding-turns section) or `session` (\"S<session>\", this session). " +
+  "Either is also this call's KEY: staging the same turn or session again " +
+  "REPLACES what you staged for it before, so a lost-receipt retry or a " +
+  "same-run correction is just another call, not a new problem. " +
+  "On `turn`: does NOT accept title/content/insight — turn prose is the " +
+  "main agent's alone to write. " +
   "grade (0-4)/type/tags: only for a turn shown in this prompt (window or " +
   "preceding turns); each overwrites whole when present, omit to leave " +
   "alone — there is no append. " +
@@ -78,7 +80,10 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "must already be a pair that existed before this run started AND still " +
   "exist when `commit` lands it — you cannot license a relation on a pair a " +
   "call earlier in this SAME run just created, or on one the main agent has " +
-  "since stopped citing.";
+  "since stopped citing. " +
+  "On `session`: `title`/`content` only, each overwritten whole when " +
+  "present (no append — compose the incremented text yourself from what " +
+  "you can already see) — grade/type/tags/relations are refused.";
 
 /**
  * The `remember` tool's settlement-side call contract — `propose` is the

@@ -12,9 +12,11 @@ import {
   listRecentSettlementProposals,
   type NoteSettlementProposalRecord,
 } from "../db/note-settlement-proposals";
+import { estimateDiaryTokens } from "../diary/domain";
 import { truncateText } from "../mcp/format";
 import { recallMemory } from "../mcp/recall";
 import { timelineQuery } from "../mcp/timeline";
+import { renderMemoryRubricBlock } from "../shared/memory-rubric";
 import { typeWordGlyph } from "../shared/type-vocabulary";
 import { estimateTokens } from "../utils/token-estimate";
 
@@ -292,6 +294,85 @@ export function topicNameForSegment(
   segment: Pick<SegmentRecord, "topicId">,
 ): string | null {
   return segment.topicId ? getTopic(db, segment.topicId)?.name ?? null : null;
+}
+
+// ---------------------------------------------------------------------------
+// The Memory Rubric + segment roster shared block (ticket 11, edge-ownership-
+// impl: "与段名册共享一个注入块").
+// ---------------------------------------------------------------------------
+
+/**
+ * The shared budget (ticket 11): "与旧 RecentSessions+DiaryIndex 共享预算同构"
+ * — structurally the same shape as that retired pair's own split (a
+ * fixed-priority block first, a remainder-consumer second), sized the same
+ * 2000 tokens `SEGMENT_BLOCK_PAGE_BUDGET` already uses per attached-segment
+ * block. Measured: the rubric alone renders at ~1460 tok
+ * (`estimateDiaryTokens`), leaving ~540 tok of headroom over the roster's
+ * observed ~175 tok in production — comfortable, not tight.
+ */
+export const RUBRIC_AND_ROSTER_BUDGET_TOKENS = 2_000;
+
+/**
+ * A hard-limit character budget from a TOKEN budget, biased to never
+ * overshoot: `estimateDiaryTokens` weighs a Han character at 1.1× (then a
+ * further 1.2× overall) versus 0.6× for anything else, so pricing every
+ * character at the Han weight is the WORST CASE — the roster text this
+ * bounds is free-form (segment titles), so a ratio that assumes the cheapest
+ * (non-CJK) case could let a CJK-heavy title push the actual token count
+ * over the budget it was supposed to respect.
+ */
+const CONSERVATIVE_CHARS_PER_TOKEN = 1 / (1.1 * 1.2);
+
+function tokenBudgetToCharLimit(budgetTokens: number): number {
+  return Math.max(0, Math.floor(budgetTokens * CONSERVATIVE_CHARS_PER_TOKEN));
+}
+
+/**
+ * Ticket 11's own explicit-failure requirement ("超预算显式失败;禁止静默截
+ * 断——截尾丢的恰是排在后面的关系与归属规则"): the rubric's own text is
+ * fixed-length and NEVER elided — silently truncating it would cut its own
+ * trailing sections (关系, 归属) first, which is exactly backwards from what
+ * a partial rubric should lose. When the rubric alone already meets or
+ * exceeds the shared budget, the roster is omitted OUTRIGHT (never rendered
+ * partially, which would look like "few/no live segments" rather than "ran
+ * out of room") and this marker says so in words a reader — or a guard test
+ * grepping for "INCOMPLETE" — cannot mistake for silence.
+ */
+function rubricOverBudgetMarker(rubricTokens: number, budgetTokens: number): string {
+  return (
+    `[block INCOMPLETE: the Memory Rubric alone (${rubricTokens} tok) meets or ` +
+    `exceeds the shared injection budget (${budgetTokens} tok) — segment roster ` +
+    "omitted rather than silently truncating either]"
+  );
+}
+
+/**
+ * The rubric + segment roster, one injection block (ticket 11). The rubric
+ * renders first, fixed-length, never participating in any elision; the
+ * roster spends whatever budget is left over — same priority order the
+ * retired RecentSessions+DiaryIndex split used. Not a segment-count trim (the
+ * roster already has its own, `ROSTER_MAX_SEGMENTS`): this additionally
+ * hard-caps the roster's RENDERED SIZE so the two together never exceed
+ * `budgetTokens`, the same demote discipline `composeWithDemoteLadder`
+ * already applies to a single attached-segment block, one level up.
+ */
+export function renderRubricAndRosterBlock(
+  db: Database,
+  options: SegmentRosterOptions = {},
+  budgetTokens: number = RUBRIC_AND_ROSTER_BUDGET_TOKENS,
+): string {
+  const rubric = renderMemoryRubricBlock();
+  const rubricTokens = estimateDiaryTokens(rubric);
+  const remainingTokens = budgetTokens - rubricTokens;
+
+  if (remainingTokens <= 0) {
+    return [rubric, "", rubricOverBudgetMarker(rubricTokens, budgetTokens)].join("\n");
+  }
+
+  const roster = renderSegmentRoster(db, options);
+  const fittedRoster = enforceHardCharLimit(roster, tokenBudgetToCharLimit(remainingTokens));
+
+  return [rubric, "", fittedRoster].join("\n");
 }
 
 // ---------------------------------------------------------------------------

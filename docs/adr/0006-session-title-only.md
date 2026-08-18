@@ -2,6 +2,18 @@
 
 **Status:** accepted · 2026-08-17 · source: S15069 T824 (grill round 3)
 
+**Superseded in part** (ticket 09, edge-ownership-impl, [S15069/T910]–[T913]):
+this ADR's "title-only" claim and its "lazily written by the main agent" claim
+are both overturned. `content` REJOINS the session as a storage field — a
+conversational narrative increment, never task state — and settlement, not
+the main agent, is the session's SOLE writer for both `title` and `content`,
+incrementing the narrative after every settled window through its own
+staged-commit channel (`.scratch/ownership-and-note-cadence/spec.md`'s
+"session 字段" section; `note`'s own session address retired outright,
+`mcp/note.ts`). The injection design below (segment blocks, roster,
+proposals) is UNAFFECTED — no session-card injection was added by this
+change; only the write path and the field count moved.
+
 The session's seven semantic fields reduce to `title` — a one-line episodic label,
 lazily written by the main agent, auto-draftable from the first attached segment.
 Everything else a browser needs is composed from the attached-segment list, the

@@ -8,7 +8,7 @@ import {
 } from "../../db/sessions";
 import {
   ATTACHED_SEGMENT_BLOCK_SLOTS,
-  renderSegmentRoster,
+  renderRubricAndRosterBlock,
 } from "../session-composition";
 import { listAttachedSegmentsByActivity } from "../../db/segments";
 import { resolveEraCutoff } from "../../db/era";
@@ -157,7 +157,11 @@ function buildContextOutput(
       )
     : undefined;
 
-  return renderSegmentRoster(db, { eraCutoffEpoch, overflowAttachedSegmentIds });
+  // Ticket 11 (edge-ownership-impl): the roster now shares its block with
+  // the Memory Rubric — the rubric renders first, fixed-length; the roster
+  // spends whatever budget is left over (see the function's own doc
+  // comment for the "never silently truncate the rubric" discipline).
+  return renderRubricAndRosterBlock(db, { eraCutoffEpoch, overflowAttachedSegmentIds });
 }
 
 export function createReadOnlyContextHandler(

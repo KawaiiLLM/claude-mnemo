@@ -18,13 +18,6 @@ import {
   recordDeclinedNoteDebt,
 } from "../db/note-debt";
 import { parseBareAddressReference } from "../db/references";
-import {
-  countTurnsSince,
-  getSession,
-  updateSessionFields,
-  type SessionRecord,
-  type UpdateSessionFieldsInput,
-} from "../db/sessions";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import {
   getTurn,
@@ -34,15 +27,6 @@ import {
   type TurnRecord,
 } from "../db/turns";
 import { isSegmentEra } from "../segment-era";
-import {
-  formatSessionFieldUsage,
-  formatSummaryCadence,
-  RETIRED_SESSION_FIELD,
-  retiredSessionFieldMessage,
-  SESSION_FIELD_GUIDANCE,
-  SESSION_SUMMARY_FIELDS,
-  type SessionSummaryField,
-} from "./session-summary";
 import {
   budgetOverageRejection,
   formatNoteBudget,
@@ -83,21 +67,19 @@ const FIELD_MODE_VALUES: readonly FieldMode[] = ["append", "overwrite"];
 // ticket 01 (ADR-0003): `grade` left this list along with the parameter
 // itself — the writer records facts, settlement assigns value.
 const TURN_MODE_FIELDS = ["title", "content", "insight", "type", "tags"] as const;
-// ticket 01/09 (spec "Session retirement"): one field, `title` — the other
-// six retired with the segment redesign. One list, imported rather than
-// restated, so the tool surface and the receipt's guidance values cannot
-// describe different sets of fields.
-const SESSION_MODE_FIELDS = SESSION_SUMMARY_FIELDS;
 
 export interface NoteToolInput {
-  // Exactly one of `turn` / `session` addresses the write (D5/E1: one tool,
-  // both surfaces).
+  // `turn` is the only address this tool accepts now (ticket 09: the
+  // `session` address retired outright — settlement is the session's sole
+  // writer, through its own staged-commit channel; see
+  // `worker/note-settlement-turn-facade.ts`). `session` stays declared here,
+  // `unknown`, ONLY so `noteTool()`'s own entry-point guard can name a
+  // caller still sending it and point at settlement rather than have it
+  // silently vanish as an object property TypeScript never sees.
   turn?: unknown;
   session?: unknown;
 
-  // Turn fields. `title`/`content`/`insight` are shared with the session
-  // address (session accepts `title` only — `content`/`insight` are refused
-  // by name there; see `handleSessionWrite`).
+  // Turn fields.
   title?: unknown;
   content?: unknown;
   insight?: unknown;
@@ -200,7 +182,11 @@ export function parseTurnAddress(value: string): TurnAddress | null {
   return { sessionId, promptNumber };
 }
 
-function parseSessionAddress(value: string): number | null {
+// Exported (ticket 09): the note tool's own session address retired, but the
+// address FORMAT ("S<n>") is still what settlement's own session-narrative
+// write parses (worker/note-settlement-turn-facade.ts) — one parser, not a
+// second hand-kept copy of the same regex.
+export function parseSessionAddress(value: string): number | null {
   const match = SESSION_ADDRESS_PATTERN.exec(value.trim());
   if (!match) {
     return null;
@@ -654,12 +640,6 @@ function parseModeMap(
   }
   const result: Partial<Record<string, FieldMode>> = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (key === RETIRED_SESSION_FIELD) {
-      // Named, not lumped into the generic "unknown field" answer: a caller
-      // still sending `mode.current` is working from the retired contract and
-      // needs to be told which field replaced it (ticket 04, spec D2).
-      fail(retiredSessionFieldMessage("mode"));
-    }
     if (!allowed.includes(key)) {
       fail(`mode.${key} names a field this call does not accept a mode for.`);
     }
@@ -1170,201 +1150,47 @@ function handleTurnWrite(
 }
 
 // ---------------------------------------------------------------------------
-// Session write
-// ---------------------------------------------------------------------------
-
-function handleSessionWrite(
-  db: Database,
-  sessionId: number,
-  input: NoteToolInput,
-  options: NoteToolOptions,
-): ToolTextResult {
-  // ticket 01 (spec "Session retirement"): `content`/`insight` retired from
-  // the session address specifically — they stay in `noteInputShape`'s
-  // schema because they are still valid TURN fields, so `.strict()` cannot
-  // catch a session call sending them; refused here by name instead, same
-  // pattern `current` already used. `next_steps`/`decision`/`done`/
-  // `reference` need no entry here at all: they are removed from the schema
-  // outright and already fail as a `.strict()` parse error before `noteTool`
-  // is even reached by a schema-validated caller (and a caller bypassing the
-  // schema, e.g. a direct `noteTool()` call, simply has them ignored — there
-  // is no field left on `NoteToolInput` to read them into). `grade` needs no
-  // entry either, for the identical reason (ADR-0003: it left this tool).
-  for (const key of [
-    "content",
-    "insight",
-    "type",
-    "tags",
-    "skip",
-    "crossSession",
-    "evidenceFor",
-    "evidenceAgainst",
-    "groundedOn",
-    "refines",
-    "override",
-    "encodes",
-    "dependsOn",
-  ] as const) {
-    if ((input as Record<string, unknown>)[key] !== undefined) {
-      return parameterError(`${key} is a turn field; this call addresses a session.`);
-    }
-  }
-
-  const providedFields = SESSION_MODE_FIELDS.filter(
-    (key) => (input as Record<string, unknown>)[key] !== undefined,
-  );
-  if (providedFields.length === 0) {
-    return parameterError(
-      `at least one of ${SESSION_MODE_FIELDS.join(", ")} is required.`,
-    );
-  }
-
-  let modeMap: Partial<Record<string, FieldMode>>;
-  try {
-    modeMap = parseModeMap(input.mode, SESSION_MODE_FIELDS);
-  } catch (error) {
-    if (error instanceof NoteValidationError) {
-      return parameterError(error.message);
-    }
-    throw error;
-  }
-
-  const session = getSession(db, sessionId);
-  if (!session) {
-    return textResult(`Session S${sessionId} not found.`);
-  }
-
-  // One field, `title` — SESSION_MODE_FIELDS (session-summary.ts) is the
-  // single source for what a session write may touch; this map stays keyed
-  // off it rather than a hand-kept literal so the two cannot drift apart.
-  const fieldMap: ReadonlyArray<[key: SessionSummaryField, existing: string | null]> = [
-    ["title", session.title],
-  ];
-
-  let resolvedInput: UpdateSessionFieldsInput;
-  const finals: Array<[SessionSummaryField, string | null]> = [];
-  try {
-    resolvedInput = {};
-    for (const [key, existing] of fieldMap) {
-      const provided = (input as Record<string, unknown>)[key];
-      if (provided === undefined) {
-        continue;
-      }
-      const resolution = resolveStringField(key, provided, existing, modeMap[key], {
-        nullable: true,
-      });
-      // ticket 01: budget teeth on the session's own field, same 2× hard
-      // line as a turn's title/content/insight — shared helper, this
-      // field's own guidance value.
-      if (resolution.value !== null) {
-        const rejection = budgetOverageRejection(
-          key,
-          resolution.value,
-          SESSION_FIELD_GUIDANCE[key],
-        );
-        if (rejection) fail(rejection);
-      }
-      finals.push([key, resolution.value]);
-      // `key` is `"title"` today — the one field left on the session address
-      // — which happens to need no camelCase remapping the way the retired
-      // `next_steps` -> `nextSteps` once did.
-      (resolvedInput as Record<string, string | null>)[key] = resolution.value;
-    }
-  } catch (error) {
-    if (error instanceof NoteValidationError) {
-      return parameterError(error.message);
-    }
-    throw error;
-  }
-
-  // Read BEFORE the write: `updateSessionFields` advances the summary epoch
-  // unconditionally, so the staleness this write is answering is only
-  // measurable from the row as it stood on the way in (spec D8).
-  const priorSummaryEpoch = session.summaryUpdatedAtEpoch;
-  const turnsSinceUpdate = countTurnsSince(db, sessionId, priorSummaryEpoch);
-
-  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
-  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const updated = writeTransaction(db, () =>
-    updateSessionFields(db, sessionId, resolvedInput, nowEpoch),
-  );
-
-  if (!updated) {
-    return textResult(`Session S${sessionId} not found.`);
-  }
-
-  // The receipt is the only feedback a session write's author ever gets (spec
-  // D8), and it carries exactly two things: per-field usage against the
-  // guidance value — post-write totals, so an appending writer sees where the
-  // field now STANDS rather than what it just added — and how many turns have
-  // passed since the last update. Nothing here truncates: over budget is a
-  // signal to the writer, never a loss to the reader.
-  //
-  // The cadence figure travels without its healthy band, deliberately (D8a).
-  // Do not "helpfully" add one: a writer that knows the target updates to
-  // reset the counter, and the diagnostic then reads healthy by construction.
-  const parts = [`Updated S${sessionId}.`];
-  parts.push(
-    `after write: ${finals
-      .map(([key, value]) => formatSessionFieldUsage(key, value))
-      .join(", ")}.`,
-  );
-  parts.push(formatSummaryCadence(turnsSinceUpdate, priorSummaryEpoch !== null));
-
-  return textResult(parts.join(" "));
-}
-
-// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 /**
- * `note` — the merged write tool (spec E1, ticket 03). One tool writes turns
- * and sessions; the retired `remember` entry point is gone. Merging is not
- * only tidiness: it removes an unfenced third writer of a turn's `grade`,
- * `type` and `tags`, so the note-timestamp fence that protects a late note
- * covers every write path without a new provenance column.
+ * `note` — the merged write tool (spec E1, ticket 03). Turn-only now (ticket
+ * 09, edge-ownership-impl "结算顺手维护 session 叙事"): the session address
+ * this section used to carry (`handleSessionWrite`) retired outright —
+ * session has no main-agent writer any more. Three layers, three writers:
+ * turn/segment stay the main agent's (`note`/`remember`), session moved to
+ * settlement's own staged-commit channel
+ * (`worker/note-settlement-turn-facade.ts`'s `evaluateSettlementTurnWrite`,
+ * a `session`-addressed branch alongside its existing `turn`-addressed one).
+ * `noteInputShape` dropped the `session` parameter entirely (a schema-
+ * validated caller sending it gets `.strict()`'s ordinary parse error); the
+ * guard below is this function's OWN belt-and-braces check for a caller that
+ * reaches `noteTool()` directly, without the schema in front — same pattern
+ * `current`'s retirement (ticket 04) used to apply here before this ticket
+ * folded session retirement's `current` special-case into the wider one.
  */
 export function noteTool(
   db: Database,
   rawInput: NoteToolInput,
   options: NoteToolOptions = {},
 ): ToolTextResult {
-  // ticket 04 (spec D2): `current` is deleted, and a caller still sending it
-  // is REFUSED rather than having the field quietly dropped — a writer whose
-  // update vanishes without a word keeps writing into the same hole. Checked
-  // at the entry point so it answers the same way on both addressing surfaces
-  // and for callers that reach `noteTool` without the zod schema in front.
-  if ((rawInput as Record<string, unknown>)[RETIRED_SESSION_FIELD] !== undefined) {
-    return parameterError(retiredSessionFieldMessage("field"));
-  }
-
-  const hasTurn = typeof rawInput.turn === "string";
-  const hasSession = typeof rawInput.session === "string";
-
-  if (rawInput.turn !== undefined && !hasTurn) {
-    return parameterError("turn must be a string when present.");
-  }
-  if (rawInput.session !== undefined && !hasSession) {
-    return parameterError("session must be a string when present.");
-  }
-
-  if (hasTurn === hasSession) {
+  if ((rawInput as Record<string, unknown>).session !== undefined) {
     return parameterError(
-      hasTurn
-        ? "exactly one of turn or session is required, not both."
-        : 'exactly one of turn ("S<session>/T<prompt>") or session ("S<session>") is required.',
+      "session writes retired from `note` — session has no main-agent writer any" +
+        " more. Settlement is the session's sole writer now: title is set once" +
+        " (when still empty) and content is incremented with a conversational" +
+        " narrative after each settled window. Nothing was written.",
     );
   }
 
-  if (hasSession) {
-    const sessionId = parseSessionAddress(rawInput.session as string);
-    if (sessionId === null) {
-      return parameterError(
-        `session must be a "S<session>" address, e.g. "S15069"; got "${rawInput.session}".`,
-      );
-    }
-    return handleSessionWrite(db, sessionId, rawInput, options);
+  const hasTurn = typeof rawInput.turn === "string";
+
+  if (!hasTurn) {
+    return parameterError(
+      rawInput.turn === undefined
+        ? 'turn ("S<session>/T<prompt>") is required.'
+        : "turn must be a string when present.",
+    );
   }
 
   const address = parseTurnAddress(rawInput.turn as string);
