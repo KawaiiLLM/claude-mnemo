@@ -24,6 +24,15 @@ import { renderSessionStateInjection } from "../mcp/session-output";
  * is the failure mode A4 names: "managing the main agent's injected context
  * must not require a second, divergent edit for the subagent."
  *
+ * ownership-and-note-cadence spec, "session 字段" ([S15069/T910]-[T913]):
+ * insight/next_steps/decision/done/reference retire from this injection
+ * unconditionally — `content` (plus `title` in the heading line) is all that
+ * is left to render. That collapses the `fields` reader split below: both
+ * `"all"` and `"global-view"` now produce identical output. The parameter
+ * stays (the settlement caller passes `fields: "global-view"` explicitly)
+ * so this remains a signature-compatible change, not a second edit at the
+ * one remaining call site.
+ *
  * Where the two genuinely differ, the difference is a PARAMETER here, never a
  * second implementation:
  *
@@ -40,19 +49,6 @@ import { renderSessionStateInjection } from "../mcp/session-output";
  *     field's own comment below: settlement is a third reader and wants the
  *     arc, not the resuming session's event stream.
  */
-
-/** Insight is stored as one bullet-per-line string and injected as a list. */
-export function splitInsight(insight: string | null): string[] {
-  if (!insight) {
-    return [];
-  }
-
-  return insight
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => line.replace(/^-+\s*/, ""));
-}
 
 /** The corpus header: how much memory exists, which session is current, and the three read axes. */
 export function buildCorpusHeader(
@@ -92,23 +88,13 @@ export interface MainAgentSessionInjectionInput {
    */
   tokenBudget?: number;
   /**
-   * Which of ticket 04's two field groups to render (user ruling, S15069/T759).
-   *
-   * Ticket 04 split the seven fields BY READER: `title`/`content`/`insight`
-   * are the compressed global view, written for a DIFFERENT session browsing
-   * this one; `next_steps`/`decision`/`done`/`reference` are recent events,
-   * written for the present session resuming itself.
-   *
-   * The settlement subagent is a third reader and wants neither role whole.
-   * It grades turns by task causality — Grade 4 is the turn that framed the
-   * problem — and ticket 14 hangs the segment partition on those same Grade-4
-   * boundaries, so what it needs is the ARC, which is exactly the global-view
-   * group. The recent-events group is an accumulating event stream it never
-   * reads, and it is the expensive half: measured on real sessions, all seven
-   * fields cost 1.2K-1.9K tokens per dispatch against 400-600 for these three.
-   *
-   * `"global-view"` therefore is not a budget trim that happens to drop the
-   * tail — it is the reader split applied to a reader ticket 04 did not have.
+   * Formerly selected which of two field groups to render (ticket 04's
+   * global-view vs. recent-events split, user ruling S15069/T759). The
+   * ownership-and-note-cadence spec ([S15069/T910]-[T913]) retires the
+   * recent-events group (next_steps/decision/done/reference) unconditionally,
+   * so there is nothing left for `"all"` to add over `"global-view"` — both
+   * now render the same title/content. Kept only so the settlement caller's
+   * `fields: "global-view"` call site does not need a second, divergent edit.
    */
   fields?: "all" | "global-view";
 }
@@ -153,25 +139,16 @@ export function renderMainAgentSessionInjection(
     budget - estimateDiaryTokens([...STATE_HEADING_LINES, ""].join("\n")),
   );
   const session = input.session;
-  const globalViewOnly = input.fields === "global-view";
   const sessionDocument = [
     ...STATE_HEADING_LINES,
+    // ownership-and-note-cadence spec ([S15069/T910]-[T913]): title/content
+    // only, regardless of `fields` — insight/next_steps/decision/done/
+    // reference retired from every render surface unconditionally.
     renderSessionStateInjection(
       {
         id: session.id,
         title: session.title,
         content: session.content,
-        insight: splitInsight(session.insight),
-        // The recent-events group, written for the session resuming itself.
-        // A `global-view` reader is a different session looking in, so these
-        // are omitted rather than truncated — see `fields` above.
-        //
-        // Raw storage, not resolved pointers: state injection keeps the
-        // compact `[T<n>]` coordinates a reader can cite straight back.
-        decision: globalViewOnly ? null : session.decision,
-        done: globalViewOnly ? null : session.done,
-        nextSteps: globalViewOnly ? null : session.nextSteps,
-        reference: globalViewOnly ? null : session.reference,
       },
       stateTokenBudget,
     ),

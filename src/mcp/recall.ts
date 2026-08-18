@@ -50,7 +50,6 @@ import {
   SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
 } from "./segment-card";
 import { expandNumericSelector } from "./selectors";
-import { resolveTurnPointers } from "./turn-pointers";
 
 export interface RecallInput {
   id?: string;
@@ -139,45 +138,23 @@ function splitInsight(insight: string | null): string[] {
     .map((line) => line.replace(/^-+\s*/, ""));
 }
 
-// D2: the seven summary fields, with [T<n>] markers resolved to current turn
-// titles. decision/done hold the inline pointers. `insight` is one of the
-// seven now (ticket 04), not a legacy fallback for an empty `decision`;
-// `current` is deleted and is not read here even though the column survives as
-// dead storage.
-//
-// Semantic-container ticket 09 (ADR-0006): the session keeps one semantic
-// field, `title`; these six retire. A session created at or after the era
-// cutoff renders none of them — same `isSegmentEra` boundary buildTurnView
-// already gates on — regardless of what (if anything) is still stored,
-// because a stray write must not resurrect a dead field. A pre-cutoff session
-// keeps reading whatever it already has: read-only, never written again.
+// ownership-and-note-cadence spec, "session 字段" ([S15069/T910]-[T913]):
+// session retires its six task-shaped fields — insight/next_steps/decision/
+// done/reference — unconditionally, superseding the older era-gated partial
+// retirement (semantic-container ticket 09, which still rendered them on a
+// pre-cutoff session). `title` and `content` are the session's only two
+// remaining semantic fields; `content` keeps its EXISTING read path
+// (including the era gate below) untouched — this ticket does not touch any
+// write path, and the settlement-side writer for `content` is a later ticket.
 function buildSessionSummaryFields(
-  db: Database,
   session: NonNullable<ReturnType<typeof getSession>>,
   eraCutoffEpoch: number | null = null,
-): Pick<
-  FormattedSession,
-  "content" | "insight" | "nextSteps" | "decision" | "done" | "reference"
-> {
+): Pick<FormattedSession, "content"> {
   if (isSegmentEra(session.createdAtEpoch, eraCutoffEpoch)) {
-    return {
-      content: null,
-      insight: [],
-      nextSteps: null,
-      decision: null,
-      done: null,
-      reference: null,
-    };
+    return { content: null };
   }
 
-  return {
-    content: session.content,
-    insight: splitInsight(session.insight),
-    nextSteps: session.nextSteps,
-    decision: resolveTurnPointers(db, session.id, session.decision),
-    done: resolveTurnPointers(db, session.id, session.done),
-    reference: session.reference,
-  };
+  return { content: session.content };
 }
 
 function formatParameterError(message: string): string {
@@ -302,7 +279,7 @@ function buildSessionView(
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    ...buildSessionSummaryFields(db, session, eraCutoffEpoch),
+    ...buildSessionSummaryFields(session, eraCutoffEpoch),
     turnCount: turns.length,
     observationCount: turns.reduce(
       (sum, turn) => sum + (turn.observationCount ?? 0),
@@ -365,7 +342,7 @@ export function buildSessionSummary(
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    ...buildSessionSummaryFields(db, session, eraCutoffEpoch),
+    ...buildSessionSummaryFields(session, eraCutoffEpoch),
     turnCount,
     observationCount,
     jsonlPath: undefined,
@@ -416,7 +393,7 @@ export function buildFormattedSession(
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    ...buildSessionSummaryFields(db, session, eraCutoffEpoch),
+    ...buildSessionSummaryFields(session, eraCutoffEpoch),
     turnCount: turns.length,
     observationCount: turns.reduce(
       (sum, turn) => sum + (turn.observationCount ?? 0),

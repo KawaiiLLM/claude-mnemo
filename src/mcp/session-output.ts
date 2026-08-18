@@ -1,31 +1,22 @@
-import type { Database } from "bun:sqlite";
-
 import type { SessionRecord } from "../db/sessions";
 import { estimateDiaryTokens } from "../diary/domain";
-import { splitBulletField } from "./format";
 import type { FormattedSession } from "./format";
 
 export const CURRENT_SESSION_STATE_TOKEN_BUDGET = 2_000;
 
+// ownership-and-note-cadence spec, "session 字段" ([S15069/T910]-[T913]):
+// decision/done/nextSteps/reference/insight retired from this input
+// unconditionally — title and content are the session's only two remaining
+// semantic fields, on every reader, legacy row or not.
 export interface SessionStateRenderInput {
   id: number;
   title: string | null;
   content: string | null;
-  decision: string | null;
-  done: string | null;
-  nextSteps: string | null;
-  reference: string | null;
-  insight?: string[];
 }
 
 export interface SessionStateTokenReport {
   title: number;
   content: number;
-  insight: number;
-  nextSteps: number;
-  decision: number;
-  done: number;
-  reference: number;
   total: number;
 }
 
@@ -42,7 +33,6 @@ function capCodePoints(value: string | null, max: number): string | null {
 function buildSessionStateLines(
   input: SessionStateRenderInput,
   capPriorityFields = false,
-  includeHistoricalFields = true,
 ): string[] {
   const title =
     (capPriorityFields ? capCodePoints(input.title, 100) : input.title) ??
@@ -60,47 +50,12 @@ function buildSessionStateLines(
       lines.push(`  ${label}: ${rendered}`);
     }
   };
-  const pushBulletField = (
-    label: string,
-    value: string | null | undefined,
-  ): void => {
-    const items = splitBulletField(value);
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  ${label}:`);
-    for (const item of items) {
-      lines.push(`    - ${item}`);
-    }
-  };
 
-  // State first: bounded rendering drops trailing historical fields before it
-  // can lose the working position. `current` used to sit between content and
-  // next; ticket 04 deleted it (spec D2) — it restated `content` at a
-  // different compression, so a writer had to guess which of the two to keep
-  // fresh and a reader got the same material twice.
+  // ownership-and-note-cadence spec ([S15069/T910]-[T913]): content is the
+  // session's only remaining state field — decision/done/next/reference/
+  // insight retired unconditionally (no more "drop trailing historical
+  // fields" ladder; there is nothing left to drop).
   pushField("content", input.content, 400);
-  pushField("next", input.nextSteps, 200);
-
-  if (!includeHistoricalFields) {
-    return lines;
-  }
-
-  if (input.decision) {
-    pushBulletField("decision", input.decision);
-  }
-  // `insight` renders in its own right now, not only as a stand-in for an
-  // empty `decision`: it is one of the seven fields (D2), the one a DIFFERENT
-  // session browsing this one reads. A legacy row (insight set, decision
-  // NULL) renders exactly as it did before.
-  if ((input.insight?.length ?? 0) > 0) {
-    lines.push("  insight:");
-    for (const item of input.insight ?? []) {
-      lines.push(`    - ${item}`);
-    }
-  }
-  pushBulletField("done", input.done);
-  pushBulletField("reference", input.reference);
   return lines;
 }
 
@@ -111,36 +66,18 @@ export function renderSessionStateOutput(input: SessionStateRenderInput): string
 export function measureSessionStateTokens(
   input: SessionStateRenderInput,
 ): SessionStateTokenReport {
-  const fieldTokens = (
-    label: string,
-    value: string | null,
-    bullet = false,
-  ): number => {
+  const fieldTokens = (label: string, value: string | null): number => {
     if (!value) {
       return 0;
     }
-    const rendered = bullet
-      ? [`  ${label}:`, ...splitBulletField(value).map((item) => `    - ${item}`)].join("\n")
-      : `  ${label}: ${value}`;
-    return estimateDiaryTokens(rendered);
+    return estimateDiaryTokens(`  ${label}: ${value}`);
   };
   const full = renderSessionStateOutput(input);
-  const insightLines = input.insight ?? [];
   return {
     title: estimateDiaryTokens(
       `[S${input.id}] ${input.title ?? "(untitled session)"}`,
     ),
     content: fieldTokens("content", input.content),
-    insight:
-      insightLines.length > 0
-        ? estimateDiaryTokens(
-            ["  insight:", ...insightLines.map((item) => `    - ${item}`)].join("\n"),
-          )
-        : 0,
-    nextSteps: fieldTokens("next", input.nextSteps),
-    decision: fieldTokens("decision", input.decision, true),
-    done: fieldTokens("done", input.done, true),
-    reference: fieldTokens("reference", input.reference, true),
     total: estimateDiaryTokens(full),
   };
 }
@@ -186,7 +123,7 @@ function renderBoundedSessionStateOutput(
   }
 
   const pointer = `  … state truncated; full summary: recall(id="S${input.id}")`;
-  const uncappedStateLines = buildSessionStateLines(input, false, false);
+  const uncappedStateLines = buildSessionStateLines(input, false);
   const stateFitsUncapped =
     estimateDiaryTokens([...uncappedStateLines, pointer].join("\n")) <=
     tokenBudget;
@@ -234,6 +171,11 @@ export function renderSessionStateInjection(
  * so this overload survives for `tests/mcp/session-output.test.ts`, which is
  * where the degradation ladder itself is proved. Adding a field to the
  * injection means adding it there, not here.
+ *
+ * ownership-and-note-cadence spec ([S15069/T910]-[T913]): `sessionRecord` is
+ * accepted only for its `id` now — decision/done/next/reference/insight
+ * retired unconditionally, so there is nothing left to prefer raw storage
+ * over the formatted view for.
  */
 export function renderCurrentSessionStateOutput(
   session: FormattedSession,
@@ -245,13 +187,6 @@ export function renderCurrentSessionStateOutput(
       id: sessionRecord.id,
       title: session.title ?? null,
       content: session.content ?? null,
-      // context.ts currently resolves pointers on FormattedSession. Read raw
-      // storage here so state injection keeps compact [T<n>] coordinates.
-      decision: sessionRecord.decision ?? session.decision ?? null,
-      done: sessionRecord.done ?? session.done ?? null,
-      nextSteps: session.nextSteps ?? null,
-      reference: session.reference ?? null,
-      insight: session.insight,
     },
     tokenBudget,
   );

@@ -1183,16 +1183,18 @@ describe("recall navigation legend (spec D1)", () => {
   });
 });
 
-// Semantic-container ticket 09 (ADR-0006): the session's six non-title
-// summary fields retire. A session created before the era cutoff still
-// renders whatever it has stored (read-only, never written again since
-// ticket 01 restricts `note(session)` to title-only). A session created at
-// or after the cutoff renders title + computed stats only — even if some
-// value slipped into storage — because a stray write must not resurrect a
-// dead field. `eraCutoffEpoch: null` (the product default and the rollback
-// value) leaves every session on the legacy path, same invariant `turns`
-// already rely on.
-describe("session semantic fields retire behind the era (ticket 09)", () => {
+// ownership-and-note-cadence spec, "session 字段" ([S15069/T910]-[T913]):
+// insight/next_steps/decision/done/reference retire from recall's session
+// rendering UNCONDITIONALLY — superseding the older era-gated partial
+// retirement (semantic-container ticket 09, which used to keep rendering
+// them on a pre-cutoff/legacy session). `content` keeps its EXISTING,
+// era-gated read path untouched (this ticket does not touch any write path):
+// a pre-cutoff session still renders `content`; a post-cutoff session does
+// not, same as before. `eraCutoffEpoch: null` (the product default and the
+// rollback value) leaves every session on the legacy path for `content`,
+// same invariant `turns` already rely on — it has no bearing on the six
+// retired fields, which never render regardless.
+describe("session semantic fields retire ([S15069/T910]-[T913]); content keeps its era gate (ticket 09)", () => {
   let db: Database;
   const ERA = 500_000;
 
@@ -1225,7 +1227,7 @@ describe("session semantic fields retire behind the era (ticket 09)", () => {
     return session.id;
   }
 
-  test("a pre-cutoff (legacy) session still renders its stored fields", () => {
+  test("a pre-cutoff (legacy) session renders content but none of the six retired fields", () => {
     db = createDatabase(":memory:");
     initializeSchema(db);
     const sessionId = seedSessionWithFields("ticket09-legacy", ERA - 100);
@@ -1236,12 +1238,20 @@ describe("session semantic fields retire behind the era (ticket 09)", () => {
       eraCutoffEpoch: ERA,
     });
 
+    // content keeps its existing (era-gated) read path: a pre-cutoff session
+    // still renders it.
     expect(output).toContain("desc: The summary layer's compressed view");
-    expect(output).toContain("- a lesson worth keeping");
-    expect(output).toContain("- the call landed");
-    expect(output).toContain("- shipped the fix");
-    expect(output).toContain("next: pick up where this left off");
-    expect(output).toContain("- docs/plans/redesign.md");
+    // insight/decision/done/next/reference retire unconditionally — legacy
+    // row or not, still sitting in storage (seedSessionWithFields wrote all
+    // of them) but rendered nowhere.
+    expect(output).not.toContain("a lesson worth keeping");
+    expect(output).not.toContain("- decision:");
+    expect(output).not.toContain("the call landed");
+    expect(output).not.toContain("- done:");
+    expect(output).not.toContain("shipped the fix");
+    expect(output).not.toContain("next:");
+    expect(output).not.toContain("- reference:");
+    expect(output).not.toContain("redesign.md");
   });
 
   test("a post-cutoff (new) session renders title + stats only, no dead fields", () => {
@@ -1303,12 +1313,13 @@ describe("session semantic fields retire behind the era (ticket 09)", () => {
     expect(output).not.toContain("desc:");
   });
 
-  test("no eraCutoffEpoch configured (product default) leaves every session on the legacy path", () => {
+  test("no eraCutoffEpoch configured (product default) still renders content, never the six retired fields", () => {
     db = createDatabase(":memory:");
     initializeSchema(db);
-    // A session "created" far in the future still renders its stored fields
+    // A session "created" far in the future still renders its `content`
     // when no operator has set a cutoff — null must mean "every session is
-    // legacy", the same rollback-safe default the turn-level era gate uses.
+    // legacy" for content's era gate, the same rollback-safe default the
+    // turn-level era gate uses. The six retired fields stay gone regardless.
     const sessionId = seedSessionWithFields("ticket09-no-cutoff", ERA + 100);
 
     const output = recallMemory(db, {
@@ -1317,7 +1328,9 @@ describe("session semantic fields retire behind the era (ticket 09)", () => {
     });
 
     expect(output).toContain("desc: The summary layer's compressed view");
-    expect(output).toContain("- shipped the fix");
+    expect(output).not.toContain("- shipped the fix");
+    expect(output).not.toContain("- decision:");
+    expect(output).not.toContain("next:");
   });
 });
 

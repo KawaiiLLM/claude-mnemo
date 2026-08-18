@@ -10,6 +10,13 @@ import {
 } from "../../src/mcp/session-output";
 import type { FormattedSession } from "../../src/mcp/format";
 
+// ownership-and-note-cadence spec, "session 字段" ([S15069/T910]-[T913]):
+// decision/done/next_steps/reference/insight retire from this renderer
+// unconditionally — title and content are the session's only two remaining
+// semantic fields, on every reader, legacy row or not. This supersedes
+// ticket 04/D2's rendering of the six fields (see the old fixtures below,
+// preserved only where they still exercise a live mechanism: the token
+// budget / truncation-pointer ladder).
 describe("renderCurrentSessionStateOutput", () => {
   let db: Database;
   let sessionRecord: SessionRecord;
@@ -42,11 +49,6 @@ describe("renderCurrentSessionStateOutput", () => {
       project: sessionRecord.project,
       createdAtEpoch: sessionRecord.createdAtEpoch,
       content: sessionRecord.content,
-      insight: ["Key insight one", "Key insight two"],
-      nextSteps: sessionRecord.nextSteps,
-      decision: null,
-      done: null,
-      reference: null,
       turnCount: 0,
       observationCount: 0,
     };
@@ -65,11 +67,6 @@ describe("renderCurrentSessionStateOutput", () => {
       project: sessionRecord.project,
       createdAtEpoch: sessionRecord.createdAtEpoch,
       content: "Test session content description.",
-      insight: [],
-      nextSteps: null,
-      decision: null,
-      done: null,
-      reference: null,
       turnCount: 0,
       observationCount: 0,
     };
@@ -79,104 +76,10 @@ describe("renderCurrentSessionStateOutput", () => {
     expect(output).toContain("  content: Test session content description.");
   });
 
-  test("renders insight bullets when decision is absent (a legacy row is unchanged)", () => {
-    const session: FormattedSession = {
-      id: sessionRecord.id,
-      title: sessionRecord.title,
-      project: sessionRecord.project,
-      createdAtEpoch: sessionRecord.createdAtEpoch,
-      content: null,
-      insight: ["Key insight one", "Key insight two"],
-      nextSteps: null,
-      decision: null,
-      done: null,
-      reference: null,
-      turnCount: 0,
-      observationCount: 0,
-    };
-
-    const output = renderCurrentSessionStateOutput(session, sessionRecord);
-
-    expect(output).toContain("  insight:");
-    expect(output).toContain("    - Key insight one");
-    expect(output).toContain("    - Key insight two");
-    expect(output).not.toContain("  decision:");
-  });
-
-  // ticket 04 (spec D2): `insight` is one of the seven fields, not a stand-in
-  // shown only while `decision` is empty. A summary that carries both renders
-  // both — the old fallback silently swallowed whichever one arrived second.
-  test("renders decision and insight together, neither suppressing the other", () => {
-    const session: FormattedSession = {
-      id: sessionRecord.id,
-      title: sessionRecord.title,
-      project: sessionRecord.project,
-      createdAtEpoch: sessionRecord.createdAtEpoch,
-      content: null,
-      insight: ["The reusable conclusion"],
-      nextSteps: null,
-      decision: "- Decision line one\n- Decision line two",
-      done: null,
-      reference: null,
-      turnCount: 0,
-      observationCount: 0,
-    };
-
-    const output = renderCurrentSessionStateOutput(session, sessionRecord);
-
-    expect(output).toContain("  decision:");
-    expect(output).toContain("    - Decision line one");
-    expect(output).toContain("    - Decision line two");
-    expect(output).toContain("  insight:");
-    expect(output).toContain("    - The reusable conclusion");
-  });
-
-  test("renders next field from nextSteps", () => {
-    const session: FormattedSession = {
-      id: sessionRecord.id,
-      title: sessionRecord.title,
-      project: sessionRecord.project,
-      createdAtEpoch: sessionRecord.createdAtEpoch,
-      content: null,
-      insight: [],
-      nextSteps: "Implement the fix before next session.",
-      decision: null,
-      done: null,
-      reference: null,
-      turnCount: 0,
-      observationCount: 0,
-    };
-
-    const output = renderCurrentSessionStateOutput(session, sessionRecord);
-
-    expect(output).toContain("  next: Implement the fix before next session.");
-    expect(output).not.toContain("next_steps:");
-  });
-
-  test("renders only state without an embedded milestone timeline", () => {
-    const session: FormattedSession = {
-      id: sessionRecord.id,
-      title: sessionRecord.title,
-      project: sessionRecord.project,
-      createdAtEpoch: sessionRecord.createdAtEpoch,
-      content: "Some content.",
-      insight: [],
-      nextSteps: null,
-      decision: null,
-      done: null,
-      reference: null,
-      turnCount: 1,
-      observationCount: 0,
-    };
-    const output = renderCurrentSessionStateOutput(session, sessionRecord);
-
-    expect(output).not.toContain("shape signals");
-    expect(output).not.toMatch(/── \d{4}-\d{2}-\d{2}/);
-  });
-
-  test("uses raw [T<n>] coordinates, renders fields in state-first order, and never renders the retired `current`", () => {
-    // `current` is written straight into the (now dead) column, the way a
-    // pre-ticket-04 row carries it: the renderer must not surface it.
+  test("never renders decision/done/next/reference/insight, even when raw storage still carries them from a pre-retirement write", () => {
+    // Written straight into the (now dead-for-rendering) columns, the way a
+    // pre-[S15069/T910] row carries them: the renderer must not surface any
+    // of the six.
     db.query(
       `UPDATE sessions
        SET content = ?,
@@ -202,36 +105,30 @@ describe("renderCurrentSessionStateOutput", () => {
       project: raw.project,
       createdAtEpoch: raw.createdAtEpoch,
       content: raw.content,
-      insight: [],
-      nextSteps: raw.nextSteps,
-      // Simulate context.ts's expanded value; injection must use raw storage.
-      decision: '- Active decision [S1/T1] "expanded title"',
-      done: '- Recent useful completion [S1/T1] "expanded title"',
-      reference: raw.reference,
       turnCount: 1,
       observationCount: 0,
     };
 
     const output = renderCurrentSessionStateOutput(formatted, raw);
-    expect(output).toContain("[T1]");
-    expect(output).not.toContain("[S1/T1]");
-    const orderedLabels = [
-      "  content:",
-      "  next:",
-      "  decision:",
-      "  done:",
-      "  reference:",
-    ];
-    const positions = orderedLabels.map((label) => output.indexOf(label));
-    expect(positions.every((position) => position >= 0)).toBe(true);
-    expect(positions).toEqual([...positions].sort((a, b) => a - b));
-    // The retired field: stored, and rendered nowhere.
+
+    expect(output).toContain("One-sentence arc overview.");
     expect(output).not.toContain("  current:");
+    expect(output).not.toContain("  next:");
+    expect(output).not.toContain("  decision:");
+    expect(output).not.toContain("  done:");
+    expect(output).not.toContain("  reference:");
+    expect(output).not.toContain("insight:");
     expect(output).not.toContain("Retired current field must not render.");
+    expect(output).not.toContain("Implement the bounded state renderer.");
+    expect(output).not.toContain("Active decision");
+    expect(output).not.toContain("Recent useful completion");
+    expect(output).not.toContain("/tmp/spec.md");
+    // Stored, and rendered nowhere.
     expect(raw.current).toBe("Retired current field must not render.");
+    expect(raw.decision).toBe("- Active decision [T1]");
   });
 
-  test("bounds an oversized legacy state to 2000 tokens while retaining content and next", () => {
+  test("bounds an oversized legacy content field to 2000 tokens", () => {
     db.query(
       `UPDATE sessions
        SET content = ?,
@@ -242,9 +139,9 @@ describe("renderCurrentSessionStateOutput", () => {
            reference = ?
        WHERE id = ?`,
     ).run(
-      "Legacy arc overview must survive.",
+      `Legacy arc overview must survive. ${"content filler ".repeat(2_000)}`,
       "Retired field.",
-      "Next action must survive.",
+      "Next action must not survive (retired).",
       `- ${"old decision ".repeat(2_000)}`,
       `- ${"old completion ".repeat(2_000)}`,
       `- ${"/very/old/path ".repeat(2_000)}`,
@@ -257,11 +154,6 @@ describe("renderCurrentSessionStateOutput", () => {
       project: raw.project,
       createdAtEpoch: raw.createdAtEpoch,
       content: raw.content,
-      insight: [],
-      nextSteps: raw.nextSteps,
-      decision: raw.decision,
-      done: raw.done,
-      reference: raw.reference,
       turnCount: 1,
       observationCount: 0,
     };
@@ -269,51 +161,14 @@ describe("renderCurrentSessionStateOutput", () => {
     const output = renderCurrentSessionStateOutput(formatted, raw);
     expect(estimateDiaryTokens(output)).toBeLessThanOrEqual(2_000);
     expect(output).toContain("Legacy arc overview must survive.");
-    expect(output).toContain("Next action must survive.");
+    expect(output).not.toContain("Next action must not survive");
   });
 
-  test("drops oversized historical fields before truncating the working state", () => {
-    const content = "arc state ".repeat(80);
-    const nextSteps = "next action ".repeat(40);
-    db.query(
-      `UPDATE sessions
-       SET content = ?,
-           next_steps = ?,
-           decision = ?
-       WHERE id = ?`,
-    ).run(
-      content,
-      nextSteps,
-      `- ${"historical decision ".repeat(2_000)}`,
-      sessionRecord.id,
-    );
-    const raw = getSession(db, sessionRecord.id)!;
-    const formatted: FormattedSession = {
-      id: raw.id,
-      title: raw.title,
-      project: raw.project,
-      createdAtEpoch: raw.createdAtEpoch,
-      content: raw.content,
-      insight: [],
-      nextSteps: raw.nextSteps,
-      decision: raw.decision,
-      done: raw.done,
-      reference: raw.reference,
-      turnCount: 1,
-      observationCount: 0,
-    };
-
-    const output = renderCurrentSessionStateOutput(formatted, raw);
-
-    expect(output).toContain(`  content: ${content}`);
-    expect(output).toContain(`  next: ${nextSteps}`);
-    expect(output).toContain("state truncated; full summary");
-    expect(estimateDiaryTokens(output)).toBeLessThanOrEqual(2_000);
-  });
-
-  // ticket 04, requirement 6: whatever the shape of the overflow, a cut says
-  // it was made. The pointer is the last line and is never the line dropped to
-  // make room — cutting the announcement of a cut is the silent tail loss.
+  // ownership-and-note-cadence spec: whatever the shape of the overflow, a cut
+  // says it was made. The pointer is the last line and is never the line
+  // dropped to make room — cutting the announcement of a cut is the silent
+  // tail loss (ticket 04, requirement 6, still true with content as the only
+  // field left to cut).
   test("every truncation announces itself, and the pointer survives an extreme budget", () => {
     const raw = getSession(db, sessionRecord.id)!;
     const formatted: FormattedSession = {
@@ -322,11 +177,6 @@ describe("renderCurrentSessionStateOutput", () => {
       project: raw.project,
       createdAtEpoch: raw.createdAtEpoch,
       content: "content ".repeat(3_000),
-      insight: ["insight ".repeat(500)],
-      nextSteps: "next ".repeat(2_000),
-      decision: `- ${"decision ".repeat(3_000)}`,
-      done: `- ${"done ".repeat(3_000)}`,
-      reference: `- ${"reference ".repeat(3_000)}`,
       turnCount: 1,
       observationCount: 0,
     };
@@ -367,11 +217,6 @@ describe("renderCurrentSessionStateOutput", () => {
       project: noTitleRecord.project,
       createdAtEpoch: noTitleRecord.createdAtEpoch,
       content: null,
-      insight: [],
-      nextSteps: null,
-      decision: null,
-      done: null,
-      reference: null,
       turnCount: 0,
       observationCount: 0,
     };
@@ -381,7 +226,7 @@ describe("renderCurrentSessionStateOutput", () => {
     expect(output).toContain(`[S${noTitleRecord.id}] (untitled session)`);
   });
 
-  test("keeps the untitled fallback when an oversized legacy state is bounded", () => {
+  test("keeps the untitled fallback when an oversized legacy content is bounded", () => {
     const noTitleRecord = upsertSession(db, {
       contentSessionId: "oversized-no-title-session",
       project: "/test/project",
@@ -398,11 +243,6 @@ describe("renderCurrentSessionStateOutput", () => {
       project: noTitleRecord.project,
       createdAtEpoch: noTitleRecord.createdAtEpoch,
       content: noTitleRecord.content,
-      insight: [],
-      nextSteps: null,
-      decision: null,
-      done: null,
-      reference: null,
       turnCount: 0,
       observationCount: 0,
     };
@@ -421,11 +261,6 @@ describe("renderCurrentSessionStateOutput", () => {
       project: "/test/project",
       createdAtEpoch: 1000,
       content: "Content.",
-      insight: [],
-      nextSteps: null,
-      decision: null,
-      done: null,
-      reference: null,
       turnCount: 0,
       observationCount: 0,
     };
@@ -434,16 +269,21 @@ describe("renderCurrentSessionStateOutput", () => {
       id: 99999,
       contentSessionId: "ghost",
       project: "/test/project",
+      transcriptPath: null,
       title: "Ghost",
       content: null,
       insight: null,
       nextSteps: null,
       decision: null,
       done: null,
+      current: null,
       reference: null,
       lastCompactTurn: null,
-      lastAgentSessionId: null,
       summaryUpdatedAtEpoch: null,
+      scanCursorByteOffset: 0,
+      scanCursorLine: 0,
+      parentSessionId: null,
+      lineageStatus: "unchecked",
       createdAtEpoch: 1000,
       updatedAtEpoch: null,
       completedAtEpoch: null,

@@ -150,8 +150,6 @@ describe("MCP format renderer", () => {
       project: "claude-mnemo",
       createdAtEpoch,
       content: "Fix race + add tests",
-      insight: ["prompt cache preserved", "per-turn extraction is resilient"],
-      nextSteps: "verify startup migration",
       turnCount: 3,
       observationCount: 8,
     };
@@ -187,16 +185,14 @@ describe("MCP format renderer", () => {
       responsePreview: "r".repeat(260),
     };
 
-    // Legacy session (insight set, decision NULL): falls back to insight
-    // bullets, and next_steps renders under its display label "next".
+    // ownership-and-note-cadence spec ([S15069/T910]-[T913]): the session's
+    // expanded view is now the collapsed line plus (when present) the raw
+    // transcript pointer — insight/decision/done/next/reference retired
+    // unconditionally, legacy row or not.
     expect(formatSessionExpanded(session)).toBe(
       [
         "- [S142] Auth refactor | 💬3 💡8 | 2026-04-05 | claude-mnemo",
         "  - desc: Fix race + add tests",
-        "  - insight:",
-        "    - prompt cache preserved",
-        "    - per-turn extraction is resilient",
-        "  - next: verify startup migration",
       ].join("\n"),
     );
 
@@ -229,24 +225,24 @@ describe("MCP format renderer", () => {
     );
   });
 
-  test("renders the redesigned session summary fields in expanded view", () => {
+  // ownership-and-note-cadence spec, "session 字段" ([S15069/T910]-[T913]):
+  // decision/insight/done/next/reference retire from the expanded view
+  // unconditionally (superseding ticket 04/D2's rendering of them) — the
+  // `FormattedSession` type no longer carries these fields at all, so there
+  // is nothing left to construct a "still renders X" fixture with. The
+  // shared per-bullet truncate-budget mechanism (`pushBullets` +
+  // `truncateText`) stays covered via `turn.insight` above and in
+  // recall-segment-card.test.ts (segment Working State bullets), which is
+  // where the session's old cap-whole-field-then-split behaviour's only
+  // surviving analogue lives.
+  test("renders only the collapsed line and the raw pointer in expanded view — no session state block", () => {
     const session: FormattedSession = {
       id: 200,
       title: "Session redesign",
       project: "claude-mnemo",
       createdAtEpoch,
       content: "Reworking the session summary schema",
-      // decision/insight/done/reference are markdown bullet lists; [T<n>]
-      // markers arrive already resolved from the recall layer. `next` stays
-      // inline. ticket 04 (spec D2): `current` is deleted, and `insight`
-      // renders in its own right rather than only when `decision` is empty.
-      decision:
-        '- Whole-rewrite over field-merge [S200/T3] "Pick rewrite"\n- DB id for [T<n>] markers [S200/T4] "Pointer semantics"',
-      insight: ["A summary field is addressed to a reader, not to a schema"],
-      done:
-        '- Shipped migration [S200/T1] "Add columns"\n- Wired read side [S200/T5] "Render fields"',
-      nextSteps: "Release 0.2.16",
-      reference: "- docs/plans/redesign.md\n- github.com/anthropics/claude-code",
+      jsonlPath: "/tmp/session-200.jsonl",
       turnCount: 5,
       observationCount: 12,
     };
@@ -255,65 +251,8 @@ describe("MCP format renderer", () => {
       [
         "- [S200] Session redesign | 💬5 💡12 | 2026-04-05 | claude-mnemo",
         "  - desc: Reworking the session summary schema",
-        "  - decision:",
-        '    - Whole-rewrite over field-merge [S200/T3] "Pick rewrite"',
-        '    - DB id for [T<n>] markers [S200/T4] "Pointer semantics"',
-        "  - insight:",
-        "    - A summary field is addressed to a reader, not to a schema",
-        "  - done:",
-        '    - Shipped migration [S200/T1] "Add columns"',
-        '    - Wired read side [S200/T5] "Render fields"',
-        "  - next: Release 0.2.16",
-        "  - reference:",
-        "    - docs/plans/redesign.md",
-        "    - github.com/anthropics/claude-code",
+        "  raw: /tmp/session-200.jsonl",
       ].join("\n"),
-    );
-  });
-
-  test("a bullet field shares one truncate budget across all bullets", () => {
-    const session: FormattedSession = {
-      id: 202,
-      title: "Big decision",
-      project: "claude-mnemo",
-      createdAtEpoch,
-      // 3 long bullets (~100 chars each, ~306 total). Under the default 200
-      // budget the whole field is capped — not 200 per bullet.
-      decision: `- ${"X".repeat(100)}\n- ${"Y".repeat(100)}\n- ${"Z".repeat(100)}`,
-      turnCount: 1,
-      observationCount: 0,
-    };
-
-    // default truncate = 200; the signal records that this field got cut.
-    const signal = createTruncationSignal();
-    const out = renderNode(
-      { type: "session", value: session },
-      { depth: "expanded", mode: "unified", signal },
-    );
-
-    expect(out).toContain("X".repeat(50)); // first bullet survives
-    expect(out).not.toContain("Z".repeat(50)); // third bullet dropped by the cap
-    // The per-field navigation sentence is gone (spec D1/D2): truncation only
-    // sets the render-scoped signal here; the response-level legend is
-    // assembled by the caller (recallMemory/timelineQuery), not this layer.
-    expect(out).not.toContain("mnemo-replay skill");
-    expect(signal.truncated).toBe(true);
-  });
-
-  test("a single-line bullet field renders as one bullet", () => {
-    const session: FormattedSession = {
-      id: 201,
-      title: "Single",
-      project: "claude-mnemo",
-      createdAtEpoch,
-      content: "x",
-      decision: "Only one decision [S201/T2] \"the call\"",
-      turnCount: 1,
-      observationCount: 0,
-    };
-
-    expect(formatSessionExpanded(session)).toContain(
-      ["  - decision:", '    - Only one decision [S201/T2] "the call"'].join("\n"),
     );
   });
 
@@ -325,7 +264,6 @@ describe("MCP format renderer", () => {
         project: "claude-mnemo",
         createdAtEpoch,
         content: "Fix race + add tests",
-        nextSteps: "verify startup migration",
         turns: [
           {
             id: 1,
@@ -349,7 +287,6 @@ describe("MCP format renderer", () => {
       [
         "- [S142] Auth refactor | 💬1 💡1 | 2026-04-05 | claude-mnemo",
         "  - desc: Fix race + add tests",
-        "  - next: verify startup migration",
         "  - [S142][T1] Diagnose auth | 💡1 [extracted]",
         "    - [O7] Mutex added",
       ].join("\n"),

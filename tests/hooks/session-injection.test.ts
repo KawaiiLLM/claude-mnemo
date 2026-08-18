@@ -72,7 +72,14 @@ function hookInput(
 }
 
 describe("renderMainAgentSessionInjection (pure function, settlement's own surface)", () => {
-  test("global-view narrows to title/content/insight, dropping the recent-events group settlement never reads", () => {
+  // ownership-and-note-cadence spec, "session 字段" ([S15069/T910]-[T913]):
+  // insight/next_steps/decision/done/reference retire from this injection
+  // unconditionally — content is all that is left, so the ticket 04/spec A4
+  // "global-view vs. recent-events" reader split this test used to pin no
+  // longer produces a difference. `fields` stays accepted (the settlement
+  // call site still passes `fields: "global-view"`) but both values now
+  // render the same title/content.
+  test("content renders regardless of `fields`; insight/next_steps/decision/done/reference never render", () => {
     const sessionDbId = seedSession();
     const session = getSession(db, sessionDbId)!;
 
@@ -83,13 +90,17 @@ describe("renderMainAgentSessionInjection (pure function, settlement's own surfa
     });
 
     expect(full).toContain("content: Settlement writes stage; commit is the only writer.");
-    expect(full).toContain("next: ship ticket 11");
     expect(globalView).toContain("content: Settlement writes stage; commit is the only writer.");
-    expect(globalView).toContain("- a lost stage receipt is not a lost commit receipt");
-    // The reader split (ticket 04/spec A4): global-view drops next_steps/decision/done/reference.
-    expect(globalView).not.toContain("next: ship ticket 11");
-    expect(globalView).not.toContain("staged writes replay inside commit");
-    expect(globalView).not.toBe(full);
+    expect(globalView).toBe(full);
+
+    for (const output of [full, globalView]) {
+      expect(output).not.toContain("next: ship ticket 11");
+      expect(output).not.toContain("staged writes replay inside commit");
+      expect(output).not.toContain("the completion gate moved into commit");
+      expect(output).not.toContain(".scratch/settlement-agentic/spec.md");
+      expect(output).not.toContain("a lost stage receipt is not a lost commit receipt");
+      expect(output).not.toContain("insight:");
+    }
   });
 
   test("the corpus header is a parameter of the same function, not a second implementation", () => {

@@ -213,11 +213,6 @@ export interface FormattedSession {
   project: string;
   createdAtEpoch: number;
   content?: string | null;
-  insight?: string[];
-  nextSteps?: string | null;
-  decision?: string | null;
-  done?: string | null;
-  reference?: string | null;
   turnCount?: number | null;
   observationCount?: number | null;
   jsonlPath?: string;
@@ -628,6 +623,12 @@ function formatSessionCollapsedWithMode(
   return lines.join("\n");
 }
 
+// ownership-and-note-cadence spec, "session 字段" ([S15069/T910]-[T913]): the
+// session's expanded view used to add decision/insight/done/next/reference
+// bullets on top of the collapsed [title + desc] line. Those six fields
+// retire from every render surface unconditionally (recall's session header
+// is title + content only), so the expanded view now differs from the
+// collapsed one only by the `raw:` transcript pointer.
 function formatSessionExpandedWithMode(
   session: FormattedSession,
   mode: RenderMode,
@@ -635,59 +636,13 @@ function formatSessionExpandedWithMode(
   truncateCap?: number,
   signal?: TruncationSignal,
 ): string {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const lines = [
     formatSessionCollapsedWithMode(session, mode, truncate, truncateCap, signal),
   ];
-  const pushField = (label: string, value: string | null | undefined): void => {
-    if (!value) {
-      return;
-    }
-    lines.push(`  - ${label}: ${truncateText(value, { limit, signal })}`);
-  };
-  // decision/done/reference are markdown bullet lists: render a label line +
-  // indented bullets (one per stored "- " line). Single-line values render as
-  // one bullet. The WHOLE field shares one `limit` budget (truncate before
-  // splitting) so a multi-bullet field can't balloon to bulletCount * limit.
-  const pushBulletField = (label: string, value: string | null | undefined): void => {
-    if (!value) {
-      return;
-    }
-    const items = splitBulletField(truncateText(value, { limit, signal }));
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  - ${label}:`);
-    pushBullets(lines, "    ", items);
-  };
 
   if (session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
   }
-
-  // D2: render the seven summary fields. Empty ones are skipped;
-  // decision/insight/done/reference are bullet lists, `next` is a single line.
-  //
-  // ticket 04: `current` is deleted — it duplicated `content` (rendered above
-  // as `desc`) at a different compression. `insight` is no longer a fallback
-  // shown only when `decision` is empty: it is one of the seven in its own
-  // right, so it renders whenever it holds something. A legacy row (insight
-  // set, decision NULL) therefore renders exactly as it did before.
-  if (session.decision) {
-    pushBulletField("decision", session.decision);
-  }
-  if (session.insight && session.insight.length > 0) {
-    lines.push("  - insight:");
-    pushBullets(
-      lines,
-      "    ",
-      session.insight.map((line) => truncateText(line, { limit, signal })),
-    );
-  }
-
-  pushBulletField("done", session.done);
-  pushField("next", session.nextSteps);
-  pushBulletField("reference", session.reference);
 
   return lines.join("\n");
 }
