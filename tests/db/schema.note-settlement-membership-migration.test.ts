@@ -16,52 +16,18 @@ import { upsertSession } from "../../src/db/sessions";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
- * `note_settlement_membership_activity` and `note_settlement_proposals`: two
- * tables reached through `CREATE TABLE IF NOT EXISTS`, the same migration
- * shape `segment_attachments` used — no 12-step rebuild, because nothing
- * existing is altered.
+ * `note_settlement_proposals` (propose's own storage — text-only, never a
+ * segment, ticket 05 keeps it as the sole exception channel) is reached
+ * through `CREATE TABLE IF NOT EXISTS`, no rebuild.
  *
- * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"): the
- * CODE that read/wrote `note_settlement_membership_activity`
- * (`recordNoteSettlementMembershipActivity`/`hasNoteSettlementMembershipActivity`,
- * `db/note-settlement-completion.ts`) is gone — the re-keyed completion gate
- * it served retired along with `assign` and duty 1/2. The table's DDL itself
- * is deliberately left in schema.ts (out of this ticket's authorised
- * territory: schema.ts is scoped to the turns-table `election_tier` region
- * only) — an orphaned, harmless table, exercised here directly through SQL
- * rather than through the deleted convenience functions, so this file still
- * proves the migration itself (creation, idempotency, cascade) rather than
- * asserting on code that no longer exists. `note_settlement_proposals`
- * (`propose`'s own storage) is UNCHANGED by ticket 05 and keeps its real
- * reader/writer functions.
+ * `note_settlement_membership_activity` is RETIRED outright (edge-ownership
+ * ticket 05): the membership gate it served died with settlement's `assign`
+ * action. Its DDL left schema.ts, and `dropRetiredMaintenanceState` drops
+ * the orphan a pre-demolition installation still carries — asserted here in
+ * both directions (fresh installs never get it, legacy installs lose it).
  */
 
 const NOW = 1_800_000_000;
-
-function recordMembershipActivity(db: Database, jobId: number, nowEpoch: number): void {
-  db.query<unknown, [number, number]>(
-    `INSERT INTO note_settlement_membership_activity (job_id, recorded_at_epoch)
-     VALUES (?, ?)
-     ON CONFLICT (job_id) DO NOTHING`,
-  ).run(jobId, nowEpoch);
-}
-
-function hasMembershipActivity(db: Database, jobId: number): boolean {
-  return (
-    db
-      .query<{ jobId: number }, [number]>(
-        "SELECT job_id AS jobId FROM note_settlement_membership_activity WHERE job_id = ?",
-      )
-      .get(jobId) !== null
-  );
-}
-
-function downgrade(db: Database): void {
-  db.exec(`
-    DROP TABLE note_settlement_membership_activity;
-    DROP TABLE note_settlement_proposals;
-  `);
-}
 
 function tableExists(db: Database, name: string): boolean {
   return (
@@ -73,7 +39,7 @@ function tableExists(db: Database, name: string): boolean {
   );
 }
 
-describe("note_settlement_membership_activity / note_settlement_proposals migration", () => {
+describe("note_settlement_proposals migration and membership-activity retirement", () => {
   let db: Database;
   let sessionId: number;
   let job: NoteSettlementJob;
@@ -107,19 +73,13 @@ describe("note_settlement_membership_activity / note_settlement_proposals migrat
     db.close();
   });
 
-  test("an existing database gains both tables; running the migration again is idempotent", () => {
-    downgrade(db);
-    expect(tableExists(db, "note_settlement_membership_activity")).toBe(false);
+  test("an existing database gains the proposals table; running the migration again is idempotent", () => {
+    db.exec("DROP TABLE note_settlement_proposals");
     expect(tableExists(db, "note_settlement_proposals")).toBe(false);
 
     initializeSchema(db);
-
-    expect(tableExists(db, "note_settlement_membership_activity")).toBe(true);
     expect(tableExists(db, "note_settlement_proposals")).toBe(true);
 
-    // Idempotent: writing through both surfaces, then re-running the
-    // migration twice more, changes nothing.
-    recordMembershipActivity(db, job.id, NOW);
     recordNoteSettlementProposal(db, {
       jobId: job.id,
       sessionId,
@@ -130,21 +90,32 @@ describe("note_settlement_membership_activity / note_settlement_proposals migrat
 
     initializeSchema(db);
     initializeSchema(db);
-
-    expect(hasMembershipActivity(db, job.id)).toBe(true);
     expect(listRecentSettlementProposals(db, 3)).toHaveLength(1);
   });
 
-  test("a fresh database (no downgrade) already carries both tables from creation", () => {
+  test("a fresh database carries proposals but NEVER the retired membership-activity table", () => {
     const fresh = createDatabase(":memory:");
     initializeSchema(fresh);
-    expect(tableExists(fresh, "note_settlement_membership_activity")).toBe(true);
     expect(tableExists(fresh, "note_settlement_proposals")).toBe(true);
+    expect(tableExists(fresh, "note_settlement_membership_activity")).toBe(false);
     fresh.close();
   });
 
-  test("both rows cascade-delete when their job is deleted", () => {
-    recordMembershipActivity(db, job.id, NOW);
+  test("a pre-demolition database carrying the retired membership table has it dropped", () => {
+    // The exact DDL a ticket-08-era installation still holds.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS note_settlement_membership_activity (
+        job_id INTEGER PRIMARY KEY REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+        recorded_at_epoch INTEGER NOT NULL
+      );
+    `);
+    expect(tableExists(db, "note_settlement_membership_activity")).toBe(true);
+
+    initializeSchema(db);
+    expect(tableExists(db, "note_settlement_membership_activity")).toBe(false);
+  });
+
+  test("a proposal row cascade-deletes when its job is deleted", () => {
     recordNoteSettlementProposal(db, {
       jobId: job.id,
       sessionId,
@@ -154,8 +125,6 @@ describe("note_settlement_membership_activity / note_settlement_proposals migrat
     });
 
     db.query<unknown, [number]>("DELETE FROM note_settlement_jobs WHERE id = ?").run(job.id);
-
-    expect(hasMembershipActivity(db, job.id)).toBe(false);
     expect(listRecentSettlementProposals(db, 3)).toHaveLength(0);
   });
 });

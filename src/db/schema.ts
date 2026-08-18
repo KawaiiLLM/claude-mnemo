@@ -559,22 +559,10 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_note_settlement_segment_exclusions_turn
     ON note_settlement_segment_exclusions(turn_id);
 
-  -- Membership review activity (ticket 08, ADR-0002): the re-keyed
-  -- segmentation completion gate's own positive fact. A window with at least
-  -- one ATTACHED segment must have engaged settlement's membership tool
-  -- (remember assign or propose) at least once before it may complete; a
-  -- window with zero attached segments needs no row here at all (the gate
-  -- reads an empty attachment set as trivially satisfied). ONE row per job,
-  -- written the instant a real assign/propose call lands in commit's own
-  -- transaction — the same "a real write, not a self-attested flag" fact
-  -- note_settlement_segment_exclusions used to be for the retired per-turn
-  -- exclude verb, coarsened from per-turn to per-job because "turns fitting
-  -- nothing stay homeless — legal, never forced" means there is no longer a
-  -- per-turn positive-or-negative fact to anti-join against.
-  CREATE TABLE IF NOT EXISTS note_settlement_membership_activity (
-    job_id INTEGER PRIMARY KEY REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
-    recorded_at_epoch INTEGER NOT NULL
-  );
+  -- note_settlement_membership_activity RETIRED (edge-ownership ticket 05,
+  -- [S15069/T912]): the membership gate it served died with settlement's
+  -- assign action; its DDL left with it and existing installations drop the
+  -- orphan in dropRetiredMaintenanceState below.
 
   -- Homeless-cluster proposals (ticket 08, spec "Proposal"): settlement's
   -- text-only suggestion that several homeless turns form one new segment.
@@ -949,10 +937,9 @@ const SCHEMA_SQL = `
 // longer offers it as a parameter (see db/citations.ts's CITATION_RELATIONS).
 // NOTE: "CREATE TABLE IF NOT EXISTS" only applies this widened list to a
 // FRESH database — an existing installation's physical CHECK constraint
-// predates this change and needs its own widening migration (the
-// ensureSegmentStatusVocabulary rebuild-and-copy idiom) before it can accept
-// an insert carrying one of the four new words; none exists yet, tracked as
-// a known gap. (No backticks inside the DDL template literal below — it is a
+// predates this change; `ensureMemoryEdgesRelationVocabulary` below rebuilds
+// it (straight copy — pair identity already holds, only the CHECK text
+// changes). (No backticks inside the DDL template literal below — it is a
 // JS template string, and a stray backtick in a SQL comment would close it.)
 const MEMORY_EDGES_DDL = `
   CREATE TABLE IF NOT EXISTS memory_edges (
@@ -1266,10 +1253,68 @@ function ensureMemoryEdgesPairIdentity(db: Database): void {
   });
 }
 
+/**
+ * Edge-ownership ticket 01: the relation CHECK widened with the four new
+ * vocabulary words (`refines`/`override`/`encodes`/`grounded-on`). A CHECK
+ * cannot be ALTERed, so an existing database still carrying the four-word
+ * list needs the rebuild-and-copy idiom — a STRAIGHT copy, unlike
+ * `collapseAndRebuildMemoryEdges` above: pair identity already holds, only
+ * the CHECK text changes. Detection reads the stored DDL for the newest word
+ * (`'grounded-on'`), so a fresh database and an already-widened one both
+ * skip on one probe. Without this, production rejects every new-vocabulary
+ * edge at the INSERT — the exact release blocker ticket 01 flagged.
+ */
+function memoryEdgesRelationVocabularyIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'grounded-on'");
+}
+
+function ensureMemoryEdgesRelationVocabulary(db: Database): void {
+  if (!memoryEdgesRelationVocabularyIsStale(db)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (!memoryEdgesRelationVocabularyIsStale(db)) {
+      return;
+    }
+    db.exec(
+      "ALTER TABLE memory_edges RENAME TO memory_edges_pre_relation_vocabulary",
+    );
+    db.exec(MEMORY_EDGES_DDL);
+    db.exec(
+      `INSERT INTO memory_edges (
+         citing_kind, citing_id, cited_kind, cited_id,
+         relation, provenance, created_at_epoch
+       )
+       SELECT
+         citing_kind, citing_id, cited_kind, cited_id,
+         relation, provenance, created_at_epoch
+       FROM memory_edges_pre_relation_vocabulary`,
+    );
+    db.exec("DROP TABLE memory_edges_pre_relation_vocabulary");
+    // The rename dragged idx_memory_edges_cited along to the old table (a
+    // rename keeps index names), so MEMORY_EDGES_DDL's IF NOT EXISTS above
+    // saw the name and skipped; now that the old table's drop took the index
+    // with it, this re-exec creates it against the new table — the same
+    // trailing re-exec `collapseAndRebuildMemoryEdges` needs for the same
+    // reason.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
+        ON memory_edges(cited_kind, cited_id, relation);
+    `);
+  });
+}
+
 function ensureMemoryEdgesSchema(db: Database): void {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
     ensureMemoryEdgesPairIdentity(db);
+    ensureMemoryEdgesRelationVocabulary(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   // Idempotent (CREATE TRIGGER IF NOT EXISTS) and safe to (re-)run on every
@@ -1920,6 +1965,12 @@ function dropRetiredMaintenanceState(db: Database): void {
   // Installed 0.3.2 databases may still contain the old maintenance table.
   // Dropping it makes the retired terminal-state deadlock unrepresentable.
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
+
+  // Edge-ownership ticket 05: the settlement membership gate retired with the
+  // assign action; a pre-demolition installation still carries its activity
+  // table. Dropping it makes the retired gate unrepresentable — same
+  // reasoning as the table above.
+  db.exec("DROP TABLE IF EXISTS note_settlement_membership_activity");
 
   // idx_turns_status is a strict prefix of idx_turns_status_created, so every
   // query it could serve the wider one serves too; keeping both would only pay
