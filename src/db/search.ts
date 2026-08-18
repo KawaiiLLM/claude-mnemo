@@ -67,6 +67,16 @@ export interface SegmentFtsRecord {
   content: string | null;
   /** Ticket 14 (spec K5): shares the `extra` slot with the facets below, exactly as a turn's own `insight` occupies that slot. */
   insight?: string | null;
+  // Ticket 03 (spec.md:55 — "segment field rows as first-class search hits
+  // beside turns"): the six Working State fields join the same `extra` slot.
+  // Optional so a caller that only ever touches the summary trio (none exist
+  // today, but nothing should require restating five nulls) still type-checks.
+  goal?: string | null;
+  constraints?: string | null;
+  decisions?: string | null;
+  done?: string | null;
+  nextSteps?: string | null;
+  reference?: string | null;
   /** JSON arrays as stored on the row; both go into the `extra` slot. */
   type: string | null;
   tags: string | null;
@@ -486,6 +496,14 @@ export function indexObservationToFTS(
  * query a turn is (spec D6: a segment carries a turn's field shape precisely so
  * the read surfaces need no second vocabulary). `type` and `tags` share the
  * `extra` slot, the same slot a session's summary fields use.
+ *
+ * Ticket 03 (spec.md:55 — "segment field rows as first-class search hits
+ * beside turns"): the six Working State fields join the `extra` slot too.
+ * Before this, `recall(query=...)` could only ever answer from a segment's
+ * title/content/insight/facets — a wording that lived ONLY in `decisions` or
+ * `goal` was invisible to search no matter how the segment's own injected
+ * fields read it, which is the same gap ticket 05 closes for `content`/
+ * `insight`'s WRITE path (this is that gap's read-side twin).
  */
 export function indexSegmentToFTS(db: Database, segment: SegmentFtsRecord): void {
   const facets = [segment.type, segment.tags]
@@ -504,13 +522,26 @@ export function indexSegmentToFTS(db: Database, segment: SegmentFtsRecord): void
     })
     .join(" ");
 
+  const workingState = [
+    segment.goal,
+    segment.constraints,
+    segment.decisions,
+    segment.done,
+    segment.nextSteps,
+    segment.reference,
+  ]
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .join("\n");
+
   indexFtsRecord(
     db,
     "segment",
     segment.id,
     segment.title,
     segment.content,
-    [segment.insight ?? "", facets].filter((part) => part.trim() !== "").join("\n"),
+    [segment.insight ?? "", workingState, facets]
+      .filter((part) => part.trim() !== "")
+      .join("\n"),
     null,
     null,
   );
@@ -610,9 +641,17 @@ export function rebuildSearchIndex(db: Database): void {
     indexObservationToFTS(db, observation);
   }
 
+  // Ticket 03: same column set `indexSegment` (db/segments.ts) passes on the
+  // incremental path — the full rebuild and the per-write reindex must never
+  // answer a `type:`/`tag:`/text query differently depending on which path
+  // last touched a given segment.
   const segmentRows = db
     .query<SegmentFtsRecord, []>(
-      "SELECT id, title, content, insight, type, tags FROM segments ORDER BY id",
+      `SELECT
+         id, title, content, insight,
+         goal, constraints, decisions, done, next_steps AS nextSteps, reference,
+         type, tags
+       FROM segments ORDER BY id`,
     )
     .all();
   for (const segment of segmentRows) {

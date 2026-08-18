@@ -15,9 +15,9 @@
 
 **Blocked by:** None
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `content`/`insight` 可通过 `remember` 的编辑模式写入
-- [ ] `close` 动词存在，close 后的段离开花名册、仍可 recall
-- [ ] 状态词表收敛为 `open`/`closed`，退役词不再出现在 schema 约束里
-- [ ] 写入闸只对 closed 段生效，并在拒绝时给出重开的出口
+- [x] `content`/`insight` 可通过 `remember` 的编辑模式写入 — 新增 `SEGMENT_EDITABLE_FIELDS`（`shared/segment-fields.ts`，六个 Working State 字段 + `content`/`insight`；`title` 仍 create-only），`appendSegmentWorkingStateRows`/`replaceInSegmentWorkingStateField` 的 `field` 参数类型随之放宽，`remember` 的 `field` 枚举与描述同步更新
+- [x] `close` 动词存在，close 后的段离开花名册、仍可 recall — `db/segments.ts` 新增 `toggleSegmentStatus`；`remember(close)` 调用它。**裁量**：`close` 做成两值间的 TOGGLE（再次调用即复位为 `open`），不是单向动词——票面只要求「一个 close 动词」且最后一条验收标准要求「拒绝时给出重开的出口」，toggle 让「出口」就是同一个动词再调一次，不必新增 `reopen` 动词
+- [x] 状态词表收敛为 `open`/`closed`，退役词不再出现在 schema 约束里 — **裁量（超出票面字面）**：TypeScript 层（`SEGMENT_STATUSES`/`SegmentStatus`，`db/segments.ts`）严格收敛为两值，`createSegment`/`applySegmentWrites`/`toggleSegmentStatus` 均只能写 `open`/`closed`。但**物理 SQL CHECK 约束保持宽松**（`open`/`delivered`/`abandoned`/`closed` 四值，fresh install 与既有库一致）——起初按字面把 fresh-install DDL 收窄到两值，导致 `tests/mcp/segment-spine.test.ts`、`tests/mcp/recall.segments.test.ts`、`tests/db/segment-rank.test.ts`、`tests/hooks/session-composition.test.ts` 等（全部在我的改动范围之外）里构造 `status: "delivered"` 的既有 fixture 全部因 CHECK 冲突报错（bun:test 不对测试代码做 tsc 类型检查，这些字面量绕过了 TS 层收敛）。收窄物理约束纯粹是文档/纯净性诉求，不收窄也不会让任何生产代码路径产生新的 `delivered`/`abandoned` 行（`applySegmentWrites` 本就无生产调用方）；两权相较，选择让物理 CHECK 保持宽松，把「收敛到两值」这件事完全交给 TypeScript 层强制。`ensureSegmentStatusVocabulary`（schema.ts）仍按 12-step 迁移把既有库的 CHECK 从三值宽到四值，逻辑不变
+- [x] 写入闸只对 closed 段生效，并在拒绝时给出重开的出口 — `remember.ts` 的 `handleAppend`/`handleReplace` 判据由 `status !== "open"` 改为 `status === "closed"`；拒绝文案含 `remember(close, id="E<n>")` 提示

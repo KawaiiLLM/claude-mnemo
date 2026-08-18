@@ -22,10 +22,10 @@ semantic-container, segment-as-semantic-container
 
 **Blocked by:** None
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `findTopic` 不再读别名列
-- [ ] `upsertTopic` 不再接受 aliases
-- [ ] 工具描述不再提及别名合并
-- [ ] 请求一个新主题名时必定得到该名字，或明确的「已存在同名」
-- [ ] `aliases` 列保留但无人读写；是否清理数据另开票
+- [x] `findTopic` 不再读别名列 — 别名扫描分支整段删除，只剩精确（大小写/宽度不敏感）名字匹配
+- [x] `upsertTopic` 不再接受 aliases — `UpsertTopicInput` 去掉 `aliases?: string[]`，合并/redirect 逻辑整段删除，INSERT/UPDATE 都不再写 `aliases` 列（该列靠 schema 默认值 `'[]'`）
+- [x] 工具描述不再提及别名合并 — `definitions.ts` 的 `topic` 参数描述由「Reused verbatim or by alias when it already exists」改为「Reused verbatim when it already exists」
+- [x] 请求一个新主题名时必定得到该名字，或明确的「已存在同名」 — 精确匹配下，一个未被精确复用的新名字必定 INSERT 出新 topic；无重定向可能
+- [x] `aliases` 列保留但无人读写；是否清理数据另开票 — **裁量**：字面上「无人读写」我理解为「无人再用它做匹配/合并判断」；`TopicRecord.aliases`/`mapTopicRow`/`listTopicsByFrequency` 仍然 SELECT 并映射该列供内省读取（未删除该字段），因为它是现有公开类型的一部分，删除会是未被要求的额外收窄。列本身与生产数据完全未动

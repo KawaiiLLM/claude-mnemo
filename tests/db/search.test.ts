@@ -9,7 +9,13 @@ import {
   updateObservation,
 } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
-import { searchMemory } from "../../src/db/search";
+import { indexSegmentToFTS, rebuildSearchIndex, searchMemory } from "../../src/db/search";
+import {
+  appendSegmentWorkingStateRows,
+  createSegment,
+  getSegment,
+  replaceInSegmentWorkingStateField,
+} from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
@@ -361,5 +367,191 @@ describe("observation queries and search", () => {
     expect(new Set(results.map((result) => result.layer))).toEqual(
       new Set(["session"]),
     );
+  });
+});
+
+// Ticket 03 (spec.md:55 — "segment field rows as first-class search hits
+// beside turns"): the six Working State fields join the segment's FTS row,
+// on BOTH the incremental write path (db/segments.ts's `indexSegment`,
+// exercised here through `createSegment`/`appendSegmentWorkingStateRows`/
+// `replaceInSegmentWorkingStateField`) and the full-rebuild path
+// (`rebuildSearchIndex`).
+describe("segment Working State fields are searchable (ticket 03)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function readSegmentFtsExtra(segmentId: number): string {
+    return (
+      db
+        .query<{ extra: string | null }, [number]>(
+          "SELECT extra FROM memory_fts WHERE layer = 'segment' AND source_id = ?",
+        )
+        .get(segmentId)?.extra ?? ""
+    );
+  }
+
+  test("indexSegmentToFTS puts all six Working State fields, not just the summary trio, into the extra slot", () => {
+    indexSegmentToFTS(db, {
+      id: 1,
+      title: "t",
+      content: "c",
+      insight: "i",
+      goal: "reach the goal",
+      constraints: "stay under budget",
+      decisions: "a ruling only decisions carries",
+      done: "shipped it",
+      nextSteps: "the next move",
+      reference: "a durable pointer",
+      type: "[]",
+      tags: "[]",
+    });
+
+    const extra = readSegmentFtsExtra(1);
+    for (const phrase of [
+      "reach the goal",
+      "stay under budget",
+      "a ruling only decisions carries",
+      "shipped it",
+      "the next move",
+      "a durable pointer",
+    ]) {
+      expect(extra).toContain(phrase);
+    }
+  });
+
+  test("a query hits a segment on a phrase that lives ONLY in decisions — the acceptance criterion", () => {
+    const segment = createSegment(db, {
+      title: "settlement election design",
+      content: "the summary — nothing about triage lives here",
+      nowEpoch: 100,
+    });
+
+    const withDecision = db
+      .query("UPDATE segments SET decisions = ? WHERE id = ? RETURNING id")
+      .get("- kelvinator-triage-protocol governs the retry order", segment.id);
+    expect(withDecision).not.toBeNull();
+    // Direct SQL write above bypasses indexSegment on purpose (proving the
+    // FULL REBUILD path, not the incremental one, in this test).
+    rebuildSearchIndex(db);
+
+    const hits = searchMemory(db, { scope: "segments", query: "kelvinator-triage-protocol" });
+    expect(hits.map((hit) => hit.sourceId)).toContain(segment.id);
+  });
+
+  test("appendSegmentWorkingStateRows reindexes — the incremental path finds a decisions-only phrase without a rebuild", () => {
+    const segment = createSegment(db, { title: "incremental reindex", nowEpoch: 100 });
+
+    appendSegmentWorkingStateRows(
+      db,
+      segment.id,
+      "decisions",
+      ["zorbathon-cutover-ruling is final"],
+      200,
+    );
+
+    const hits = searchMemory(db, { scope: "segments", query: "zorbathon-cutover-ruling" });
+    expect(hits.map((hit) => hit.sourceId)).toContain(segment.id);
+    expect(readSegmentFtsExtra(segment.id)).toContain("zorbathon-cutover-ruling is final");
+  });
+
+  test("replaceInSegmentWorkingStateField reindexes too — a stale search row is not left after a replace", () => {
+    const segment = createSegment(db, { title: "replace reindex", nowEpoch: 100 });
+    appendSegmentWorkingStateRows(db, segment.id, "goal", ["glimmerfrost-original-goal"], 100);
+    expect(
+      searchMemory(db, { scope: "segments", query: "glimmerfrost-original-goal" }).map(
+        (hit) => hit.sourceId,
+      ),
+    ).toContain(segment.id);
+
+    replaceInSegmentWorkingStateField(
+      db,
+      segment.id,
+      "goal",
+      "- glimmerfrost-original-goal",
+      "- glimmerfrost-revised-goal",
+      200,
+    );
+
+    expect(
+      searchMemory(db, { scope: "segments", query: "glimmerfrost-original-goal" }).map(
+        (hit) => hit.sourceId,
+      ),
+    ).not.toContain(segment.id);
+    expect(
+      searchMemory(db, { scope: "segments", query: "glimmerfrost-revised-goal" }).map(
+        (hit) => hit.sourceId,
+      ),
+    ).toContain(segment.id);
+  });
+
+  test("the full-rebuild path and the incremental path index the SAME column set — no drift between them", () => {
+    const segment = createSegment(db, { title: "parity check", nowEpoch: 100 });
+    db.query(
+      "UPDATE segments SET goal = ?, constraints = ?, decisions = ?, done = ?, next_steps = ?, reference = ? WHERE id = ?",
+    ).run(
+      "- goal row",
+      "- constraint row",
+      "- decision row",
+      "- done row",
+      "- next row",
+      "- reference row",
+      segment.id,
+    );
+    // The direct SQL write above did NOT reindex — read what the incremental
+    // path last wrote (nothing beyond the summary trio, from `createSegment`).
+    const beforeRebuild = readSegmentFtsExtra(segment.id);
+
+    rebuildSearchIndex(db);
+    const afterRebuild = readSegmentFtsExtra(segment.id);
+
+    expect(beforeRebuild).not.toContain("goal row");
+    for (const phrase of [
+      "goal row",
+      "constraint row",
+      "decision row",
+      "done row",
+      "next row",
+      "reference row",
+    ]) {
+      expect(afterRebuild).toContain(phrase);
+    }
+
+    // Now reach parity through the INCREMENTAL path (a real remember-style
+    // write on one field), and confirm rebuilding again changes nothing —
+    // the two paths already agree.
+    db.query("UPDATE segments SET reference = ? WHERE id = ?").run(
+      "- reference row",
+      segment.id,
+    );
+    const segmentRecord = getSegment(db, segment.id)!;
+    // Re-derive through the SAME helper `indexSegment` (db/segments.ts) uses
+    // internally, via the public `indexSegmentToFTS` — proves the shape, not
+    // a private function.
+    indexSegmentToFTS(db, {
+      id: segmentRecord.id,
+      title: segmentRecord.title,
+      content: segmentRecord.content,
+      insight: segmentRecord.insight,
+      goal: segmentRecord.goal,
+      constraints: segmentRecord.constraints,
+      decisions: segmentRecord.decisions,
+      done: segmentRecord.done,
+      nextSteps: segmentRecord.nextSteps,
+      reference: segmentRecord.reference,
+      type: JSON.stringify(segmentRecord.type),
+      tags: JSON.stringify(segmentRecord.tags),
+    });
+    const afterIncremental = readSegmentFtsExtra(segment.id);
+
+    rebuildSearchIndex(db);
+    expect(readSegmentFtsExtra(segment.id)).toBe(afterIncremental);
   });
 });

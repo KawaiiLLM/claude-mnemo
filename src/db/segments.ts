@@ -4,8 +4,8 @@ import { reconcileCitedPairs } from "./memory-edges";
 import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
 import {
-  SEGMENT_WORKING_STATE_FIELDS,
-  type SegmentWorkingStateField,
+  SEGMENT_EDITABLE_FIELDS,
+  type SegmentEditableField,
 } from "../shared/segment-fields";
 import {
   MEMORY_TYPES,
@@ -27,8 +27,61 @@ import {
  * module only refuses writes that would corrupt the structure.
  */
 
-export const SEGMENT_STATUSES = ["open", "delivered", "abandoned"] as const;
+/**
+ * Ticket 05 (ADR-0005: "Old segment statuses (open/delivered) are arc
+ * semantics, retired with the arc"; user ruling: "status 初版不需要搞复杂，
+ * 和以后用不用状态机无关"). Two values, no state machine: `open` accepts
+ * writes and stays on the roster; `closed` is manually toggled through
+ * `remember`'s `close` verb, refuses `append`/`replace`, and leaves the
+ * roster while remaining `recall`-able. The retired `delivered`/`abandoned`
+ * words never appear here — a database written under the old three-value
+ * vocabulary keeps whatever it already has on disk (schema.ts's
+ * `ensureSegmentStatusVocabulary` widens the physical CHECK so those rows
+ * stay legible and updatable; nothing rewrites their stored value).
+ */
+export const SEGMENT_STATUSES = ["open", "closed"] as const;
 export type SegmentStatus = (typeof SEGMENT_STATUSES)[number];
+
+/**
+ * Ticket 02 (ADR-0005: "legacy arc-segments freeze as-is — readable via
+ * recall, absent from the roster"): the boundary between a legacy
+ * arc-segment (this table's pre-redesign occupant — a G4-bounded window,
+ * 0-4 graded, no Working State, no topic-container semantics) and a segment
+ * created under ADR-0001. `status = 'open'` alone CANNOT tell the two apart:
+ * the old write path also defaulted new rows to `open`, so on the live
+ * database 13 of 14 `status = 'open'` rows were legacy arc-segments carrying
+ * an activity-prefixed title from a different project entirely (measured,
+ * ticket 02's own evidence) — the doc comment this replaces asserted the
+ * opposite as a load-bearing assumption ("no writer... moves a segment...
+ * off `open`, so `status != 'open'` uniquely identifies legacy rows") and it
+ * was false against production data from the day it was written.
+ *
+ * The freeze judgement is therefore a recorded FACT — `created_at_epoch`
+ * against a pinned moment — not an inference from a value settlement or
+ * `remember` could still be writing today. Same idiom as
+ * `ELECTION_ERA_CUTOFF_EPOCH`/`TASK_CAUSALITY_ERA_CUTOFF_EPOCH`
+ * (election-era.ts/task-causality-era.ts): a real release moment, not an
+ * operator-configured placeholder — but NOT `isSegmentEra`
+ * (segment-era.ts), which is a DIFFERENT era boundary (the P2 turn-to-
+ * segment-spine cutover) gating TURNS, not this table's own rows.
+ *
+ * Pinned to commit e709279 ("docs: semantic-container ADRs 0001-0007,
+ * glossary, spec and eleven tickets"), 2026-08-17 15:48:57 UTC — the moment
+ * ADR-0001's container semantics became the accepted design. Verified against
+ * the live database: every legacy row's `created_at_epoch` sits strictly
+ * before it (the latest, E47, at 2026-08-16 20:04:14 UTC) and the first
+ * genuinely new container (E48, "segment upgraded to per-topic container")
+ * sits strictly after it (2026-08-17 18:14:50 UTC) — no row falls in the gap
+ * between them, so the exact value within that gap is not load-bearing.
+ */
+export const SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH = 1_786_981_737;
+
+export function isLiveSegmentEra(
+  createdAtEpoch: number,
+  cutoffEpoch: number = SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
+): boolean {
+  return createdAtEpoch >= cutoffEpoch;
+}
 
 export const TOPIC_STATUSES = ["active", "dormant", "retired"] as const;
 export type TopicStatus = (typeof TOPIC_STATUSES)[number];
@@ -143,10 +196,15 @@ const SEGMENT_COLUMNS = `
  * `SegmentRecord` property it reads/writes. One map, so the MCP seam and the
  * DB writers below cannot disagree about which property a field name means.
  * `next_steps` is the only entry where the two spellings differ.
+ *
+ * Ticket 05 widened this from the six Working State fields to
+ * `SegmentEditableField` (content/insight join the same append/replace
+ * mechanism, ADR-0001) — `content`/`insight` map to themselves, same as
+ * every other entry except `next_steps`.
  */
-const SEGMENT_WORKING_STATE_PROPERTY: Record<
-  SegmentWorkingStateField,
-  "goal" | "constraints" | "decisions" | "done" | "nextSteps" | "reference"
+const SEGMENT_EDITABLE_PROPERTY: Record<
+  SegmentEditableField,
+  "goal" | "constraints" | "decisions" | "done" | "nextSteps" | "reference" | "content" | "insight"
 > = {
   goal: "goal",
   constraints: "constraints",
@@ -154,6 +212,8 @@ const SEGMENT_WORKING_STATE_PROPERTY: Record<
   done: "done",
   next_steps: "nextSteps",
   reference: "reference",
+  content: "content",
+  insight: "insight",
 };
 
 function parseStringArray(value: string | null): string[] {
@@ -202,57 +262,41 @@ function mapSegmentRow(row: SegmentRow | null): SegmentRecord | null {
     : null;
 }
 
-/** Alias lookup is case- and width-insensitive; the stored spelling is kept. */
+/** Name lookup is case- and width-insensitive; the stored spelling is kept. */
 function normalizeTopicKey(value: string): string {
   return value.normalize("NFKC").trim().toLocaleLowerCase("en-US");
 }
 
 export interface UpsertTopicInput {
   name: string;
-  aliases?: string[];
   status?: TopicStatus;
   nowEpoch: number;
 }
 
 /**
- * Register a topic, or fold a new spelling into the one that already owns this
- * name (spec D6/D9's anti-fragmentation rule: search before minting). Returns
- * the surviving topic either way, so a caller never has to branch on whether it
- * won the race.
+ * Register a topic, or reuse the one that already owns this EXACT name
+ * (case-/width-insensitive). Returns the surviving topic either way, so a
+ * caller never has to branch on whether it won the race.
+ *
+ * Ticket 07 (user ruling: "从没说过要别名表，就不要乱加机制"): no alias
+ * merging. The prior version folded a caller's spelling into an existing
+ * topic's `aliases` array and matched future lookups against it —
+ * unrequested machinery that, on the live database, let one topic capture
+ * ten names (including the repository's own) through exactly this
+ * mechanism, each new alias making the next false match more likely. The
+ * `aliases` column stays on `topics` (nothing here reads or writes it); a
+ * data cleanup for the rows it already accumulated is a separate ticket.
  */
 export function upsertTopic(db: Database, input: UpsertTopicInput): TopicRecord {
   const existing = findTopic(db, input.name);
   if (existing) {
-    const merged = [...existing.aliases];
-    for (const alias of input.aliases ?? []) {
-      if (
-        normalizeTopicKey(alias) !== normalizeTopicKey(existing.name) &&
-        !merged.some((known) => normalizeTopicKey(known) === normalizeTopicKey(alias))
-      ) {
-        merged.push(alias);
-      }
-    }
-    // The name a caller arrives with becomes an alias when the match came
-    // through an existing alias — otherwise the spelling would be lost.
-    if (
-      normalizeTopicKey(input.name) !== normalizeTopicKey(existing.name) &&
-      !merged.some((known) => normalizeTopicKey(known) === normalizeTopicKey(input.name))
-    ) {
-      merged.push(input.name);
-    }
-
     const updated = mapTopicRow(
       db
-        .query<TopicRow, [string, TopicStatus, number, number]>(
-          `UPDATE topics SET aliases = ?, status = ?, updated_at_epoch = ?
+        .query<TopicRow, [TopicStatus, number, number]>(
+          `UPDATE topics SET status = ?, updated_at_epoch = ?
            WHERE id = ? RETURNING ${TOPIC_COLUMNS}`,
         )
-        .get(
-          JSON.stringify(merged),
-          input.status ?? existing.status,
-          input.nowEpoch,
-          existing.id,
-        ) ?? null,
+        .get(input.status ?? existing.status, input.nowEpoch, existing.id) ?? null,
     );
     if (!updated) {
       throw new Error(`Failed to update topic ${existing.id}.`);
@@ -262,14 +306,13 @@ export function upsertTopic(db: Database, input: UpsertTopicInput): TopicRecord 
 
   const inserted = mapTopicRow(
     db
-      .query<TopicRow, [string, string, TopicStatus, number, number]>(
-        `INSERT INTO topics (name, aliases, status, created_at_epoch, updated_at_epoch)
-         VALUES (?, ?, ?, ?, ?)
+      .query<TopicRow, [string, TopicStatus, number, number]>(
+        `INSERT INTO topics (name, status, created_at_epoch, updated_at_epoch)
+         VALUES (?, ?, ?, ?)
          RETURNING ${TOPIC_COLUMNS}`,
       )
       .get(
         input.name,
-        JSON.stringify(input.aliases ?? []),
         input.status ?? "active",
         input.nowEpoch,
         input.nowEpoch,
@@ -282,20 +325,21 @@ export function upsertTopic(db: Database, input: UpsertTopicInput): TopicRecord 
   return inserted;
 }
 
-/** Resolve a name through the registry: exact name first, then aliases. */
+/**
+ * Resolve a name through the registry by EXACT name only (case-/width-
+ * insensitive via `normalizeTopicKey`).
+ *
+ * Ticket 07: the alias-scanning fallback this used to fall through to is
+ * retired — anti-fragmentation is the roster's/topic listing's visibility,
+ * not a silent redirect here (user ruling: "从没说过要别名表，就不要乱加
+ * 机制"). `topics.aliases` is not read by this function any more.
+ */
 export function findTopic(db: Database, name: string): TopicRecord | null {
   const key = normalizeTopicKey(name);
   const rows = db.query<TopicRow, []>(`SELECT ${TOPIC_COLUMNS} FROM topics`).all();
 
   const byName = rows.find((row) => normalizeTopicKey(row.name) === key);
-  if (byName) {
-    return mapTopicRow(byName);
-  }
-
-  const byAlias = rows.find((row) =>
-    parseStringArray(row.aliases).some((alias) => normalizeTopicKey(alias) === key),
-  );
-  return mapTopicRow(byAlias ?? null);
+  return mapTopicRow(byName ?? null);
 }
 
 export function getTopic(db: Database, topicId: number): TopicRecord | null {
@@ -448,13 +492,26 @@ function reconcileSegmentCitedPairs(
   );
 }
 
-/** Keep the segment's search row in step with the row it was written from. */
+/**
+ * Keep the segment's search row in step with the row it was written from.
+ *
+ * Ticket 03: passes all six Working State fields too, the same set
+ * `rebuildSearchIndex`'s full-rebuild query (db/search.ts) selects — this is
+ * the ONE place a `SegmentRecord` becomes a `SegmentFtsRecord`, so the two
+ * paths cannot drift onto different column sets.
+ */
 function indexSegment(db: Database, segment: SegmentRecord): void {
   indexSegmentToFTS(db, {
     id: segment.id,
     title: segment.title,
     content: segment.content,
     insight: segment.insight,
+    goal: segment.goal,
+    constraints: segment.constraints,
+    decisions: segment.decisions,
+    done: segment.done,
+    nextSteps: segment.nextSteps,
+    reference: segment.reference,
     type: JSON.stringify(segment.type),
     tags: JSON.stringify(segment.tags),
   });
@@ -907,8 +964,10 @@ const SEGMENT_WRITE_SAVEPOINT = "mnemo_segment_writes";
  * including the caller's other partition writes, which never enter this
  * savepoint's rollback path — commits.
  *
- * A frozen (delivered/abandoned) segment refuses writes outright: spec D6
- * overturns a closed segment with an edge, never by rewriting history.
+ * A non-open segment refuses writes outright: spec D6 overturns a closed
+ * segment with an edge, never by rewriting history. (This CAS path is the
+ * settlement writer's own — ticket 05's narrower "only `closed` blocks"
+ * gate lives in `remember.ts`'s own append/replace handlers, not here.)
  */
 export function applySegmentWrites(
   db: Database,
@@ -1024,13 +1083,14 @@ export function normalizeWorkingStateRow(text: string): string {
 }
 
 /**
- * Append one or more rows to a Working State field (spec "Tools", `remember`
+ * Append one or more rows to an editable field (spec "Tools", `remember`
  * `append`). Newline-joined onto whatever the field already holds; a `null`/
  * empty field starts fresh. Returns the updated record, or `null` if the
  * segment does not exist.
  *
- * `field` is typed as `SegmentWorkingStateField` — the closed six-value union
- * `remember`'s own parameter schema enforces — so the column name interpolated
+ * `field` is typed as `SegmentEditableField` — the closed eight-value union
+ * `remember`'s own parameter schema enforces (ticket 05: the six Working
+ * State fields plus `content`/`insight`) — so the column name interpolated
  * into the `UPDATE` below is never a caller-controlled string, the same
  * discipline `shouldRebuildSearchIndex` (schema.ts) applies to its own
  * whitelisted table names.
@@ -1038,7 +1098,7 @@ export function normalizeWorkingStateRow(text: string): string {
 export function appendSegmentWorkingStateRows(
   db: Database,
   segmentId: number,
-  field: SegmentWorkingStateField,
+  field: SegmentEditableField,
   rows: readonly string[],
   nowEpoch: number,
 ): SegmentRecord | null {
@@ -1047,7 +1107,7 @@ export function appendSegmentWorkingStateRows(
     return null;
   }
 
-  const property = SEGMENT_WORKING_STATE_PROPERTY[field];
+  const property = SEGMENT_EDITABLE_PROPERTY[field];
   const existing = segment[property];
   const addition = rows.map(normalizeWorkingStateRow).join("\n");
   const merged =
@@ -1064,6 +1124,10 @@ export function appendSegmentWorkingStateRows(
 
   if (updated) {
     reconcileSegmentCitedPairs(db, updated, nowEpoch);
+    // Ticket 03: the only production writer of these fields never reindexed
+    // — a row appended through `remember` was invisible to `recall(query=…)`
+    // until the next full rebuild, which nothing schedules.
+    indexSegment(db, updated);
   }
   return updated;
 }
@@ -1096,7 +1160,7 @@ export interface ReplaceSegmentWorkingStateFieldResult {
 export function replaceInSegmentWorkingStateField(
   db: Database,
   segmentId: number,
-  field: SegmentWorkingStateField,
+  field: SegmentEditableField,
   oldString: string,
   newString: string,
   nowEpoch: number,
@@ -1106,7 +1170,7 @@ export function replaceInSegmentWorkingStateField(
     return { segment: null };
   }
 
-  const property = SEGMENT_WORKING_STATE_PROPERTY[field];
+  const property = SEGMENT_EDITABLE_PROPERTY[field];
   const current = segment[property] ?? "";
   const occurrences = current === "" ? 0 : current.split(oldString).length - 1;
 
@@ -1134,8 +1198,47 @@ export function replaceInSegmentWorkingStateField(
 
   if (updated) {
     reconcileSegmentCitedPairs(db, updated, nowEpoch);
+    // Ticket 03 — see `appendSegmentWorkingStateRows`'s own note.
+    indexSegment(db, updated);
   }
   return { segment: updated };
+}
+
+/**
+ * `remember`'s `close` verb (ticket 05, ADR-0005: "A finished task is
+ * manually closed through remember and leaves the roster"). The status
+ * vocabulary is two values with no state machine, so `close` is a TOGGLE
+ * rather than a one-way transition: called on a segment that is not
+ * currently `closed`, it closes; called again on an already-`closed` one, it
+ * reopens — this IS the checklist's "拒绝时给出重开的出口" (the exit is the
+ * same verb, called again), not a second verb.
+ *
+ * No revision fence, matching `appendSegmentWorkingStateRows` /
+ * `replaceInSegmentWorkingStateField` above and NOT `applySegmentWrites`:
+ * ADR-0002 makes maintenance advisory and single-writer-per-session, not a
+ * CAS domain.
+ *
+ * Returns the updated record, or `null` if the segment does not exist.
+ */
+export function toggleSegmentStatus(
+  db: Database,
+  segmentId: number,
+  nowEpoch: number,
+): SegmentRecord | null {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return null;
+  }
+  const next: SegmentStatus = segment.status === "closed" ? "open" : "closed";
+
+  return mapSegmentRow(
+    db
+      .query<SegmentRow, [SegmentStatus, number, number]>(
+        `UPDATE segments SET status = ?, updated_at_epoch = ? WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`,
+      )
+      .get(next, nowEpoch, segmentId) ?? null,
+  );
 }
 
 /** Every segment currently carrying `topicId` — attach-by-topic's candidate set. */
@@ -1320,25 +1423,64 @@ export function listSegmentsByActivity(db: Database, limit: number): SegmentReco
 }
 
 /**
+ * The one "live" predicate `listLiveSegmentsByActivity` and
+ * `countLiveSegments` both filter on (ticket 02's own acceptance criterion:
+ * "溢出计数与候选集用同一判据" — the overflow count and the candidate set
+ * must never disagree about the total). Two facts, not one: `status =
+ * 'open'` (ticket 05 — a `closed` segment leaves the roster) AND, when an
+ * era cutoff is given, `created_at_epoch >= eraCutoffEpoch` (ticket 02 — a
+ * pre-redesign legacy arc-segment never belongs on the roster, whatever its
+ * status). Neither fact substitutes for the other: a legacy row can carry
+ * `status = 'open'` (the bug this ticket fixes), and a brand-new segment can
+ * be `closed`.
+ *
+ * `eraCutoffEpoch: null` (the default on both public functions below) is
+ * INERT — status-only, byte-for-byte the predicate both functions used
+ * before this ticket — same "null means every row reads as it always did"
+ * idiom `computeSegmentMemberFacetCounts` above and `isSegmentEra`
+ * (segment-era.ts) already use. This is deliberate, not a placeholder to
+ * finish later: the one production caller, `renderSegmentRoster`
+ * (hooks/session-composition.ts), is outside this ticket's file scope, so
+ * threading the real cutoff into ITS call sites is a follow-up one line
+ * away (`countLiveSegments(db, SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH)` /
+ * `listLiveSegmentsByActivity(db, limit, SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH)`)
+ * rather than something this change can silently do FOR that file without
+ * risking exactly the collision it was told to avoid.
+ */
+function liveSegmentWhereClause(eraCutoffEpoch: number | null): {
+  clause: string;
+  params: number[];
+} {
+  return eraCutoffEpoch === null
+    ? { clause: "s.status = 'open'", params: [] }
+    : {
+        clause: "s.status = 'open' AND s.created_at_epoch >= ?",
+        params: [eraCutoffEpoch],
+      };
+}
+
+/**
  * The SessionStart roster's candidate set (ticket 10): live segments only,
  * activity-ordered like `listSegmentsByActivity`, with the topic name joined
  * so the roster can group by it without a second query per row.
  *
  * "Live" excludes the frozen pre-redesign rows ADR-0005 counted at 47 and
- * ruled "absent from the roster". There is no dedicated era column for this:
- * no writer in this codebase ever moves a segment created under this
- * redesign off `status = 'open'` (`createSegment` always defaults to `open`
- * and no close verb exists yet — ticket 08's own follow-up note), so
- * `status != 'open'` today uniquely identifies those legacy rows. This reads
- * the same boolean `applySegmentWrites`' "frozen" guard already uses for a
- * different purpose (refusing writes) — same fact, read here for listing.
+ * ruled "absent from the roster" — see `SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH`
+ * for why this can no longer be inferred from `status` alone, and
+ * `liveSegmentWhereClause` above for why `eraCutoffEpoch` defaults to `null`
+ * (inert) rather than that constant.
  */
-export function listLiveSegmentsByActivity(db: Database, limit: number): SegmentWithTopic[] {
+export function listLiveSegmentsByActivity(
+  db: Database,
+  limit: number,
+  eraCutoffEpoch: number | null = null,
+): SegmentWithTopic[] {
   if (limit <= 0) {
     return [];
   }
+  const where = liveSegmentWhereClause(eraCutoffEpoch);
   return db
-    .query<SegmentRow & { topicName: string | null }, [number]>(
+    .query<SegmentRow & { topicName: string | null }, number[]>(
       `SELECT ${JOINED_SEGMENT_COLUMNS}, tp.name AS topicName
        FROM segments s
        LEFT JOIN topics tp ON tp.id = s.topic_id
@@ -1348,25 +1490,29 @@ export function listLiveSegmentsByActivity(db: Database, limit: number): Segment
          JOIN turns t ON t.id = sm.turn_id
          GROUP BY sm.segment_id
        ) activity ON activity.segmentId = s.id
-       WHERE s.status = 'open'
+       WHERE ${where.clause}
        ORDER BY MAX(s.updated_at_epoch, COALESCE(activity.lastMemberEpoch, 0)) DESC, s.id DESC
        LIMIT ?`,
     )
-    .all(limit)
+    .all(...where.params, limit)
     .flatMap((row) => {
       const segment = mapSegmentRow(row);
       return segment ? [{ segment, topicName: row.topicName }] : [];
     });
 }
 
-/** Same status filter as `listLiveSegmentsByActivity`, unpaged — the roster's overflow count. */
-export function countLiveSegments(db: Database): number {
+/** Same predicate as `listLiveSegmentsByActivity` (`liveSegmentWhereClause`), unpaged — the roster's overflow count. */
+export function countLiveSegments(
+  db: Database,
+  eraCutoffEpoch: number | null = null,
+): number {
+  const where = liveSegmentWhereClause(eraCutoffEpoch);
   return (
     db
-      .query<{ count: number }, []>(
-        `SELECT COUNT(*) AS count FROM segments WHERE status = 'open'`,
+      .query<{ count: number }, number[]>(
+        `SELECT COUNT(*) AS count FROM segments s WHERE ${where.clause}`,
       )
-      .get()?.count ?? 0
+      .get(...where.params)?.count ?? 0
   );
 }
 

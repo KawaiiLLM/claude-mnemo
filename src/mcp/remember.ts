@@ -15,6 +15,7 @@ import {
   getSegment,
   getSegmentsForTopic,
   replaceInSegmentWorkingStateField,
+  toggleSegmentStatus,
   upsertTopic,
   type SegmentRecord,
 } from "../db/segments";
@@ -22,8 +23,8 @@ import { countTurnsSince } from "../db/sessions";
 import { decodeHtmlEntities } from "./note";
 import { renderSegmentCard } from "./segment-card";
 import {
-  SEGMENT_WORKING_STATE_FIELDS,
-  type SegmentWorkingStateField,
+  SEGMENT_EDITABLE_FIELDS,
+  type SegmentEditableField,
 } from "../shared/segment-fields";
 import {
   containsToolCallSyntax,
@@ -38,12 +39,13 @@ type ToolTextResult = {
   }>;
 };
 
-export type RememberVerb = "create" | "attach" | "append" | "replace";
+export type RememberVerb = "create" | "attach" | "append" | "replace" | "close";
 const REMEMBER_VERBS: readonly RememberVerb[] = [
   "create",
   "attach",
   "append",
   "replace",
+  "close",
 ];
 
 /**
@@ -65,9 +67,9 @@ export interface RememberToolInput {
   topic?: unknown;
   goal?: unknown;
   members?: unknown;
-  // attach / append / replace share `id` — a segment's `E<n>` address, or
-  // (attach only in practice, but resolved identically everywhere) a topic
-  // name.
+  // attach / append / replace / close share `id` — a segment's `E<n>`
+  // address, or (attach/close only in practice, but resolved identically
+  // everywhere) a topic name.
   id?: unknown;
   // append / replace
   field?: unknown;
@@ -409,15 +411,23 @@ function handleAttach(
 // append
 // ---------------------------------------------------------------------------
 
-function isWorkingStateField(value: unknown): value is SegmentWorkingStateField {
+function isEditableField(value: unknown): value is SegmentEditableField {
   return (
     typeof value === "string" &&
-    (SEGMENT_WORKING_STATE_FIELDS as readonly string[]).includes(value)
+    (SEGMENT_EDITABLE_FIELDS as readonly string[]).includes(value)
   );
 }
 
 function fieldRequiredMessage(): string {
-  return `field is required and must be one of ${SEGMENT_WORKING_STATE_FIELDS.join(", ")}.`;
+  return `field is required and must be one of ${SEGMENT_EDITABLE_FIELDS.join(", ")}.`;
+}
+
+/** Ticket 05: the write gate names `close` as the way back, in the same breath it refuses. */
+function closedSegmentRejection(segmentId: number): string {
+  return (
+    `E${segmentId} is closed — Working State only accepts writes on an open segment; ` +
+    `remember(close, id="E${segmentId}") reopens it.`
+  );
 }
 
 function handleAppend(
@@ -428,7 +438,7 @@ function handleAppend(
   if (typeof input.id !== "string" || input.id.trim() === "") {
     return parameterError('id is required for append — an "E<n>" address or a topic name.');
   }
-  if (!isWorkingStateField(input.field)) {
+  if (!isEditableField(input.field)) {
     return parameterError(fieldRequiredMessage());
   }
   if (
@@ -443,10 +453,8 @@ function handleAppend(
   if (!resolution.ok) {
     return parameterError(resolution.message);
   }
-  if (resolution.segment.status !== "open") {
-    return parameterError(
-      `E${resolution.segment.id} is ${resolution.segment.status} — Working State only accepts writes on an open segment.`,
-    );
+  if (resolution.segment.status === "closed") {
+    return parameterError(closedSegmentRejection(resolution.segment.id));
   }
 
   const field = input.field;
@@ -509,7 +517,7 @@ function handleReplace(
   if (typeof input.id !== "string" || input.id.trim() === "") {
     return parameterError('id is required for replace — an "E<n>" address or a topic name.');
   }
-  if (!isWorkingStateField(input.field)) {
+  if (!isEditableField(input.field)) {
     return parameterError(fieldRequiredMessage());
   }
   if (typeof input.oldString !== "string" || input.oldString === "") {
@@ -523,10 +531,8 @@ function handleReplace(
   if (!resolution.ok) {
     return parameterError(resolution.message);
   }
-  if (resolution.segment.status !== "open") {
-    return parameterError(
-      `E${resolution.segment.id} is ${resolution.segment.status} — Working State only accepts writes on an open segment.`,
-    );
+  if (resolution.segment.status === "closed") {
+    return parameterError(closedSegmentRejection(resolution.segment.id));
   }
 
   const field = input.field;
@@ -573,15 +579,57 @@ function handleReplace(
 }
 
 // ---------------------------------------------------------------------------
+// close
+// ---------------------------------------------------------------------------
+
+/**
+ * Ticket 05: toggles the segment closed (leaves the roster, still
+ * `recall`-able) or, on an already-closed segment, reopens it — see
+ * `toggleSegmentStatus` (db/segments.ts) for why this is one verb, not two.
+ */
+function handleClose(
+  db: Database,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError('id is required for close — an "E<n>" address or a topic name.');
+  }
+
+  const resolution = resolveSegmentTarget(db, input.id);
+  if (!resolution.ok) {
+    return parameterError(resolution.message);
+  }
+
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const updated = writeTransaction(db, () =>
+    toggleSegmentStatus(db, resolution.segment.id, nowEpoch),
+  );
+
+  if (!updated) {
+    return parameterError(`E${resolution.segment.id} no longer exists.`);
+  }
+
+  return textResult(
+    updated.status === "closed"
+      ? `Closed E${updated.id} — it leaves the roster, still recall-able. ` +
+          `remember(close, id="E${updated.id}") reopens it.`
+      : `Reopened E${updated.id} — it rejoins the roster.`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 /**
  * `remember` — the segment (semantic) write surface, revived beside `note`
- * (episodic) per ADR-0002. Four verbs, one tool: `create` mints a segment
+ * (episodic) per ADR-0002. Five verbs, one tool: `create` mints a segment
  * from the roster the caller has in view; `attach` binds the current session
  * to one and returns its fields; `append`/`replace` maintain one named
- * Working State field.
+ * field (Working State, or content/insight); `close` toggles the segment off
+ * (or back onto) the roster.
  */
 export function rememberTool(
   db: Database,
@@ -601,5 +649,7 @@ export function rememberTool(
       return handleAppend(db, rawInput, options);
     case "replace":
       return handleReplace(db, rawInput, options);
+    case "close":
+      return handleClose(db, rawInput, options);
   }
 }

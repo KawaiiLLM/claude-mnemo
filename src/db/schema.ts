@@ -375,11 +375,14 @@ const SCHEMA_SQL = `
     updated_at_epoch INTEGER NOT NULL
   );
 
-  -- Topic registry (spec D6): the one place a theme's name and its alternate
-  -- spellings live, so "continuous work on the same theme reuses the same word"
-  -- is enforceable rather than aspirational. The aliases column is a JSON array of
-  -- the other names the same theme has been written as; the settlement pass folds
-  -- new spellings in here instead of minting a near-duplicate topic.
+  -- Topic registry (spec D6): the one place a theme's name lives, so
+  -- "continuous work on the same theme reuses the same word" is enforceable
+  -- rather than aspirational — db/segments.ts's findTopic matches this EXACT
+  -- name only (case-/width-insensitive). The aliases column is a JSON array
+  -- left over from a prior alias-merging mechanism (ticket 07, user ruling:
+  -- "从没说过要别名表，就不要乱加机制") — no writer sets it and no reader
+  -- matches against it any more; it stays only because dropping it is a
+  -- data-cleanup decision this ticket does not make.
   CREATE TABLE IF NOT EXISTS topics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -416,12 +419,26 @@ const SCHEMA_SQL = `
     insight TEXT,
     type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
     tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
-    -- open = still accepting members and rewrites; delivered = closed by a
-    -- shipped/merged/settled outcome; abandoned = went silent. Only open
-    -- segments are writable — a closed one is frozen and gets overturned by an
-    -- edge, never by a rewrite (spec D6: freeze history, not the present).
+    -- Ticket 05 (ADR-0005): the APPLICATION vocabulary is two values, no
+    -- state machine — open = accepting writes and on the roster; closed =
+    -- manually toggled off through remember's close verb, refuses
+    -- append/replace, off the roster, still recall-able (spec D6: freeze
+    -- history, not the present — an edge overturns a closed segment, never a
+    -- rewrite). SEGMENT_STATUSES/SegmentStatus (db/segments.ts) enforce
+    -- exactly those two values on every TYPED writer — createSegment,
+    -- applySegmentWrites, toggleSegmentStatus — so no code path in this
+    -- codebase can produce a delivered/abandoned row from here on.
+    --
+    -- The PHYSICAL CHECK below stays wide enough to also accept the retired
+    -- arc-era words, deliberately NOT narrowed to match: those words are
+    -- read-and-updated on 47 pre-existing production rows (recomputeSegment-
+    -- Facets/the repair sweep issue plain UPDATEs against them that never
+    -- touch status, and SQLite re-validates the WHOLE row's CHECK
+    -- regardless of which columns changed), so a narrower CHECK would break
+    -- facet maintenance on every one of them the moment this migration ran
+    -- (see ensureSegmentStatusVocabulary, and its "why not narrow" note).
     status TEXT NOT NULL DEFAULT 'open' CHECK (
-      status IN ('open', 'delivered', 'abandoned')
+      status IN ('open', 'delivered', 'abandoned', 'closed')
     ),
     revision INTEGER NOT NULL DEFAULT 1,
     -- Ticket 15 (findings 1-3): "this segment owes a facet derivation".
@@ -1420,6 +1437,7 @@ export function initializeSchema(db: Database): void {
   ensureSegmentInsightColumn(db);
   ensureSegmentWorkingStateColumns(db);
   ensureSegmentDerivedFacets(db);
+  ensureSegmentStatusVocabulary(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
   retireLegacyTurnCitationsTable(db);
@@ -2008,6 +2026,141 @@ function ensureSegmentDerivedFacets(db: Database): void {
   // Idempotent (CREATE TRIGGER IF NOT EXISTS) and re-run on every process
   // start, so a database that predates this ticket gains them too.
   db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
+}
+
+/**
+ * The rebuild target for `ensureSegmentStatusVocabulary` below — every
+ * `segments` column exactly as the table above declares them, including the
+ * SAME wide `status` CHECK (`open`/`delivered`/`abandoned`/`closed` — see
+ * that CHECK's own comment on the table above for why it stays wide rather
+ * than narrowing to the two-value APPLICATION vocabulary). Not hoisted into
+ * one function shared with `SCHEMA_SQL`'s inline definition the way
+ * `noteSettlementJobsTableDdl` is shared by its two call sites — the two
+ * texts already have to agree by hand (same reasoning both places), and nothing
+ * here reads or diffs them against each other at runtime, so duplicating the
+ * DDL text costs nothing a shared function would have saved.
+ */
+const segmentsStatusVocabularyRebuildDdl = (tableName: string): string => `
+  CREATE TABLE ${tableName} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    content TEXT,
+    insight TEXT,
+    type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (
+      status IN ('open', 'delivered', 'abandoned', 'closed')
+    ),
+    revision INTEGER NOT NULL DEFAULT 1,
+    facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
+    goal TEXT,
+    constraints TEXT,
+    decisions TEXT,
+    done TEXT,
+    next_steps TEXT,
+    reference TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+`;
+
+const SEGMENTS_INDEXES_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_segments_topic_status
+    ON segments(topic_id, status, updated_at_epoch);
+
+  CREATE INDEX IF NOT EXISTS idx_segments_status_updated
+    ON segments(status, updated_at_epoch);
+`;
+
+/**
+ * The one TRIGGER that lives ON `segments` itself (the two facet-staleness
+ * triggers in `SEGMENT_FACET_STALE_TRIGGERS_DDL` are declared `ON
+ * segment_members`/`ON turns` and survive a `segments` rebuild untouched;
+ * this one does not).
+ */
+const SEGMENTS_OWN_TRIGGER_DDL = `
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_segment
+    AFTER DELETE ON segments
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE (citing_kind = 'segment' AND citing_id = OLD.id)
+         OR (cited_kind = 'segment' AND cited_id = OLD.id);
+    END;
+`;
+
+function segmentsStatusVocabularyIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'segments'`,
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'closed'");
+}
+
+/**
+ * Ticket 05: widen `segments.status`'s CHECK so `closed` is a legal value,
+ * SQLite's 12-step ALTER TABLE procedure (a CHECK cannot be ALTERed).
+ * Same shape as `ensureNoteSettlementTriggerVocabulary`: build the
+ * replacement under a temporary name, copy explicit columns, drop the
+ * original, rename the replacement INTO the original's name (never rename
+ * the original away) — `segment_members`/`segment_attachments` both hold
+ * `REFERENCES segments(id) ON DELETE CASCADE`, and with `PRAGMA foreign_keys
+ * = ON` a rename-away would repoint those clauses at the renamed table and
+ * then cascade-delete every member/attachment row the moment it was dropped.
+ *
+ * `PRAGMA foreign_keys` is a no-op inside a transaction, so it is turned off
+ * on the connection before `runWriteTransaction` opens one and restored
+ * after. `foreign_key_check` runs INSIDE the transaction: a check after the
+ * commit turns a violation into a durable swap plus a skipped migration.
+ */
+function ensureSegmentStatusVocabulary(db: Database): void {
+  if (!segmentsStatusVocabularyIsStale(db)) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!segmentsStatusVocabularyIsStale(db)) {
+        return;
+      }
+
+      db.exec(
+        segmentsStatusVocabularyRebuildDdl("segments_status_vocabulary_rebuild"),
+      );
+      // Explicit column list on both sides — see `ensureNoteSettlementTriggerVocabulary`.
+      db.exec(
+        `INSERT INTO segments_status_vocabulary_rebuild (
+           id, topic_id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps, reference,
+           created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, topic_id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps, reference,
+           created_at_epoch, updated_at_epoch
+         FROM segments`,
+      );
+      db.exec("DROP TABLE segments");
+      db.exec("ALTER TABLE segments_status_vocabulary_rebuild RENAME TO segments");
+      // The indexes and the trigger belonged to the dropped table and died with it.
+      db.exec(SEGMENTS_INDEXES_DDL);
+      db.exec(SEGMENTS_OWN_TRIGGER_DDL);
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `segments rebuild left ${violations.length} foreign key violation(s) while widening status: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
 }
 
 /**

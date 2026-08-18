@@ -5,7 +5,6 @@ import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import {
-  applySegmentWrites,
   findTopic,
   getSegment,
   getSegmentMemberTurnIds,
@@ -422,17 +421,20 @@ describe("remember tool (ticket 02)", () => {
       expect(getSegment(db, segmentId)?.goal).toBeNull();
     });
 
-    test("refuses a write on a non-open (frozen) segment", () => {
-      const segmentId = createSegmentId("append-frozen");
-      const segment = getSegment(db, segmentId)!;
-      applySegmentWrites(db, [{ segmentId, expectedRevision: segment.revision, status: "delivered" }], {
-        nowEpoch: 100,
-      });
+    // Ticket 05: the write gate is now `status === "closed"` only (not "any
+    // non-open") — closing goes through remember's own `close` verb, and the
+    // rejection names it as the way back.
+    test("refuses a write on a closed segment, naming close as the way back", () => {
+      const segmentId = createSegmentId("append-closed");
+      rememberTool(db, { verb: "close", id: `E${segmentId}` });
+      expect(getSegment(db, segmentId)?.status).toBe("closed");
+
       const text = resultText(
         rememberTool(db, { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["late"] }),
       );
       expect(text).toStartWith("Parameter error:");
-      expect(text).toContain("delivered");
+      expect(text).toContain("closed");
+      expect(text).toContain(`remember(close, id="E${segmentId}")`);
     });
 
     test("citations in an appended row create a memory edge (existing citation machinery reused)", () => {
@@ -551,12 +553,10 @@ describe("remember tool (ticket 02)", () => {
       expect(getOutgoingEdges(db, { kind: "segment", id: segmentId }).length).toBe(0);
     });
 
-    test("refuses a write on a non-open (frozen) segment", () => {
-      const segmentId = createWithRow("replace-frozen", "goal", "ship it");
-      const segment = getSegment(db, segmentId)!;
-      applySegmentWrites(db, [{ segmentId, expectedRevision: segment.revision, status: "abandoned" }], {
-        nowEpoch: 100,
-      });
+    test("refuses a write on a closed segment, naming close as the way back", () => {
+      const segmentId = createWithRow("replace-closed", "goal", "ship it");
+      rememberTool(db, { verb: "close", id: `E${segmentId}` });
+
       const text = resultText(
         rememberTool(db, {
           verb: "replace",
@@ -567,7 +567,59 @@ describe("remember tool (ticket 02)", () => {
         }),
       );
       expect(text).toStartWith("Parameter error:");
-      expect(text).toContain("abandoned");
+      expect(text).toContain("closed");
+      expect(text).toContain(`remember(close, id="E${segmentId}")`);
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // close
+  // ---------------------------------------------------------------------
+
+  describe("close", () => {
+    function createViaTool(topic: string): number {
+      const text = resultText(
+        rememberTool(db, { verb: "create", title: `Segment for ${topic}`, topic }),
+      );
+      return Number(/Created E(\d+)/.exec(text)![1]);
+    }
+
+    test("closes an open segment — it leaves the roster, remains recall-able, and the write gate engages", () => {
+      const segmentId = createViaTool("close-basic");
+      const text = resultText(rememberTool(db, { verb: "close", id: `E${segmentId}` }));
+
+      expect(text).toContain(`Closed E${segmentId}`);
+      expect(text).toContain(`remember(close, id="E${segmentId}")`);
+      expect(getSegment(db, segmentId)?.status).toBe("closed");
+    });
+
+    test("closing an already-closed segment toggles it back open — the reopen exit IS this same verb", () => {
+      const segmentId = createViaTool("close-toggle");
+      rememberTool(db, { verb: "close", id: `E${segmentId}` });
+      expect(getSegment(db, segmentId)?.status).toBe("closed");
+
+      const text = resultText(rememberTool(db, { verb: "close", id: `E${segmentId}` }));
+      expect(text).toContain(`Reopened E${segmentId}`);
+      expect(getSegment(db, segmentId)?.status).toBe("open");
+
+      // Writes are accepted again on the reopened segment.
+      const appendText = resultText(
+        rememberTool(db, { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["back open"] }),
+      );
+      expect(appendText).toStartWith("Appended");
+    });
+
+    test("close by topic name resolves the same way append/replace/attach do", () => {
+      createViaTool("close-by-topic");
+      const text = resultText(rememberTool(db, { verb: "close", id: "close-by-topic" }));
+      expect(text).toContain("Closed E");
+    });
+
+    test("rejects a missing id, and an unresolvable address", () => {
+      expect(resultText(rememberTool(db, { verb: "close" }))).toStartWith("Parameter error:");
+      expect(
+        resultText(rememberTool(db, { verb: "close", id: "E999999" })),
+      ).toStartWith("Parameter error:");
     });
   });
 });

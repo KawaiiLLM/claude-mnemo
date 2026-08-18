@@ -1,8 +1,18 @@
 import { z } from "zod";
 
 import { NOTE_TOKEN_BUDGET } from "../shared/note-budget";
-import { SEGMENT_WORKING_STATE_FIELDS } from "../shared/segment-fields";
+import {
+  SEGMENT_EDITABLE_FIELDS,
+  SEGMENT_WORKING_STATE_FIELDS,
+} from "../shared/segment-fields";
 import { MEMORY_TYPES } from "../shared/type-vocabulary";
+
+// Ticket 05: hoisted above `MNEMO_TOOL_DESCRIPTIONS` (which quotes
+// `WORKING_STATE_FIELD_LIST`) as well as `rememberInputShape` (which quotes
+// `EDITABLE_FIELD_LIST`) — one source for each list, read by both the tool
+// description prose and the per-field zod `.describe()`.
+const EDITABLE_FIELD_LIST = SEGMENT_EDITABLE_FIELDS.join("/");
+const WORKING_STATE_FIELD_LIST = SEGMENT_WORKING_STATE_FIELDS.join(", ");
 
 // Ticket 04 (spec "Tools"): the one structured filter grammar shared by
 // `recall` and `timeline` — mirrors `MemoryFilterInput` (mcp/memory-filter.ts)
@@ -78,7 +88,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
   remember:
-    "Maintain a segment — claude-mnemo's per-topic, long-lived semantic container (记住; `note` is the per-turn episodic surface, 记录). Four verbs: `create` mints a new segment from the roster you have in view — deliberate, never automatic, never a near-duplicate of an existing topic; `attach` binds the current session to a segment (by `id=\"E<n>\"` or an existing topic name) and returns its full fields; `append` adds rows to one named Working State field; `replace` finds `oldString` in one field and swaps in `newString` — ambiguous (matches more than once) or missing rejects loudly naming which, and `newString: \"\"` deletes the matched row. Working State fields: goal, constraints, decisions, done, next_steps, reference — each an uncapped markdown row list. Rows may cite `[S<session>/T<prompt>]` or `[E<n>]`, ids seen in injected context only, never invented. Tool-call markup (`<parameter`, `<invoke`, …) is rejected, nothing stored. Every field is written in English.\n" +
+    `Maintain a segment — claude-mnemo's per-topic, long-lived semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Five verbs: \`create\` mints a new segment from the roster you have in view — deliberate, never automatic, never a near-duplicate of an existing topic; \`attach\` binds the current session to a segment (by \`id="E<n>"\` or an existing topic name) and returns its full fields; \`append\` adds rows to one named field; \`replace\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous (matches more than once) or missing rejects loudly naming which, and \`newString: ""\` deletes the matched row; \`close\` toggles the segment off the roster (still \`recall\`-able) or, called again on an already-closed one, back on. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. A closed segment refuses append/replace, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\` or \`[E<n>]\`, ids seen in injected context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
     "Maintenance is advisory, never a gate: every append/replace reports turns since this segment was last touched — under 10 turns draws a too-soon reminder (a `decisions` append is exempt — a lost ruling is the costliest loss), 20+ turns without a touch draws a nudge on the next write.",
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
   // Stop hook and the completion gate already call the coverage predicate
@@ -299,27 +309,30 @@ export const noteInputShape = {
   mode: noteModeShape,
 };
 
-// ticket 02: one shape for all four `remember` verbs (D5/D5a's own
+// ticket 02: one shape for all five `remember` verbs (D5/D5a's own
 // discipline extended to the segment surface) — `.strict()` further down
 // rejects a field a verb does not accept, e.g. `rows` on `attach`, the same
 // way `noteInputSchema` rejects a session call sending `type`. Per-field
 // verb scoping is enforced in `mcp/remember.ts`, not by a zod union: a
 // union's error dump names no field, the same reasoning `note`'s
 // `turn`/`session` dispatch already settled.
-const WORKING_STATE_FIELD_LIST = SEGMENT_WORKING_STATE_FIELDS.join("/");
-
+//
+// ticket 05: `field`'s own enum widened from the six Working State fields to
+// `SEGMENT_EDITABLE_FIELDS` — content/insight join the same append/replace
+// mechanism (ADR-0001). `EDITABLE_FIELD_LIST`/`WORKING_STATE_FIELD_LIST` are
+// declared above `MNEMO_TOOL_DESCRIPTIONS`, which quotes the latter too.
 export const rememberInputShape = {
   verb: z
-    .enum(["create", "attach", "append", "replace"])
+    .enum(["create", "attach", "append", "replace", "close"])
     .describe(
-      "create: mint a new segment. attach: bind the current session to one. append: add rows to a Working State field. replace: find/replace text within one field.",
+      "create: mint a new segment. attach: bind the current session to one. append: add rows to a field. replace: find/replace text within one field. close: toggle the segment off the roster (or, called again, back on).",
     ),
   id: z
     .string()
     .min(1)
     .optional()
     .describe(
-      'attach/append/replace: the target segment — an "E<n>" address, or a topic name resolved through the topic registry (ambiguous — more than one segment on that topic — rejects, asking for the explicit "E<n>" address instead). Not used by create.',
+      'attach/append/replace/close: the target segment — an "E<n>" address, or a topic name resolved through the topic registry (ambiguous — more than one segment on that topic — rejects, asking for the explicit "E<n>" address instead). Not used by create.',
     ),
   title: z
     .string()
@@ -331,7 +344,7 @@ export const rememberInputShape = {
     .min(1)
     .optional()
     .describe(
-      "create only (required): the topic this segment belongs to. Reused verbatim or by alias when it already exists (search the roster before minting) — never assume a new name is needed.",
+      "create only (required): the topic this segment belongs to. Reused verbatim when it already exists (search the roster before minting) — never assume a new name is needed.",
     ),
   goal: z
     .string()
@@ -345,9 +358,9 @@ export const rememberInputShape = {
       'create only, optional: seed member turn addresses ("S<session>/T<prompt>", as seen in context — from an approved proposal, never recalled or invented). Membership is recorded for exactly these turns; a call naming even one bad address seeds none.',
     ),
   field: z
-    .enum(SEGMENT_WORKING_STATE_FIELDS)
+    .enum(SEGMENT_EDITABLE_FIELDS)
     .optional()
-    .describe(`append/replace only (required): which Working State field — ${WORKING_STATE_FIELD_LIST}.`),
+    .describe(`append/replace only (required): which field — ${EDITABLE_FIELD_LIST}.`),
   rows: z
     .array(z.string().min(1))
     .optional()

@@ -7,16 +7,21 @@ import { initializeSchema } from "../../src/db/schema";
 import {
   addSegmentMembers,
   applySegmentWrites,
+  countLiveSegments,
   createSegment,
   findTopic,
   getSegment,
   getSegmentMemberTurnIds,
   getSegmentsForTurn,
+  isLiveSegmentEra,
+  listLiveSegmentsByActivity,
+  SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
   listOpenSegments,
   listRecentSegments,
   listTopics,
   listTopicsByFrequency,
   repairStaleSegmentFacets,
+  toggleSegmentStatus,
   upsertTopic,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -88,24 +93,50 @@ describe("segments, topics and membership", () => {
   });
 
   describe("topic registry", () => {
-    test("resolves a name through its aliases instead of minting a twin", () => {
-      const created = upsertTopic(db, {
-        name: "extraction-redesign",
-        aliases: ["提取管线重设计"],
-        nowEpoch: 100,
-      });
-
-      const viaAlias = upsertTopic(db, {
-        name: "提取管线重设计",
-        aliases: ["extraction pipeline"],
+    // Ticket 07 (user ruling: "从没说过要别名表，就不要乱加机制"): alias
+    // matching is retired outright — no merging, no redirect. Reusing the
+    // EXACT name (case-/width-insensitive) still resolves to the same
+    // topic; a DIFFERENT name mints a separate one rather than being folded
+    // in, even one that reads as an obvious rewording to a human.
+    test("reuses a topic by its EXACT name (case-/width-insensitive), never by alias", () => {
+      const created = upsertTopic(db, { name: "extraction-redesign", nowEpoch: 100 });
+      const sameNameDifferentCase = upsertTopic(db, {
+        name: "EXTRACTION-REDESIGN",
         nowEpoch: 200,
       });
 
-      expect(viaAlias.id).toBe(created.id);
-      expect(viaAlias.aliases).toContain("extraction pipeline");
+      expect(sameNameDifferentCase.id).toBe(created.id);
       expect(listTopics(db)).toHaveLength(1);
-      expect(findTopic(db, "EXTRACTION-REDESIGN")?.id).toBe(created.id);
+      expect(findTopic(db, "extraction-Redesign")?.id).toBe(created.id);
       expect(findTopic(db, "unrelated")).toBeNull();
+    });
+
+    test("a genuinely different name mints a SEPARATE topic — no alias redirect", () => {
+      const original = upsertTopic(db, { name: "extraction-redesign", nowEpoch: 100 });
+      const rewording = upsertTopic(db, { name: "提取管线重设计", nowEpoch: 200 });
+
+      expect(rewording.id).not.toBe(original.id);
+      expect(listTopics(db)).toHaveLength(2);
+      expect(findTopic(db, "提取管线重设计")?.id).toBe(rewording.id);
+    });
+
+    test("upsertTopic never writes the aliases column — it stays the schema default", () => {
+      const topic = upsertTopic(db, { name: "no-alias-write", nowEpoch: 100 });
+      expect(topic.aliases).toEqual([]);
+
+      // Even a raw alias value sitting on the row (data from before this
+      // ticket, or written directly) is never consulted by findTopic.
+      db.query("UPDATE topics SET aliases = ? WHERE id = ?").run(
+        JSON.stringify(["legacy-alias-spelling"]),
+        topic.id,
+      );
+      expect(findTopic(db, "legacy-alias-spelling")).toBeNull();
+
+      // upsertTopic on the SAME exact name still reuses it, and does not
+      // touch (let alone clear) whatever the aliases column already holds.
+      const reused = upsertTopic(db, { name: "no-alias-write", nowEpoch: 200 });
+      expect(reused.id).toBe(topic.id);
+      expect(reused.aliases).toEqual(["legacy-alias-spelling"]);
     });
 
     test("carries a status the settlement pass can retire", () => {
@@ -316,12 +347,12 @@ describe("segments, topics and membership", () => {
           {
             segmentId: segment.id,
             expectedRevision: segment.revision,
-            status: "delivered",
+            status: "closed",
           },
         ],
         { nowEpoch: 200 },
       );
-      expect(closed.applied[0]?.status).toBe("delivered");
+      expect(closed.applied[0]?.status).toBe("closed");
 
       const rewrite = applySegmentWrites(
         db,
@@ -701,7 +732,7 @@ describe("segments, topics and membership", () => {
       const oldest = createSegment(db, { title: "oldest", nowEpoch: 100 });
       const middle = createSegment(db, {
         title: "middle",
-        status: "delivered",
+        status: "closed",
         topicId: topic.id,
         nowEpoch: 200,
       });
@@ -752,6 +783,100 @@ describe("segments, topics and membership", () => {
 
       expect(listTopicsByFrequency(db, "active")).toHaveLength(0);
       expect(listTopicsByFrequency(db).map((entry) => entry.topic.name)).toEqual(["gone"]);
+    });
+  });
+
+  // Ticket 02: the roster's freeze judgement is a recorded fact
+  // (created_at_epoch against a pinned cutoff), never an inference from
+  // `status`. Most tests here use an explicit `eraCutoffEpoch` override —
+  // fixtures across this whole file seed small epochs (100, 200, …), so the
+  // real production constant would classify every one of them as legacy.
+  describe("the live-segment freeze judgement (ticket 02)", () => {
+    const CUTOFF = 1_000;
+
+    test("isLiveSegmentEra: >= cutoff is live, < cutoff is legacy", () => {
+      expect(isLiveSegmentEra(999, CUTOFF)).toBe(false);
+      expect(isLiveSegmentEra(1_000, CUTOFF)).toBe(true);
+      expect(isLiveSegmentEra(1_001, CUTOFF)).toBe(true);
+    });
+
+    test("status = 'open' alone does NOT make a pre-cutoff segment live — the exact bug ticket 02 fixes", () => {
+      // A legacy arc-segment: status 'open' (the old write path's default
+      // too), created BEFORE the cutoff.
+      const legacyOpen = createSegment(db, {
+        title: "measure+legacy-pipeline: old arc, still status open",
+        nowEpoch: 500,
+      });
+      // A genuinely new container, created AFTER the cutoff.
+      const liveOpen = createSegment(db, { title: "new container", nowEpoch: 1_500 });
+
+      const roster = listLiveSegmentsByActivity(db, 10, CUTOFF);
+      expect(roster.map((entry) => entry.segment.id)).toEqual([liveOpen.id]);
+      expect(roster.map((entry) => entry.segment.id)).not.toContain(legacyOpen.id);
+
+      expect(countLiveSegments(db, CUTOFF)).toBe(1);
+    });
+
+    test("a closed post-cutoff segment also leaves the roster (ticket 05's axis, same predicate)", () => {
+      const closedNew = createSegment(db, { title: "closed new container", nowEpoch: 1_500 });
+      toggleSegmentStatus(db, closedNew.id, 1_600);
+      expect(getSegment(db, closedNew.id)?.status).toBe("closed");
+
+      expect(listLiveSegmentsByActivity(db, 10, CUTOFF)).toHaveLength(0);
+      expect(countLiveSegments(db, CUTOFF)).toBe(0);
+    });
+
+    test("the candidate set and the overflow count never disagree about the total (acceptance criterion 3)", () => {
+      for (let index = 0; index < 5; index += 1) {
+        createSegment(db, { title: `live ${index}`, nowEpoch: 1_000 + index });
+      }
+      for (let index = 0; index < 3; index += 1) {
+        createSegment(db, { title: `legacy ${index}`, nowEpoch: 500 + index });
+      }
+
+      expect(listLiveSegmentsByActivity(db, 100, CUTOFF)).toHaveLength(5);
+      expect(countLiveSegments(db, CUTOFF)).toBe(5);
+
+      // …and a LIMIT-truncated candidate set still agrees with the total —
+      // the count is never derived from the (possibly truncated) list length.
+      expect(listLiveSegmentsByActivity(db, 2, CUTOFF)).toHaveLength(2);
+      expect(countLiveSegments(db, CUTOFF)).toBe(5);
+    });
+
+    // hooks/session-composition.ts's renderSegmentRoster is this ticket's one
+    // production caller, and it is outside this ticket's file scope (a
+    // different worker owns it) — it calls both functions with NO third
+    // argument. `eraCutoffEpoch` therefore defaults to `null`, the SAME
+    // inert-by-default idiom `computeSegmentMemberFacetCounts` above and
+    // `isSegmentEra` (segment-era.ts) already use: status-only, byte-for-byte
+    // what both functions did before this ticket. This is what keeps that
+    // file's own test suite (session-composition.test.ts, small fixture
+    // epochs, unmodified by this ticket) passing unchanged; wiring the real
+    // cutoff into ITS call sites is the one-line follow-up this ticket
+    // cannot make on that file's behalf.
+    test("defaults to null (inert) — status-only, unchanged from before this ticket", () => {
+      createSegment(db, { title: "test-epoch segment", nowEpoch: 100 });
+      expect(listLiveSegmentsByActivity(db, 10)).toHaveLength(1);
+      expect(countLiveSegments(db)).toBe(1);
+    });
+
+    // The other half of the same story: passing the REAL pinned constant
+    // explicitly (the follow-up wiring session-composition.ts needs) DOES
+    // correctly separate legacy from live, using this file's own epoch
+    // convention (100/200/…) as the "legacy" side and the real cutoff's
+    // neighbourhood as the "live" side — proves the production constant
+    // itself, not just an arbitrary test CUTOFF.
+    test("the pinned production constant, passed explicitly, classifies correctly", () => {
+      const legacy = createSegment(db, { title: "old test-era segment", nowEpoch: 100 });
+      const live = createSegment(db, {
+        title: "new container",
+        nowEpoch: SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH + 1,
+      });
+
+      const roster = listLiveSegmentsByActivity(db, 10, SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH);
+      expect(roster.map((entry) => entry.segment.id)).toEqual([live.id]);
+      expect(roster.map((entry) => entry.segment.id)).not.toContain(legacy.id);
+      expect(countLiveSegments(db, SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH)).toBe(1);
     });
   });
 

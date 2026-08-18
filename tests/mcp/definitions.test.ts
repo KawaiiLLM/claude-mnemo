@@ -343,20 +343,31 @@ describe("tool surface", () => {
   });
 
   // Ticket 02 (ADR-0001/0002): `remember` revives the retired tool name as
-  // the segment write surface, distinct from `note`.
-  it("the remember description names all four verbs, the field list, markup/citation/English rules and stays capped", () => {
+  // the segment write surface, distinct from `note`. Ticket 05 adds `close`
+  // as a fifth verb and widens the field list to content/insight.
+  it("the remember description names all five verbs, the field list, markup/citation/English rules and stays capped", () => {
     const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
     expect(remember).toContain("`create`");
     expect(remember).toContain("`attach`");
     expect(remember).toContain("`append`");
     expect(remember).toContain("`replace`");
+    expect(remember).toContain("`close`");
     expect(remember).toContain("goal, constraints, decisions, done, next_steps, reference");
+    expect(remember).toContain("content, insight");
     expect(remember).toContain("Tool-call markup");
     expect(remember).toContain("Every field is written in English.");
     expect(remember).toContain("under 10 turns draws a too-soon reminder");
     expect(remember).toContain("20+ turns without a touch draws a nudge");
     expect(remember).toContain("`decisions` append is exempt");
     expect(estimateTokens(remember)).toBeLessThanOrEqual(380);
+  });
+
+  // Ticket 07 (user ruling: "从没说过要别名表，就不要乱加机制"): the alias
+  // merging mechanism is retired, and its wording must not survive in the
+  // tool contract a caller reads to decide whether reusing a name is safe.
+  it("the remember topic description no longer mentions alias merging", () => {
+    const topicDescription = rememberInputShape.topic.description ?? "";
+    expect(topicDescription.toLowerCase()).not.toContain("alias");
   });
 });
 
@@ -374,10 +385,18 @@ describe("rememberInputShape", () => {
     }
   });
 
-  it("field's enum matches the six Working State columns exactly", () => {
+  // Ticket 05: field's enum widened from the six Working State columns to
+  // those six PLUS content/insight (ADR-0001's append/replace mechanism
+  // covers the summary trio's two prose fields too; title stays create-only).
+  it("field's enum accepts the six Working State columns plus content/insight, and nothing else", () => {
+    for (const field of ["goal", "constraints", "decisions", "done", "next_steps", "reference", "content", "insight"]) {
+      expect(() =>
+        rememberInputSchema.parse({ verb: "append", id: "E1", field, rows: ["x"] }),
+      ).not.toThrow();
+    }
     expect(() =>
-      rememberInputSchema.parse({ verb: "append", id: "E1", field: "goal", rows: ["x"] }),
-    ).not.toThrow();
+      rememberInputSchema.parse({ verb: "append", id: "E1", field: "title", rows: ["x"] }),
+    ).toThrow();
     expect(() =>
       rememberInputSchema.parse({ verb: "append", id: "E1", field: "not-a-field", rows: ["x"] }),
     ).toThrow();
@@ -385,6 +404,11 @@ describe("rememberInputShape", () => {
 
   it("rejects a verb outside the closed vocabulary", () => {
     expect(() => rememberInputSchema.parse({ verb: "delete", id: "E1" })).toThrow();
+  });
+
+  // Ticket 05: close only needs id — no field/rows/oldString/newString.
+  it("accepts close with just an id", () => {
+    expect(() => rememberInputSchema.parse({ verb: "close", id: "E1" })).not.toThrow();
   });
 });
 

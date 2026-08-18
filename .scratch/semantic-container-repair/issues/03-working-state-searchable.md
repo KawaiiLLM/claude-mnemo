@@ -12,9 +12,9 @@
 
 **Blocked by:** 05（`content`/`insight` 有了写入者，索引才有完整对象）
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 六个 Working State 字段进入段的 FTS 行
-- [ ] append/replace 成功后该段索引行同步更新
-- [ ] 全量重建路径与增量路径索引同一组列
-- [ ] 用 `recall(query=…)` 命中一条只出现在 `decisions` 里的措辞
+- [x] 六个 Working State 字段进入段的 FTS 行 — `SegmentFtsRecord`（`db/search.ts`）新增 goal/constraints/decisions/done/nextSteps/reference；`indexSegmentToFTS` 把它们与 insight、facets 一并拼进 `extra` 槽
+- [x] append/replace 成功后该段索引行同步更新 — `appendSegmentWorkingStateRows`/`replaceInSegmentWorkingStateField`（`db/segments.ts`）在 `reconcileSegmentCitedPairs` 之后各加一次 `indexSegment(db, updated)` 调用
+- [x] 全量重建路径与增量路径索引同一组列 — `db/segments.ts` 的 `indexSegment` 私有帮助函数是 `SegmentRecord → SegmentFtsRecord` 的唯一转换点，`rebuildSearchIndex`（`db/search.ts`）的 SELECT 语句显式取同一组列（title/content/insight/goal/constraints/decisions/done/next_steps AS nextSteps/reference/type/tags），两条路径不可能各自漂移
+- [x] 用 `recall(query=…)` 命中一条只出现在 `decisions` 里的措辞 — 用 `searchMemory(scope:"segments")` 在 `tests/db/search.test.ts` 验证（`recall` 本身走同一 `searchMemory`，未改动、未新增依赖）；复验命令见交付报告
