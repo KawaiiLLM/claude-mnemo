@@ -55,7 +55,7 @@
 ### P10 · session title 首窗定值只有 prompt 在守(peer 发现,2026-08-20)
 - 事实链:[T913] 裁决「title 同笔、首个窗口定、极少改」;HEAD turn-facade.ts:402-413 自认不特判非空、靠 prompt 遵守;门拦过期认领者但拦不住后续窗口合法认领者的覆写;测试只盖 content-only。
 - 决策点等价物:改结算 session 写面时问「title 的首窗语义靠什么守」。
-- 期望:三通道召回 T913;注意评测期望≠硬拒——「极少改」允许罕改,机械形待用户裁(prompt-only / 硬首定 / 显式旗标罕改)。
+- 期望:三通道召回 T913 与 [T1040] 的裁决链;已裁 A([S15069/T1040]):**prompt-only 即设计**——「极少改」由 prompt 承载判断,不设机械门;评测只验召回,不期望机械测试。
 
 ### P11 · 建段判断在 remember 工具描述残留英文复述(peer 发现,2026-08-20)
 - 事实链:[T978] 裁决「工具描述=时机+作用,判断入 rubric」;HEAD definitions.ts:120 仍带 "never a near-duplicate" 判断句;single-home 守卫只筛中文三句,漏英文复述。

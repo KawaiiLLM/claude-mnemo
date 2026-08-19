@@ -408,7 +408,10 @@ const SESSION_ONLY_FORBIDDEN_FIELDS = [
  * here for the one address kind that still wants it: `title` set once (this
  * function does not special-case "already non-empty" — a repeat call simply
  * overwrites, so the PROMPT is what tells the model to leave it alone once
- * set), `content` incremented by the model composing old-plus-new text
+ * set — prompt-only enforcement USER-RATIFIED at [S15069/T1040] against a
+ * hard first-set gate and an explicit-flag variant: T913's "极少改" allows
+ * rare changes, and the prompt is the ruled keeper of that judgment),
+ * `content` incremented by the model composing old-plus-new text
  * itself (it can already see the current session summary in its own
  * context) and submitting the whole result.
  */
