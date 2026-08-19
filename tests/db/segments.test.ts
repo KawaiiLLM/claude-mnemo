@@ -9,7 +9,6 @@ import {
   applySegmentWrites,
   countLiveSegments,
   createSegment,
-  findTopic,
   getSegment,
   getSegmentMemberTurnIds,
   getSegmentsForTurn,
@@ -18,17 +17,14 @@ import {
   SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
   listOpenSegments,
   listRecentSegments,
-  listTopics,
-  listTopicsByFrequency,
   repairStaleSegmentFacets,
   toggleSegmentStatus,
-  upsertTopic,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { resetTurnExtractionFields, updateTurnById } from "../../src/db/turns";
 import { normalizeTypeValues } from "../../src/shared/type-vocabulary";
 
-describe("segments, topics and membership", () => {
+describe("segments and membership", () => {
   let db: Database;
   let sessionId: number;
 
@@ -90,63 +86,6 @@ describe("segments, topics and membership", () => {
 
   afterEach(() => {
     db.close();
-  });
-
-  describe("topic registry", () => {
-    // Ticket 07 (user ruling: "从没说过要别名表，就不要乱加机制"): alias
-    // matching is retired outright — no merging, no redirect. Reusing the
-    // EXACT name (case-/width-insensitive) still resolves to the same
-    // topic; a DIFFERENT name mints a separate one rather than being folded
-    // in, even one that reads as an obvious rewording to a human.
-    test("reuses a topic by its EXACT name (case-/width-insensitive), never by alias", () => {
-      const created = upsertTopic(db, { name: "extraction-redesign", nowEpoch: 100 });
-      const sameNameDifferentCase = upsertTopic(db, {
-        name: "EXTRACTION-REDESIGN",
-        nowEpoch: 200,
-      });
-
-      expect(sameNameDifferentCase.id).toBe(created.id);
-      expect(listTopics(db)).toHaveLength(1);
-      expect(findTopic(db, "extraction-Redesign")?.id).toBe(created.id);
-      expect(findTopic(db, "unrelated")).toBeNull();
-    });
-
-    test("a genuinely different name mints a SEPARATE topic — no alias redirect", () => {
-      const original = upsertTopic(db, { name: "extraction-redesign", nowEpoch: 100 });
-      const rewording = upsertTopic(db, { name: "提取管线重设计", nowEpoch: 200 });
-
-      expect(rewording.id).not.toBe(original.id);
-      expect(listTopics(db)).toHaveLength(2);
-      expect(findTopic(db, "提取管线重设计")?.id).toBe(rewording.id);
-    });
-
-    test("upsertTopic never writes the aliases column — it stays the schema default", () => {
-      const topic = upsertTopic(db, { name: "no-alias-write", nowEpoch: 100 });
-      expect(topic.aliases).toEqual([]);
-
-      // Even a raw alias value sitting on the row (data from before this
-      // ticket, or written directly) is never consulted by findTopic.
-      db.query("UPDATE topics SET aliases = ? WHERE id = ?").run(
-        JSON.stringify(["legacy-alias-spelling"]),
-        topic.id,
-      );
-      expect(findTopic(db, "legacy-alias-spelling")).toBeNull();
-
-      // upsertTopic on the SAME exact name still reuses it, and does not
-      // touch (let alone clear) whatever the aliases column already holds.
-      const reused = upsertTopic(db, { name: "no-alias-write", nowEpoch: 200 });
-      expect(reused.id).toBe(topic.id);
-      expect(reused.aliases).toEqual(["legacy-alias-spelling"]);
-    });
-
-    test("carries a status the settlement pass can retire", () => {
-      const topic = upsertTopic(db, { name: "arc-spine", nowEpoch: 100 });
-      expect(topic.status).toBe("active");
-
-      upsertTopic(db, { name: "arc-spine", status: "retired", nowEpoch: 200 });
-      expect(listTopics(db, "retired")).toHaveLength(1);
-      expect(listTopics(db, "active")).toHaveLength(0);
-    });
   });
 
   // ticket 02 (spec B1/B5): the mechanical title-to-type derivation is
@@ -727,62 +666,22 @@ describe("segments, topics and membership", () => {
   });
 
   describe("the anti-fragmentation surface (ticket 14)", () => {
-    test("listRecentSegments returns the most recently active first, whatever their status, with the topic name", () => {
-      const topic = upsertTopic(db, { name: "lease-fencing", nowEpoch: 100 });
+    test("listRecentSegments returns the most recently active first, whatever their status", () => {
       const oldest = createSegment(db, { title: "oldest", nowEpoch: 100 });
       const middle = createSegment(db, {
         title: "middle",
         status: "closed",
-        topicId: topic.id,
         nowEpoch: 200,
       });
       const newest = createSegment(db, { title: "newest", nowEpoch: 300 });
 
       const recent = listRecentSegments(db, 2);
-      expect(recent.map((entry) => entry.segment.id)).toEqual([newest.id, middle.id]);
-      expect(recent[1]?.topicName).toBe("lease-fencing");
-      expect(recent[0]?.topicName).toBeNull();
-      expect(listRecentSegments(db, 10).map((entry) => entry.segment.id)).toEqual([
+      expect(recent.map((segment) => segment.id)).toEqual([newest.id, middle.id]);
+      expect(listRecentSegments(db, 10).map((segment) => segment.id)).toEqual([
         newest.id,
         middle.id,
         oldest.id,
       ]);
-    });
-
-    test("listTopicsByFrequency orders by how many segments carry each name, ties by name", () => {
-      const established = upsertTopic(db, { name: "observation-pipeline", nowEpoch: 100 });
-      const beta = upsertTopic(db, { name: "beta", nowEpoch: 100 });
-      const alpha = upsertTopic(db, { name: "alpha", nowEpoch: 100 });
-      upsertTopic(db, { name: "never-used", nowEpoch: 100 });
-      for (let index = 0; index < 3; index += 1) {
-        createSegment(db, {
-          title: `pipeline ${index}`,
-          topicId: established.id,
-          nowEpoch: 100,
-        });
-      }
-      createSegment(db, { title: "beta chapter", topicId: beta.id, nowEpoch: 100 });
-      createSegment(db, { title: "alpha chapter", topicId: alpha.id, nowEpoch: 100 });
-
-      expect(
-        listTopicsByFrequency(db, "active").map((entry) => [
-          entry.topic.name,
-          entry.segmentCount,
-        ]),
-      ).toEqual([
-        ["observation-pipeline", 3],
-        ["alpha", 1],
-        ["beta", 1],
-        ["never-used", 0],
-      ]);
-    });
-
-    test("a retired topic stays out of the active registry", () => {
-      const retired = upsertTopic(db, { name: "gone", status: "retired", nowEpoch: 100 });
-      createSegment(db, { title: "chapter", topicId: retired.id, nowEpoch: 100 });
-
-      expect(listTopicsByFrequency(db, "active")).toHaveLength(0);
-      expect(listTopicsByFrequency(db).map((entry) => entry.topic.name)).toEqual(["gone"]);
     });
   });
 
@@ -811,8 +710,8 @@ describe("segments, topics and membership", () => {
       const liveOpen = createSegment(db, { title: "new container", nowEpoch: 1_500 });
 
       const roster = listLiveSegmentsByActivity(db, 10, CUTOFF);
-      expect(roster.map((entry) => entry.segment.id)).toEqual([liveOpen.id]);
-      expect(roster.map((entry) => entry.segment.id)).not.toContain(legacyOpen.id);
+      expect(roster.map((segment) => segment.id)).toEqual([liveOpen.id]);
+      expect(roster.map((segment) => segment.id)).not.toContain(legacyOpen.id);
 
       expect(countLiveSegments(db, CUTOFF)).toBe(1);
     });
@@ -874,8 +773,8 @@ describe("segments, topics and membership", () => {
       });
 
       const roster = listLiveSegmentsByActivity(db, 10, SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH);
-      expect(roster.map((entry) => entry.segment.id)).toEqual([live.id]);
-      expect(roster.map((entry) => entry.segment.id)).not.toContain(legacy.id);
+      expect(roster.map((segment) => segment.id)).toEqual([live.id]);
+      expect(roster.map((segment) => segment.id)).not.toContain(legacy.id);
       expect(countLiveSegments(db, SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH)).toBe(1);
     });
   });

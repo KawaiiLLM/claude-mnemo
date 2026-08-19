@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import type { NoteSettlementJob } from "../db/note-settlement";
-import { getTopic, listAttachedSegments } from "../db/segments";
+import { listAttachedSegments } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getShadowNote, type ShadowNoteRecord } from "../db/shadow-notes";
 import { getTurnsForSession } from "../db/turns";
@@ -31,10 +31,11 @@ import { formatTurnCompact, type FormattedTurn } from "../mcp/format";
  *
  * TICKET 05'S CHANGE (spec "结算不读段的字段" [S15069/T906]): settlement no
  * longer reads a segment's FIELDS at all — no content/insight, no Working
- * State. What survives is the ROSTER: id/title/topic for each of the
- * session's attached segments, enough for membership correction to name a
- * target without granting settlement any visibility into a segment's own
- * body. The old `attachedSegments` field (full `SegmentRecord[]`, feeding a
+ * State. What survives is the ROSTER: id/title for each of the session's
+ * attached segments, enough for membership correction to name a target
+ * without granting settlement any visibility into a segment's own body
+ * (ticket 15 dropped the roster's own `topic` column along with the
+ * registry it named). The old `attachedSegments` field (full `SegmentRecord[]`, feeding a
  * hand-rolled renderer in worker/note-settlement-prompt.ts) is gone along
  * with `db/note-settlement-summary-flags.ts` (the summary-contradiction
  * check that field existed to feed).
@@ -86,15 +87,15 @@ export interface NoteSettlementWindowTurn {
 }
 
 /**
- * The segment ROSTER (spec "结算不读段的字段", [S15069/T912]) — id/title/topic
- * for one of the session's ATTACHED segments, never its content/insight/
- * Working State. Enough for membership correction to name a target by; not
- * enough to judge what the segment is ABOUT beyond its title and topic.
+ * The segment ROSTER (spec "结算不读段的字段", [S15069/T912]) — id/title for
+ * one of the session's ATTACHED segments, never its content/insight/Working
+ * State. Enough for membership correction to name a target by; not enough to
+ * judge what the segment is ABOUT beyond its title (ticket 15 retired the
+ * roster's own `topic` field along with the registry that named it).
  */
 export interface NoteSettlementSegmentRosterEntry {
   id: number;
   title: string;
-  topic: string | null;
 }
 
 export interface NoteSettlementContext {
@@ -116,8 +117,8 @@ export interface NoteSettlementContext {
    */
   sessionStateRendering: string;
   /**
-   * The session's currently ATTACHED segments, as a ROSTER (id/title/topic
-   * only — ticket 05, spec "结算不读段的字段"). Not a scope gate any more —
+   * The session's currently ATTACHED segments, as a ROSTER (id/title only —
+   * ticket 05, spec "结算不读段的字段"). Not a scope gate any more —
    * settlement's `assign` action retired with it — purely informational, for
    * `propose` and the model's own orientation.
    */
@@ -276,16 +277,14 @@ export function buildNoteSettlementContext(
   );
 
   // The session's own attachment rows — never a global recency window —
-  // projected down to the roster shape (id/title/topic, ticket 05: "结算不
-  // 读段的字段"). `getTopic` resolves the topic NAME from `topicId`; a
-  // segment with no topic renders `topic: null`.
+  // projected down to the roster shape (id/title, ticket 05: "结算不读段的
+  // 字段"; ticket 15 dropped `topic` along with the registry it named).
   const segmentRoster: NoteSettlementSegmentRosterEntry[] = listAttachedSegments(
     db,
     job.sessionId,
   ).map((segment) => ({
     id: segment.id,
     title: segment.title,
-    topic: segment.topicId !== null ? (getTopic(db, segment.topicId)?.name ?? null) : null,
   }));
 
   const context: NoteSettlementContext = {

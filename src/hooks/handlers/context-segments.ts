@@ -8,7 +8,6 @@ import {
   ATTACHED_SEGMENT_BLOCK_SLOTS,
   renderAttachedSegmentBlock,
   renderProposalsBlock,
-  topicNameForSegment,
   type SegmentBlockKind,
 } from "../session-composition";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -69,12 +68,10 @@ export function createSegmentBlockContextHandler(
       if (!segment) {
         return { continue: true };
       }
-      const topicName = topicNameForSegment(dependencies.db, segment);
       const hookSpecificOutput = renderAttachedSegmentBlock(
         dependencies.db,
         kind,
         segment,
-        topicName,
         eraCutoffEpoch,
         sessionWriterId(session.id),
       );

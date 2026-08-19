@@ -2444,12 +2444,12 @@ export function renderSegmentRosterFeed(
   const header = `## Segment roster (${totalLive} live)`;
 
   if (candidates.length === 0) {
-    return `${header}\n(no live segments yet — remember(create) mints one from a topic)`;
+    return `${header}\n(no live segments yet — remember(create) mints one)`;
   }
 
   const rendered = candidates.map((entry) => ({
-    segmentId: entry.segment.id,
-    text: renderRosterLine(entry.segment, itemBudget, overflow),
+    segmentId: entry.id,
+    text: renderRosterLine(entry, itemBudget, overflow),
   }));
 
   // Greedy token-budget packing into pages — same shape as `buildBrowseFeed`'s

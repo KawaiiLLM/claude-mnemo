@@ -8,7 +8,6 @@ import {
   computeSegmentMemberFacetCounts,
   getAttachedSessionIds,
   getSegment,
-  getTopic,
   type SegmentRecord,
 } from "../db/segments";
 import { countTurnsSince, getSession } from "../db/sessions";
@@ -223,13 +222,6 @@ function renderElidedField(entry: ElidedSegmentCardField): string[] {
 // Header facts
 // ---------------------------------------------------------------------------
 
-function topicNameForSegment(db: Database, segment: SegmentRecord): string | null {
-  if (segment.topicId === null) {
-    return null;
-  }
-  return getTopic(db, segment.topicId)?.name ?? null;
-}
-
 interface AttachedSessionRow {
   sessionId: number;
   title: string | null;
@@ -357,7 +349,6 @@ export function renderSegmentCardRecord(
 
   const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   const facetCounts = computeSegmentMemberFacetCounts(db, segment.id, eraCutoffEpoch);
-  const topicName = topicNameForSegment(db, segment);
   const attachedSessionIds = getAttachedSessionIds(db, segment.id);
   const sessionRows = buildAttachedSessionRows(db, segment, members);
   const maintenance = maintenanceTurnsAgo(db, segment, attachedSessionIds);
@@ -372,7 +363,6 @@ export function renderSegmentCardRecord(
   const headerLines: string[] = [];
 
   const metaParts = [
-    `#${topicName ?? "(no topic)"}`,
     `[${segment.status}]`,
     `${members.length} ${members.length === 1 ? "turn" : "turns"}`,
     `created ${formatEpoch(segment.createdAtEpoch)}`,

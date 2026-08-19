@@ -13,7 +13,6 @@ import {
   attachSegmentToSession,
   createSegment,
   SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
-  upsertTopic,
 } from "../../src/db/segments";
 
 // Ticket 02: the roster applies the segment-era freeze by default, so every
@@ -79,10 +78,8 @@ describe("SessionStart injection matrix", () => {
 
       // An attached segment — the fixed pool's slot 1 should render it when
       // the section is unblocked, and stay silent otherwise.
-      const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
       const segment = createSegment(db, {
         title: `Ship the matrix ${source}`,
-        topicId: topic.id,
         nowEpoch: ERA + 1_000,
       });
       addSegmentMembers(db, segment.id, [memberTurn.id], 1_700_000_000);
@@ -141,7 +138,7 @@ describe("SessionStart injection matrix", () => {
       expect(proposals.hookSpecificOutput).toContain(`Adopt the ${source} cluster`);
       if (source === "resume" || source === "compact") {
         expect(segment1Fields.hookSpecificOutput).toContain(
-          `[E${segment.id}] #claude-mnemo · fields`,
+          `[E${segment.id}] · fields`,
         );
       } else {
         expect(segment1Fields).toEqual({ continue: true });
@@ -182,13 +179,11 @@ describe("SessionStart injection matrix", () => {
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
     // One attached segment beyond the fixed pool's slot count.
     const attachedIds: number[] = [];
     for (let index = 1; index <= 4; index += 1) {
       const segment = createSegment(db, {
         title: `Attached lane ${index}`,
-        topicId: topic.id,
         nowEpoch: ERA + 1_000 + index,
       });
       attachSegmentToSession(db, current.id, segment.id, 1_000 + index);

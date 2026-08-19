@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-import { getTopic, type SegmentRecord } from "../db/segments";
+import type { SegmentRecord } from "../db/segments";
 import {
   listRecentSettlementProposals,
   type NoteSettlementProposalRecord,
@@ -93,10 +93,9 @@ function readerOutputAtBudget(
 /** The self-identifying first line every emitted segment block carries. */
 export function segmentBlockHeader(
   segmentId: number,
-  topicName: string | null,
   kind: SegmentBlockKind,
 ): string {
-  return `[E${segmentId}] #${topicName ?? "(no topic)"} · ${kind}`;
+  return `[E${segmentId}] · ${kind}`;
 }
 
 /**
@@ -134,7 +133,6 @@ export function renderAttachedSegmentBlock(
   db: Database,
   kind: SegmentBlockKind,
   segment: Pick<SegmentRecord, "id">,
-  topicName: string | null,
   eraCutoffEpoch: number | null,
   /**
    * Write gate (ticket 01): the reading session's own write-gate identity
@@ -146,7 +144,7 @@ export function renderAttachedSegmentBlock(
    */
   readerId?: string | null,
 ): string {
-  const header = segmentBlockHeader(segment.id, topicName, kind);
+  const header = segmentBlockHeader(segment.id, kind);
   return composeWithDemoteLadder(header, (pageBudget) =>
     readerOutputAtBudget(db, kind, segment.id, eraCutoffEpoch, pageBudget, readerId),
   );
@@ -176,13 +174,6 @@ export function renderSegmentRosterBlock(
   options: SegmentRosterOptions = {},
 ): string {
   return enforceHardCharLimit(renderSegmentRosterFeed(db, options));
-}
-
-export function topicNameForSegment(
-  db: Database,
-  segment: Pick<SegmentRecord, "topicId">,
-): string | null {
-  return segment.topicId ? getTopic(db, segment.topicId)?.name ?? null : null;
 }
 
 // ---------------------------------------------------------------------------

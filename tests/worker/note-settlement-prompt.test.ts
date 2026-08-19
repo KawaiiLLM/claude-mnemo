@@ -25,7 +25,7 @@ import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
  * the settlement prompt has to SAY now that duty 1 (grading), duty 2 (note
  * reconstruction) and `assign` are all gone — only PROPOSALS (floor 1, never
  * required) and RELATIONS remain, plus a bare segment ROSTER
- * (id/title/topic — never a segment's own fields).
+ * (id/title only, ticket 15 dropped `topic` — never a segment's own fields).
  *
  * Every assertion here is a sentence the ticket names as a deliverable, so it
  * is pinned as a substring of the rendered prompt: the prompt IS the
@@ -97,7 +97,7 @@ function claimWindow(sessionDbId: number, start: number, end: number): NoteSettl
   return job;
 }
 
-/** A rendered prompt over a one-turn window, with whatever segments/topics the test seeded first. */
+/** A rendered prompt over a one-turn window, with whatever segments the test seeded first. */
 function renderPrompt(): string {
   const sessionDbId = seedSession();
   seedTurn(sessionDbId, 1);
@@ -146,7 +146,7 @@ describe("commit is never gated on membership (ticket 05/06)", () => {
   });
 });
 
-describe("the segment roster (ticket 05) — id/title/topic only, never a segment's own fields", () => {
+describe("the segment roster (ticket 05) — id/title only, never a segment's own fields", () => {
   test("an unattached segment does not render, whatever its recency", () => {
     const sessionDbId = seedSession();
     seedTurn(sessionDbId, 1);
@@ -174,7 +174,7 @@ describe("the segment roster (ticket 05) — id/title/topic only, never a segmen
     attachSegmentToSession(db, sessionDbId, segment.id, NOW - 4_000);
 
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
-    expect(context.segmentRoster).toEqual([{ id: segment.id, title: "fencing the claim", topic: null }]);
+    expect(context.segmentRoster).toEqual([{ id: segment.id, title: "fencing the claim" }]);
 
     const prompt = renderNoteSettlementPrompt(context);
     const roster = prompt.slice(prompt.indexOf("## Segment roster"));

@@ -117,7 +117,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
   remember:
-    `Maintain a segment — claude-mnemo's per-topic, long-lived semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Six verbs: \`create\` mints a new segment from the roster you have in view — never a near-duplicate of an existing topic; \`attach\` binds the current session to a segment (\`id="E<n>"\` or an existing topic name) and returns its collapsed card; \`append\` adds rows to one named field; \`replace\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched row; \`close\` toggles the segment off the roster (still \`recall\`-able), or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership — or clears ownership if \`id\` is omitted. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. A closed segment refuses append/replace, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
+    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Six verbs: \`create\` mints a new segment from the roster you have in view — never a near-duplicate of an existing one; \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`append\` adds rows to one named field; \`replace\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched row; \`close\` toggles the segment off the roster (still \`recall\`-able), or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership — or clears ownership if \`id\` is omitted. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. A closed segment refuses append/replace, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
     "Maintenance is advisory, never a gate: every append/replace reports turns since this segment was last touched — under 10 turns draws a too-soon reminder (a `decisions` append is exempt — a lost ruling is the costliest loss).\n" +
     "20-turn reminder: check membership, Working State, whether to create or attach — judgment lives in the Memory Rubric, not here.",
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -438,19 +438,24 @@ export const rememberInputShape = {
     .min(1)
     .optional()
     .describe(
-      'attach/append/replace/close: the target segment — an "E<n>" address, or a topic name resolved through the topic registry (ambiguous — more than one segment on that topic — rejects, asking for the explicit "E<n>" address instead). assign: the same, but OPTIONAL — omit entirely to clear ownership on `turns` instead of placing them. Not used by create.',
+      'attach/append/replace/close: the target segment — an "E<n>" address only. assign: the same, but OPTIONAL — omit entirely to clear ownership on `turns` instead of placing them. Not used by create.',
     ),
   title: z
     .string()
     .min(1)
     .optional()
     .describe("create only (required): the segment's title, written in English."),
+  // Ticket 15 (topic registry retirement, CONTEXT.md "Topic — retired"): the
+  // registry this once named a segment into folded into tags — a
+  // mechanism-level synonym split. Declared here ONLY so `rememberInputSchema`'s
+  // superRefine below can reject a caller still sending it with a message
+  // naming the retirement and pointing at tags, the same precedent
+  // `recallInputSchema`'s retired `truncate`/`view` set.
   topic: z
     .string()
-    .min(1)
     .optional()
     .describe(
-      "create only (required): the topic this segment belongs to. Reused verbatim when it already exists (search the roster before minting) — never assume a new name is needed.",
+      "Retired — the topic registry folded into tags; name the segment's theme as a `note` tag on its member turns instead.",
     ),
   goal: z
     .string()
@@ -612,4 +617,20 @@ export const noteInputSchema = z
   .object(noteInputShape)
   .omit({ supersedes: true })
   .strict();
-export const rememberInputSchema = z.object(rememberInputShape).strict();
+// Ticket 15 (topic registry retirement): `topic` is defined on
+// `rememberInputShape` (above) purely so this refine can name its
+// replacement — the same `truncate`/`view` precedent `recallInputSchema`
+// already set (see that schema's own superRefine).
+export const rememberInputSchema = z
+  .object(rememberInputShape)
+  .strict()
+  .superRefine((data, ctx) => {
+    if (data.topic !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "`topic` has retired — the topic registry folded into tags; tag the segment's member turns instead.",
+        path: ["topic"],
+      });
+    }
+  });

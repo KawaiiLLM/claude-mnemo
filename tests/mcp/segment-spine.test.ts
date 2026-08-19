@@ -527,7 +527,6 @@ describe("spine rows cut like every other field", () => {
   const row: SegmentSpineRow = {
     segment: {
       id: 47,
-      topicId: null,
       title,
       content: null,
       type: [],

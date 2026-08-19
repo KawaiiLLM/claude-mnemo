@@ -130,16 +130,16 @@ function renderWindowTurn(turn: NoteSettlementWindowTurn): string {
 
 /**
  * The session's segment ROSTER (ticket 05, spec "结算不读段的字段") —
- * id/title/topic only, never content/insight/Working State. Not a scope
- * gate any more (settlement's `assign` retired); purely orientation for
- * `propose`.
+ * id/title only, never content/insight/Working State (ticket 15 dropped
+ * `topic` along with the registry it named). Not a scope gate any more
+ * (settlement's `assign` retired); purely orientation for `propose`.
  */
 function renderSegmentRoster(context: NoteSettlementContext): string {
   if (context.segmentRoster.length === 0) {
     return "(no segments attached to this session)";
   }
   return context.segmentRoster
-    .map((segment) => `[E${segment.id}] ${segment.title}${segment.topic ? ` (${segment.topic})` : ""}`)
+    .map((segment) => `[E${segment.id}] ${segment.title}`)
     .join("\n");
 }
 
@@ -232,7 +232,7 @@ export function renderNoteSettlementPrompt(
     "   leaves your writes standing but the window itself gets retried later",
     "   — always call it, even after a window where you wrote nothing.",
     "",
-    "## Segment roster (this session's attached segments — id/title/topic only)",
+    "## Segment roster (this session's attached segments — id/title only)",
     "",
     renderSegmentRoster(context),
     "",

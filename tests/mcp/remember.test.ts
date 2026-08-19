@@ -5,7 +5,6 @@ import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import {
-  findTopic,
   getSegment,
   getSegmentMemberTurnIds,
 } from "../../src/db/segments";
@@ -64,11 +63,20 @@ describe("remember tool (ticket 02)", () => {
   describe("rememberInputSchema", () => {
     test("accepts each verb's own field set and rejects an unknown field", () => {
       expect(() =>
-        rememberInputSchema.parse({ verb: "create", title: "x", topic: "y" }),
+        rememberInputSchema.parse({ verb: "create", title: "x" }),
       ).not.toThrow();
       expect(() => rememberInputSchema.parse({ verb: "bogus" })).toThrow();
       expect(() =>
-        rememberInputSchema.parse({ verb: "create", title: "x", topic: "y", bogusField: 1 }),
+        rememberInputSchema.parse({ verb: "create", title: "x", bogusField: 1 }),
+      ).toThrow();
+    });
+
+    // Ticket 15 (topic registry retirement): a caller still sending `topic`
+    // is rejected, not silently ignored — see definitions.test.ts for the
+    // message-content assertion.
+    test("rejects a supplied topic", () => {
+      expect(() =>
+        rememberInputSchema.parse({ verb: "create", title: "x", topic: "y" }),
       ).toThrow();
     });
   });
@@ -78,38 +86,20 @@ describe("remember tool (ticket 02)", () => {
   // ---------------------------------------------------------------------
 
   describe("create", () => {
-    test("mints a segment under a new topic and reports zero members", () => {
+    test("mints a segment with no topic parameter and reports zero members", () => {
       const result = rememberTool(db, {
         verb: "create",
         title: "Ship the semantic container",
-        topic: "semantic-container",
       });
       const text = resultText(result);
       expect(text).toContain('Created E');
-      expect(text).toContain("semantic-container");
       expect(text).toContain("0 members seeded.");
 
-      const topic = findTopic(db, "semantic-container");
-      expect(topic).not.toBeNull();
       const match = /Created E(\d+)/.exec(text);
       const segmentId = Number(match![1]);
       const segment = getSegment(db, segmentId);
       expect(segment?.title).toBe("Ship the semantic container");
-      expect(segment?.topicId).toBe(topic!.id);
       expect(segment?.status).toBe("open");
-    });
-
-    test("reuses an existing topic rather than minting a near-duplicate", () => {
-      rememberTool(db, { verb: "create", title: "First lane", topic: "reuse-me" });
-      const second = resultText(
-        rememberTool(db, { verb: "create", title: "Second lane", topic: "reuse-me" }),
-      );
-      expect(second).toContain("(topic: reuse-me)");
-
-      const topics = db.query<{ count: number }, []>(
-        "SELECT COUNT(*) AS count FROM topics WHERE name = 'reuse-me'",
-      ).get()!.count;
-      expect(topics).toBe(1);
     });
 
     test("seeds a goal row when goal is given", () => {
@@ -117,7 +107,6 @@ describe("remember tool (ticket 02)", () => {
         rememberTool(db, {
           verb: "create",
           title: "With a goal",
-          topic: "goal-topic",
           goal: "land ticket 02",
         }),
       );
@@ -137,7 +126,6 @@ describe("remember tool (ticket 02)", () => {
         rememberTool(db, {
           verb: "create",
           title: "Adopted from a proposal",
-          topic: "adopted-topic",
           members: [`S${sessionId}/T1`, `S${sessionId}/T2`],
         }),
       );
@@ -156,7 +144,6 @@ describe("remember tool (ticket 02)", () => {
         rememberTool(db, {
           verb: "create",
           title: "Should not exist",
-          topic: "rejected-topic",
           members: [`S${sessionId}/T1`, `S${sessionId}/T999`, "not-an-address"],
         }),
       );
@@ -167,14 +154,10 @@ describe("remember tool (ticket 02)", () => {
 
       const after = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM segments").get()!.count;
       expect(after).toBe(before);
-      expect(findTopic(db, "rejected-topic")).toBeNull();
     });
 
-    test("rejects missing title or topic, and tool-call markup", () => {
-      expect(resultText(rememberTool(db, { verb: "create", topic: "x" }))).toStartWith(
-        "Parameter error:",
-      );
-      expect(resultText(rememberTool(db, { verb: "create", title: "x" }))).toStartWith(
+    test("rejects a missing title, and tool-call markup", () => {
+      expect(resultText(rememberTool(db, { verb: "create" }))).toStartWith(
         "Parameter error:",
       );
       expect(
@@ -182,7 +165,6 @@ describe("remember tool (ticket 02)", () => {
           rememberTool(db, {
             verb: "create",
             title: 'bad <parameter name="x">',
-            topic: "markup-topic",
           }),
         ),
       ).toContain("tool-call syntax");
@@ -194,9 +176,9 @@ describe("remember tool (ticket 02)", () => {
   // ---------------------------------------------------------------------
 
   describe("attach", () => {
-    function createViaTool(topic: string): number {
+    function createViaTool(label: string): number {
       const text = resultText(
-        rememberTool(db, { verb: "create", title: `Segment for ${topic}`, topic }),
+        rememberTool(db, { verb: "create", title: `Segment for ${label}` }),
       );
       return Number(/Created E(\d+)/.exec(text)![1]);
     }
@@ -285,30 +267,23 @@ describe("remember tool (ticket 02)", () => {
       expect(total).toBe(2);
     });
 
-    test("attaches by topic name when exactly one segment matches", () => {
-      createViaTool("solo-topic");
+    // Ticket 15 (topic registry retirement): `id` resolves ONLY as a segment
+    // address now — a caller that used to name a topic gets a rejection
+    // echoing the "E<n>" address grammar, not a resolved segment.
+    test("rejects a non-address name, echoing the E<n> address grammar", () => {
+      createViaTool("not-an-address-anymore");
       const text = resultText(
-        rememberTool(db, { verb: "attach", id: "solo-topic" }, { callerSessionId: sessionId }),
-      );
-      expect(text).toContain(`Attached S${sessionId} to E`);
-    });
-
-    test("rejects an ambiguous topic (more than one segment), naming both E ids", () => {
-      const first = createViaTool("shared-topic");
-      // Mint a second segment on the SAME topic directly (bypassing create's
-      // own anti-duplicate framing — this simulates two prior creates that
-      // both legitimately reused the topic name).
-      rememberTool(db, { verb: "create", title: "second lane", topic: "shared-topic" });
-
-      const text = resultText(
-        rememberTool(db, { verb: "attach", id: "shared-topic" }, { callerSessionId: sessionId }),
+        rememberTool(
+          db,
+          { verb: "attach", id: "not-an-address-anymore" },
+          { callerSessionId: sessionId },
+        ),
       );
       expect(text).toStartWith("Parameter error:");
-      expect(text).toContain(`E${first}`);
-      expect(text).toContain('explicit "E<n>" address');
+      expect(text).toContain('"E<n>"');
     });
 
-    test("rejects an id that is neither a resolvable E address nor a known topic", () => {
+    test("rejects an id naming no real segment", () => {
       const text = resultText(
         rememberTool(db, { verb: "attach", id: "E999999" }, { callerSessionId: sessionId }),
       );
@@ -325,9 +300,9 @@ describe("remember tool (ticket 02)", () => {
     // Fixed at epoch 100 — matching `seedTurn`/`seedTurnsSince`'s own baseline
     // — so the cadence tests below can control exactly how many of a
     // session's turns fall AFTER the segment's `updatedAtEpoch`.
-    function createSegmentId(topic: string): number {
+    function createSegmentId(label: string): number {
       const text = resultText(
-        rememberTool(db, { verb: "create", title: topic, topic }, { now: () => 100 }),
+        rememberTool(db, { verb: "create", title: label }, { now: () => 100 }),
       );
       return Number(/Created E(\d+)/.exec(text)![1]);
     }
@@ -463,8 +438,8 @@ describe("remember tool (ticket 02)", () => {
   // ---------------------------------------------------------------------
 
   describe("replace", () => {
-    function createWithRow(topic: string, field: string, row: string): number {
-      const text = resultText(rememberTool(db, { verb: "create", title: topic, topic }));
+    function createWithRow(label: string, field: string, row: string): number {
+      const text = resultText(rememberTool(db, { verb: "create", title: label }));
       const segmentId = Number(/Created E(\d+)/.exec(text)![1]);
       rememberTool(db, { verb: "append", id: `E${segmentId}`, field, rows: [row] });
       return segmentId;
@@ -583,9 +558,9 @@ describe("remember tool (ticket 02)", () => {
   // ---------------------------------------------------------------------
 
   describe("close", () => {
-    function createViaTool(topic: string): number {
+    function createViaTool(label: string): number {
       const text = resultText(
-        rememberTool(db, { verb: "create", title: `Segment for ${topic}`, topic }),
+        rememberTool(db, { verb: "create", title: `Segment for ${label}` }),
       );
       return Number(/Created E(\d+)/.exec(text)![1]);
     }
@@ -615,10 +590,14 @@ describe("remember tool (ticket 02)", () => {
       expect(appendText).toStartWith("Appended");
     });
 
-    test("close by topic name resolves the same way append/replace/attach do", () => {
-      createViaTool("close-by-topic");
-      const text = resultText(rememberTool(db, { verb: "close", id: "close-by-topic" }));
-      expect(text).toContain("Closed E");
+    // Ticket 15 (topic registry retirement): `id` resolves ONLY as a
+    // segment address — a non-address name is rejected, echoing the "E<n>"
+    // grammar, same as attach/append/replace.
+    test("rejects a non-address name, echoing the E<n> address grammar", () => {
+      createViaTool("not-an-address-anymore");
+      const text = resultText(rememberTool(db, { verb: "close", id: "not-an-address-anymore" }));
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain('"E<n>"');
     });
 
     test("rejects a missing id, and an unresolvable address", () => {
@@ -633,8 +612,8 @@ describe("remember tool (ticket 02)", () => {
   // revives the retired verb to carry ownership — the main agent's own
   // channel, single ownership enforced by the write path.
   describe("assign (ticket 02)", () => {
-    function createViaTool(topic: string, title = `Segment for ${topic}`): number {
-      const text = resultText(rememberTool(db, { verb: "create", title, topic }));
+    function createViaTool(label: string, title = `Segment for ${label}`): number {
+      const text = resultText(rememberTool(db, { verb: "create", title }));
       return Number(/Created E(\d+)/.exec(text)![1]);
     }
 
@@ -740,7 +719,6 @@ describe("remember tool (ticket 02)", () => {
         rememberTool(db, {
           verb: "create",
           title: "Steals the turn via members",
-          topic: "shared-path-b",
           members: [turnAddress(1)],
         }),
       );
@@ -817,9 +795,9 @@ describe("remember write gate (ticket 02)", () => {
   let sessionA: number;
   let sessionB: number;
 
-  function createSegmentAs(topic: string): number {
+  function createSegmentAs(label: string): number {
     const text = resultText(
-      rememberTool(db, { verb: "create", title: topic, topic }, { callerSessionId: sessionA }),
+      rememberTool(db, { verb: "create", title: label }, { callerSessionId: sessionA }),
     );
     return Number(/Created E(\d+)/.exec(text)![1]);
   }
@@ -1037,7 +1015,7 @@ describe("last_remember_epoch stamp (ticket 13)", () => {
 
     rememberTool(
       db,
-      { verb: "create", title: "stamps the clock", topic: "cadence" },
+      { verb: "create", title: "stamps the clock" },
       { callerSessionId: sessionId, now: () => 5000 },
     );
 
@@ -1047,7 +1025,7 @@ describe("last_remember_epoch stamp (ticket 13)", () => {
   test("a rejected call (Parameter error) does not stamp anything", () => {
     const result = rememberTool(
       db,
-      { verb: "create", topic: "cadence" }, // missing required `title`
+      { verb: "create" }, // missing required `title`
       { callerSessionId: sessionId, now: () => 5000 },
     );
 
@@ -1059,7 +1037,6 @@ describe("last_remember_epoch stamp (ticket 13)", () => {
     const created = rememberTool(db, {
       verb: "create",
       title: "target segment",
-      topic: "cadence-append",
     });
     const segmentId = /Created E(\d+)/.exec(resultText(created))![1];
 
@@ -1075,7 +1052,7 @@ describe("last_remember_epoch stamp (ticket 13)", () => {
   test("without a caller session, nothing is stamped (there is nothing to attribute it to)", () => {
     rememberTool(
       db,
-      { verb: "create", title: "no caller session", topic: "cadence-anon" },
+      { verb: "create", title: "no caller session" },
       { now: () => 5000 },
     );
 

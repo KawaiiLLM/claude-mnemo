@@ -14,7 +14,7 @@ import {
 } from "../shared/type-vocabulary";
 
 /**
- * Segments and the topic registry (spec D6).
+ * Segments (spec D6).
  *
  * A segment is one coherent chapter of work on one topic — the unit that would
  * earn a line in the day's diary. It carries a turn's field shape (title,
@@ -83,21 +83,8 @@ export function isLiveSegmentEra(
   return createdAtEpoch >= cutoffEpoch;
 }
 
-export const TOPIC_STATUSES = ["active", "dormant", "retired"] as const;
-export type TopicStatus = (typeof TOPIC_STATUSES)[number];
-
-export interface TopicRecord {
-  id: number;
-  name: string;
-  aliases: string[];
-  status: TopicStatus;
-  createdAtEpoch: number;
-  updatedAtEpoch: number;
-}
-
 export interface SegmentRecord {
   id: number;
-  topicId: number | null;
   title: string;
   content: string | null;
   /**
@@ -133,18 +120,8 @@ export interface SegmentRecord {
   updatedAtEpoch: number;
 }
 
-interface TopicRow {
-  id: number;
-  name: string;
-  aliases: string;
-  status: TopicStatus;
-  createdAtEpoch: number;
-  updatedAtEpoch: number;
-}
-
 interface SegmentRow {
   id: number;
-  topicId: number | null;
   title: string;
   content: string | null;
   insight: string | null;
@@ -162,18 +139,8 @@ interface SegmentRow {
   updatedAtEpoch: number;
 }
 
-const TOPIC_COLUMNS = `
-  id,
-  name,
-  aliases,
-  status,
-  created_at_epoch AS createdAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-
 const SEGMENT_COLUMNS = `
   id,
-  topic_id AS topicId,
   title,
   content,
   insight,
@@ -248,10 +215,6 @@ function parseMemberFacetArray(value: string | null): string[] {
   }
 }
 
-function mapTopicRow(row: TopicRow | null): TopicRecord | null {
-  return row ? { ...row, aliases: parseStringArray(row.aliases) } : null;
-}
-
 function mapSegmentRow(row: SegmentRow | null): SegmentRecord | null {
   return row
     ? {
@@ -262,113 +225,8 @@ function mapSegmentRow(row: SegmentRow | null): SegmentRecord | null {
     : null;
 }
 
-/** Name lookup is case- and width-insensitive; the stored spelling is kept. */
-function normalizeTopicKey(value: string): string {
-  return value.normalize("NFKC").trim().toLocaleLowerCase("en-US");
-}
-
-export interface UpsertTopicInput {
-  name: string;
-  status?: TopicStatus;
-  nowEpoch: number;
-}
-
-/**
- * Register a topic, or reuse the one that already owns this EXACT name
- * (case-/width-insensitive). Returns the surviving topic either way, so a
- * caller never has to branch on whether it won the race.
- *
- * Ticket 07 (user ruling: "从没说过要别名表，就不要乱加机制"): no alias
- * merging. The prior version folded a caller's spelling into an existing
- * topic's `aliases` array and matched future lookups against it —
- * unrequested machinery that, on the live database, let one topic capture
- * ten names (including the repository's own) through exactly this
- * mechanism, each new alias making the next false match more likely. The
- * `aliases` column stays on `topics` (nothing here reads or writes it); a
- * data cleanup for the rows it already accumulated is a separate ticket.
- */
-export function upsertTopic(db: Database, input: UpsertTopicInput): TopicRecord {
-  const existing = findTopic(db, input.name);
-  if (existing) {
-    const updated = mapTopicRow(
-      db
-        .query<TopicRow, [TopicStatus, number, number]>(
-          `UPDATE topics SET status = ?, updated_at_epoch = ?
-           WHERE id = ? RETURNING ${TOPIC_COLUMNS}`,
-        )
-        .get(input.status ?? existing.status, input.nowEpoch, existing.id) ?? null,
-    );
-    if (!updated) {
-      throw new Error(`Failed to update topic ${existing.id}.`);
-    }
-    return updated;
-  }
-
-  const inserted = mapTopicRow(
-    db
-      .query<TopicRow, [string, TopicStatus, number, number]>(
-        `INSERT INTO topics (name, status, created_at_epoch, updated_at_epoch)
-         VALUES (?, ?, ?, ?)
-         RETURNING ${TOPIC_COLUMNS}`,
-      )
-      .get(
-        input.name,
-        input.status ?? "active",
-        input.nowEpoch,
-        input.nowEpoch,
-      ) ?? null,
-  );
-
-  if (!inserted) {
-    throw new Error(`Failed to register topic ${input.name}.`);
-  }
-  return inserted;
-}
-
-/**
- * Resolve a name through the registry by EXACT name only (case-/width-
- * insensitive via `normalizeTopicKey`).
- *
- * Ticket 07: the alias-scanning fallback this used to fall through to is
- * retired — anti-fragmentation is the roster's/topic listing's visibility,
- * not a silent redirect here (user ruling: "从没说过要别名表，就不要乱加
- * 机制"). `topics.aliases` is not read by this function any more.
- */
-export function findTopic(db: Database, name: string): TopicRecord | null {
-  const key = normalizeTopicKey(name);
-  const rows = db.query<TopicRow, []>(`SELECT ${TOPIC_COLUMNS} FROM topics`).all();
-
-  const byName = rows.find((row) => normalizeTopicKey(row.name) === key);
-  return mapTopicRow(byName ?? null);
-}
-
-export function getTopic(db: Database, topicId: number): TopicRecord | null {
-  return mapTopicRow(
-    db
-      .query<TopicRow, [number]>(`SELECT ${TOPIC_COLUMNS} FROM topics WHERE id = ?`)
-      .get(topicId) ?? null,
-  );
-}
-
-export function listTopics(db: Database, status?: TopicStatus): TopicRecord[] {
-  const rows = status
-    ? db
-        .query<TopicRow, [TopicStatus]>(
-          `SELECT ${TOPIC_COLUMNS} FROM topics WHERE status = ? ORDER BY id ASC`,
-        )
-        .all(status)
-    : db
-        .query<TopicRow, []>(`SELECT ${TOPIC_COLUMNS} FROM topics ORDER BY id ASC`)
-        .all();
-
-  return rows
-    .map((row) => mapTopicRow(row))
-    .filter((topic): topic is TopicRecord => topic !== null);
-}
-
 export interface CreateSegmentInput {
   title: string;
-  topicId?: number | null;
   content?: string | null;
   /** Ticket 14 (spec K5). */
   insight?: string | null;
@@ -396,7 +254,6 @@ export function createSegment(
       .query<
         SegmentRow,
         [
-          number | null,
           string,
           string | null,
           string | null,
@@ -408,13 +265,12 @@ export function createSegment(
         ]
       >(
         `INSERT INTO segments (
-           topic_id, title, content, insight, type, tags, status,
+           title, content, insight, type, tags, status,
            created_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING ${SEGMENT_COLUMNS}`,
       )
       .get(
-        input.topicId ?? null,
         input.title,
         input.content ?? null,
         input.insight ?? null,
@@ -741,7 +597,6 @@ export function listOpenSegments(db: Database): SegmentRecord[] {
 /** The same columns as `SEGMENT_COLUMNS`, qualified for a join. */
 const JOINED_SEGMENT_COLUMNS = `
   s.id,
-  s.topic_id AS topicId,
   s.title,
   s.content,
   s.insight,
@@ -759,80 +614,31 @@ const JOINED_SEGMENT_COLUMNS = `
   s.updated_at_epoch AS updatedAtEpoch
 `;
 
-export interface SegmentWithTopic {
-  segment: SegmentRecord;
-  /** The registry name, resolved here so a reader does not re-query per row. */
-  topicName: string | null;
-}
-
 /**
  * The most recently active segments, whatever their status (ticket 14, spec
  * D9's anti-fragmentation surface). Deliberately NOT open-only: a DELIVERED
- * segment is the evidence that a topic name is established, which is exactly
- * what the caller has to see before it decides it needs a new one.
+ * segment is evidence that a theme is already established (carried on its
+ * tags — ticket 15 retired the topic registry that used to name it), which
+ * is exactly what the caller has to see before it decides it needs a new
+ * segment.
  */
 export function listRecentSegments(
   db: Database,
   limit: number,
-): SegmentWithTopic[] {
+): SegmentRecord[] {
   if (limit <= 0) {
     return [];
   }
   return db
-    .query<SegmentRow & { topicName: string | null }, [number]>(
-      `SELECT ${JOINED_SEGMENT_COLUMNS}, tp.name AS topicName
+    .query<SegmentRow, [number]>(
+      `SELECT ${JOINED_SEGMENT_COLUMNS}
        FROM segments s
-       LEFT JOIN topics tp ON tp.id = s.topic_id
        ORDER BY s.updated_at_epoch DESC, s.id DESC
        LIMIT ?`,
     )
     .all(limit)
-    .flatMap((row) => {
-      const segment = mapSegmentRow(row);
-      return segment ? [{ segment, topicName: row.topicName }] : [];
-    });
-}
-
-export interface TopicFrequency {
-  topic: TopicRecord;
-  /** How many segments carry this topic — an established name vs. a one-off. */
-  segmentCount: number;
-}
-
-/**
- * The topic registry ordered by how many segments carry each name (ticket 14).
- * A bare alphabetical list makes a name minted once look exactly like the name
- * five segments share, which is the reading that lets a near-duplicate get
- * minted next to an established word. Ties break on name, ascending, so the
- * rendering is stable between two calls that see the same counts.
- */
-export function listTopicsByFrequency(
-  db: Database,
-  status?: TopicStatus,
-): TopicFrequency[] {
-  const columns = `
-    t.id,
-    t.name,
-    t.aliases,
-    t.status,
-    t.created_at_epoch AS createdAtEpoch,
-    t.updated_at_epoch AS updatedAtEpoch,
-    COUNT(s.id) AS segmentCount
-  `;
-  const sql = `SELECT ${columns}
-     FROM topics t
-     LEFT JOIN segments s ON s.topic_id = t.id
-     ${status ? "WHERE t.status = ?" : ""}
-     GROUP BY t.id
-     ORDER BY segmentCount DESC, t.name ASC`;
-  const rows = status
-    ? db.query<TopicRow & { segmentCount: number }, [TopicStatus]>(sql).all(status)
-    : db.query<TopicRow & { segmentCount: number }, []>(sql).all();
-
-  return rows.flatMap((row) => {
-    const topic = mapTopicRow(row);
-    return topic ? [{ topic, segmentCount: row.segmentCount }] : [];
-  });
+    .map((row) => mapSegmentRow(row))
+    .filter((segment): segment is SegmentRecord => segment !== null);
 }
 
 /**
@@ -1307,21 +1113,6 @@ export function toggleSegmentStatus(
   );
 }
 
-/** Every segment currently carrying `topicId` — attach-by-topic's candidate set. */
-export function getSegmentsForTopic(
-  db: Database,
-  topicId: number,
-): SegmentRecord[] {
-  return db
-    .query<SegmentRow, [number]>(
-      `SELECT ${SEGMENT_COLUMNS} FROM segments WHERE topic_id = ?
-       ORDER BY updated_at_epoch DESC, id DESC`,
-    )
-    .all(topicId)
-    .map((row) => mapSegmentRow(row))
-    .filter((segment): segment is SegmentRecord => segment !== null);
-}
-
 // ---------------------------------------------------------------------------
 // Attachment (ADR-0005) — the session↔segment binding. Rows accumulate, never
 // expire, no detach verb: `attachSegmentToSession` is a pure idempotent
@@ -1527,8 +1318,7 @@ function liveSegmentWhereClause(eraCutoffEpoch: number | null): {
 
 /**
  * The SessionStart roster's candidate set (ticket 10): live segments only,
- * activity-ordered like `listSegmentsByActivity`, with the topic name joined
- * so the roster can group by it without a second query per row.
+ * activity-ordered like `listSegmentsByActivity`.
  *
  * "Live" excludes the frozen pre-redesign rows ADR-0005 counted at 47 and
  * ruled "absent from the roster" — see `SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH`
@@ -1540,16 +1330,15 @@ export function listLiveSegmentsByActivity(
   db: Database,
   limit: number,
   eraCutoffEpoch: number | null = null,
-): SegmentWithTopic[] {
+): SegmentRecord[] {
   if (limit <= 0) {
     return [];
   }
   const where = liveSegmentWhereClause(eraCutoffEpoch);
   return db
-    .query<SegmentRow & { topicName: string | null }, number[]>(
-      `SELECT ${JOINED_SEGMENT_COLUMNS}, tp.name AS topicName
+    .query<SegmentRow, number[]>(
+      `SELECT ${JOINED_SEGMENT_COLUMNS}
        FROM segments s
-       LEFT JOIN topics tp ON tp.id = s.topic_id
        LEFT JOIN (
          SELECT sm.segment_id AS segmentId, MAX(t.created_at_epoch) AS lastMemberEpoch
          FROM segment_members sm
@@ -1561,10 +1350,8 @@ export function listLiveSegmentsByActivity(
        LIMIT ?`,
     )
     .all(...where.params, limit)
-    .flatMap((row) => {
-      const segment = mapSegmentRow(row);
-      return segment ? [{ segment, topicName: row.topicName }] : [];
-    });
+    .map((row) => mapSegmentRow(row))
+    .filter((segment): segment is SegmentRecord => segment !== null);
 }
 
 /** Same predicate as `listLiveSegmentsByActivity` (`liveSegmentWhereClause`), unpaged — the roster's overflow count. */

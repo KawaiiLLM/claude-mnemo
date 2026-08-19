@@ -240,7 +240,6 @@ describe("acceptance criterion — remember(create) seeds exactly a proposal's a
     const result = rememberTool(db, {
       verb: "create",
       title: proposal!.title,
-      topic: "lease fencing",
       members: proposal!.addresses,
     });
 

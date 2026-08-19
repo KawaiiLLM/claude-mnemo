@@ -25,12 +25,23 @@ import { createSegment, getSegment } from "../../src/db/segments";
  * segments(id) ON DELETE CASCADE` and a rename-away would repoint those
  * clauses at the renamed table.
  */
+// `topic_id` (ticket 15 note): this fixture simulates a database old enough
+// to predate ticket 05's status widening — old enough that it still carries
+// the `topic_id` column ticket 15 later retired, which is exactly why
+// `ensureSegmentStatusVocabulary`'s OWN rebuild target
+// (`segmentsStatusVocabularyRebuildDdl`, schema.ts) still declares it: on a
+// real database this old, `retireTopicRegistry` has not run yet either. The
+// column is declared here so that rebuild's INSERT has somewhere to land,
+// but NOT populated from the current (post-ticket-15) `segments` table below
+// — that table never had the column at all — so every downgraded row's
+// `topic_id` is simply its schema default (NULL), which this test does not
+// exercise.
 function downgradeToPreClosedStatusVocabulary(db: Database): void {
   db.exec("PRAGMA foreign_keys = OFF;");
   db.exec(`
     CREATE TABLE segments_downgrade (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
+      topic_id INTEGER,
       title TEXT NOT NULL,
       content TEXT,
       insight TEXT,
@@ -51,19 +62,17 @@ function downgradeToPreClosedStatusVocabulary(db: Database): void {
       updated_at_epoch INTEGER NOT NULL
     );
     INSERT INTO segments_downgrade (
-      id, topic_id, title, content, insight, type, tags, status, revision,
+      id, title, content, insight, type, tags, status, revision,
       facets_stale, goal, constraints, decisions, done, next_steps, reference,
       created_at_epoch, updated_at_epoch
     )
     SELECT
-      id, topic_id, title, content, insight, type, tags, status, revision,
+      id, title, content, insight, type, tags, status, revision,
       facets_stale, goal, constraints, decisions, done, next_steps, reference,
       created_at_epoch, updated_at_epoch
     FROM segments;
     DROP TABLE segments;
     ALTER TABLE segments_downgrade RENAME TO segments;
-    CREATE INDEX IF NOT EXISTS idx_segments_topic_status
-      ON segments(topic_id, status, updated_at_epoch);
     CREATE INDEX IF NOT EXISTS idx_segments_status_updated
       ON segments(status, updated_at_epoch);
     CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_segment

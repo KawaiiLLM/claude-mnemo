@@ -6,7 +6,6 @@ import {
   addSegmentMembers,
   attachSegmentToSession,
   createSegment,
-  upsertTopic,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import {
@@ -48,9 +47,8 @@ describe("createSegmentBlockContextHandler", () => {
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
-    const older = createSegment(db, { title: "Older lane", topicId: topic.id, nowEpoch: 1_001 });
-    const newer = createSegment(db, { title: "Newer lane", topicId: topic.id, nowEpoch: 1_002 });
+    const older = createSegment(db, { title: "Older lane", nowEpoch: 1_001 });
+    const newer = createSegment(db, { title: "Newer lane", nowEpoch: 1_002 });
     attachSegmentToSession(db, session.id, older.id, 1_001);
     attachSegmentToSession(db, session.id, newer.id, 1_002);
 
@@ -58,8 +56,8 @@ describe("createSegmentBlockContextHandler", () => {
     const slot2 = await createSegmentBlockContextHandler({ db }, 2, "fields")(input());
     const slot3 = await createSegmentBlockContextHandler({ db }, 3, "fields")(input());
 
-    expect(slot1.hookSpecificOutput).toContain(`[E${newer.id}] #claude-mnemo · fields`);
-    expect(slot2.hookSpecificOutput).toContain(`[E${older.id}] #claude-mnemo · fields`);
+    expect(slot1.hookSpecificOutput).toContain(`[E${newer.id}] · fields`);
+    expect(slot2.hookSpecificOutput).toContain(`[E${older.id}] · fields`);
     // Slot 3 has no third attached segment — silent, not an empty block.
     expect(slot3).toEqual({ continue: true });
     db.close();
@@ -77,8 +75,7 @@ describe("createSegmentBlockContextHandler", () => {
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
-    const segment = createSegment(db, { title: "Gated lane", topicId: topic.id, nowEpoch: 1_000 });
+    const segment = createSegment(db, { title: "Gated lane", nowEpoch: 1_000 });
     attachSegmentToSession(db, session.id, segment.id, 1_000);
 
     for (const source of ["startup", "clear"] as const) {
@@ -102,8 +99,7 @@ describe("createSegmentBlockContextHandler", () => {
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
-    const segment = createSegment(db, { title: "Milestone lane", topicId: topic.id, nowEpoch: 1_000 });
+    const segment = createSegment(db, { title: "Milestone lane", nowEpoch: 1_000 });
     const turn = db
       .query<{ id: number }, [number]>(
         `INSERT INTO turns (
@@ -118,7 +114,7 @@ describe("createSegmentBlockContextHandler", () => {
     attachSegmentToSession(db, session.id, segment.id, 1_000);
 
     const result = await createSegmentBlockContextHandler({ db }, 1, "milestones")(input());
-    expect(result.hookSpecificOutput).toContain(`[E${segment.id}] #claude-mnemo · milestones`);
+    expect(result.hookSpecificOutput).toContain(`[E${segment.id}] · milestones`);
     db.close();
   });
 
@@ -140,10 +136,8 @@ describe("createSegmentBlockContextHandler", () => {
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
     const segment = createSegment(db, {
       title: "Edge-signal lane",
-      topicId: topic.id,
       nowEpoch: 1_000,
     });
 

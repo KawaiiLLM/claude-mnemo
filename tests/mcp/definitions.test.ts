@@ -487,12 +487,27 @@ describe("tool surface", () => {
     expect(estimateTokens(remember)).toBeLessThanOrEqual(400);
   });
 
-  // Ticket 07 (user ruling: "从没说过要别名表，就不要乱加机制"): the alias
-  // merging mechanism is retired, and its wording must not survive in the
-  // tool contract a caller reads to decide whether reusing a name is safe.
-  it("the remember topic description no longer mentions alias merging", () => {
+  // Ticket 15 (topic registry retirement): `topic` stays declared on the
+  // shape ONLY so a caller still sending it gets a message naming the
+  // retirement and pointing at tags, not a generic unrecognised-key error.
+  it("the retired remember topic parameter names its retirement and points at tags", () => {
     const topicDescription = rememberInputShape.topic.description ?? "";
+    expect(topicDescription.toLowerCase()).toContain("retired");
+    expect(topicDescription.toLowerCase()).toContain("tag");
+    // Ticket 07's alias-merging wording must not have survived either.
     expect(topicDescription.toLowerCase()).not.toContain("alias");
+  });
+
+  it("a supplied `topic` is rejected, naming the retirement and pointing at tags", () => {
+    const result = rememberInputSchema.safeParse({
+      verb: "create",
+      title: "x",
+      topic: "y",
+    });
+    expect(result.success).toBe(false);
+    const message = result.success ? "" : result.error.issues[0]?.message ?? "";
+    expect(message.toLowerCase()).toContain("retired");
+    expect(message.toLowerCase()).toContain("tag");
   });
 });
 

@@ -7,7 +7,7 @@ import { runWriteTransaction } from "./database";
 import { rankEdgeProvenance, type EdgeProvenance } from "./memory-edges";
 import { canonicalizeSettlementProposalAddresses } from "./note-settlement-proposals";
 import { rebuildSearchIndex } from "./search";
-import { repairStaleSegmentFacets } from "./segments";
+import { recomputeSegmentFacets, repairStaleSegmentFacets } from "./segments";
 
 const MEMORY_FTS_DDL = `
   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -421,33 +421,18 @@ const SCHEMA_SQL = `
     updated_at_epoch INTEGER NOT NULL
   );
 
-  -- Topic registry (spec D6): the one place a theme's name lives, so
-  -- "continuous work on the same theme reuses the same word" is enforceable
-  -- rather than aspirational — db/segments.ts's findTopic matches this EXACT
-  -- name only (case-/width-insensitive). The aliases column is a JSON array
-  -- left over from a prior alias-merging mechanism (ticket 07, user ruling:
-  -- "从没说过要别名表，就不要乱加机制") — no writer sets it and no reader
-  -- matches against it any more; it stays only because dropping it is a
-  -- data-cleanup decision this ticket does not make.
-  CREATE TABLE IF NOT EXISTS topics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    aliases TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(aliases)),
-    status TEXT NOT NULL DEFAULT 'active' CHECK (
-      status IN ('active', 'dormant', 'retired')
-    ),
-    created_at_epoch INTEGER NOT NULL,
-    updated_at_epoch INTEGER NOT NULL
-  );
-
-  -- Segments (spec D6): one coherent chapter of work on one topic. Same field
-  -- shape as a turn — title / content / type / tag / status — because the
-  -- reading surfaces (recall's type:/tag: filters, FTS, the glyph) are meant to
-  -- work across granularities without a second vocabulary.
+  -- Segments (spec D6): one coherent chapter of work on one theme (ticket 15:
+  -- the theme lives on tags — a topic registry once named it separately, a
+  -- mechanism-level synonym split, retired; CONTEXT.md's "Topic — retired").
+  -- Same field shape as a turn — title / content / type / tag / status —
+  -- because the reading surfaces (recall's type:/tag: filters, FTS, the
+  -- glyph) are meant to work across granularities without a second
+  -- vocabulary.
   --
-  -- Deliberately NOT bound to a session: a topic outruns any one session, and a
-  -- segment that had to name one would have to pick arbitrarily among its
-  -- members' sessions. Membership (segment_members) carries that relation.
+  -- Deliberately NOT bound to a session: a segment outruns any one session,
+  -- and one that had to name a single session would have to pick arbitrarily
+  -- among its members' sessions. Membership (segment_members) carries that
+  -- relation.
   --
   -- type and tags are JSON arrays (multi-value; a segment's type is the
   -- union of its members'). revision is the write fence: an open segment is a
@@ -455,7 +440,6 @@ const SCHEMA_SQL = `
   -- every write CASes on the revision it read (see db/segments.ts).
   CREATE TABLE IF NOT EXISTS segments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
     title TEXT NOT NULL,
     content TEXT,
     -- Ticket 14 (spec K5): the segment's most reusable conclusion, including
@@ -519,9 +503,6 @@ const SCHEMA_SQL = `
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL
   );
-
-  CREATE INDEX IF NOT EXISTS idx_segments_topic_status
-    ON segments(topic_id, status, updated_at_epoch);
 
   CREATE INDEX IF NOT EXISTS idx_segments_status_updated
     ON segments(status, updated_at_epoch);
@@ -1660,8 +1641,13 @@ export function initializeSchema(db: Database): void {
   // function guarantees, so it must never be the one deciding what shape
   // `type` is in.
   retireTurnCitesRecordedColumn(db);
-  // Strictly last (ticket 15): both rebuilds above and the tag-namespace strip
-  // rewrite the member columns this derives from.
+  // Ticket 15 (topic registry retirement): folds each segment's topic name
+  // into its members' own tags (or, for a zero-member segment, directly into
+  // the segment's own stored tags) before `topics`/`segments.topic_id`
+  // retire — see `retireTopicRegistry`'s own comment.
+  retireTopicRegistry(db);
+  // Strictly last (ticket 15): every rebuild above rewrites the member
+  // columns this derives from.
   repairDerivedSegmentFacets(db);
 }
 
@@ -2523,6 +2509,251 @@ function ensureSegmentStatusVocabulary(db: Database): void {
       if (violations.length > 0) {
         throw new Error(
           `segments rebuild left ${violations.length} foreign key violation(s) while widening status: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 15 (topic registry retirement, CONTEXT.md "Topic — retired"): two
+// mechanisms recorded the same "what is this segment about" fact — the topic
+// registry's name and the segment's own tags — a mechanism-level synonym
+// split. `foldTopicNamesIntoSegmentTags` moves the information into the
+// surviving mechanism FIRST, then `retireTopicRegistry` drops `topics` and
+// `segments.topic_id` for good. A fresh install never creates either.
+// ---------------------------------------------------------------------------
+
+/**
+ * The rebuild target for `retireTopicRegistry` below: every `segments` column
+ * exactly as the table above declares them, minus `topic_id`. Not hoisted
+ * into a function shared with `SCHEMA_SQL`'s inline definition — same
+ * reasoning as `segmentsStatusVocabularyRebuildDdl` above: the two texts
+ * already have to agree by hand, and nothing here diffs them at runtime.
+ */
+const segmentsWithoutTopicRebuildDdl = (tableName: string): string => `
+  CREATE TABLE ${tableName} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    content TEXT,
+    insight TEXT,
+    type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (
+      status IN ('open', 'delivered', 'abandoned', 'closed')
+    ),
+    revision INTEGER NOT NULL DEFAULT 1,
+    facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
+    goal TEXT,
+    constraints TEXT,
+    decisions TEXT,
+    done TEXT,
+    next_steps TEXT,
+    reference TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+`;
+
+/** Same shape as `SEGMENTS_INDEXES_DDL` above, minus the topic-keyed index — `topic_id` is gone. */
+const SEGMENTS_TOPIC_RETIRED_INDEXES_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_segments_status_updated
+    ON segments(status, updated_at_epoch);
+`;
+
+/**
+ * Ticket 15's own bare-tag normalization for a topic's NAME — lowercase,
+ * internal whitespace collapsed to a single hyphen (spec: "小写连字符归
+ * 一") — using the SAME case-folding convention `db/segments.ts`'s own
+ * (now-retired) `normalizeTopicKey` used, so two spellings the registry's
+ * exact-name lookup already treated as the SAME topic fold onto the
+ * identical tag rather than minting two.
+ */
+function normalizeTopicNameToTag(name: string): string {
+  return name
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase("en-US")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+/** Tolerant JSON-array parse for migration code touching `turns.tags` (no `json_valid` CHECK on that column — see `db/segments.ts`'s `parseMemberFacetArray` for the same guard). */
+function safeParseTagArray(value: string | null): string[] {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fold each segment's topic NAME into its tags — the durable home for the
+ * information once the registry that used to carry it is gone.
+ *
+ * `segments.tags` is DERIVED from its members (`recomputeSegmentFacets`, spec
+ * K5a): writing directly into it is safe only where NOTHING will ever
+ * recompute it. For a segment WITH members, that is never guaranteed (a
+ * future membership change recomputes and would silently erase a value
+ * written straight into the column) — so the durable write lands on each
+ * MEMBER TURN's own `tags` instead, the actual source `recomputeSegmentFacets`
+ * reads, and this function then runs that SAME derivation once so the
+ * migrated tag is visible immediately rather than waiting for the next
+ * membership event.
+ *
+ * A segment with ZERO members has no such source — there is no member turn to
+ * fold the tag into, and `recomputeSegmentFacets` would derive `[]` for it
+ * regardless of what this writes. For that case only, this writes the topic
+ * tag directly into `segments.tags`. This is the one write in this migration
+ * NOT proof against a future recompute: if the segment later gains its first
+ * member, that membership event re-derives `tags` from the member's own facets
+ * and the seeded topic tag is superseded (not preserved) — flagged here
+ * because it is the one place this migration's guarantee is weaker than
+ * everywhere else, per this ticket's own caution about writing a value the
+ * next recompute erases. No mechanism exists today to give a memberless
+ * segment a tag source that survives its first membership event without
+ * inventing new machinery this ticket does not ask for.
+ */
+function foldTopicNamesIntoSegmentTags(db: Database): void {
+  const topicSegments = db
+    .query<{ id: number; topicId: number; tags: string }, []>(
+      `SELECT id, topic_id AS topicId, tags FROM segments WHERE topic_id IS NOT NULL`,
+    )
+    .all();
+  if (topicSegments.length === 0) {
+    return;
+  }
+
+  const topicNames = new Map<number, string>(
+    db
+      .query<{ id: number; name: string }, []>("SELECT id, name FROM topics")
+      .all()
+      .map((row) => [row.id, row.name] as const),
+  );
+
+  for (const segment of topicSegments) {
+    const topicName = topicNames.get(segment.topicId);
+    if (!topicName) {
+      continue;
+    }
+    const bareTag = normalizeTopicNameToTag(topicName);
+    if (bareTag === "") {
+      continue;
+    }
+
+    const memberTurnIds = db
+      .query<{ turnId: number }, [number]>(
+        "SELECT turn_id AS turnId FROM segment_members WHERE segment_id = ?",
+      )
+      .all(segment.id)
+      .map((row) => row.turnId);
+
+    if (memberTurnIds.length === 0) {
+      const currentTags = safeParseTagArray(segment.tags);
+      if (currentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
+        continue;
+      }
+      db.query<unknown, [string, number]>("UPDATE segments SET tags = ? WHERE id = ?").run(
+        JSON.stringify([...currentTags, bareTag]),
+        segment.id,
+      );
+      continue;
+    }
+
+    let foldedAny = false;
+    for (const turnId of memberTurnIds) {
+      const row = db
+        .query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?")
+        .get(turnId);
+      const currentTags = safeParseTagArray(row?.tags ?? null);
+      if (currentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
+        continue;
+      }
+      db.query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?").run(
+        JSON.stringify([...currentTags, bareTag]),
+        turnId,
+      );
+      foldedAny = true;
+    }
+    if (foldedAny) {
+      // Re-derive NOW rather than leaving the trigger's `facets_stale` debt
+      // for the next batched sweep (`repairStaleSegmentFacets` pays at most
+      // `SEGMENT_FACET_REPAIR_BATCH` per process start) — a one-time
+      // migration needs the tag visible in THIS pass, not eventually.
+      recomputeSegmentFacets(db, segment.id);
+    }
+  }
+}
+
+function topicRegistryStillPresent(db: Database): boolean {
+  return hasColumn(db, "segments", "topic_id");
+}
+
+/**
+ * Ticket 15: retire the topic registry. `foldTopicNamesIntoSegmentTags` runs
+ * FIRST, inside the SAME transaction, so a topic's name is never lost between
+ * "still readable off `topic_id`" and "the column that named it is gone".
+ * Then `segments` rebuilds without `topic_id` — SQLite's 12-step ALTER TABLE
+ * procedure, the same reasoning `retireTurnCitesRecordedColumn` gives for its
+ * own column drop — and `topics` is dropped outright; nothing references it
+ * once `topic_id` is gone.
+ *
+ * `PRAGMA foreign_keys = OFF` for the same reason `ensureSegmentStatusVocabulary`
+ * turns it off: `segment_members`/`segment_attachments` hold `REFERENCES
+ * segments(id) ON DELETE CASCADE`, and with the pragma ON a rename-away of
+ * `segments` mid-rebuild would cascade-delete both the moment the original
+ * table was dropped.
+ */
+function retireTopicRegistry(db: Database): void {
+  if (!topicRegistryStillPresent(db)) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!topicRegistryStillPresent(db)) {
+        return;
+      }
+
+      foldTopicNamesIntoSegmentTags(db);
+
+      db.exec(segmentsWithoutTopicRebuildDdl("segments_topic_registry_retired"));
+      db.exec(
+        `INSERT INTO segments_topic_registry_retired (
+           id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps,
+           reference, created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps,
+           reference, created_at_epoch, updated_at_epoch
+         FROM segments`,
+      );
+      db.exec("DROP TABLE segments");
+      db.exec(
+        "ALTER TABLE segments_topic_registry_retired RENAME TO segments",
+      );
+      // The indexes and the trigger belonged to the dropped table and died with it.
+      db.exec(SEGMENTS_TOPIC_RETIRED_INDEXES_DDL);
+      db.exec(SEGMENTS_OWN_TRIGGER_DDL);
+
+      db.exec("DROP TABLE IF EXISTS topics");
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `segments rebuild left ${violations.length} foreign key violation(s) while retiring the topic registry: ${JSON.stringify(violations)}`,
         );
       }
     });

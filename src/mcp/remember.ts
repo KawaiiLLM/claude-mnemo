@@ -10,13 +10,10 @@ import {
   appendSegmentWorkingStateRows,
   attachSegmentToSession,
   createSegment,
-  findTopic,
   getSegment,
-  getSegmentsForTopic,
   reassignSegmentMembers,
   replaceInSegmentWorkingStateField,
   toggleSegmentStatus,
-  upsertTopic,
   type ReplaceSegmentWorkingStateFieldResult,
   type SegmentRecord,
 } from "../db/segments";
@@ -63,13 +60,11 @@ export interface RememberToolInput {
   verb?: unknown;
   // create
   title?: unknown;
-  topic?: unknown;
   goal?: unknown;
   members?: unknown;
   // attach / append / replace / close / assign share `id` — a segment's
-  // `E<n>` address, or (attach/close/assign in practice, but resolved
-  // identically everywhere) a topic name. `assign` alone treats `id` as
-  // OPTIONAL: omitted means "clear ownership" (ticket 02).
+  // `E<n>` address (ticket 15: the topic-name fallback retired). `assign`
+  // alone treats `id` as OPTIONAL: omitted means "clear ownership" (ticket 02).
   id?: unknown;
   // append / replace
   field?: unknown;
@@ -111,7 +106,7 @@ function fail(message: string): never {
 }
 
 /**
- * The one prose-field resolver `create`'s title/topic/goal all go through:
+ * The one prose-field resolver `create`'s title/goal both go through:
  * decode, markup-reject, strip `<private>` — the same hygiene `note`'s
  * `resolveStringField` applies, minus the append/overwrite mode machinery
  * `remember` has no equivalent of (a fresh segment has no prior value to
@@ -141,9 +136,10 @@ function resolveProseField(field: string, value: unknown, opts: { required: bool
 }
 
 // ---------------------------------------------------------------------------
-// Segment targeting — shared by attach/append/replace (ticket 02: "attach …
-// by E id or topic"). append/replace reuse the identical resolution so a
-// caller addresses a segment the same way from every verb.
+// Segment targeting — shared by attach/append/replace/close/assign (ticket
+// 15: the topic registry retired, so `id` resolves ONLY as a segment address
+// — every verb that used to fall back to a topic name now rejects a
+// non-address string, echoing the address grammar).
 // ---------------------------------------------------------------------------
 
 type SegmentTargetResolution =
@@ -154,43 +150,17 @@ function resolveSegmentTarget(db: Database, rawId: string): SegmentTargetResolut
   const trimmed = rawId.trim();
   const bareRef = parseBareAddressReference(trimmed);
 
-  if (bareRef) {
-    if (bareRef.kind !== "segment") {
-      return {
-        ok: false,
-        message: `id must be a segment address ("E<n>") or a topic name — got a turn address "${trimmed}".`,
-      };
-    }
-    const segment = getSegment(db, bareRef.segmentId);
-    if (!segment) {
-      return { ok: false, message: `no segment E${bareRef.segmentId}.` };
-    }
-    return { ok: true, segment };
-  }
-
-  const topic = findTopic(db, trimmed);
-  if (!topic) {
+  if (!bareRef || bareRef.kind !== "segment") {
     return {
       ok: false,
-      message: `no segment "E<n>" and no topic named "${trimmed}" — use remember(create) to mint one.`,
+      message: `id must be a segment address ("E<n>") — got "${trimmed}".`,
     };
   }
-  const candidates = getSegmentsForTopic(db, topic.id);
-  if (candidates.length === 0) {
-    return {
-      ok: false,
-      message: `topic "${topic.name}" has no segment yet — use remember(create) to mint one.`,
-    };
+  const segment = getSegment(db, bareRef.segmentId);
+  if (!segment) {
+    return { ok: false, message: `no segment E${bareRef.segmentId}.` };
   }
-  if (candidates.length > 1) {
-    return {
-      ok: false,
-      message:
-        `topic "${topic.name}" has ${candidates.length} segments ` +
-        `(${candidates.map((entry) => `E${entry.id}`).join(", ")}) — use an explicit "E<n>" address.`,
-    };
-  }
-  return { ok: true, segment: candidates[0]! };
+  return { ok: true, segment };
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +246,6 @@ function resolveMemberAddresses(
 
 interface CreateTransactionResult {
   segment: SegmentRecord;
-  topicName: string;
   memberTurnIds: number[];
   goalSeeded: boolean;
 }
@@ -287,12 +256,10 @@ function handleCreate(
   options: RememberToolOptions,
 ): ToolTextResult {
   let title: string;
-  let topicInput: string;
   let goal: string | null;
   let memberAddresses: string[];
   try {
     title = resolveProseField("title", input.title, { required: true })!;
-    topicInput = resolveProseField("topic", input.topic, { required: true })!;
     goal = resolveProseField("goal", input.goal, { required: false });
 
     if (input.members === undefined) {
@@ -323,10 +290,8 @@ function handleCreate(
         fail(formatMemberRejections(rejections));
       }
 
-      const topic = upsertTopic(db, { name: topicInput, nowEpoch });
       let segment = createSegment(db, {
         title,
-        topicId: topic.id,
         nowEpoch,
       });
 
@@ -356,7 +321,7 @@ function handleCreate(
         }
       }
 
-      return { segment, topicName: topic.name, memberTurnIds: turnIds, goalSeeded };
+      return { segment, memberTurnIds: turnIds, goalSeeded };
     });
   } catch (error) {
     if (error instanceof RememberValidationError) {
@@ -365,9 +330,7 @@ function handleCreate(
     throw error;
   }
 
-  const parts = [
-    `Created E${result.segment.id} "${result.segment.title}" (topic: ${result.topicName}).`,
-  ];
+  const parts = [`Created E${result.segment.id} "${result.segment.title}".`];
   parts.push(
     result.memberTurnIds.length > 0
       ? `${result.memberTurnIds.length} member(s) seeded.`
@@ -389,7 +352,7 @@ function handleAttach(
   options: RememberToolOptions,
 ): ToolTextResult {
   if (typeof input.id !== "string" || input.id.trim() === "") {
-    return parameterError('id is required for attach — an "E<n>" address or a topic name.');
+    return parameterError('id is required for attach — an "E<n>" address.');
   }
   if (typeof options.callerSessionId !== "number") {
     return parameterError("caller session unknown; attach cannot bind a segment to it.");
@@ -493,7 +456,7 @@ function handleAppend(
   options: RememberToolOptions,
 ): ToolTextResult {
   if (typeof input.id !== "string" || input.id.trim() === "") {
-    return parameterError('id is required for append — an "E<n>" address or a topic name.');
+    return parameterError('id is required for append — an "E<n>" address.');
   }
   if (!isEditableField(input.field)) {
     return parameterError(fieldRequiredMessage());
@@ -592,7 +555,7 @@ function handleReplace(
   options: RememberToolOptions,
 ): ToolTextResult {
   if (typeof input.id !== "string" || input.id.trim() === "") {
-    return parameterError('id is required for replace — an "E<n>" address or a topic name.');
+    return parameterError('id is required for replace — an "E<n>" address.');
   }
   if (!isEditableField(input.field)) {
     return parameterError(fieldRequiredMessage());
@@ -696,7 +659,7 @@ function handleClose(
   options: RememberToolOptions,
 ): ToolTextResult {
   if (typeof input.id !== "string" || input.id.trim() === "") {
-    return parameterError('id is required for close — an "E<n>" address or a topic name.');
+    return parameterError('id is required for close — an "E<n>" address.');
   }
 
   const resolution = resolveSegmentTarget(db, input.id);
@@ -847,8 +810,8 @@ function resolveAssignTurns(
 
 /**
  * `remember`'s `assign` verb (ticket 02, ownership-and-note-cadence spec):
- * the main agent's own ownership channel. `id="E<n>"` (or a topic name)
- * places the named turns in that segment; `id` OMITTED clears ownership —
+ * the main agent's own ownership channel. `id="E<n>"` places the named turns
+ * in that segment; `id` OMITTED clears ownership —
  * the named turns become homeless. Single ownership is the WRITE path's own
  * invariant (`reassignSegmentMembers`, db/segments.ts): a turn already
  * belonging elsewhere is moved, not duplicated, in the same transaction.
@@ -862,7 +825,7 @@ function handleAssign(
   if (input.id !== undefined) {
     if (typeof input.id !== "string" || input.id.trim() === "") {
       return parameterError(
-        'id must be a non-empty "E<n>" address or topic name when present — omit id entirely to clear ownership.',
+        'id must be a non-empty "E<n>" address when present — omit id entirely to clear ownership.',
       );
     }
     const resolution = resolveSegmentTarget(db, input.id);
