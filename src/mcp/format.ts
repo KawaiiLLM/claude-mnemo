@@ -578,9 +578,12 @@ function formatTurnLabel(
   fields: TurnRenderFields,
   { indent = "  ", sessionId, includeDbTurnIds = false }: RenderNodeOptions,
 ): string {
-  const turnId = turn.transcriptLineStart === null
-    ? `T${turn.promptNumber}`
-    : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
+  // Bare `T<n>` on purpose: the `:L<line>` suffix this once carried was the
+  // JSONL-first replay handoff coordinate, retired when replay went
+  // SQLite-first — the replay skill itself forbids locating content by
+  // transcript_line_start (stale/duplicated, dangerously so on rewound
+  // turns), so rendering it taught the exact anti-pattern.
+  const turnId = `T${turn.promptNumber}`;
   const prefix =
     sessionId === undefined
       ? `${indent}- [${turnId}]`

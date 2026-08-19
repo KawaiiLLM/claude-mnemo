@@ -1839,10 +1839,10 @@ function formatBrowseTurnLabel(
   sessionId: number,
   includeDbTurnIds: boolean,
 ): string {
-  const turnId =
-    turn.transcriptLineStart === null
-      ? `T${turn.promptNumber}`
-      : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
+  // Bare `T<n>` — see format.ts's renderTurnNode comment: the `:L` suffix was
+  // the retired JSONL-first replay coordinate, and the replay skill forbids
+  // using it.
+  const turnId = `T${turn.promptNumber}`;
   const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
   const statusSegment = turn.status ? ` [${turn.status}]` : "";
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";

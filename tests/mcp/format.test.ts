@@ -57,7 +57,7 @@ describe("MCP format renderer", () => {
 
     expect(renderNode({ type: "turn", value: turn })).toBe(
       [
-        "  - [T1:L17] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
+        "  - [T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
         "    - desc: Refresh overlap diagnosed",
       ].join("\n"),
     );
@@ -66,7 +66,7 @@ describe("MCP format renderer", () => {
       renderNode({ type: "turn", value: turn }, { indent: "", sessionId: 142 }),
     ).toBe(
       [
-        "- [S142][T1:L17] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
+        "- [S142][T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
         "  - desc: Refresh overlap diagnosed",
       ].join("\n"),
     );
@@ -507,7 +507,7 @@ describe("per-item token budget (`turnBudget` — the `turn` param at the MCP se
         { type: "turn", value: anchoredTurn },
         { sessionId: 17, turnBudget: 1 },
       ),
-    ).toContain("[S17][T13:L42] Anchored turn");
+    ).toContain("[S17][T13] Anchored turn");
   });
 });
 

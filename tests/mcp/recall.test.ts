@@ -285,14 +285,14 @@ describe("recallMemory", () => {
     expect(sessionOutput).toContain(
       `raw: ${resolveTranscriptPath("claude-mnemo", "session-2")}`,
     );
-    expect(sessionOutput).toContain("[T1:L4] Diagnose auth race");
+    expect(sessionOutput).toContain("[T1] Diagnose auth race");
     // The default field set (title/content/prompt) already carries the
     // prompt line on the session's own turn preview — no `filter.fields`
     // needed to see it there.
     expect(sessionOutput).toContain('prompt: "Why am I getting 401 errors?"');
     expect(sessionOutput).not.toContain("[O1] Auth mutex");
 
-    expect(turnOutput).toContain(`[T1:L4] Diagnose auth race`);
+    expect(turnOutput).toContain(`[T1] Diagnose auth race`);
     expect(turnOutput).toContain('prompt: "Why am I getting 401 errors?"');
     expect(turnOutput).toContain("[O1] Auth mutex");
 
@@ -335,7 +335,7 @@ describe("recallMemory", () => {
       depth: "collapsed",
     });
 
-    expect(output).toContain(`[S${authSessionId}][T1:L4] Diagnose auth race`);
+    expect(output).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
     expect(output).toContain(`[S${authSessionId}][T2] Follow-up`);
   });
 
@@ -411,7 +411,7 @@ describe("recallMemory", () => {
 
     expect(observationsOutput).toContain(`[O${authObservationId}] Auth mutex`);
     expect(observationsOutput).toContain("desc: Guards refresh");
-    expect(observationsOutput).toContain("[T1:L4] Diagnose auth race");
+    expect(observationsOutput).toContain("[T1] Diagnose auth race");
     expect(sessionObservationsOutput).not.toContain("page 1 / 1 (total 60)");
     expect(sessionObservationsOutput).toContain(`[S${floodSessionId}] Observation flood`);
     expect(sessionObservationsOutput).toContain("[T1] Observation flood");
@@ -433,7 +433,7 @@ describe("recallMemory", () => {
     });
 
     expect(typeQuery).toContain(`[S${authSessionId}] Auth race fix`);
-    expect(typeQuery).toContain(`[S${authSessionId}][T1:L4] Diagnose auth race`);
+    expect(typeQuery).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
 
     const hitCount = (timeScopedQuery.match(/\n- \[/g) ?? []).length + (timeScopedQuery.startsWith("- [") ? 1 : 0);
     expect(hitCount).toBe(1);
@@ -624,7 +624,7 @@ describe("recallMemory", () => {
   test("main audience (default) keeps prompt-number labels and emits no dbid: token", () => {
     // Regression on the existing public form pinned around line 369 (`[S...][T<prompt_number>]`).
     const byQuery = recallMemory(db, { filter: { type: "bugfix" } });
-    expect(byQuery).toContain(`[S${authSessionId}][T1:L4] Diagnose auth race`);
+    expect(byQuery).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
     expect(byQuery).not.toContain("dbid:");
 
     const byPromptId = recallMemory(db, {
