@@ -11,7 +11,10 @@ import {
   type SegmentRosterFeedOptions,
 } from "../mcp/recall";
 import { timelineQuery } from "../mcp/timeline";
-import { renderMemoryRubricBlock } from "../shared/memory-rubric";
+import {
+  renderMemoryPolicyBlock,
+  renderMemoryRubricBlock,
+} from "../shared/memory-rubric";
 
 /**
  * SessionStart's per-attached-segment blocks and the fixed roster/proposals
@@ -183,9 +186,17 @@ export function renderSegmentRosterBlock(
 // text is fixed-length prose with nothing left to share space with).
 // ---------------------------------------------------------------------------
 
-/** The Memory Rubric, on its own — same hard char safety net every block in this module applies, no budget interaction with any other block. */
+/**
+ * The Memory Rubric plus the Memory Policy, one slot payload ([S15069/T1028]:
+ * "和 rubric 一个块") — two static bounded tags, same hard char safety net.
+ * The policy rides ONLY here: the rubric's other consumer (the settlement
+ * prompt) has no recall tool, so it must never see retrieval policy — see
+ * `shared/memory-rubric.ts`'s sibling-block rationale.
+ */
 export function renderRubricBlock(): string {
-  return enforceHardCharLimit(renderMemoryRubricBlock());
+  return enforceHardCharLimit(
+    `${renderMemoryRubricBlock()}\n${renderMemoryPolicyBlock()}`,
+  );
 }
 
 // ---------------------------------------------------------------------------

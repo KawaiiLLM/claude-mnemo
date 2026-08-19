@@ -83,6 +83,20 @@ describe("renderRubricBlock — its own block, no shared budget (ticket 14 roste
     expect(block).not.toContain("## Segment roster");
     expect(block).not.toContain("INCOMPLETE");
   });
+
+  // [S15069/T1028]: the Memory Policy rides the SAME slot as the rubric — one
+  // hook payload, two static tags — but must never leak into the rubric's
+  // OTHER consumer: the settlement prompt belongs to an agent with no recall
+  // tool, and retrieval policy there would teach a tool that does not exist.
+  test("the memory policy rides the rubric slot but never the shared rubric constant", () => {
+    const block = renderRubricBlock();
+    expect(block).toContain('<mnemo-memory-policy version="v1">');
+    expect(block).toContain("注入块只是索引,不是记忆本身");
+    expect(block).toContain("先 recall/replay 原回合再落笔");
+    // The shared constant both consumers render stays policy-free.
+    expect(MEMORY_RUBRIC_TEXT).not.toContain("Memory Policy");
+    expect(MEMORY_RUBRIC_TEXT).not.toContain("recall/replay");
+  });
 });
 
 describe("single-home grep guard — judgment prose lives ONLY in the Memory Rubric (ticket 11)", () => {

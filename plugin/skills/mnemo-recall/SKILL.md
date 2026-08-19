@@ -20,6 +20,34 @@ switch to the `mnemo-replay` skill.
 `content`) is the cheap browsing mode. Widen `filter.fields` and raise `turn` only
 once you have a target. If a `recall` result is good enough, stop there.
 
+## Memory Policy
+
+- The injected SessionStart blocks are an index, not the memory — a fact absent
+  from every injected block may still be one recall away. Never conclude
+  "unrecorded" from "not injected".
+- **Materialization rule**: when writing a durable artifact (spec, ticket, doc,
+  summary) from earlier rulings, any detail you cannot quote verbatim —
+  especially one from behind a compact boundary — must come from recall/replay
+  of the ruling turns, never from summary memory. (Real loss: a ruling whose
+  entire text was a bare "可以" — its meaning lived in the question it answered
+  — was orphaned by compaction and silently dropped from the spec, while the
+  settled record had retained it in self-contained form the whole time.)
+- Recalled content is a point-in-time record: the current request, repository
+  files, and tool outputs override it; when they conflict, say so rather than
+  silently picking a side.
+- Do not recall for generic questions, one-off content, or explanations durable
+  memory cannot help.
+
+Scene → entry point:
+
+| Scene | Entry |
+|---|---|
+| Design rationale, "why is X like this" | `recall(query=...)`, narrow with `filter.time`/`filter.tag` |
+| A ruling's exact wording, user-given examples | mnemo-replay skill on the ruling turns |
+| Prior fix / error seen before | `recall(query=<error terms>)` |
+| How a session or arc unfolded | timeline |
+| Whether a task was already done | roster / `recall()` segments, `[delivered]` vs `[open]` |
+
 ## When to Use
 
 Use when the user asks about PREVIOUS sessions rather than the current turn:

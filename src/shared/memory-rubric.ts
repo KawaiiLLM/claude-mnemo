@@ -87,6 +87,34 @@ export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v3
 - 无合适段才新建;以任务实际形状命名,开场臆测的名字会锚定错误
 `;
 
+/**
+ * The Memory Policy — WHEN to reach for memory, the read-side discipline the
+ * user ruled into the rubric's own injection slot ([S15069/T1028]; shaped by
+ * the pi-hermes policy review at [S15069/T1027] with one inversion for
+ * mnemo's partial-injection premise).
+ *
+ * Deliberately a SIBLING block, not a section of `MEMORY_RUBRIC_TEXT`: the
+ * rubric renders byte-identical into TWO consumers, and the second — the
+ * settlement prompt — belongs to an agent that has no recall tool at all, so
+ * folding retrieval policy into the shared constant would teach a tool that
+ * does not exist there. This block ships only through the injection composer
+ * (`hooks/session-composition.ts`'s rubric slot), same slot as the rubric —
+ * one hook payload, two static bounded tags, well under the ~10K collapse
+ * line.
+ */
+export const MEMORY_POLICY_VERSION = "v1";
+
+export const MEMORY_POLICY_TEXT = `# Memory Policy
+- 注入块只是索引,不是记忆本身——注入里没有 ≠ 记录里没有。
+- 物化时刻(把记忆写成 spec/票/文档/总结):凡复述不出原文的裁决——尤其压缩边界之后——先 recall/replay 原回合再落笔,禁止凭摘要转写。
+- recalled 内容是时点记录:当前请求、代码现状、工具输出优先;冲突时说出来,不静默取舍。
+- 泛问、一次性内容、记忆帮不上的解释,不调 recall。
+`;
+
+export function renderMemoryPolicyBlock(): string {
+  return `<mnemo-memory-policy version="${MEMORY_POLICY_VERSION}">\n${MEMORY_POLICY_TEXT}</mnemo-memory-policy>`;
+}
+
 function computeHash(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 12);
 }
