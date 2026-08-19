@@ -6803,167 +6803,656 @@ var require_dist = __commonJS({
   }
 });
 
-// src/segment-era.ts
-function isSegmentEra(createdAtEpoch, cutoffEpoch) {
-  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
+// src/shared/type-vocabulary.ts
+function isMemoryType(value) {
+  return typeof value === "string" && MEMORY_TYPES.includes(value);
 }
-function normalizeEraCutoffEpoch(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+function typeWordGlyph(word) {
+  if (isMemoryType(word)) {
+    return TYPE_GLYPH[word];
+  }
+  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
 }
-var init_segment_era = __esm({
-  "src/segment-era.ts"() {
+function typeListGlyph(types) {
+  if (!types || types.length === 0) {
+    return "\u2022";
+  }
+  return types.map(typeWordGlyph).join("");
+}
+function normalizeTypeValues(values) {
+  const normalized = [];
+  for (const raw of values) {
+    const value = raw.trim();
+    if (!value) {
+      continue;
+    }
+    if (!isMemoryType(value)) {
+      throw new Error(`unknown type value: ${raw}`);
+    }
+    if (!normalized.includes(value)) {
+      normalized.push(value);
+    }
+  }
+  return normalized;
+}
+function typeListsEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+var MEMORY_TYPES, TYPE_GLYPH, COMPACT_TYPE_GLYPH, LEGACY_TYPE_GLYPH;
+var init_type_vocabulary = __esm({
+  "src/shared/type-vocabulary.ts"() {
     "use strict";
+    MEMORY_TYPES = [
+      "discuss",
+      "research",
+      "design",
+      "implement",
+      "refactor",
+      "fix",
+      "measure",
+      "review",
+      "ops",
+      "delegate",
+      "correction"
+    ];
+    TYPE_GLYPH = {
+      discuss: "\u{1F4AC}",
+      research: "\u{1F50D}",
+      design: "\u2696\uFE0F",
+      implement: "\u{1F527}",
+      refactor: "\u{1F504}",
+      fix: "\u{1F534}",
+      measure: "\u{1F4CA}",
+      review: "\u2705",
+      ops: "\u2699\uFE0F",
+      delegate: "\u{1F91D}",
+      correction: "\u21A9\uFE0F"
+    };
+    COMPACT_TYPE_GLYPH = "\u23F8";
+    LEGACY_TYPE_GLYPH = {
+      bugfix: "\u{1F534}",
+      feature: "\u{1F7E3}",
+      refactor: "\u{1F504}",
+      change: "\u2705",
+      discovery: "\u{1F535}",
+      decision: "\u2696\uFE0F",
+      compact: COMPACT_TYPE_GLYPH
+    };
   }
 });
 
-// src/shared/config.ts
-function resolveConfigPath(homePath = (0, import_node_os.homedir)()) {
-  return (0, import_node_path.join)(homePath, ".claude-mnemo", "config.json");
+// src/db/memory-edges.ts
+function rankEdgeProvenance(provenance) {
+  return PROVENANCE_RANK[provenance];
 }
-function resolveDreamAgentModel(value, logger) {
-  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
-    return value;
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
-  );
-  return DEFAULT_DREAM_AGENT_MODEL;
+function isEdgeNodeKind(value) {
+  return typeof value === "string" && EDGE_NODE_KINDS.includes(value);
 }
-function resolveDreamAgentTimeZone(value, logger) {
-  if (typeof value === "string") {
-    try {
-      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
-      return value;
-    } catch {
-    }
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
-  );
-  return DEFAULT_DREAM_AGENT_TIME_ZONE;
+function isCitingNodeKind(value) {
+  return typeof value === "string" && CITING_NODE_KINDS.includes(value);
 }
-function resolveBoolean(value, fallback) {
-  return typeof value === "boolean" ? value : fallback;
+function isEdgeProvenance(value) {
+  return typeof value === "string" && EDGE_PROVENANCES.includes(value);
 }
-function clampInteger(value, min, max, fallback) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-    return fallback;
-  }
-  return Math.min(Math.max(value, min), max);
-}
-function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
+function mapEdgeRow(row) {
   return {
-    hardExitTimeoutMs: clampInteger(
-      config2.hardExitTimeoutMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.hardExitTimeoutMs
-    ),
-    settlementEnabled: resolveBoolean(
-      config2.settlementEnabled,
-      DEFAULT_CONFIG.settlementEnabled
-    ),
-    // Anything that is not a positive whole epoch reads as "no era yet" rather
-    // than as an epoch of 0, which would put every turn on the new path.
-    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
-    dreamAgentEnabled: resolveBoolean(
-      config2.dreamAgentEnabled,
-      DEFAULT_CONFIG.dreamAgentEnabled
-    ),
-    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
-    dreamAgentTimeoutMs: clampInteger(
-      config2.dreamAgentTimeoutMs,
-      6e4,
-      864e5,
-      DEFAULT_CONFIG.dreamAgentTimeoutMs
-    ),
-    dreamAgentIdleWatchdogMs: clampInteger(
-      config2.dreamAgentIdleWatchdogMs,
-      3e4,
-      36e5,
-      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
-    ),
-    dreamAgentHour: clampInteger(
-      config2.dreamAgentHour,
-      0,
-      23,
-      DEFAULT_CONFIG.dreamAgentHour
-    ),
-    dreamAgentTimeZone: resolveDreamAgentTimeZone(
-      rawDreamAgentTimeZone,
-      logger
-    ),
-    dreamAgentBacklogLimit: clampInteger(
-      config2.dreamAgentBacklogLimit,
-      1,
-      366,
-      DEFAULT_CONFIG.dreamAgentBacklogLimit
-    )
+    citing: { kind: row.citingKind, id: row.citingId },
+    cited: { kind: row.citedKind, id: row.citedId },
+    relation: row.relation,
+    provenance: row.provenance,
+    createdAtEpoch: row.createdAtEpoch
   };
 }
-function loadConfig(homePath = (0, import_node_os.homedir)(), logger = { warn: (message) => console.warn(message) }) {
-  const path2 = resolveConfigPath(homePath);
-  if (!(0, import_node_fs.existsSync)(path2)) {
-    return DEFAULT_CONFIG;
+function isValidCitingNode(node) {
+  return node !== void 0 && isCitingNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
+}
+function isValidCitedNode(node) {
+  return node !== void 0 && isEdgeNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
+}
+function pairKey(edge) {
+  return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
+}
+function mayCarryRelation(options, edge) {
+  const eligible = options.eligibleForRelation;
+  if (eligible === void 0) {
+    return false;
   }
-  try {
-    const raw = JSON.parse((0, import_node_fs.readFileSync)(path2, "utf8"));
-    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentModel"
-    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
-    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentTimeZone"
-    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
-    return clampConfig({
-      ...DEFAULT_CONFIG,
-      ...raw
-    }, configuredDreamModel, configuredDreamTimeZone, logger);
-  } catch {
-    return DEFAULT_CONFIG;
+  return eligible === "unrestricted" || eligible.has(pairKey(edge));
+}
+function writeMemoryEdges(db, edges, nowEpoch, options = {}) {
+  const written = [];
+  const rejected = [];
+  const relationsByPair = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited) || !isCitationRelation(edge.relation)) {
+      continue;
+    }
+    const key = pairKey(edge);
+    const relations = relationsByPair.get(key) ?? /* @__PURE__ */ new Set();
+    relations.add(edge.relation);
+    relationsByPair.set(key, relations);
+  }
+  const conflictingPairs = new Set(
+    [...relationsByPair.entries()].filter(([, relations]) => relations.size > 1).map(([key]) => key)
+  );
+  const upsert = db.query(
+    `
+      INSERT INTO memory_edges (
+        citing_kind, citing_id, cited_kind, cited_id,
+        relation, provenance, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id)
+        DO UPDATE SET
+          -- Spec C14: no rank test between an authorised write and the
+          -- relation it sets. A relation-bearing write replaces relation AND
+          -- provenance together, unconditionally; a bare write (relation
+          -- NULL) touches neither \u2014 it can create a pair but never modify a
+          -- relation one already carries.
+          relation = CASE
+            WHEN excluded.relation IS NOT NULL THEN excluded.relation
+            ELSE memory_edges.relation
+          END,
+          provenance = CASE
+            WHEN excluded.relation IS NOT NULL THEN excluded.provenance
+            ELSE memory_edges.provenance
+          END
+      RETURNING ${EDGE_COLUMNS}
+    `
+  );
+  for (const edge of edges) {
+    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
+      rejected.push({ input: edge, reason: "invalid-node" });
+      continue;
+    }
+    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
+      rejected.push({ input: edge, reason: "self-loop" });
+      continue;
+    }
+    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
+      rejected.push({ input: edge, reason: "invalid-relation" });
+      continue;
+    }
+    if (!isEdgeProvenance(edge.provenance)) {
+      rejected.push({ input: edge, reason: "invalid-provenance" });
+      continue;
+    }
+    if (edge.relation !== null && conflictingPairs.has(pairKey(edge))) {
+      rejected.push({ input: edge, reason: "conflicting-relation" });
+      continue;
+    }
+    if (edge.relation !== null && !mayCarryRelation(options, edge)) {
+      rejected.push({ input: edge, reason: "relation-ineligible" });
+      continue;
+    }
+    const row = upsert.get(
+      edge.citing.kind,
+      edge.citing.id,
+      edge.cited.kind,
+      edge.cited.id,
+      edge.relation,
+      edge.provenance,
+      edge.createdAtEpoch ?? nowEpoch
+    );
+    if (row) {
+      written.push(mapEdgeRow(row));
+    }
+  }
+  return { written, rejected };
+}
+function getOutgoingEdges(db, citing) {
+  return db.query(
+    `SELECT ${EDGE_COLUMNS} FROM memory_edges
+       WHERE citing_kind = ? AND citing_id = ?
+       ORDER BY cited_kind ASC, cited_id ASC, relation ASC`
+  ).all(citing.kind, citing.id).map(mapEdgeRow);
+}
+function reconcileCitedPairs(db, citing, citedNodes, nowEpoch, provenance) {
+  const desired = /* @__PURE__ */ new Map();
+  for (const node of citedNodes) {
+    if (isValidCitedNode(node)) {
+      desired.set(`${node.kind}:${node.id}`, node);
+    }
+  }
+  const existing = getOutgoingEdges(db, citing);
+  const stale = existing.filter(
+    (edge) => !desired.has(`${edge.cited.kind}:${edge.cited.id}`)
+  );
+  const del = db.query(
+    `DELETE FROM memory_edges
+     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?`
+  );
+  for (const edge of stale) {
+    del.run(citing.kind, citing.id, edge.cited.kind, edge.cited.id);
+  }
+  const { written } = writeMemoryEdges(
+    db,
+    [...desired.values()].map((cited) => ({
+      citing,
+      cited,
+      relation: null,
+      provenance
+    })),
+    nowEpoch
+  );
+  return { written, deleted: stale };
+}
+var EDGE_NODE_KINDS, CITING_NODE_KINDS, EDGE_PROVENANCES, PROVENANCE_RANK, EDGE_COLUMNS;
+var init_memory_edges = __esm({
+  "src/db/memory-edges.ts"() {
+    "use strict";
+    init_citations();
+    EDGE_NODE_KINDS = ["turn", "segment"];
+    CITING_NODE_KINDS = ["turn", "segment", "session"];
+    EDGE_PROVENANCES = [
+      "retrieval",
+      "text-ref",
+      "rollback",
+      "judged",
+      "asserted"
+    ];
+    PROVENANCE_RANK = {
+      retrieval: 0,
+      rollback: 1,
+      "text-ref": 2,
+      judged: 3,
+      asserted: 4
+    };
+    EDGE_COLUMNS = `
+  citing_kind AS citingKind,
+  citing_id AS citingId,
+  cited_kind AS citedKind,
+  cited_id AS citedId,
+  relation,
+  provenance,
+  created_at_epoch AS createdAtEpoch
+`;
+  }
+});
+
+// src/db/references.ts
+function isBareAddressToken(bracketed) {
+  return ADDRESS_TOKEN_PATTERN.test(bracketed);
+}
+function parseBareAddressReference(token) {
+  const trimmed = token.trim();
+  const bracketed = trimmed.startsWith("[") ? trimmed : `[${trimmed}]`;
+  if (!isBareAddressToken(bracketed)) {
+    return null;
+  }
+  const parsed = parseQualifiedReferences(bracketed);
+  return parsed.length === 1 ? parsed[0] : null;
+}
+function topLevelBracketGroups(content) {
+  const groups = [];
+  for (let index = 0; index < content.length; index += 1) {
+    if (content[index] !== "[") {
+      continue;
+    }
+    const start = index;
+    let depth = 0;
+    let nested = false;
+    let cursor = index;
+    for (; cursor < content.length; cursor += 1) {
+      const char = content[cursor];
+      if (char === "[") {
+        depth += 1;
+        if (depth > 1) {
+          nested = true;
+        }
+      } else if (char === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          break;
+        }
+      }
+    }
+    if (depth !== 0) {
+      break;
+    }
+    if (!nested) {
+      groups.push(content.slice(start, cursor + 1));
+    }
+    index = cursor;
+  }
+  return groups;
+}
+function parsePositiveId(digits) {
+  if (digits === void 0) {
+    return null;
+  }
+  const value = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+function parseQualifiedReferences(content) {
+  if (!content) {
+    return [];
+  }
+  const references = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const group of topLevelBracketGroups(content)) {
+    const match = REFERENCE_PATTERN.exec(group);
+    if (match === null) {
+      continue;
+    }
+    const raw = match[0];
+    const segmentId = parsePositiveId(match[3]);
+    if (segmentId !== null) {
+      const key2 = `E${segmentId}`;
+      if (!seen.has(key2)) {
+        seen.add(key2);
+        references.push({ kind: "segment", raw, segmentId });
+      }
+      continue;
+    }
+    const sessionId = parsePositiveId(match[1]);
+    const promptNumber = parsePositiveId(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    const key = `S${sessionId}/T${promptNumber}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      references.push({ kind: "turn", raw, sessionId, promptNumber });
+    }
+  }
+  return references;
+}
+function validateReferences(db, references, options = {}) {
+  const accepted = [];
+  const rejected = [];
+  if (references.length === 0) {
+    return { accepted, rejected };
+  }
+  const turnLookup = db.query(
+    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
+  );
+  const segmentLookup = db.query(
+    "SELECT id FROM segments WHERE id = ?"
+  );
+  for (const reference of references) {
+    if (reference.kind === "turn") {
+      const row2 = turnLookup.get(reference.sessionId, reference.promptNumber);
+      if (!row2) {
+        rejected.push({ reference, reason: "unresolved" });
+        continue;
+      }
+      accepted.push({ reference, node: { kind: "turn", id: row2.id } });
+      continue;
+    }
+    const row = segmentLookup.get(reference.segmentId);
+    if (!row) {
+      rejected.push({ reference, reason: "unresolved" });
+      continue;
+    }
+    accepted.push({ reference, node: { kind: "segment", id: row.id } });
+  }
+  if (rejected.length > 0) {
+    const logger = options.logger ?? console;
+    logger.warn?.(
+      `[claude-mnemo] S${options.writerSessionId ?? "?"}: dropped ${rejected.length} illegal reference(s): ${rejected.map((entry) => `${entry.reference.raw} (${entry.reason})`).join(", ")}`
+    );
+  }
+  return { accepted, rejected };
+}
+var REFERENCE_PATTERN, ADDRESS_TOKEN_PATTERN;
+var init_references = __esm({
+  "src/db/references.ts"() {
+    "use strict";
+    REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
+    ADDRESS_TOKEN_PATTERN = /^\[[ \t]*(?:S\d+[ \t]*\/[ \t]*T\d+|E\d+)[ \t]*\]$/;
+  }
+});
+
+// src/db/citations.ts
+function isCitationRelation(value) {
+  return typeof value === "string" && CITATION_RELATIONS.includes(value);
+}
+function parsePositiveId2(digits) {
+  const id = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+function* citationBracketBodies(content) {
+  let index = 0;
+  while (index < content.length) {
+    const open = content.indexOf("[", index);
+    if (open === -1) {
+      return;
+    }
+    const close = content.indexOf("]", open + 1);
+    if (close === -1) {
+      return;
+    }
+    const body = content.slice(open + 1, close);
+    index = close + 1;
+    if (body.includes("[")) {
+      continue;
+    }
+    yield body;
   }
 }
-var import_node_fs, import_node_os, import_node_path, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_HARD_EXIT_TIMEOUT_MS, DEFAULT_CONFIG;
-var init_config = __esm({
-  "src/shared/config.ts"() {
+function expandBracketBody(body) {
+  if (/[\n\r]/.test(body)) {
+    return [];
+  }
+  const inner = body.trim();
+  const range = RANGE_PATTERN.exec(inner);
+  if (range) {
+    const start = parsePositiveId2(range[1]);
+    const end = parsePositiveId2(range[2]);
+    if (start === null || end === null || end < start) {
+      return [];
+    }
+    const span = end - start + 1;
+    if (span > INLINE_RANGE_EXPANSION_CAP) {
+      return [start, end];
+    }
+    const ids = [];
+    for (let id = start; id <= end; id += 1) {
+      ids.push(id);
+    }
+    return ids;
+  }
+  if (LIST_PATTERN.test(inner)) {
+    const ids = [];
+    LIST_ELEMENT_PATTERN.lastIndex = 0;
+    let element;
+    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
+      const id = parsePositiveId2(element[1]);
+      if (id === null) {
+        return [];
+      }
+      ids.push(id);
+    }
+    return ids;
+  }
+  const single = SINGLE_PATTERN.exec(inner);
+  if (single) {
+    const id = parsePositiveId2(single[1]);
+    return id === null ? [] : [id];
+  }
+  const annotated = ANNOTATED_PATTERN.exec(inner);
+  if (annotated) {
+    const id = parsePositiveId2(annotated[1]);
+    return id === null ? [] : [id];
+  }
+  return [];
+}
+function parseInlineCitations(content, maxRefs) {
+  if (!content) {
+    return [];
+  }
+  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
+  if (cap <= 0) {
+    return [];
+  }
+  const ids = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const body of citationBracketBodies(content)) {
+    for (const id of expandBracketBody(body)) {
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      ids.push(id);
+      if (ids.length >= cap) {
+        return ids;
+      }
+    }
+  }
+  return ids;
+}
+function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, logger) {
+  const references = [
+    ...parseQualifiedReferences(fields.title),
+    ...parseQualifiedReferences(fields.content),
+    ...parseQualifiedReferences(fields.insight)
+  ];
+  const { accepted, rejected } = validateReferences(db, references, {
+    writerSessionId,
+    logger
+  });
+  const { written, deleted } = reconcileCitedPairs(
+    db,
+    { kind: "turn", id: turnId },
+    accepted.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref"
+  );
+  return { written, deleted, rejected };
+}
+function attachTurnRelations(db, citingTurnId, fields, bodyCitedPairs, nowEpoch) {
+  const citing = { kind: "turn", id: citingTurnId };
+  const eligiblePairKeys = new Set(bodyCitedPairs.map((edge) => pairKey(edge)));
+  const rejected = [];
+  const claimedBy = /* @__PURE__ */ new Map();
+  const inputs = [];
+  for (const field of fields) {
+    for (const raw of field.targets) {
+      const reference = parseBareAddressReference(raw);
+      if (!reference) {
+        rejected.push({ relation: field.relation, raw, reason: "malformed" });
+        continue;
+      }
+      const { accepted } = validateReferences(db, [reference]);
+      const node = accepted[0]?.node;
+      if (!node) {
+        rejected.push({ relation: field.relation, raw, reason: "unresolved" });
+        continue;
+      }
+      const key = pairKey({ citing, cited: node });
+      if (!eligiblePairKeys.has(key)) {
+        rejected.push({ relation: field.relation, raw, reason: "not-cited" });
+        continue;
+      }
+      const priorClaim = claimedBy.get(key);
+      if (priorClaim !== void 0 && priorClaim !== field.relation) {
+        rejected.push({ relation: field.relation, raw, reason: "duplicate-target" });
+        continue;
+      }
+      claimedBy.set(key, field.relation);
+      inputs.push({ citing, cited: node, relation: field.relation, provenance: "asserted" });
+    }
+  }
+  if (rejected.length > 0 || inputs.length === 0) {
+    return { written: [], rejected };
+  }
+  const { written } = writeMemoryEdges(db, inputs, nowEpoch, {
+    eligibleForRelation: eligiblePairKeys
+  });
+  return { written, rejected: [] };
+}
+function appendUnseen(into, ids) {
+  const seen = new Set(into);
+  for (const id of ids) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      into.push(id);
+    }
+  }
+}
+function dedupeCitedIds(edges) {
+  const citedTurnIds = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (seen.has(edge.citedTurnId)) {
+      continue;
+    }
+    seen.add(edge.citedTurnId);
+    citedTurnIds.push(edge.citedTurnId);
+  }
+  return citedTurnIds;
+}
+function getSessionEffectiveCitations(db, sessionId) {
+  const turns = db.query(
+    `SELECT id, content
+       FROM turns
+       WHERE session_id = ?
+       ORDER BY prompt_number ASC, id ASC`
+  ).all(sessionId);
+  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
+  const edgesByCiter = /* @__PURE__ */ new Map();
+  const edgeRows = db.query(
+    `SELECT
+         e.citing_id AS citingTurnId,
+         e.cited_id AS citedTurnId,
+         e.relation,
+         e.created_at_epoch AS createdAtEpoch
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
+       JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
+       WHERE citing.session_id = ? AND cited.session_id = ?
+       ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
+  ).all(sessionId, sessionId);
+  for (const edge of edgeRows) {
+    if (edge.citedTurnId === edge.citingTurnId) {
+      continue;
+    }
+    const bucket = edgesByCiter.get(edge.citingTurnId);
+    if (bucket) {
+      bucket.push(edge);
+    } else {
+      edgesByCiter.set(edge.citingTurnId, [edge]);
+    }
+  }
+  const effective = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    const edges = edgesByCiter.get(turn.id) ?? [];
+    const citedTurnIds = dedupeCitedIds(edges);
+    appendUnseen(
+      citedTurnIds,
+      parseInlineCitations(turn.content).filter(
+        (id) => id !== turn.id && sessionTurnIds.has(id)
+      )
+    );
+    effective.set(turn.id, { citedTurnIds, edges });
+  }
+  return effective;
+}
+var CITATION_RELATIONS, INLINE_RANGE_EXPANSION_CAP, RANGE_PATTERN, LIST_PATTERN, LIST_ELEMENT_PATTERN, SINGLE_PATTERN, ANNOTATED_PATTERN;
+var init_citations = __esm({
+  "src/db/citations.ts"() {
     "use strict";
-    import_node_fs = require("node:fs");
-    import_node_os = require("node:os");
-    import_node_path = require("node:path");
-    init_segment_era();
-    KNOWN_DREAM_AGENT_MODELS = [
-      "opus",
-      "sonnet",
-      "haiku",
-      "claude-opus-4-8",
-      "claude-opus-4-6",
-      "claude-opus-4-5",
-      "claude-sonnet-5",
-      "claude-sonnet-4-6",
-      "claude-sonnet-4-5",
-      "claude-haiku-4-5"
+    init_memory_edges();
+    init_references();
+    CITATION_RELATIONS = [
+      "evidence-for",
+      "evidence-against",
+      "supersedes",
+      "depends-on",
+      "refines",
+      "override",
+      "encodes",
+      "grounded-on"
     ];
-    DEFAULT_DREAM_AGENT_MODEL = "opus";
-    DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
-    DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
-    DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
-    DEFAULT_DREAM_AGENT_HOUR = 4;
-    DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
-    DEFAULT_CONFIG = {
-      hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
-      // On by default because it is a kill switch, not the cutover switch: with no
-      // era cutoff configured this changes nothing at all.
-      settlementEnabled: true,
-      eraCutoffEpoch: null,
-      dreamAgentEnabled: false,
-      dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
-      dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
-      dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
-      dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
-      dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
-      dreamAgentBacklogLimit: 1
-    };
+    INLINE_RANGE_EXPANSION_CAP = 8;
+    RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
+    LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
+    LIST_ELEMENT_PATTERN = /T(\d+)/g;
+    SINGLE_PATTERN = /^T(\d+)$/;
+    ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
   }
 });
 
@@ -6971,7 +7460,7 @@ var init_config = __esm({
 function resolveDatabasePath(explicitPath) {
   const candidatePath = explicitPath || process.env.CLAUDE_MNEMO_DB_PATH || DEFAULT_DB_PATH;
   if (candidatePath.startsWith("~/")) {
-    return (0, import_node_path2.join)((0, import_node_os2.homedir)(), candidatePath.slice(2));
+    return (0, import_node_path.join)((0, import_node_os.homedir)(), candidatePath.slice(2));
   }
   return candidatePath;
 }
@@ -6979,10 +7468,10 @@ function encodeProjectPath(projectPath) {
   return projectPath.replace(/[/:\\.]/g, "-");
 }
 function transcriptRootPath() {
-  return (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude", "projects");
+  return (0, import_node_path.join)((0, import_node_os.homedir)(), ".claude", "projects");
 }
 function resolveTranscriptPath(projectPath, sessionId) {
-  return (0, import_node_path2.join)(
+  return (0, import_node_path.join)(
     transcriptRootPath(),
     encodeProjectPath(projectPath),
     `${sessionId}.jsonl`
@@ -6991,16 +7480,16 @@ function resolveTranscriptPath(projectPath, sessionId) {
 function resolveSessionTranscriptPath(session) {
   return session.transcriptPath ?? resolveTranscriptPath(session.project, session.contentSessionId);
 }
-var import_node_os2, import_node_path2, DATA_DIR, DEFAULT_DB_PATH, WORKER_PID_PATH, WORKER_STARTING_PATH;
+var import_node_os, import_node_path, DATA_DIR, DEFAULT_DB_PATH, WORKER_PID_PATH, WORKER_STARTING_PATH;
 var init_paths = __esm({
   "src/shared/paths.ts"() {
     "use strict";
-    import_node_os2 = require("node:os");
-    import_node_path2 = require("node:path");
-    DATA_DIR = (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude-mnemo");
-    DEFAULT_DB_PATH = (0, import_node_path2.join)(DATA_DIR, "claude-mnemo.db");
-    WORKER_PID_PATH = (0, import_node_path2.join)(DATA_DIR, "worker.pid");
-    WORKER_STARTING_PATH = (0, import_node_path2.join)(DATA_DIR, "worker.starting");
+    import_node_os = require("node:os");
+    import_node_path = require("node:path");
+    DATA_DIR = (0, import_node_path.join)((0, import_node_os.homedir)(), ".claude-mnemo");
+    DEFAULT_DB_PATH = (0, import_node_path.join)(DATA_DIR, "claude-mnemo.db");
+    WORKER_PID_PATH = (0, import_node_path.join)(DATA_DIR, "worker.pid");
+    WORKER_STARTING_PATH = (0, import_node_path.join)(DATA_DIR, "worker.starting");
   }
 });
 
@@ -7022,9 +7511,9 @@ function ensureParentDirectory(databasePath) {
   if (databasePath === ":memory:") {
     return;
   }
-  const parentDirectory = (0, import_node_path3.dirname)(databasePath);
-  if (!(0, import_node_fs2.existsSync)(parentDirectory)) {
-    (0, import_node_fs2.mkdirSync)(parentDirectory, { recursive: true });
+  const parentDirectory = (0, import_node_path2.dirname)(databasePath);
+  if (!(0, import_node_fs.existsSync)(parentDirectory)) {
+    (0, import_node_fs.mkdirSync)(parentDirectory, { recursive: true });
   }
 }
 function normalizeNonNegativeMilliseconds(value, name) {
@@ -7120,16 +7609,180 @@ function runHookWriteTransaction(db, fn, options = {}) {
     }
   }
 }
-var import_node_fs2, import_node_path3, import_bun_sqlite, DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_HOOK_TRANSACTION_BUDGET_MS;
+var import_node_fs, import_node_path2, import_bun_sqlite, DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_HOOK_TRANSACTION_BUDGET_MS;
 var init_database = __esm({
   "src/db/database.ts"() {
     "use strict";
-    import_node_fs2 = require("node:fs");
-    import_node_path3 = require("node:path");
+    import_node_fs = require("node:fs");
+    import_node_path2 = require("node:path");
     import_bun_sqlite = require("bun:sqlite");
     init_paths();
     DEFAULT_BUSY_TIMEOUT_MS = 5e3;
     DEFAULT_HOOK_TRANSACTION_BUDGET_MS = 2500;
+  }
+});
+
+// src/segment-era.ts
+function isSegmentEra(createdAtEpoch, cutoffEpoch) {
+  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
+}
+function normalizeEraCutoffEpoch(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+var init_segment_era = __esm({
+  "src/segment-era.ts"() {
+    "use strict";
+  }
+});
+
+// src/shared/config.ts
+function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
+  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
+}
+function resolveDreamAgentModel(value, logger) {
+  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
+    return value;
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
+  );
+  return DEFAULT_DREAM_AGENT_MODEL;
+}
+function resolveDreamAgentTimeZone(value, logger) {
+  if (typeof value === "string") {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
+      return value;
+    } catch {
+    }
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
+  );
+  return DEFAULT_DREAM_AGENT_TIME_ZONE;
+}
+function resolveBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
+}
+function clampInteger(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
+  return {
+    hardExitTimeoutMs: clampInteger(
+      config2.hardExitTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.hardExitTimeoutMs
+    ),
+    settlementEnabled: resolveBoolean(
+      config2.settlementEnabled,
+      DEFAULT_CONFIG.settlementEnabled
+    ),
+    // Anything that is not a positive whole epoch reads as "no era yet" rather
+    // than as an epoch of 0, which would put every turn on the new path.
+    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
+    dreamAgentEnabled: resolveBoolean(
+      config2.dreamAgentEnabled,
+      DEFAULT_CONFIG.dreamAgentEnabled
+    ),
+    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
+    dreamAgentTimeoutMs: clampInteger(
+      config2.dreamAgentTimeoutMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.dreamAgentTimeoutMs
+    ),
+    dreamAgentIdleWatchdogMs: clampInteger(
+      config2.dreamAgentIdleWatchdogMs,
+      3e4,
+      36e5,
+      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
+    ),
+    dreamAgentHour: clampInteger(
+      config2.dreamAgentHour,
+      0,
+      23,
+      DEFAULT_CONFIG.dreamAgentHour
+    ),
+    dreamAgentTimeZone: resolveDreamAgentTimeZone(
+      rawDreamAgentTimeZone,
+      logger
+    ),
+    dreamAgentBacklogLimit: clampInteger(
+      config2.dreamAgentBacklogLimit,
+      1,
+      366,
+      DEFAULT_CONFIG.dreamAgentBacklogLimit
+    )
+  };
+}
+function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
+  const path2 = resolveConfigPath(homePath);
+  if (!(0, import_node_fs2.existsSync)(path2)) {
+    return DEFAULT_CONFIG;
+  }
+  try {
+    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
+    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentModel"
+    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
+    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentTimeZone"
+    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
+    return clampConfig({
+      ...DEFAULT_CONFIG,
+      ...raw
+    }, configuredDreamModel, configuredDreamTimeZone, logger);
+  } catch {
+    return DEFAULT_CONFIG;
+  }
+}
+var import_node_fs2, import_node_os2, import_node_path3, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_HARD_EXIT_TIMEOUT_MS, DEFAULT_CONFIG;
+var init_config = __esm({
+  "src/shared/config.ts"() {
+    "use strict";
+    import_node_fs2 = require("node:fs");
+    import_node_os2 = require("node:os");
+    import_node_path3 = require("node:path");
+    init_segment_era();
+    KNOWN_DREAM_AGENT_MODELS = [
+      "opus",
+      "sonnet",
+      "haiku",
+      "claude-opus-4-8",
+      "claude-opus-4-6",
+      "claude-opus-4-5",
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+      "claude-sonnet-4-5",
+      "claude-haiku-4-5"
+    ];
+    DEFAULT_DREAM_AGENT_MODEL = "opus";
+    DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
+    DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_HOUR = 4;
+    DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
+    DEFAULT_CONFIG = {
+      hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
+      // On by default because it is a kill switch, not the cutover switch: with no
+      // era cutoff configured this changes nothing at all.
+      settlementEnabled: true,
+      eraCutoffEpoch: null,
+      dreamAgentEnabled: false,
+      dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
+      dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+      dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
+      dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
+      dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
+      dreamAgentBacklogLimit: 1
+    };
   }
 });
 
@@ -7324,13 +7977,21 @@ function indexSegmentToFTS(db, segment) {
       return [];
     }
   }).join(" ");
+  const workingState = [
+    segment.goal,
+    segment.constraints,
+    segment.decisions,
+    segment.done,
+    segment.nextSteps,
+    segment.reference
+  ].filter((value) => Boolean(value && value.trim())).join("\n");
   indexFtsRecord(
     db,
     "segment",
     segment.id,
     segment.title,
     segment.content,
-    [segment.insight ?? "", facets].filter((part) => part.trim() !== "").join("\n"),
+    [segment.insight ?? "", workingState, facets].filter((part) => part.trim() !== "").join("\n"),
     null,
     null
   );
@@ -7385,7 +8046,11 @@ function rebuildSearchIndex(db) {
     indexObservationToFTS(db, observation);
   }
   const segmentRows = db.query(
-    "SELECT id, title, content, insight, type, tags FROM segments ORDER BY id"
+    `SELECT
+         id, title, content, insight,
+         goal, constraints, decisions, done, next_steps AS nextSteps, reference,
+         type, tags
+       FROM segments ORDER BY id`
   ).all();
   for (const segment of segmentRows) {
     indexSegmentToFTS(db, segment);
@@ -7859,655 +8524,6 @@ var init_search = __esm({
   }
 });
 
-// src/db/references.ts
-function isBareAddressToken(bracketed) {
-  return ADDRESS_TOKEN_PATTERN.test(bracketed);
-}
-function parseBareAddressReference(token) {
-  const trimmed = token.trim();
-  const bracketed = trimmed.startsWith("[") ? trimmed : `[${trimmed}]`;
-  if (!isBareAddressToken(bracketed)) {
-    return null;
-  }
-  const parsed = parseQualifiedReferences(bracketed);
-  return parsed.length === 1 ? parsed[0] : null;
-}
-function topLevelBracketGroups(content) {
-  const groups = [];
-  for (let index = 0; index < content.length; index += 1) {
-    if (content[index] !== "[") {
-      continue;
-    }
-    const start = index;
-    let depth = 0;
-    let nested = false;
-    let cursor = index;
-    for (; cursor < content.length; cursor += 1) {
-      const char = content[cursor];
-      if (char === "[") {
-        depth += 1;
-        if (depth > 1) {
-          nested = true;
-        }
-      } else if (char === "]") {
-        depth -= 1;
-        if (depth === 0) {
-          break;
-        }
-      }
-    }
-    if (depth !== 0) {
-      break;
-    }
-    if (!nested) {
-      groups.push(content.slice(start, cursor + 1));
-    }
-    index = cursor;
-  }
-  return groups;
-}
-function parsePositiveId(digits) {
-  if (digits === void 0) {
-    return null;
-  }
-  const value = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-function parseQualifiedReferences(content) {
-  if (!content) {
-    return [];
-  }
-  const references = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const group of topLevelBracketGroups(content)) {
-    const match = REFERENCE_PATTERN.exec(group);
-    if (match === null) {
-      continue;
-    }
-    const raw = match[0];
-    const segmentId = parsePositiveId(match[3]);
-    if (segmentId !== null) {
-      const key2 = `E${segmentId}`;
-      if (!seen.has(key2)) {
-        seen.add(key2);
-        references.push({ kind: "segment", raw, segmentId });
-      }
-      continue;
-    }
-    const sessionId = parsePositiveId(match[1]);
-    const promptNumber = parsePositiveId(match[2]);
-    if (sessionId === null || promptNumber === null) {
-      continue;
-    }
-    const key = `S${sessionId}/T${promptNumber}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      references.push({ kind: "turn", raw, sessionId, promptNumber });
-    }
-  }
-  return references;
-}
-function validateReferences(db, references, options = {}) {
-  const accepted = [];
-  const rejected = [];
-  if (references.length === 0) {
-    return { accepted, rejected };
-  }
-  const turnLookup = db.query(
-    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
-  );
-  const segmentLookup = db.query(
-    "SELECT id FROM segments WHERE id = ?"
-  );
-  for (const reference of references) {
-    if (reference.kind === "turn") {
-      const row2 = turnLookup.get(reference.sessionId, reference.promptNumber);
-      if (!row2) {
-        rejected.push({ reference, reason: "unresolved" });
-        continue;
-      }
-      accepted.push({ reference, node: { kind: "turn", id: row2.id } });
-      continue;
-    }
-    const row = segmentLookup.get(reference.segmentId);
-    if (!row) {
-      rejected.push({ reference, reason: "unresolved" });
-      continue;
-    }
-    accepted.push({ reference, node: { kind: "segment", id: row.id } });
-  }
-  if (rejected.length > 0) {
-    const logger = options.logger ?? console;
-    logger.warn?.(
-      `[claude-mnemo] S${options.writerSessionId ?? "?"}: dropped ${rejected.length} illegal reference(s): ${rejected.map((entry) => `${entry.reference.raw} (${entry.reason})`).join(", ")}`
-    );
-  }
-  return { accepted, rejected };
-}
-var REFERENCE_PATTERN, ADDRESS_TOKEN_PATTERN;
-var init_references = __esm({
-  "src/db/references.ts"() {
-    "use strict";
-    REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
-    ADDRESS_TOKEN_PATTERN = /^\[[ \t]*(?:S\d+[ \t]*\/[ \t]*T\d+|E\d+)[ \t]*\]$/;
-  }
-});
-
-// src/db/citations.ts
-function isCitationRelation(value) {
-  return typeof value === "string" && CITATION_RELATIONS.includes(value);
-}
-function parsePositiveId2(digits) {
-  const id = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
-}
-function* citationBracketBodies(content) {
-  let index = 0;
-  while (index < content.length) {
-    const open = content.indexOf("[", index);
-    if (open === -1) {
-      return;
-    }
-    const close = content.indexOf("]", open + 1);
-    if (close === -1) {
-      return;
-    }
-    const body = content.slice(open + 1, close);
-    index = close + 1;
-    if (body.includes("[")) {
-      continue;
-    }
-    yield body;
-  }
-}
-function expandBracketBody(body) {
-  if (/[\n\r]/.test(body)) {
-    return [];
-  }
-  const inner = body.trim();
-  const range = RANGE_PATTERN.exec(inner);
-  if (range) {
-    const start = parsePositiveId2(range[1]);
-    const end = parsePositiveId2(range[2]);
-    if (start === null || end === null || end < start) {
-      return [];
-    }
-    const span = end - start + 1;
-    if (span > INLINE_RANGE_EXPANSION_CAP) {
-      return [start, end];
-    }
-    const ids = [];
-    for (let id = start; id <= end; id += 1) {
-      ids.push(id);
-    }
-    return ids;
-  }
-  if (LIST_PATTERN.test(inner)) {
-    const ids = [];
-    LIST_ELEMENT_PATTERN.lastIndex = 0;
-    let element;
-    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
-      const id = parsePositiveId2(element[1]);
-      if (id === null) {
-        return [];
-      }
-      ids.push(id);
-    }
-    return ids;
-  }
-  const single = SINGLE_PATTERN.exec(inner);
-  if (single) {
-    const id = parsePositiveId2(single[1]);
-    return id === null ? [] : [id];
-  }
-  const annotated = ANNOTATED_PATTERN.exec(inner);
-  if (annotated) {
-    const id = parsePositiveId2(annotated[1]);
-    return id === null ? [] : [id];
-  }
-  return [];
-}
-function parseInlineCitations(content, maxRefs) {
-  if (!content) {
-    return [];
-  }
-  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
-  if (cap <= 0) {
-    return [];
-  }
-  const ids = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const body of citationBracketBodies(content)) {
-    for (const id of expandBracketBody(body)) {
-      if (seen.has(id)) {
-        continue;
-      }
-      seen.add(id);
-      ids.push(id);
-      if (ids.length >= cap) {
-        return ids;
-      }
-    }
-  }
-  return ids;
-}
-function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, logger) {
-  const references = [
-    ...parseQualifiedReferences(fields.title),
-    ...parseQualifiedReferences(fields.content),
-    ...parseQualifiedReferences(fields.insight)
-  ];
-  const { accepted, rejected } = validateReferences(db, references, {
-    writerSessionId,
-    logger
-  });
-  const { written, deleted } = reconcileCitedPairs(
-    db,
-    { kind: "turn", id: turnId },
-    accepted.map((entry) => entry.node),
-    nowEpoch,
-    "text-ref"
-  );
-  return { written, deleted, rejected };
-}
-function attachTurnRelations(db, citingTurnId, fields, bodyCitedPairs, nowEpoch) {
-  const citing = { kind: "turn", id: citingTurnId };
-  const eligiblePairKeys = new Set(bodyCitedPairs.map((edge) => pairKey(edge)));
-  const rejected = [];
-  const claimedBy = /* @__PURE__ */ new Map();
-  const inputs = [];
-  for (const field of fields) {
-    for (const raw of field.targets) {
-      const reference = parseBareAddressReference(raw);
-      if (!reference) {
-        rejected.push({ relation: field.relation, raw, reason: "malformed" });
-        continue;
-      }
-      const { accepted } = validateReferences(db, [reference]);
-      const node = accepted[0]?.node;
-      if (!node) {
-        rejected.push({ relation: field.relation, raw, reason: "unresolved" });
-        continue;
-      }
-      const key = pairKey({ citing, cited: node });
-      if (!eligiblePairKeys.has(key)) {
-        rejected.push({ relation: field.relation, raw, reason: "not-cited" });
-        continue;
-      }
-      const priorClaim = claimedBy.get(key);
-      if (priorClaim !== void 0 && priorClaim !== field.relation) {
-        rejected.push({ relation: field.relation, raw, reason: "duplicate-target" });
-        continue;
-      }
-      claimedBy.set(key, field.relation);
-      inputs.push({ citing, cited: node, relation: field.relation, provenance: "asserted" });
-    }
-  }
-  if (rejected.length > 0 || inputs.length === 0) {
-    return { written: [], rejected };
-  }
-  const { written } = writeMemoryEdges(db, inputs, nowEpoch, {
-    eligibleForRelation: eligiblePairKeys
-  });
-  return { written, rejected: [] };
-}
-function appendUnseen(into, ids) {
-  const seen = new Set(into);
-  for (const id of ids) {
-    if (!seen.has(id)) {
-      seen.add(id);
-      into.push(id);
-    }
-  }
-}
-function dedupeCitedIds(edges) {
-  const citedTurnIds = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (seen.has(edge.citedTurnId)) {
-      continue;
-    }
-    seen.add(edge.citedTurnId);
-    citedTurnIds.push(edge.citedTurnId);
-  }
-  return citedTurnIds;
-}
-function getSessionEffectiveCitations(db, sessionId) {
-  const turns = db.query(
-    `SELECT id, content
-       FROM turns
-       WHERE session_id = ?
-       ORDER BY prompt_number ASC, id ASC`
-  ).all(sessionId);
-  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
-  const edgesByCiter = /* @__PURE__ */ new Map();
-  const edgeRows = db.query(
-    `SELECT
-         e.citing_id AS citingTurnId,
-         e.cited_id AS citedTurnId,
-         e.relation,
-         e.created_at_epoch AS createdAtEpoch
-       FROM memory_edges e
-       JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
-       JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
-       WHERE citing.session_id = ? AND cited.session_id = ?
-       ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
-  ).all(sessionId, sessionId);
-  for (const edge of edgeRows) {
-    if (edge.citedTurnId === edge.citingTurnId) {
-      continue;
-    }
-    const bucket = edgesByCiter.get(edge.citingTurnId);
-    if (bucket) {
-      bucket.push(edge);
-    } else {
-      edgesByCiter.set(edge.citingTurnId, [edge]);
-    }
-  }
-  const effective = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    const edges = edgesByCiter.get(turn.id) ?? [];
-    const citedTurnIds = dedupeCitedIds(edges);
-    appendUnseen(
-      citedTurnIds,
-      parseInlineCitations(turn.content).filter(
-        (id) => id !== turn.id && sessionTurnIds.has(id)
-      )
-    );
-    effective.set(turn.id, { citedTurnIds, edges });
-  }
-  return effective;
-}
-var CITATION_RELATIONS, INLINE_RANGE_EXPANSION_CAP, RANGE_PATTERN, LIST_PATTERN, LIST_ELEMENT_PATTERN, SINGLE_PATTERN, ANNOTATED_PATTERN;
-var init_citations = __esm({
-  "src/db/citations.ts"() {
-    "use strict";
-    init_memory_edges();
-    init_references();
-    CITATION_RELATIONS = [
-      "evidence-for",
-      "evidence-against",
-      "supersedes",
-      "depends-on"
-    ];
-    INLINE_RANGE_EXPANSION_CAP = 8;
-    RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
-    LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
-    LIST_ELEMENT_PATTERN = /T(\d+)/g;
-    SINGLE_PATTERN = /^T(\d+)$/;
-    ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
-  }
-});
-
-// src/db/memory-edges.ts
-function rankEdgeProvenance(provenance) {
-  return PROVENANCE_RANK[provenance];
-}
-function isEdgeNodeKind(value) {
-  return typeof value === "string" && EDGE_NODE_KINDS.includes(value);
-}
-function isCitingNodeKind(value) {
-  return typeof value === "string" && CITING_NODE_KINDS.includes(value);
-}
-function isEdgeProvenance(value) {
-  return typeof value === "string" && EDGE_PROVENANCES.includes(value);
-}
-function mapEdgeRow(row) {
-  return {
-    citing: { kind: row.citingKind, id: row.citingId },
-    cited: { kind: row.citedKind, id: row.citedId },
-    relation: row.relation,
-    provenance: row.provenance,
-    createdAtEpoch: row.createdAtEpoch
-  };
-}
-function isValidCitingNode(node) {
-  return node !== void 0 && isCitingNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
-}
-function isValidCitedNode(node) {
-  return node !== void 0 && isEdgeNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
-}
-function pairKey(edge) {
-  return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
-}
-function mayCarryRelation(options, edge) {
-  const eligible = options.eligibleForRelation;
-  if (eligible === void 0) {
-    return false;
-  }
-  return eligible === "unrestricted" || eligible.has(pairKey(edge));
-}
-function writeMemoryEdges(db, edges, nowEpoch, options = {}) {
-  const written = [];
-  const rejected = [];
-  const relationsByPair = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited) || !isCitationRelation(edge.relation)) {
-      continue;
-    }
-    const key = pairKey(edge);
-    const relations = relationsByPair.get(key) ?? /* @__PURE__ */ new Set();
-    relations.add(edge.relation);
-    relationsByPair.set(key, relations);
-  }
-  const conflictingPairs = new Set(
-    [...relationsByPair.entries()].filter(([, relations]) => relations.size > 1).map(([key]) => key)
-  );
-  const upsert = db.query(
-    `
-      INSERT INTO memory_edges (
-        citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id)
-        DO UPDATE SET
-          -- Spec C14: no rank test between an authorised write and the
-          -- relation it sets. A relation-bearing write replaces relation AND
-          -- provenance together, unconditionally; a bare write (relation
-          -- NULL) touches neither \u2014 it can create a pair but never modify a
-          -- relation one already carries.
-          relation = CASE
-            WHEN excluded.relation IS NOT NULL THEN excluded.relation
-            ELSE memory_edges.relation
-          END,
-          provenance = CASE
-            WHEN excluded.relation IS NOT NULL THEN excluded.provenance
-            ELSE memory_edges.provenance
-          END
-      RETURNING ${EDGE_COLUMNS}
-    `
-  );
-  for (const edge of edges) {
-    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
-      rejected.push({ input: edge, reason: "invalid-node" });
-      continue;
-    }
-    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
-      rejected.push({ input: edge, reason: "self-loop" });
-      continue;
-    }
-    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
-      rejected.push({ input: edge, reason: "invalid-relation" });
-      continue;
-    }
-    if (!isEdgeProvenance(edge.provenance)) {
-      rejected.push({ input: edge, reason: "invalid-provenance" });
-      continue;
-    }
-    if (edge.relation !== null && conflictingPairs.has(pairKey(edge))) {
-      rejected.push({ input: edge, reason: "conflicting-relation" });
-      continue;
-    }
-    if (edge.relation !== null && !mayCarryRelation(options, edge)) {
-      rejected.push({ input: edge, reason: "relation-ineligible" });
-      continue;
-    }
-    const row = upsert.get(
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id,
-      edge.relation,
-      edge.provenance,
-      edge.createdAtEpoch ?? nowEpoch
-    );
-    if (row) {
-      written.push(mapEdgeRow(row));
-    }
-  }
-  return { written, rejected };
-}
-function getOutgoingEdges(db, citing) {
-  return db.query(
-    `SELECT ${EDGE_COLUMNS} FROM memory_edges
-       WHERE citing_kind = ? AND citing_id = ?
-       ORDER BY cited_kind ASC, cited_id ASC, relation ASC`
-  ).all(citing.kind, citing.id).map(mapEdgeRow);
-}
-function reconcileCitedPairs(db, citing, citedNodes, nowEpoch, provenance) {
-  const desired = /* @__PURE__ */ new Map();
-  for (const node of citedNodes) {
-    if (isValidCitedNode(node)) {
-      desired.set(`${node.kind}:${node.id}`, node);
-    }
-  }
-  const existing = getOutgoingEdges(db, citing);
-  const stale = existing.filter(
-    (edge) => !desired.has(`${edge.cited.kind}:${edge.cited.id}`)
-  );
-  const del = db.query(
-    `DELETE FROM memory_edges
-     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?`
-  );
-  for (const edge of stale) {
-    del.run(citing.kind, citing.id, edge.cited.kind, edge.cited.id);
-  }
-  const { written } = writeMemoryEdges(
-    db,
-    [...desired.values()].map((cited) => ({
-      citing,
-      cited,
-      relation: null,
-      provenance
-    })),
-    nowEpoch
-  );
-  return { written, deleted: stale };
-}
-var EDGE_NODE_KINDS, CITING_NODE_KINDS, EDGE_PROVENANCES, PROVENANCE_RANK, EDGE_COLUMNS;
-var init_memory_edges = __esm({
-  "src/db/memory-edges.ts"() {
-    "use strict";
-    init_citations();
-    EDGE_NODE_KINDS = ["turn", "segment"];
-    CITING_NODE_KINDS = ["turn", "segment", "session"];
-    EDGE_PROVENANCES = [
-      "retrieval",
-      "text-ref",
-      "rollback",
-      "judged",
-      "asserted"
-    ];
-    PROVENANCE_RANK = {
-      retrieval: 0,
-      rollback: 1,
-      "text-ref": 2,
-      judged: 3,
-      asserted: 4
-    };
-    EDGE_COLUMNS = `
-  citing_kind AS citingKind,
-  citing_id AS citingId,
-  cited_kind AS citedKind,
-  cited_id AS citedId,
-  relation,
-  provenance,
-  created_at_epoch AS createdAtEpoch
-`;
-  }
-});
-
-// src/shared/type-vocabulary.ts
-function isMemoryType(value) {
-  return typeof value === "string" && MEMORY_TYPES.includes(value);
-}
-function typeWordGlyph(word) {
-  if (isMemoryType(word)) {
-    return TYPE_GLYPH[word];
-  }
-  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
-}
-function typeListGlyph(types) {
-  if (!types || types.length === 0) {
-    return "\u2022";
-  }
-  return types.map(typeWordGlyph).join("");
-}
-function normalizeTypeValues(values) {
-  const normalized = [];
-  for (const raw of values) {
-    const value = raw.trim();
-    if (!value) {
-      continue;
-    }
-    if (!isMemoryType(value)) {
-      throw new Error(`unknown type value: ${raw}`);
-    }
-    if (!normalized.includes(value)) {
-      normalized.push(value);
-    }
-  }
-  return normalized;
-}
-function typeListsEqual(left, right) {
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every((value, index) => value === right[index]);
-}
-var MEMORY_TYPES, TYPE_GLYPH, COMPACT_TYPE_GLYPH, LEGACY_TYPE_GLYPH;
-var init_type_vocabulary = __esm({
-  "src/shared/type-vocabulary.ts"() {
-    "use strict";
-    MEMORY_TYPES = [
-      "discuss",
-      "research",
-      "design",
-      "implement",
-      "refactor",
-      "fix",
-      "measure",
-      "review",
-      "ops",
-      "delegate",
-      "correction"
-    ];
-    TYPE_GLYPH = {
-      discuss: "\u{1F4AC}",
-      research: "\u{1F50D}",
-      design: "\u2696\uFE0F",
-      implement: "\u{1F527}",
-      refactor: "\u{1F504}",
-      fix: "\u{1F534}",
-      measure: "\u{1F4CA}",
-      review: "\u2705",
-      ops: "\u2699\uFE0F",
-      delegate: "\u{1F91D}",
-      correction: "\u21A9\uFE0F"
-    };
-    COMPACT_TYPE_GLYPH = "\u23F8";
-    LEGACY_TYPE_GLYPH = {
-      bugfix: "\u{1F534}",
-      feature: "\u{1F7E3}",
-      refactor: "\u{1F504}",
-      change: "\u2705",
-      discovery: "\u{1F535}",
-      decision: "\u2696\uFE0F",
-      compact: COMPACT_TYPE_GLYPH
-    };
-  }
-});
-
 // src/db/segments.ts
 function parseStringArray(value) {
   if (!value) {
@@ -8533,12 +8549,66 @@ function mapSegmentRow(row) {
     tags: parseStringArray(row.tags)
   } : null;
 }
+function createSegment(db, input) {
+  const type = normalizeTypeValues(input.type ?? []);
+  const inserted = mapSegmentRow(
+    db.query(
+      `INSERT INTO segments (
+           title, content, insight, type, tags, status,
+           created_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING ${SEGMENT_COLUMNS}`
+    ).get(
+      input.title,
+      input.content ?? null,
+      input.insight ?? null,
+      JSON.stringify(type),
+      JSON.stringify(input.tags ?? []),
+      input.status ?? "open",
+      input.nowEpoch,
+      input.nowEpoch
+    ) ?? null
+  );
+  if (!inserted) {
+    throw new Error("Failed to create segment.");
+  }
+  indexSegment(db, inserted);
+  reconcileSegmentCitedPairs(db, inserted, input.nowEpoch);
+  return inserted;
+}
+function reconcileSegmentCitedPairs(db, segment, nowEpoch) {
+  const references = [
+    ...parseQualifiedReferences(segment.title),
+    ...parseQualifiedReferences(segment.content),
+    ...parseQualifiedReferences(segment.insight),
+    ...parseQualifiedReferences(segment.goal),
+    ...parseQualifiedReferences(segment.constraints),
+    ...parseQualifiedReferences(segment.decisions),
+    ...parseQualifiedReferences(segment.done),
+    ...parseQualifiedReferences(segment.nextSteps),
+    ...parseQualifiedReferences(segment.reference)
+  ];
+  const resolved = validateReferences(db, references).accepted;
+  reconcileCitedPairs(
+    db,
+    { kind: "segment", id: segment.id },
+    resolved.map((entry) => entry.node),
+    nowEpoch,
+    "text-ref"
+  );
+}
 function indexSegment(db, segment) {
   indexSegmentToFTS(db, {
     id: segment.id,
     title: segment.title,
     content: segment.content,
     insight: segment.insight,
+    goal: segment.goal,
+    constraints: segment.constraints,
+    decisions: segment.decisions,
+    done: segment.done,
+    nextSteps: segment.nextSteps,
+    reference: segment.reference,
     type: JSON.stringify(segment.type),
     tags: JSON.stringify(segment.tags)
   });
@@ -8610,7 +8680,167 @@ function getSegment(db, segmentId) {
     ).get(segmentId) ?? null
   );
 }
-var SEGMENT_COLUMNS, SEGMENT_FACET_REPAIR_BATCH;
+function addSegmentMembers(db, segmentId, turnIds, nowEpoch) {
+  const statement = db.query(
+    `INSERT INTO segment_members (segment_id, turn_id, created_at_epoch)
+     VALUES (?, ?, ?)
+     ON CONFLICT (segment_id, turn_id) DO NOTHING
+     RETURNING turn_id AS turnId`
+  );
+  const added = [];
+  for (const turnId of turnIds) {
+    const row = statement.get(segmentId, turnId, nowEpoch);
+    if (row) {
+      added.push(row.turnId);
+    }
+  }
+  if (added.length > 0) {
+    recomputeSegmentFacets(db, segmentId);
+  }
+  return added;
+}
+function reassignSegmentMembers(db, turnIds, targetSegmentId, nowEpoch) {
+  if (turnIds.length === 0) {
+    return { vacatedSegmentIds: [], addedTurnIds: [], targetSegmentId };
+  }
+  const placeholders = turnIds.map(() => "?").join(",");
+  const priorSegmentIds = db.query(
+    `SELECT DISTINCT segment_id AS segmentId FROM segment_members WHERE turn_id IN (${placeholders})`
+  ).all(...turnIds).map((row) => row.segmentId);
+  db.query(
+    `DELETE FROM segment_members WHERE turn_id IN (${placeholders})`
+  ).run(...turnIds);
+  const addedTurnIds = targetSegmentId === null ? [] : addSegmentMembers(db, targetSegmentId, turnIds, nowEpoch);
+  const vacatedSegmentIds = priorSegmentIds.filter((id) => id !== targetSegmentId);
+  for (const segmentId of vacatedSegmentIds) {
+    recomputeSegmentFacets(db, segmentId);
+  }
+  return { vacatedSegmentIds, addedTurnIds, targetSegmentId };
+}
+function normalizeWorkingStateRow(text) {
+  const trimmed = text.trim();
+  return trimmed.startsWith("- ") ? trimmed : `- ${trimmed}`;
+}
+function appendSegmentWorkingStateRows(db, segmentId, field, rows, nowEpoch) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return null;
+  }
+  const property = SEGMENT_EDITABLE_PROPERTY[field];
+  const existing = segment[property];
+  const addition = rows.map(normalizeWorkingStateRow).join("\n");
+  const merged = existing !== null && existing.trim() !== "" ? `${existing}
+${addition}` : addition;
+  const updated = mapSegmentRow(
+    db.query(
+      `UPDATE segments SET ${field} = ?, updated_at_epoch = ? WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`
+    ).get(merged, nowEpoch, segmentId) ?? null
+  );
+  if (updated) {
+    reconcileSegmentCitedPairs(db, updated, nowEpoch);
+    indexSegment(db, updated);
+  }
+  return updated;
+}
+function replaceInSegmentWorkingStateField(db, segmentId, field, oldString, newString, nowEpoch) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return { segment: null };
+  }
+  const property = SEGMENT_EDITABLE_PROPERTY[field];
+  const current = segment[property] ?? "";
+  const occurrences = current === "" ? 0 : current.split(oldString).length - 1;
+  if (occurrences === 0) {
+    return { segment, rejection: "missing" };
+  }
+  if (occurrences > 1) {
+    return { segment, rejection: "ambiguous", occurrences };
+  }
+  const replaced = current.split(oldString).join(newString);
+  const cleaned = replaced.split("\n").filter((line) => line.trim() !== "").join("\n");
+  const updated = mapSegmentRow(
+    db.query(
+      `UPDATE segments SET ${field} = ?, updated_at_epoch = ? WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`
+    ).get(cleaned === "" ? null : cleaned, nowEpoch, segmentId) ?? null
+  );
+  if (updated) {
+    reconcileSegmentCitedPairs(db, updated, nowEpoch);
+    indexSegment(db, updated);
+  }
+  return { segment: updated };
+}
+function toggleSegmentStatus(db, segmentId, nowEpoch) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return null;
+  }
+  const next = segment.status === "closed" ? "open" : "closed";
+  return mapSegmentRow(
+    db.query(
+      `UPDATE segments SET status = ?, updated_at_epoch = ? WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`
+    ).get(next, nowEpoch, segmentId) ?? null
+  );
+}
+function attachSegmentToSession(db, sessionId, segmentId, nowEpoch) {
+  const row = db.query(
+    `INSERT INTO segment_attachments (session_id, segment_id, created_at_epoch)
+       VALUES (?, ?, ?)
+       ON CONFLICT (session_id, segment_id) DO NOTHING
+       RETURNING 1 AS inserted`
+  ).get(sessionId, segmentId, nowEpoch);
+  return { attached: row !== null };
+}
+function getAttachedSessionIds(db, segmentId) {
+  return db.query(
+    `SELECT session_id AS sessionId FROM segment_attachments
+       WHERE segment_id = ? ORDER BY created_at_epoch ASC, session_id ASC`
+  ).all(segmentId).map((row) => row.sessionId);
+}
+function computeSegmentMemberFacetCounts(db, segmentId, eraCutoffEpoch = null) {
+  const members = db.query(
+    `SELECT t.type AS type, t.tags AS tags
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id = ?
+         ${eraCutoffEpoch === null ? "" : "AND t.created_at_epoch >= ?"}`
+  ).all(...eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]);
+  const typeCounts = /* @__PURE__ */ new Map();
+  const tagCounts = /* @__PURE__ */ new Map();
+  for (const member of members) {
+    for (const word of new Set(parseMemberFacetArray(member.type))) {
+      typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
+    }
+    for (const tag of new Set(parseMemberFacetArray(member.tags))) {
+      if (tag.includes(":") || tag.trim() === "") {
+        continue;
+      }
+      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+    }
+  }
+  const type = MEMORY_TYPES.filter((word) => typeCounts.has(word)).map((word) => ({ word, count: typeCounts.get(word) })).sort((left, right) => right.count - left.count);
+  const tags = [...tagCounts.entries()].map(([tag, count]) => ({ tag, count })).sort(compareDerivedTags).map(({ tag, count }) => ({ word: tag, count }));
+  return { type, tags };
+}
+function listSegmentsByActivity(db, limit) {
+  if (limit <= 0) {
+    return [];
+  }
+  return db.query(
+    `SELECT ${JOINED_SEGMENT_COLUMNS} FROM segments s
+       LEFT JOIN (
+         SELECT sm.segment_id AS segmentId, MAX(t.created_at_epoch) AS lastMemberEpoch
+         FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         GROUP BY sm.segment_id
+       ) activity ON activity.segmentId = s.id
+       ORDER BY MAX(s.updated_at_epoch, COALESCE(activity.lastMemberEpoch, 0)) DESC, s.id DESC
+       LIMIT ?`
+  ).all(limit).map((row) => mapSegmentRow(row)).filter((segment) => segment !== null);
+}
+var SEGMENT_COLUMNS, SEGMENT_EDITABLE_PROPERTY, SEGMENT_FACET_REPAIR_BATCH, JOINED_SEGMENT_COLUMNS;
 var init_segments = __esm({
   "src/db/segments.ts"() {
     "use strict";
@@ -8620,7 +8850,6 @@ var init_segments = __esm({
     init_type_vocabulary();
     SEGMENT_COLUMNS = `
   id,
-  topic_id AS topicId,
   title,
   content,
   insight,
@@ -8628,10 +8857,44 @@ var init_segments = __esm({
   tags,
   status,
   revision,
+  goal,
+  constraints,
+  decisions,
+  done,
+  next_steps AS nextSteps,
+  reference,
   created_at_epoch AS createdAtEpoch,
   updated_at_epoch AS updatedAtEpoch
 `;
+    SEGMENT_EDITABLE_PROPERTY = {
+      goal: "goal",
+      constraints: "constraints",
+      decisions: "decisions",
+      done: "done",
+      next_steps: "nextSteps",
+      reference: "reference",
+      content: "content",
+      insight: "insight"
+    };
     SEGMENT_FACET_REPAIR_BATCH = 16;
+    JOINED_SEGMENT_COLUMNS = `
+  s.id,
+  s.title,
+  s.content,
+  s.insight,
+  s.type,
+  s.tags,
+  s.status,
+  s.revision,
+  s.goal,
+  s.constraints,
+  s.decisions,
+  s.done,
+  s.next_steps AS nextSteps,
+  s.reference,
+  s.created_at_epoch AS createdAtEpoch,
+  s.updated_at_epoch AS updatedAtEpoch
+`;
   }
 });
 
@@ -8696,7 +8959,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.11.2-mswtfh3c" : "dev";
+    BUILD_ID = true ? "0.12.0-mt05zv1j" : "dev";
   }
 });
 
@@ -8721,6 +8984,17 @@ function recordInitializerBuild(db, buildId, nowEpoch) {
 }
 var init_build_state = __esm({
   "src/db/build-state.ts"() {
+    "use strict";
+  }
+});
+
+// src/db/note-settlement-proposals.ts
+function canonicalizeSettlementProposalAddresses(addresses) {
+  const normalized = [...new Set(addresses.map((raw) => raw.trim()))].sort();
+  return JSON.stringify(normalized);
+}
+var init_note_settlement_proposals = __esm({
+  "src/db/note-settlement-proposals.ts"() {
     "use strict";
   }
 });
@@ -8841,10 +9115,46 @@ function ensureMemoryEdgesPairIdentity(db) {
     collapseAndRebuildMemoryEdges(db);
   });
 }
+function memoryEdgesRelationVocabularyIsStale(db) {
+  const storedDdl = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'grounded-on'");
+}
+function ensureMemoryEdgesRelationVocabulary(db) {
+  if (!memoryEdgesRelationVocabularyIsStale(db)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (!memoryEdgesRelationVocabularyIsStale(db)) {
+      return;
+    }
+    db.exec(
+      "ALTER TABLE memory_edges RENAME TO memory_edges_pre_relation_vocabulary"
+    );
+    db.exec(MEMORY_EDGES_DDL);
+    db.exec(
+      `INSERT INTO memory_edges (
+         citing_kind, citing_id, cited_kind, cited_id,
+         relation, provenance, created_at_epoch
+       )
+       SELECT
+         citing_kind, citing_id, cited_kind, cited_id,
+         relation, provenance, created_at_epoch
+       FROM memory_edges_pre_relation_vocabulary`
+    );
+    db.exec("DROP TABLE memory_edges_pre_relation_vocabulary");
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
+        ON memory_edges(cited_kind, cited_id, relation);
+    `);
+  });
+}
 function ensureMemoryEdgesSchema(db) {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
     ensureMemoryEdgesPairIdentity(db);
+    ensureMemoryEdgesRelationVocabulary(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
@@ -8938,12 +9248,15 @@ function initializeSchema(db) {
   ensureSessionTranscriptPathColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
+  ensureSessionLastRememberEpochColumn(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureSegmentInsightColumn(db);
+  ensureSegmentWorkingStateColumns(db);
   ensureSegmentDerivedFacets(db);
+  ensureSegmentStatusVocabulary(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
   retireLegacyTurnCitationsTable(db);
@@ -8963,10 +9276,13 @@ function initializeSchema(db) {
   ensureNoteDebtCursorReliefColumn(db);
   retireLegacyPendingNoteDebts(db);
   ensureNoteSettlementTriggerVocabulary(db);
+  ensureNoteSettlementJobsRetrySchema(db);
+  ensureNoteSettlementProposalIdempotencyKey(db);
   dropLegacyMemoriesTable(db);
   ensureTurnTypeMultiValueColumn(db);
   stripRetiredTopicTagNamespace(db);
   retireTurnCitesRecordedColumn(db);
+  retireTopicRegistry(db);
   repairDerivedSegmentFacets(db);
 }
 function stripRetiredTopicTagNamespace(db) {
@@ -9110,6 +9426,95 @@ function ensureNoteSettlementTriggerVocabulary(db) {
     db.exec("PRAGMA foreign_keys = ON;");
   }
 }
+function noteSettlementJobsRetrySchemaIsStale(db) {
+  const storedDdl = db.query(
+    `SELECT sql FROM sqlite_master
+         WHERE type = 'table' AND name = 'note_settlement_jobs'`
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'abandoned'");
+}
+function ensureNoteSettlementJobsRetrySchema(db) {
+  if (!noteSettlementJobsRetrySchemaIsStale(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!noteSettlementJobsRetrySchemaIsStale(db)) {
+        return;
+      }
+      db.exec(noteSettlementJobsTableDdl("note_settlement_jobs_retry_rebuild"));
+      db.exec(
+        `INSERT INTO note_settlement_jobs_retry_rebuild (
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error, failure_class, created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error,
+           CASE WHEN status = 'failed' THEN 'deterministic' ELSE NULL END,
+           created_at_epoch, updated_at_epoch
+         FROM note_settlement_jobs`
+      );
+      db.exec("DROP TABLE note_settlement_jobs");
+      db.exec(
+        "ALTER TABLE note_settlement_jobs_retry_rebuild RENAME TO note_settlement_jobs"
+      );
+      db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `note_settlement_jobs rebuild left ${violations.length} foreign key violation(s) while adding failure_class/abandoned: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+function ensureNoteSettlementProposalIdempotencyKey(db) {
+  const columnAdded = addColumnIfMissing(
+    db,
+    "note_settlement_proposals",
+    "addresses_key",
+    "TEXT"
+  );
+  if (!columnAdded && db.query(
+    `SELECT name FROM sqlite_master
+         WHERE type = 'index' AND name = 'idx_note_settlement_proposals_session_addresses'`
+  ).get()) {
+    return;
+  }
+  const rows = db.query(
+    `SELECT id, session_id AS sessionId, addresses FROM note_settlement_proposals
+       WHERE addresses_key IS NULL`
+  ).all();
+  const seen = /* @__PURE__ */ new Set();
+  for (const row of rows) {
+    let addresses;
+    try {
+      addresses = JSON.parse(row.addresses);
+    } catch {
+      addresses = [];
+    }
+    const list = Array.isArray(addresses) ? addresses.filter((entry) => typeof entry === "string") : [];
+    let key = canonicalizeSettlementProposalAddresses(list);
+    const dedupeKey = `${row.sessionId}:${key}`;
+    if (seen.has(dedupeKey)) {
+      key = `${key}#${row.id}`;
+    }
+    seen.add(dedupeKey);
+    db.query(
+      `UPDATE note_settlement_proposals SET addresses_key = ? WHERE id = ?`
+    ).run(key, row.id);
+  }
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_note_settlement_proposals_session_addresses
+       ON note_settlement_proposals(session_id, addresses_key)`
+  );
+}
 function ensureObservationExtractionExclusionColumn(db) {
   addColumnIfMissing(
     db,
@@ -9170,6 +9575,7 @@ function ensureDiaryDayStateRetryDispositionColumn(db) {
 }
 function dropRetiredMaintenanceState(db) {
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
+  db.exec("DROP TABLE IF EXISTS note_settlement_membership_activity");
   db.exec("DROP INDEX IF EXISTS idx_turns_status");
 }
 function ensureSessionTranscriptPathColumn(db) {
@@ -9177,6 +9583,9 @@ function ensureSessionTranscriptPathColumn(db) {
 }
 function ensureSessionSummaryUpdatedAtEpochColumn(db) {
   addColumnIfMissing(db, "sessions", "summary_updated_at_epoch", "INTEGER");
+}
+function ensureSessionLastRememberEpochColumn(db) {
+  addColumnIfMissing(db, "sessions", "last_remember_epoch", "INTEGER");
 }
 function ensureSessionSummaryFieldColumns(db) {
   for (const column of ["decision", "done", "current", "reference"]) {
@@ -9196,6 +9605,14 @@ function ensureTurnInvalidationColumns(db) {
 function ensureSegmentInsightColumn(db) {
   addColumnIfMissing(db, "segments", "insight", "TEXT");
 }
+function ensureSegmentWorkingStateColumns(db) {
+  addColumnIfMissing(db, "segments", "goal", "TEXT");
+  addColumnIfMissing(db, "segments", "constraints", "TEXT");
+  addColumnIfMissing(db, "segments", "decisions", "TEXT");
+  addColumnIfMissing(db, "segments", "done", "TEXT");
+  addColumnIfMissing(db, "segments", "next_steps", "TEXT");
+  addColumnIfMissing(db, "segments", "reference", "TEXT");
+}
 function ensureSegmentDerivedFacets(db) {
   addColumnIfMissing(
     db,
@@ -9204,6 +9621,162 @@ function ensureSegmentDerivedFacets(db) {
     "INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1))"
   );
   db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
+}
+function segmentsStatusVocabularyIsStale(db) {
+  const storedDdl = db.query(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'segments'`
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'closed'");
+}
+function ensureSegmentStatusVocabulary(db) {
+  if (!segmentsStatusVocabularyIsStale(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!segmentsStatusVocabularyIsStale(db)) {
+        return;
+      }
+      db.exec(
+        segmentsStatusVocabularyRebuildDdl("segments_status_vocabulary_rebuild")
+      );
+      db.exec(
+        `INSERT INTO segments_status_vocabulary_rebuild (
+           id, topic_id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps, reference,
+           created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, topic_id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps, reference,
+           created_at_epoch, updated_at_epoch
+         FROM segments`
+      );
+      db.exec("DROP TABLE segments");
+      db.exec("ALTER TABLE segments_status_vocabulary_rebuild RENAME TO segments");
+      db.exec(SEGMENTS_INDEXES_DDL);
+      db.exec(SEGMENTS_OWN_TRIGGER_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `segments rebuild left ${violations.length} foreign key violation(s) while widening status: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+function normalizeTopicNameToTag(name) {
+  return name.normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+}
+function safeParseTagArray(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((entry) => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function foldTopicNamesIntoSegmentTags(db) {
+  const topicSegments = db.query(
+    `SELECT id, topic_id AS topicId, tags FROM segments WHERE topic_id IS NOT NULL`
+  ).all();
+  if (topicSegments.length === 0) {
+    return;
+  }
+  const topicNames = new Map(
+    db.query("SELECT id, name FROM topics").all().map((row) => [row.id, row.name])
+  );
+  for (const segment of topicSegments) {
+    const topicName = topicNames.get(segment.topicId);
+    if (!topicName) {
+      continue;
+    }
+    const bareTag = normalizeTopicNameToTag(topicName);
+    if (bareTag === "") {
+      continue;
+    }
+    const memberTurnIds = db.query(
+      "SELECT turn_id AS turnId FROM segment_members WHERE segment_id = ?"
+    ).all(segment.id).map((row) => row.turnId);
+    if (memberTurnIds.length === 0) {
+      const currentTags = safeParseTagArray(segment.tags);
+      if (currentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
+        continue;
+      }
+      db.query("UPDATE segments SET tags = ? WHERE id = ?").run(
+        JSON.stringify([...currentTags, bareTag]),
+        segment.id
+      );
+      continue;
+    }
+    let foldedAny = false;
+    for (const turnId of memberTurnIds) {
+      const row = db.query("SELECT tags FROM turns WHERE id = ?").get(turnId);
+      const currentTags = safeParseTagArray(row?.tags ?? null);
+      if (currentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
+        continue;
+      }
+      db.query("UPDATE turns SET tags = ? WHERE id = ?").run(
+        JSON.stringify([...currentTags, bareTag]),
+        turnId
+      );
+      foldedAny = true;
+    }
+    if (foldedAny) {
+      recomputeSegmentFacets(db, segment.id);
+    }
+  }
+}
+function topicRegistryStillPresent(db) {
+  return hasColumn(db, "segments", "topic_id");
+}
+function retireTopicRegistry(db) {
+  if (!topicRegistryStillPresent(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!topicRegistryStillPresent(db)) {
+        return;
+      }
+      foldTopicNamesIntoSegmentTags(db);
+      db.exec(segmentsWithoutTopicRebuildDdl("segments_topic_registry_retired"));
+      db.exec(
+        `INSERT INTO segments_topic_registry_retired (
+           id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps,
+           reference, created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps,
+           reference, created_at_epoch, updated_at_epoch
+         FROM segments`
+      );
+      db.exec("DROP TABLE segments");
+      db.exec(
+        "ALTER TABLE segments_topic_registry_retired RENAME TO segments"
+      );
+      db.exec(SEGMENTS_TOPIC_RETIRED_INDEXES_DDL);
+      db.exec(SEGMENTS_OWN_TRIGGER_DDL);
+      db.exec("DROP TABLE IF EXISTS topics");
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `segments rebuild left ${violations.length} foreign key violation(s) while retiring the topic registry: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
 }
 function repairDerivedSegmentFacets(db) {
   if (!hasRow(db, "SELECT 1 FROM segments WHERE facets_stale = 1")) {
@@ -9381,7 +9954,14 @@ function ensureTurnTypeMultiValueColumn(db) {
         // `retireTurnCitesRecordedColumn` runs right after this one in
         // `initializeSchema` and owns it exclusively — present here or not,
         // it is accounted for, not unexpected.
-        ["cites_recorded"],
+        //
+        // `election_tier`: retired outright (ownership-and-note-cadence spec,
+        // ticket 06) — a database migrated under a pre-06 install may still
+        // physically carry it (added by the now-removed
+        // `ensureTurnElectionTierColumn`), and this rebuild deliberately does
+        // NOT carry it forward. Listed here so the guard reads that omission
+        // as an intentional drop rather than an unaccounted-for column.
+        ["cites_recorded", "election_tier"],
         "ensureTurnTypeMultiValueColumn"
       );
       db.exec(`
@@ -9533,7 +10113,11 @@ function retireTurnCitesRecordedColumn(db) {
       assertNoUnexpectedTurnsColumns(
         db,
         [...canonicalColumns, ...stallColumns.map((c) => c.name)],
-        ["cites_recorded"],
+        // `election_tier`: retired outright (ownership-and-note-cadence spec,
+        // ticket 06) — see `ensureTurnTypeMultiValueColumn`'s own copy of
+        // this comment; this rebuild deliberately does not carry it forward
+        // either.
+        ["cites_recorded", "election_tier"],
         "retireTurnCitesRecordedColumn"
       );
       db.exec(`
@@ -9736,12 +10320,15 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS shadow_notes");
   db.exec("DROP TABLE IF EXISTS note_id_exposures");
   db.exec("DROP TABLE IF EXISTS note_settlement_segment_exclusions");
+  db.exec("DROP TABLE IF EXISTS note_settlement_debts");
+  db.exec("DROP TABLE IF EXISTS note_settlement_proposals");
   db.exec("DROP TABLE IF EXISTS note_settlement_jobs");
   db.exec("DROP TABLE IF EXISTS note_settlement_cursors");
   db.exec("DROP TABLE IF EXISTS note_debt_cursor");
   db.exec("DROP TABLE IF EXISTS note_debt");
   db.exec("DROP TABLE IF EXISTS note_debt_pre_closed_reason");
   db.exec("DROP TABLE IF EXISTS observations");
+  db.exec("DROP TABLE IF EXISTS segment_attachments");
   db.exec("DROP TABLE IF EXISTS segment_members");
   db.exec("DROP TABLE IF EXISTS segments");
   db.exec("DROP TABLE IF EXISTS topics");
@@ -9765,7 +10352,7 @@ function initializeDatabase(db) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
+var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -9774,6 +10361,7 @@ var init_schema = __esm({
     init_citations();
     init_database();
     init_memory_edges();
+    init_note_settlement_proposals();
     init_search();
     init_segments();
     MEMORY_FTS_DDL = `
@@ -9831,13 +10419,23 @@ var init_schema = __esm({
         'consecutive', 'compact', 'residual', 'sessionend', 'backfill'
       )
     ),
+    -- 'abandoned' (ticket 06, read-write-contract spec "\u4F5C\u4E1A\u72B6\u6001\u673A\u76F8\u5E94\u6269\u5C55"):
+    -- a DETERMINISTIC failure's own terminal state once it has spent its
+    -- capped attempts \u2014 distinct from 'failed', which after this ticket is a
+    -- retryable-pending-backoff intermediate state, never a resting place.
+    -- A CHECK constraint cannot be ALTERed, so this widening travels through
+    -- the same 12-step rebuild trigger_type's own history already uses
+    -- (ensureNoteSettlementJobsRetrySchema).
     status TEXT NOT NULL DEFAULT 'pending' CHECK (
-      status IN ('pending', 'claimed', 'done', 'failed')
+      status IN ('pending', 'claimed', 'done', 'failed', 'abandoned')
     ),
     attempts INTEGER NOT NULL DEFAULT 0,
     -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
     -- no clock for settlement, so a due retry is noticed in passing by the next
-    -- trigger event rather than woken by anything.
+    -- trigger event rather than woken by anything. Ticket 06: backoff now
+    -- applies to a DETERMINISTIC failure only \u2014 a transient one (see
+    -- failure_class) returns straight to 'pending' with this left at "now",
+    -- so the very next trigger event (not a timer) picks it up.
     retry_at_epoch INTEGER NOT NULL DEFAULT 0,
     claimed_at_epoch INTEGER,
     -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
@@ -9845,6 +10443,16 @@ var init_schema = __esm({
     -- under and so writes nothing over the attempt that displaced it.
     claim_generation INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
+    -- Ticket 06: which retry discipline the LAST recorded failure belongs to \u2014
+    -- null until a failure has landed at all. A transient failure
+    -- (network/connection/SQLITE_BUSY, worker/note-settlement-dispatch.ts's
+    -- classifySettlementFailure) never leaves a 'failed' row behind (it goes
+    -- straight back to 'pending', uncounted); this column is populated only
+    -- by the deterministic path, plus the one-time migration backfill below
+    -- for rows that failed before the column existed.
+    failure_class TEXT CHECK (
+      failure_class IS NULL OR failure_class IN ('transient', 'deterministic')
+    ),
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL,
     UNIQUE(session_id, window_start, trigger_type)
@@ -9858,6 +10466,17 @@ var init_schema = __esm({
     ON note_settlement_jobs(session_id, status, window_start);
 `;
     SCHEMA_SQL = `
+  -- ownership-and-note-cadence spec, "session \u5B57\u6BB5" ([S15069/T910]-[T913]):
+  -- insight/next_steps/decision/done/current/reference are retired from
+  -- EVERY read surface (injection, recall's session header, summary
+  -- queries, tool-facing output) unconditionally \u2014 title and content are
+  -- the session's only two remaining semantic fields. The physical columns
+  -- stay: db/sessions.ts's write paths (upsertSession,
+  -- updateSessionSummaryRewrite, updateSessionFields) still read/write them
+  -- and are out of this ticket's scope (a settlement-side writer for
+  -- content lands in a later ticket) \u2014 dropping the columns would break
+  -- those INSERT/UPDATE statements. Existing rows keep whatever they have;
+  -- nothing reads it back.
   CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content_session_id TEXT UNIQUE NOT NULL,
@@ -9875,6 +10494,18 @@ var init_schema = __esm({
     summary_updated_at_epoch INTEGER,
     scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0,
     scan_cursor_line INTEGER NOT NULL DEFAULT 0,
+    -- Ticket 13 (spec "\u8282\u594F\u4E0E\u5EFA\u6BB5\u6307\u5BFC"): the universal 20-turn remember
+    -- reminder's own marker \u2014 "since the last remember call, any verb", a
+    -- session-scoped fact no existing column carries (create/close/assign
+    -- never even attribute a caller session on their own write paths, so
+    -- there is nothing to derive this from). NULL means "never called" \u2014
+    -- the reminder then counts from created_at_epoch instead (see
+    -- touchSessionRememberActivity in db/sessions.ts). Deliberately excluded
+    -- from upsertSession's UPDATE SET list, the same "own dedicated setter,
+    -- never the general upsert" treatment parent_session_id/lineage_status
+    -- already get, so a routine SessionStart/UserPromptSubmit upsert cannot
+    -- clobber it back to NULL.
+    last_remember_epoch INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -9914,6 +10545,15 @@ var init_schema = __esm({
     significance_grade INTEGER CHECK (
       significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
     ),
+    -- election_tier (ADR-0003) is RETIRED (ownership-and-note-cadence spec,
+    -- ticket 06, "\u9009\u4E3E\u673A\u5668\u62C6\u9664"): the election-tier third grading semantics
+    -- never carried real data in production (the era cutoff was never
+    -- pinned), and settlement no longer assigns grade or tier at all (ticket
+    -- 05). A database migrated under a pre-06 install may still carry the
+    -- physical column \u2014 harmless and orphaned, never read or written by any
+    -- code from here on; a fresh database never gets it. ADR-0003 is marked
+    -- superseded; significance_grade above is UNRELATED and stays exactly as
+    -- it was, old grade reads intact.
     tags TEXT,
     files_read TEXT,
     files_modified TEXT,
@@ -10112,30 +10752,18 @@ var init_schema = __esm({
     updated_at_epoch INTEGER NOT NULL
   );
 
-  -- Topic registry (spec D6): the one place a theme's name and its alternate
-  -- spellings live, so "continuous work on the same theme reuses the same word"
-  -- is enforceable rather than aspirational. The aliases column is a JSON array of
-  -- the other names the same theme has been written as; the settlement pass folds
-  -- new spellings in here instead of minting a near-duplicate topic.
-  CREATE TABLE IF NOT EXISTS topics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    aliases TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(aliases)),
-    status TEXT NOT NULL DEFAULT 'active' CHECK (
-      status IN ('active', 'dormant', 'retired')
-    ),
-    created_at_epoch INTEGER NOT NULL,
-    updated_at_epoch INTEGER NOT NULL
-  );
-
-  -- Segments (spec D6): one coherent chapter of work on one topic. Same field
-  -- shape as a turn \u2014 title / content / type / tag / status \u2014 because the
-  -- reading surfaces (recall's type:/tag: filters, FTS, the glyph) are meant to
-  -- work across granularities without a second vocabulary.
+  -- Segments (spec D6): one coherent chapter of work on one theme (ticket 15:
+  -- the theme lives on tags \u2014 a topic registry once named it separately, a
+  -- mechanism-level synonym split, retired; CONTEXT.md's "Topic \u2014 retired").
+  -- Same field shape as a turn \u2014 title / content / type / tag / status \u2014
+  -- because the reading surfaces (recall's type:/tag: filters, FTS, the
+  -- glyph) are meant to work across granularities without a second
+  -- vocabulary.
   --
-  -- Deliberately NOT bound to a session: a topic outruns any one session, and a
-  -- segment that had to name one would have to pick arbitrarily among its
-  -- members' sessions. Membership (segment_members) carries that relation.
+  -- Deliberately NOT bound to a session: a segment outruns any one session,
+  -- and one that had to name a single session would have to pick arbitrarily
+  -- among its members' sessions. Membership (segment_members) carries that
+  -- relation.
   --
   -- type and tags are JSON arrays (multi-value; a segment's type is the
   -- union of its members'). revision is the write fence: an open segment is a
@@ -10143,7 +10771,6 @@ var init_schema = __esm({
   -- every write CASes on the revision it read (see db/segments.ts).
   CREATE TABLE IF NOT EXISTS segments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
     title TEXT NOT NULL,
     content TEXT,
     -- Ticket 14 (spec K5): the segment's most reusable conclusion, including
@@ -10153,12 +10780,26 @@ var init_schema = __esm({
     insight TEXT,
     type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
     tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
-    -- open = still accepting members and rewrites; delivered = closed by a
-    -- shipped/merged/settled outcome; abandoned = went silent. Only open
-    -- segments are writable \u2014 a closed one is frozen and gets overturned by an
-    -- edge, never by a rewrite (spec D6: freeze history, not the present).
+    -- Ticket 05 (ADR-0005): the APPLICATION vocabulary is two values, no
+    -- state machine \u2014 open = accepting writes and on the roster; closed =
+    -- manually toggled off through remember's close verb, refuses
+    -- append/replace, off the roster, still recall-able (spec D6: freeze
+    -- history, not the present \u2014 an edge overturns a closed segment, never a
+    -- rewrite). SEGMENT_STATUSES/SegmentStatus (db/segments.ts) enforce
+    -- exactly those two values on every TYPED writer \u2014 createSegment,
+    -- applySegmentWrites, toggleSegmentStatus \u2014 so no code path in this
+    -- codebase can produce a delivered/abandoned row from here on.
+    --
+    -- The PHYSICAL CHECK below stays wide enough to also accept the retired
+    -- arc-era words, deliberately NOT narrowed to match: those words are
+    -- read-and-updated on 47 pre-existing production rows (recomputeSegment-
+    -- Facets/the repair sweep issue plain UPDATEs against them that never
+    -- touch status, and SQLite re-validates the WHOLE row's CHECK
+    -- regardless of which columns changed), so a narrower CHECK would break
+    -- facet maintenance on every one of them the moment this migration ran
+    -- (see ensureSegmentStatusVocabulary, and its "why not narrow" note).
     status TEXT NOT NULL DEFAULT 'open' CHECK (
-      status IN ('open', 'delivered', 'abandoned')
+      status IN ('open', 'delivered', 'abandoned', 'closed')
     ),
     revision INTEGER NOT NULL DEFAULT 1,
     -- Ticket 15 (findings 1-3): "this segment owes a facet derivation".
@@ -10173,12 +10814,26 @@ var init_schema = __esm({
     -- Bookkeeping, not a facet: no read surface renders it and no caller may
     -- state it.
     facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
+    -- Working State (ADR-0001, ticket 02): the resuming worker's six fields,
+    -- beside the summary trio above. Each stores a markdown row list ("- "
+    -- rows, newline-joined), uncapped, maintained ONLY through remember
+    -- (db/segments.ts's appendSegmentWorkingStateRows /
+    -- replaceInSegmentWorkingStateField) \u2014 never applySegmentWrites, the
+    -- settlement CAS path over the summary trio and structural fields
+    -- (ADR-0002's one-writer-per-layer split). Plain nullable TEXT with no
+    -- CHECK referencing another column, so a bare ALTER TABLE ... ADD COLUMN
+    -- is legal SQLite on an existing database (ensureSegmentWorkingStateColumns
+    -- below) \u2014 same shape of migration as significance_grade on turns, no
+    -- 12-step rebuild needed.
+    goal TEXT,
+    constraints TEXT,
+    decisions TEXT,
+    done TEXT,
+    next_steps TEXT,
+    reference TEXT,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL
   );
-
-  CREATE INDEX IF NOT EXISTS idx_segments_topic_status
-    ON segments(topic_id, status, updated_at_epoch);
 
   CREATE INDEX IF NOT EXISTS idx_segments_status_updated
     ON segments(status, updated_at_epoch);
@@ -10196,6 +10851,26 @@ var init_schema = __esm({
 
   CREATE INDEX IF NOT EXISTS idx_segment_members_turn
     ON segment_members(turn_id);
+
+  -- Attachment (ADR-0005, ticket 02): a session's reference to a segment as
+  -- loaded working memory \u2014 "binding rows accumulate, never expire, no
+  -- detach". remember(attach) asserts a row idempotently
+  -- (attachSegmentToSession, db/segments.ts); there is no writer that ever
+  -- removes one. Consulted-only attachments (zero segment_members rows for
+  -- the pair) are legal and expected \u2014 this table carries no relationship to
+  -- membership at all, only to which sessions have loaded which segments.
+  --
+  -- PRIMARY KEY (session_id, segment_id): one row per pair, so attaching an
+  -- already-attached segment is a no-op rather than a growing duplicate log.
+  CREATE TABLE IF NOT EXISTS segment_attachments (
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (session_id, segment_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_segment_attachments_segment
+    ON segment_attachments(segment_id);
 
   -- Segmentation exclusions (spec G7, ticket 09): the completion gate's
   -- anti-join needs a NEGATIVE fact \u2014 "this turn was reviewed under this
@@ -10230,6 +10905,65 @@ var init_schema = __esm({
   -- job_id alone is already the leading column of the primary key above.
   CREATE INDEX IF NOT EXISTS idx_note_settlement_segment_exclusions_turn
     ON note_settlement_segment_exclusions(turn_id);
+
+  -- note_settlement_membership_activity RETIRED (edge-ownership ticket 05,
+  -- [S15069/T912]): the membership gate it served died with settlement's
+  -- assign action; its DDL left with it and existing installations drop the
+  -- orphan in dropRetiredMaintenanceState below.
+
+  -- Homeless-cluster proposals (ticket 08, spec "Proposal"): settlement's
+  -- text-only suggestion that several homeless turns form one new segment.
+  -- NEVER a segment row and never auto-adopted \u2014 addresses/title are plain
+  -- text, rendered to the next session (at most three, newest first) and
+  -- handed to remember(create)'s own members field verbatim on approval
+  -- (ticket 02's seed-address path). addresses is a JSON array of
+  -- "S<session>/T<prompt>" strings, not a foreign key: a proposal survives
+  -- even if this project later reshapes turn identity, and validating the
+  -- addresses is the READER's job (they are re-validated by remember(create)
+  -- itself at adoption time regardless).
+  -- addresses_key (ticket 05, spec "propose \u643A\u5E42\u7B49\u952E"): the CANONICAL form of
+  -- addresses (sorted, de-duplicated, JSON-encoded \u2014
+  -- db/note-settlement-proposals.ts's canonicalizeSettlementProposalAddresses)
+  -- alongside the display-order original. A re-claimed job has a NEW job id
+  -- (retry = new job, spec: "\u91CD\u8BD5=\u65B0 job id,\u6240\u4EE5 job \u4F5C\u7528\u57DF\u7684 key \u4E0D\u80FD\u53BB\u91CD"),
+  -- so the idempotency key is (session_id, addresses_key), not job-scoped \u2014
+  -- see the UNIQUE index below and ensureNoteSettlementProposalIdempotencyKey
+  -- for how an existing installation gains this column and index.
+  CREATE TABLE IF NOT EXISTS note_settlement_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    addresses TEXT NOT NULL CHECK (json_valid(addresses)),
+    addresses_key TEXT,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_proposals_created
+    ON note_settlement_proposals(created_at_epoch);
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_note_settlement_proposals_session_addresses
+    ON note_settlement_proposals(session_id, addresses_key);
+
+  -- Settlement retry debt (ticket 06, spec "\u91CD\u8BD5"/"\u4F5C\u4E1A\u72B6\u6001\u673A\u76F8\u5E94\u6269\u5C55"): one
+  -- row per window a DETERMINISTIC failure abandoned after spending its capped
+  -- attempts \u2014 the window range plus why, so an operator's manual
+  -- /settle backfill has something concrete to consume instead of having to
+  -- rediscover the gap from note_settlement_jobs.status = 'abandoned' rows
+  -- directly. Never written for a transient failure (it never reaches a
+  -- terminal state at all \u2014 see failNoteSettlementJob).
+  CREATE TABLE IF NOT EXISTS note_settlement_debts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    window_start INTEGER NOT NULL,
+    window_end INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_debts_session
+    ON note_settlement_debts(session_id, created_at_epoch);
 
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
@@ -10535,6 +11269,53 @@ var init_schema = __esm({
       SELECT RAISE(ABORT, 'rule_events is append-only');
     END;
 
+  -- Read-write contract (db/write-gate.ts). A writer's license to write an
+  -- entity, earned by that entity appearing in its injected context or a
+  -- recall/timeline render (CONTEXT.md "Read grant"). Entity-level: one row
+  -- per (writer, entity) \u2014 one appearance licenses every field. Non-
+  -- destructive: a write does not delete another writer's grant row, it just
+  -- leaves it behind the field's stamp sequence, which is what
+  -- checkFieldGate compares to tell a genuinely never-read entity from one
+  -- this writer read but that moved since ("Stale" vs "never-read",
+  -- CONTEXT.md). entity_type widens to session up front \u2014 a CHECK
+  -- constraint cannot be ALTERed, and ticket 05's settlement narrative write
+  -- is the same table, not a second one.
+  CREATE TABLE IF NOT EXISTS write_gate_reads (
+    writer TEXT NOT NULL,
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('segment', 'turn', 'session')),
+    entity_id INTEGER NOT NULL,
+    read_at_epoch INTEGER NOT NULL,
+    read_sequence INTEGER NOT NULL,
+    PRIMARY KEY (writer, entity_type, entity_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_write_gate_reads_entity
+    ON write_gate_reads (entity_type, entity_id);
+
+  -- One field's freshness stamp: who wrote it last, and at what point in the
+  -- monotonic write sequence (CONTEXT.md "Stale") \u2014 never epoch seconds, so
+  -- two writes landing in the same wall-clock second stay ordered (spec: the
+  -- legacy yield gate's >= second comparison mis-ranks a same-second early
+  -- write as late; this sequence has no such tie).
+  CREATE TABLE IF NOT EXISTS write_gate_stamps (
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('segment', 'turn', 'session')),
+    entity_id INTEGER NOT NULL,
+    field TEXT NOT NULL,
+    writer TEXT NOT NULL,
+    write_sequence INTEGER NOT NULL,
+    written_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (entity_type, entity_id, field)
+  );
+
+  -- The write gate's single monotonic counter (db/write-gate.ts). One row,
+  -- incremented inside the SAME transaction as the field stamp it numbers \u2014
+  -- never read at epoch-second granularity, so two writers committing in the
+  -- same second are still totally ordered against each other.
+  CREATE TABLE IF NOT EXISTS write_gate_sequence (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    value INTEGER NOT NULL DEFAULT 0
+  );
+
   ${MEMORY_FTS_DDL}
 `;
     MEMORY_EDGES_DDL = `
@@ -10545,7 +11326,10 @@ var init_schema = __esm({
     cited_id INTEGER NOT NULL,
     relation TEXT CHECK (
       relation IS NULL OR
-      relation IN ('evidence-for', 'evidence-against', 'supersedes', 'depends-on')
+      relation IN (
+        'evidence-for', 'evidence-against', 'supersedes', 'depends-on',
+        'refines', 'override', 'encodes', 'grounded-on'
+      )
     ),
     provenance TEXT NOT NULL CHECK (
       provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
@@ -10595,6 +11379,73 @@ var init_schema = __esm({
       UPDATE segments SET facets_stale = 1
       WHERE id IN (SELECT segment_id FROM segment_members WHERE turn_id = NEW.id);
     END;
+`;
+    segmentsStatusVocabularyRebuildDdl = (tableName) => `
+  CREATE TABLE ${tableName} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    content TEXT,
+    insight TEXT,
+    type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (
+      status IN ('open', 'delivered', 'abandoned', 'closed')
+    ),
+    revision INTEGER NOT NULL DEFAULT 1,
+    facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
+    goal TEXT,
+    constraints TEXT,
+    decisions TEXT,
+    done TEXT,
+    next_steps TEXT,
+    reference TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+`;
+    SEGMENTS_INDEXES_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_segments_topic_status
+    ON segments(topic_id, status, updated_at_epoch);
+
+  CREATE INDEX IF NOT EXISTS idx_segments_status_updated
+    ON segments(status, updated_at_epoch);
+`;
+    SEGMENTS_OWN_TRIGGER_DDL = `
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_segment
+    AFTER DELETE ON segments
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE (citing_kind = 'segment' AND citing_id = OLD.id)
+         OR (cited_kind = 'segment' AND cited_id = OLD.id);
+    END;
+`;
+    segmentsWithoutTopicRebuildDdl = (tableName) => `
+  CREATE TABLE ${tableName} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    content TEXT,
+    insight TEXT,
+    type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (
+      status IN ('open', 'delivered', 'abandoned', 'closed')
+    ),
+    revision INTEGER NOT NULL DEFAULT 1,
+    facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
+    goal TEXT,
+    constraints TEXT,
+    decisions TEXT,
+    done TEXT,
+    next_steps TEXT,
+    reference TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+`;
+    SEGMENTS_TOPIC_RETIRED_INDEXES_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_segments_status_updated
+    ON segments(status, updated_at_epoch);
 `;
     EXPECTED_FTS_COLUMNS = [
       "layer",
@@ -33973,6 +34824,161 @@ function getMnemoSessionIdForProcessSession(db, identityKey) {
   ).get(identityKey)?.sessionId ?? null;
 }
 
+// src/mcp/memory-filter.ts
+var RECALL_TURN_FIELD_NAMES = [
+  "title",
+  "content",
+  "prompt",
+  "response",
+  "insight",
+  "observations",
+  "files"
+];
+function isRecallTurnField(value) {
+  return RECALL_TURN_FIELD_NAMES.includes(value);
+}
+function describeRecallTurnFieldGrammar() {
+  return `expected one of: ${RECALL_TURN_FIELD_NAMES.join(", ")}`;
+}
+function parseUtcDate(value) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const epoch = Math.floor(
+    Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) / 1e3
+  );
+  return Number.isNaN(epoch) ? null : epoch;
+}
+function parseTimeInput(time3) {
+  if (!time3) {
+    return {};
+  }
+  const trimmed = time3.trim();
+  if (!trimmed) {
+    return {};
+  }
+  const rangeMatch = trimmed.match(
+    /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/
+  );
+  if (rangeMatch) {
+    const start = parseUtcDate(rangeMatch[1]);
+    const end = parseUtcDate(rangeMatch[2]);
+    if (start === null || end === null) {
+      return { error: `invalid time selector "${time3}"` };
+    }
+    return {
+      range: {
+        after: start,
+        before: end + 86399
+      }
+    };
+  }
+  const relativeMatch = trimmed.match(/^-([0-9]+)([dw])$/);
+  if (relativeMatch) {
+    const amount = Number(relativeMatch[1]);
+    const unit = relativeMatch[2];
+    const secondsPerUnit = unit === "d" ? 86400 : 7 * 86400;
+    return {
+      range: {
+        after: Math.floor(Date.now() / 1e3) - amount * secondsPerUnit
+      }
+    };
+  }
+  const dateEpoch = parseUtcDate(trimmed);
+  if (dateEpoch !== null) {
+    return {
+      range: {
+        after: dateEpoch,
+        before: dateEpoch + 86399
+      }
+    };
+  }
+  return { error: `invalid time selector "${time3}"` };
+}
+function parseSessionFilter(value) {
+  if (value === void 0) {
+    return {};
+  }
+  const raw = typeof value === "number" ? String(value) : value.trim().replace(/^[Ss]/, "");
+  const sessionId = Number(raw);
+  if (Number.isInteger(sessionId) && sessionId > 0) {
+    return { sessionId };
+  }
+  return { error: `invalid filter.session "${value}"` };
+}
+function parseMemoryFilter(filter) {
+  const parsed = {};
+  if (!filter) {
+    return { parsed };
+  }
+  if (filter.type) {
+    parsed.type = filter.type;
+  }
+  if (filter.tag) {
+    parsed.tag = filter.tag;
+  }
+  if (filter.file) {
+    parsed.file = filter.file;
+  }
+  if (filter.session !== void 0) {
+    const { sessionId, error: error48 } = parseSessionFilter(filter.session);
+    if (error48) {
+      return { parsed, error: error48 };
+    }
+    parsed.sessionId = sessionId;
+  }
+  if (filter.time !== void 0) {
+    const { range, error: error48 } = parseTimeInput(filter.time);
+    if (error48) {
+      return { parsed, error: error48 };
+    }
+    parsed.after = range?.after;
+    parsed.before = range?.before;
+  }
+  if (filter.fields !== void 0) {
+    if (filter.fields.length === 0) {
+      return { parsed, error: `filter.fields must not be empty \u2014 ${describeRecallTurnFieldGrammar()}` };
+    }
+    const invalid = filter.fields.filter((field) => !isRecallTurnField(field));
+    if (invalid.length > 0) {
+      return {
+        parsed,
+        error: `invalid filter.fields entry "${invalid[0]}" \u2014 ${describeRecallTurnFieldGrammar()}`
+      };
+    }
+    parsed.fields = filter.fields;
+  }
+  return { parsed };
+}
+function hasFilterCriteria(filter) {
+  return filter.type !== void 0 || filter.tag !== void 0 || filter.file !== void 0 || filter.sessionId !== void 0 || filter.after !== void 0 || filter.before !== void 0;
+}
+function turnMatchesFilter(turn, filter) {
+  if (filter.type !== void 0 && !turn.type.includes(filter.type)) {
+    return false;
+  }
+  if (filter.tag !== void 0 && !turn.tags.includes(filter.tag)) {
+    return false;
+  }
+  if (filter.sessionId !== void 0 && turn.sessionId !== filter.sessionId) {
+    return false;
+  }
+  if (filter.file !== void 0) {
+    const hit = turn.filesRead.some((path2) => path2.includes(filter.file)) || turn.filesModified.some((path2) => path2.includes(filter.file));
+    if (!hit) {
+      return false;
+    }
+  }
+  if (filter.after !== void 0 && turn.createdAtEpoch < filter.after) {
+    return false;
+  }
+  if (filter.before !== void 0 && turn.createdAtEpoch > filter.before) {
+    return false;
+  }
+  return true;
+}
+
 // src/utils/token-estimate.ts
 var CJK_CHARACTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 function estimateTokens(text) {
@@ -34014,8 +35020,56 @@ function formatRatio(total, budget) {
   const ratio = total / budget;
   return ratio < 0.05 ? "<0.1" : ratio.toFixed(1);
 }
+var BUDGET_REJECTION_MULTIPLE = 2;
+function budgetOverageRejection(field, value, budgetTokens) {
+  const count = estimateTokens(value);
+  const limit = budgetTokens * BUDGET_REJECTION_MULTIPLE;
+  if (count <= limit) {
+    return null;
+  }
+  return `${field} is ${count} tok, over ${BUDGET_REJECTION_MULTIPLE}\xD7 its ${budgetTokens} tok budget (limit ${limit}) \u2014 nothing stored.`;
+}
+
+// src/shared/segment-fields.ts
+var SEGMENT_WORKING_STATE_FIELDS = [
+  "goal",
+  "constraints",
+  "decisions",
+  "done",
+  "next_steps",
+  "reference"
+];
+var SEGMENT_EDITABLE_FIELDS = [
+  ...SEGMENT_WORKING_STATE_FIELDS,
+  "content",
+  "insight"
+];
 
 // src/mcp/definitions.ts
+init_type_vocabulary();
+var EDITABLE_FIELD_LIST = SEGMENT_EDITABLE_FIELDS.join("/");
+var WORKING_STATE_FIELD_LIST = SEGMENT_WORKING_STATE_FIELDS.join(", ");
+var memoryFilterShape = {
+  type: external_exports3.string().optional().describe(
+    "Exact match against one stored `type` value (a turn's type array, or a segment's)."
+  ),
+  tag: external_exports3.string().optional().describe(
+    "Exact match against one whole `tags` array element, either namespace (bare or `topic:`-prefixed) \u2014 a prefix does not match."
+  ),
+  session: external_exports3.union([external_exports3.string(), external_exports3.number()]).optional().describe('Scope to one session: "S12" or bare "12"/12.'),
+  time: external_exports3.string().optional().describe(
+    "`-7d`/`-2w` (relative), `YYYY-MM-DD` (one day), or `YYYY-MM-DD..YYYY-MM-DD` (inclusive range)."
+  ),
+  file: external_exports3.string().optional().describe("Substring match against files_read + files_modified."),
+  // Ticket 07 (read-write-contract spec, "视图(读面)"): field selection
+  // replaces the collapsed/expanded depth switch — any combination of turn
+  // fields, in any order. Not a scoping criterion: `filter: { fields: [...] }`
+  // alone does not force bare `recall()` off the browse path.
+  fields: external_exports3.array(external_exports3.enum(RECALL_TURN_FIELD_NAMES)).optional().describe(
+    `Which turn fields to render, any combination \u2014 replaces the collapsed/expanded field-set switch. One of: ${RECALL_TURN_FIELD_NAMES.join(", ")}.`
+  )
+};
+var memoryFilterSchema = external_exports3.object(memoryFilterShape).strict();
 var MNEMO_TOOL_DESCRIPTIONS = {
   // ticket 14 (spec K1): the segment addressing and `query=` participation
   // below were already load-bearing in the implementation before this
@@ -34023,58 +35077,112 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // needs it. K1's whole point is that a segment lets an agent avoid
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
-  recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id=\"E<n>\"` (also `E*`, `E1..9`) recalls a segment \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. Segments also surface in `query=` search (text, `tag:`, `type:`) alongside sessions and turns.",
-  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
-  // The per-field budgets are spliced in from `NOTE_TOKEN_BUDGET`, the constant
-  // the receipt measures a write against, rather than restated as prose here.
+  recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the segment card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/T<m>"` (also `E<n>/T*`, `E<n>/T3..7`) addresses the segment\'s own members by their 1-based EVENT-ORDER position \u2014 a navigation handle only, never a citation (cite the rendered `[S<session>][T<prompt>]` address instead, since a late-settling member shifts the ordinal). `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, content); a segment card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.',
+  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` (key chronological digest) \u2014 `phases` has retired. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
+  // ticket 01 (spec "Note contract revision"): the field-level contract used
+  // to live entirely in this one string — title's shape, content's admission
+  // test, type's vocabulary, tags' noun order, the session's seven fields —
+  // one blob no reader could jump into at the level their own field governs.
+  // Every per-field rule now lives in that parameter's own zod `.describe()`
+  // in `noteInputShape` below; THIS text keeps only what governs the CALL as
+  // a whole — which address to use, when to call at all, what a citation may
+  // point at, the relation procedure, markup, and the one-line English rule.
+  // Capped by tests/mcp/definitions.test.ts, same as before.
   //
-  // Single home of the note contract (user ruling, S15069 T586): fields,
-  // budgets, the skip test and the mode vocabulary live HERE and nowhere else;
-  // the SessionStart block (src/hooks/handlers/context-note-taking.ts) carries
-  // only the batch-timing digest and points at this text. Capped by
-  // tests/mcp/definitions.test.ts.
-  //
-  // ticket 03 (spec E1/D5/D5a): `note` and the retired `remember` are one tool
-  // now, addressed by `turn` (a turn) XOR `session` (a session's summary).
-  // Every field takes one rule: absent leaves it alone; present on an EMPTY
-  // field just writes; present on a NON-empty field requires `mode.<field>` —
-  // `"overwrite"` (replace whole) or `"append"` (add to it) — named once for
-  // the caller, not spelled out per field below.
-  //
-  // ticket 07 (spec C7) added four relation fields, and the cap moved 500 →
-  // 600 to pay for them (user decision, S15069/T717; the estimate put to
-  // the user was +80 and the measured cost is +112, all of it procedure).
-  // C4 makes that procedure's exact wording normative — the four ordered
-  // questions, and
+  // ticket 07 (spec C7) added four relation fields, and C4 makes the
+  // procedure's exact wording normative — the four ordered questions, and
   // above all question 3's counterfactual — because the predecessor
   // vocabulary measured 61% precision at exactly the point where it was
-  // softened to "used" or "built on". A paraphrase that fits 13 tokens of
-  // headroom is therefore not a cheaper version of this text, it is the
-  // failure mode; shipping the fields undocumented instead would have left
-  // the main agent guessing in that same direction. The alternative
-  // considered and rejected was moving the procedure to the SessionStart
-  // injection, which is cheaper per turn but re-splits the contract T586
-  // had just given one home.
-  note: 'Write or correct a turn\'s note, or a session\'s summary. Exactly one of `turn` (`S<session>/T<prompt>`, from the current-turn line, its owed suffix, or backlog relief \u2014 never recalled or invented) or `session` (`S<session>`). Timing: (1) note only FINISHED turns, never the one in progress; (2) owed addresses settle in this turn\'s FIRST tool batch, last among its calls \u2014 you cannot know which batch will be last, and a turn with no tool calls settles nothing; (3) a batch for notes alone only at 5+ owed, or to fix a note already written. A non-empty field needs `mode.<field>`: `"overwrite"` replaces it whole, `"append"` adds (text: newline-joined; type/tags: unioned). Empty needs no mode; omitted stays untouched. Clearing (insight/grade/session fields) needs `null` + overwrite mode. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored.\nTurn \u2014 title (~' + NOTE_TOKEN_BUDGET.title + " tok): `<activity>+<topic>: <what this turn covered>`, the real stage. content (~" + NOTE_TOKEN_BUDGET.content + " tok): the conclusion, then the evidence chain \u2014 rejected alternatives with reasons; never restate the title, never narrate looking. A first note needs both title and content. insight (~" + NOTE_TOKEN_BUDGET.insight + " tok, default none): long-term knowledge orthogonal to the conclusion, claim first. type: discuss/research/design/implement/refactor/fix/measure/review/ops/delegate/correction \u2014 omit or [] when none fit, never guess. tags: bare topic words, no prefix. grade: 0-4. Receipt reports token counts and each touched field's post-write total; over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson. `crossSession: true` only for another session's turn. Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\nRelations \u2014 evidenceFor/evidenceAgainst/supersedes/dependsOn: address lists; a target this write does not cite rejects the call. Four ordered questions, first yes wins: (1) Did the citing turn overturn it? \u2192 supersedes. (2) Did it test the claim, for or against? \u2192 evidenceFor/Against. (3) If the cited turn were wrong, would the citing turn's conclusion also be wrong? \u2192 dependsOn. (4) None \u2192 no relation. Never soften (3) to \"used\"/\"built on\".\nSession \u2014 title/content/insight: a compressed view for another session browsing this one. decision/done/next_steps/reference: this session's recent state. Fields may carry unattributed [S/T] citations.",
-  // ticket 08 (spec G8): the coverage predicate pulled by the agent, not the
-  // Stop hook (ticket 11) or the completion gate (ticket 09) — those call the
-  // same underlying predicate (db/coverage.ts's `computeCoverageGaps`)
-  // directly rather than through this tool. Own budget, own test in
-  // definitions.test.ts — independent of note's own cap.
-  check: "Ask what a session still owes before you believe you are finished \u2014 the same predicate the Stop hook and the completion gate check, so a clean answer here does not reopen later. Input: `id` (`S<session>`). Reports missing turns as bare addresses, never why \u2014 you already know why. An eligible turn is owed when it carries no stated `type`, unless it was skipped: skip is itself a verdict and counts as covered. Eligible excludes a compact marker and a slash command the harness answered with no model reply; a sidechain turn is included."
+  // softened to "used" or "built on". A paraphrase is not a cheaper version
+  // of this text, it is the failure mode.
+  //
+  // ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): `session`
+  // retired from this call outright — session has no main-agent writer any
+  // more (three layers, three writers: turn/segment stay the main agent's,
+  // session moved to settlement's staged-commit channel, [S15069/T910]–
+  // [T913]). The opening sentence and address clause below no longer
+  // mention it.
+  //
+  // ticket 11 (edge-ownership-impl, "统一 Memory Rubric"): the six ordered
+  // relation questions this string used to inline ARE judgment — [S15069/
+  // T933]/[T937]–[T939] peer discussion settled a three-way split (format on
+  // each parameter's own `.describe()`, timing/frequency here, judgment in
+  // the Memory Rubric alone) and this was the one piece of judgment still
+  // sitting on the call-level description rather than the rubric. What
+  // remains here is the call-level POINTER plus the FORMAT facts a rubric
+  // cannot state (turn-only, an uncited target rejects the call) — the
+  // single-home grep guard (tests/shared/memory-rubric.test.ts) asserts the
+  // judgment prose itself appears nowhere on this surface.
+  note: "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief \u2014 never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\nRelations \u2014 evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn: turn-only address lists; an uncited target rejects the call. Which relation, if any \u2014 the judgment \u2014 lives in the Memory Rubric (SessionStart injection); this call only enforces the address/citation shape.\nTool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
+  // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
+  // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
+  // per-turn). Revives the retired 0.x tool name, now scoped to segments only.
+  // Per-verb parameter contracts live in `rememberInputShape`'s `.describe()`s
+  // below, same split as `note`'s ticket 01 revision — this text keeps only
+  // what governs the call as a whole.
+  remember: `Maintain a segment \u2014 claude-mnemo's long-lived, per-task semantic container (\u8BB0\u4F4F; \`note\` is the per-turn episodic surface, \u8BB0\u5F55). Six verbs: \`create\` mints a new segment from the roster you have in view \u2014 never a near-duplicate of an existing one; \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`append\` adds rows to one named field; \`replace\` finds \`oldString\` in one field and swaps in \`newString\` \u2014 ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched row; \`close\` toggles the segment off the roster (still \`recall\`-able), or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership \u2014 or clears ownership if \`id\` is omitted. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) \u2014 each an uncapped markdown row list. A closed segment refuses append/replace, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, \u2026) is rejected, nothing stored. Every field is written in English.
+Maintenance is advisory, never a gate: every append/replace reports turns since this segment was last touched \u2014 under 10 turns draws a too-soon reminder (a \`decisions\` append is exempt \u2014 a lost ruling is the costliest loss).
+20-turn reminder: check membership, Working State, whether to create or attach \u2014 judgment lives in the Memory Rubric, not here.`
+  // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
+  // Stop hook and the completion gate already call the coverage predicate
+  // (db/coverage.ts's `computeCoverageGaps`) directly, and this self-service
+  // pull duplicated the same answer for no reader who could not already get
+  // it another way. No replacement entry: the main agent has no tool here
+  // any more, by design, not by omission.
 };
 var recallInputShape = {
   id: external_exports3.string().optional(),
-  query: external_exports3.string().optional(),
-  time: external_exports3.string().optional(),
-  depth: external_exports3.enum(["collapsed", "expanded"]).optional(),
+  query: external_exports3.string().optional().describe(
+    "Pure full-text search \u2014 no in-string dialect (a literal `tag:foo` searches those characters). Use `filter` for type/tag/session/time/file scoping."
+  ),
+  // Ticket 04 (spec "Tools"): the one structured filter grammar, shared with
+  // `timeline`. AND-composed with each other, with `id`, and with `query`.
+  // Replaces the retired in-query prefix dialect AND the top-level `time`
+  // param this shape used to carry (folded in as `filter.time`, same
+  // grammar) — no non-test caller in this repo passed top-level `time`, so
+  // it is cut clean rather than kept as a deprecated alias.
+  filter: memoryFilterSchema.optional().describe(
+    "Structured scoping \u2014 {type, tag, session, time, file} \u2014 AND-composed with each other, with `id`, and with `query`."
+  ),
+  // Ticket 11 (read-write-contract spec, "视图(读面)"): the collapsed/expanded
+  // depth switch retires — the field stays DEFINED only so
+  // `recallInputSchema`'s superRefine below can reject a supplied value with
+  // a message naming its replacement, the same precedent `truncate` already
+  // set. Detail is expressed entirely through `filter.fields` now.
+  view: external_exports3.enum(["collapsed", "expanded"]).optional().describe("Retired \u2014 select which turn fields to show via `filter.fields` instead."),
   page: external_exports3.number().int().positive().optional(),
   pageSize: external_exports3.number().int().positive().optional(),
-  truncate: external_exports3.number().int().min(1).max(2e3).optional()
+  // Ticket 04/11: `truncate` retires from the public surface (ticket 11 also
+  // drops the worker-only exemption that used to keep it working there — see
+  // `workerRecallInputShape`'s own comment). The field stays DEFINED (rather
+  // than simply omitted) so `recallInputSchema`'s superRefine below can
+  // reject it with a message naming its replacements — an omitted key would
+  // only ever produce zod's generic "unrecognized key" text, which names
+  // nothing to point the caller at.
+  truncate: external_exports3.number().optional().describe(
+    "Retired \u2014 use `pageBudget` (page overflow) or `turn` (per-item token cap) instead."
+  ),
+  // ticket 03 (spec "Budgets"): the segment card's own token budget, default
+  // 1000. Distinct from `page` above (still the 1-indexed page NUMBER) —
+  // `page` doubles as this render's own overflow escape: page 1 is the
+  // elided collapsed card, page ≥ 2 is the same card with every Working
+  // State row shown, uncapped — "stable page 2" (never dropping content
+  // silently), reached by asking for the next page rather than a different
+  // parameter.
+  pageBudget: external_exports3.number().int().positive().optional().describe(
+    `Token budget for a segment card (id="E<n>") \u2014 default 1000. Over budget, the collapsed card elides the largest Working State field's oldest rows first (newest rows always visible), marked "\u2026 +N earlier"; ask for page 2 of the same id to see every row, uncapped.`
+  ),
+  // Ticket 11: the ONE per-item size knob left, alongside `pageBudget` — no
+  // more depth-dependent default. Applies to every rendered session, turn,
+  // and observation block; a caller widening `filter.fields` beyond the
+  // default (title, content) should usually raise this too, or the extra
+  // fields mostly get cut by the unchanged default budget.
+  turn: external_exports3.number().int().positive().optional().describe(
+    "Per-item token cap on every rendered session/turn/observation block (default 150, word-boundary cut). Raise it when `filter.fields` selects more turn fields than the default."
+  )
 };
 var workerRecallInputShape = {
-  ...recallInputShape,
-  truncate: external_exports3.number().int().min(1).optional()
+  ...recallInputShape
 };
 var fieldModeEnum = external_exports3.enum(["overwrite", "append"]);
 var noteModeShape = external_exports3.object({
@@ -34082,28 +35190,42 @@ var noteModeShape = external_exports3.object({
   content: fieldModeEnum.optional(),
   insight: fieldModeEnum.optional(),
   type: fieldModeEnum.optional(),
-  tags: fieldModeEnum.optional(),
-  grade: fieldModeEnum.optional(),
-  decision: fieldModeEnum.optional(),
-  done: fieldModeEnum.optional(),
-  next_steps: fieldModeEnum.optional(),
-  reference: fieldModeEnum.optional()
-}).strict().optional();
+  tags: fieldModeEnum.optional()
+}).strict().optional().describe(
+  'Required when the target field already holds something: "overwrite" replaces it whole, "append" adds to it (text: newline-joined; type/tags: unioned). Not required when the field is empty or omitted \u2014 omitting the field itself leaves it untouched. Clearing a nullable field (insight) needs the field set to null plus its mode set to "overwrite".'
+);
+var TYPE_VOCABULARY_LIST = MEMORY_TYPES.join("/");
 var noteInputShape = {
-  turn: external_exports3.string().min(1).optional(),
-  session: external_exports3.string().min(1).optional(),
-  // Turn fields.
-  title: external_exports3.string().nullable().optional(),
-  content: external_exports3.string().nullable().optional(),
-  insight: external_exports3.string().nullable().optional(),
-  type: external_exports3.array(external_exports3.string()).optional(),
-  tags: external_exports3.array(external_exports3.string()).optional(),
-  grade: external_exports3.number().int().min(0).max(4).nullable().optional(),
-  skip: external_exports3.boolean().optional(),
+  turn: external_exports3.string().min(1).describe(
+    "Address of a finished turn: `S<session>/T<prompt>`, from the current-turn line or backlog relief \u2014 never recalled or invented (see the tool description)."
+  ),
+  // Turn fields. (ticket 09: `title` is turn-only now — the session address
+  // this describe used to also govern retired outright; settlement writes
+  // the session's own title/content through its own staged-commit channel.)
+  title: external_exports3.string().nullable().optional().describe(
+    `Turn (~${NOTE_TOKEN_BUDGET.title} tok): one English claim sentence \u2014 this turn's conclusion, standing alone in a title-only list. No activity/topic prefix (type/tags carry that). Name the decider when a ruling landed. No session-local codewords without a gloss.`
+  ),
+  content: external_exports3.string().nullable().optional().describe(
+    `Turn only (~${NOTE_TOKEN_BUDGET.content} tok): assume the title was just read \u2014 expand, never restate. In order: the precision that makes the conclusion usable, each rejected alternative with a one-line reason, secondary conclusions, citations. Sentence deletion test: remove a sentence \u2014 if the conclusion's derivation still holds, cut it. No process narration (replay stores it).`
+  ),
+  insight: external_exports3.string().nullable().optional().describe(
+    `Turn only (~${NOTE_TOKEN_BUDGET.insight} tok, default omit): a task-scoped lesson under the episode-deletion test \u2014 delete the episode; does the sentence still teach someone useful prior knowledge?`
+  ),
+  type: external_exports3.array(external_exports3.string()).optional().describe(
+    `Closed vocabulary: ${TYPE_VOCABULARY_LIST} \u2014 omit or [] when none fit, never guess. Honesty rule: report the stage that actually happened \u2014 a design discussion with no ruling is discuss, not design.`
+  ),
+  tags: external_exports3.array(external_exports3.string()).optional().describe(
+    "At least one coarse noun naming the project, then fine nouns for subsystems/artifacts. Never activities (type carries those), no -design/-fix hybrids. Reuse exact spellings already in use."
+  ),
+  skip: external_exports3.boolean().optional().describe(
+    "true to decline noting this turn instead of writing one \u2014 see the tool description's skip test. Valid only together with `turn`."
+  ),
   // spec D4: declares intent to write a turn outside the caller's own
   // session. No legitimate use exists today (every address a caller is ever
   // handed is its own session's) — this is a pure guardrail.
-  crossSession: external_exports3.boolean().optional(),
+  crossSession: external_exports3.boolean().optional().describe(
+    "true to confirm a write addressed at a turn outside the caller's own session; required whenever the address's session differs from the caller's, refused otherwise."
+  ),
   // ticket 07 (spec C1/C5/C7): one named field per relation, not a generic
   // `{turn, relation}` list — an illegal relation is structurally
   // unrepresentable. Targets are address tokens, `S<session>/T<prompt>` or
@@ -34113,35 +35235,274 @@ var noteInputShape = {
   // title/tags/type there is no PRIOR value at this layer to append to or
   // overwrite, and `writeMemoryEdges`'s upsert (spec C14) already governs
   // replacing a relation the pair carries from an earlier write.
-  evidenceFor: external_exports3.array(external_exports3.string()).optional(),
-  evidenceAgainst: external_exports3.array(external_exports3.string()).optional(),
-  supersedes: external_exports3.array(external_exports3.string()).optional(),
-  dependsOn: external_exports3.array(external_exports3.string()).optional(),
-  // Session fields (D2/D4). Seven in total: `title`/`content`/`insight` are
-  // declared above and shared with the turn surface, and these four are the
-  // session's own. `current` is DELETED (ticket 04) and deliberately absent
-  // from the schema, so the model is never offered a field that no longer
-  // exists; a call that sends it anyway is refused by name in mcp/note.ts
-  // rather than having the field dropped in silence.
-  decision: external_exports3.string().nullable().optional(),
-  done: external_exports3.string().nullable().optional(),
-  next_steps: external_exports3.string().nullable().optional(),
-  reference: external_exports3.string().nullable().optional(),
+  evidenceFor: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses this write's own body tests FOR its claim \u2014 see the tool description's relation procedure. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target."
+  ),
+  evidenceAgainst: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses this write's own body tests AGAINST its claim \u2014 see the tool description's relation procedure. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target."
+  ),
+  // ticket 01 (turn-edge-mechanism spec, [S15069/T935] mid-flight amendment):
+  // `groundedOn` — a decision rests on an earlier finding, evidence-phase OR
+  // delivery-phase (a review/audit finding grounds a decision the same as a
+  // research finding). Recorded but excluded from every scoring surface —
+  // see `shared/turn-phase.ts`'s `UNSCORED_RELATIONS`.
+  groundedOn: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses the earlier finding this write's own decision rests on \u2014 counterfactual: if that finding were false, this decision would fall. Decision-phase (design/discuss/correction) source; evidence-phase (research/measure) OR delivery-phase (implement/refactor/fix/delegate/review/ops) target. Recorded, never scored."
+  ),
+  // ticket 01 (turn-edge-mechanism spec): `refines`/`override` replace the
+  // retired `supersedes` — a decision-phase turn's relation to a
+  // decision-phase predecessor, split by whether the predecessor's
+  // conclusion survives IN PART (`refines`) or not AT ALL (`override`).
+  // `supersedes` itself is REMOVED from this shape outright: a caller still
+  // sending it gets `.strict()`'s parse error, naming the unrecognised key —
+  // existing `supersedes` EDGES stay frozen-readable (db/citations.ts), only
+  // the write parameter is gone.
+  // ticket 11 (edge-ownership-impl): `refines`/`override`'s own discriminator
+  // — "if the predecessor's any sub-conclusion still holds, use refines" —
+  // moved to the Memory Rubric's 关系 section (single home for judgment;
+  // [S15069/T933]/[T939]). What stays here is FORMAT only: the phase pair
+  // both ends require, and a pointer to where the choice between the two is
+  // actually made.
+  refines: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses a predecessor decision this write's own body continues or partially revises \u2014 decision-phase turns only (design/discuss/correction) on both ends; the predecessor is not wholly wrong. Judgment (refines vs. override) lives in the Memory Rubric."
+  ),
+  override: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses a predecessor decision this write's own body overturns WHOLE \u2014 decision-phase turns only (design/discuss/correction) on both ends. Judgment (refines vs. override) lives in the Memory Rubric."
+  ),
+  // ticket 01: `encodes` — a delivery-phase turn (spec/ADR/ticket/commit/
+  // release) naming the decision(s) it carries. Ticket 11: the minimal-set
+  // discriminator moved to the Memory Rubric (关系, question ④) — this
+  // describe keeps the format fact (self-asserted, not mechanically checked)
+  // and a pointer, not the rule itself.
+  encodes: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses the decision(s) this write's own artifact (spec/ADR/ticket/commit/release) carries \u2014 a delivery-phase turn (implement/refactor/fix/delegate/review/ops) citing a decision-phase (design/discuss/correction) target. Self-asserted, not mechanically checked; which decisions to name (the minimal set) is judgment \u2014 see the Memory Rubric."
+  ),
+  dependsOn: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses this write's own conclusion depends on \u2014 see the tool description's relation procedure. Turn-only; requires a delivery-phase (implement/refactor/fix/delegate/review/ops) source and target."
+  ),
+  // ticket 01 (turn-edge-mechanism spec): `supersedes` retired from the NOTE
+  // TOOL's own surface — `noteInputSchema` below `.omit()`s this key, so a
+  // caller sending it gets `.strict()`'s parse error naming the unrecognised
+  // key, same as any other retired field. Ticket 08 (edge-ownership-impl)
+  // retired settlement's own write of it too — `settlementNoteInputShape` no
+  // longer reuses this field object, so it now has NO reuser at all. It stays
+  // declared, unexported from the schema, purely as frozen documentation of
+  // the word this project once wrote and no longer does; `db/citations.ts`'s
+  // `CITATION_RELATIONS` is where the READ-side legacy value actually lives.
+  supersedes: external_exports3.array(external_exports3.string()).optional().describe(
+    "Retired on the note tool (ticket 01) \u2014 use refines/override instead. Present here only for settlement's own surface."
+  ),
   mode: noteModeShape
+};
+var rememberInputShape = {
+  verb: external_exports3.enum(["create", "attach", "append", "replace", "close", "assign"]).describe(
+    "create: mint a new segment. attach: bind the current session to one. append: add rows to a field. replace: find/replace text within one field. close: toggle the segment off the roster (or, called again, back on). assign: place turns into a segment (id set) or clear their ownership (id omitted)."
+  ),
+  id: external_exports3.string().min(1).optional().describe(
+    'attach/append/replace/close: the target segment \u2014 an "E<n>" address only. assign: the same, but OPTIONAL \u2014 omit entirely to clear ownership on `turns` instead of placing them. Not used by create.'
+  ),
+  title: external_exports3.string().min(1).optional().describe("create only (required): the segment's title, written in English."),
+  // Ticket 15 (topic registry retirement, CONTEXT.md "Topic — retired"): the
+  // registry this once named a segment into folded into tags — a
+  // mechanism-level synonym split. Declared here ONLY so `rememberInputSchema`'s
+  // superRefine below can reject a caller still sending it with a message
+  // naming the retirement and pointing at tags, the same precedent
+  // `recallInputSchema`'s retired `truncate`/`view` set.
+  topic: external_exports3.string().optional().describe(
+    "Retired \u2014 the topic registry folded into tags; name the segment's theme as a `note` tag on its member turns instead."
+  ),
+  goal: external_exports3.string().min(1).optional().describe("create only, optional: a seed row for the new segment's `goal` field."),
+  members: external_exports3.array(external_exports3.string()).optional().describe(
+    'create only, optional: seed member turn addresses ("S<session>/T<prompt>", as seen in context \u2014 from an approved proposal, never recalled or invented). Membership is recorded for exactly these turns; a call naming even one bad address seeds none.'
+  ),
+  field: external_exports3.enum(SEGMENT_EDITABLE_FIELDS).optional().describe(`append/replace only (required): which field \u2014 ${EDITABLE_FIELD_LIST}.`),
+  rows: external_exports3.array(external_exports3.string().min(1)).optional().describe(
+    'append only (required): one or more row texts to add, one line each \u2014 a leading "- " is added if you did not include it.'
+  ),
+  oldString: external_exports3.string().min(1).optional().describe(
+    "replace only (required): the exact existing text to find within `field` \u2014 missing or matching more than once rejects, naming which."
+  ),
+  newString: external_exports3.string().optional().describe('replace only (required): the replacement text; "" deletes the matched text.'),
+  // ticket 02 (ownership-and-note-cadence spec): `assign`'s own turn
+  // selector — an interval OR a list, one array parameter for both shapes.
+  turns: external_exports3.array(external_exports3.string()).optional().describe(
+    'assign only (required): turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>", inclusive) \u2014 as seen in context, never recalled or invented. An interval spanning even one missing turn rejects the whole call, naming which; nothing is assigned.'
+  )
 };
 var timelineInputShape = {
   id: external_exports3.string().min(1),
   page: external_exports3.number().int().positive().optional(),
   pageSize: external_exports3.number().int().positive().optional(),
-  view: external_exports3.enum(["turns", "milestones", "phases"]).optional()
+  // Ticket 05: the view's token budget — the milestone view's size governor
+  // and the turn view's pagination budget. Mirrors recall's field; interactive
+  // default 1000 lives in timeline.ts, injections pass their own explicitly.
+  pageBudget: external_exports3.number().int().positive().optional(),
+  // Ticket 04: `phases` retires. Removing it from the enum outright (rather
+  // than keeping it defined only to reject, as `truncate` below does) is
+  // enough — zod's own invalid-enum message already names the surviving
+  // options ("expected one of \"turns\"|\"milestones\""), so no custom
+  // superRefine is needed to satisfy "parse error naming the two surviving
+  // views".
+  view: external_exports3.enum(["turns", "milestones"]).optional(),
+  // Ticket 04 (spec "Tools"): the same structured filter grammar recall
+  // carries, shared verbatim — AND-composed with the id selector's range.
+  filter: memoryFilterSchema.optional().describe(
+    "Structured scoping, shared with recall's `filter`: {type, tag, session, time, file}, AND-composed with the id selector's range."
+  )
 };
-var checkInputShape = {
-  id: external_exports3.string().min(1)
+var settlementNoteInputShape = {
+  turn: external_exports3.string().min(1).optional(),
+  session: external_exports3.string().min(1).optional(),
+  title: external_exports3.string().optional(),
+  content: external_exports3.string().optional(),
+  insight: noteInputShape.insight,
+  grade: external_exports3.number().int().min(0).max(4).optional(),
+  type: noteInputShape.type,
+  tags: noteInputShape.tags,
+  evidenceFor: noteInputShape.evidenceFor,
+  evidenceAgainst: noteInputShape.evidenceAgainst,
+  groundedOn: noteInputShape.groundedOn,
+  refines: noteInputShape.refines,
+  override: noteInputShape.override,
+  encodes: noteInputShape.encodes,
+  dependsOn: noteInputShape.dependsOn
 };
-var recallInputSchema = external_exports3.object(recallInputShape).strict();
+var recallInputSchema = external_exports3.object(recallInputShape).strict().superRefine((data, ctx) => {
+  if (data.truncate !== void 0) {
+    ctx.addIssue({
+      code: "custom",
+      message: "`truncate` has retired \u2014 use `pageBudget` (page overflow) or `turn` (per-item token cap) instead.",
+      path: ["truncate"]
+    });
+  }
+  if (data.view !== void 0) {
+    ctx.addIssue({
+      code: "custom",
+      message: "`view` (the collapsed/expanded depth switch) has retired \u2014 select fields via `filter.fields` instead.",
+      path: ["view"]
+    });
+  }
+});
 var timelineInputSchema = external_exports3.object(timelineInputShape).strict();
-var noteInputSchema = external_exports3.object(noteInputShape).strict();
-var checkInputSchema = external_exports3.object(checkInputShape).strict();
+var noteInputSchema = external_exports3.object(noteInputShape).omit({ supersedes: true }).strict();
+var rememberInputSchema = external_exports3.object(rememberInputShape).strict().superRefine((data, ctx) => {
+  if (data.topic !== void 0) {
+    ctx.addIssue({
+      code: "custom",
+      message: "`topic` has retired \u2014 the topic registry folded into tags; tag the segment's member turns instead.",
+      path: ["topic"]
+    });
+  }
+});
+
+// src/mcp/note.ts
+init_citations();
+init_database();
+
+// src/db/note-debt.ts
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = 'noted', reason = NULL,
+             closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ?
+           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
+  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
+}
+function recordDeclinedNoteDebt(db, turn, nowEpoch) {
+  return db.query(
+    `INSERT OR IGNORE INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
+}
+
+// src/mcp/note.ts
+init_references();
+
+// src/db/shadow-notes.ts
+var SHADOW_NOTE_COLUMNS = `
+  turn_id AS turnId,
+  title,
+  content,
+  insight,
+  writer_model AS writerModel,
+  writer_origin AS writerOrigin,
+  ride_turn_id AS rideTurnId,
+  created_at_epoch AS createdAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function upsertShadowNote(db, input) {
+  const written = db.query(
+    `
+        INSERT INTO shadow_notes (
+          turn_id,
+          title,
+          content,
+          insight,
+          writer_model,
+          writer_origin,
+          ride_turn_id,
+          created_at_epoch,
+          updated_at_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(turn_id) DO UPDATE SET
+          title = excluded.title,
+          content = excluded.content,
+          insight = excluded.insight,
+          writer_model = excluded.writer_model,
+          writer_origin = excluded.writer_origin,
+          ride_turn_id = excluded.ride_turn_id,
+          updated_at_epoch = excluded.updated_at_epoch
+        RETURNING ${SHADOW_NOTE_COLUMNS}
+      `
+  ).get(
+    input.turnId,
+    input.title,
+    input.content,
+    input.insight ?? null,
+    input.writerModel ?? null,
+    input.writerOrigin ?? "agent",
+    input.rideTurnId ?? null,
+    input.nowEpoch,
+    input.nowEpoch
+  );
+  if (!written) {
+    throw new Error(`Failed to write shadow note for turn ${input.turnId}.`);
+  }
+  return written;
+}
+function getShadowNote(db, turnId) {
+  return db.query(
+    `SELECT ${SHADOW_NOTE_COLUMNS} FROM shadow_notes WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
 
 // src/diary/calendar.ts
 var dateFormatters = /* @__PURE__ */ new Map();
@@ -34410,381 +35771,100 @@ function getFirstTurn(db, sessionId) {
   );
 }
 
-// src/db/coverage.ts
-var NO_REPLY_COMMAND_ENVELOPE_PREFIXES = [
-  "<local-command-",
-  "<command-name>",
-  "<command-args>",
-  "<command-message>"
-];
-function isNoReplySlashCommandPrompt(userPrompt) {
-  if (userPrompt === null) {
-    return false;
+// src/db/write-gate.ts
+function sessionWriterId(sessionDbId) {
+  return `session:${sessionDbId}`;
+}
+var SESSION_WRITER_PATTERN = /^session:(\d+)$/;
+function formatWriterForDisplay(writer) {
+  const match = SESSION_WRITER_PATTERN.exec(writer);
+  if (match) {
+    return `S${match[1]}`;
   }
-  const trimmed = userPrompt.trimStart();
-  const isCommandEnvelope = NO_REPLY_COMMAND_ENVELOPE_PREFIXES.some(
-    (prefix) => trimmed.startsWith(prefix)
+  return writer;
+}
+function nextWriteGateSequence(db) {
+  return db.query(
+    `INSERT INTO write_gate_sequence (id, value) VALUES (1, 1)
+       ON CONFLICT(id) DO UPDATE SET value = value + 1
+       RETURNING value`
+  ).get().value;
+}
+function snapshotWriteGateSequence(db) {
+  const row = db.query(`SELECT value FROM write_gate_sequence WHERE id = 1`).get();
+  return row?.value ?? 0;
+}
+function recordReadGrants(db, writer, entries, nowEpoch, sequence) {
+  if (entries.length === 0) {
+    return;
+  }
+  const stmt = db.query(
+    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
+       read_at_epoch = excluded.read_at_epoch,
+       read_sequence = excluded.read_sequence`
   );
-  if (!isCommandEnvelope) {
-    return false;
+  for (const entry of entries) {
+    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence);
   }
-  return !/<command-name>\s*([^<]+?)\s*<\/command-name>/.test(trimmed);
 }
-function isCompactMarkerTurn(turn) {
-  return turn.type.includes("compact");
+function getReadGrant(db, writer, entityType, entityId) {
+  return db.query(
+    `SELECT read_at_epoch AS readAtEpoch, read_sequence AS readSequence
+         FROM write_gate_reads
+         WHERE writer = ? AND entity_type = ? AND entity_id = ?`
+  ).get(writer, entityType, entityId) ?? null;
 }
-function isEligibleCoverageTurn(turn) {
-  return !isCompactMarkerTurn(turn) && !isNoReplySlashCommandPrompt(turn.userPrompt);
+function getFieldStamp(db, entityType, entityId, field) {
+  return db.query(
+    `SELECT writer, write_sequence AS writeSequence, written_at_epoch AS writtenAtEpoch
+         FROM write_gate_stamps
+         WHERE entity_type = ? AND entity_id = ? AND field = ?`
+  ).get(entityType, entityId, field) ?? null;
 }
-function declinedSkipTurnIds(db, turnIds) {
-  if (turnIds.length === 0) {
-    return /* @__PURE__ */ new Set();
-  }
-  const placeholders = turnIds.map(() => "?").join(", ");
-  const rows = db.query(
-    `SELECT turn_id AS turnId FROM note_debt
-       WHERE status = 'skipped' AND reason = 'declined'
-         AND turn_id IN (${placeholders})`
-  ).all(...turnIds);
-  return new Set(rows.map((row) => row.turnId));
+function stampField(db, entityType, entityId, field, writer, nowEpoch) {
+  const writeSequence = nextWriteGateSequence(db);
+  db.query(
+    `INSERT INTO write_gate_stamps (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(entity_type, entity_id, field) DO UPDATE SET
+       writer = excluded.writer,
+       write_sequence = excluded.write_sequence,
+       written_at_epoch = excluded.written_at_epoch`
+  ).run(entityType, entityId, field, writer, writeSequence, nowEpoch);
+  return { writer, writeSequence, writtenAtEpoch: nowEpoch };
 }
-function isCoveredCoverageTurn(turn, hasDeclinedSkip) {
-  return turn.type.length > 0 || turn.status === "skipped" || hasDeclinedSkip;
+function neverReadMessage(address) {
+  return `${address} has not been read this session \u2014 recall(id="${address}") first, then write it.`;
 }
-function computeCoverageGaps(db, turnIds) {
-  const declined = declinedSkipTurnIds(db, turnIds);
-  const gaps = [];
-  for (const turnId of turnIds) {
-    const turn = getTurnById(db, turnId);
-    if (!turn) {
-      continue;
+function staleMessage(field, address, staleWriter) {
+  const label = formatWriterForDisplay(staleWriter);
+  return `${field} on ${address} was changed by ${label} since you last read it \u2014 recall(id="${address}") again before writing ${field}.`;
+}
+function checkFieldGate(db, writer, entityType, entityId, field, address) {
+  const grant = getReadGrant(db, writer, entityType, entityId);
+  const stamp = getFieldStamp(db, entityType, entityId, field);
+  if (grant) {
+    const movedSinceRead = stamp !== null && stamp.writer !== writer && stamp.writeSequence > grant.readSequence;
+    if (!movedSinceRead) {
+      return { ok: true };
     }
-    if (!isEligibleCoverageTurn(turn)) {
-      continue;
-    }
-    if (isCoveredCoverageTurn(turn, declined.has(turnId))) {
-      continue;
-    }
-    gaps.push({
-      turnId: turn.id,
-      sessionId: turn.sessionId,
-      promptNumber: turn.promptNumber
-    });
+    return {
+      ok: false,
+      reason: "stale",
+      message: staleMessage(field, address, stamp.writer),
+      staleWriter: stamp.writer
+    };
   }
-  return gaps;
-}
-
-// src/mcp/check.ts
-function textResult(text) {
-  return { content: [{ type: "text", text }] };
-}
-function parameterError(message) {
-  return textResult(`Parameter error: ${message}`);
-}
-var SESSION_ADDRESS_PATTERN = /^S(\d+)$/i;
-function checkTool(db, rawInput) {
-  if (typeof rawInput.id !== "string") {
-    return parameterError('id is required, e.g. "S15069".');
+  if (stamp === null || stamp.writer === writer) {
+    return { ok: true };
   }
-  const match = SESSION_ADDRESS_PATTERN.exec(rawInput.id.trim());
-  if (!match) {
-    return parameterError(`id must be a "S<session>" address; got "${rawInput.id}".`);
-  }
-  const sessionId = Number.parseInt(match[1], 10);
-  if (!Number.isSafeInteger(sessionId) || sessionId <= 0) {
-    return parameterError(`id must be a "S<session>" address; got "${rawInput.id}".`);
-  }
-  const sessionExists = db.query("SELECT id FROM sessions WHERE id = ?").get(sessionId);
-  if (!sessionExists) {
-    return parameterError(`S${sessionId} is not a session in this database.`);
-  }
-  const turnIds = db.query(
-    "SELECT id FROM turns WHERE session_id = ? ORDER BY prompt_number ASC"
-  ).all(sessionId).map((row) => row.id);
-  const gaps = computeCoverageGaps(db, turnIds);
-  if (gaps.length === 0) {
-    return textResult(
-      `S${sessionId}: nothing owed \u2014 every eligible turn is typed or skipped.`
-    );
-  }
-  const addresses = gaps.map((gap) => `S${gap.sessionId}/T${gap.promptNumber}`).join(", ");
-  return textResult(
-    `S${sessionId}: ${gaps.length} turn(s) still owe review: ${addresses}.`
-  );
-}
-
-// src/mcp/note.ts
-init_citations();
-init_database();
-
-// src/db/note-debt.ts
-var NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = 'noted', reason = NULL,
-             closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ?
-           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
-  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
-}
-function recordDeclinedNoteDebt(db, turn, nowEpoch) {
-  return db.query(
-    `INSERT OR IGNORE INTO note_debt (
-           turn_id, session_id, prompt_number, status, reason,
-           opened_at_epoch, closed_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
-}
-
-// src/db/sessions.ts
-init_memory_edges();
-init_references();
-init_search();
-var SESSION_SELECT = `
-  SELECT
-    id,
-    content_session_id AS contentSessionId,
-    project,
-    transcript_path AS transcriptPath,
-    title,
-    content,
-    insight,
-    next_steps AS nextSteps,
-    decision,
-    done,
-    "current" AS current,
-    "reference" AS reference,
-    last_compact_turn AS lastCompactTurn,
-    summary_updated_at_epoch AS summaryUpdatedAtEpoch,
-    scan_cursor_byte_offset AS scanCursorByteOffset,
-    scan_cursor_line AS scanCursorLine,
-    parent_session_id AS parentSessionId,
-    lineage_status AS lineageStatus,
-    created_at_epoch AS createdAtEpoch,
-    updated_at_epoch AS updatedAtEpoch,
-    completed_at_epoch AS completedAtEpoch
-  FROM sessions
-`;
-function updateSessionFields(db, sessionId, input, nowEpoch) {
-  const existing = getSession(db, sessionId);
-  if (!existing) {
-    return null;
-  }
-  const resolve = (value, current) => {
-    if (value === void 0) {
-      return current;
-    }
-    if (value === null) {
-      return null;
-    }
-    return value.trim() === "" ? null : value;
-  };
-  const title = resolve(input.title, existing.title);
-  const content = resolve(input.content, existing.content);
-  const insight = resolve(input.insight, existing.insight);
-  const decision = resolve(input.decision, existing.decision);
-  const done = resolve(input.done, existing.done);
-  const nextSteps = resolve(input.nextSteps, existing.nextSteps);
-  const reference = resolve(input.reference, existing.reference);
-  const session = db.query(`
-      UPDATE sessions SET
-        title = ?,
-        content = ?,
-        insight = ?,
-        decision = ?,
-        done = ?,
-        next_steps = ?,
-        "reference" = ?,
-        summary_updated_at_epoch = ?,
-        updated_at_epoch = ?
-      WHERE id = ?
-      RETURNING
-        id,
-        content_session_id AS contentSessionId,
-        project,
-        transcript_path AS transcriptPath,
-        title,
-        content,
-        insight,
-        next_steps AS nextSteps,
-        decision,
-        done,
-        "current" AS current,
-        "reference" AS reference,
-        last_compact_turn AS lastCompactTurn,
-            summary_updated_at_epoch AS summaryUpdatedAtEpoch,
-        scan_cursor_byte_offset AS scanCursorByteOffset,
-        scan_cursor_line AS scanCursorLine,
-        parent_session_id AS parentSessionId,
-        lineage_status AS lineageStatus,
-        created_at_epoch AS createdAtEpoch,
-        updated_at_epoch AS updatedAtEpoch,
-        completed_at_epoch AS completedAtEpoch
-    `).get(
-    title,
-    content,
-    insight,
-    decision,
-    done,
-    nextSteps,
-    reference,
-    nowEpoch,
-    nowEpoch,
-    sessionId
-  );
-  if (!session) {
-    return null;
-  }
-  indexSessionToFTS(db, session);
-  const references = [
-    ...parseQualifiedReferences(session.title),
-    ...parseQualifiedReferences(session.content),
-    ...parseQualifiedReferences(session.insight),
-    ...parseQualifiedReferences(session.decision),
-    ...parseQualifiedReferences(session.done),
-    ...parseQualifiedReferences(session.nextSteps),
-    ...parseQualifiedReferences(session.reference)
-  ];
-  const { accepted } = validateReferences(db, references, {
-    writerSessionId: sessionId
-  });
-  reconcileCitedPairs(
-    db,
-    { kind: "session", id: sessionId },
-    accepted.map((entry) => entry.node),
-    nowEpoch,
-    "text-ref"
-  );
-  return session;
-}
-function countTurnsSince(db, sessionId, sinceEpoch) {
-  return db.query(
-    `SELECT COUNT(*) AS count FROM turns
-         WHERE session_id = ?
-           AND status != 'undone'
-           AND created_at_epoch > ?`
-  ).get(sessionId, sinceEpoch ?? -1)?.count ?? 0;
-}
-function getSession(db, id) {
-  return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
-}
-
-// src/db/shadow-notes.ts
-var SHADOW_NOTE_COLUMNS = `
-  turn_id AS turnId,
-  title,
-  content,
-  insight,
-  writer_model AS writerModel,
-  writer_origin AS writerOrigin,
-  ride_turn_id AS rideTurnId,
-  created_at_epoch AS createdAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function upsertShadowNote(db, input) {
-  const written = db.query(
-    `
-        INSERT INTO shadow_notes (
-          turn_id,
-          title,
-          content,
-          insight,
-          writer_model,
-          writer_origin,
-          ride_turn_id,
-          created_at_epoch,
-          updated_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(turn_id) DO UPDATE SET
-          title = excluded.title,
-          content = excluded.content,
-          insight = excluded.insight,
-          writer_model = excluded.writer_model,
-          writer_origin = excluded.writer_origin,
-          ride_turn_id = excluded.ride_turn_id,
-          updated_at_epoch = excluded.updated_at_epoch
-        RETURNING ${SHADOW_NOTE_COLUMNS}
-      `
-  ).get(
-    input.turnId,
-    input.title,
-    input.content,
-    input.insight ?? null,
-    input.writerModel ?? null,
-    input.writerOrigin ?? "agent",
-    input.rideTurnId ?? null,
-    input.nowEpoch,
-    input.nowEpoch
-  );
-  if (!written) {
-    throw new Error(`Failed to write shadow note for turn ${input.turnId}.`);
-  }
-  return written;
-}
-function getShadowNote(db, turnId) {
-  return db.query(
-    `SELECT ${SHADOW_NOTE_COLUMNS} FROM shadow_notes WHERE turn_id = ?`
-  ).get(turnId) ?? null;
+  return { ok: false, reason: "never-read", message: neverReadMessage(address) };
 }
 
 // src/mcp/note.ts
 init_segment_era();
-
-// src/mcp/session-summary.ts
-var SESSION_FIELD_GUIDANCE = {
-  title: 30,
-  content: 250,
-  insight: 80,
-  next_steps: 250,
-  decision: 300,
-  done: 150,
-  reference: 100
-};
-var SESSION_SUMMARY_FIELDS = Object.keys(
-  SESSION_FIELD_GUIDANCE
-);
-var RETIRED_SESSION_FIELD = "current";
-function retiredSessionFieldMessage(where) {
-  const subject = where === "mode" ? `mode.${RETIRED_SESSION_FIELD}` : RETIRED_SESSION_FIELD;
-  return `${subject} no longer exists: the session summary's \`current\` field is deleted (spec D2). It duplicated \`content\` at a different compression, so the two competed for the same material. Write \`content\` (the compressed view another session browsing this one reads) or \`next_steps\` (what this session does next) instead. Nothing was written.`;
-}
-function formatSessionFieldUsage(field, storedValue) {
-  if (storedValue === null) {
-    return `${field} (cleared)`;
-  }
-  const used = estimateTokens(storedValue);
-  const guidance = SESSION_FIELD_GUIDANCE[field];
-  return `${field} ${used}/${guidance}${used > guidance ? " (over guidance)" : ""}`;
-}
-function formatSummaryCadence(turnsSince, hadPreviousUpdate) {
-  const turns = `${turnsSince} turn${turnsSince === 1 ? "" : "s"}`;
-  return hadPreviousUpdate ? `${turns} since the last summary update.` : `No previous summary update; ${turns} so far.`;
-}
 
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
@@ -34822,27 +35902,116 @@ function toolCallSyntaxMessage(field) {
 
 // src/mcp/note.ts
 init_type_vocabulary();
-var FIELD_MODE_VALUES = ["append", "overwrite"];
-var TURN_MODE_FIELDS = [
-  "title",
-  "content",
-  "insight",
-  "type",
-  "tags",
-  "grade"
+
+// src/shared/turn-phase.ts
+init_type_vocabulary();
+var TYPE_PHASE = {
+  research: "evidence",
+  measure: "evidence",
+  design: "decision",
+  discuss: "decision",
+  correction: "decision",
+  implement: "delivery",
+  refactor: "delivery",
+  fix: "delivery",
+  delegate: "delivery",
+  review: "delivery",
+  ops: "delivery"
+};
+var PHASE_CANONICAL_TYPE = {
+  evidence: "research",
+  decision: "design",
+  delivery: "implement"
+};
+function phasesForTypes(types) {
+  const phases = /* @__PURE__ */ new Set();
+  for (const raw of types) {
+    const phase = TYPE_PHASE[raw];
+    if (phase !== void 0) {
+      phases.add(phase);
+    }
+  }
+  return phases;
+}
+var EDGE_RELATIONS = [
+  "evidence-for",
+  "evidence-against",
+  "grounded-on",
+  "refines",
+  "override",
+  "encodes",
+  "depends-on"
 ];
-var SESSION_MODE_FIELDS = SESSION_SUMMARY_FIELDS;
-var SESSION_ONLY_FIELDS = SESSION_MODE_FIELDS.filter(
-  (key) => key !== "title" && key !== "content" && key !== "insight"
-);
-function textResult2(text) {
+function isTurnEdgeRelation(value) {
+  return typeof value === "string" && EDGE_RELATIONS.includes(value);
+}
+var RELATION_PHASE_REQUIREMENT = {
+  "evidence-for": [{ source: "evidence", target: "decision" }],
+  "evidence-against": [{ source: "evidence", target: "decision" }],
+  "grounded-on": [
+    { source: "decision", target: "evidence" },
+    { source: "decision", target: "delivery" }
+  ],
+  refines: [{ source: "decision", target: "decision" }],
+  override: [{ source: "decision", target: "decision" }],
+  encodes: [{ source: "delivery", target: "decision" }],
+  "depends-on": [{ source: "delivery", target: "delivery" }]
+};
+function isRelationLegalForPhases(relation, citingPhases, citedPhases) {
+  return RELATION_PHASE_REQUIREMENT[relation].some(
+    (pair) => citingPhases.has(pair.source) && citedPhases.has(pair.target)
+  );
+}
+function phaseRequirementClause(side, phases) {
+  const options = phases.map(
+    (phase) => `a ${phase}-phase type (e.g. \`${PHASE_CANONICAL_TYPE[phase]}\`)`
+  );
+  return `the ${side} turn to carry ${options.join(" or ")}`;
+}
+function explainRelationPhaseRejection(relation, citingPhases, citedPhases) {
+  const pairs = RELATION_PHASE_REQUIREMENT[relation];
+  const sourceSatisfiedPairs = pairs.filter((pair) => citingPhases.has(pair.source));
+  if (sourceSatisfiedPairs.length === 0) {
+    const sourcePhases = [...new Set(pairs.map((pair) => pair.source))];
+    return `needs ${phaseRequirementClause("citing", sourcePhases)}`;
+  }
+  const targetPhases = [...new Set(sourceSatisfiedPairs.map((pair) => pair.target))];
+  return `needs ${phaseRequirementClause("cited", targetPhases)}`;
+}
+var SEGMENT_TARGET_DETAIL = "is a segment address \u2014 relation targets are turn-only; a segment tie goes through ownership (e.g. remember's assign/attach) or a bare cites reference, never a relation";
+function validateRelationTarget(input) {
+  if (input.targetKind === "segment") {
+    return { ok: false, reason: "segment-target", detail: SEGMENT_TARGET_DETAIL };
+  }
+  if (isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: "phase-illegal",
+    detail: explainRelationPhaseRejection(input.relation, input.citingPhases, input.citedPhases)
+  };
+}
+var RELATION_FIELD_NAME = {
+  "evidence-for": "evidenceFor",
+  "evidence-against": "evidenceAgainst",
+  "grounded-on": "groundedOn",
+  refines: "refines",
+  override: "override",
+  encodes: "encodes",
+  "depends-on": "dependsOn"
+};
+
+// src/mcp/note.ts
+var FIELD_MODE_VALUES = ["append", "overwrite"];
+var TURN_MODE_FIELDS = ["title", "content", "insight", "type", "tags"];
+function textResult(text) {
   return { content: [{ type: "text", text }] };
 }
-function parameterError2(message) {
-  return textResult2(`Parameter error: ${message}`);
+function parameterError(message) {
+  return textResult(`Parameter error: ${message}`);
 }
 var TURN_ADDRESS_PATTERN = /^S(\d+)\/T(\d+)$/i;
-var SESSION_ADDRESS_PATTERN2 = /^S(\d+)$/i;
 function parseTurnAddress(value) {
   const match = TURN_ADDRESS_PATTERN.exec(value.trim());
   if (!match) {
@@ -34854,14 +36023,6 @@ function parseTurnAddress(value) {
     return null;
   }
   return { sessionId, promptNumber };
-}
-function parseSessionAddress(value) {
-  const match = SESSION_ADDRESS_PATTERN2.exec(value.trim());
-  if (!match) {
-    return null;
-  }
-  const sessionId = Number.parseInt(match[1], 10);
-  return Number.isSafeInteger(sessionId) ? sessionId : null;
 }
 var WRITER_MODEL_ENV_KEYS = [
   "CLAUDE_MNEMO_WRITER_MODEL",
@@ -34974,35 +36135,6 @@ function resolveClear(field, existing, mode) {
   }
   return { value: null };
 }
-function resolveGradeField(provided, existing, mode) {
-  if (provided === void 0) {
-    return void 0;
-  }
-  if (provided === null) {
-    if (existing === null) {
-      return { value: null };
-    }
-    if (mode === void 0) {
-      fail(modeRequiredMessage("grade"));
-    }
-    if (mode === "append") {
-      fail('grade cannot be cleared with mode: "append" \u2014 use "overwrite".');
-    }
-    return { value: null };
-  }
-  if (typeof provided !== "number" || !Number.isInteger(provided) || provided < 0 || provided > 4) {
-    fail("grade must be an integer from 0 through 4.");
-  }
-  if (existing !== null) {
-    if (mode === void 0) {
-      fail(modeRequiredMessage("grade"));
-    }
-    if (mode === "append") {
-      fail('grade has no append operation; use mode: "overwrite".');
-    }
-  }
-  return { value: provided };
-}
 function resolveTypeField(provided, existing, mode) {
   if (provided === void 0) {
     return void 0;
@@ -35064,12 +36196,7 @@ function resolveTagsField(provided, existing, mode) {
   }
   return { value: decoded };
 }
-var RELATION_FIELD_ENTRIES = [
-  ["evidenceFor", "evidence-for"],
-  ["evidenceAgainst", "evidence-against"],
-  ["supersedes", "supersedes"],
-  ["dependsOn", "depends-on"]
-];
+var RELATION_FIELD_ENTRIES = EDGE_RELATIONS.map((relation) => [RELATION_FIELD_NAME[relation], relation]);
 var RELATION_REJECTION_TEXT = {
   malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
   unresolved: "does not resolve to a turn or segment",
@@ -35082,7 +36209,36 @@ function formatRelationRejections(rejections) {
   );
   return `relation field rejected: ${lines.join("; ")}.`;
 }
-function resolveRelationFields(db, citingTurnId, input, citations, nowEpoch) {
+function checkRelationTargetPhase(db, relation, raw, citingPhases) {
+  if (!isTurnEdgeRelation(relation)) {
+    return null;
+  }
+  const reference = parseBareAddressReference(raw);
+  if (!reference) {
+    return null;
+  }
+  if (reference.kind === "segment") {
+    const result2 = validateRelationTarget({
+      relation,
+      citingPhases,
+      targetKind: "segment",
+      citedPhases: /* @__PURE__ */ new Set()
+    });
+    return result2.ok ? null : `${relation} "${raw}" ${result2.detail}`;
+  }
+  const cited = getTurn(db, reference.sessionId, reference.promptNumber);
+  if (!cited) {
+    return null;
+  }
+  const result = validateRelationTarget({
+    relation,
+    citingPhases,
+    targetKind: "turn",
+    citedPhases: phasesForTypes(cited.type)
+  });
+  return result.ok ? null : `${relation} "${raw}" ${result.detail}`;
+}
+function resolveRelationFields(db, citingTurnId, citingTurnType, input, citations, nowEpoch) {
   const fields = [];
   for (const [key, relation] of RELATION_FIELD_ENTRIES) {
     const provided = input[key];
@@ -35101,8 +36257,21 @@ function resolveRelationFields(db, citingTurnId, input, citations, nowEpoch) {
   }
   if (citations === null) {
     fail(
-      "evidenceFor/evidenceAgainst/supersedes/dependsOn require this write to also touch a citation-bearing field (title, content or insight) whose post-state names the target \u2014 a relation cannot attach to a pair this call is not itself citing (spec C7)."
+      "evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn require this write to also touch a citation-bearing field (title, content or insight) whose post-state names the target \u2014 a relation cannot attach to a pair this call is not itself citing (spec C7)."
     );
+  }
+  const citingPhases = phasesForTypes(citingTurnType);
+  const phaseIssues = [];
+  for (const field of fields) {
+    for (const raw of field.targets) {
+      const issue2 = checkRelationTargetPhase(db, field.relation, raw, citingPhases);
+      if (issue2) {
+        phaseIssues.push(issue2);
+      }
+    }
+  }
+  if (phaseIssues.length > 0) {
+    fail(`relation field rejected: ${phaseIssues.join("; ")}.`);
   }
   const result = attachTurnRelations(db, citingTurnId, fields, citations.written, nowEpoch);
   if (result.rejected.length > 0) {
@@ -35119,9 +36288,6 @@ function parseModeMap(raw, allowed) {
   }
   const result = {};
   for (const [key, value] of Object.entries(raw)) {
-    if (key === RETIRED_SESSION_FIELD) {
-      fail(retiredSessionFieldMessage("mode"));
-    }
     if (!allowed.includes(key)) {
       fail(`mode.${key} names a field this call does not accept a mode for.`);
     }
@@ -35135,15 +36301,15 @@ function parseModeMap(raw, allowed) {
 function declineTurn(db, address, options, crossSession) {
   const turn = getTurn(db, address.sessionId, address.promptNumber);
   if (!turn) {
-    return parameterError2(
+    return parameterError(
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
   }
   if (turn.type.includes("compact")) {
-    return parameterError2(compactMarkerMessage(address));
+    return parameterError(compactMarkerMessage(address));
   }
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
-    return parameterError2(
+    return parameterError(
       crossSessionRequiredMessage(address, options.callerSessionId)
     );
   }
@@ -35167,13 +36333,13 @@ function declineTurn(db, address, options, crossSession) {
   });
   switch (outcome.kind) {
     case "declined":
-      return textResult2(
+      return textResult(
         `Skipped ${ref}. Its debt is closed as declined and it will not be listed again; send a real note for this turn if the material comes back.`
       );
     case "already-noted":
-      return textResult2(`Skipped ${ref} ignored: it already has a note.`);
+      return textResult(`Skipped ${ref} ignored: it already has a note.`);
     case "already-settled":
-      return textResult2(
+      return textResult(
         `Skipped ${ref} ignored: its debt already closed as ${outcome.settledAs}.`
       );
   }
@@ -35189,31 +36355,26 @@ function isValidPredecessorFor(db, turn) {
 }
 function handleTurnWrite(db, address, input, options) {
   if (input.skip !== void 0 && typeof input.skip !== "boolean") {
-    return parameterError2("skip must be a boolean when present.");
+    return parameterError("skip must be a boolean when present.");
   }
   if (input.crossSession !== void 0 && typeof input.crossSession !== "boolean") {
-    return parameterError2("crossSession must be a boolean when present.");
+    return parameterError("crossSession must be a boolean when present.");
   }
   const crossSession = input.crossSession === true;
   if (input.skip === true) {
     return declineTurn(db, address, options, crossSession);
   }
-  for (const key of SESSION_ONLY_FIELDS) {
-    if (input[key] !== void 0) {
-      return parameterError2(`${key} is a session field; this call addresses a turn.`);
-    }
-  }
   const turn = getTurn(db, address.sessionId, address.promptNumber);
   if (!turn) {
-    return parameterError2(
+    return parameterError(
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
   }
   if (turn.type.includes("compact")) {
-    return parameterError2(compactMarkerMessage(address));
+    return parameterError(compactMarkerMessage(address));
   }
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
-    return parameterError2(
+    return parameterError(
       crossSessionRequiredMessage(address, options.callerSessionId)
     );
   }
@@ -35221,8 +36382,8 @@ function handleTurnWrite(db, address, input, options) {
     (key) => input[key] !== void 0
   );
   if (providedFields.length === 0) {
-    return parameterError2(
-      "at least one of title, content, insight, type, tags, grade is required."
+    return parameterError(
+      `at least one of ${TURN_MODE_FIELDS.join(", ")} is required.`
     );
   }
   let modeMap;
@@ -35230,7 +36391,7 @@ function handleTurnWrite(db, address, input, options) {
     modeMap = parseModeMap(input.mode, TURN_MODE_FIELDS);
   } catch (error48) {
     if (error48 instanceof NoteValidationError) {
-      return parameterError2(error48.message);
+      return parameterError(error48.message);
     }
     throw error48;
   }
@@ -35240,15 +36401,25 @@ function handleTurnWrite(db, address, input, options) {
   const rideTurnId = current?.id ?? null;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const promotesTurnRecord = isSegmentEra(turn.createdAtEpoch, options.eraCutoffEpoch);
+  const writer = typeof options.callerSessionId === "number" ? sessionWriterId(options.callerSessionId) : null;
+  const addressLabel = `S${turn.sessionId}/T${turn.promptNumber}`;
   const eraConfigured = options.eraCutoffEpoch !== void 0 && options.eraCutoffEpoch !== null;
   if (eraConfigured && !promotesTurnRecord && (input.title !== void 0 || input.content !== void 0 || input.insight !== void 0)) {
-    return parameterError2(
+    return parameterError(
       `S${address.sessionId}/T${address.promptNumber} is a pre-cutoff turn, whose prose has no reader \u2014 title, content and insight cannot be written to it. Its grade, type and tags are still writable.`
     );
   }
   let result;
   try {
     result = writeTransaction(db, () => {
+      if (writer) {
+        for (const field of providedFields) {
+          const verdict = checkFieldGate(db, writer, "turn", turn.id, field, addressLabel);
+          if (!verdict.ok) {
+            fail(verdict.message);
+          }
+        }
+      }
       const freshTurn = getTurnById(db, turn.id);
       const existingNote = getShadowNote(db, turn.id);
       const noteExisted = existingNote !== null;
@@ -35283,11 +36454,6 @@ function handleTurnWrite(db, address, input, options) {
       }
       const typeResolution = resolveTypeField(input.type, freshTurn.type, modeMap.type);
       const tagsResolution = resolveTagsField(input.tags, freshTurn.tags, modeMap.tags);
-      const gradeResolution = resolveGradeField(
-        input.grade,
-        freshTurn.significanceGrade,
-        modeMap.grade
-      );
       const touchedProse = titleResolution !== void 0 || contentResolution !== void 0 || insightResolution !== void 0;
       let stripped = false;
       let finalTitle = titleResolution?.value;
@@ -35313,6 +36479,30 @@ function handleTurnWrite(db, address, input, options) {
         finalTitle = strippedTitle;
         finalContent = bracketedContent;
         finalInsight = strippedInsight;
+        if (titleResolution !== void 0 && finalTitle !== null) {
+          const rejection = budgetOverageRejection(
+            "title",
+            finalTitle,
+            NOTE_TOKEN_BUDGET.title
+          );
+          if (rejection) fail(rejection);
+        }
+        if (contentResolution !== void 0 && finalContent !== null) {
+          const rejection = budgetOverageRejection(
+            "content",
+            finalContent,
+            NOTE_TOKEN_BUDGET.content
+          );
+          if (rejection) fail(rejection);
+        }
+        if (insightResolution !== void 0 && finalInsight !== null) {
+          const rejection = budgetOverageRejection(
+            "insight",
+            finalInsight,
+            NOTE_TOKEN_BUDGET.insight
+          );
+          if (rejection) fail(rejection);
+        }
         upsertShadowNote(db, {
           turnId: turn.id,
           // shadow_notes.title/content are NOT NULL — by this point both are
@@ -35329,7 +36519,7 @@ function handleTurnWrite(db, address, input, options) {
       let updatedTurn = freshTurn;
       let citations = null;
       const promotesThisWrite = touchedProse && promotesTurnRecord;
-      const wantsFieldsWrite = typeResolution !== void 0 || tagsResolution !== void 0 || gradeResolution !== void 0;
+      const wantsFieldsWrite = typeResolution !== void 0 || tagsResolution !== void 0;
       if (promotesThisWrite) {
         const promoted = promoteTurnFromNote(db, turn.id, {
           title: finalTitle,
@@ -35345,7 +36535,6 @@ function handleTurnWrite(db, address, input, options) {
         const written = updateTurnById(db, turn.id, {
           type: typeResolution?.value,
           tags: tagsResolution?.value,
-          significanceGrade: gradeResolution?.value,
           updatedAtEpoch: nowEpoch
         });
         if (written) {
@@ -35365,7 +36554,27 @@ function handleTurnWrite(db, address, input, options) {
           updatedTurn.sessionId
         );
       }
-      const relations = resolveRelationFields(db, turn.id, input, citations, nowEpoch);
+      const relations = resolveRelationFields(
+        db,
+        turn.id,
+        updatedTurn.type,
+        input,
+        citations,
+        nowEpoch
+      );
+      if ((touchedProse || wantsFieldsWrite) && writer) {
+        if (titleResolution !== void 0) {
+          stampField(db, "turn", turn.id, "title", writer, nowEpoch);
+        }
+        if (contentResolution !== void 0) {
+          stampField(db, "turn", turn.id, "content", writer, nowEpoch);
+        }
+        if (insightResolution !== void 0) {
+          stampField(db, "turn", turn.id, "insight", writer, nowEpoch);
+        }
+        stampField(db, "turn", turn.id, "type", writer, nowEpoch);
+        stampField(db, "turn", turn.id, "tags", writer, nowEpoch);
+      }
       return {
         turn: updatedTurn,
         noteExisted,
@@ -35375,7 +36584,6 @@ function handleTurnWrite(db, address, input, options) {
         finalInsight,
         finalType: typeResolution?.value,
         finalTags: tagsResolution?.value,
-        finalGrade: gradeResolution?.value,
         citations,
         relations,
         stripped
@@ -35383,7 +36591,7 @@ function handleTurnWrite(db, address, input, options) {
     });
   } catch (error48) {
     if (error48 instanceof NoteValidationError) {
-      return parameterError2(error48.message);
+      return parameterError(error48.message);
     }
     throw error48;
   }
@@ -35415,9 +36623,6 @@ function handleTurnWrite(db, address, input, options) {
   if (result.finalTags !== void 0) {
     parts.push(`tags: ${result.finalTags.length > 0 ? result.finalTags.join(", ") : "(none)"}.`);
   }
-  if (result.finalGrade !== void 0) {
-    parts.push(`grade: ${result.finalGrade === null ? "(cleared)" : result.finalGrade}.`);
-  }
   if (result.citations) {
     if (result.citations.written.length > 0 || result.citations.deleted.length > 0) {
       let citeLine = `Cites ${result.citations.written.length} pair(s)`;
@@ -35436,123 +36641,23 @@ function handleTurnWrite(db, address, input, options) {
   if (result.relations && result.relations.written.length > 0) {
     parts.push(`Attached ${result.relations.written.length} relation(s).`);
   }
-  return textResult2(parts.join(" "));
-}
-function handleSessionWrite(db, sessionId, input, options) {
-  for (const key of [
-    "type",
-    "tags",
-    "grade",
-    "skip",
-    "crossSession",
-    "evidenceFor",
-    "evidenceAgainst",
-    "supersedes",
-    "dependsOn"
-  ]) {
-    if (input[key] !== void 0) {
-      return parameterError2(`${key} is a turn field; this call addresses a session.`);
-    }
-  }
-  const providedFields = SESSION_MODE_FIELDS.filter(
-    (key) => input[key] !== void 0
-  );
-  if (providedFields.length === 0) {
-    return parameterError2(
-      `at least one of ${SESSION_MODE_FIELDS.join(", ")} is required.`
-    );
-  }
-  let modeMap;
-  try {
-    modeMap = parseModeMap(input.mode, SESSION_MODE_FIELDS);
-  } catch (error48) {
-    if (error48 instanceof NoteValidationError) {
-      return parameterError2(error48.message);
-    }
-    throw error48;
-  }
-  const session = getSession(db, sessionId);
-  if (!session) {
-    return textResult2(`Session S${sessionId} not found.`);
-  }
-  const fieldMap = [
-    ["title", session.title],
-    ["content", session.content],
-    ["insight", session.insight],
-    ["next_steps", session.nextSteps],
-    ["decision", session.decision],
-    ["done", session.done],
-    ["reference", session.reference]
-  ];
-  let resolvedInput;
-  const finals = [];
-  try {
-    resolvedInput = {};
-    for (const [key, existing] of fieldMap) {
-      const provided = input[key];
-      if (provided === void 0) {
-        continue;
-      }
-      const resolution = resolveStringField(key, provided, existing, modeMap[key], {
-        nullable: true
-      });
-      finals.push([key, resolution.value]);
-      const inputKey = key === "next_steps" ? "nextSteps" : key;
-      resolvedInput[inputKey] = resolution.value;
-    }
-  } catch (error48) {
-    if (error48 instanceof NoteValidationError) {
-      return parameterError2(error48.message);
-    }
-    throw error48;
-  }
-  const priorSummaryEpoch = session.summaryUpdatedAtEpoch;
-  const turnsSinceUpdate = countTurnsSince(db, sessionId, priorSummaryEpoch);
-  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
-  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const updated = writeTransaction(
-    db,
-    () => updateSessionFields(db, sessionId, resolvedInput, nowEpoch)
-  );
-  if (!updated) {
-    return textResult2(`Session S${sessionId} not found.`);
-  }
-  const parts = [`Updated S${sessionId}.`];
-  parts.push(
-    `after write: ${finals.map(([key, value]) => formatSessionFieldUsage(key, value)).join(", ")}.`
-  );
-  parts.push(formatSummaryCadence(turnsSinceUpdate, priorSummaryEpoch !== null));
-  return textResult2(parts.join(" "));
+  return textResult(parts.join(" "));
 }
 function noteTool(db, rawInput, options = {}) {
-  if (rawInput[RETIRED_SESSION_FIELD] !== void 0) {
-    return parameterError2(retiredSessionFieldMessage("field"));
-  }
-  const hasTurn = typeof rawInput.turn === "string";
-  const hasSession = typeof rawInput.session === "string";
-  if (rawInput.turn !== void 0 && !hasTurn) {
-    return parameterError2("turn must be a string when present.");
-  }
-  if (rawInput.session !== void 0 && !hasSession) {
-    return parameterError2("session must be a string when present.");
-  }
-  if (hasTurn === hasSession) {
-    return parameterError2(
-      hasTurn ? "exactly one of turn or session is required, not both." : 'exactly one of turn ("S<session>/T<prompt>") or session ("S<session>") is required.'
+  if (rawInput.session !== void 0) {
+    return parameterError(
+      "session writes retired from `note` \u2014 session has no main-agent writer any more. Settlement is the session's sole writer now: title is set once (when still empty) and content is incremented with a conversational narrative after each settled window. Nothing was written."
     );
   }
-  if (hasSession) {
-    const sessionId = parseSessionAddress(rawInput.session);
-    if (sessionId === null) {
-      return parameterError2(
-        `session must be a "S<session>" address, e.g. "S15069"; got "${rawInput.session}".`
-      );
-    }
-    return handleSessionWrite(db, sessionId, rawInput, options);
+  const hasTurn = typeof rawInput.turn === "string";
+  if (!hasTurn) {
+    return parameterError(
+      rawInput.turn === void 0 ? 'turn ("S<session>/T<prompt>") is required.' : "turn must be a string when present."
+    );
   }
   const address = parseTurnAddress(rawInput.turn);
   if (!address) {
-    return parameterError2(
+    return parameterError(
       `turn must be a fully qualified "S<session>/T<prompt>" address, e.g. "S15069/T332"; got "${rawInput.turn}".`
     );
   }
@@ -35877,6 +36982,55 @@ function getSegmentMembershipForTurns(db, turnIds) {
 
 // src/mcp/recall.ts
 init_segments();
+
+// src/db/sessions.ts
+init_memory_edges();
+init_references();
+init_search();
+var SESSION_SELECT = `
+  SELECT
+    id,
+    content_session_id AS contentSessionId,
+    project,
+    transcript_path AS transcriptPath,
+    title,
+    content,
+    insight,
+    next_steps AS nextSteps,
+    decision,
+    done,
+    "current" AS current,
+    "reference" AS reference,
+    last_compact_turn AS lastCompactTurn,
+    summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+    scan_cursor_byte_offset AS scanCursorByteOffset,
+    scan_cursor_line AS scanCursorLine,
+    parent_session_id AS parentSessionId,
+    lineage_status AS lineageStatus,
+    last_remember_epoch AS lastRememberEpoch,
+    created_at_epoch AS createdAtEpoch,
+    updated_at_epoch AS updatedAtEpoch,
+    completed_at_epoch AS completedAtEpoch
+  FROM sessions
+`;
+function countTurnsSince(db, sessionId, sinceEpoch) {
+  return db.query(
+    `SELECT COUNT(*) AS count FROM turns
+         WHERE session_id = ?
+           AND status != 'undone'
+           AND created_at_epoch > ?`
+  ).get(sessionId, sinceEpoch ?? -1)?.count ?? 0;
+}
+function getSession(db, id) {
+  return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
+}
+function touchSessionRememberActivity(db, sessionId, epoch) {
+  db.query(
+    `UPDATE sessions SET last_remember_epoch = ? WHERE id = ?`
+  ).run(epoch, sessionId);
+}
+
+// src/mcp/recall.ts
 init_segment_era();
 init_paths();
 init_type_vocabulary();
@@ -36257,9 +37411,10 @@ function projectToolCall(toolName, toolInput, toolResult) {
 
 // src/mcp/format.ts
 var FIELD_TRUNCATION_SUFFIX = "\u2026";
-var DEFAULT_TRUNCATE = 200;
-var MAX_TRUNCATE = 2e3;
 var DEFAULT_PREVIEW_COUNT = 5;
+var DEFAULT_TURN_TOKEN_BUDGET = 150;
+var TURN_BUDGET_TRUNCATION_MARKER = "  \u2026 truncated to fit the per-item token budget";
+var REWIND_MARKER = " \u293A rewound (transcript pointer stale \u2014 do not trust replay)";
 function createTruncationSignal() {
   return { truncated: false };
 }
@@ -36369,50 +37524,75 @@ function truncateText(text, {
   }
   return `${window}${FIELD_TRUNCATION_SUFFIX}`;
 }
-function truncateLines(lines, {
-  limit,
-  signal,
-  lineLimit
-}) {
-  const boundedLimit = Math.max(limit, 1);
-  const content = lines.filter((line) => line.trim() !== "");
-  const kept = [];
-  let used = 0;
-  for (const line of content) {
-    const capped = lineLimit === void 0 ? line : truncateText(line, { limit: lineLimit, signal });
-    const nextUsed = used + capped.length + (kept.length > 0 ? 1 : 0);
-    if (kept.length > 0 && nextUsed > boundedLimit) {
-      break;
-    }
-    kept.push(capped);
-    used = nextUsed;
+function truncateTextToTokenBudget(text, maxTokens) {
+  if (maxTokens <= 0) {
+    return "";
   }
-  const omitted = content.length - kept.length;
-  if (omitted <= 0) {
-    return kept;
+  if (estimateTokens(text) <= maxTokens) {
+    return text;
+  }
+  let low = 0;
+  let high = text.length;
+  let best = "";
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = truncateText(text, { limit: Math.max(mid, 1) });
+    if (estimateTokens(candidate) <= maxTokens) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best;
+}
+function capRenderToTokenBudget(rendered, budgetTokens, signal) {
+  if (budgetTokens === void 0 || !Number.isFinite(budgetTokens)) {
+    return rendered;
+  }
+  if (estimateTokens(rendered) <= budgetTokens) {
+    return rendered;
+  }
+  const lines = rendered.split("\n");
+  const markerTokens = estimateTokens(TURN_BUDGET_TRUNCATION_MARKER);
+  const kept = [lines[0] ?? ""];
+  let used = estimateTokens(kept[0]);
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    const lineTokens = estimateTokens(line);
+    const remaining = budgetTokens - used - markerTokens;
+    if (remaining <= 0) {
+      markTruncated(signal);
+      kept.push(TURN_BUDGET_TRUNCATION_MARKER);
+      return kept.join("\n");
+    }
+    if (lineTokens <= remaining) {
+      kept.push(line);
+      used += lineTokens;
+      continue;
+    }
+    const partial2 = truncateTextToTokenBudget(line, remaining);
+    if (partial2) {
+      kept.push(partial2);
+    }
+    markTruncated(signal);
+    kept.push(TURN_BUDGET_TRUNCATION_MARKER);
+    return kept.join("\n");
+  }
+  if (kept.length === lines.length) {
+    return rendered;
   }
   markTruncated(signal);
-  return [...kept, `${FIELD_TRUNCATION_SUFFIX} +${omitted} lines`];
+  kept.push(TURN_BUDGET_TRUNCATION_MARKER);
+  return kept.join("\n");
 }
-function truncateCallHeader(header, { limit, signal }) {
-  if (header.length <= limit) {
-    return header;
-  }
-  const open = header.indexOf("(");
-  if (open <= 0 || !header.endsWith(")")) {
-    return truncateText(header, { limit, signal });
-  }
-  const toolName = header.slice(0, open);
-  const argument = header.slice(open + 1, -1);
-  const argumentBudget = limit - toolName.length - 3;
-  if (argumentBudget < 1) {
-    markTruncated(signal);
-    return toolName;
-  }
-  return `${toolName}(${truncateText(argument, { limit: argumentBudget, signal })})`;
-}
-function resolveExplicitTruncate(truncate, truncateCap = MAX_TRUNCATE) {
-  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
+var DEFAULT_TURN_RENDER_FIELDS = /* @__PURE__ */ new Set([
+  "title",
+  "content",
+  "prompt"
+]);
+function resolveTurnFields(fields) {
+  return fields && fields.length > 0 ? new Set(fields) : DEFAULT_TURN_RENDER_FIELDS;
 }
 function formatStatus(status) {
   return status ? ` [${status}]` : "";
@@ -36458,247 +37638,32 @@ function extractKeyParam(name, input) {
       return null;
   }
 }
-function formatSessionCollapsedWithMode(session, mode, truncate, truncateCap, signal) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
+function formatSessionBlock(session, options) {
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
     `- [S${session.id}] ${session.title ?? "Untitled"}${statsSegment} | ${formatEpoch(session.createdAtEpoch)} | ${session.project}`
   ];
   if (session.content) {
-    lines.push(
-      `  - desc: ${truncateText(session.content, { limit, signal })}`
-    );
+    lines.push(`  - desc: ${session.content}`);
   }
-  return lines.join("\n");
-}
-function formatSessionExpandedWithMode(session, mode, truncate, truncateCap, signal) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const lines = [
-    formatSessionCollapsedWithMode(session, mode, truncate, truncateCap, signal)
-  ];
-  const pushField = (label, value) => {
-    if (!value) {
-      return;
-    }
-    lines.push(`  - ${label}: ${truncateText(value, { limit, signal })}`);
-  };
-  const pushBulletField = (label, value) => {
-    if (!value) {
-      return;
-    }
-    const items = splitBulletField(truncateText(value, { limit, signal }));
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  - ${label}:`);
-    pushBullets(lines, "    ", items);
-  };
-  if (session.jsonlPath) {
+  if (options.includeRawPointer && session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
   }
-  if (session.decision) {
-    pushBulletField("decision", session.decision);
-  }
-  if (session.insight && session.insight.length > 0) {
-    lines.push("  - insight:");
-    pushBullets(
-      lines,
-      "    ",
-      session.insight.map((line) => truncateText(line, { limit, signal }))
-    );
-  }
-  pushBulletField("done", session.done);
-  pushField("next", session.nextSteps);
-  pushBulletField("reference", session.reference);
   return lines.join("\n");
 }
-function formatTurnLabel(turn, {
-  indent = "  ",
-  sessionId,
-  depth = "collapsed",
-  truncate,
-  truncateCap,
-  includeDbTurnIds = false,
-  signal
-} = {}) {
+function formatTurnLabel(turn, fields, { indent = "  ", sessionId, includeDbTurnIds = false }) {
   const turnId = turn.transcriptLineStart === null ? `T${turn.promptNumber}` : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
   const prefix = sessionId === void 0 ? `${indent}- [${turnId}]` : `${indent}- [S${sessionId}][${turnId}]`;
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
-  const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const title = turn.title === null && turn.promptPreview ? (
-    // The title slot is one line by construction. A prompt standing in for
-    // a missing note need not be: a task notification or a pasted payload
-    // carries newlines, and they reached the layout intact, spilling one
-    // turn's label across four lines. Collapse before measuring, so the
-    // truncation budget is spent on content rather than on line breaks.
-    `"${truncateText(collapseToSingleLine(turn.promptPreview), {
-      limit,
-      signal
-    })}"`
-  ) : truncateText(rawTitle, { limit, signal });
+  const titleSelected = fields.has("title") && turn.title !== null;
+  const title = titleSelected ? turn.title : turn.promptPreview ? `"${collapseToSingleLine(turn.promptPreview)}"` : "Untitled";
   const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
-  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}`;
+  const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
+  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}${rewindSegment}`;
 }
-function formatTurnCollapsedWithMode(turn, options = {}) {
-  const { indent = "  ", mode = "legacy", signal } = options;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const lines = [
-    formatTurnLabel(turn, {
-      ...options,
-      mode,
-      depth: "collapsed"
-    })
-  ];
-  if (turn.content) {
-    lines.push(
-      `${indent}  - desc: ${truncateText(turn.content, { limit, signal })}`
-    );
-  }
-  return lines.join("\n");
-}
-function formatToolCallLabel(toolCall, { indent = "    ", truncate, truncateCap, signal } = {}) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
-  const suffix = keyParam ? ` ${truncateText(keyParam, { limit, signal })}` : "";
-  return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
-}
-function formatToolCallCollapsedWithMode(toolCall, options = {}) {
-  return formatToolCallLabel(toolCall, {
-    ...options,
-    mode: options.mode,
-    depth: "collapsed"
-  });
-}
-function formatToolCallExpandedWithMode(toolCall, options = {}) {
-  const { indent = "    ", truncate, signal } = options;
-  const limit = resolveExplicitTruncate(truncate, options.truncateCap);
-  const detailIndent = `${indent}  `;
-  const lines = [
-    formatToolCallLabel(toolCall, {
-      ...options,
-      depth: "expanded",
-      truncate
-    })
-  ];
-  if (toolCall.input !== void 0) {
-    lines.push(
-      `${detailIndent}- in: ${truncateText(JSON.stringify(toolCall.input), {
-        limit,
-        signal
-      })}`
-    );
-  }
-  if (toolCall.result) {
-    lines.push(
-      `${detailIndent}- out: ${truncateText(toolCall.result, { limit, signal })}`
-    );
-  }
-  return lines.join("\n");
-}
-function renderTurnChildren(turn, depth, options = {}) {
-  if (depth === "collapsed") {
-    return "";
-  }
-  const { indent = "  ", sessionId, mode = "legacy", truncate, signal } = options;
-  const childIndent = `${indent}  `;
-  const childLines = [];
-  if (turn.observations && turn.observations.length > 0) {
-    for (const observation of turn.observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
-      childLines.push(
-        formatObservationExpandedWithMode(observation, {
-          indent: childIndent,
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-          mode,
-          depth: "expanded",
-          truncate,
-          signal
-        })
-      );
-    }
-    if (turn.observations.length > DEFAULT_PREVIEW_COUNT) {
-      childLines.push(`${childIndent}+${turn.observations.length - DEFAULT_PREVIEW_COUNT} more`);
-    }
-    return childLines.join("\n");
-  }
-  if (turn.toolCalls && turn.toolCalls.length > 0) {
-    for (const toolCall of turn.toolCalls.slice(0, DEFAULT_PREVIEW_COUNT)) {
-      childLines.push(
-        formatToolCallExpandedWithMode(toolCall, {
-          indent: childIndent,
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-          mode,
-          depth: "expanded",
-          truncate,
-          signal
-        })
-      );
-    }
-    if (turn.toolCalls.length > DEFAULT_PREVIEW_COUNT) {
-      childLines.push(`${childIndent}+${turn.toolCalls.length - DEFAULT_PREVIEW_COUNT} more`);
-    }
-  }
-  return childLines.join("\n");
-}
-function formatTurnExpandedWithMode(turn, options = {}) {
-  const {
-    indent = "  ",
-    mode = "legacy",
-    depth = "expanded",
-    includeChildren = mode === "unified",
-    signal
-  } = options;
-  const detailIndent = `${indent}  `;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
-  if (turn.promptPreview) {
-    lines.push(
-      `${detailIndent}- prompt: "${truncateText(collapseToSingleLine(turn.promptPreview), { limit, signal })}"`
-    );
-  }
-  if (turn.responsePreview) {
-    lines.push(
-      `${detailIndent}- response: "${truncateText(collapseToSingleLine(turn.responsePreview), { limit, signal })}"`
-    );
-  }
-  if (turn.insight && turn.insight.length > 0) {
-    lines.push(`${detailIndent}- insight:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      turn.insight.map((line) => truncateText(line, { limit, signal }))
-    );
-  }
-  if (mode === "unified" && turn.filesRead && turn.filesRead.length > 0) {
-    lines.push(`${detailIndent}- files_read:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      truncateLines(renderFileTree(turn.filesRead).split("\n"), { limit, signal })
-    );
-  }
-  if (mode === "unified" && turn.filesModified && turn.filesModified.length > 0) {
-    lines.push(`${detailIndent}- files_modified:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      truncateLines(renderFileTree(turn.filesModified).split("\n"), {
-        limit,
-        signal
-      })
-    );
-  }
-  const childBlock = includeChildren ? renderTurnChildren(turn, depth, { ...options, mode }) : "";
-  if (childBlock) {
-    lines.push(childBlock);
-  }
-  return lines.join("\n");
-}
-function formatObservationLabel(observation, { indent = "" } = {}, header) {
+function formatObservationLabel(observation, indent, header) {
   return `${indent}- [O${observation.id}] ${header ?? observation.title}`;
 }
 var OBSERVATION_BODY_INDENT = "    ";
@@ -36712,69 +37677,147 @@ function projectObservation(observation) {
     observation.toolResult
   );
 }
-function formatObservationCollapsedWithMode(observation, options = {}) {
-  const { indent = "", signal } = options;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
+function formatObservationBlock(observation, { indent = "" }) {
   const projection = projectObservation(observation);
   const headerIsLabel = projection !== null && observation.title === observation.toolName;
   const lines = [
     formatObservationLabel(
       observation,
-      options,
-      headerIsLabel ? truncateCallHeader(projection.header, { limit, signal }) : void 0
+      indent,
+      headerIsLabel ? projection.header : void 0
     )
   ];
   if (observation.content) {
-    lines.push(
-      `${indent}  - desc: ${truncateText(observation.content, { limit, signal })}`
-    );
+    lines.push(`${indent}  - desc: ${observation.content}`);
   }
   const toolLine = projection ? headerIsLabel ? null : projection.header : observation.toolName && observation.toolName !== observation.title ? observation.toolName : null;
   if (toolLine) {
-    lines.push(
-      `${indent}  - tool: \u{1F527} ${truncateCallHeader(toolLine, { limit, signal })}`
-    );
+    lines.push(`${indent}  - tool: \u{1F527} ${toolLine}`);
   }
   if (projection) {
-    for (const line of truncateLines(projection.body, {
-      limit,
-      signal,
-      lineLimit: limit
-    })) {
+    for (const line of projection.body) {
+      if (line.trim() === "") {
+        continue;
+      }
       lines.push(`${indent}${OBSERVATION_BODY_INDENT}${line}`);
     }
   }
   return lines.join("\n");
 }
-function formatObservationExpandedWithMode(observation, options = {}) {
-  const mode = options.mode ?? "legacy";
-  const lines = [formatObservationCollapsedWithMode(observation, { ...options, mode })];
+function formatToolCallBlock(toolCall, { indent = "    " }) {
+  const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
+  const suffix = keyParam ? ` ${keyParam}` : "";
+  const detailIndent = `${indent}  `;
+  const lines = [`${indent}- \u{1F527} ${toolCall.name}${suffix}`];
+  if (toolCall.input !== void 0) {
+    lines.push(`${detailIndent}- in: ${JSON.stringify(toolCall.input)}`);
+  }
+  if (toolCall.result) {
+    lines.push(`${detailIndent}- out: ${toolCall.result}`);
+  }
   return lines.join("\n");
 }
-function renderNode(node, options) {
-  const mode = options.mode ?? "unified";
-  const effectiveOptions = options;
+function renderTurnChildren(turn, options) {
+  const { indent = "  ", sessionId } = options;
+  const childIndent = `${indent}  `;
+  const childLines = [];
+  if (turn.observations && turn.observations.length > 0) {
+    for (const observation of turn.observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
+      childLines.push(
+        formatObservationBlock(observation, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber
+        })
+      );
+    }
+    if (turn.observations.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.observations.length - DEFAULT_PREVIEW_COUNT} more`);
+    }
+    return childLines.join("\n");
+  }
+  if (turn.toolCalls && turn.toolCalls.length > 0) {
+    for (const toolCall of turn.toolCalls.slice(0, DEFAULT_PREVIEW_COUNT)) {
+      childLines.push(
+        formatToolCallBlock(toolCall, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber
+        })
+      );
+    }
+    if (turn.toolCalls.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.toolCalls.length - DEFAULT_PREVIEW_COUNT} more`);
+    }
+  }
+  return childLines.join("\n");
+}
+function formatTurnBody(turn, fields, options) {
+  const { indent = "  " } = options;
+  const lines = [formatTurnLabel(turn, fields, options)];
+  if (fields.has("content") && turn.content) {
+    lines.push(`${indent}  - desc: ${turn.content}`);
+  }
+  const titleSelected = fields.has("title") && turn.title !== null;
+  if (fields.has("prompt") && titleSelected && turn.promptPreview) {
+    lines.push(
+      `${indent}  - prompt: "${collapseToSingleLine(turn.promptPreview)}"`
+    );
+  }
+  if (fields.has("response") && turn.responsePreview) {
+    lines.push(
+      `${indent}  - response: "${collapseToSingleLine(turn.responsePreview)}"`
+    );
+  }
+  if (fields.has("insight") && turn.insight && turn.insight.length > 0) {
+    lines.push(`${indent}  - insight:`);
+    pushBullets(lines, `${indent}    `, turn.insight);
+  }
+  if (fields.has("files") && turn.filesRead && turn.filesRead.length > 0) {
+    lines.push(`${indent}  - files_read:`);
+    pushBullets(lines, `${indent}    `, renderFileTree(turn.filesRead).split("\n"));
+  }
+  if (fields.has("files") && turn.filesModified && turn.filesModified.length > 0) {
+    lines.push(`${indent}  - files_modified:`);
+    pushBullets(
+      lines,
+      `${indent}    `,
+      renderFileTree(turn.filesModified).split("\n")
+    );
+  }
+  if (fields.has("observations")) {
+    const childBlock = renderTurnChildren(turn, options);
+    if (childBlock) {
+      lines.push(childBlock);
+    }
+  }
+  return lines.join("\n");
+}
+function renderNode(node, options = {}) {
+  const budget = options.turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET;
   switch (node.type) {
     case "session":
-      return effectiveOptions.depth === "collapsed" ? formatSessionCollapsedWithMode(
-        node.value,
-        mode,
-        effectiveOptions.truncate,
-        effectiveOptions.truncateCap,
-        effectiveOptions.signal
-      ) : formatSessionExpandedWithMode(
-        node.value,
-        mode,
-        effectiveOptions.truncate,
-        effectiveOptions.truncateCap,
-        effectiveOptions.signal
+      return capRenderToTokenBudget(
+        formatSessionBlock(node.value, options),
+        budget,
+        options.signal
       );
-    case "turn":
-      return effectiveOptions.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatTurnExpandedWithMode(node.value, { ...effectiveOptions, mode });
+    case "turn": {
+      const fields = options.fields ?? DEFAULT_TURN_RENDER_FIELDS;
+      return capRenderToTokenBudget(
+        formatTurnBody(node.value, fields, options),
+        budget,
+        options.signal
+      );
+    }
     case "observation":
-      return effectiveOptions.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatObservationExpandedWithMode(node.value, { ...effectiveOptions, mode });
+      return capRenderToTokenBudget(
+        formatObservationBlock(node.value, options),
+        budget,
+        options.signal
+      );
     case "toolCall":
-      return effectiveOptions.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatToolCallExpandedWithMode(node.value, { ...effectiveOptions, mode });
+      return formatToolCallBlock(node.value, options);
   }
 }
 
@@ -36890,12 +37933,12 @@ function renderSegmentHeaderLines(input) {
   ];
   if (segment.content) {
     lines.push(
-      `  - desc: ${truncateText(segment.content, { limit: input.truncate })}`
+      `  - desc: ${truncateText(segment.content, { limit: input.charLimit })}`
     );
   }
   if (segment.insight) {
     lines.push(
-      `  - insight: ${truncateText(segment.insight, { limit: input.truncate })}`
+      `  - insight: ${truncateText(segment.insight, { limit: input.charLimit })}`
     );
   }
   const trace = formatPhaseTrace(input.phaseTrace);
@@ -36906,6 +37949,275 @@ function renderSegmentHeaderLines(input) {
     lines.push(`  - anchors: ${input.anchorRefs.join(", ")}`);
   }
   return lines;
+}
+
+// src/mcp/segment-card.ts
+init_segments();
+init_type_vocabulary();
+var SEGMENT_CARD_DEFAULT_PAGE_BUDGET = 1e3;
+function chronologicalSegmentMembers(db, segment, eraCutoffEpoch) {
+  const members = rankSegmentMembers(db, segment.id, void 0, eraCutoffEpoch);
+  return [...members].sort((left, right) => {
+    if (left.createdAtEpoch !== right.createdAtEpoch) {
+      return left.createdAtEpoch - right.createdAtEpoch;
+    }
+    return left.turnId - right.turnId;
+  });
+}
+function resolveSegmentMembersByOrdinal(db, segment, eraCutoffEpoch, ordinals) {
+  const chronological = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  if (ordinals.length === 0) {
+    return chronological;
+  }
+  const wanted = new Set(ordinals);
+  return chronological.filter((_member, index) => wanted.has(index + 1));
+}
+function elideSegmentCardFields(fields, budgetTokens) {
+  const rowTokens = fields.map((entry) => entry.rows.map((row) => estimateTokens(row)));
+  const dropped = fields.map(() => 0);
+  let total = rowTokens.reduce((sum, tokens) => sum + tokens.reduce((s, t) => s + t, 0), 0);
+  while (total > budgetTokens) {
+    let largestIndex = -1;
+    let largestTokens = -1;
+    for (let index = 0; index < fields.length; index += 1) {
+      const remainingStart = dropped[index];
+      if (remainingStart >= rowTokens[index].length) {
+        continue;
+      }
+      const remainingTokens = rowTokens[index].slice(remainingStart).reduce((s, t) => s + t, 0);
+      if (remainingTokens > largestTokens) {
+        largestTokens = remainingTokens;
+        largestIndex = index;
+      }
+    }
+    if (largestIndex === -1) {
+      break;
+    }
+    total -= rowTokens[largestIndex][dropped[largestIndex]];
+    dropped[largestIndex] += 1;
+  }
+  return fields.map((entry, index) => ({
+    field: entry.field,
+    totalRows: entry.rows.length,
+    keptRows: entry.rows.slice(dropped[index]),
+    droppedCount: dropped[index]
+  }));
+}
+var WORKING_STATE_PROPERTY = {
+  goal: "goal",
+  constraints: "constraints",
+  decisions: "decisions",
+  done: "done",
+  next_steps: "nextSteps",
+  reference: "reference"
+};
+function segmentWorkingStateRows(segment) {
+  return SEGMENT_WORKING_STATE_FIELDS.map((field) => ({
+    field,
+    rows: splitBulletField(segment[WORKING_STATE_PROPERTY[field]])
+  }));
+}
+function summaryFieldRows(field, value) {
+  return { field, rows: value ? [value] : [] };
+}
+function renderElidedField(entry) {
+  const lines = [`  - ${entry.field}: ${entry.totalRows} ${entry.totalRows === 1 ? "row" : "rows"}`];
+  if (entry.droppedCount > 0) {
+    lines.push(`    - \u2026 +${entry.droppedCount} earlier`);
+  }
+  for (const row of entry.keptRows) {
+    lines.push(`    - ${row}`);
+  }
+  return lines;
+}
+function buildAttachedSessionRows(db, segment, members) {
+  const membersBySession = /* @__PURE__ */ new Map();
+  for (const member of members) {
+    const list = membersBySession.get(member.sessionId) ?? [];
+    list.push(member);
+    membersBySession.set(member.sessionId, list);
+  }
+  const attachedSessionIds = getAttachedSessionIds(db, segment.id);
+  const rows = [];
+  for (const sessionId of attachedSessionIds) {
+    const session = getSession(db, sessionId);
+    if (!session) {
+      continue;
+    }
+    const sessionMembers = membersBySession.get(sessionId) ?? [];
+    const consultedOnly = sessionMembers.length === 0;
+    const lastActiveEpoch = consultedOnly ? session.updatedAtEpoch ?? session.createdAtEpoch : Math.max(...sessionMembers.map((member) => member.createdAtEpoch));
+    rows.push({
+      sessionId,
+      title: session.title,
+      memberCount: sessionMembers.length,
+      lastActiveEpoch,
+      consultedOnly
+    });
+  }
+  return rows;
+}
+function maintenanceTurnsAgo(db, segment, attachedSessionIds) {
+  return attachedSessionIds.reduce(
+    (max, sessionId) => Math.max(max, countTurnsSince(db, sessionId, segment.updatedAtEpoch)),
+    0
+  );
+}
+var MAX_ATTACHED_SESSION_ROWS = DEFAULT_PREVIEW_COUNT;
+function renderSegmentCard(db, segmentId, options) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return "Segment not found.";
+  }
+  return renderSegmentCardRecord(db, segment, options);
+}
+function renderSegmentCardRecord(db, segment, options) {
+  const eraCutoffEpoch = options.eraCutoffEpoch ?? null;
+  const pageBudget = options.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
+  const page = Math.max(1, options.page ?? 1);
+  const elides = page <= 1;
+  const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  const facetCounts = computeSegmentMemberFacetCounts(db, segment.id, eraCutoffEpoch);
+  const attachedSessionIds = getAttachedSessionIds(db, segment.id);
+  const sessionRows = buildAttachedSessionRows(db, segment, members);
+  const maintenance = maintenanceTurnsAgo(db, segment, attachedSessionIds);
+  const headerLines = [];
+  const metaParts = [
+    `[${segment.status}]`,
+    `${members.length} ${members.length === 1 ? "turn" : "turns"}`,
+    `created ${formatEpoch(segment.createdAtEpoch)}`,
+    `last edit ${formatEpoch(segment.updatedAtEpoch)}`,
+    // Ticket 12's nudge half (T825 "每 20 轮还没更新，提醒一次") retired
+    // (ticket 13, spec "节奏与建段指导"): this header only ever reached a
+    // session with the card already in view (SessionStart, or `recall` on an
+    // ATTACHED segment) — silent for exactly the session that most needs the
+    // reminder, the one that has never attached anything. The universal
+    // 20-turn `remember` check (hooks/note-reminder.ts's
+    // `renderRememberReminder`, rendered on every UserPromptSubmit) carries
+    // that function now; this line states only the bare fact.
+    `maintenance ${maintenance} ${maintenance === 1 ? "turn" : "turns"} ago`
+  ];
+  headerLines.push(`  ${metaParts.join(" \xB7 ")}`);
+  if (facetCounts.tags.length > 0) {
+    headerLines.push(
+      `  - tags: ${facetCounts.tags.map((entry) => `#${entry.word}\xD7${entry.count}`).join(" ")}`
+    );
+  }
+  if (facetCounts.type.length > 0) {
+    headerLines.push(
+      `  - type: ${facetCounts.type.map((entry) => `${typeWordGlyph(entry.word)}${entry.word}\xD7${entry.count}`).join(" ")}`
+    );
+  }
+  const sessionsByRecency = [...sessionRows].sort(
+    (left, right) => right.lastActiveEpoch - left.lastActiveEpoch
+  );
+  const visibleSessionRows = elides ? sessionsByRecency.slice(0, MAX_ATTACHED_SESSION_ROWS) : sessionsByRecency;
+  const overflowSessionCount = sessionsByRecency.length - visibleSessionRows.length;
+  headerLines.push(`  - sessions: ${sessionRows.length === 0 ? "(none attached)" : ""}`.trimEnd());
+  for (const row of visibleSessionRows) {
+    const label = `S${row.sessionId}${row.title ? ` "${row.title}"` : ""}`;
+    const stats = row.consultedOnly ? "consulted only" : `${row.memberCount} ${row.memberCount === 1 ? "turn" : "turns"}`;
+    headerLines.push(`    - ${label}: ${stats}, last active ${formatEpoch(row.lastActiveEpoch)}`);
+  }
+  if (overflowSessionCount > 0) {
+    headerLines.push(
+      `    - \u2026 +${overflowSessionCount} more ${overflowSessionCount === 1 ? "session" : "sessions"}`
+    );
+  }
+  const cardFieldRows = [
+    summaryFieldRows("title", segment.title),
+    summaryFieldRows("content", segment.content),
+    summaryFieldRows("insight", segment.insight),
+    ...segmentWorkingStateRows(segment)
+  ];
+  const headerTokens = estimateTokens(headerLines.join("\n"));
+  const fieldsBudget = Math.max(0, pageBudget - headerTokens);
+  const elidedFields = elides ? elideSegmentCardFields(cardFieldRows, fieldsBudget) : cardFieldRows.map((entry) => ({
+    field: entry.field,
+    totalRows: entry.rows.length,
+    keptRows: entry.rows,
+    droppedCount: 0
+  }));
+  if (elides && (elidedFields.some((entry) => entry.droppedCount > 0) || overflowSessionCount > 0) && options.signal) {
+    options.signal.truncated = true;
+  }
+  const fieldByKey = new Map(elidedFields.map((entry) => [entry.field, entry]));
+  const titleField = fieldByKey.get("title");
+  const contentField = fieldByKey.get("content");
+  const insightField = fieldByKey.get("insight");
+  const titleText = titleField.keptRows[0];
+  const lines = [`- [E${segment.id}]${titleText ? ` ${titleText}` : ""}`];
+  lines.push(...headerLines);
+  const contentText = contentField.keptRows[0];
+  if (contentText) {
+    lines.push(`  - desc: ${contentText}`);
+  }
+  const insightText = insightField.keptRows[0];
+  if (insightText) {
+    lines.push(`  - insight: ${insightText}`);
+  }
+  for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+    lines.push(...renderElidedField(fieldByKey.get(field)));
+  }
+  if (!elides) {
+    lines.push(`  - member index (event order):`);
+    if (members.length === 0) {
+      lines.push(`    - (no members)`);
+    }
+    for (const [index, member] of members.entries()) {
+      const turn = getTurnById(db, member.turnId);
+      const title = turn?.title ?? turn?.userPrompt ?? "untitled";
+      lines.push(`    - ${index + 1}. S${member.sessionId}/T${member.promptNumber} "${title}"`);
+    }
+  }
+  return lines.join("\n");
+}
+function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return "Segment not found.";
+  }
+  const eraCutoffEpoch = options.eraCutoffEpoch ?? null;
+  const resolved = resolveSegmentMembersByOrdinal(db, segment, eraCutoffEpoch, ordinals);
+  if (resolved.length === 0) {
+    return ordinals.length === 0 ? "(no members)" : "Segment member not found.";
+  }
+  const chronological = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  const ordinalByTurnId = new Map(chronological.map((member, index) => [member.turnId, index + 1]));
+  const lines = [];
+  for (const member of resolved) {
+    const turn = getTurnById(db, member.turnId);
+    if (!turn) {
+      continue;
+    }
+    const view = {
+      id: turn.id,
+      promptNumber: turn.promptNumber,
+      transcriptLineStart: turn.transcriptLineStart,
+      title: turn.title,
+      content: turn.content,
+      status: turn.status,
+      promptPreview: turn.userPrompt,
+      responsePreview: turn.assistantResponse,
+      insight: turn.insight ? turn.insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, "")) : [],
+      filesRead: turn.filesRead,
+      filesModified: turn.filesModified,
+      observationCount: 0
+    };
+    const ordinal = ordinalByTurnId.get(member.turnId);
+    const rendered = renderNode(
+      { type: "turn", value: view },
+      {
+        fields: options.fields,
+        sessionId: member.sessionId,
+        includeDbTurnIds: options.includeDbTurnIds,
+        turnBudget: options.turnBudget,
+        signal: options.signal
+      }
+    );
+    lines.push(ordinal !== void 0 ? `  \u27E8E${segmentId}/T${ordinal}\u27E9 ${rendered.trimStart()}` : rendered);
+  }
+  return lines.join("\n");
 }
 
 // src/mcp/selectors.ts
@@ -36931,21 +38243,6 @@ function expandNumericSelector(value) {
   return values;
 }
 
-// src/mcp/turn-pointers.ts
-var TURN_POINTER_PATTERN = /\[T(\d+)\]/g;
-function resolveTurnPointers(db, sessionId, text) {
-  if (!text || !text.includes("[T")) {
-    return text;
-  }
-  return text.replace(TURN_POINTER_PATTERN, (literal2, idDigits) => {
-    const turn = getTurnById(db, Number.parseInt(idDigits, 10));
-    if (!turn || turn.sessionId !== sessionId || turn.status === "undone") {
-      return literal2;
-    }
-    return `[S${sessionId}/T${turn.promptNumber}] "${turn.title ?? "untitled"}"`;
-  });
-}
-
 // src/mcp/recall.ts
 var CHILD_PREVIEW_SIZE = 5;
 function splitInsight(insight) {
@@ -36954,75 +38251,16 @@ function splitInsight(insight) {
   }
   return insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
 }
-function buildSessionSummaryFields(db, session) {
-  return {
-    content: session.content,
-    insight: splitInsight(session.insight),
-    nextSteps: session.nextSteps,
-    decision: resolveTurnPointers(db, session.id, session.decision),
-    done: resolveTurnPointers(db, session.id, session.done),
-    reference: session.reference
-  };
+function buildSessionSummaryFields(session, eraCutoffEpoch = null) {
+  if (isSegmentEra(session.createdAtEpoch, eraCutoffEpoch)) {
+    return { content: null };
+  }
+  return { content: session.content };
 }
 function formatParameterError(message) {
   return `Parameter error: ${message}`;
 }
-function parseTimeInput(time3) {
-  if (!time3) {
-    return {};
-  }
-  const trimmed = time3.trim();
-  if (!trimmed) {
-    return {};
-  }
-  const rangeMatch = trimmed.match(
-    /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/
-  );
-  if (rangeMatch) {
-    const start = parseUtcDate(rangeMatch[1]);
-    const end = parseUtcDate(rangeMatch[2]);
-    if (start === null || end === null) {
-      return { error: `invalid time selector "${time3}"` };
-    }
-    return {
-      range: {
-        after: start,
-        before: end + 86399
-      }
-    };
-  }
-  const relativeMatch = trimmed.match(/^-([0-9]+)([dw])$/);
-  if (relativeMatch) {
-    const amount = Number(relativeMatch[1]);
-    const unit = relativeMatch[2];
-    const secondsPerUnit = unit === "d" ? 86400 : 7 * 86400;
-    return {
-      range: {
-        after: Math.floor(Date.now() / 1e3) - amount * secondsPerUnit
-      }
-    };
-  }
-  const dateEpoch = parseUtcDate(trimmed);
-  if (dateEpoch !== null) {
-    return {
-      range: {
-        after: dateEpoch,
-        before: dateEpoch + 86399
-      }
-    };
-  }
-  return { error: `invalid time selector "${time3}"` };
-}
-function parseUtcDate(value) {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) {
-    return null;
-  }
-  const epoch = Math.floor(
-    Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) / 1e3
-  );
-  return Number.isNaN(epoch) ? null : epoch;
-}
+var ID_SELECTOR_GRAMMAR_HINT = 'each item must be one address: "S<n>", "S<n>/T<m>" (also T*, Ta..b), "E<n>" (also E*, Ea..b), "E<n>/T<m>" (also T*, Ta..b), "T<n>" (global), "O<n>", "S<n>/T<m>/O*", or "S<n>/T*/O*" \u2014 every item in the list must be the SAME kind.';
 function parseRoutedId(value) {
   const trimmed = value.trim();
   const sessionObservationListMatch = /^S(\d+)\/T\*\/O\*$/i.exec(trimmed);
@@ -37059,6 +38297,18 @@ function parseRoutedId(value) {
       observationId: Number(observationMatch[1])
     };
   }
+  const segmentMemberMatch = /^E(\d+)\/T(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (segmentMemberMatch) {
+    const ordinals = expandNumericSelector(segmentMemberMatch[2]);
+    if (ordinals === null) {
+      return null;
+    }
+    return {
+      kind: "segment-members",
+      segmentId: Number(segmentMemberMatch[1]),
+      ordinals
+    };
+  }
   const segmentMatch = /^E(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
   if (segmentMatch) {
     const segmentIds = expandNumericSelector(segmentMatch[1]);
@@ -37087,57 +38337,6 @@ function parseRoutedId(value) {
   }
   return null;
 }
-function resolveTimeRange(time3) {
-  const parsedTime = parseTimeInput(time3);
-  if (parsedTime.error) {
-    return { error: parsedTime.error };
-  }
-  return {
-    after: parsedTime.range?.after,
-    before: parsedTime.range?.before
-  };
-}
-function parseQueryFilters(query) {
-  if (!query) {
-    return {};
-  }
-  const filters = {};
-  const textTerms = [];
-  for (const token of query.trim().split(/\s+/).filter(Boolean)) {
-    if (token.startsWith("type:")) {
-      filters.type = token.slice("type:".length);
-      continue;
-    }
-    if (token.startsWith("file:")) {
-      filters.file = token.slice("file:".length);
-      continue;
-    }
-    if (token.startsWith("tag:")) {
-      const tag = token.slice("tag:".length);
-      if (tag) {
-        filters.tag = tag;
-      }
-      continue;
-    }
-    if (token.startsWith("project:")) {
-      filters.project = token.slice("project:".length);
-      continue;
-    }
-    if (token.startsWith("session:")) {
-      const raw = token.slice("session:".length).replace(/^[Ss]/, "");
-      const sessionId = Number(raw);
-      if (Number.isInteger(sessionId) && sessionId > 0) {
-        filters.session = sessionId;
-      }
-      continue;
-    }
-    textTerms.push(token);
-  }
-  if (textTerms.length > 0) {
-    filters.text = textTerms.join(" ");
-  }
-  return filters;
-}
 function buildSessionView(db, session, eraCutoffEpoch = null) {
   const turns = getTurnsForSession(db, session.id).map(
     (turn) => buildTurnView(db, turn, eraCutoffEpoch)
@@ -37147,7 +38346,7 @@ function buildSessionView(db, session, eraCutoffEpoch = null) {
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    ...buildSessionSummaryFields(db, session),
+    ...buildSessionSummaryFields(session, eraCutoffEpoch),
     turnCount: turns.length,
     observationCount: turns.reduce(
       (sum, turn) => sum + (turn.observationCount ?? 0),
@@ -37157,7 +38356,7 @@ function buildSessionView(db, session, eraCutoffEpoch = null) {
     turns
   };
 }
-function buildSessionSummary(db, sessionId) {
+function buildSessionSummary(db, sessionId, eraCutoffEpoch = null) {
   const session = getSession(db, sessionId);
   if (!session) {
     return null;
@@ -37176,7 +38375,7 @@ function buildSessionSummary(db, sessionId) {
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    ...buildSessionSummaryFields(db, session),
+    ...buildSessionSummaryFields(session, eraCutoffEpoch),
     turnCount,
     observationCount,
     jsonlPath: void 0
@@ -37202,7 +38401,8 @@ function buildTurnView(db, turn, eraCutoffEpoch = null) {
     filesModified: turn.filesModified,
     observations: observations.map(
       (observation) => buildObservationView(observation, turn.createdAtEpoch, eraCutoffEpoch)
-    )
+    ),
+    wasRolledBack: turn.wasRolledBack
   };
 }
 function previewItems(items, size = 5) {
@@ -37245,54 +38445,44 @@ function deriveBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function renderSession(db, session, depth, truncate, turnSelector, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
-  const view = depth === "expanded" ? buildSessionView(db, session, eraCutoffEpoch) : buildSessionSummary(db, session.id) ?? buildSessionView(db, session, eraCutoffEpoch);
+function renderSession(db, session, fields, turnSelector, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget) {
+  const view = buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
     renderNode(
       { type: "session", value: view },
-      {
-        depth: depth === "collapsed" ? "collapsed" : "expanded",
-        mode: "unified",
-        truncate,
-        includeDbTurnIds,
-        truncateCap,
-        signal
-      }
+      { includeRawPointer: true, turnBudget, signal }
     )
   ];
   if (breadcrumb !== null) {
     lines.push(`  ${breadcrumb}`);
   }
-  if (depth === "collapsed") {
-    return lines.join("\n");
-  }
   const turns = getTurnsForSession(db, session.id).filter(
     (turn) => turnSelector ? turnSelector.has(turn.promptNumber) : true
   );
   const preview = previewItems(turns, CHILD_PREVIEW_SIZE);
+  const turnIds = [];
   for (const item of preview.items) {
     const turnView = buildTurnView(db, item, eraCutoffEpoch);
     const turnLines = renderNode(
       { type: "turn", value: turnView },
       {
-        depth: "collapsed",
-        mode: "unified",
+        fields,
         sessionId: session.id,
-        truncate,
         includeDbTurnIds,
-        truncateCap,
+        turnBudget,
         signal
       }
     );
     lines.push(turnLines);
+    turnIds.push(item.id);
   }
   if (preview.omittedCount > 0) {
     lines.push(`  +${preview.omittedCount} more`);
   }
-  return lines.join("\n");
+  return { text: lines.join("\n"), turnIds };
 }
-function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderTurnScope(db, turns, fields, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const turn of turns) {
@@ -37304,15 +38494,12 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateC
     (session) => session !== null
   );
   for (const session of sessions) {
-    const view = buildSessionSummary(db, session.id);
+    const view = buildSessionSummary(db, session.id, eraCutoffEpoch);
     if (!view) {
       continue;
     }
     lines.push(
-      renderNode(
-        { type: "session", value: view },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal }
-      )
+      renderNode({ type: "session", value: view }, { turnBudget, signal })
     );
     const sessionTurns = grouped.get(session.id) ?? [];
     for (const item of sessionTurns) {
@@ -37321,13 +38508,11 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateC
         renderNode(
           { type: "turn", value: turnView },
           {
-            depth,
-            mode: "unified",
+            fields,
             sessionId: session.id,
-            truncate,
             includeDbTurnIds,
-            truncateCap,
-            signal
+            signal,
+            turnBudget
           }
         )
       );
@@ -37335,7 +38520,7 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateC
   }
   return lines.join("\n");
 }
-function renderObservationScope(db, observations, depth, includeParents, truncate, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderObservationScope(db, observations, includeParents, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const row of observations) {
@@ -37360,13 +38545,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
       lines.push(
         renderNode(
           { type: "observation", value: observationView },
-          {
-            depth: depth === "collapsed" ? "collapsed" : "expanded",
-            mode: "unified",
-            truncate,
-            truncateCap,
-            signal
-          }
+          { turnBudget, signal }
         )
       );
     }
@@ -37376,15 +38555,12 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
     (session) => session !== null
   );
   for (const session of sessions) {
-    const sessionView = buildSessionSummary(db, session.id);
+    const sessionView = buildSessionSummary(db, session.id, eraCutoffEpoch);
     if (!sessionView) {
       continue;
     }
     lines.push(
-      renderNode(
-        { type: "session", value: sessionView },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal }
-      )
+      renderNode({ type: "session", value: sessionView }, { turnBudget, signal })
     );
     const turnMap = grouped.get(session.id) ?? /* @__PURE__ */ new Map();
     const turns = getTurnsForSession(db, session.id).filter(
@@ -37396,12 +38572,9 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
         renderNode(
           { type: "turn", value: turnView },
           {
-            depth: "collapsed",
-            mode: "unified",
             sessionId: session.id,
-            truncate,
             includeDbTurnIds,
-            truncateCap,
+            turnBudget,
             signal
           }
         )
@@ -37422,13 +38595,10 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
           renderNode(
             { type: "observation", value: observationView },
             {
-              depth: depth === "collapsed" ? "collapsed" : "expanded",
-              mode: "unified",
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate,
-              truncateCap,
+              turnBudget,
               signal
             }
           )
@@ -37458,36 +38628,26 @@ function buildOwnedObservationView(db, observation, eraCutoffEpoch) {
     eraCutoffEpoch
   );
 }
-function renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderSessionDetail(db, sessionId, fields, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget) {
   const session = getSession(db, sessionId);
   return session ? renderSession(
     db,
     session,
-    depth,
-    truncate,
+    fields,
     void 0,
     includeDbTurnIds,
-    truncateCap,
     eraCutoffEpoch,
-    signal
-  ) : "Session not found.";
+    signal,
+    turnBudget
+  ) : { text: "Session not found.", turnIds: [] };
 }
-function renderObservationDetail(db, observationId, depth, truncate, truncateCap, eraCutoffEpoch = null, signal) {
+function renderObservationDetail(db, observationId, eraCutoffEpoch = null, signal, turnBudget) {
   const observation = getObservation(db, observationId);
   if (!observation || observation.excludedFromExtraction !== 0) {
     return "Observation not found.";
   }
   const view = buildOwnedObservationView(db, observation, eraCutoffEpoch);
-  return renderNode(
-    { type: "observation", value: view },
-    {
-      depth: depth === "collapsed" ? "collapsed" : "expanded",
-      mode: "unified",
-      truncate,
-      truncateCap,
-      signal
-    }
-  );
+  return renderNode({ type: "observation", value: view }, { turnBudget, signal });
 }
 function buildSegmentFacts(db, segment, eraCutoffEpoch = null) {
   const members = rankSegmentMembers(db, segment.id, void 0, eraCutoffEpoch);
@@ -37521,7 +38681,7 @@ function buildSegmentFacts(db, segment, eraCutoffEpoch = null) {
     members
   };
 }
-function renderSegmentSummary(db, segmentId, truncate, eraCutoffEpoch = null) {
+function renderSegmentSummary(db, segmentId, turnBudget, eraCutoffEpoch = null) {
   const segment = getSegment(db, segmentId);
   if (!segment) {
     return null;
@@ -37533,54 +38693,8 @@ function renderSegmentSummary(db, segmentId, truncate, eraCutoffEpoch = null) {
     dominantType: facts.dominantType,
     phaseTrace: facts.phaseTrace,
     anchorRefs: facts.anchorRefs,
-    truncate: truncate ?? DEFAULT_TRUNCATE
+    charLimit: Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN)
   }).join("\n");
-}
-function renderSegmentDetail(db, segmentId, depth, pageSize, truncate, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
-  const segment = getSegment(db, segmentId);
-  if (!segment) {
-    return "Segment not found.";
-  }
-  const facts = buildSegmentFacts(db, segment, eraCutoffEpoch);
-  const lines = renderSegmentHeaderLines({
-    segment,
-    memberCount: facts.memberCount,
-    dominantType: facts.dominantType,
-    phaseTrace: facts.phaseTrace,
-    anchorRefs: facts.anchorRefs,
-    truncate: truncate ?? DEFAULT_TRUNCATE
-  });
-  const shown = facts.members.slice(0, Math.max(0, pageSize));
-  if (facts.members.length > 0) {
-    lines.push(
-      `  - members (anchors first, then derived rank): ${shown.length}/${facts.members.length}`
-    );
-  }
-  for (const member of shown) {
-    const turn = getTurnById(db, member.turnId);
-    if (!turn) {
-      continue;
-    }
-    const rendered = renderNode(
-      { type: "turn", value: buildTurnView(db, turn, eraCutoffEpoch) },
-      {
-        depth,
-        mode: "unified",
-        sessionId: member.sessionId,
-        truncate,
-        includeDbTurnIds,
-        truncateCap,
-        signal
-      }
-    );
-    lines.push(
-      member.anchorPosition === null || !rendered.startsWith("  - ") ? rendered : `  \u2693${member.anchorPosition} ${rendered.slice(4)}`
-    );
-  }
-  if (facts.members.length > shown.length) {
-    lines.push(`  +${facts.members.length - shown.length} more`);
-  }
-  return lines.join("\n");
 }
 function listSegmentIds(db, segmentIds) {
   if (segmentIds && segmentIds.length === 1) {
@@ -37591,7 +38705,23 @@ function listSegmentIds(db, segmentIds) {
   }
   return db.query("SELECT id FROM segments ORDER BY id DESC").all().map((row) => row.id);
 }
-function listSessionIds(db, sessionIds, after, before) {
+function listSessionIds(db, sessionIds, after, before, filter) {
+  const hasExtraFilter = filter !== void 0 && (filter.type !== void 0 || filter.tag !== void 0 || filter.file !== void 0 || filter.sessionId !== void 0);
+  if (hasExtraFilter) {
+    const matched = new Set(
+      searchMemory(db, {
+        scope: "sessions",
+        type: filter.type,
+        tag: filter.tag,
+        file: filter.file,
+        sessionId: filter.sessionId,
+        after,
+        before
+      }).map((result) => result.sourceId)
+    );
+    const candidates = sessionIds && sessionIds.length > 0 ? sessionIds : [...matched];
+    return candidates.filter((sessionId) => matched.has(sessionId));
+  }
   const sessions = sessionIds && sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
     (session) => session !== null
   ) : db.query(
@@ -37619,10 +38749,105 @@ function applyTurnSelector(db, sessionId, promptNumbers) {
   const selected = new Set(promptNumbers);
   return turns.filter((turn) => selected.has(turn.promptNumber));
 }
-function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
-  const segmentLines = results.filter((result) => result.layer === "segment").map(
-    (result) => renderSegmentSummary(db, result.sourceId, truncate, eraCutoffEpoch)
-  ).filter((line) => line !== null);
+function extractQueryTerms(query) {
+  return query.trim().split(/\s+/).map((term) => term.replace(/["*]/g, "")).filter(Boolean);
+}
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function boldAllTermOccurrences(text, terms) {
+  const escaped = terms.map(escapeRegExp).filter(Boolean);
+  if (escaped.length === 0) {
+    return text;
+  }
+  const pattern = new RegExp(`(${escaped.join("|")})`, "gi");
+  return text.replace(pattern, "**$1**");
+}
+function boldSearchSnippet(text, terms, windowChars, signal) {
+  if (terms.length === 0) {
+    return truncateText(text, { limit: windowChars, signal });
+  }
+  const lower = text.toLowerCase();
+  let matchStart = -1;
+  let matchLength = 0;
+  for (const term of terms) {
+    if (!term) continue;
+    const idx = lower.indexOf(term.toLowerCase());
+    if (idx !== -1 && (matchStart === -1 || idx < matchStart)) {
+      matchStart = idx;
+      matchLength = term.length;
+    }
+  }
+  if (matchStart === -1) {
+    return truncateText(text, { limit: windowChars, signal });
+  }
+  const halfWindow = Math.max(10, Math.floor(windowChars / 2));
+  const leftStart = Math.max(0, matchStart - halfWindow);
+  const rightEnd = Math.min(text.length, matchStart + matchLength + halfWindow);
+  let left = text.slice(leftStart, matchStart);
+  let right = text.slice(matchStart + matchLength, rightEnd);
+  const matched = text.slice(matchStart, matchStart + matchLength);
+  const leftTruncated = leftStart > 0;
+  const rightTruncated = rightEnd < text.length;
+  if (leftTruncated) {
+    const spaceIdx = left.indexOf(" ");
+    if (spaceIdx !== -1 && spaceIdx <= left.length * 0.2) {
+      left = left.slice(spaceIdx + 1);
+    }
+  }
+  if (rightTruncated) {
+    const spaceIdx = right.lastIndexOf(" ");
+    if (spaceIdx !== -1 && spaceIdx >= right.length * 0.8) {
+      right = right.slice(0, spaceIdx);
+    }
+  }
+  if ((leftTruncated || rightTruncated) && signal) {
+    signal.truncated = true;
+  }
+  const windowText = `${left}${matched}${right}`;
+  const bolded = boldAllTermOccurrences(windowText, terms);
+  return `${leftTruncated ? "\u2026" : ""}${bolded}${rightTruncated ? "\u2026" : ""}`;
+}
+function withBasicSearchSnippet(view, terms, windowChars, signal) {
+  if (terms.length === 0) {
+    return view;
+  }
+  return {
+    ...view,
+    title: view.title ? boldSearchSnippet(view.title, terms, windowChars, signal) : view.title,
+    content: view.content ? boldSearchSnippet(view.content, terms, windowChars, signal) : view.content
+  };
+}
+function withTurnSearchSnippet(view, terms, windowChars, signal) {
+  if (terms.length === 0) {
+    return view;
+  }
+  return {
+    ...view,
+    title: view.title ? boldSearchSnippet(view.title, terms, windowChars, signal) : view.title,
+    content: view.content ? boldSearchSnippet(view.content, terms, windowChars, signal) : view.content,
+    promptPreview: view.promptPreview ? boldSearchSnippet(view.promptPreview, terms, windowChars, signal) : view.promptPreview,
+    responsePreview: view.responsePreview ? boldSearchSnippet(view.responsePreview, terms, windowChars, signal) : view.responsePreview,
+    insight: view.insight?.map((row) => boldSearchSnippet(row, terms, windowChars, signal))
+  };
+}
+function renderGroupedSearchResults(db, results, fields, turnBudget, includeDbTurnIds, eraCutoffEpoch = null, signal, queryText, readerId, now = () => Math.floor(Date.now() / 1e3), sequence = 0) {
+  const terms = queryText ? extractQueryTerms(queryText) : [];
+  const snippetWindow = Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN);
+  const relevanceRank = /* @__PURE__ */ new Map();
+  results.forEach((result, index) => {
+    if (result.turnId !== null && !relevanceRank.has(result.turnId)) {
+      relevanceRank.set(result.turnId, index);
+    }
+  });
+  const grants = [];
+  const segmentLines = results.filter((result) => result.layer === "segment").map((result) => {
+    const line = renderSegmentSummary(db, result.sourceId, turnBudget, eraCutoffEpoch);
+    if (line !== null) {
+      grants.push({ entityType: "segment", entityId: result.sourceId });
+    }
+    return line;
+  }).filter((line) => line !== null);
   const sessionGroups = /* @__PURE__ */ new Map();
   const sessionOrder = [];
   for (const result of results) {
@@ -37659,44 +38884,58 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
     if (!session || !group) {
       return "";
     }
+    grants.push({ entityType: "session", entityId: session.id });
     if (group.sessionHit && group.turnIds.size === 0) {
-      return renderSession(
-        db,
-        session,
-        depth,
-        truncate,
-        void 0,
-        includeDbTurnIds,
-        truncateCap,
-        eraCutoffEpoch,
+      const sessionView2 = withBasicSearchSnippet(
+        buildSessionSummary(db, session.id, eraCutoffEpoch) ?? buildSessionView(db, session, eraCutoffEpoch),
+        terms,
+        snippetWindow,
         signal
       );
+      return renderNode(
+        { type: "session", value: sessionView2 },
+        { turnBudget, signal }
+      );
     }
+    const sessionView = withBasicSearchSnippet(
+      buildSessionSummary(db, session.id, eraCutoffEpoch) ?? buildSessionView(db, session, eraCutoffEpoch),
+      terms,
+      snippetWindow,
+      signal
+    );
     const lines = [
       renderNode(
-        {
-          type: "session",
-          value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session, eraCutoffEpoch)
-        },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal }
+        { type: "session", value: sessionView },
+        { turnBudget, signal }
       )
     ];
     const turns = getTurnsForSession(db, session.id).filter(
       (turn) => group.turnIds.has(turn.id) || group.observationIdsByTurnId.has(turn.id)
-    );
+    ).sort((left, right) => {
+      const leftRank = relevanceRank.get(left.id) ?? Number.POSITIVE_INFINITY;
+      const rightRank = relevanceRank.get(right.id) ?? Number.POSITIVE_INFINITY;
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      return left.promptNumber - right.promptNumber;
+    });
     for (const turn of turns) {
-      const turnView = buildTurnView(db, turn, eraCutoffEpoch);
-      const turnDepth = group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id) ? "collapsed" : depth;
+      grants.push({ entityType: "turn", entityId: turn.id });
+      const turnView = withTurnSearchSnippet(
+        buildTurnView(db, turn, eraCutoffEpoch),
+        terms,
+        snippetWindow,
+        signal
+      );
+      const turnFields = group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id) ? DEFAULT_TURN_RENDER_FIELDS : fields;
       lines.push(
         renderNode(
           { type: "turn", value: turnView },
           {
-            depth: turnDepth,
-            mode: "unified",
+            fields: turnFields,
             sessionId: session.id,
-            truncate,
             includeDbTurnIds,
-            truncateCap,
+            turnBudget,
             signal
           }
         )
@@ -37707,22 +38946,20 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
         if (!observation) {
           continue;
         }
-        const observationView = buildObservationView(
-          observation,
-          turn.createdAtEpoch,
-          eraCutoffEpoch
+        const observationView = withBasicSearchSnippet(
+          buildObservationView(observation, turn.createdAtEpoch, eraCutoffEpoch),
+          terms,
+          snippetWindow,
+          signal
         );
         lines.push(
           renderNode(
             { type: "observation", value: observationView },
             {
-              depth: depth === "collapsed" ? "collapsed" : "expanded",
-              mode: "unified",
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate,
-              truncateCap,
+              turnBudget,
               signal
             }
           )
@@ -37731,53 +38968,101 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
     }
     return lines.join("\n");
   });
+  if (readerId && grants.length > 0) {
+    recordReadGrants(db, readerId, grants, now(), sequence);
+  }
   return [...segmentLines, ...sessionLines].filter(Boolean).join("\n");
 }
-function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, before, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderRoutedId(db, routed, fields, page, pageSize, after, before, includeDbTurnIds, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, readerId, now = () => Math.floor(Date.now() / 1e3), sequence = 0) {
+  const recordGrants = (entries) => {
+    if (readerId && entries.length > 0) {
+      recordReadGrants(db, readerId, entries, now(), sequence);
+    }
+  };
   if (routed.kind === "sessions") {
     const paged = paginateItems(
-      listSessionIds(db, routed.sessionIds, after, before),
+      listSessionIds(db, routed.sessionIds, after, before, filter),
       page,
       pageSize
     );
+    const rendered = paged.items.map((sessionId) => ({
+      sessionId,
+      ...renderSessionDetail(
+        db,
+        sessionId,
+        fields,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        turnBudget
+      )
+    }));
+    recordGrants(
+      rendered.flatMap((entry) => [
+        { entityType: "session", entityId: entry.sessionId },
+        ...entry.turnIds.map((turnId) => ({ entityType: "turn", entityId: turnId }))
+      ])
+    );
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      paged.items.map(
-        (sessionId) => renderSessionDetail(
-          db,
-          sessionId,
-          depth,
-          truncate,
-          includeDbTurnIds,
-          truncateCap,
-          eraCutoffEpoch,
-          signal
-        )
-      ).join("\n"),
+      rendered.map((entry) => entry.text).join("\n"),
       paged.pageCount
     );
   }
   if (routed.kind === "segments") {
+    if (routed.segmentIds && routed.segmentIds.length === 1) {
+      recordGrants([{ entityType: "segment", entityId: routed.segmentIds[0] }]);
+      return renderSegmentCard(db, routed.segmentIds[0], {
+        pageBudget,
+        page,
+        turnBudget,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal
+      });
+    }
     const paged = paginateItems(
       listSegmentIds(db, routed.segmentIds),
       page,
       pageSize
     );
+    recordGrants(paged.items.map((segmentId) => ({ entityType: "segment", entityId: segmentId })));
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       paged.items.map(
-        (segmentId) => renderSegmentDetail(
-          db,
-          segmentId,
-          depth,
-          pageSize,
-          truncate,
+        (segmentId) => renderSegmentCard(db, segmentId, {
+          pageBudget,
+          page: 1,
+          turnBudget,
           includeDbTurnIds,
-          truncateCap,
           eraCutoffEpoch,
           signal
-        )
+        })
       ).join("\n"),
+      paged.pageCount
+    );
+  }
+  if (routed.kind === "segment-members") {
+    const segment = getSegment(db, routed.segmentId);
+    if (!segment) {
+      return "Segment not found.";
+    }
+    const chronologicalMembers = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+    const wantedOrdinals = routed.ordinals && routed.ordinals.length > 0 ? routed.ordinals : chronologicalMembers.map((_member, index) => index + 1);
+    const paged = paginateItems(wantedOrdinals, page, pageSize);
+    recordGrants([
+      { entityType: "segment", entityId: segment.id },
+      ...paged.items.map((ordinal) => chronologicalMembers[ordinal - 1]).filter((member) => member !== void 0).map((member) => ({ entityType: "turn", entityId: member.turnId }))
+    ]);
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderSegmentMembersByOrdinal(db, routed.segmentId, paged.items, {
+        fields,
+        includeDbTurnIds,
+        turnBudget,
+        eraCutoffEpoch,
+        signal
+      }),
       paged.pageCount
     );
   }
@@ -37789,42 +39074,49 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
       if (before !== void 0 && turn.createdAtEpoch > before) {
         return false;
       }
-      return true;
+      return turnMatchesFilter(turn, filter);
     });
     const paged = paginateItems(turns, page, pageSize);
+    recordGrants(paged.items.map((turn) => ({ entityType: "turn", entityId: turn.id })));
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderTurnScope(
         db,
         paged.items,
-        depth,
-        truncate,
+        fields,
         includeDbTurnIds,
-        truncateCap,
         eraCutoffEpoch,
-        signal
+        signal,
+        turnBudget
       ),
       paged.pageCount
     );
   }
   if (routed.kind === "turn-by-id") {
     const turn = getTurnById(db, routed.turnId);
-    return turn ? renderTurnScope(
+    if (!turn) {
+      return "Turn not found.";
+    }
+    recordGrants([{ entityType: "turn", entityId: turn.id }]);
+    return renderTurnScope(
       db,
       [turn],
-      depth,
-      truncate,
+      fields,
       includeDbTurnIds,
-      truncateCap,
       eraCutoffEpoch,
-      signal
-    ) : "Turn not found.";
+      signal,
+      turnBudget
+    );
   }
   if (routed.kind === "observation-list") {
     const turn = getTurn(db, routed.sessionId, routed.promptNumber);
     if (!turn) {
       return "Turn not found.";
     }
+    recordGrants([
+      { entityType: "turn", entityId: turn.id },
+      { entityType: "session", entityId: routed.sessionId }
+    ]);
     const observations = getExtractableObservationsForTurn(db, turn.id).filter((observation) => {
       if (after !== void 0 && observation.createdAtEpoch < after) {
         return false;
@@ -37844,13 +39136,11 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
       renderObservationScope(
         db,
         paged.items,
-        depth,
         true,
-        truncate,
         includeDbTurnIds,
-        truncateCap,
         eraCutoffEpoch,
-        signal
+        signal,
+        turnBudget
       ),
       paged.pageCount
     );
@@ -37872,69 +39162,264 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
       }))
     );
     const paged = paginateItems(observations, page, pageSize);
+    recordGrants([
+      { entityType: "session", entityId: routed.sessionId },
+      ...[...new Set(paged.items.map((entry) => entry.turnId))].map((turnId) => ({
+        entityType: "turn",
+        entityId: turnId
+      }))
+    ]);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderObservationScope(
         db,
         paged.items,
-        depth,
         true,
-        truncate,
         includeDbTurnIds,
-        truncateCap,
         eraCutoffEpoch,
-        signal
+        signal,
+        turnBudget
       ),
       paged.pageCount
     );
   }
   if (routed.kind === "observation") {
+    const observation = getObservation(db, routed.observationId);
+    if (observation && observation.excludedFromExtraction === 0) {
+      const owningTurn = getTurnById(db, observation.turnId);
+      if (owningTurn) {
+        recordGrants([
+          { entityType: "turn", entityId: owningTurn.id },
+          { entityType: "session", entityId: owningTurn.sessionId }
+        ]);
+      }
+    }
     return renderObservationDetail(
       db,
       routed.observationId,
-      depth,
-      truncate,
-      truncateCap,
       eraCutoffEpoch,
-      signal
+      signal,
+      turnBudget
     );
   }
   routed;
   return formatParameterError(`unrecognized id kind`);
 }
-function renderSessionList(db, depth, page, pageSize, truncate, after, before, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
-  const paged = paginateItems(
-    listSessionIds(db, void 0, after, before),
-    page,
-    pageSize
-  );
+var DEFAULT_BROWSE_FIELDS = ["title", "content"];
+var BROWSE_CANDIDATE_CAP = 500;
+var BROWSE_CHARS_PER_TOKEN = 4;
+function browseFieldText(db, turn, field) {
+  switch (field) {
+    case "title":
+      return turn.title;
+    case "content":
+      return turn.content;
+    case "prompt":
+      return turn.userPrompt;
+    case "response":
+      return turn.assistantResponse;
+    case "insight": {
+      const lines = splitInsight(turn.insight);
+      return lines.length > 0 ? lines.join("; ") : null;
+    }
+    case "files": {
+      const files = [...turn.filesRead, ...turn.filesModified];
+      return files.length > 0 ? files.join(", ") : null;
+    }
+    case "observations": {
+      const count = getExtractableObservationsForTurn(db, turn.id).length;
+      return count > 0 ? `${count} observation${count === 1 ? "" : "s"}` : null;
+    }
+    default:
+      return null;
+  }
+}
+function formatBrowseTurnLabel(turn, sessionId, includeDbTurnIds) {
+  const turnId = turn.transcriptLineStart === null ? `T${turn.promptNumber}` : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
+  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
+  const statusSegment = turn.status ? ` [${turn.status}]` : "";
+  const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
+  return `  - [S${sessionId}][${turnId}]${statusSegment}${dbIdSegment}${rewindSegment}`;
+}
+function renderBrowseTurnBlock(db, turn, sessionId, fields, includeDbTurnIds, turnBudget, signal) {
+  const label = formatBrowseTurnLabel(turn, sessionId, includeDbTurnIds);
+  const values = fields.map((field) => ({ field, text: browseFieldText(db, turn, field) })).filter((entry) => Boolean(entry.text));
+  if (values.length === 0) {
+    return label;
+  }
+  const perFieldCharLimit = turnBudget !== void 0 ? Math.max(20, Math.floor(turnBudget * BROWSE_CHARS_PER_TOKEN / values.length)) : void 0;
+  const fieldLines = values.map(({ field, text }) => {
+    const rendered = perFieldCharLimit !== void 0 ? truncateText(text, { limit: perFieldCharLimit, signal }) : text;
+    return `    - ${field}: ${rendered}`;
+  });
+  return [label, ...fieldLines].join("\n");
+}
+function renderBrowseSessionHeader(session) {
+  return `- [S${session.id}] ${session.title ?? "Untitled"}`;
+}
+function browseUnitSessionId(unit) {
+  return unit.kind === "turn" ? unit.turn.sessionId : unit.session.id;
+}
+function buildBrowseFeed(db, page, pageSize, pageBudget, turnBudget, fields, includeDbTurnIds, signal, readerId, now, sequence) {
+  const turnIdRows = db.query(
+    `SELECT id FROM turns ORDER BY created_at_epoch DESC, id DESC LIMIT ?`
+  ).all(BROWSE_CANDIDATE_CAP);
+  const turnUnits = turnIdRows.map((row) => getTurnById(db, row.id)).filter((turn) => turn !== null).map((turn) => ({ kind: "turn", epoch: turn.createdAtEpoch, turn }));
+  const emptySessionRows = db.query(
+    `SELECT id, created_at_epoch AS createdAtEpoch FROM sessions
+       WHERE id NOT IN (SELECT DISTINCT session_id FROM turns)
+       ORDER BY created_at_epoch DESC LIMIT ?`
+  ).all(BROWSE_CANDIDATE_CAP);
+  const sessionCache = /* @__PURE__ */ new Map();
+  const sessionFor = (sessionId) => {
+    if (!sessionCache.has(sessionId)) {
+      sessionCache.set(sessionId, getSession(db, sessionId));
+    }
+    return sessionCache.get(sessionId) ?? null;
+  };
+  const emptySessionUnits = emptySessionRows.flatMap((row) => {
+    const session = sessionFor(row.id);
+    return session ? [{ kind: "session", epoch: row.createdAtEpoch, session }] : [];
+  });
+  const units = [...turnUnits, ...emptySessionUnits].sort((left, right) => {
+    if (left.epoch !== right.epoch) {
+      return right.epoch - left.epoch;
+    }
+    return browseUnitSessionId(right) - browseUnitSessionId(left);
+  });
+  if (units.length === 0) {
+    return joinPage(formatPageHeader(1, 1, 0), "", 1);
+  }
+  const resolvedFields = fields && fields.length > 0 ? fields : DEFAULT_BROWSE_FIELDS;
+  const renderForPage = (unit, seenSessions) => {
+    const sessionId = browseUnitSessionId(unit);
+    const isFirst = !seenSessions.has(sessionId);
+    if (unit.kind === "session") {
+      return isFirst ? renderBrowseSessionHeader(unit.session) : "";
+    }
+    const session = sessionFor(unit.turn.sessionId);
+    if (!session) {
+      return "";
+    }
+    const block = renderBrowseTurnBlock(
+      db,
+      unit.turn,
+      session.id,
+      resolvedFields,
+      includeDbTurnIds,
+      turnBudget,
+      signal
+    );
+    return isFirst ? `${renderBrowseSessionHeader(session)}
+${block}` : block;
+  };
+  const pages = [];
+  let current = [];
+  let seenInPage = /* @__PURE__ */ new Set();
+  let used = 0;
+  for (const unit of units) {
+    if (unit.kind === "turn" && !sessionFor(unit.turn.sessionId)) {
+      continue;
+    }
+    let rendered = renderForPage(unit, seenInPage);
+    let cost = estimateTokens(rendered);
+    const overflowsCount = current.length >= pageSize;
+    const overflowsBudget = current.length > 0 && used + cost > pageBudget;
+    if (current.length > 0 && (overflowsCount || overflowsBudget)) {
+      pages.push(current);
+      current = [];
+      seenInPage = /* @__PURE__ */ new Set();
+      used = 0;
+      rendered = renderForPage(unit, seenInPage);
+      cost = estimateTokens(rendered);
+    }
+    current.push({ unit, rendered });
+    seenInPage.add(browseUnitSessionId(unit));
+    used += cost;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  const pageCount = pages.length;
+  const clampedPage = Math.min(Math.max(1, page), pageCount);
+  const pageItems = pages[clampedPage - 1] ?? [];
+  if (readerId && pageItems.length > 0) {
+    const grants = [];
+    const grantedSessions = /* @__PURE__ */ new Set();
+    for (const item of pageItems) {
+      const sessionId = browseUnitSessionId(item.unit);
+      if (item.unit.kind === "turn") {
+        grants.push({ entityType: "turn", entityId: item.unit.turn.id });
+      }
+      if (!grantedSessions.has(sessionId)) {
+        grantedSessions.add(sessionId);
+        grants.push({ entityType: "session", entityId: sessionId });
+      }
+    }
+    recordReadGrants(db, readerId, grants, now(), sequence);
+  }
   return joinPage(
-    formatPageHeader(page, paged.pageCount, paged.total),
-    paged.items.map(
-      (sessionId) => renderSessionDetail(
-        db,
-        sessionId,
-        depth,
-        truncate,
-        includeDbTurnIds,
-        truncateCap,
-        eraCutoffEpoch,
-        signal
-      )
-    ).join("\n"),
-    paged.pageCount
+    formatPageHeader(clampedPage, pageCount, units.length),
+    pageItems.map((item) => item.rendered).filter(Boolean).join("\n"),
+    pageCount
   );
 }
-function searchQueryResults(db, filters, after, before, eraCutoffEpoch = null) {
+function renderBareOverview(db, page, pageSize, includeDbTurnIds, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, readerId, now = () => Math.floor(Date.now() / 1e3), sequence = 0) {
+  const parts = [];
+  if (page === 1) {
+    const segments = listSegmentsByActivity(db, pageSize);
+    if (segments.length > 0) {
+      parts.push(`\u2500\u2500 segments (${segments.length}) \u2500\u2500`);
+      for (const segment of segments) {
+        if (readerId) {
+          recordReadGrants(
+            db,
+            readerId,
+            [{ entityType: "segment", entityId: segment.id }],
+            now(),
+            sequence
+          );
+        }
+        parts.push(
+          renderSegmentCard(db, segment.id, {
+            pageBudget,
+            page: 1,
+            turnBudget,
+            includeDbTurnIds,
+            eraCutoffEpoch,
+            signal
+          })
+        );
+      }
+    }
+  }
+  parts.push(`\u2500\u2500 turns \u2500\u2500`);
+  parts.push(
+    buildBrowseFeed(
+      db,
+      page,
+      pageSize,
+      pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+      turnBudget,
+      filter.fields,
+      includeDbTurnIds ?? false,
+      signal,
+      readerId,
+      now,
+      sequence
+    )
+  );
+  return parts.join("\n");
+}
+function searchQueryResults(db, text, filter, eraCutoffEpoch = null) {
   return searchMemory(db, {
-    query: filters.text,
-    type: filters.type,
-    file: filters.file,
-    tag: filters.tag,
-    project: filters.project,
-    sessionId: filters.session,
-    after,
-    before,
+    query: text,
+    type: filter.type,
+    file: filter.file,
+    tag: filter.tag,
+    sessionId: filter.sessionId,
+    after: filter.after,
+    before: filter.before,
     // Only the observation layer reads this, and only to decide whether a
     // status still means anything (db/search.ts).
     eraCutoffEpoch
@@ -37948,40 +39433,85 @@ function recallMemory(db, input) {
   return appendNavigationLegend(recallMemoryBody(db, input, signal), signal);
 }
 function recallMemoryBody(db, input, signal) {
-  const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
   const includeDbTurnIds = input.includeDbTurnIds ?? false;
-  const truncate = input.truncate ?? DEFAULT_TRUNCATE;
-  const truncateCap = input.truncateCap;
   const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
-  const timeRange = resolveTimeRange(input.time);
-  if (timeRange.error) {
-    return formatParameterError(timeRange.error);
+  const pageBudget = input.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
+  const turnBudget = input.turn ?? DEFAULT_TURN_TOKEN_BUDGET;
+  const fields = resolveTurnFields(input.filter?.fields);
+  const { parsed: filter, error: filterError } = parseMemoryFilter(input.filter);
+  if (filterError) {
+    return formatParameterError(filterError);
   }
+  const sequence = snapshotWriteGateSequence(db);
+  const now = input.now ?? (() => Math.floor(Date.now() / 1e3));
   if (input.id) {
-    const routed = parseRoutedId(input.id);
-    if (!routed) {
-      return formatParameterError(`invalid id selector "${input.id}"`);
+    const idItems = input.id.split(",").map((item) => item.trim()).filter((item) => item.length > 0);
+    if (idItems.length <= 1) {
+      const routed = parseRoutedId(input.id.trim());
+      if (!routed) {
+        return formatParameterError(`invalid id selector "${input.id}"`);
+      }
+      return renderRoutedId(
+        db,
+        routed,
+        fields,
+        page,
+        pageSize,
+        filter.after,
+        filter.before,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        pageBudget,
+        turnBudget,
+        filter,
+        input.readerId,
+        now,
+        sequence
+      );
     }
-    return renderRoutedId(
-      db,
-      routed,
-      depth,
-      page,
-      pageSize,
-      truncate,
-      timeRange.after,
-      timeRange.before,
-      includeDbTurnIds,
-      truncateCap,
-      eraCutoffEpoch,
-      signal
-    );
+    const routedItems = [];
+    for (const item of idItems) {
+      const routed = parseRoutedId(item);
+      if (!routed) {
+        return formatParameterError(
+          `invalid id selector "${item}" in comma list "${input.id}" \u2014 ${ID_SELECTOR_GRAMMAR_HINT}`
+        );
+      }
+      routedItems.push(routed);
+    }
+    const firstKind = routedItems[0].kind;
+    if (routedItems.some((routed) => routed.kind !== firstKind)) {
+      return formatParameterError(
+        `mixed id kinds in comma list "${input.id}" \u2014 ${ID_SELECTOR_GRAMMAR_HINT}`
+      );
+    }
+    return routedItems.map(
+      (routed) => renderRoutedId(
+        db,
+        routed,
+        fields,
+        page,
+        pageSize,
+        filter.after,
+        filter.before,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        pageBudget,
+        turnBudget,
+        filter,
+        input.readerId,
+        now,
+        sequence
+      )
+    ).join("\n\n");
   }
-  if (input.query) {
-    const filters = parseQueryFilters(input.query);
-    const hasCriteria = Boolean(filters.text) || Boolean(filters.type) || Boolean(filters.file) || Boolean(filters.tag) || Boolean(filters.project) || filters.session !== void 0 || timeRange.after !== void 0 || timeRange.before !== void 0;
+  if (input.query || hasFilterCriteria(filter)) {
+    const text = (input.query ?? "").trim();
+    const hasCriteria = text.length > 0 || hasFilterCriteria(filter);
     if (!hasCriteria) {
       return formatParameterError(
         `query "${input.query}" has no searchable terms or filters`
@@ -37989,9 +39519,8 @@ function recallMemoryBody(db, input, signal) {
     }
     const results = searchQueryResults(
       db,
-      filters,
-      timeRange.after,
-      timeRange.before,
+      text || void 0,
+      filter,
       input.eraCutoffEpoch ?? null
     );
     const paged = paginateItems(results, page, pageSize);
@@ -38000,33 +39529,666 @@ function recallMemoryBody(db, input, signal) {
       renderGroupedSearchResults(
         db,
         paged.items,
-        depth,
-        truncate,
+        fields,
+        turnBudget,
         includeDbTurnIds,
-        truncateCap,
         eraCutoffEpoch,
-        signal
+        signal,
+        text || void 0,
+        input.readerId,
+        now,
+        sequence
       ),
       paged.pageCount
     );
   }
-  return renderSessionList(
+  return renderBareOverview(
     db,
-    depth,
     page,
     pageSize,
-    truncate,
-    timeRange.after,
-    timeRange.before,
     includeDbTurnIds,
-    truncateCap,
     eraCutoffEpoch,
-    signal
+    signal,
+    pageBudget,
+    turnBudget,
+    filter,
+    input.readerId,
+    now,
+    sequence
   );
+}
+
+// src/mcp/remember.ts
+init_database();
+init_references();
+init_segments();
+
+// src/shared/segment-cadence.ts
+var TOO_SOON_UNDER_TURNS = 10;
+
+// src/mcp/remember.ts
+var REMEMBER_VERBS = [
+  "create",
+  "attach",
+  "append",
+  "replace",
+  "close",
+  "assign"
+];
+function textResult2(text) {
+  return { content: [{ type: "text", text }] };
+}
+function parameterError2(message) {
+  return textResult2(`Parameter error: ${message}`);
+}
+var RememberValidationError = class extends Error {
+};
+function fail2(message) {
+  throw new RememberValidationError(message);
+}
+function resolveProseField(field, value, opts) {
+  if (value === void 0 || value === null) {
+    if (opts.required) {
+      fail2(`${field} is required.`);
+    }
+    return null;
+  }
+  if (typeof value !== "string") {
+    fail2(`${field} must be a string when present.`);
+  }
+  const decoded = decodeHtmlEntities(value);
+  if (decoded.trim() === "") {
+    if (opts.required) {
+      fail2(`${field} must not be empty.`);
+    }
+    return null;
+  }
+  if (containsToolCallSyntax(decoded)) {
+    fail2(toolCallSyntaxMessage(field));
+  }
+  return stripPrivateTags(decoded);
+}
+function resolveSegmentTarget(db, rawId) {
+  const trimmed = rawId.trim();
+  const bareRef = parseBareAddressReference(trimmed);
+  if (!bareRef || bareRef.kind !== "segment") {
+    return {
+      ok: false,
+      message: `id must be a segment address ("E<n>") \u2014 got "${trimmed}".`
+    };
+  }
+  const segment = getSegment(db, bareRef.segmentId);
+  if (!segment) {
+    return { ok: false, message: `no segment E${bareRef.segmentId}.` };
+  }
+  return { ok: true, segment };
+}
+function formatMaintenanceCadence(db, callerSessionId, priorUpdatedAtEpoch, exemptFromTooSoon) {
+  if (typeof callerSessionId !== "number") {
+    return "maintenance cadence: caller session unknown.";
+  }
+  const turnsSince = countTurnsSince(db, callerSessionId, priorUpdatedAtEpoch);
+  const label = `${turnsSince} turn${turnsSince === 1 ? "" : "s"}`;
+  if (turnsSince < TOO_SOON_UNDER_TURNS && !exemptFromTooSoon) {
+    return `${label} since this segment's last maintenance \u2014 you may be over-maintaining; consider batching small edits.`;
+  }
+  return `${label} since this segment's last maintenance.`;
+}
+var MEMBER_REJECTION_TEXT = {
+  malformed: 'is not a valid turn address ("S<session>/T<prompt>")',
+  "not-a-turn": "names a segment, not a turn",
+  unresolved: "does not resolve to a turn"
+};
+function formatMemberRejections(rejections) {
+  return "members rejected: " + rejections.map((entry) => `"${entry.raw}" ${MEMBER_REJECTION_TEXT[entry.reason]}`).join("; ") + " \u2014 membership is recorded for exactly the addresses given, so a call naming even one bad address seeds none.";
+}
+function resolveMemberAddresses(db, addresses) {
+  const rejections = [];
+  const turnRefs = [];
+  for (const raw of addresses) {
+    const parsed = parseBareAddressReference(raw);
+    if (!parsed) {
+      rejections.push({ raw, reason: "malformed" });
+      continue;
+    }
+    if (parsed.kind !== "turn") {
+      rejections.push({ raw, reason: "not-a-turn" });
+      continue;
+    }
+    turnRefs.push(parsed);
+  }
+  if (turnRefs.length === 0) {
+    return { turnIds: [], rejections };
+  }
+  const { accepted, rejected } = validateReferences(db, turnRefs);
+  for (const entry of rejected) {
+    rejections.push({ raw: entry.reference.raw, reason: "unresolved" });
+  }
+  return { turnIds: accepted.map((entry) => entry.node.id), rejections };
+}
+function handleCreate(db, input, options) {
+  let title;
+  let goal;
+  let memberAddresses;
+  try {
+    title = resolveProseField("title", input.title, { required: true });
+    goal = resolveProseField("goal", input.goal, { required: false });
+    if (input.members === void 0) {
+      memberAddresses = [];
+    } else if (Array.isArray(input.members) && input.members.every((value) => typeof value === "string")) {
+      memberAddresses = input.members;
+    } else {
+      fail2("members must be an array of strings when present.");
+    }
+  } catch (error48) {
+    if (error48 instanceof RememberValidationError) {
+      return parameterError2(error48.message);
+    }
+    throw error48;
+  }
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  let result;
+  try {
+    result = writeTransaction(db, () => {
+      const { turnIds, rejections } = resolveMemberAddresses(db, memberAddresses);
+      if (rejections.length > 0) {
+        fail2(formatMemberRejections(rejections));
+      }
+      let segment = createSegment(db, {
+        title,
+        nowEpoch
+      });
+      if (turnIds.length > 0) {
+        reassignSegmentMembers(db, turnIds, segment.id, nowEpoch);
+      }
+      let goalSeeded = false;
+      if (goal !== null) {
+        const withGoal = appendSegmentWorkingStateRows(
+          db,
+          segment.id,
+          "goal",
+          [goal],
+          nowEpoch
+        );
+        if (withGoal) {
+          segment = withGoal;
+          goalSeeded = true;
+        }
+      }
+      return { segment, memberTurnIds: turnIds, goalSeeded };
+    });
+  } catch (error48) {
+    if (error48 instanceof RememberValidationError) {
+      return parameterError2(error48.message);
+    }
+    throw error48;
+  }
+  const parts = [`Created E${result.segment.id} "${result.segment.title}".`];
+  parts.push(
+    result.memberTurnIds.length > 0 ? `${result.memberTurnIds.length} member(s) seeded.` : "0 members seeded."
+  );
+  if (result.goalSeeded) {
+    parts.push("goal: 1 row seeded.");
+  }
+  return textResult2(parts.join(" "));
+}
+function handleAttach(db, input, options) {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError2('id is required for attach \u2014 an "E<n>" address.');
+  }
+  if (typeof options.callerSessionId !== "number") {
+    return parameterError2("caller session unknown; attach cannot bind a segment to it.");
+  }
+  const callerSessionId = options.callerSessionId;
+  const resolution = resolveSegmentTarget(db, input.id);
+  if (!resolution.ok) {
+    return parameterError2(resolution.message);
+  }
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const { attached } = writeTransaction(
+    db,
+    () => attachSegmentToSession(db, callerSessionId, resolution.segment.id, nowEpoch)
+  );
+  const header = `Attached S${callerSessionId} to E${resolution.segment.id}${attached ? "" : " (already attached)"}.`;
+  const card = renderSegmentCard(db, resolution.segment.id, {
+    eraCutoffEpoch: null
+  });
+  return textResult2(`${header}
+${card}`);
+}
+function isEditableField(value) {
+  return typeof value === "string" && SEGMENT_EDITABLE_FIELDS.includes(value);
+}
+function fieldRequiredMessage() {
+  return `field is required and must be one of ${SEGMENT_EDITABLE_FIELDS.join(", ")}.`;
+}
+function closedSegmentRejection(segmentId) {
+  return `E${segmentId} is closed \u2014 Working State only accepts writes on an open segment; remember(close, id="E${segmentId}") reopens it.`;
+}
+function checkSegmentFieldGate(db, writer, segmentId, field) {
+  if (!writer) {
+    return null;
+  }
+  const verdict = checkFieldGate(db, writer, "segment", segmentId, field, `E${segmentId}`);
+  return verdict.ok ? null : verdict.message;
+}
+function stampSegmentField(db, writer, segmentId, field, nowEpoch) {
+  if (writer) {
+    stampField(db, "segment", segmentId, field, writer, nowEpoch);
+  }
+}
+function callerWriterId(callerSessionId) {
+  return typeof callerSessionId === "number" ? sessionWriterId(callerSessionId) : null;
+}
+function handleAppend(db, input, options) {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError2('id is required for append \u2014 an "E<n>" address.');
+  }
+  if (!isEditableField(input.field)) {
+    return parameterError2(fieldRequiredMessage());
+  }
+  if (!Array.isArray(input.rows) || input.rows.length === 0 || !input.rows.every((value) => typeof value === "string")) {
+    return parameterError2("rows must be a non-empty array of strings.");
+  }
+  const resolution = resolveSegmentTarget(db, input.id);
+  if (!resolution.ok) {
+    return parameterError2(resolution.message);
+  }
+  if (resolution.segment.status === "closed") {
+    return parameterError2(closedSegmentRejection(resolution.segment.id));
+  }
+  const field = input.field;
+  let rows;
+  try {
+    rows = input.rows.map((raw, index) => {
+      const decoded = decodeHtmlEntities(raw);
+      if (decoded.trim() === "") {
+        fail2(`rows[${index}] must not be empty.`);
+      }
+      if (containsToolCallSyntax(decoded)) {
+        fail2(toolCallSyntaxMessage(`rows[${index}]`));
+      }
+      if (decoded.includes("\n")) {
+        fail2(`rows[${index}] contains a newline \u2014 one row, one line.`);
+      }
+      return stripPrivateTags(decoded);
+    });
+  } catch (error48) {
+    if (error48 instanceof RememberValidationError) {
+      return parameterError2(error48.message);
+    }
+    throw error48;
+  }
+  const priorUpdatedAtEpoch = resolution.segment.updatedAtEpoch;
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const writer = callerWriterId(options.callerSessionId);
+  const outcome = writeTransaction(db, () => {
+    const rejection = checkSegmentFieldGate(db, writer, resolution.segment.id, field);
+    if (rejection) {
+      return { kind: "gate-rejected", message: rejection };
+    }
+    const updated2 = appendSegmentWorkingStateRows(db, resolution.segment.id, field, rows, nowEpoch);
+    if (!updated2) {
+      return { kind: "missing" };
+    }
+    stampSegmentField(db, writer, resolution.segment.id, field, nowEpoch);
+    return { kind: "ok", segment: updated2 };
+  });
+  if (outcome.kind === "gate-rejected") {
+    return parameterError2(outcome.message);
+  }
+  if (outcome.kind === "missing") {
+    return parameterError2(`E${resolution.segment.id} no longer exists.`);
+  }
+  const updated = outcome.segment;
+  const cadence = formatMaintenanceCadence(
+    db,
+    options.callerSessionId,
+    priorUpdatedAtEpoch,
+    field === "decisions"
+  );
+  return textResult2(
+    `Appended ${rows.length} row(s) to ${field} on E${updated.id}. ${cadence}`
+  );
+}
+function handleReplace(db, input, options) {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError2('id is required for replace \u2014 an "E<n>" address.');
+  }
+  if (!isEditableField(input.field)) {
+    return parameterError2(fieldRequiredMessage());
+  }
+  if (typeof input.oldString !== "string" || input.oldString === "") {
+    return parameterError2("oldString is required and must be a non-empty string.");
+  }
+  if (typeof input.newString !== "string") {
+    return parameterError2('newString is required (use "" to delete the matched text).');
+  }
+  const resolution = resolveSegmentTarget(db, input.id);
+  if (!resolution.ok) {
+    return parameterError2(resolution.message);
+  }
+  if (resolution.segment.status === "closed") {
+    return parameterError2(closedSegmentRejection(resolution.segment.id));
+  }
+  const field = input.field;
+  const oldString = decodeHtmlEntities(input.oldString);
+  const newStringRaw = decodeHtmlEntities(input.newString);
+  if (containsToolCallSyntax(oldString)) {
+    return parameterError2(toolCallSyntaxMessage("oldString"));
+  }
+  if (newStringRaw !== "" && containsToolCallSyntax(newStringRaw)) {
+    return parameterError2(toolCallSyntaxMessage("newString"));
+  }
+  const newString = newStringRaw === "" ? "" : stripPrivateTags(newStringRaw);
+  const priorUpdatedAtEpoch = resolution.segment.updatedAtEpoch;
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const writer = callerWriterId(options.callerSessionId);
+  const outcome = writeTransaction(db, () => {
+    const rejection = checkSegmentFieldGate(db, writer, resolution.segment.id, field);
+    if (rejection) {
+      return { kind: "gate-rejected", message: rejection };
+    }
+    const result2 = replaceInSegmentWorkingStateField(
+      db,
+      resolution.segment.id,
+      field,
+      oldString,
+      newString,
+      nowEpoch
+    );
+    if (result2.segment && !result2.rejection) {
+      stampSegmentField(db, writer, resolution.segment.id, field, nowEpoch);
+    }
+    return { kind: "replaced", result: result2 };
+  });
+  if (outcome.kind === "gate-rejected") {
+    return parameterError2(outcome.message);
+  }
+  const { result } = outcome;
+  if (!result.segment) {
+    return parameterError2(`E${resolution.segment.id} no longer exists.`);
+  }
+  if (result.rejection === "missing") {
+    return parameterError2(
+      `oldString ${JSON.stringify(oldString)} not found in ${field} on E${resolution.segment.id}.`
+    );
+  }
+  if (result.rejection === "ambiguous") {
+    return parameterError2(
+      `oldString ${JSON.stringify(oldString)} matches ${result.occurrences} times in ${field} on E${resolution.segment.id} \u2014 narrow it so it matches exactly once.`
+    );
+  }
+  const cadence = formatMaintenanceCadence(
+    db,
+    options.callerSessionId,
+    priorUpdatedAtEpoch,
+    false
+  );
+  const verb = newString === "" ? "Removed a row from" : "Replaced text in";
+  return textResult2(`${verb} ${field} on E${resolution.segment.id}. ${cadence}`);
+}
+function handleClose(db, input, options) {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError2('id is required for close \u2014 an "E<n>" address.');
+  }
+  const resolution = resolveSegmentTarget(db, input.id);
+  if (!resolution.ok) {
+    return parameterError2(resolution.message);
+  }
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const updated = writeTransaction(
+    db,
+    () => toggleSegmentStatus(db, resolution.segment.id, nowEpoch)
+  );
+  if (!updated) {
+    return parameterError2(`E${resolution.segment.id} no longer exists.`);
+  }
+  return textResult2(
+    updated.status === "closed" ? `Closed E${updated.id} \u2014 it leaves the roster, still recall-able. remember(close, id="E${updated.id}") reopens it.` : `Reopened E${updated.id} \u2014 it rejoins the roster.`
+  );
+}
+var ASSIGN_RANGE_PATTERN = /^S(\d+)\/T(\d+)\.\.T(\d+)$/i;
+var ASSIGN_TOKEN_REJECTION_TEXT = {
+  malformed: 'is not a valid turn address ("S<session>/T<prompt>") or interval ("S<session>/T<a>..T<b>")',
+  "not-a-turn": "names a segment, not a turn",
+  unresolved: "does not resolve to a turn"
+};
+function formatAssignRejections(rejections) {
+  return "turns rejected: " + rejections.map(
+    (entry) => `"${entry.raw}" ${entry.detail ?? ASSIGN_TOKEN_REJECTION_TEXT[entry.reason]}`
+  ).join("; ") + " \u2014 the whole call is rejected, zero turns assigned.";
+}
+function resolveAssignTurns(db, tokens) {
+  const rejections = [];
+  const turnIds = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const raw of tokens) {
+    const trimmed = raw.trim();
+    const rangeMatch = ASSIGN_RANGE_PATTERN.exec(trimmed);
+    if (rangeMatch) {
+      const sessionId = Number.parseInt(rangeMatch[1], 10);
+      const start = Number.parseInt(rangeMatch[2], 10);
+      const end = Number.parseInt(rangeMatch[3], 10);
+      if (!Number.isSafeInteger(sessionId) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) {
+        rejections.push({ raw, reason: "malformed" });
+        continue;
+      }
+      for (let promptNumber = start; promptNumber <= end; promptNumber += 1) {
+        const row = db.query(
+          "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
+        ).get(sessionId, promptNumber);
+        if (!row) {
+          rejections.push({
+            raw,
+            reason: "unresolved",
+            detail: `spans a missing turn S${sessionId}/T${promptNumber}`
+          });
+          continue;
+        }
+        if (!seen.has(row.id)) {
+          seen.add(row.id);
+          turnIds.push(row.id);
+        }
+      }
+      continue;
+    }
+    const parsed = parseBareAddressReference(trimmed);
+    if (!parsed) {
+      rejections.push({ raw, reason: "malformed" });
+      continue;
+    }
+    if (parsed.kind !== "turn") {
+      rejections.push({ raw, reason: "not-a-turn" });
+      continue;
+    }
+    const { accepted, rejected } = validateReferences(db, [parsed]);
+    if (rejected.length > 0) {
+      rejections.push({ raw, reason: "unresolved" });
+      continue;
+    }
+    const id = accepted[0].node.id;
+    if (!seen.has(id)) {
+      seen.add(id);
+      turnIds.push(id);
+    }
+  }
+  return { turnIds, rejections };
+}
+function handleAssign(db, input, options) {
+  let targetSegment = null;
+  if (input.id !== void 0) {
+    if (typeof input.id !== "string" || input.id.trim() === "") {
+      return parameterError2(
+        'id must be a non-empty "E<n>" address when present \u2014 omit id entirely to clear ownership.'
+      );
+    }
+    const resolution = resolveSegmentTarget(db, input.id);
+    if (!resolution.ok) {
+      return parameterError2(resolution.message);
+    }
+    targetSegment = resolution.segment;
+  }
+  if (!Array.isArray(input.turns) || input.turns.length === 0 || !input.turns.every((value) => typeof value === "string")) {
+    return parameterError2(
+      'turns is required for assign \u2014 an array of turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>").'
+    );
+  }
+  const { turnIds, rejections } = resolveAssignTurns(db, input.turns);
+  if (rejections.length > 0) {
+    return parameterError2(formatAssignRejections(rejections));
+  }
+  if (turnIds.length === 0) {
+    return parameterError2("turns resolved to zero addresses.");
+  }
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const result = writeTransaction(
+    db,
+    () => reassignSegmentMembers(db, turnIds, targetSegment?.id ?? null, nowEpoch)
+  );
+  const parts = [
+    targetSegment ? `Assigned ${result.addedTurnIds.length} turn(s) to E${targetSegment.id}.` : `Cleared ownership on ${turnIds.length} turn(s) \u2014 now homeless.`
+  ];
+  if (result.vacatedSegmentIds.length > 0) {
+    parts.push(
+      `Removed from prior segment(s): ${result.vacatedSegmentIds.map((id) => `E${id}`).join(", ")}.`
+    );
+  }
+  return textResult2(parts.join(" "));
+}
+function isParameterError(result) {
+  return result.content[0]?.text.startsWith("Parameter error:") ?? false;
+}
+function rememberTool(db, rawInput, options = {}) {
+  if (typeof rawInput.verb !== "string" || !REMEMBER_VERBS.includes(rawInput.verb)) {
+    return parameterError2(`verb must be one of ${REMEMBER_VERBS.join(", ")}.`);
+  }
+  const result = (() => {
+    switch (rawInput.verb) {
+      case "create":
+        return handleCreate(db, rawInput, options);
+      case "attach":
+        return handleAttach(db, rawInput, options);
+      case "append":
+        return handleAppend(db, rawInput, options);
+      case "replace":
+        return handleReplace(db, rawInput, options);
+      case "close":
+        return handleClose(db, rawInput, options);
+      case "assign":
+        return handleAssign(db, rawInput, options);
+    }
+  })();
+  if (typeof options.callerSessionId === "number" && !isParameterError(result)) {
+    touchSessionRememberActivity(
+      db,
+      options.callerSessionId,
+      options.now?.() ?? Math.floor(Date.now() / 1e3)
+    );
+  }
+  return result;
 }
 
 // src/mcp/timeline.ts
 init_citations();
+
+// src/db/edge-signals.ts
+function zeroSignals() {
+  return { overridden: false, refinesExcess: { decision: 0, delivery: 0 }, encodesCount: 0 };
+}
+function parseTypeArray(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+function primaryPhaseBucket(phases) {
+  if (phases.has("decision")) {
+    return "decision";
+  }
+  if (phases.has("delivery")) {
+    return "delivery";
+  }
+  return null;
+}
+function getTurnEdgeSignals(db, turnIds) {
+  const result = /* @__PURE__ */ new Map();
+  const uniqueIds = [...new Set(turnIds)];
+  for (const id of uniqueIds) {
+    result.set(id, zeroSignals());
+  }
+  if (uniqueIds.length === 0) {
+    return result;
+  }
+  const placeholders = uniqueIds.map(() => "?").join(",");
+  const overrideRows = db.query(
+    `SELECT DISTINCT e.cited_id AS targetId
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id
+       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+         AND e.relation = 'override'
+         AND citing.was_rolled_back = 0
+         AND e.cited_id IN (${placeholders})`
+  ).all(...uniqueIds);
+  for (const row of overrideRows) {
+    result.get(row.targetId).overridden = true;
+  }
+  const encodesRows = db.query(
+    `SELECT e.cited_id AS targetId, COUNT(*) AS count
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id
+       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+         AND e.relation = 'encodes'
+         AND citing.was_rolled_back = 0
+         AND e.cited_id IN (${placeholders})
+       GROUP BY e.cited_id`
+  ).all(...uniqueIds);
+  for (const row of encodesRows) {
+    result.get(row.targetId).encodesCount = row.count;
+  }
+  const refinesRows = db.query(
+    `SELECT e.cited_id AS targetId, citing.type AS citingType
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id
+       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+         AND e.relation = 'refines'
+         AND citing.was_rolled_back = 0
+         AND e.cited_id IN (${placeholders})
+       ORDER BY e.cited_id ASC, e.created_at_epoch ASC, e.citing_id ASC`
+  ).all(...uniqueIds);
+  let currentTarget = null;
+  let seenForTarget = 0;
+  for (const row of refinesRows) {
+    if (row.targetId !== currentTarget) {
+      currentTarget = row.targetId;
+      seenForTarget = 0;
+    }
+    seenForTarget += 1;
+    if (seenForTarget === 1) {
+      continue;
+    }
+    const phases = phasesForTypes(parseTypeArray(row.citingType));
+    const bucket = primaryPhaseBucket(phases);
+    if (bucket) {
+      result.get(row.targetId).refinesExcess[bucket] += 1;
+    }
+  }
+  return result;
+}
+
+// src/mcp/timeline.ts
+init_segments();
 
 // src/diary/domain.ts
 var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
@@ -38062,6 +40224,7 @@ var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
 var TOOL_BURST_TOP_N = 3;
 var DEFAULT_TITLE_CAP = 100;
 var MILESTONE_UNIT_TOKEN_CAP = 150;
+var DEFAULT_MILESTONE_PAGE_BUDGET = 1e3;
 var MILESTONE_UNIT_PULLED_CAP = 4;
 var MILESTONE_PROMPT_PREFIX_CAP = 32;
 var MILESTONE_FILE_BASENAME_CAP = 3;
@@ -38109,14 +40272,6 @@ var REVERSAL_KEYWORD_TAGS = /* @__PURE__ */ new Set([
   "design-pivot",
   "pivot"
 ]);
-var EMPTY_MILESTONE_SELECTION = {
-  kept: [],
-  ranked: [],
-  pulled: [],
-  overflowByDay: [],
-  effGradeByTurnId: /* @__PURE__ */ new Map()
-};
-var EMPTY_TURN_ID_SET = /* @__PURE__ */ new Set();
 var PENDING_EMOJI = "\u23F3";
 var MISSING_LINE_ANCHOR = "\u2014";
 var MISSING_GRADE_CELL = "\u2014";
@@ -38199,7 +40354,7 @@ function parseTimelineId(id) {
   }
   if (/^\d+$/.test(rangeValue)) {
     throw new Error(
-      `timeline does not accept single turn forms; use recall(id='S${sessionId}/T${rangeValue}', depth='expanded') instead`
+      `timeline does not accept single turn forms; use recall(id='S${sessionId}/T${rangeValue}') instead`
     );
   }
   throw new Error(`timeline range syntax not recognized: T${rangeValue}`);
@@ -38316,14 +40471,6 @@ function formatLocalWeekday(epochSeconds) {
 }
 function formatLocalDateWithWeekday(epochSeconds) {
   return `${formatLocalDate(epochSeconds)} ${formatLocalWeekday(epochSeconds)}`;
-}
-function formatLocalMonthDay(epochSeconds) {
-  const [year, month, day] = formatLocalDate(epochSeconds).split("-");
-  void year;
-  return `${month}-${day}`;
-}
-function formatLocalMonthDayWithWeekday(epochSeconds) {
-  return `${formatLocalMonthDay(epochSeconds)} ${formatLocalWeekday(epochSeconds)}`;
 }
 function sameLocalDate(leftEpoch, rightEpoch) {
   return formatLocalDate(leftEpoch) === formatLocalDate(rightEpoch);
@@ -38566,58 +40713,6 @@ function formatCompactTokenCount(tokens) {
 }
 function formatTranscriptLineAnchor(lineNumber) {
   return lineNumber === null ? MISSING_LINE_ANCHOR : `L${lineNumber}`;
-}
-function segmentPhases(turns) {
-  const sortedTurns = sortTurnsForAnalysis(turns);
-  const phases = [];
-  let current = null;
-  let currentStartEpoch = 0;
-  let currentEndEpoch = 0;
-  for (const turn of sortedTurns) {
-    if (!isTimelineLiveTurn(turn)) {
-      continue;
-    }
-    const kind = turn.type.length === 0 ? "pending" : "typed";
-    const emoji3 = typeEmoji(turn.type);
-    if (current === null || current.kind !== kind || !typeListsEqual(current.type, turn.type)) {
-      if (current !== null) {
-        current.durationMs = (currentEndEpoch - currentStartEpoch) * 1e3;
-      }
-      current = {
-        kind,
-        type: turn.type,
-        emoji: emoji3,
-        startPromptNumber: turn.promptNumber,
-        endPromptNumber: turn.promptNumber,
-        startEpoch: turn.createdAtEpoch,
-        endEpoch: turn.createdAtEpoch,
-        turnCount: 0,
-        totalToolCalls: 0,
-        totalFilesRead: 0,
-        totalFilesModified: 0,
-        durationMs: 0,
-        externalInputs: []
-      };
-      phases.push(current);
-      currentStartEpoch = turn.createdAtEpoch;
-    }
-    current.endPromptNumber = turn.promptNumber;
-    current.endEpoch = turn.createdAtEpoch;
-    current.turnCount += 1;
-    current.totalToolCalls += turn.toolCallCount ?? 0;
-    current.totalFilesRead += turn.filesRead.length;
-    current.totalFilesModified += turn.filesModified.length;
-    currentEndEpoch = turn.createdAtEpoch;
-    for (const source of extractSourceTags(turn.tags)) {
-      if (!current.externalInputs.includes(source)) {
-        current.externalInputs.push(source);
-      }
-    }
-  }
-  if (current !== null) {
-    current.durationMs = (currentEndEpoch - currentStartEpoch) * 1e3;
-  }
-  return phases;
 }
 function computeTypesDistribution(turns) {
   const words = {};
@@ -38987,15 +41082,19 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const sorted = [...allTurns].sort((a, b) => a.promptNumber - b.promptNumber);
   const bounds = totalTurns > 0 ? { first: sorted[0].promptNumber, last: sorted[totalTurns - 1].promptNumber } : { first: 1, last: 0 };
   const window = resolveWindow(parsed.range, totalTurns, bounds);
-  const windowTurns = sorted.filter(
+  const rangeWindowTurns = sorted.filter(
     (turn) => turn.promptNumber >= window.startPromptNumber && turn.promptNumber <= window.endPromptNumber
   );
+  const { parsed: memoryFilter, error: filterError } = parseMemoryFilter(input.filter);
+  if (filterError) {
+    throw new Error(filterError);
+  }
+  const windowTurns = hasFilterCriteria(memoryFilter) ? rangeWindowTurns.filter((turn) => turnMatchesFilter(turn, memoryFilter)) : rangeWindowTurns;
   const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
   const isEra = (turn) => isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch);
   const eraWindowTurns = eraCutoffEpoch === null ? [] : windowTurns.filter(isEra);
   const legacyWindowTurns = eraCutoffEpoch === null ? windowTurns : windowTurns.filter((turn) => !isEra(turn));
   const legacySessionTurns = eraCutoffEpoch === null ? allTurns : allTurns.filter((turn) => !isEra(turn));
-  const eraSessionTurns = eraCutoffEpoch === null ? [] : allTurns.filter(isEra);
   const page = Math.max(1, input.page ?? 1);
   const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
   const typesDistribution = computeTypesDistribution(allTurns);
@@ -39020,7 +41119,6 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     sessionTurns: legacySessionTurns,
     citations
   });
-  const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
   const pagedTurns = viewKind === "turns" ? paginateItems2(nonSkippedTurns, page, pageSize) : emptyPaginatedItems(nonSkippedTurns.length, pageSize);
   const milestoneTail = viewKind === "milestones" && input.milestoneTail === true;
@@ -39030,23 +41128,28 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     milestoneSelection.kept,
     milestoneSelection.overflowByDay
   ) : [];
-  const pagedPhases = viewKind === "phases" ? paginateItems2(phases, page, pageSize) : emptyPaginatedItems(phases.length, pageSize);
   const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
   const eraWindowTurnIds = new Set(eraWindowTurns.map((turn) => turn.id));
   const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
   const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
-  const eraMilestoneSelection = renderSegments ? selectMilestoneTurns({
-    session,
-    windowTurns: eraWindowTurns,
-    windowSignals,
-    compactBoundaries,
-    sessionTurns: eraSessionTurns,
-    citations
-  }) : EMPTY_MILESTONE_SELECTION;
+  const segmentMilestoneSelection = /* @__PURE__ */ new Map();
+  if (renderSegments) {
+    for (const row of segmentSpine) {
+      segmentMilestoneSelection.set(
+        row.segment.id,
+        selectSegmentMilestonesByEdgeSignals(
+          db,
+          chronologicalSegmentMembers(db, row.segment, eraCutoffEpoch),
+          DEFAULT_TIMELINE_PAGE_SIZE,
+          input.taskCausalityEraCutoffEpoch
+        )
+      );
+    }
+  }
   const eraSegmentIdByTurnId = renderSegments ? getSegmentMembershipForTurns(db, eraWindowTurns.map((turn) => turn.id)) : /* @__PURE__ */ new Map();
-  const viewItemTotal = viewKind === "turns" ? pagedTurns.total : viewKind === "milestones" ? pagedMilestones.total : pagedPhases.total;
-  const pageCount = viewKind === "turns" ? pagedTurns.pageCount : viewKind === "milestones" ? pagedMilestones.pageCount : pagedPhases.pageCount;
-  const pageAnchorEpoch = viewKind === "turns" ? pagedTurns.items[0]?.createdAtEpoch ?? null : viewKind === "milestones" ? pagedMilestones.items[0]?.turn.createdAtEpoch ?? null : pagedPhases.items[0]?.startEpoch ?? null;
+  const viewItemTotal = viewKind === "turns" ? pagedTurns.total : pagedMilestones.total;
+  const pageCount = viewKind === "turns" ? pagedTurns.pageCount : pagedMilestones.pageCount;
+  const pageAnchorEpoch = viewKind === "turns" ? pagedTurns.items[0]?.createdAtEpoch ?? null : pagedMilestones.items[0]?.turn.createdAtEpoch ?? null;
   return {
     view: viewKind,
     session,
@@ -39063,7 +41166,6 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     milestonePulled: viewKind === "milestones" ? milestoneSelection.pulled : [],
     turnEffGrades: milestoneSelection.effGradeByTurnId,
     milestoneDayGroups,
-    pagedPhases: pagedPhases.items,
     viewItemTotal,
     pageAnchorEpoch,
     page,
@@ -39079,8 +41181,7 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     eraWindowTurns,
     segmentSpine,
     orphanAnchors,
-    eraKeptMilestones: eraMilestoneSelection.kept,
-    eraMilestonePulled: eraMilestoneSelection.pulled,
+    segmentMilestoneSelection,
     eraSegmentIdByTurnId
   };
 }
@@ -39945,50 +42046,6 @@ function sanitizeTimelineField(value) {
 function isTimelineLiveTurn(turn) {
   return turn.status !== "undone" && turn.status !== "skipped";
 }
-function renderPhases(view, titleCap, signal) {
-  if (view.pagedPhases.length === 0) {
-    return [];
-  }
-  const turnByPrompt = new Map(
-    view.windowTurns.map((turn) => [turn.promptNumber, turn])
-  );
-  const lines = [
-    "",
-    "  phases:",
-    "  # | date | type | turns | span | work | lead title"
-  ];
-  let previousPhaseEpoch = null;
-  const startIndex = (view.page - 1) * view.pageSize;
-  for (const [index, phase] of view.pagedPhases.entries()) {
-    if (previousPhaseEpoch !== null && !sameLocalDate(previousPhaseEpoch, phase.startEpoch)) {
-      lines.push(`  ${renderDayDivider(phase.startEpoch, previousPhaseEpoch)}`);
-    }
-    const range = phase.startPromptNumber === phase.endPromptNumber ? `T${phase.startPromptNumber}` : `T${phase.startPromptNumber}-T${phase.endPromptNumber}`;
-    const durationLabel = phase.durationMs > 0 ? `~${formatDuration(phase.durationMs)}` : "<1m";
-    const countsLabel = `${phase.turnCount} ${phase.turnCount === 1 ? "turn" : "turns"}`;
-    const stats = [];
-    if (phase.totalFilesRead > 0) {
-      stats.push(`\u{1F4D6}${phase.totalFilesRead}`);
-    }
-    if (phase.totalFilesModified > 0) {
-      stats.push(`\u270F\uFE0F${phase.totalFilesModified}`);
-    }
-    if (phase.totalToolCalls > 0) {
-      stats.push(`\u{1F527}${phase.totalToolCalls}`);
-    }
-    const extSuffix = phase.externalInputs.length > 0 ? `  [ext:${phase.externalInputs.join(",")}]` : "";
-    const dateLabel = sameLocalDate(phase.startEpoch, phase.endEpoch) ? formatLocalMonthDayWithWeekday(phase.startEpoch) : `${formatLocalMonthDay(phase.startEpoch)}\u2192${formatLocalMonthDay(phase.endEpoch)}`;
-    const leadTurn = turnByPrompt.get(phase.startPromptNumber);
-    const leadTextCandidate = leadTurn?.title ?? cleanPromptForLabel(leadTurn?.userPrompt ?? null);
-    const leadText = leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
-    const leadTitle = sanitizeTimelineField(truncateText(leadText, { limit: titleCap, signal }));
-    lines.push(
-      `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type.join(",")).padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd()
-    );
-    previousPhaseEpoch = phase.endEpoch;
-  }
-  return lines;
-}
 function renderShapeSignals(view) {
   const windowLabel = view.window.startPromptNumber === view.firstPromptNumber && view.window.endPromptNumber === view.lastPromptNumber ? " = full session" : "";
   const lines = [
@@ -40072,93 +42129,86 @@ function withLegacyEraHeader(view, bodyLines, hasSpine) {
   const [first, ...rest] = bodyLines;
   return first === "" ? ["", header, ...rest] : [header, ...bodyLines];
 }
-function renderEraMilestoneLines(view, titleCap, removed, descOff, signal) {
+function compareEdgeSignalRank(left, right, signals) {
+  const leftSignal = signals.get(left.turnId);
+  const rightSignal = signals.get(right.turnId);
+  if (leftSignal.encodesCount !== rightSignal.encodesCount) {
+    return rightSignal.encodesCount - leftSignal.encodesCount;
+  }
+  if (leftSignal.refinesExcess.decision !== rightSignal.refinesExcess.decision) {
+    return rightSignal.refinesExcess.decision - leftSignal.refinesExcess.decision;
+  }
+  if (leftSignal.refinesExcess.delivery !== rightSignal.refinesExcess.delivery) {
+    return rightSignal.refinesExcess.delivery - leftSignal.refinesExcess.delivery;
+  }
+  if (left.createdAtEpoch !== right.createdAtEpoch) {
+    return right.createdAtEpoch - left.createdAtEpoch;
+  }
+  return right.turnId - left.turnId;
+}
+function selectSegmentMilestonesByEdgeSignals(db, members, pageSize, taskCausalityEraCutoffEpoch) {
+  const eraEligible = members.filter(
+    (member) => isTaskCausalityEra(member.createdAtEpoch, taskCausalityEraCutoffEpoch)
+  );
+  if (eraEligible.length === 0) {
+    return { kept: [], demotedCount: 0 };
+  }
+  const signals = getTurnEdgeSignals(db, eraEligible.map((member) => member.turnId));
+  const candidates = eraEligible.filter((member) => !signals.get(member.turnId).overridden);
+  const ranked = [...candidates].sort(
+    (left, right) => compareEdgeSignalRank(left, right, signals)
+  );
+  const admitted = new Set(ranked.slice(0, Math.max(0, pageSize)).map((member) => member.turnId));
+  const chronologicalOrdinals = new Map(members.map((member, index) => [member.turnId, index + 1]));
+  const kept = members.filter((member) => admitted.has(member.turnId)).map((member) => ({ member, ordinal: chronologicalOrdinals.get(member.turnId) }));
+  return { kept, demotedCount: candidates.length - kept.length };
+}
+function renderSegmentMilestoneRow(row, titleCap, signal) {
+  const { member, ordinal } = row;
+  const flag = member.isCorrector ? "\u2691 " : "";
+  const glyph = typeEmoji(member.type);
+  const title = sanitizeTimelineField(
+    truncateText(member.title ?? "(untitled)", { limit: titleCap, signal })
+  );
+  const date5 = formatLocalDate(member.createdAtEpoch);
+  const time3 = formatLocalTime(member.createdAtEpoch);
+  return `   ${flag}T${ordinal} ${date5} ${time3} ${glyph} ${title}`.trimEnd();
+}
+function renderMilestoneDemotedPointer(demotedCount) {
+  if (demotedCount <= 0) {
+    return null;
+  }
+  return `   \u2026 +${demotedCount} more`;
+}
+function renderEraMilestoneLines(view, titleCap, signal) {
   const bySegment = /* @__PURE__ */ new Map();
-  if (view.eraKeptMilestones.length === 0) {
-    return bySegment;
-  }
-  const renderable = view.eraKeptMilestones.filter(
-    (milestone) => !removed.has(milestone.turn.id) && view.eraSegmentIdByTurnId.has(milestone.turn.id)
-  );
-  const renderablePrompts = new Set(
-    renderable.map((milestone) => milestone.turn.promptNumber)
-  );
-  const homedPulled = /* @__PURE__ */ new Map();
-  for (const antecedent of view.eraMilestonePulled) {
-    const home = antecedent.citerPromptNumbers.find(
-      (promptNumber) => renderablePrompts.has(promptNumber)
+  for (const [segmentId, selection] of view.segmentMilestoneSelection) {
+    const lines = selection.kept.map(
+      (row) => renderSegmentMilestoneRow(row, titleCap, signal)
     );
-    if (home === void 0) {
-      continue;
+    const pointer = renderMilestoneDemotedPointer(selection.demotedCount);
+    if (pointer !== null) {
+      lines.push(pointer);
+      if (signal) {
+        signal.truncated = true;
+      }
     }
-    const bucket = homedPulled.get(home) ?? [];
-    bucket.push(antecedent);
-    homedPulled.set(home, bucket);
-  }
-  for (const milestone of renderable) {
-    const segmentId = view.eraSegmentIdByTurnId.get(milestone.turn.id);
-    const pulled = homedPulled.get(milestone.turn.promptNumber) ?? [];
-    const lines = renderUnitFitted(
-      { milestone, pulled },
-      titleCap,
-      descOff.has(milestone.turn.id),
-      signal
-    );
-    const bucket = bySegment.get(segmentId) ?? [];
-    bucket.push(...lines);
-    bySegment.set(segmentId, bucket);
+    if (lines.length > 0) {
+      bySegment.set(segmentId, lines);
+    }
   }
   return bySegment;
-}
-function eraMilestoneDegradationOrder(kept) {
-  return [...kept].sort(compareMilestoneRank).reverse();
-}
-function fitEraMilestonesToBudget(view, titleCap, tokenBudget, measure, signal) {
-  if (view.eraKeptMilestones.length === 0) {
-    return /* @__PURE__ */ new Map();
-  }
-  const removed = /* @__PURE__ */ new Set();
-  const descOff = /* @__PURE__ */ new Set();
-  const build = () => {
-    const lines = renderEraMilestoneLines(view, titleCap, removed, descOff, signal);
-    const spineLines = renderSegmentSpineBlock({
-      spine: view.segmentSpine,
-      orphans: view.orphanAnchors,
-      titleCap,
-      milestoneLinesBySegmentId: lines
-    });
-    return { lines, spineLines };
-  };
-  let current = build();
-  if (measure(current.spineLines) <= tokenBudget) {
-    return current.lines;
-  }
-  for (const milestone of eraMilestoneDegradationOrder(view.eraKeptMilestones)) {
-    descOff.add(milestone.turn.id);
-    current = build();
-    if (measure(current.spineLines) <= tokenBudget) {
-      return current.lines;
-    }
-  }
-  for (const milestone of eraMilestoneDegradationOrder(view.eraKeptMilestones)) {
-    removed.add(milestone.turn.id);
-    current = build();
-    if (measure(current.spineLines) <= tokenBudget) {
-      return current.lines;
-    }
-  }
-  return current.lines;
 }
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
   const signal = createTruncationSignal();
-  const eraMilestoneLinesFull = view.view === "milestones" ? renderEraMilestoneLines(view, titleCap, EMPTY_TURN_ID_SET, EMPTY_TURN_ID_SET, signal) : /* @__PURE__ */ new Map();
+  const eraMilestoneLines = view.view === "milestones" ? renderEraMilestoneLines(view, titleCap, signal) : /* @__PURE__ */ new Map();
   let spineLines = view.view === "milestones" ? renderSegmentSpineBlock({
     spine: view.segmentSpine,
     orphans: view.orphanAnchors,
     titleCap,
-    milestoneLinesBySegmentId: eraMilestoneLinesFull
+    milestoneLinesBySegmentId: eraMilestoneLines
   }) : [];
   const assemble = (bodyLines, spineOverride = spineLines) => [
     ...renderSessionHeader(view),
@@ -40168,11 +42218,6 @@ function renderTimeline(view, options = {}) {
     ...renderEarlierHint(view, options),
     ...renderLineagePointer(view)
   ].join("\n");
-  if (view.view === "phases") {
-    return appendNavigationLegend(assemble(renderPhases(view, titleCap, signal)), {
-      truncated: signal.truncated
-    });
-  }
   if (view.view !== "milestones") {
     return appendNavigationLegend(
       assemble(renderTurnTable(view, promptCap, titleCap, signal)),
@@ -40186,19 +42231,6 @@ function renderTimeline(view, options = {}) {
     });
   }
   if (spineLines.length > 0) {
-    const fittedMilestoneLines = fitEraMilestonesToBudget(
-      view,
-      titleCap,
-      options.tokenBudget,
-      (candidateSpineLines) => estimateDiaryTokens(assemble([], candidateSpineLines)),
-      signal
-    );
-    spineLines = renderSegmentSpineBlock({
-      spine: view.segmentSpine,
-      orphans: view.orphanAnchors,
-      titleCap,
-      milestoneLinesBySegmentId: fittedMilestoneLines
-    });
     shedSpineToBudget({
       view,
       titleCap,
@@ -40207,7 +42239,7 @@ function renderTimeline(view, options = {}) {
         spineLines = candidate;
       },
       measure: () => estimateDiaryTokens(assemble([])),
-      milestoneLinesBySegmentId: fittedMilestoneLines
+      milestoneLinesBySegmentId: eraMilestoneLines
     });
   }
   const body = fitMilestoneBodyToBudget(
@@ -40248,9 +42280,204 @@ function shedSpineToBudget(options) {
     );
   }
 }
+function parseSegmentTimelineId(id) {
+  const match = id.trim().match(/^E(\d+)(?:\/T.*)?$/i);
+  if (!match) {
+    return null;
+  }
+  return { segmentId: Number(match[1]) };
+}
+var SEGMENT_TIMELINE_TITLE_CAP = DEFAULT_TITLE_CAP;
+function paginateByTokenBudget(items, page, pageSize, budgetTokens, measure) {
+  const pages = [];
+  let current = [];
+  let used = 0;
+  for (const item of items) {
+    const cost = measure(item);
+    const overflowsCount = current.length >= pageSize;
+    const overflowsBudget = current.length > 0 && used + cost > budgetTokens;
+    if (overflowsCount || overflowsBudget) {
+      pages.push(current);
+      current = [];
+      used = 0;
+    }
+    current.push(item);
+    used += cost;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  const pageCount = pages.length;
+  const clampedPage = Math.min(Math.max(1, page), pageCount);
+  return { items: pages[clampedPage - 1] ?? [], page: clampedPage, pageCount };
+}
+function renderSegmentTurnRow(row, turn, promptCap, titleCap, signal) {
+  const home = `[S${turn.sessionId}/T${turn.promptNumber}]`;
+  const time3 = formatLocalTime(turn.createdAtEpoch);
+  const glyph = typeEmoji(turn.type);
+  const excerpt = sanitizeTimelineField(
+    truncateText(cleanPromptForLabel(turn.userPrompt), { limit: promptCap, signal })
+  );
+  const title = sanitizeTimelineField(
+    truncateText(turn.title ?? "(untitled)", { limit: titleCap, signal })
+  );
+  const head = excerpt !== "" && title !== "" ? `${excerpt} \u2192 ${title}` : `${excerpt}${title}`;
+  return `  T${row.ordinal} ${home} ${time3} ${glyph} ${head}`.trimEnd();
+}
+function buildSegmentTimelineView(db, input) {
+  const segment = getSegment(db, input.segmentId);
+  if (!segment) {
+    throw new Error(`timeline: segment E${input.segmentId} not found`);
+  }
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const viewKind = input.view ?? "turns";
+  const pageBudget = input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET;
+  const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  const rows = members.map((member, index) => ({
+    member,
+    ordinal: index + 1
+  }));
+  let pageMembers = [];
+  let page = Math.max(1, input.page ?? 1);
+  let pageCount = 1;
+  let keptMilestones = [];
+  let demotedCount = 0;
+  if (viewKind === "turns") {
+    const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
+    const withTurns = rows.flatMap((row) => {
+      const turn = getTurnById(db, row.member.turnId);
+      return turn ? [{ row, turn }] : [];
+    });
+    const paged = paginateByTokenBudget(
+      withTurns,
+      page,
+      pageSize,
+      pageBudget,
+      (entry) => estimateDiaryTokens(
+        renderSegmentTurnRow(entry.row, entry.turn, PROMPT_COLUMN_CAP, SEGMENT_TIMELINE_TITLE_CAP)
+      )
+    );
+    pageMembers = paged.items.map((entry) => ({
+      member: entry.row.member,
+      ordinal: entry.row.ordinal,
+      turn: entry.turn
+    }));
+    page = paged.page;
+    pageCount = paged.pageCount;
+  } else {
+    const milestonePageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
+    const selection = selectSegmentMilestonesByEdgeSignals(
+      db,
+      members,
+      milestonePageSize,
+      input.taskCausalityEraCutoffEpoch
+    );
+    keptMilestones = selection.kept;
+    demotedCount = selection.demotedCount;
+  }
+  return {
+    view: viewKind,
+    segment,
+    totalMembers: members.length,
+    pageBudget,
+    titleCap: SEGMENT_TIMELINE_TITLE_CAP,
+    pageMembers,
+    page,
+    pageCount,
+    keptMilestones,
+    demotedCount
+  };
+}
+function renderSegmentTimeline(view) {
+  const signal = createTruncationSignal();
+  const header = [
+    `- [E${view.segment.id}] ${sanitizeTimelineField(
+      truncateText(view.segment.title, { limit: view.titleCap, signal })
+    )}`,
+    `  [${view.segment.status}] \xB7 ${view.totalMembers} ${view.totalMembers === 1 ? "member" : "members"}`
+  ];
+  if (view.view === "turns") {
+    const lines2 = [
+      ...header,
+      "",
+      ...view.pageMembers.map(
+        (entry) => renderSegmentTurnRow(
+          { member: entry.member, ordinal: entry.ordinal },
+          entry.turn,
+          PROMPT_COLUMN_CAP,
+          view.titleCap,
+          signal
+        )
+      )
+    ];
+    if (view.pageCount > 1) {
+      lines2.push("", `  showing: turns \xB7 page ${view.page}/${view.pageCount}`);
+    }
+    return appendNavigationLegend(lines2.join("\n"), { truncated: signal.truncated });
+  }
+  const lines = [
+    ...header,
+    "",
+    ...view.keptMilestones.map(
+      (row) => renderSegmentMilestoneRow(row, view.titleCap, signal)
+    )
+  ];
+  const pointer = renderMilestoneDemotedPointer(view.demotedCount);
+  if (pointer !== null) {
+    lines.push(pointer);
+    signal.truncated = true;
+  }
+  return appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated });
+}
+function recordTimelineReadGrants(db, readerId, now, entries, sequence) {
+  if (!readerId || entries.length === 0) {
+    return;
+  }
+  recordReadGrants(db, readerId, entries, (now ?? (() => Math.floor(Date.now() / 1e3)))(), sequence);
+}
 function timelineQuery(db, input) {
+  const sequence = snapshotWriteGateSequence(db);
   try {
-    return renderTimeline(buildTimelineView(db, input));
+    const segmentRoute = parseSegmentTimelineId(input.id);
+    if (segmentRoute !== null) {
+      const view2 = buildSegmentTimelineView(db, {
+        segmentId: segmentRoute.segmentId,
+        view: input.view,
+        page: input.page,
+        pageSize: input.pageSize,
+        pageBudget: input.pageBudget,
+        eraCutoffEpoch: input.eraCutoffEpoch,
+        taskCausalityEraCutoffEpoch: input.taskCausalityEraCutoffEpoch
+      });
+      recordTimelineReadGrants(
+        db,
+        input.readerId,
+        input.now,
+        [
+          { entityType: "segment", entityId: view2.segment.id },
+          ...view2.pageMembers.map((row) => ({ entityType: "turn", entityId: row.turn.id })),
+          ...view2.keptMilestones.map((row) => ({
+            entityType: "turn",
+            entityId: row.member.turnId
+          }))
+        ],
+        sequence
+      );
+      return renderSegmentTimeline(view2);
+    }
+    const view = buildTimelineView(db, input);
+    recordTimelineReadGrants(
+      db,
+      input.readerId,
+      input.now,
+      [
+        { entityType: "session", entityId: view.session.id },
+        ...view.pageTurns.map((turn) => ({ entityType: "turn", entityId: turn.id })),
+        ...view.pagedMilestones.map((row) => ({ entityType: "turn", entityId: row.turn.id }))
+      ],
+      sequence
+    );
+    return renderTimeline(view, { pageBudget: input.pageBudget });
   } catch (error48) {
     const message = error48 instanceof Error ? error48.message : String(error48);
     return `timeline error: ${message}`;
@@ -40287,6 +42514,12 @@ function toTimelineQueryInput(args) {
   if (args.view !== void 0) {
     input.view = args.view;
   }
+  if (args.filter !== void 0) {
+    input.filter = args.filter;
+  }
+  if (args.pageBudget !== void 0) {
+    input.pageBudget = args.pageBudget;
+  }
   return input;
 }
 function createDatabaseBackedHandlers(database, options = {}) {
@@ -40295,6 +42528,10 @@ function createDatabaseBackedHandlers(database, options = {}) {
   }
   const includeDbTurnIds = options.audience === "worker";
   const eraCutoff = () => options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveEraCutoff(database);
+  const readerId = () => {
+    const callerSessionId = options.resolveCallerSessionId?.() ?? null;
+    return typeof callerSessionId === "number" ? sessionWriterId(callerSessionId) : null;
+  };
   const workerTextResult = (text) => {
     if (!includeDbTurnIds) {
       return textResult3(text);
@@ -40316,20 +42553,27 @@ function createDatabaseBackedHandlers(database, options = {}) {
       recallMemory(database, {
         id: args.id,
         query: args.query,
-        time: args.time,
-        depth: args.depth,
+        // Ticket 04: `time` moved into the structured `filter` object
+        // (public schema no longer offers a top-level `time`). Ticket 11:
+        // `filter.fields` is the sole field-selection mechanism — the
+        // worker gets no special exemption any more (the retired `view`/
+        // `depth` mapping and the `truncate`/`truncateCap` forwarding
+        // below it are both gone).
+        filter: args.filter,
         page: args.page,
         pageSize: args.pageSize,
-        truncate: args.truncate,
+        pageBudget: args.pageBudget,
+        turn: args.turn,
         includeDbTurnIds,
-        truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : void 0,
-        eraCutoffEpoch: eraCutoff()
+        eraCutoffEpoch: eraCutoff(),
+        readerId: readerId()
       })
     ),
     timeline: (args) => workerTextResult(
       timelineQuery(database, {
         ...toTimelineQueryInput(args),
-        eraCutoffEpoch: eraCutoff()
+        eraCutoffEpoch: eraCutoff(),
+        readerId: readerId()
       })
     ),
     // Not wrapped in workerTextResult: `note` is a main-agent-only write, and
@@ -40339,13 +42583,18 @@ function createDatabaseBackedHandlers(database, options = {}) {
       eraCutoffEpoch: eraCutoff(),
       callerSessionId: options.resolveCallerSessionId?.() ?? null
     }),
-    // Same shape as `note`: a short mechanical report, nothing to truncate.
-    check: (args) => checkTool(database, args)
+    // Same shape as `note`: a main-agent-only write (ADR-0002), a short
+    // mechanical receipt (plus `attach`'s field render), nothing to truncate.
+    // No era gating — segments carry no legacy shape `remember` needs to
+    // route around.
+    remember: (args) => rememberTool(database, args, {
+      callerSessionId: options.resolveCallerSessionId?.() ?? null
+    })
   };
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.11.2" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.12.0" : "0.0.0-test";
 function resolveCallerSessionIdFromEnv(db, env = process.env) {
   for (const identityKey of deriveProcessIdentityKeys(env)) {
     const sessionId = getMnemoSessionIdForProcessSession(db, identityKey);
@@ -40390,12 +42639,12 @@ function registerMainMcpTools(server, toolHandlers) {
     (args) => toolHandlers.note(args)
   );
   server.registerTool(
-    "check",
+    "remember",
     {
-      description: MNEMO_TOOL_DESCRIPTIONS.check,
-      inputSchema: checkInputSchema
+      description: MNEMO_TOOL_DESCRIPTIONS.remember,
+      inputSchema: rememberInputSchema
     },
-    (args) => toolHandlers.check(args)
+    (args) => toolHandlers.remember(args)
   );
 }
 function createMcpServer(options = {}) {
@@ -40421,7 +42670,7 @@ function createMcpServer(options = {}) {
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
     timeline: mergedHandlers.timeline ?? createStubHandler("timeline"),
     note: mergedHandlers.note ?? createStubHandler("note"),
-    check: mergedHandlers.check ?? createStubHandler("check")
+    remember: mergedHandlers.remember ?? createStubHandler("remember")
   };
   registerMainMcpTools(server, toolHandlers);
   return server;

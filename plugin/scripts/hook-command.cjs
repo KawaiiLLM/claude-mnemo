@@ -390,7 +390,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.11.2-mswtfh3c" : "dev";
+var BUILD_ID = true ? "0.12.0-mt05zv1j" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -424,12 +424,94 @@ function rankEdgeProvenance(provenance) {
   return PROVENANCE_RANK[provenance];
 }
 
+// src/db/references.ts
+var REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
+function topLevelBracketGroups(content) {
+  const groups = [];
+  for (let index = 0; index < content.length; index += 1) {
+    if (content[index] !== "[") {
+      continue;
+    }
+    const start = index;
+    let depth = 0;
+    let nested = false;
+    let cursor = index;
+    for (; cursor < content.length; cursor += 1) {
+      const char = content[cursor];
+      if (char === "[") {
+        depth += 1;
+        if (depth > 1) {
+          nested = true;
+        }
+      } else if (char === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          break;
+        }
+      }
+    }
+    if (depth !== 0) {
+      break;
+    }
+    if (!nested) {
+      groups.push(content.slice(start, cursor + 1));
+    }
+    index = cursor;
+  }
+  return groups;
+}
+function parsePositiveId(digits) {
+  if (digits === void 0) {
+    return null;
+  }
+  const value = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+function parseQualifiedReferences(content) {
+  if (!content) {
+    return [];
+  }
+  const references = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const group of topLevelBracketGroups(content)) {
+    const match = REFERENCE_PATTERN.exec(group);
+    if (match === null) {
+      continue;
+    }
+    const raw = match[0];
+    const segmentId = parsePositiveId(match[3]);
+    if (segmentId !== null) {
+      const key2 = `E${segmentId}`;
+      if (!seen.has(key2)) {
+        seen.add(key2);
+        references.push({ kind: "segment", raw, segmentId });
+      }
+      continue;
+    }
+    const sessionId = parsePositiveId(match[1]);
+    const promptNumber = parsePositiveId(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    const key = `S${sessionId}/T${promptNumber}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      references.push({ kind: "turn", raw, sessionId, promptNumber });
+    }
+  }
+  return references;
+}
+
 // src/db/citations.ts
 var CITATION_RELATIONS = [
   "evidence-for",
   "evidence-against",
   "supersedes",
-  "depends-on"
+  "depends-on",
+  "refines",
+  "override",
+  "encodes",
+  "grounded-on"
 ];
 function isCitationRelation(value) {
   return typeof value === "string" && CITATION_RELATIONS.includes(value);
@@ -440,7 +522,7 @@ var LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
 var LIST_ELEMENT_PATTERN = /T(\d+)/g;
 var SINGLE_PATTERN = /^T(\d+)$/;
 var ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
-function parsePositiveId(digits) {
+function parsePositiveId2(digits) {
   const id = Number.parseInt(digits, 10);
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
@@ -470,8 +552,8 @@ function expandBracketBody(body) {
   const inner = body.trim();
   const range = RANGE_PATTERN.exec(inner);
   if (range) {
-    const start = parsePositiveId(range[1]);
-    const end = parsePositiveId(range[2]);
+    const start = parsePositiveId2(range[1]);
+    const end = parsePositiveId2(range[2]);
     if (start === null || end === null || end < start) {
       return [];
     }
@@ -490,7 +572,7 @@ function expandBracketBody(body) {
     LIST_ELEMENT_PATTERN.lastIndex = 0;
     let element;
     while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
-      const id = parsePositiveId(element[1]);
+      const id = parsePositiveId2(element[1]);
       if (id === null) {
         return [];
       }
@@ -500,12 +582,12 @@ function expandBracketBody(body) {
   }
   const single = SINGLE_PATTERN.exec(inner);
   if (single) {
-    const id = parsePositiveId(single[1]);
+    const id = parsePositiveId2(single[1]);
     return id === null ? [] : [id];
   }
   const annotated = ANNOTATED_PATTERN.exec(inner);
   if (annotated) {
-    const id = parsePositiveId(annotated[1]);
+    const id = parsePositiveId2(annotated[1]);
     return id === null ? [] : [id];
   }
   return [];
@@ -602,6 +684,41 @@ function getSessionEffectiveCitations(db, sessionId) {
   return effective;
 }
 
+// src/db/note-settlement-proposals.ts
+function canonicalizeSettlementProposalAddresses(addresses) {
+  const normalized = [...new Set(addresses.map((raw) => raw.trim()))].sort();
+  return JSON.stringify(normalized);
+}
+var PROPOSAL_COLUMNS = `
+  id,
+  job_id AS jobId,
+  session_id AS sessionId,
+  title,
+  addresses,
+  created_at_epoch AS createdAtEpoch
+`;
+function mapProposalRow(row) {
+  const parsed = JSON.parse(row.addresses);
+  return {
+    id: row.id,
+    jobId: row.jobId,
+    sessionId: row.sessionId,
+    title: row.title,
+    addresses: Array.isArray(parsed) ? parsed.filter((entry) => typeof entry === "string") : [],
+    createdAtEpoch: row.createdAtEpoch
+  };
+}
+function listRecentSettlementProposals(db, limit) {
+  if (limit <= 0) {
+    return [];
+  }
+  return db.query(
+    `SELECT ${PROPOSAL_COLUMNS} FROM note_settlement_proposals
+       ORDER BY created_at_epoch DESC, id DESC
+       LIMIT ?`
+  ).all(limit).map(mapProposalRow);
+}
+
 // src/db/search.ts
 var OBSERVATION_ORIGINAL_INDEX_CHARS = 500;
 function truncateOriginal(value) {
@@ -612,6 +729,106 @@ function truncateOriginal(value) {
 }
 function normalizeTrigramText(value) {
   return value.normalize("NFKC").toLocaleLowerCase("en-US").replace(/\s+/gu, " ").trim();
+}
+var RENDERED_TURN_STATUS_CLAUSE = "t.status = 'extracted'";
+var READER_FACING_OBSERVATION_CLAUSE = "o.excluded_from_extraction = 0";
+function buildObservationStatusClause(eraCutoffEpoch) {
+  return eraCutoffEpoch === null || eraCutoffEpoch === void 0 ? { clause: "o.status = 'extracted'", params: [] } : {
+    clause: "(o.status = 'extracted' OR t.created_at_epoch >= ?)",
+    params: [eraCutoffEpoch]
+  };
+}
+function parseJsonArray(value) {
+  if (!value) {
+    return [];
+  }
+  return JSON.parse(value);
+}
+function mapSearchRow(row) {
+  return {
+    ...row,
+    filesRead: parseJsonArray(row.filesRead),
+    filesModified: parseJsonArray(row.filesModified)
+  };
+}
+function resolveEpochRange(options) {
+  const lowerBounds = [options.after].filter(
+    (value) => value !== void 0
+  );
+  const upperBounds = [options.before].filter(
+    (value) => value !== void 0
+  );
+  return {
+    after: lowerBounds.length > 0 ? Math.max(...lowerBounds) : void 0,
+    before: upperBounds.length > 0 ? Math.min(...upperBounds) : void 0
+  };
+}
+function buildDateClause(column, options) {
+  const { after, before } = resolveEpochRange(options);
+  const clauses = [];
+  const params = [];
+  if (after !== void 0) {
+    clauses.push(`${column} >= ?`);
+    params.push(after);
+  }
+  if (before !== void 0) {
+    clauses.push(`${column} <= ?`);
+    params.push(before);
+  }
+  return {
+    clause: clauses.length > 0 ? clauses.join(" AND ") : "",
+    params
+  };
+}
+function buildFileClause(readColumn, modifiedColumn, file2) {
+  if (!file2) {
+    return { clause: "", params: [] };
+  }
+  return {
+    clause: `(${readColumn} LIKE ? OR ${modifiedColumn} LIKE ?)`,
+    params: [`%${file2}%`, `%${file2}%`]
+  };
+}
+function buildTagClause(column, tag) {
+  if (!tag) {
+    return { clause: "", params: [] };
+  }
+  return {
+    clause: `EXISTS (SELECT 1 FROM json_each(${column}) WHERE value = ?)`,
+    params: [tag]
+  };
+}
+function buildProjectClause(project) {
+  if (!project) {
+    return { clause: "", params: [] };
+  }
+  return {
+    clause: "s.project = ?",
+    params: [project]
+  };
+}
+function buildSessionClause(column, sessionId) {
+  if (sessionId === void 0) {
+    return { clause: "", params: [] };
+  }
+  return {
+    clause: `${column} = ?`,
+    params: [sessionId]
+  };
+}
+function combineClauses(clauses) {
+  const filtered = clauses.filter(Boolean);
+  return filtered.length > 0 ? ` WHERE ${filtered.join(" AND ")}` : "";
+}
+function buildSafeFtsQuery(query) {
+  const terms = query?.trim().split(/\s+/).filter(Boolean).map((term) => {
+    const sanitized = term.replace(/["*]/g, "");
+    return sanitized ? `"${sanitized.replace(/"/g, '""')}"` : null;
+  }).filter(Boolean);
+  if (!terms || terms.length === 0) {
+    return void 0;
+  }
+  return terms.join(" OR ");
 }
 function indexFtsRecord(db, layer, sourceId, title, content, extra, prompt, response) {
   db.query("DELETE FROM memory_fts WHERE layer = ? AND source_id = ?").run(
@@ -712,13 +929,21 @@ function indexSegmentToFTS(db, segment) {
       return [];
     }
   }).join(" ");
+  const workingState = [
+    segment.goal,
+    segment.constraints,
+    segment.decisions,
+    segment.done,
+    segment.nextSteps,
+    segment.reference
+  ].filter((value) => Boolean(value && value.trim())).join("\n");
   indexFtsRecord(
     db,
     "segment",
     segment.id,
     segment.title,
     segment.content,
-    [segment.insight ?? "", facets].filter((part) => part.trim() !== "").join("\n"),
+    [segment.insight ?? "", workingState, facets].filter((part) => part.trim() !== "").join("\n"),
     null,
     null
   );
@@ -773,7 +998,11 @@ function rebuildSearchIndex(db) {
     indexObservationToFTS(db, observation);
   }
   const segmentRows = db.query(
-    "SELECT id, title, content, insight, type, tags FROM segments ORDER BY id"
+    `SELECT
+         id, title, content, insight,
+         goal, constraints, decisions, done, next_steps AS nextSteps, reference,
+         type, tags
+       FROM segments ORDER BY id`
   ).all();
   for (const segment of segmentRows) {
     indexSegmentToFTS(db, segment);
@@ -782,6 +1011,460 @@ function rebuildSearchIndex(db) {
   for (const rule of ruleRows) {
     indexRuleToFTS(db, rule);
   }
+}
+function queryRows(db, sql, params) {
+  return db.query(sql).all(...params).map(mapSearchRow);
+}
+function applyLimit(sql, limit) {
+  return limit === void 0 ? sql : `${sql}
+      LIMIT ?`;
+}
+function withLimit(params, limit) {
+  return limit === void 0 ? params : [...params, limit];
+}
+function queryRecentSessions(db, options) {
+  const projectClause = buildProjectClause(options.project);
+  return queryRows(
+    db,
+    applyLimit(`
+      SELECT
+        'session' AS layer,
+        s.id AS sourceId,
+        s.id AS sessionId,
+        NULL AS turnId,
+        NULL AS observationId,
+        NULL AS sourceTurnId,
+        s.project AS project,
+        s.title AS title,
+        s.content AS content,
+        NULL AS type,
+        NULL AS filesRead,
+        NULL AS filesModified,
+        s.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
+      FROM sessions s
+      ${combineClauses([projectClause.clause])}
+      ORDER BY s.created_at_epoch DESC
+    `, options.limit),
+    withLimit([...projectClause.params], options.limit)
+  );
+}
+function queryRecentTurns(db, options) {
+  const projectClause = buildProjectClause(options.project);
+  return queryRows(
+    db,
+    applyLimit(`
+      SELECT
+        'turn' AS layer,
+        t.id AS sourceId,
+        t.session_id AS sessionId,
+        t.id AS turnId,
+        NULL AS observationId,
+        NULL AS sourceTurnId,
+        s.project AS project,
+        t.title AS title,
+        t.content AS content,
+        NULL AS type,
+        t.files_read AS filesRead,
+        t.files_modified AS filesModified,
+        t.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
+      FROM turns t
+      JOIN sessions s ON s.id = t.session_id
+      ${combineClauses([projectClause.clause])}
+      ORDER BY t.created_at_epoch DESC
+    `, options.limit),
+    withLimit([...projectClause.params], options.limit)
+  );
+}
+function queryRecentObservations(db, options) {
+  const projectClause = buildProjectClause(options.project);
+  const statusClause = buildObservationStatusClause(options.eraCutoffEpoch);
+  return queryRows(
+    db,
+    applyLimit(`
+      SELECT
+        'observation' AS layer,
+        o.id AS sourceId,
+        t.session_id AS sessionId,
+        t.id AS turnId,
+        o.id AS observationId,
+        NULL AS sourceTurnId,
+        s.project AS project,
+        o.title AS title,
+        o.content AS content,
+        NULL AS type,
+        NULL AS filesRead,
+        NULL AS filesModified,
+        o.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
+      FROM observations o
+      JOIN turns t ON t.id = o.turn_id
+      JOIN sessions s ON s.id = t.session_id
+      ${combineClauses([
+      READER_FACING_OBSERVATION_CLAUSE,
+      statusClause.clause,
+      projectClause.clause
+    ])}
+      ORDER BY o.created_at_epoch DESC
+    `, options.limit),
+    withLimit([...statusClause.params, ...projectClause.params], options.limit)
+  );
+}
+function buildSessionTurnFacetClauses(options) {
+  const clauses = [];
+  const params = [];
+  if (options.type) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND EXISTS (SELECT 1 FROM json_each(t.type) WHERE value = ?)
+      )`
+    );
+    params.push(options.type);
+  }
+  if (options.file) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
+      )`
+    );
+    params.push(`%${options.file}%`, `%${options.file}%`);
+  }
+  if (options.tag) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
+      )`
+    );
+    params.push(options.tag);
+  }
+  return { clauses, params };
+}
+function querySessionsByScope(db, options, query) {
+  const projectClause = buildProjectClause(options.project);
+  const dateClause = buildDateClause("s.created_at_epoch", options);
+  const sessionClause = buildSessionClause("s.id", options.sessionId);
+  const facets = buildSessionTurnFacetClauses(options);
+  if (query) {
+    const whereClauses2 = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, ...facets.clauses];
+    const params2 = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...facets.params];
+    return queryRows(
+      db,
+      applyLimit(`
+        SELECT
+          'session' AS layer,
+          s.id AS sourceId,
+          s.id AS sessionId,
+          NULL AS turnId,
+          NULL AS observationId,
+          NULL AS sourceTurnId,
+          s.project AS project,
+          s.title AS title,
+          s.content AS content,
+          NULL AS type,
+          NULL AS filesRead,
+          NULL AS filesModified,
+          s.created_at_epoch AS timestampEpoch,
+          bm25(memory_fts, 0.0, 0.0, 10.0, 5.0, 5.0, 3.0, 1.0) AS relevance
+        FROM memory_fts
+        JOIN sessions s ON s.id = memory_fts.source_id
+        ${combineClauses(whereClauses2)}
+        ORDER BY relevance ASC
+      `, options.limit),
+      withLimit(params2, options.limit)
+    );
+  }
+  const whereClauses = [projectClause.clause, sessionClause.clause, dateClause.clause, ...facets.clauses];
+  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...facets.params];
+  return queryRows(
+    db,
+    applyLimit(`
+      SELECT
+        'session' AS layer,
+        s.id AS sourceId,
+        s.id AS sessionId,
+        NULL AS turnId,
+        NULL AS observationId,
+        NULL AS sourceTurnId,
+        s.project AS project,
+        s.title AS title,
+        s.content AS content,
+        NULL AS type,
+        NULL AS filesRead,
+        NULL AS filesModified,
+        s.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
+      FROM sessions s
+      ${combineClauses(whereClauses)}
+      ORDER BY s.created_at_epoch DESC
+    `, options.limit),
+    withLimit(params, options.limit)
+  );
+}
+function queryTurnsByScope(db, options, query) {
+  const projectClause = buildProjectClause(options.project);
+  const dateClause = buildDateClause("t.created_at_epoch", options);
+  const fileClause = buildFileClause("t.files_read", "t.files_modified", options.file);
+  const tagClause = buildTagClause("t.tags", options.tag);
+  const sessionClause = buildSessionClause("t.session_id", options.sessionId);
+  if (query) {
+    const whereClauses2 = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", RENDERED_TURN_STATUS_CLAUSE, projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+    const params2 = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
+    if (options.type) {
+      whereClauses2.push("EXISTS (SELECT 1 FROM json_each(t.type) WHERE value = ?)");
+      params2.push(options.type);
+    }
+    return queryRows(
+      db,
+      applyLimit(`
+        SELECT
+          'turn' AS layer,
+          t.id AS sourceId,
+          t.session_id AS sessionId,
+          t.id AS turnId,
+          NULL AS observationId,
+          NULL AS sourceTurnId,
+          s.project AS project,
+          t.title AS title,
+          t.content AS content,
+          NULL AS type,
+          t.files_read AS filesRead,
+          t.files_modified AS filesModified,
+          t.created_at_epoch AS timestampEpoch,
+          bm25(memory_fts, 0.0, 0.0, 10.0, 5.0, 5.0, 3.0, 1.0) AS relevance
+        FROM memory_fts
+        JOIN turns t ON t.id = memory_fts.source_id
+        JOIN sessions s ON s.id = t.session_id
+        ${combineClauses(whereClauses2)}
+        ORDER BY relevance ASC
+      `, options.limit),
+      withLimit(params2, options.limit)
+    );
+  }
+  const whereClauses = [RENDERED_TURN_STATUS_CLAUSE, projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
+  if (options.type) {
+    whereClauses.push("EXISTS (SELECT 1 FROM json_each(t.type) WHERE value = ?)");
+    params.push(options.type);
+  }
+  return queryRows(
+    db,
+    applyLimit(`
+      SELECT
+        'turn' AS layer,
+        t.id AS sourceId,
+        t.session_id AS sessionId,
+        t.id AS turnId,
+        NULL AS observationId,
+        NULL AS sourceTurnId,
+        s.project AS project,
+        t.title AS title,
+        t.content AS content,
+        NULL AS type,
+        t.files_read AS filesRead,
+        t.files_modified AS filesModified,
+        t.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
+      FROM turns t
+      JOIN sessions s ON s.id = t.session_id
+      ${combineClauses(whereClauses)}
+      ORDER BY t.created_at_epoch DESC
+    `, options.limit),
+    withLimit(params, options.limit)
+  );
+}
+function querySegmentsByScope(db, options, query) {
+  if (options.file) {
+    return [];
+  }
+  const dateClause = buildDateClause("g.created_at_epoch", options);
+  const tagClause = buildTagClause("g.tags", options.tag);
+  const whereClauses = [];
+  const params = [];
+  if (query) {
+    whereClauses.push("memory_fts.layer = 'segment'", "memory_fts MATCH ?");
+    params.push(query);
+  }
+  whereClauses.push(dateClause.clause, tagClause.clause);
+  params.push(...dateClause.params, ...tagClause.params);
+  if (options.type) {
+    whereClauses.push("EXISTS (SELECT 1 FROM json_each(g.type) WHERE value = ?)");
+    params.push(options.type);
+  }
+  if (options.project !== void 0) {
+    whereClauses.push(
+      `EXISTS (
+         SELECT 1 FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         JOIN sessions s ON s.id = t.session_id
+         WHERE sm.segment_id = g.id AND s.project = ?
+       )`
+    );
+    params.push(options.project);
+  }
+  if (options.sessionId !== void 0) {
+    whereClauses.push(
+      `EXISTS (
+         SELECT 1 FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         WHERE sm.segment_id = g.id AND t.session_id = ?
+       )`
+    );
+    params.push(options.sessionId);
+  }
+  const selection = `
+    SELECT
+      'segment' AS layer,
+      g.id AS sourceId,
+      NULL AS sessionId,
+      NULL AS turnId,
+      NULL AS observationId,
+      NULL AS sourceTurnId,
+      '' AS project,
+      g.title AS title,
+      g.content AS content,
+      g.type AS type,
+      NULL AS filesRead,
+      NULL AS filesModified,
+      g.created_at_epoch AS timestampEpoch,
+      ${query ? "bm25(memory_fts, 0.0, 0.0, 10.0, 5.0, 5.0, 3.0, 1.0)" : "NULL"} AS relevance
+    ${query ? "FROM memory_fts JOIN segments g ON g.id = memory_fts.source_id" : "FROM segments g"}
+    ${combineClauses(whereClauses)}
+    ORDER BY ${query ? "relevance ASC" : "g.created_at_epoch DESC"}
+  `;
+  return queryRows(db, applyLimit(selection, options.limit), withLimit(params, options.limit));
+}
+function queryObservationsByScope(db, options, query) {
+  if (options.file) {
+    return [];
+  }
+  if (options.type) {
+    return [];
+  }
+  if (options.tag) {
+    return [];
+  }
+  const projectClause = buildProjectClause(options.project);
+  const statusClause = buildObservationStatusClause(options.eraCutoffEpoch);
+  const dateClause = buildDateClause("o.created_at_epoch", options);
+  const sessionClause = buildSessionClause("t.session_id", options.sessionId);
+  if (query) {
+    const whereClauses2 = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", READER_FACING_OBSERVATION_CLAUSE, statusClause.clause, projectClause.clause, sessionClause.clause, dateClause.clause];
+    const params2 = [query, ...statusClause.params, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
+    return queryRows(
+      db,
+      applyLimit(`
+        SELECT
+          'observation' AS layer,
+          o.id AS sourceId,
+          t.session_id AS sessionId,
+          t.id AS turnId,
+          o.id AS observationId,
+          NULL AS sourceTurnId,
+          s.project AS project,
+          o.title AS title,
+          o.content AS content,
+          NULL AS type,
+          NULL AS filesRead,
+          NULL AS filesModified,
+          o.created_at_epoch AS timestampEpoch,
+          bm25(memory_fts, 0.0, 0.0, 10.0, 5.0, 5.0, 3.0, 1.0) AS relevance
+        FROM memory_fts
+        JOIN observations o ON o.id = memory_fts.source_id
+        JOIN turns t ON t.id = o.turn_id
+        JOIN sessions s ON s.id = t.session_id
+        ${combineClauses(whereClauses2)}
+        ORDER BY relevance ASC
+      `, options.limit),
+      withLimit(params2, options.limit)
+    );
+  }
+  const whereClauses = [READER_FACING_OBSERVATION_CLAUSE, statusClause.clause, projectClause.clause, sessionClause.clause, dateClause.clause];
+  const params = [...statusClause.params, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
+  return queryRows(
+    db,
+    applyLimit(`
+      SELECT
+        'observation' AS layer,
+        o.id AS sourceId,
+        t.session_id AS sessionId,
+        t.id AS turnId,
+        o.id AS observationId,
+        NULL AS sourceTurnId,
+        s.project AS project,
+        o.title AS title,
+        o.content AS content,
+        NULL AS type,
+        NULL AS filesRead,
+        NULL AS filesModified,
+        o.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
+      FROM observations o
+      JOIN turns t ON t.id = o.turn_id
+      JOIN sessions s ON s.id = t.session_id
+      ${combineClauses(whereClauses)}
+      ORDER BY o.created_at_epoch DESC
+    `, options.limit),
+    withLimit(params, options.limit)
+  );
+}
+function searchMemory(db, options) {
+  const query = buildSafeFtsQuery(options.query);
+  const hasFilters = Boolean(options.type) || Boolean(options.file) || Boolean(options.tag) || options.sessionId !== void 0 || options.after !== void 0 || options.before !== void 0;
+  if (!query && !hasFilters) {
+    if (!options.scope || options.scope === "sessions") {
+      return queryRecentSessions(db, options);
+    }
+    if (options.scope === "turns") {
+      return queryRecentTurns(db, options);
+    }
+    if (options.scope === "segments") {
+      return querySegmentsByScope(db, options, query);
+    }
+    return queryRecentObservations(db, options);
+  }
+  if (!options.scope) {
+    const results = [];
+    if (!options.file) {
+      results.push(...querySessionsByScope(db, options, query));
+      results.push(...querySegmentsByScope(db, options, query));
+    }
+    results.push(...queryTurnsByScope(db, options, query));
+    results.push(...queryObservationsByScope(db, options, query));
+    if (query) {
+      return results.sort((left, right) => {
+        const leftRank = left.relevance ?? Number.POSITIVE_INFINITY;
+        const rightRank = right.relevance ?? Number.POSITIVE_INFINITY;
+        if (leftRank !== rightRank) {
+          return leftRank - rightRank;
+        }
+        return right.timestampEpoch - left.timestampEpoch;
+      });
+    }
+    return results.sort((left, right) => right.timestampEpoch - left.timestampEpoch);
+  }
+  if (options.scope === "sessions") {
+    return querySessionsByScope(db, options, query);
+  }
+  if (options.scope === "turns") {
+    return queryTurnsByScope(db, options, query);
+  }
+  if (options.scope === "segments") {
+    return querySegmentsByScope(db, options, query);
+  }
+  return queryObservationsByScope(db, options, query);
 }
 
 // src/shared/type-vocabulary.ts
@@ -844,9 +1527,9 @@ function typeListsEqual(left, right) {
 }
 
 // src/db/segments.ts
+var SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH = 1786981737;
 var SEGMENT_COLUMNS = `
   id,
-  topic_id AS topicId,
   title,
   content,
   insight,
@@ -854,6 +1537,12 @@ var SEGMENT_COLUMNS = `
   tags,
   status,
   revision,
+  goal,
+  constraints,
+  decisions,
+  done,
+  next_steps AS nextSteps,
+  reference,
   created_at_epoch AS createdAtEpoch,
   updated_at_epoch AS updatedAtEpoch
 `;
@@ -887,6 +1576,12 @@ function indexSegment(db, segment) {
     title: segment.title,
     content: segment.content,
     insight: segment.insight,
+    goal: segment.goal,
+    constraints: segment.constraints,
+    decisions: segment.decisions,
+    done: segment.done,
+    nextSteps: segment.nextSteps,
+    reference: segment.reference,
     type: JSON.stringify(segment.type),
     tags: JSON.stringify(segment.tags)
   });
@@ -959,6 +1654,119 @@ function getSegment(db, segmentId) {
     ).get(segmentId) ?? null
   );
 }
+var JOINED_SEGMENT_COLUMNS = `
+  s.id,
+  s.title,
+  s.content,
+  s.insight,
+  s.type,
+  s.tags,
+  s.status,
+  s.revision,
+  s.goal,
+  s.constraints,
+  s.decisions,
+  s.done,
+  s.next_steps AS nextSteps,
+  s.reference,
+  s.created_at_epoch AS createdAtEpoch,
+  s.updated_at_epoch AS updatedAtEpoch
+`;
+function getAttachedSessionIds(db, segmentId) {
+  return db.query(
+    `SELECT session_id AS sessionId FROM segment_attachments
+       WHERE segment_id = ? ORDER BY created_at_epoch ASC, session_id ASC`
+  ).all(segmentId).map((row) => row.sessionId);
+}
+function computeSegmentMemberFacetCounts(db, segmentId, eraCutoffEpoch = null) {
+  const members = db.query(
+    `SELECT t.type AS type, t.tags AS tags
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id = ?
+         ${eraCutoffEpoch === null ? "" : "AND t.created_at_epoch >= ?"}`
+  ).all(...eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]);
+  const typeCounts = /* @__PURE__ */ new Map();
+  const tagCounts = /* @__PURE__ */ new Map();
+  for (const member of members) {
+    for (const word of new Set(parseMemberFacetArray(member.type))) {
+      typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
+    }
+    for (const tag of new Set(parseMemberFacetArray(member.tags))) {
+      if (tag.includes(":") || tag.trim() === "") {
+        continue;
+      }
+      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+    }
+  }
+  const type = MEMORY_TYPES.filter((word) => typeCounts.has(word)).map((word) => ({ word, count: typeCounts.get(word) })).sort((left, right) => right.count - left.count);
+  const tags = [...tagCounts.entries()].map(([tag, count]) => ({ tag, count })).sort(compareDerivedTags).map(({ tag, count }) => ({ word: tag, count }));
+  return { type, tags };
+}
+function listSegmentsByActivity(db, limit) {
+  if (limit <= 0) {
+    return [];
+  }
+  return db.query(
+    `SELECT ${JOINED_SEGMENT_COLUMNS} FROM segments s
+       LEFT JOIN (
+         SELECT sm.segment_id AS segmentId, MAX(t.created_at_epoch) AS lastMemberEpoch
+         FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         GROUP BY sm.segment_id
+       ) activity ON activity.segmentId = s.id
+       ORDER BY MAX(s.updated_at_epoch, COALESCE(activity.lastMemberEpoch, 0)) DESC, s.id DESC
+       LIMIT ?`
+  ).all(limit).map((row) => mapSegmentRow(row)).filter((segment) => segment !== null);
+}
+function liveSegmentWhereClause(eraCutoffEpoch) {
+  return eraCutoffEpoch === null ? { clause: "s.status = 'open'", params: [] } : {
+    clause: "s.status = 'open' AND s.created_at_epoch >= ?",
+    params: [eraCutoffEpoch]
+  };
+}
+function listLiveSegmentsByActivity(db, limit, eraCutoffEpoch = null) {
+  if (limit <= 0) {
+    return [];
+  }
+  const where = liveSegmentWhereClause(eraCutoffEpoch);
+  return db.query(
+    `SELECT ${JOINED_SEGMENT_COLUMNS}
+       FROM segments s
+       LEFT JOIN (
+         SELECT sm.segment_id AS segmentId, MAX(t.created_at_epoch) AS lastMemberEpoch
+         FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         GROUP BY sm.segment_id
+       ) activity ON activity.segmentId = s.id
+       WHERE ${where.clause}
+       ORDER BY MAX(s.updated_at_epoch, COALESCE(activity.lastMemberEpoch, 0)) DESC, s.id DESC
+       LIMIT ?`
+  ).all(...where.params, limit).map((row) => mapSegmentRow(row)).filter((segment) => segment !== null);
+}
+function countLiveSegments(db, eraCutoffEpoch = null) {
+  const where = liveSegmentWhereClause(eraCutoffEpoch);
+  return db.query(
+    `SELECT COUNT(*) AS count FROM segments s WHERE ${where.clause}`
+  ).get(...where.params)?.count ?? 0;
+}
+function listAttachedSegmentsByActivity(db, sessionId, limit) {
+  if (limit <= 0) {
+    return [];
+  }
+  return db.query(
+    `SELECT ${JOINED_SEGMENT_COLUMNS} FROM segments s
+       JOIN segment_attachments sa ON sa.segment_id = s.id AND sa.session_id = ?
+       LEFT JOIN (
+         SELECT sm.segment_id AS segmentId, MAX(t.created_at_epoch) AS lastMemberEpoch
+         FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         GROUP BY sm.segment_id
+       ) activity ON activity.segmentId = s.id
+       ORDER BY MAX(s.updated_at_epoch, COALESCE(activity.lastMemberEpoch, 0)) DESC, s.id DESC
+       LIMIT ?`
+  ).all(sessionId, limit).map((row) => mapSegmentRow(row)).filter((segment) => segment !== null);
+}
 
 // src/db/schema.ts
 var MEMORY_FTS_DDL = `
@@ -1016,13 +1824,23 @@ var noteSettlementJobsTableDdl = (tableName) => `
         'consecutive', 'compact', 'residual', 'sessionend', 'backfill'
       )
     ),
+    -- 'abandoned' (ticket 06, read-write-contract spec "\u4F5C\u4E1A\u72B6\u6001\u673A\u76F8\u5E94\u6269\u5C55"):
+    -- a DETERMINISTIC failure's own terminal state once it has spent its
+    -- capped attempts \u2014 distinct from 'failed', which after this ticket is a
+    -- retryable-pending-backoff intermediate state, never a resting place.
+    -- A CHECK constraint cannot be ALTERed, so this widening travels through
+    -- the same 12-step rebuild trigger_type's own history already uses
+    -- (ensureNoteSettlementJobsRetrySchema).
     status TEXT NOT NULL DEFAULT 'pending' CHECK (
-      status IN ('pending', 'claimed', 'done', 'failed')
+      status IN ('pending', 'claimed', 'done', 'failed', 'abandoned')
     ),
     attempts INTEGER NOT NULL DEFAULT 0,
     -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
     -- no clock for settlement, so a due retry is noticed in passing by the next
-    -- trigger event rather than woken by anything.
+    -- trigger event rather than woken by anything. Ticket 06: backoff now
+    -- applies to a DETERMINISTIC failure only \u2014 a transient one (see
+    -- failure_class) returns straight to 'pending' with this left at "now",
+    -- so the very next trigger event (not a timer) picks it up.
     retry_at_epoch INTEGER NOT NULL DEFAULT 0,
     claimed_at_epoch INTEGER,
     -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
@@ -1030,6 +1848,16 @@ var noteSettlementJobsTableDdl = (tableName) => `
     -- under and so writes nothing over the attempt that displaced it.
     claim_generation INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
+    -- Ticket 06: which retry discipline the LAST recorded failure belongs to \u2014
+    -- null until a failure has landed at all. A transient failure
+    -- (network/connection/SQLITE_BUSY, worker/note-settlement-dispatch.ts's
+    -- classifySettlementFailure) never leaves a 'failed' row behind (it goes
+    -- straight back to 'pending', uncounted); this column is populated only
+    -- by the deterministic path, plus the one-time migration backfill below
+    -- for rows that failed before the column existed.
+    failure_class TEXT CHECK (
+      failure_class IS NULL OR failure_class IN ('transient', 'deterministic')
+    ),
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL,
     UNIQUE(session_id, window_start, trigger_type)
@@ -1043,6 +1871,17 @@ var NOTE_SETTLEMENT_JOBS_INDEX_DDL = `
     ON note_settlement_jobs(session_id, status, window_start);
 `;
 var SCHEMA_SQL = `
+  -- ownership-and-note-cadence spec, "session \u5B57\u6BB5" ([S15069/T910]-[T913]):
+  -- insight/next_steps/decision/done/current/reference are retired from
+  -- EVERY read surface (injection, recall's session header, summary
+  -- queries, tool-facing output) unconditionally \u2014 title and content are
+  -- the session's only two remaining semantic fields. The physical columns
+  -- stay: db/sessions.ts's write paths (upsertSession,
+  -- updateSessionSummaryRewrite, updateSessionFields) still read/write them
+  -- and are out of this ticket's scope (a settlement-side writer for
+  -- content lands in a later ticket) \u2014 dropping the columns would break
+  -- those INSERT/UPDATE statements. Existing rows keep whatever they have;
+  -- nothing reads it back.
   CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content_session_id TEXT UNIQUE NOT NULL,
@@ -1060,6 +1899,18 @@ var SCHEMA_SQL = `
     summary_updated_at_epoch INTEGER,
     scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0,
     scan_cursor_line INTEGER NOT NULL DEFAULT 0,
+    -- Ticket 13 (spec "\u8282\u594F\u4E0E\u5EFA\u6BB5\u6307\u5BFC"): the universal 20-turn remember
+    -- reminder's own marker \u2014 "since the last remember call, any verb", a
+    -- session-scoped fact no existing column carries (create/close/assign
+    -- never even attribute a caller session on their own write paths, so
+    -- there is nothing to derive this from). NULL means "never called" \u2014
+    -- the reminder then counts from created_at_epoch instead (see
+    -- touchSessionRememberActivity in db/sessions.ts). Deliberately excluded
+    -- from upsertSession's UPDATE SET list, the same "own dedicated setter,
+    -- never the general upsert" treatment parent_session_id/lineage_status
+    -- already get, so a routine SessionStart/UserPromptSubmit upsert cannot
+    -- clobber it back to NULL.
+    last_remember_epoch INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -1099,6 +1950,15 @@ var SCHEMA_SQL = `
     significance_grade INTEGER CHECK (
       significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
     ),
+    -- election_tier (ADR-0003) is RETIRED (ownership-and-note-cadence spec,
+    -- ticket 06, "\u9009\u4E3E\u673A\u5668\u62C6\u9664"): the election-tier third grading semantics
+    -- never carried real data in production (the era cutoff was never
+    -- pinned), and settlement no longer assigns grade or tier at all (ticket
+    -- 05). A database migrated under a pre-06 install may still carry the
+    -- physical column \u2014 harmless and orphaned, never read or written by any
+    -- code from here on; a fresh database never gets it. ADR-0003 is marked
+    -- superseded; significance_grade above is UNRELATED and stays exactly as
+    -- it was, old grade reads intact.
     tags TEXT,
     files_read TEXT,
     files_modified TEXT,
@@ -1297,30 +2157,18 @@ var SCHEMA_SQL = `
     updated_at_epoch INTEGER NOT NULL
   );
 
-  -- Topic registry (spec D6): the one place a theme's name and its alternate
-  -- spellings live, so "continuous work on the same theme reuses the same word"
-  -- is enforceable rather than aspirational. The aliases column is a JSON array of
-  -- the other names the same theme has been written as; the settlement pass folds
-  -- new spellings in here instead of minting a near-duplicate topic.
-  CREATE TABLE IF NOT EXISTS topics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    aliases TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(aliases)),
-    status TEXT NOT NULL DEFAULT 'active' CHECK (
-      status IN ('active', 'dormant', 'retired')
-    ),
-    created_at_epoch INTEGER NOT NULL,
-    updated_at_epoch INTEGER NOT NULL
-  );
-
-  -- Segments (spec D6): one coherent chapter of work on one topic. Same field
-  -- shape as a turn \u2014 title / content / type / tag / status \u2014 because the
-  -- reading surfaces (recall's type:/tag: filters, FTS, the glyph) are meant to
-  -- work across granularities without a second vocabulary.
+  -- Segments (spec D6): one coherent chapter of work on one theme (ticket 15:
+  -- the theme lives on tags \u2014 a topic registry once named it separately, a
+  -- mechanism-level synonym split, retired; CONTEXT.md's "Topic \u2014 retired").
+  -- Same field shape as a turn \u2014 title / content / type / tag / status \u2014
+  -- because the reading surfaces (recall's type:/tag: filters, FTS, the
+  -- glyph) are meant to work across granularities without a second
+  -- vocabulary.
   --
-  -- Deliberately NOT bound to a session: a topic outruns any one session, and a
-  -- segment that had to name one would have to pick arbitrarily among its
-  -- members' sessions. Membership (segment_members) carries that relation.
+  -- Deliberately NOT bound to a session: a segment outruns any one session,
+  -- and one that had to name a single session would have to pick arbitrarily
+  -- among its members' sessions. Membership (segment_members) carries that
+  -- relation.
   --
   -- type and tags are JSON arrays (multi-value; a segment's type is the
   -- union of its members'). revision is the write fence: an open segment is a
@@ -1328,7 +2176,6 @@ var SCHEMA_SQL = `
   -- every write CASes on the revision it read (see db/segments.ts).
   CREATE TABLE IF NOT EXISTS segments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
     title TEXT NOT NULL,
     content TEXT,
     -- Ticket 14 (spec K5): the segment's most reusable conclusion, including
@@ -1338,12 +2185,26 @@ var SCHEMA_SQL = `
     insight TEXT,
     type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
     tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
-    -- open = still accepting members and rewrites; delivered = closed by a
-    -- shipped/merged/settled outcome; abandoned = went silent. Only open
-    -- segments are writable \u2014 a closed one is frozen and gets overturned by an
-    -- edge, never by a rewrite (spec D6: freeze history, not the present).
+    -- Ticket 05 (ADR-0005): the APPLICATION vocabulary is two values, no
+    -- state machine \u2014 open = accepting writes and on the roster; closed =
+    -- manually toggled off through remember's close verb, refuses
+    -- append/replace, off the roster, still recall-able (spec D6: freeze
+    -- history, not the present \u2014 an edge overturns a closed segment, never a
+    -- rewrite). SEGMENT_STATUSES/SegmentStatus (db/segments.ts) enforce
+    -- exactly those two values on every TYPED writer \u2014 createSegment,
+    -- applySegmentWrites, toggleSegmentStatus \u2014 so no code path in this
+    -- codebase can produce a delivered/abandoned row from here on.
+    --
+    -- The PHYSICAL CHECK below stays wide enough to also accept the retired
+    -- arc-era words, deliberately NOT narrowed to match: those words are
+    -- read-and-updated on 47 pre-existing production rows (recomputeSegment-
+    -- Facets/the repair sweep issue plain UPDATEs against them that never
+    -- touch status, and SQLite re-validates the WHOLE row's CHECK
+    -- regardless of which columns changed), so a narrower CHECK would break
+    -- facet maintenance on every one of them the moment this migration ran
+    -- (see ensureSegmentStatusVocabulary, and its "why not narrow" note).
     status TEXT NOT NULL DEFAULT 'open' CHECK (
-      status IN ('open', 'delivered', 'abandoned')
+      status IN ('open', 'delivered', 'abandoned', 'closed')
     ),
     revision INTEGER NOT NULL DEFAULT 1,
     -- Ticket 15 (findings 1-3): "this segment owes a facet derivation".
@@ -1358,12 +2219,26 @@ var SCHEMA_SQL = `
     -- Bookkeeping, not a facet: no read surface renders it and no caller may
     -- state it.
     facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
+    -- Working State (ADR-0001, ticket 02): the resuming worker's six fields,
+    -- beside the summary trio above. Each stores a markdown row list ("- "
+    -- rows, newline-joined), uncapped, maintained ONLY through remember
+    -- (db/segments.ts's appendSegmentWorkingStateRows /
+    -- replaceInSegmentWorkingStateField) \u2014 never applySegmentWrites, the
+    -- settlement CAS path over the summary trio and structural fields
+    -- (ADR-0002's one-writer-per-layer split). Plain nullable TEXT with no
+    -- CHECK referencing another column, so a bare ALTER TABLE ... ADD COLUMN
+    -- is legal SQLite on an existing database (ensureSegmentWorkingStateColumns
+    -- below) \u2014 same shape of migration as significance_grade on turns, no
+    -- 12-step rebuild needed.
+    goal TEXT,
+    constraints TEXT,
+    decisions TEXT,
+    done TEXT,
+    next_steps TEXT,
+    reference TEXT,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL
   );
-
-  CREATE INDEX IF NOT EXISTS idx_segments_topic_status
-    ON segments(topic_id, status, updated_at_epoch);
 
   CREATE INDEX IF NOT EXISTS idx_segments_status_updated
     ON segments(status, updated_at_epoch);
@@ -1381,6 +2256,26 @@ var SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_segment_members_turn
     ON segment_members(turn_id);
+
+  -- Attachment (ADR-0005, ticket 02): a session's reference to a segment as
+  -- loaded working memory \u2014 "binding rows accumulate, never expire, no
+  -- detach". remember(attach) asserts a row idempotently
+  -- (attachSegmentToSession, db/segments.ts); there is no writer that ever
+  -- removes one. Consulted-only attachments (zero segment_members rows for
+  -- the pair) are legal and expected \u2014 this table carries no relationship to
+  -- membership at all, only to which sessions have loaded which segments.
+  --
+  -- PRIMARY KEY (session_id, segment_id): one row per pair, so attaching an
+  -- already-attached segment is a no-op rather than a growing duplicate log.
+  CREATE TABLE IF NOT EXISTS segment_attachments (
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (session_id, segment_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_segment_attachments_segment
+    ON segment_attachments(segment_id);
 
   -- Segmentation exclusions (spec G7, ticket 09): the completion gate's
   -- anti-join needs a NEGATIVE fact \u2014 "this turn was reviewed under this
@@ -1415,6 +2310,65 @@ var SCHEMA_SQL = `
   -- job_id alone is already the leading column of the primary key above.
   CREATE INDEX IF NOT EXISTS idx_note_settlement_segment_exclusions_turn
     ON note_settlement_segment_exclusions(turn_id);
+
+  -- note_settlement_membership_activity RETIRED (edge-ownership ticket 05,
+  -- [S15069/T912]): the membership gate it served died with settlement's
+  -- assign action; its DDL left with it and existing installations drop the
+  -- orphan in dropRetiredMaintenanceState below.
+
+  -- Homeless-cluster proposals (ticket 08, spec "Proposal"): settlement's
+  -- text-only suggestion that several homeless turns form one new segment.
+  -- NEVER a segment row and never auto-adopted \u2014 addresses/title are plain
+  -- text, rendered to the next session (at most three, newest first) and
+  -- handed to remember(create)'s own members field verbatim on approval
+  -- (ticket 02's seed-address path). addresses is a JSON array of
+  -- "S<session>/T<prompt>" strings, not a foreign key: a proposal survives
+  -- even if this project later reshapes turn identity, and validating the
+  -- addresses is the READER's job (they are re-validated by remember(create)
+  -- itself at adoption time regardless).
+  -- addresses_key (ticket 05, spec "propose \u643A\u5E42\u7B49\u952E"): the CANONICAL form of
+  -- addresses (sorted, de-duplicated, JSON-encoded \u2014
+  -- db/note-settlement-proposals.ts's canonicalizeSettlementProposalAddresses)
+  -- alongside the display-order original. A re-claimed job has a NEW job id
+  -- (retry = new job, spec: "\u91CD\u8BD5=\u65B0 job id,\u6240\u4EE5 job \u4F5C\u7528\u57DF\u7684 key \u4E0D\u80FD\u53BB\u91CD"),
+  -- so the idempotency key is (session_id, addresses_key), not job-scoped \u2014
+  -- see the UNIQUE index below and ensureNoteSettlementProposalIdempotencyKey
+  -- for how an existing installation gains this column and index.
+  CREATE TABLE IF NOT EXISTS note_settlement_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    addresses TEXT NOT NULL CHECK (json_valid(addresses)),
+    addresses_key TEXT,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_proposals_created
+    ON note_settlement_proposals(created_at_epoch);
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_note_settlement_proposals_session_addresses
+    ON note_settlement_proposals(session_id, addresses_key);
+
+  -- Settlement retry debt (ticket 06, spec "\u91CD\u8BD5"/"\u4F5C\u4E1A\u72B6\u6001\u673A\u76F8\u5E94\u6269\u5C55"): one
+  -- row per window a DETERMINISTIC failure abandoned after spending its capped
+  -- attempts \u2014 the window range plus why, so an operator's manual
+  -- /settle backfill has something concrete to consume instead of having to
+  -- rediscover the gap from note_settlement_jobs.status = 'abandoned' rows
+  -- directly. Never written for a transient failure (it never reaches a
+  -- terminal state at all \u2014 see failNoteSettlementJob).
+  CREATE TABLE IF NOT EXISTS note_settlement_debts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    window_start INTEGER NOT NULL,
+    window_end INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_debts_session
+    ON note_settlement_debts(session_id, created_at_epoch);
 
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
@@ -1720,6 +2674,53 @@ var SCHEMA_SQL = `
       SELECT RAISE(ABORT, 'rule_events is append-only');
     END;
 
+  -- Read-write contract (db/write-gate.ts). A writer's license to write an
+  -- entity, earned by that entity appearing in its injected context or a
+  -- recall/timeline render (CONTEXT.md "Read grant"). Entity-level: one row
+  -- per (writer, entity) \u2014 one appearance licenses every field. Non-
+  -- destructive: a write does not delete another writer's grant row, it just
+  -- leaves it behind the field's stamp sequence, which is what
+  -- checkFieldGate compares to tell a genuinely never-read entity from one
+  -- this writer read but that moved since ("Stale" vs "never-read",
+  -- CONTEXT.md). entity_type widens to session up front \u2014 a CHECK
+  -- constraint cannot be ALTERed, and ticket 05's settlement narrative write
+  -- is the same table, not a second one.
+  CREATE TABLE IF NOT EXISTS write_gate_reads (
+    writer TEXT NOT NULL,
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('segment', 'turn', 'session')),
+    entity_id INTEGER NOT NULL,
+    read_at_epoch INTEGER NOT NULL,
+    read_sequence INTEGER NOT NULL,
+    PRIMARY KEY (writer, entity_type, entity_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_write_gate_reads_entity
+    ON write_gate_reads (entity_type, entity_id);
+
+  -- One field's freshness stamp: who wrote it last, and at what point in the
+  -- monotonic write sequence (CONTEXT.md "Stale") \u2014 never epoch seconds, so
+  -- two writes landing in the same wall-clock second stay ordered (spec: the
+  -- legacy yield gate's >= second comparison mis-ranks a same-second early
+  -- write as late; this sequence has no such tie).
+  CREATE TABLE IF NOT EXISTS write_gate_stamps (
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('segment', 'turn', 'session')),
+    entity_id INTEGER NOT NULL,
+    field TEXT NOT NULL,
+    writer TEXT NOT NULL,
+    write_sequence INTEGER NOT NULL,
+    written_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (entity_type, entity_id, field)
+  );
+
+  -- The write gate's single monotonic counter (db/write-gate.ts). One row,
+  -- incremented inside the SAME transaction as the field stamp it numbers \u2014
+  -- never read at epoch-second granularity, so two writers committing in the
+  -- same second are still totally ordered against each other.
+  CREATE TABLE IF NOT EXISTS write_gate_sequence (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    value INTEGER NOT NULL DEFAULT 0
+  );
+
   ${MEMORY_FTS_DDL}
 `;
 var MEMORY_EDGES_DDL = `
@@ -1730,7 +2731,10 @@ var MEMORY_EDGES_DDL = `
     cited_id INTEGER NOT NULL,
     relation TEXT CHECK (
       relation IS NULL OR
-      relation IN ('evidence-for', 'evidence-against', 'supersedes', 'depends-on')
+      relation IN (
+        'evidence-for', 'evidence-against', 'supersedes', 'depends-on',
+        'refines', 'override', 'encodes', 'grounded-on'
+      )
     ),
     provenance TEXT NOT NULL CHECK (
       provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
@@ -1888,10 +2892,46 @@ function ensureMemoryEdgesPairIdentity(db) {
     collapseAndRebuildMemoryEdges(db);
   });
 }
+function memoryEdgesRelationVocabularyIsStale(db) {
+  const storedDdl = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'grounded-on'");
+}
+function ensureMemoryEdgesRelationVocabulary(db) {
+  if (!memoryEdgesRelationVocabularyIsStale(db)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (!memoryEdgesRelationVocabularyIsStale(db)) {
+      return;
+    }
+    db.exec(
+      "ALTER TABLE memory_edges RENAME TO memory_edges_pre_relation_vocabulary"
+    );
+    db.exec(MEMORY_EDGES_DDL);
+    db.exec(
+      `INSERT INTO memory_edges (
+         citing_kind, citing_id, cited_kind, cited_id,
+         relation, provenance, created_at_epoch
+       )
+       SELECT
+         citing_kind, citing_id, cited_kind, cited_id,
+         relation, provenance, created_at_epoch
+       FROM memory_edges_pre_relation_vocabulary`
+    );
+    db.exec("DROP TABLE memory_edges_pre_relation_vocabulary");
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
+        ON memory_edges(cited_kind, cited_id, relation);
+    `);
+  });
+}
 function ensureMemoryEdgesSchema(db) {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
     ensureMemoryEdgesPairIdentity(db);
+    ensureMemoryEdgesRelationVocabulary(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
@@ -1985,12 +3025,15 @@ function initializeSchema(db) {
   ensureSessionTranscriptPathColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
+  ensureSessionLastRememberEpochColumn(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureSegmentInsightColumn(db);
+  ensureSegmentWorkingStateColumns(db);
   ensureSegmentDerivedFacets(db);
+  ensureSegmentStatusVocabulary(db);
   ensureTurnConsultedMemoriesColumn(db);
   ensureMemoryEdgesSchema(db);
   retireLegacyTurnCitationsTable(db);
@@ -2010,10 +3053,13 @@ function initializeSchema(db) {
   ensureNoteDebtCursorReliefColumn(db);
   retireLegacyPendingNoteDebts(db);
   ensureNoteSettlementTriggerVocabulary(db);
+  ensureNoteSettlementJobsRetrySchema(db);
+  ensureNoteSettlementProposalIdempotencyKey(db);
   dropLegacyMemoriesTable(db);
   ensureTurnTypeMultiValueColumn(db);
   stripRetiredTopicTagNamespace(db);
   retireTurnCitesRecordedColumn(db);
+  retireTopicRegistry(db);
   repairDerivedSegmentFacets(db);
 }
 function stripRetiredTopicTagNamespace(db) {
@@ -2157,6 +3203,95 @@ function ensureNoteSettlementTriggerVocabulary(db) {
     db.exec("PRAGMA foreign_keys = ON;");
   }
 }
+function noteSettlementJobsRetrySchemaIsStale(db) {
+  const storedDdl = db.query(
+    `SELECT sql FROM sqlite_master
+         WHERE type = 'table' AND name = 'note_settlement_jobs'`
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'abandoned'");
+}
+function ensureNoteSettlementJobsRetrySchema(db) {
+  if (!noteSettlementJobsRetrySchemaIsStale(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!noteSettlementJobsRetrySchemaIsStale(db)) {
+        return;
+      }
+      db.exec(noteSettlementJobsTableDdl("note_settlement_jobs_retry_rebuild"));
+      db.exec(
+        `INSERT INTO note_settlement_jobs_retry_rebuild (
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error, failure_class, created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error,
+           CASE WHEN status = 'failed' THEN 'deterministic' ELSE NULL END,
+           created_at_epoch, updated_at_epoch
+         FROM note_settlement_jobs`
+      );
+      db.exec("DROP TABLE note_settlement_jobs");
+      db.exec(
+        "ALTER TABLE note_settlement_jobs_retry_rebuild RENAME TO note_settlement_jobs"
+      );
+      db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `note_settlement_jobs rebuild left ${violations.length} foreign key violation(s) while adding failure_class/abandoned: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+function ensureNoteSettlementProposalIdempotencyKey(db) {
+  const columnAdded = addColumnIfMissing(
+    db,
+    "note_settlement_proposals",
+    "addresses_key",
+    "TEXT"
+  );
+  if (!columnAdded && db.query(
+    `SELECT name FROM sqlite_master
+         WHERE type = 'index' AND name = 'idx_note_settlement_proposals_session_addresses'`
+  ).get()) {
+    return;
+  }
+  const rows = db.query(
+    `SELECT id, session_id AS sessionId, addresses FROM note_settlement_proposals
+       WHERE addresses_key IS NULL`
+  ).all();
+  const seen = /* @__PURE__ */ new Set();
+  for (const row of rows) {
+    let addresses;
+    try {
+      addresses = JSON.parse(row.addresses);
+    } catch {
+      addresses = [];
+    }
+    const list = Array.isArray(addresses) ? addresses.filter((entry) => typeof entry === "string") : [];
+    let key = canonicalizeSettlementProposalAddresses(list);
+    const dedupeKey = `${row.sessionId}:${key}`;
+    if (seen.has(dedupeKey)) {
+      key = `${key}#${row.id}`;
+    }
+    seen.add(dedupeKey);
+    db.query(
+      `UPDATE note_settlement_proposals SET addresses_key = ? WHERE id = ?`
+    ).run(key, row.id);
+  }
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_note_settlement_proposals_session_addresses
+       ON note_settlement_proposals(session_id, addresses_key)`
+  );
+}
 function ensureObservationExtractionExclusionColumn(db) {
   addColumnIfMissing(
     db,
@@ -2217,6 +3352,7 @@ function ensureDiaryDayStateRetryDispositionColumn(db) {
 }
 function dropRetiredMaintenanceState(db) {
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
+  db.exec("DROP TABLE IF EXISTS note_settlement_membership_activity");
   db.exec("DROP INDEX IF EXISTS idx_turns_status");
 }
 function ensureSessionTranscriptPathColumn(db) {
@@ -2224,6 +3360,9 @@ function ensureSessionTranscriptPathColumn(db) {
 }
 function ensureSessionSummaryUpdatedAtEpochColumn(db) {
   addColumnIfMissing(db, "sessions", "summary_updated_at_epoch", "INTEGER");
+}
+function ensureSessionLastRememberEpochColumn(db) {
+  addColumnIfMissing(db, "sessions", "last_remember_epoch", "INTEGER");
 }
 function ensureSessionSummaryFieldColumns(db) {
   for (const column of ["decision", "done", "current", "reference"]) {
@@ -2243,6 +3382,14 @@ function ensureTurnInvalidationColumns(db) {
 function ensureSegmentInsightColumn(db) {
   addColumnIfMissing(db, "segments", "insight", "TEXT");
 }
+function ensureSegmentWorkingStateColumns(db) {
+  addColumnIfMissing(db, "segments", "goal", "TEXT");
+  addColumnIfMissing(db, "segments", "constraints", "TEXT");
+  addColumnIfMissing(db, "segments", "decisions", "TEXT");
+  addColumnIfMissing(db, "segments", "done", "TEXT");
+  addColumnIfMissing(db, "segments", "next_steps", "TEXT");
+  addColumnIfMissing(db, "segments", "reference", "TEXT");
+}
 function ensureSegmentDerivedFacets(db) {
   addColumnIfMissing(
     db,
@@ -2251,6 +3398,229 @@ function ensureSegmentDerivedFacets(db) {
     "INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1))"
   );
   db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
+}
+var segmentsStatusVocabularyRebuildDdl = (tableName) => `
+  CREATE TABLE ${tableName} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    content TEXT,
+    insight TEXT,
+    type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (
+      status IN ('open', 'delivered', 'abandoned', 'closed')
+    ),
+    revision INTEGER NOT NULL DEFAULT 1,
+    facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
+    goal TEXT,
+    constraints TEXT,
+    decisions TEXT,
+    done TEXT,
+    next_steps TEXT,
+    reference TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+`;
+var SEGMENTS_INDEXES_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_segments_topic_status
+    ON segments(topic_id, status, updated_at_epoch);
+
+  CREATE INDEX IF NOT EXISTS idx_segments_status_updated
+    ON segments(status, updated_at_epoch);
+`;
+var SEGMENTS_OWN_TRIGGER_DDL = `
+  CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_segment
+    AFTER DELETE ON segments
+    BEGIN
+      DELETE FROM memory_edges
+      WHERE (citing_kind = 'segment' AND citing_id = OLD.id)
+         OR (cited_kind = 'segment' AND cited_id = OLD.id);
+    END;
+`;
+function segmentsStatusVocabularyIsStale(db) {
+  const storedDdl = db.query(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'segments'`
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'closed'");
+}
+function ensureSegmentStatusVocabulary(db) {
+  if (!segmentsStatusVocabularyIsStale(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!segmentsStatusVocabularyIsStale(db)) {
+        return;
+      }
+      db.exec(
+        segmentsStatusVocabularyRebuildDdl("segments_status_vocabulary_rebuild")
+      );
+      db.exec(
+        `INSERT INTO segments_status_vocabulary_rebuild (
+           id, topic_id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps, reference,
+           created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, topic_id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps, reference,
+           created_at_epoch, updated_at_epoch
+         FROM segments`
+      );
+      db.exec("DROP TABLE segments");
+      db.exec("ALTER TABLE segments_status_vocabulary_rebuild RENAME TO segments");
+      db.exec(SEGMENTS_INDEXES_DDL);
+      db.exec(SEGMENTS_OWN_TRIGGER_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `segments rebuild left ${violations.length} foreign key violation(s) while widening status: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+var segmentsWithoutTopicRebuildDdl = (tableName) => `
+  CREATE TABLE ${tableName} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    content TEXT,
+    insight TEXT,
+    type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (
+      status IN ('open', 'delivered', 'abandoned', 'closed')
+    ),
+    revision INTEGER NOT NULL DEFAULT 1,
+    facets_stale INTEGER NOT NULL DEFAULT 0 CHECK (facets_stale IN (0, 1)),
+    goal TEXT,
+    constraints TEXT,
+    decisions TEXT,
+    done TEXT,
+    next_steps TEXT,
+    reference TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+`;
+var SEGMENTS_TOPIC_RETIRED_INDEXES_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_segments_status_updated
+    ON segments(status, updated_at_epoch);
+`;
+function normalizeTopicNameToTag(name) {
+  return name.normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+}
+function safeParseTagArray(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((entry) => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function foldTopicNamesIntoSegmentTags(db) {
+  const topicSegments = db.query(
+    `SELECT id, topic_id AS topicId, tags FROM segments WHERE topic_id IS NOT NULL`
+  ).all();
+  if (topicSegments.length === 0) {
+    return;
+  }
+  const topicNames = new Map(
+    db.query("SELECT id, name FROM topics").all().map((row) => [row.id, row.name])
+  );
+  for (const segment of topicSegments) {
+    const topicName = topicNames.get(segment.topicId);
+    if (!topicName) {
+      continue;
+    }
+    const bareTag = normalizeTopicNameToTag(topicName);
+    if (bareTag === "") {
+      continue;
+    }
+    const memberTurnIds = db.query(
+      "SELECT turn_id AS turnId FROM segment_members WHERE segment_id = ?"
+    ).all(segment.id).map((row) => row.turnId);
+    if (memberTurnIds.length === 0) {
+      const currentTags = safeParseTagArray(segment.tags);
+      if (currentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
+        continue;
+      }
+      db.query("UPDATE segments SET tags = ? WHERE id = ?").run(
+        JSON.stringify([...currentTags, bareTag]),
+        segment.id
+      );
+      continue;
+    }
+    let foldedAny = false;
+    for (const turnId of memberTurnIds) {
+      const row = db.query("SELECT tags FROM turns WHERE id = ?").get(turnId);
+      const currentTags = safeParseTagArray(row?.tags ?? null);
+      if (currentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
+        continue;
+      }
+      db.query("UPDATE turns SET tags = ? WHERE id = ?").run(
+        JSON.stringify([...currentTags, bareTag]),
+        turnId
+      );
+      foldedAny = true;
+    }
+    if (foldedAny) {
+      recomputeSegmentFacets(db, segment.id);
+    }
+  }
+}
+function topicRegistryStillPresent(db) {
+  return hasColumn(db, "segments", "topic_id");
+}
+function retireTopicRegistry(db) {
+  if (!topicRegistryStillPresent(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!topicRegistryStillPresent(db)) {
+        return;
+      }
+      foldTopicNamesIntoSegmentTags(db);
+      db.exec(segmentsWithoutTopicRebuildDdl("segments_topic_registry_retired"));
+      db.exec(
+        `INSERT INTO segments_topic_registry_retired (
+           id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps,
+           reference, created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, title, content, insight, type, tags, status, revision,
+           facets_stale, goal, constraints, decisions, done, next_steps,
+           reference, created_at_epoch, updated_at_epoch
+         FROM segments`
+      );
+      db.exec("DROP TABLE segments");
+      db.exec(
+        "ALTER TABLE segments_topic_registry_retired RENAME TO segments"
+      );
+      db.exec(SEGMENTS_TOPIC_RETIRED_INDEXES_DDL);
+      db.exec(SEGMENTS_OWN_TRIGGER_DDL);
+      db.exec("DROP TABLE IF EXISTS topics");
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `segments rebuild left ${violations.length} foreign key violation(s) while retiring the topic registry: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
 }
 function repairDerivedSegmentFacets(db) {
   if (!hasRow(db, "SELECT 1 FROM segments WHERE facets_stale = 1")) {
@@ -2455,7 +3825,14 @@ function ensureTurnTypeMultiValueColumn(db) {
         // `retireTurnCitesRecordedColumn` runs right after this one in
         // `initializeSchema` and owns it exclusively — present here or not,
         // it is accounted for, not unexpected.
-        ["cites_recorded"],
+        //
+        // `election_tier`: retired outright (ownership-and-note-cadence spec,
+        // ticket 06) — a database migrated under a pre-06 install may still
+        // physically carry it (added by the now-removed
+        // `ensureTurnElectionTierColumn`), and this rebuild deliberately does
+        // NOT carry it forward. Listed here so the guard reads that omission
+        // as an intentional drop rather than an unaccounted-for column.
+        ["cites_recorded", "election_tier"],
         "ensureTurnTypeMultiValueColumn"
       );
       db.exec(`
@@ -2607,7 +3984,11 @@ function retireTurnCitesRecordedColumn(db) {
       assertNoUnexpectedTurnsColumns(
         db,
         [...canonicalColumns, ...stallColumns.map((c) => c.name)],
-        ["cites_recorded"],
+        // `election_tier`: retired outright (ownership-and-note-cadence spec,
+        // ticket 06) — see `ensureTurnTypeMultiValueColumn`'s own copy of
+        // this comment; this rebuild deliberately does not carry it forward
+        // either.
+        ["cites_recorded", "election_tier"],
         "retireTurnCitesRecordedColumn"
       );
       db.exec(`
@@ -2810,12 +4191,15 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS shadow_notes");
   db.exec("DROP TABLE IF EXISTS note_id_exposures");
   db.exec("DROP TABLE IF EXISTS note_settlement_segment_exclusions");
+  db.exec("DROP TABLE IF EXISTS note_settlement_debts");
+  db.exec("DROP TABLE IF EXISTS note_settlement_proposals");
   db.exec("DROP TABLE IF EXISTS note_settlement_jobs");
   db.exec("DROP TABLE IF EXISTS note_settlement_cursors");
   db.exec("DROP TABLE IF EXISTS note_debt_cursor");
   db.exec("DROP TABLE IF EXISTS note_debt");
   db.exec("DROP TABLE IF EXISTS note_debt_pre_closed_reason");
   db.exec("DROP TABLE IF EXISTS observations");
+  db.exec("DROP TABLE IF EXISTS segment_attachments");
   db.exec("DROP TABLE IF EXISTS segment_members");
   db.exec("DROP TABLE IF EXISTS segments");
   db.exec("DROP TABLE IF EXISTS topics");
@@ -3018,41 +4402,10 @@ function createLogger(component, options = {}) {
   };
 }
 
-// src/diary/file-store.ts
-var import_promises = require("node:fs/promises");
-var import_node_path5 = require("node:path");
-var DiaryFileStore = class {
-  constructor(dataRoot) {
-    this.dataRoot = dataRoot;
-  }
-  dataRoot;
-  async readIndex() {
-    const diaryRoot = (0, import_node_path5.join)(this.dataRoot, "diary");
-    try {
-      const rootMetadata = await (0, import_promises.lstat)(diaryRoot);
-      if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
-        throw new Error(`Diary root must be a real directory: ${diaryRoot}`);
-      }
-    } catch (error48) {
-      if (error48.code !== "ENOENT") throw error48;
-    }
-    const indexPath = (0, import_node_path5.join)(diaryRoot, "INDEX.md");
-    try {
-      const indexMetadata = await (0, import_promises.lstat)(indexPath);
-      if (indexMetadata.isSymbolicLink() || !indexMetadata.isFile()) {
-        throw new Error(`Diary index must be a regular file: ${indexPath}`);
-      }
-    } catch (error48) {
-      if (error48.code !== "ENOENT") throw error48;
-    }
-    return (0, import_promises.readFile)(indexPath);
-  }
-};
-
 // src/diary/memory-store.ts
 var import_node_crypto = require("node:crypto");
-var import_promises2 = require("node:fs/promises");
-var import_node_path6 = require("node:path");
+var import_promises = require("node:fs/promises");
+var import_node_path5 = require("node:path");
 
 // src/shared/markdown-sections.ts
 var FENCE_START = /^ {0,3}(`{3,}|~{3,})/;
@@ -3248,8 +4601,8 @@ function assertSafeId(id) {
   }
 }
 function isWithin(root, target) {
-  const pathFromRoot = (0, import_node_path6.relative)(root, target);
-  return pathFromRoot === "" || pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${import_node_path6.sep}`) && !pathFromRoot.startsWith(import_node_path6.sep);
+  const pathFromRoot = (0, import_node_path5.relative)(root, target);
+  return pathFromRoot === "" || pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${import_node_path5.sep}`) && !pathFromRoot.startsWith(import_node_path5.sep);
 }
 var DreamMemoryStore = class {
   constructor(dataRoot, options = {}) {
@@ -3316,12 +4669,12 @@ var DreamMemoryStore = class {
         }
         throw error48;
       } else {
-        await (0, import_promises2.rm)(transaction.root, { recursive: true, force: true }).catch(
+        await (0, import_promises.rm)(transaction.root, { recursive: true, force: true }).catch(
           () => void 0
         );
       }
     }
-    await (0, import_promises2.rm)(transaction.root, { recursive: true, force: true });
+    await (0, import_promises.rm)(transaction.root, { recursive: true, force: true });
     await this.syncDirectory(this.transactionsRoot()).catch(() => void 0);
     await this.applyRetention().catch((error48) => {
       this.logger.warn("Memory snapshot retention failed after a successful commit", {
@@ -3418,30 +4771,30 @@ var DreamMemoryStore = class {
     await this.faultInjector?.(point);
   }
   memoryRoot() {
-    return (0, import_node_path6.join)(this.dataRoot, "memory");
+    return (0, import_node_path5.join)(this.dataRoot, "memory");
   }
   memoryPath(filename) {
-    return (0, import_node_path6.join)(this.memoryRoot(), filename);
+    return (0, import_node_path5.join)(this.memoryRoot(), filename);
   }
   historyRoot() {
-    return (0, import_node_path6.join)(this.memoryRoot(), "history");
+    return (0, import_node_path5.join)(this.memoryRoot(), "history");
   }
   transactionsRoot() {
-    return (0, import_node_path6.join)(this.memoryRoot(), ".transactions");
+    return (0, import_node_path5.join)(this.memoryRoot(), ".transactions");
   }
   successMarkerPath() {
-    return (0, import_node_path6.join)(this.memoryRoot(), "last-successful.json");
+    return (0, import_node_path5.join)(this.memoryRoot(), "last-successful.json");
   }
   migrationStatePath() {
-    return (0, import_node_path6.join)(this.memoryRoot(), "migration-state.json");
+    return (0, import_node_path5.join)(this.memoryRoot(), "migration-state.json");
   }
   async assertWorkspaceRootsAreSafe(options = {}) {
     if (options.createDataRoot !== false) {
-      await (0, import_promises2.mkdir)(this.dataRoot, { recursive: true });
+      await (0, import_promises.mkdir)(this.dataRoot, { recursive: true });
     }
-    for (const root of [this.dataRoot, this.memoryRoot(), (0, import_node_path6.join)(this.dataRoot, "diary")]) {
+    for (const root of [this.dataRoot, this.memoryRoot(), (0, import_node_path5.join)(this.dataRoot, "diary")]) {
       try {
-        const metadata = await (0, import_promises2.lstat)(root);
+        const metadata = await (0, import_promises.lstat)(root);
         if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
           throw new Error(`Dream workspace root must be a real directory: ${root}`);
         }
@@ -3451,13 +4804,13 @@ var DreamMemoryStore = class {
     }
   }
   async assertFileIsSafe(path2) {
-    const absoluteRoot = (0, import_node_path6.resolve)(this.dataRoot);
-    const absolutePath = (0, import_node_path6.resolve)(path2);
+    const absoluteRoot = (0, import_node_path5.resolve)(this.dataRoot);
+    const absolutePath = (0, import_node_path5.resolve)(path2);
     if (!isWithin(absoluteRoot, absolutePath)) {
       throw new Error(`Dream workspace path is outside data root: ${path2}`);
     }
     try {
-      const metadata = await (0, import_promises2.lstat)(path2);
+      const metadata = await (0, import_promises.lstat)(path2);
       if (metadata.isSymbolicLink() || !metadata.isFile()) {
         throw new Error(`Dream workspace document must be a regular file: ${path2}`);
       }
@@ -3477,7 +4830,7 @@ var DreamMemoryStore = class {
     const path2 = this.memoryPath(filename);
     await this.assertFileIsSafe(path2);
     try {
-      return decodeUtf8(await (0, import_promises2.readFile)(path2), `memory/${filename}`);
+      return decodeUtf8(await (0, import_promises.readFile)(path2), `memory/${filename}`);
     } catch (error48) {
       if (error48.code === "ENOENT") return fallback;
       throw error48;
@@ -3487,15 +4840,15 @@ var DreamMemoryStore = class {
     const createdAt = this.now().toISOString();
     const id = snapshotId(new Date(createdAt));
     const historyRoot = this.historyRoot();
-    const finalRoot = (0, import_node_path6.join)(historyRoot, id);
-    const temporaryRoot = (0, import_node_path6.join)(historyRoot, `.${id}.tmp`);
-    await (0, import_promises2.mkdir)(historyRoot, { recursive: true });
-    await (0, import_promises2.mkdir)(temporaryRoot);
+    const finalRoot = (0, import_node_path5.join)(historyRoot, id);
+    const temporaryRoot = (0, import_node_path5.join)(historyRoot, `.${id}.tmp`);
+    await (0, import_promises.mkdir)(historyRoot, { recursive: true });
+    await (0, import_promises.mkdir)(temporaryRoot);
     try {
       const files = {};
       for (const filename of MEMORY_FILES) {
         const bytes = encoder.encode(documentForFilename(documents, filename));
-        await this.writeFileSynced((0, import_node_path6.join)(temporaryRoot, filename), bytes);
+        await this.writeFileSynced((0, import_node_path5.join)(temporaryRoot, filename), bytes);
         files[filename] = sha256(bytes);
       }
       const manifest = {
@@ -3506,16 +4859,16 @@ var DreamMemoryStore = class {
         files
       };
       await this.writeFileSynced(
-        (0, import_node_path6.join)(temporaryRoot, SNAPSHOT_MANIFEST_FILE),
+        (0, import_node_path5.join)(temporaryRoot, SNAPSHOT_MANIFEST_FILE),
         encoder.encode(`${JSON.stringify(manifest, null, 2)}
 `)
       );
       await this.syncDirectory(temporaryRoot);
-      await (0, import_promises2.rename)(temporaryRoot, finalRoot);
+      await (0, import_promises.rename)(temporaryRoot, finalRoot);
       await this.syncDirectory(historyRoot);
       return { id, date: date5, createdAt };
     } catch (error48) {
-      await (0, import_promises2.rm)(temporaryRoot, { recursive: true, force: true }).catch(
+      await (0, import_promises.rm)(temporaryRoot, { recursive: true, force: true }).catch(
         () => void 0
       );
       throw error48;
@@ -3524,7 +4877,7 @@ var DreamMemoryStore = class {
   async listSnapshotsWithoutRecovery() {
     let entries;
     try {
-      entries = await (0, import_promises2.readdir)(this.historyRoot(), { withFileTypes: true });
+      entries = await (0, import_promises.readdir)(this.historyRoot(), { withFileTypes: true });
     } catch (error48) {
       if (error48.code === "ENOENT") return [];
       throw error48;
@@ -3548,8 +4901,8 @@ var DreamMemoryStore = class {
   }
   async readSnapshotManifest(id) {
     assertSafeId(id);
-    const root = (0, import_node_path6.join)(this.historyRoot(), id);
-    const metadata = await (0, import_promises2.lstat)(root);
+    const root = (0, import_node_path5.join)(this.historyRoot(), id);
+    const metadata = await (0, import_promises.lstat)(root);
     if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
       throw new Error(`Memory snapshot is not a real directory: ${id}`);
     }
@@ -3557,7 +4910,7 @@ var DreamMemoryStore = class {
     try {
       manifest = JSON.parse(
         decodeUtf8(
-          await (0, import_promises2.readFile)((0, import_node_path6.join)(root, SNAPSHOT_MANIFEST_FILE)),
+          await (0, import_promises.readFile)((0, import_node_path5.join)(root, SNAPSHOT_MANIFEST_FILE)),
           `memory snapshot manifest ${id}`
         )
       );
@@ -3580,15 +4933,15 @@ var DreamMemoryStore = class {
   }
   async verifySnapshotWithoutRecovery(id) {
     const manifest = await this.readSnapshotManifest(id);
-    const root = (0, import_node_path6.join)(this.historyRoot(), id);
+    const root = (0, import_node_path5.join)(this.historyRoot(), id);
     const loaded = {};
     for (const filename of MEMORY_FILES) {
-      const path2 = (0, import_node_path6.join)(root, filename);
-      const metadata = await (0, import_promises2.lstat)(path2);
+      const path2 = (0, import_node_path5.join)(root, filename);
+      const metadata = await (0, import_promises.lstat)(path2);
       if (metadata.isSymbolicLink() || !metadata.isFile()) {
         throw new Error(`Invalid memory snapshot document: ${id}/${filename}`);
       }
-      const bytes = await (0, import_promises2.readFile)(path2);
+      const bytes = await (0, import_promises.readFile)(path2);
       if (sha256(bytes) !== manifest.files[filename]) {
         throw new Error(`Memory snapshot hash mismatch: ${id}/${filename}`);
       }
@@ -3621,7 +4974,7 @@ var DreamMemoryStore = class {
     }
     for (const snapshot of snapshots) {
       if (!keep.has(snapshot.id)) {
-        await (0, import_promises2.rm)((0, import_node_path6.join)(this.historyRoot(), snapshot.id), {
+        await (0, import_promises.rm)((0, import_node_path5.join)(this.historyRoot(), snapshot.id), {
           recursive: true,
           force: true
         });
@@ -3632,64 +4985,64 @@ var DreamMemoryStore = class {
   async prepareTransaction(kind, date5, documents) {
     if (date5 !== null) assertDiaryDate(date5);
     const id = (0, import_node_crypto.randomUUID)();
-    const root = (0, import_node_path6.join)(this.transactionsRoot(), id);
-    await (0, import_promises2.mkdir)((0, import_node_path6.join)(root, "backups"), { recursive: true });
-    await (0, import_promises2.mkdir)((0, import_node_path6.join)(root, "staged"), { recursive: true });
+    const root = (0, import_node_path5.join)(this.transactionsRoot(), id);
+    await (0, import_promises.mkdir)((0, import_node_path5.join)(root, "backups"), { recursive: true });
+    await (0, import_promises.mkdir)((0, import_node_path5.join)(root, "staged"), { recursive: true });
     const targets = [];
     try {
       for (const [relativePath, document] of Object.entries(documents)) {
         this.assertTransactionPath(relativePath);
-        const finalPath = (0, import_node_path6.join)(this.dataRoot, relativePath);
+        const finalPath = (0, import_node_path5.join)(this.dataRoot, relativePath);
         await this.assertFileIsSafe(finalPath);
         let existed = true;
         try {
-          const bytes = await (0, import_promises2.readFile)(finalPath);
-          await this.writeFileSynced((0, import_node_path6.join)(root, "backups", relativePath), bytes);
+          const bytes = await (0, import_promises.readFile)(finalPath);
+          await this.writeFileSynced((0, import_node_path5.join)(root, "backups", relativePath), bytes);
         } catch (error48) {
           if (error48.code !== "ENOENT") throw error48;
           existed = false;
         }
         await this.writeFileSynced(
-          (0, import_node_path6.join)(root, "staged", relativePath),
+          (0, import_node_path5.join)(root, "staged", relativePath),
           encoder.encode(document)
         );
         targets.push({ path: relativePath, existed });
       }
       const manifest = { version: 1, id, kind, date: date5, targets };
       await this.writeFileSynced(
-        (0, import_node_path6.join)(root, "manifest.json"),
+        (0, import_node_path5.join)(root, "manifest.json"),
         encoder.encode(`${JSON.stringify(manifest, null, 2)}
 `)
       );
       await this.syncDirectory(root);
       return { id, root, manifest };
     } catch (error48) {
-      await (0, import_promises2.rm)(root, { recursive: true, force: true }).catch(() => void 0);
+      await (0, import_promises.rm)(root, { recursive: true, force: true }).catch(() => void 0);
       throw error48;
     }
   }
   async publishTransaction(transaction) {
     for (const target of transaction.manifest.targets) {
-      const finalPath = (0, import_node_path6.join)(this.dataRoot, target.path);
-      await (0, import_promises2.mkdir)((0, import_node_path6.dirname)(finalPath), { recursive: true });
-      await (0, import_promises2.rename)((0, import_node_path6.join)(transaction.root, "staged", target.path), finalPath);
-      await this.syncDirectory((0, import_node_path6.dirname)(finalPath));
+      const finalPath = (0, import_node_path5.join)(this.dataRoot, target.path);
+      await (0, import_promises.mkdir)((0, import_node_path5.dirname)(finalPath), { recursive: true });
+      await (0, import_promises.rename)((0, import_node_path5.join)(transaction.root, "staged", target.path), finalPath);
+      await this.syncDirectory((0, import_node_path5.dirname)(finalPath));
     }
   }
   async rollbackTransaction(transaction) {
     for (const target of transaction.manifest.targets) {
-      const finalPath = (0, import_node_path6.join)(this.dataRoot, target.path);
+      const finalPath = (0, import_node_path5.join)(this.dataRoot, target.path);
       if (target.existed) {
-        const backup = await (0, import_promises2.readFile)((0, import_node_path6.join)(transaction.root, "backups", target.path));
+        const backup = await (0, import_promises.readFile)((0, import_node_path5.join)(transaction.root, "backups", target.path));
         await this.writeAtomically(finalPath, backup);
       } else {
-        await (0, import_promises2.unlink)(finalPath).catch((error48) => {
+        await (0, import_promises.unlink)(finalPath).catch((error48) => {
           if (error48.code !== "ENOENT") throw error48;
         });
-        await this.syncDirectory((0, import_node_path6.dirname)(finalPath)).catch(() => void 0);
+        await this.syncDirectory((0, import_node_path5.dirname)(finalPath)).catch(() => void 0);
       }
     }
-    await (0, import_promises2.rm)(transaction.root, { recursive: true, force: true });
+    await (0, import_promises.rm)(transaction.root, { recursive: true, force: true });
   }
   async executeTransaction(transaction, rollbackFailureMessage) {
     try {
@@ -3705,12 +5058,12 @@ var DreamMemoryStore = class {
       }
       throw error48;
     }
-    await (0, import_promises2.rm)(transaction.root, { recursive: true, force: true });
+    await (0, import_promises.rm)(transaction.root, { recursive: true, force: true });
   }
   async recoverIncompleteTransactions() {
     let entries;
     try {
-      entries = await (0, import_promises2.readdir)(this.transactionsRoot(), { withFileTypes: true });
+      entries = await (0, import_promises.readdir)(this.transactionsRoot(), { withFileTypes: true });
     } catch (error48) {
       if (error48.code === "ENOENT") return;
       throw error48;
@@ -3722,15 +5075,15 @@ var DreamMemoryStore = class {
       if (!entry.isDirectory() || entry.isSymbolicLink()) {
         throw new Error(`Invalid dream transaction entry: ${entry.name}`);
       }
-      const root = (0, import_node_path6.join)(this.transactionsRoot(), entry.name);
+      const root = (0, import_node_path5.join)(this.transactionsRoot(), entry.name);
       let manifest;
       try {
         manifest = JSON.parse(
-          decodeUtf8(await (0, import_promises2.readFile)((0, import_node_path6.join)(root, "manifest.json")), "dream transaction manifest")
+          decodeUtf8(await (0, import_promises.readFile)((0, import_node_path5.join)(root, "manifest.json")), "dream transaction manifest")
         );
       } catch (error48) {
         if (error48.code === "ENOENT") {
-          await (0, import_promises2.rm)(root, { recursive: true, force: true });
+          await (0, import_promises.rm)(root, { recursive: true, force: true });
           continue;
         }
         throw new Error(`Invalid dream transaction manifest: ${entry.name}`);
@@ -3738,7 +5091,7 @@ var DreamMemoryStore = class {
       this.validateTransactionManifest(manifest);
       const transaction = { id: manifest.id, root, manifest };
       if (manifest.kind === "commit" && marker?.transactionId === manifest.id) {
-        await (0, import_promises2.rm)(root, { recursive: true, force: true });
+        await (0, import_promises.rm)(root, { recursive: true, force: true });
       } else {
         await this.rollbackTransaction(transaction);
       }
@@ -3758,7 +5111,7 @@ var DreamMemoryStore = class {
     }
   }
   assertTransactionPath(path2) {
-    if (path2.includes("\0") || path2.startsWith("/") || !path2.startsWith("memory/") && !path2.startsWith("diary/") || !isWithin((0, import_node_path6.resolve)(this.dataRoot), (0, import_node_path6.resolve)(this.dataRoot, path2))) {
+    if (path2.includes("\0") || path2.startsWith("/") || !path2.startsWith("memory/") && !path2.startsWith("diary/") || !isWithin((0, import_node_path5.resolve)(this.dataRoot), (0, import_node_path5.resolve)(this.dataRoot, path2))) {
       throw new Error(`Invalid dream transaction path: ${path2}`);
     }
   }
@@ -3782,7 +5135,7 @@ var DreamMemoryStore = class {
   async readSuccessMarkerWithoutRecovery() {
     try {
       const value = JSON.parse(
-        decodeUtf8(await (0, import_promises2.readFile)(this.successMarkerPath()), "dream success marker")
+        decodeUtf8(await (0, import_promises.readFile)(this.successMarkerPath()), "dream success marker")
       );
       if (typeof value.last_successful_date !== "string" || typeof value.transaction_id !== "string") {
         throw new Error("Invalid dream success marker");
@@ -3808,7 +5161,7 @@ var DreamMemoryStore = class {
   async readMigrationStateWithoutRecovery() {
     try {
       const value = JSON.parse(
-        decodeUtf8(await (0, import_promises2.readFile)(this.migrationStatePath()), "dream migration state")
+        decodeUtf8(await (0, import_promises.readFile)(this.migrationStatePath()), "dream migration state")
       );
       if (value.version !== 1 || typeof value.requires_full_fill !== "boolean") {
         throw new Error("Invalid dream migration state");
@@ -3833,10 +5186,10 @@ var DreamMemoryStore = class {
     );
   }
   async loadLegacyCurrentPersona() {
-    const personaRoot = (0, import_node_path6.join)(this.dataRoot, "persona");
+    const personaRoot = (0, import_node_path5.join)(this.dataRoot, "persona");
     await this.assertLegacyPersonaRootIsSafe();
     const currentBytes = await this.readLegacyFile(
-      (0, import_node_path6.join)(personaRoot, "CURRENT"),
+      (0, import_node_path5.join)(personaRoot, "CURRENT"),
       "persona CURRENT"
     );
     let current;
@@ -3850,15 +5203,15 @@ var DreamMemoryStore = class {
     if (!Number.isSafeInteger(current.generation) || current.generation < 1) {
       throw new LegacyPersonaUnavailableError("Invalid legacy persona CURRENT generation");
     }
-    const generationRoot = (0, import_node_path6.join)(
+    const generationRoot = (0, import_node_path5.join)(
       personaRoot,
       "generations",
       String(current.generation)
     );
     const [manifestBytes, profileBytes, experienceBytes] = await Promise.all([
-      this.readLegacyFile((0, import_node_path6.join)(generationRoot, "manifest.json"), "generation manifest"),
-      this.readLegacyFile((0, import_node_path6.join)(generationRoot, "user-profile.md"), "user profile"),
-      this.readLegacyFile((0, import_node_path6.join)(generationRoot, "experience.md"), "experience")
+      this.readLegacyFile((0, import_node_path5.join)(generationRoot, "manifest.json"), "generation manifest"),
+      this.readLegacyFile((0, import_node_path5.join)(generationRoot, "user-profile.md"), "user profile"),
+      this.readLegacyFile((0, import_node_path5.join)(generationRoot, "experience.md"), "experience")
     ]);
     if (manifestBytes.length !== currentBytes.length || !manifestBytes.every((byte, index) => byte === currentBytes[index])) {
       throw new LegacyPersonaUnavailableError(
@@ -3893,10 +5246,10 @@ var DreamMemoryStore = class {
     };
   }
   async retireLegacyPersonaLayout() {
-    const personaRoot = (0, import_node_path6.join)(this.dataRoot, "persona");
+    const personaRoot = (0, import_node_path5.join)(this.dataRoot, "persona");
     await this.assertLegacyPersonaRootIsSafe();
-    await (0, import_promises2.rm)((0, import_node_path6.join)(personaRoot, "generations"), { recursive: true, force: true });
-    await (0, import_promises2.unlink)((0, import_node_path6.join)(personaRoot, "CURRENT")).catch((error48) => {
+    await (0, import_promises.rm)((0, import_node_path5.join)(personaRoot, "generations"), { recursive: true, force: true });
+    await (0, import_promises.unlink)((0, import_node_path5.join)(personaRoot, "CURRENT")).catch((error48) => {
       if (error48.code !== "ENOENT") throw error48;
     });
     if (await this.pathExists(personaRoot)) {
@@ -3904,9 +5257,9 @@ var DreamMemoryStore = class {
     }
   }
   async assertLegacyPersonaRootIsSafe() {
-    const personaRoot = (0, import_node_path6.join)(this.dataRoot, "persona");
+    const personaRoot = (0, import_node_path5.join)(this.dataRoot, "persona");
     try {
-      const metadata = await (0, import_promises2.lstat)(personaRoot);
+      const metadata = await (0, import_promises.lstat)(personaRoot);
       if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
         throw new Error(`Legacy persona root must be a real directory: ${personaRoot}`);
       }
@@ -3917,13 +5270,13 @@ var DreamMemoryStore = class {
   }
   async readLegacyFile(path2, label) {
     try {
-      const metadata = await (0, import_promises2.lstat)(path2);
+      const metadata = await (0, import_promises.lstat)(path2);
       if (metadata.isSymbolicLink() || !metadata.isFile()) {
         throw new LegacyPersonaUnavailableError(
           `Legacy ${label} is not a regular file`
         );
       }
-      return await (0, import_promises2.readFile)(path2);
+      return await (0, import_promises.readFile)(path2);
     } catch (error48) {
       if (error48 instanceof LegacyPersonaUnavailableError) throw error48;
       const code = error48.code;
@@ -3935,7 +5288,7 @@ var DreamMemoryStore = class {
   }
   async pathExists(path2) {
     try {
-      await (0, import_promises2.lstat)(path2);
+      await (0, import_promises.lstat)(path2);
       return true;
     } catch (error48) {
       if (error48.code === "ENOENT") return false;
@@ -3943,8 +5296,8 @@ var DreamMemoryStore = class {
     }
   }
   async writeFileSynced(path2, bytes) {
-    await (0, import_promises2.mkdir)((0, import_node_path6.dirname)(path2), { recursive: true });
-    const file2 = await (0, import_promises2.open)(path2, "wx");
+    await (0, import_promises.mkdir)((0, import_node_path5.dirname)(path2), { recursive: true });
+    const file2 = await (0, import_promises.open)(path2, "wx");
     try {
       await file2.writeFile(bytes);
       await file2.sync();
@@ -3954,23 +5307,23 @@ var DreamMemoryStore = class {
   }
   async writeAtomically(path2, bytes) {
     await this.assertFileIsSafe(path2);
-    const parent = (0, import_node_path6.dirname)(path2);
-    const temporary = (0, import_node_path6.join)(
+    const parent = (0, import_node_path5.dirname)(path2);
+    const temporary = (0, import_node_path5.join)(
       parent,
-      `.${(0, import_node_path6.basename)(path2)}.${process.pid}.${(0, import_node_crypto.randomUUID)()}.tmp`
+      `.${(0, import_node_path5.basename)(path2)}.${process.pid}.${(0, import_node_crypto.randomUUID)()}.tmp`
     );
-    await (0, import_promises2.mkdir)(parent, { recursive: true });
+    await (0, import_promises.mkdir)(parent, { recursive: true });
     try {
       await this.writeFileSynced(temporary, bytes);
-      await (0, import_promises2.rename)(temporary, path2);
+      await (0, import_promises.rename)(temporary, path2);
       await this.syncDirectory(parent);
     } catch (error48) {
-      await (0, import_promises2.unlink)(temporary).catch(() => void 0);
+      await (0, import_promises.unlink)(temporary).catch(() => void 0);
       throw error48;
     }
   }
   async syncDirectory(path2) {
-    const directory = await (0, import_promises2.open)(path2, "r");
+    const directory = await (0, import_promises.open)(path2, "r");
     try {
       await directory.sync();
     } finally {
@@ -4081,6 +5434,7 @@ var SESSION_SELECT = `
     scan_cursor_line AS scanCursorLine,
     parent_session_id AS parentSessionId,
     lineage_status AS lineageStatus,
+    last_remember_epoch AS lastRememberEpoch,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -4136,6 +5490,7 @@ function upsertSession(db, input) {
         scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
+        last_remember_epoch AS lastRememberEpoch,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -4159,6 +5514,14 @@ function upsertSession(db, input) {
   indexSessionToFTS(db, session);
   return session;
 }
+function countTurnsSince(db, sessionId, sinceEpoch) {
+  return db.query(
+    `SELECT COUNT(*) AS count FROM turns
+         WHERE session_id = ?
+           AND status != 'undone'
+           AND created_at_epoch > ?`
+  ).get(sessionId, sinceEpoch ?? -1)?.count ?? 0;
+}
 function getSession(db, id) {
   return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
 }
@@ -4167,18 +5530,10 @@ function getSessionByContentId(db, contentSessionId) {
     `${SESSION_SELECT} WHERE content_session_id = ?`
   ).get(contentSessionId) ?? null;
 }
-function getRecentSessions(db, options = {}) {
-  const clauses = [];
-  const params = [];
-  if (options.project) {
-    clauses.push("project = ?");
-    params.push(options.project);
-  }
-  const whereClause = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
-  const limit = options.limit ?? 20;
-  return db.query(
-    `${SESSION_SELECT}${whereClause} ORDER BY created_at_epoch DESC LIMIT ?`
-  ).all(...params, limit);
+function touchSessionCompletion(db, sessionId, updatedAtEpoch, completedAtEpoch) {
+  db.query(
+    `UPDATE sessions SET updated_at_epoch = ?, completed_at_epoch = ? WHERE id = ?`
+  ).run(updatedAtEpoch, completedAtEpoch, sessionId);
 }
 function compareAndSetScanCursor(db, sessionId, byteOffset, lineNumber, observedByteOffset) {
   const result = db.query(
@@ -4229,7 +5584,7 @@ function setSessionLineageStatus(db, sessionId, status) {
 // src/worker/client.ts
 var import_node_child_process = require("node:child_process");
 var import_node_fs4 = require("node:fs");
-var import_node_path7 = require("node:path");
+var import_node_path6 = require("node:path");
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -4289,17 +5644,17 @@ function resolvePluginRoot(env = process.env) {
   if (env.CLAUDE_PLUGIN_ROOT && env.CLAUDE_PLUGIN_ROOT.trim() !== "") {
     return env.CLAUDE_PLUGIN_ROOT;
   }
-  const currentDir = (0, import_node_path7.dirname)(__filename);
+  const currentDir = (0, import_node_path6.dirname)(__filename);
   if (currentDir.endsWith("/plugin/scripts") || currentDir.endsWith("\\plugin\\scripts")) {
-    return (0, import_node_path7.resolve)(currentDir, "..");
+    return (0, import_node_path6.resolve)(currentDir, "..");
   }
-  return (0, import_node_path7.resolve)(currentDir, "..", "..", "plugin");
+  return (0, import_node_path6.resolve)(currentDir, "..", "..", "plugin");
 }
 function resolveWorkerScriptPaths(env = process.env) {
   const pluginRoot = resolvePluginRoot(env);
   return {
-    bunRunnerPath: (0, import_node_path7.join)(pluginRoot, "scripts", "bun-runner.js"),
-    workerPath: (0, import_node_path7.join)(pluginRoot, "scripts", "worker.cjs")
+    bunRunnerPath: (0, import_node_path6.join)(pluginRoot, "scripts", "bun-runner.js"),
+    workerPath: (0, import_node_path6.join)(pluginRoot, "scripts", "worker.cjs")
   };
 }
 async function readWorkerHealth(fetchImpl, timeoutMs) {
@@ -4505,10 +5860,683 @@ function createCompactHandler(dependencies) {
 }
 
 // src/hooks/handlers/context.ts
-var import_node_path12 = require("node:path");
+var import_node_path11 = require("node:path");
+
+// src/db/observations.ts
+var OBSERVATION_COLUMNS = `
+  id,
+  turn_id AS turnId,
+  tool_name AS toolName,
+  tool_input AS toolInput,
+  tool_result AS toolResult,
+  status,
+  title,
+  content,
+  excluded_from_extraction AS excludedFromExtraction,
+  created_at_epoch AS createdAtEpoch
+`;
+var OBSERVATION_SELECT = `
+  SELECT ${OBSERVATION_COLUMNS}
+  FROM observations
+`;
+function mapObservationRow(row) {
+  if (!row) {
+    return null;
+  }
+  return row;
+}
+function createObservation(db, input) {
+  const inserted = db.query(
+    `
+        INSERT INTO observations (
+          turn_id,
+          tool_name,
+          tool_input,
+          tool_result,
+          status,
+          title,
+          content,
+          excluded_from_extraction,
+          created_at_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING ${OBSERVATION_COLUMNS}
+      `
+  ).get(
+    input.turnId,
+    input.toolName ?? null,
+    input.toolInput ?? null,
+    input.toolResult ?? null,
+    input.status ?? "pending",
+    input.title ?? null,
+    input.content ?? null,
+    input.excludedFromExtraction ? 1 : 0,
+    input.createdAtEpoch
+  );
+  const observation = mapObservationRow(inserted);
+  if (!observation) {
+    throw new Error("Failed to create observation.");
+  }
+  indexObservationToFTS(db, observation);
+  return observation;
+}
+function getExtractableObservationsForTurn(db, turnId) {
+  return db.query(
+    `${OBSERVATION_SELECT} WHERE turn_id = ? AND excluded_from_extraction = 0 ORDER BY id ASC`
+  ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
+}
+function getObservation(db, observationId) {
+  return mapObservationRow(
+    db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
+  );
+}
+
+// src/db/segment-rank.ts
+var RANK_FACT_COLUMNS = `
+  t.id AS turnId,
+  t.session_id AS sessionId,
+  t.prompt_number AS promptNumber,
+  t.title AS title,
+  t.type AS type,
+  t.status AS status,
+  t.created_at_epoch AS createdAtEpoch,
+  (EXISTS (
+     SELECT 1 FROM memory_edges e
+     WHERE e.citing_kind = 'turn' AND e.citing_id = t.id
+       AND e.relation = 'supersedes'
+   )) AS isCorrector,
+  -- 'rolled-back' left the type vocabulary (ticket 02, spec B4): a reversal is
+  -- knowable only after the fact and is carried by a supersedes edge, never a
+  -- type a turn states about itself. The old scalar comparison against t.type,
+  -- a JSON-array column (spec B5), was therefore permanently false -- already
+  -- inert before the migration, since no legacy turn ever carried a bare
+  -- 'rolled-back' scalar either (it was a settlement-only, segment-only
+  -- value). Ticket 13 moves the test to what spec B4 always pointed at: an
+  -- INBOUND supersedes edge names this turn as another turn's victim, which is
+  -- exactly what "rolled back" means.
+  (EXISTS (
+     SELECT 1 FROM memory_edges e
+     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
+       AND e.relation = 'supersedes'
+   )) AS isRolledBack,
+  (SELECT COUNT(*) FROM (
+     SELECT DISTINCT e.citing_kind, e.citing_id
+     FROM memory_edges e
+     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
+   )) AS citedBy,
+  (EXISTS (
+     SELECT 1 FROM segment_members dm
+     JOIN segments ds ON ds.id = dm.segment_id
+     WHERE dm.turn_id = t.id AND ds.status = 'delivered'
+   )) AS isDeliveryMember,
+  (CASE WHEN json_valid(t.files_modified)
+        THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount
+`;
+function parseTypeList(raw) {
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function mapMemberRankFactsRow(row) {
+  return { ...row, type: parseTypeList(row.type) };
+}
+var DERIVED_RANK_ORDER = `
+  ORDER BY isCorrector DESC,
+           isRolledBack ASC,
+           citedBy DESC,
+           isDeliveryMember DESC,
+           filesModifiedCount DESC,
+           t.created_at_epoch DESC,
+           t.id DESC
+`;
+function resolveSegmentAnchorTurnIds(db, segment) {
+  const references = parseQualifiedReferences(segment.content);
+  if (references.length === 0) {
+    return [];
+  }
+  const lookup = db.query(
+    `SELECT t.id AS id
+     FROM turns t
+     JOIN segment_members sm ON sm.turn_id = t.id
+     WHERE t.session_id = ? AND t.prompt_number = ? AND sm.segment_id = ?`
+  );
+  const anchors = [];
+  for (const reference of references) {
+    if (reference.kind !== "turn") {
+      continue;
+    }
+    const row = lookup.get(reference.sessionId, reference.promptNumber, segment.id);
+    if (row && !anchors.includes(row.id)) {
+      anchors.push(row.id);
+    }
+  }
+  return anchors;
+}
+function rankSegmentMembers(db, segmentId, limit, eraCutoffEpoch = null) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return [];
+  }
+  const rows = db.query(
+    `SELECT ${RANK_FACT_COLUMNS}
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id = ?
+         ${eraCutoffEpoch === null ? "" : "AND t.created_at_epoch >= ?"}
+       ${DERIVED_RANK_ORDER}`
+  ).all(...eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]).map(mapMemberRankFactsRow);
+  const anchorIds = resolveSegmentAnchorTurnIds(db, segment);
+  const anchorPosition = new Map(
+    anchorIds.map((turnId, index) => [turnId, index + 1])
+  );
+  const byTurnId = new Map(rows.map((row) => [row.turnId, row]));
+  const ordered = [];
+  for (const turnId of anchorIds) {
+    const row = byTurnId.get(turnId);
+    if (row) {
+      ordered.push({ ...row, anchorPosition: anchorPosition.get(turnId) ?? null });
+    }
+  }
+  for (const row of rows) {
+    if (anchorPosition.has(row.turnId)) {
+      continue;
+    }
+    ordered.push({ ...row, anchorPosition: null });
+  }
+  return limit === void 0 ? ordered : ordered.slice(0, Math.max(0, limit));
+}
+function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch, windowTurnIds) {
+  if (eraCutoffEpoch === null) {
+    return [];
+  }
+  const memberRows = db.query(
+    `SELECT
+         sm.segment_id AS segmentId,
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber,
+         t.type AS type,
+         t.created_at_epoch AS createdAtEpoch
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE t.created_at_epoch >= ?
+         AND sm.segment_id IN (
+           SELECT sm2.segment_id
+           FROM segment_members sm2
+           JOIN turns t2 ON t2.id = sm2.turn_id
+           WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
+         )
+       ORDER BY t.created_at_epoch ASC, t.id ASC`
+  ).all(eraCutoffEpoch, sessionId, eraCutoffEpoch).map((row) => ({ ...row, type: parseTypeList(row.type) }));
+  const bySegment = /* @__PURE__ */ new Map();
+  for (const row of memberRows) {
+    const bucket = bySegment.get(row.segmentId) ?? [];
+    bucket.push(row);
+    bySegment.set(row.segmentId, bucket);
+  }
+  const rows = [];
+  for (const [segmentId, members] of bySegment) {
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      continue;
+    }
+    const sessionMembers = members.filter((member) => member.sessionId === sessionId);
+    if (windowTurnIds !== void 0 && !sessionMembers.some((member) => windowTurnIds.has(member.turnId))) {
+      continue;
+    }
+    const prompts = sessionMembers.map((member) => member.promptNumber);
+    rows.push({
+      segment,
+      // Flattened: a multi-valued member contributes every one of its own
+      // words to the mode count (spec B5), not just a "first" pick —
+      // `deriveDominantType`'s own logic is untouched (pin: it stays).
+      dominantType: deriveDominantType(
+        members.flatMap((member) => member.type),
+        segment.type
+      ),
+      memberCount: members.length,
+      sessionMemberCount: sessionMembers.length,
+      firstPromptNumber: prompts.length > 0 ? Math.min(...prompts) : null,
+      lastPromptNumber: prompts.length > 0 ? Math.max(...prompts) : null,
+      firstEpoch: members[0].createdAtEpoch,
+      lastEpoch: members[members.length - 1].createdAtEpoch,
+      phaseTrace: collapseTypeListRuns(
+        members.map((member) => member.type).filter((type) => type.length > 0)
+      )
+    });
+  }
+  return rows.sort((left, right) => {
+    const leftPrompt = left.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
+    const rightPrompt = right.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
+    if (leftPrompt !== rightPrompt) {
+      return leftPrompt - rightPrompt;
+    }
+    return left.segment.id - right.segment.id;
+  });
+}
+function deriveDominantType(memberTypes, segmentTypes) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const type of memberTypes) {
+    if (type === null || type === "") {
+      continue;
+    }
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+  }
+  let best = null;
+  let bestCount = 0;
+  let tied = false;
+  for (const [type, count] of counts) {
+    if (count > bestCount) {
+      best = type;
+      bestCount = count;
+      tied = false;
+    } else if (count === bestCount) {
+      tied = true;
+    }
+  }
+  if (best !== null && !tied) {
+    return best;
+  }
+  return segmentTypes[0] ?? null;
+}
+function collapseTypeListRuns(values) {
+  const out = [];
+  for (const value of values) {
+    const previous = out[out.length - 1];
+    if (!previous || !typeListsEqual(previous, value)) {
+      out.push([...value]);
+    }
+  }
+  return out;
+}
+function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch, windowTurnIds) {
+  if (eraCutoffEpoch === null) {
+    return [];
+  }
+  const rows = db.query(
+    `SELECT ${RANK_FACT_COLUMNS}
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.created_at_epoch >= ?
+         AND t.status NOT IN ('skipped', 'undone')
+         AND NOT EXISTS (
+           SELECT 1 FROM segment_members sm WHERE sm.turn_id = t.id
+         )
+       ${DERIVED_RANK_ORDER}`
+  ).all(sessionId, eraCutoffEpoch).map(mapMemberRankFactsRow);
+  return rows.filter((facts) => windowTurnIds === void 0 || windowTurnIds.has(facts.turnId)).map((facts) => ({ facts, signals: orphanSignals(facts) })).filter((row) => row.signals.length > 0);
+}
+function orphanSignals(facts) {
+  const signals = [];
+  if (facts.isCorrector) {
+    signals.push("corrector");
+  }
+  if (facts.isRolledBack) {
+    signals.push("rolled-back");
+  }
+  if (facts.citedBy > 0) {
+    signals.push(`cited ${facts.citedBy}`);
+  }
+  return signals;
+}
+function getSegmentMembershipForTurns(db, turnIds) {
+  const membership = /* @__PURE__ */ new Map();
+  if (turnIds.length === 0) {
+    return membership;
+  }
+  const placeholders = turnIds.map(() => "?").join(", ");
+  const rows = db.query(
+    `SELECT turn_id AS turnId, segment_id AS segmentId
+       FROM segment_members
+       WHERE turn_id IN (${placeholders})
+       ORDER BY turn_id ASC, segment_id ASC`
+  ).all(...turnIds);
+  for (const row of rows) {
+    if (!membership.has(row.turnId)) {
+      membership.set(row.turnId, row.segmentId);
+    }
+  }
+  return membership;
+}
+
+// src/diary/calendar.ts
+var dateFormatters = /* @__PURE__ */ new Map();
+function dateFormatter(timeZone) {
+  let formatter = dateFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    });
+    dateFormatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+function partNumber(parts, type) {
+  const value = parts.find((part) => part.type === type)?.value;
+  if (value === void 0) throw new Error(`Missing ${type} calendar part`);
+  return Number.parseInt(value, 10);
+}
+function calendarDateAt(epochSeconds, timeZone) {
+  const parts = dateFormatter(timeZone).formatToParts(epochSeconds * 1e3);
+  const year = String(partNumber(parts, "year")).padStart(4, "0");
+  const month = String(partNumber(parts, "month")).padStart(2, "0");
+  const day = String(partNumber(parts, "day")).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+function contentDateAt(epochSeconds, timeZone, boundaryHour) {
+  return calendarDateAt(epochSeconds - boundaryHour * 3600, timeZone);
+}
+
+// src/db/diary-state.ts
+function readDreamCalendarBoundary(db) {
+  const timeZone = db.query(
+    "SELECT value FROM diary_state WHERE key = 'dream_timezone'"
+  ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
+  const boundaryHour = Number(
+    db.query(
+      "SELECT value FROM diary_state WHERE key = 'dream_hour'"
+    ).get()?.value ?? DEFAULT_DREAM_AGENT_HOUR
+  );
+  return { timeZone, boundaryHour };
+}
+function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
+  const { timeZone, boundaryHour } = readDreamCalendarBoundary(db);
+  const date5 = contentDateAt(createdAtEpoch, timeZone, boundaryHour);
+  db.query(
+    `UPDATE diary_day_state
+     SET needs_regen = 1,
+         attempt_count = 0,
+         next_attempt_epoch = NULL,
+         retry_disposition = NULL,
+         last_error = NULL
+     WHERE date = ?
+       AND settled_at_epoch IS NOT NULL
+       AND date >= COALESCE(
+         (SELECT value FROM diary_state WHERE key = 'cutover_date'),
+         '9999-12-31'
+       )`
+  ).run(date5);
+}
+
+// src/db/turns.ts
+var TURN_SELECT = `
+  SELECT
+    id,
+    session_id AS sessionId,
+    prompt_number AS promptNumber,
+    content_prompt_id AS contentPromptId,
+    transcript_line_start AS transcriptLineStart,
+    was_interrupted AS wasInterrupted,
+    was_rolled_back AS wasRolledBack,
+    status,
+    user_prompt AS userPrompt,
+    assistant_response AS assistantResponse,
+    assistant_transcript AS assistantTranscript,
+    title,
+    content,
+    insight,
+    type,
+    significance_grade AS significanceGrade,
+    tags,
+    files_read AS filesRead,
+    files_modified AS filesModified,
+    tool_call_count AS toolCallCount,
+    parent_turn_id AS parentTurnId,
+    compact_boundary_uuid AS compactBoundaryUuid,
+    created_at_epoch AS createdAtEpoch,
+    updated_at_epoch AS updatedAtEpoch
+  FROM turns
+`;
+function stringifyArray(values) {
+  return JSON.stringify(values);
+}
+function parseJsonArray2(value) {
+  if (!value) {
+    return [];
+  }
+  return JSON.parse(value);
+}
+function mapTurnRow(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    ...row,
+    wasInterrupted: row.wasInterrupted === 1,
+    wasRolledBack: row.wasRolledBack === 1,
+    type: parseJsonArray2(row.type),
+    tags: parseJsonArray2(row.tags),
+    filesRead: parseJsonArray2(row.filesRead),
+    filesModified: parseJsonArray2(row.filesModified),
+    parentTurnId: row.parentTurnId ?? null
+  };
+}
+function getTurn(db, sessionId, promptNumber) {
+  return mapTurnRow(
+    db.query(
+      `${TURN_SELECT} WHERE session_id = ? AND prompt_number = ?`
+    ).get(sessionId, promptNumber) ?? null
+  );
+}
+function getTurnById(db, turnId) {
+  return mapTurnRow(
+    db.query(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null
+  );
+}
+function resolveNullable(value, existing) {
+  return value === void 0 ? existing : value;
+}
+function updateTurnById(db, turnId, input) {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return null;
+  }
+  const mergedTitle = resolveNullable(input.title, existing.title);
+  const mergedContent = resolveNullable(input.content, existing.content);
+  const mergedInsight = resolveNullable(input.insight, existing.insight);
+  const mergedType = input.type === void 0 ? existing.type : input.type;
+  const mergedGrade = resolveNullable(
+    input.significanceGrade,
+    existing.significanceGrade
+  );
+  const hasSubstance = mergedTitle !== null || mergedContent !== null;
+  const nextStatus = input.status ?? (existing.status === "active" && hasSubstance ? "extracted" : existing.status);
+  const nextTags = input.tags === void 0 ? existing.tags : input.tags;
+  const updated = mapTurnRow(
+    db.query(
+      `
+          UPDATE turns
+          SET
+            status = ?,
+            was_interrupted = ?,
+            was_rolled_back = ?,
+            title = ?,
+            content = ?,
+            insight = ?,
+            type = ?,
+            significance_grade = ?,
+            transcript_line_start = ?,
+            tags = ?,
+            files_read = ?,
+            files_modified = ?,
+            tool_call_count = ?,
+            updated_at_epoch = ?
+          WHERE id = ?
+          RETURNING
+            id,
+            session_id AS sessionId,
+            prompt_number AS promptNumber,
+            content_prompt_id AS contentPromptId,
+            was_interrupted AS wasInterrupted,
+            was_rolled_back AS wasRolledBack,
+            status,
+            user_prompt AS userPrompt,
+            assistant_response AS assistantResponse,
+            assistant_transcript AS assistantTranscript,
+            title,
+            content,
+            insight,
+            type,
+            significance_grade AS significanceGrade,
+            transcript_line_start AS transcriptLineStart,
+            tags,
+            files_read AS filesRead,
+            files_modified AS filesModified,
+            tool_call_count AS toolCallCount,
+            parent_turn_id AS parentTurnId,
+            compact_boundary_uuid AS compactBoundaryUuid,
+            created_at_epoch AS createdAtEpoch,
+            updated_at_epoch AS updatedAtEpoch
+        `
+    ).get(
+      nextStatus,
+      input.wasInterrupted ?? existing.wasInterrupted ? 1 : 0,
+      input.wasRolledBack ?? existing.wasRolledBack ? 1 : 0,
+      mergedTitle,
+      mergedContent,
+      mergedInsight,
+      stringifyArray(mergedType),
+      mergedGrade,
+      input.transcriptLineStart ?? existing.transcriptLineStart,
+      stringifyArray(nextTags),
+      stringifyArray(input.filesRead ?? existing.filesRead),
+      stringifyArray(input.filesModified ?? existing.filesModified),
+      input.toolCallCount ?? existing.toolCallCount,
+      input.updatedAtEpoch ?? existing.updatedAtEpoch,
+      turnId
+    ) ?? null
+  );
+  if (!updated) {
+    return null;
+  }
+  indexTurnToFTS(db, updated);
+  if (JSON.stringify(existing.type) !== stringifyArray(mergedType) || JSON.stringify(existing.tags) !== stringifyArray(nextTags)) {
+    recomputeSegmentFacetsForTurn(db, turnId);
+  }
+  if (existing.status !== updated.status || existing.userPrompt !== updated.userPrompt || existing.assistantResponse !== updated.assistantResponse || existing.title !== updated.title || existing.content !== updated.content || existing.insight !== updated.insight) {
+    markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
+  }
+  return updated;
+}
+function resetTurnExtractionFields(db, turnId, updatedAtEpoch) {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return;
+  }
+  const keptTags = existing.tags.filter((tag) => tag.includes(":"));
+  db.query(
+    `UPDATE turns
+       SET status = 'active',
+           title = NULL,
+           content = NULL,
+           insight = NULL,
+           type = '[]',
+           tags = ?,
+           updated_at_epoch = ?
+       WHERE id = ?`
+  ).run(stringifyArray(keptTags), updatedAtEpoch, turnId);
+  reindexTurnFromDb(db, turnId);
+  if (existing.type.length > 0 || JSON.stringify(existing.tags) !== stringifyArray(keptTags)) {
+    recomputeSegmentFacetsForTurn(db, turnId);
+  }
+  if (existing.status !== "active" || existing.title !== null || existing.content !== null || existing.insight !== null) {
+    markSettledDiaryDayStaleForTurn(db, existing.createdAtEpoch);
+  }
+}
+function getTurnsForSession(db, sessionId) {
+  return db.query(
+    `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC`
+  ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
+}
+function getStrandedTurns(db, sessionId) {
+  return db.query(
+    `${TURN_SELECT}
+       WHERE session_id = ?
+         AND assistant_response IS NOT NULL
+         AND ( status IN ('active','provisional')
+               OR (status = 'extracted' AND title IS NULL AND content IS NULL) )
+       ORDER BY prompt_number ASC`
+  ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
+}
+function getFirstTurn(db, sessionId) {
+  return mapTurnRow(
+    db.query(
+      `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC LIMIT 1`
+    ).get(sessionId) ?? null
+  );
+}
+function setTurnParent(db, turnId, parentTurnId) {
+  db.query("UPDATE turns SET parent_turn_id = ? WHERE id = ?").run(
+    parentTurnId,
+    turnId
+  );
+}
+function getMaxPromptNumber(db, sessionId) {
+  const row = db.query(
+    "SELECT MAX(prompt_number) AS max FROM turns WHERE session_id = ?"
+  ).get(sessionId);
+  return row?.max ?? null;
+}
+function getMaxTurnId(db, sessionId) {
+  const row = db.query(
+    "SELECT MAX(id) AS max FROM turns WHERE session_id = ?"
+  ).get(sessionId);
+  return row?.max ?? null;
+}
+function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount, contentPromptId, transcriptLineStart, assistantTranscript) {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return;
+  }
+  const safeContentPromptId = contentPromptId && !hasOtherTurnWithContentPromptId(
+    db,
+    existing.sessionId,
+    turnId,
+    contentPromptId
+  ) ? contentPromptId : null;
+  db.query(
+    `UPDATE turns
+     SET assistant_response = ?,
+         assistant_transcript = COALESCE(?, assistant_transcript),
+         tool_call_count = ?,
+         content_prompt_id = COALESCE(content_prompt_id, ?),
+         transcript_line_start = COALESCE(?, transcript_line_start)
+     WHERE id = ?`
+  ).run(
+    assistantResponse,
+    assistantTranscript ?? null,
+    toolCallCount,
+    safeContentPromptId,
+    transcriptLineStart ?? null,
+    turnId
+  );
+  if (existing.assistantResponse !== assistantResponse) {
+    markSettledDiaryDayStaleForTurn(db, existing.createdAtEpoch);
+  }
+}
+function hasOtherTurnWithContentPromptId(db, sessionId, turnId, contentPromptId) {
+  return db.query(
+    `
+          SELECT id
+          FROM turns
+          WHERE session_id = ?
+            AND content_prompt_id = ?
+            AND id <> ?
+          LIMIT 1
+        `
+  ).get(sessionId, contentPromptId, turnId) !== null;
+}
 
 // src/shared/file-tree.ts
-var import_node_path8 = __toESM(require("node:path"), 1);
+var import_node_path7 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
   return { files: [], dirs: /* @__PURE__ */ new Map() };
 }
@@ -4605,7 +6633,7 @@ function renderFileTree(paths, opts) {
   const root = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
   for (const value of uniquePaths) {
-    const relative2 = import_node_path8.default.posix.relative(root, value);
+    const relative2 = import_node_path7.default.posix.relative(root, value);
     if (!relative2 || relative2 === "") {
       continue;
     }
@@ -4639,6 +6667,21 @@ function renderFileTree(paths, opts) {
     return capRenderedTree(lines, uniquePaths.length, opts.maxChars);
   }
   return rendered;
+}
+
+// src/utils/token-estimate.ts
+var CJK_CHARACTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+function estimateTokens(text) {
+  let cjk = 0;
+  let rest = 0;
+  for (const character of text) {
+    if (CJK_CHARACTER.test(character)) {
+      cjk += 1;
+    } else {
+      rest += 1;
+    }
+  }
+  return Math.ceil(cjk + rest / 4);
 }
 
 // src/mcp/tool-projection.ts
@@ -4883,9 +6926,10 @@ function projectToolCall(toolName, toolInput, toolResult) {
 
 // src/mcp/format.ts
 var FIELD_TRUNCATION_SUFFIX = "\u2026";
-var DEFAULT_TRUNCATE = 200;
-var MAX_TRUNCATE = 2e3;
 var DEFAULT_PREVIEW_COUNT = 5;
+var DEFAULT_TURN_TOKEN_BUDGET = 150;
+var TURN_BUDGET_TRUNCATION_MARKER = "  \u2026 truncated to fit the per-item token budget";
+var REWIND_MARKER = " \u293A rewound (transcript pointer stale \u2014 do not trust replay)";
 function createTruncationSignal() {
   return { truncated: false };
 }
@@ -4995,50 +7039,75 @@ function truncateText(text, {
   }
   return `${window}${FIELD_TRUNCATION_SUFFIX}`;
 }
-function truncateLines(lines, {
-  limit,
-  signal,
-  lineLimit
-}) {
-  const boundedLimit = Math.max(limit, 1);
-  const content = lines.filter((line) => line.trim() !== "");
-  const kept = [];
-  let used = 0;
-  for (const line of content) {
-    const capped = lineLimit === void 0 ? line : truncateText(line, { limit: lineLimit, signal });
-    const nextUsed = used + capped.length + (kept.length > 0 ? 1 : 0);
-    if (kept.length > 0 && nextUsed > boundedLimit) {
-      break;
-    }
-    kept.push(capped);
-    used = nextUsed;
+function truncateTextToTokenBudget(text, maxTokens) {
+  if (maxTokens <= 0) {
+    return "";
   }
-  const omitted = content.length - kept.length;
-  if (omitted <= 0) {
-    return kept;
+  if (estimateTokens(text) <= maxTokens) {
+    return text;
+  }
+  let low = 0;
+  let high = text.length;
+  let best = "";
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = truncateText(text, { limit: Math.max(mid, 1) });
+    if (estimateTokens(candidate) <= maxTokens) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best;
+}
+function capRenderToTokenBudget(rendered, budgetTokens, signal) {
+  if (budgetTokens === void 0 || !Number.isFinite(budgetTokens)) {
+    return rendered;
+  }
+  if (estimateTokens(rendered) <= budgetTokens) {
+    return rendered;
+  }
+  const lines = rendered.split("\n");
+  const markerTokens = estimateTokens(TURN_BUDGET_TRUNCATION_MARKER);
+  const kept = [lines[0] ?? ""];
+  let used = estimateTokens(kept[0]);
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    const lineTokens = estimateTokens(line);
+    const remaining = budgetTokens - used - markerTokens;
+    if (remaining <= 0) {
+      markTruncated(signal);
+      kept.push(TURN_BUDGET_TRUNCATION_MARKER);
+      return kept.join("\n");
+    }
+    if (lineTokens <= remaining) {
+      kept.push(line);
+      used += lineTokens;
+      continue;
+    }
+    const partial2 = truncateTextToTokenBudget(line, remaining);
+    if (partial2) {
+      kept.push(partial2);
+    }
+    markTruncated(signal);
+    kept.push(TURN_BUDGET_TRUNCATION_MARKER);
+    return kept.join("\n");
+  }
+  if (kept.length === lines.length) {
+    return rendered;
   }
   markTruncated(signal);
-  return [...kept, `${FIELD_TRUNCATION_SUFFIX} +${omitted} lines`];
+  kept.push(TURN_BUDGET_TRUNCATION_MARKER);
+  return kept.join("\n");
 }
-function truncateCallHeader(header, { limit, signal }) {
-  if (header.length <= limit) {
-    return header;
-  }
-  const open2 = header.indexOf("(");
-  if (open2 <= 0 || !header.endsWith(")")) {
-    return truncateText(header, { limit, signal });
-  }
-  const toolName = header.slice(0, open2);
-  const argument = header.slice(open2 + 1, -1);
-  const argumentBudget = limit - toolName.length - 3;
-  if (argumentBudget < 1) {
-    markTruncated(signal);
-    return toolName;
-  }
-  return `${toolName}(${truncateText(argument, { limit: argumentBudget, signal })})`;
-}
-function resolveExplicitTruncate(truncate, truncateCap = MAX_TRUNCATE) {
-  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
+var DEFAULT_TURN_RENDER_FIELDS = /* @__PURE__ */ new Set([
+  "title",
+  "content",
+  "prompt"
+]);
+function resolveTurnFields(fields) {
+  return fields && fields.length > 0 ? new Set(fields) : DEFAULT_TURN_RENDER_FIELDS;
 }
 function formatStatus(status) {
   return status ? ` [${status}]` : "";
@@ -5084,247 +7153,32 @@ function extractKeyParam(name, input) {
       return null;
   }
 }
-function formatSessionCollapsedWithMode(session, mode, truncate, truncateCap, signal) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
+function formatSessionBlock(session, options) {
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
     `- [S${session.id}] ${session.title ?? "Untitled"}${statsSegment} | ${formatEpoch(session.createdAtEpoch)} | ${session.project}`
   ];
   if (session.content) {
-    lines.push(
-      `  - desc: ${truncateText(session.content, { limit, signal })}`
-    );
+    lines.push(`  - desc: ${session.content}`);
   }
-  return lines.join("\n");
-}
-function formatSessionExpandedWithMode(session, mode, truncate, truncateCap, signal) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const lines = [
-    formatSessionCollapsedWithMode(session, mode, truncate, truncateCap, signal)
-  ];
-  const pushField = (label, value) => {
-    if (!value) {
-      return;
-    }
-    lines.push(`  - ${label}: ${truncateText(value, { limit, signal })}`);
-  };
-  const pushBulletField = (label, value) => {
-    if (!value) {
-      return;
-    }
-    const items = splitBulletField(truncateText(value, { limit, signal }));
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  - ${label}:`);
-    pushBullets(lines, "    ", items);
-  };
-  if (session.jsonlPath) {
+  if (options.includeRawPointer && session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
   }
-  if (session.decision) {
-    pushBulletField("decision", session.decision);
-  }
-  if (session.insight && session.insight.length > 0) {
-    lines.push("  - insight:");
-    pushBullets(
-      lines,
-      "    ",
-      session.insight.map((line) => truncateText(line, { limit, signal }))
-    );
-  }
-  pushBulletField("done", session.done);
-  pushField("next", session.nextSteps);
-  pushBulletField("reference", session.reference);
   return lines.join("\n");
 }
-function formatTurnLabel(turn, {
-  indent = "  ",
-  sessionId,
-  depth = "collapsed",
-  truncate,
-  truncateCap,
-  includeDbTurnIds = false,
-  signal
-} = {}) {
+function formatTurnLabel(turn, fields, { indent = "  ", sessionId, includeDbTurnIds = false }) {
   const turnId = turn.transcriptLineStart === null ? `T${turn.promptNumber}` : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
   const prefix = sessionId === void 0 ? `${indent}- [${turnId}]` : `${indent}- [S${sessionId}][${turnId}]`;
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
-  const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const title = turn.title === null && turn.promptPreview ? (
-    // The title slot is one line by construction. A prompt standing in for
-    // a missing note need not be: a task notification or a pasted payload
-    // carries newlines, and they reached the layout intact, spilling one
-    // turn's label across four lines. Collapse before measuring, so the
-    // truncation budget is spent on content rather than on line breaks.
-    `"${truncateText(collapseToSingleLine(turn.promptPreview), {
-      limit,
-      signal
-    })}"`
-  ) : truncateText(rawTitle, { limit, signal });
+  const titleSelected = fields.has("title") && turn.title !== null;
+  const title = titleSelected ? turn.title : turn.promptPreview ? `"${collapseToSingleLine(turn.promptPreview)}"` : "Untitled";
   const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
-  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}`;
+  const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
+  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}${rewindSegment}`;
 }
-function formatTurnCollapsedWithMode(turn, options = {}) {
-  const { indent = "  ", mode = "legacy", signal } = options;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const lines = [
-    formatTurnLabel(turn, {
-      ...options,
-      mode,
-      depth: "collapsed"
-    })
-  ];
-  if (turn.content) {
-    lines.push(
-      `${indent}  - desc: ${truncateText(turn.content, { limit, signal })}`
-    );
-  }
-  return lines.join("\n");
-}
-function formatToolCallLabel(toolCall, { indent = "    ", truncate, truncateCap, signal } = {}) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
-  const suffix = keyParam ? ` ${truncateText(keyParam, { limit, signal })}` : "";
-  return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
-}
-function formatToolCallCollapsedWithMode(toolCall, options = {}) {
-  return formatToolCallLabel(toolCall, {
-    ...options,
-    mode: options.mode,
-    depth: "collapsed"
-  });
-}
-function formatToolCallExpandedWithMode(toolCall, options = {}) {
-  const { indent = "    ", truncate, signal } = options;
-  const limit = resolveExplicitTruncate(truncate, options.truncateCap);
-  const detailIndent = `${indent}  `;
-  const lines = [
-    formatToolCallLabel(toolCall, {
-      ...options,
-      depth: "expanded",
-      truncate
-    })
-  ];
-  if (toolCall.input !== void 0) {
-    lines.push(
-      `${detailIndent}- in: ${truncateText(JSON.stringify(toolCall.input), {
-        limit,
-        signal
-      })}`
-    );
-  }
-  if (toolCall.result) {
-    lines.push(
-      `${detailIndent}- out: ${truncateText(toolCall.result, { limit, signal })}`
-    );
-  }
-  return lines.join("\n");
-}
-function renderTurnChildren(turn, depth, options = {}) {
-  if (depth === "collapsed") {
-    return "";
-  }
-  const { indent = "  ", sessionId, mode = "legacy", truncate, signal } = options;
-  const childIndent = `${indent}  `;
-  const childLines = [];
-  if (turn.observations && turn.observations.length > 0) {
-    for (const observation of turn.observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
-      childLines.push(
-        formatObservationExpandedWithMode(observation, {
-          indent: childIndent,
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-          mode,
-          depth: "expanded",
-          truncate,
-          signal
-        })
-      );
-    }
-    if (turn.observations.length > DEFAULT_PREVIEW_COUNT) {
-      childLines.push(`${childIndent}+${turn.observations.length - DEFAULT_PREVIEW_COUNT} more`);
-    }
-    return childLines.join("\n");
-  }
-  if (turn.toolCalls && turn.toolCalls.length > 0) {
-    for (const toolCall of turn.toolCalls.slice(0, DEFAULT_PREVIEW_COUNT)) {
-      childLines.push(
-        formatToolCallExpandedWithMode(toolCall, {
-          indent: childIndent,
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-          mode,
-          depth: "expanded",
-          truncate,
-          signal
-        })
-      );
-    }
-    if (turn.toolCalls.length > DEFAULT_PREVIEW_COUNT) {
-      childLines.push(`${childIndent}+${turn.toolCalls.length - DEFAULT_PREVIEW_COUNT} more`);
-    }
-  }
-  return childLines.join("\n");
-}
-function formatTurnExpandedWithMode(turn, options = {}) {
-  const {
-    indent = "  ",
-    mode = "legacy",
-    depth = "expanded",
-    includeChildren = mode === "unified",
-    signal
-  } = options;
-  const detailIndent = `${indent}  `;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
-  if (turn.promptPreview) {
-    lines.push(
-      `${detailIndent}- prompt: "${truncateText(collapseToSingleLine(turn.promptPreview), { limit, signal })}"`
-    );
-  }
-  if (turn.responsePreview) {
-    lines.push(
-      `${detailIndent}- response: "${truncateText(collapseToSingleLine(turn.responsePreview), { limit, signal })}"`
-    );
-  }
-  if (turn.insight && turn.insight.length > 0) {
-    lines.push(`${detailIndent}- insight:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      turn.insight.map((line) => truncateText(line, { limit, signal }))
-    );
-  }
-  if (mode === "unified" && turn.filesRead && turn.filesRead.length > 0) {
-    lines.push(`${detailIndent}- files_read:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      truncateLines(renderFileTree(turn.filesRead).split("\n"), { limit, signal })
-    );
-  }
-  if (mode === "unified" && turn.filesModified && turn.filesModified.length > 0) {
-    lines.push(`${detailIndent}- files_modified:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      truncateLines(renderFileTree(turn.filesModified).split("\n"), {
-        limit,
-        signal
-      })
-    );
-  }
-  const childBlock = includeChildren ? renderTurnChildren(turn, depth, { ...options, mode }) : "";
-  if (childBlock) {
-    lines.push(childBlock);
-  }
-  return lines.join("\n");
-}
-function formatObservationLabel(observation, { indent = "" } = {}, header) {
+function formatObservationLabel(observation, indent, header) {
   return `${indent}- [O${observation.id}] ${header ?? observation.title}`;
 }
 var OBSERVATION_BODY_INDENT = "    ";
@@ -5338,409 +7192,2270 @@ function projectObservation(observation) {
     observation.toolResult
   );
 }
-function formatObservationCollapsedWithMode(observation, options = {}) {
-  const { indent = "", signal } = options;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
+function formatObservationBlock(observation, { indent = "" }) {
   const projection = projectObservation(observation);
   const headerIsLabel = projection !== null && observation.title === observation.toolName;
   const lines = [
     formatObservationLabel(
       observation,
-      options,
-      headerIsLabel ? truncateCallHeader(projection.header, { limit, signal }) : void 0
+      indent,
+      headerIsLabel ? projection.header : void 0
     )
   ];
   if (observation.content) {
-    lines.push(
-      `${indent}  - desc: ${truncateText(observation.content, { limit, signal })}`
-    );
+    lines.push(`${indent}  - desc: ${observation.content}`);
   }
   const toolLine = projection ? headerIsLabel ? null : projection.header : observation.toolName && observation.toolName !== observation.title ? observation.toolName : null;
   if (toolLine) {
-    lines.push(
-      `${indent}  - tool: \u{1F527} ${truncateCallHeader(toolLine, { limit, signal })}`
-    );
+    lines.push(`${indent}  - tool: \u{1F527} ${toolLine}`);
   }
   if (projection) {
-    for (const line of truncateLines(projection.body, {
-      limit,
-      signal,
-      lineLimit: limit
-    })) {
+    for (const line of projection.body) {
+      if (line.trim() === "") {
+        continue;
+      }
       lines.push(`${indent}${OBSERVATION_BODY_INDENT}${line}`);
     }
   }
   return lines.join("\n");
 }
-function formatObservationExpandedWithMode(observation, options = {}) {
-  const mode = options.mode ?? "legacy";
-  const lines = [formatObservationCollapsedWithMode(observation, { ...options, mode })];
+function formatToolCallBlock(toolCall, { indent = "    " }) {
+  const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
+  const suffix = keyParam ? ` ${keyParam}` : "";
+  const detailIndent = `${indent}  `;
+  const lines = [`${indent}- \u{1F527} ${toolCall.name}${suffix}`];
+  if (toolCall.input !== void 0) {
+    lines.push(`${detailIndent}- in: ${JSON.stringify(toolCall.input)}`);
+  }
+  if (toolCall.result) {
+    lines.push(`${detailIndent}- out: ${toolCall.result}`);
+  }
   return lines.join("\n");
 }
-function renderNode(node, options) {
-  const mode = options.mode ?? "unified";
-  const effectiveOptions = options;
+function renderTurnChildren(turn, options) {
+  const { indent = "  ", sessionId } = options;
+  const childIndent = `${indent}  `;
+  const childLines = [];
+  if (turn.observations && turn.observations.length > 0) {
+    for (const observation of turn.observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
+      childLines.push(
+        formatObservationBlock(observation, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber
+        })
+      );
+    }
+    if (turn.observations.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.observations.length - DEFAULT_PREVIEW_COUNT} more`);
+    }
+    return childLines.join("\n");
+  }
+  if (turn.toolCalls && turn.toolCalls.length > 0) {
+    for (const toolCall of turn.toolCalls.slice(0, DEFAULT_PREVIEW_COUNT)) {
+      childLines.push(
+        formatToolCallBlock(toolCall, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber
+        })
+      );
+    }
+    if (turn.toolCalls.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.toolCalls.length - DEFAULT_PREVIEW_COUNT} more`);
+    }
+  }
+  return childLines.join("\n");
+}
+function formatTurnBody(turn, fields, options) {
+  const { indent = "  " } = options;
+  const lines = [formatTurnLabel(turn, fields, options)];
+  if (fields.has("content") && turn.content) {
+    lines.push(`${indent}  - desc: ${turn.content}`);
+  }
+  const titleSelected = fields.has("title") && turn.title !== null;
+  if (fields.has("prompt") && titleSelected && turn.promptPreview) {
+    lines.push(
+      `${indent}  - prompt: "${collapseToSingleLine(turn.promptPreview)}"`
+    );
+  }
+  if (fields.has("response") && turn.responsePreview) {
+    lines.push(
+      `${indent}  - response: "${collapseToSingleLine(turn.responsePreview)}"`
+    );
+  }
+  if (fields.has("insight") && turn.insight && turn.insight.length > 0) {
+    lines.push(`${indent}  - insight:`);
+    pushBullets(lines, `${indent}    `, turn.insight);
+  }
+  if (fields.has("files") && turn.filesRead && turn.filesRead.length > 0) {
+    lines.push(`${indent}  - files_read:`);
+    pushBullets(lines, `${indent}    `, renderFileTree(turn.filesRead).split("\n"));
+  }
+  if (fields.has("files") && turn.filesModified && turn.filesModified.length > 0) {
+    lines.push(`${indent}  - files_modified:`);
+    pushBullets(
+      lines,
+      `${indent}    `,
+      renderFileTree(turn.filesModified).split("\n")
+    );
+  }
+  if (fields.has("observations")) {
+    const childBlock = renderTurnChildren(turn, options);
+    if (childBlock) {
+      lines.push(childBlock);
+    }
+  }
+  return lines.join("\n");
+}
+function renderNode(node, options = {}) {
+  const budget = options.turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET;
   switch (node.type) {
     case "session":
-      return effectiveOptions.depth === "collapsed" ? formatSessionCollapsedWithMode(
-        node.value,
-        mode,
-        effectiveOptions.truncate,
-        effectiveOptions.truncateCap,
-        effectiveOptions.signal
-      ) : formatSessionExpandedWithMode(
-        node.value,
-        mode,
-        effectiveOptions.truncate,
-        effectiveOptions.truncateCap,
-        effectiveOptions.signal
+      return capRenderToTokenBudget(
+        formatSessionBlock(node.value, options),
+        budget,
+        options.signal
       );
-    case "turn":
-      return effectiveOptions.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatTurnExpandedWithMode(node.value, { ...effectiveOptions, mode });
+    case "turn": {
+      const fields = options.fields ?? DEFAULT_TURN_RENDER_FIELDS;
+      return capRenderToTokenBudget(
+        formatTurnBody(node.value, fields, options),
+        budget,
+        options.signal
+      );
+    }
     case "observation":
-      return effectiveOptions.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatObservationExpandedWithMode(node.value, { ...effectiveOptions, mode });
+      return capRenderToTokenBudget(
+        formatObservationBlock(node.value, options),
+        budget,
+        options.signal
+      );
     case "toolCall":
-      return effectiveOptions.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatToolCallExpandedWithMode(node.value, { ...effectiveOptions, mode });
+      return formatToolCallBlock(node.value, options);
   }
 }
 
-// src/diary/calendar.ts
-var dateFormatters = /* @__PURE__ */ new Map();
-function dateFormatter(timeZone) {
-  let formatter = dateFormatters.get(timeZone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat("en-CA", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
-    });
-    dateFormatters.set(timeZone, formatter);
+// src/mcp/memory-filter.ts
+var RECALL_TURN_FIELD_NAMES = [
+  "title",
+  "content",
+  "prompt",
+  "response",
+  "insight",
+  "observations",
+  "files"
+];
+function isRecallTurnField(value) {
+  return RECALL_TURN_FIELD_NAMES.includes(value);
+}
+function describeRecallTurnFieldGrammar() {
+  return `expected one of: ${RECALL_TURN_FIELD_NAMES.join(", ")}`;
+}
+function parseUtcDate(value) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
   }
-  return formatter;
-}
-function partNumber(parts, type) {
-  const value = parts.find((part) => part.type === type)?.value;
-  if (value === void 0) throw new Error(`Missing ${type} calendar part`);
-  return Number.parseInt(value, 10);
-}
-function calendarDateAt(epochSeconds, timeZone) {
-  const parts = dateFormatter(timeZone).formatToParts(epochSeconds * 1e3);
-  const year = String(partNumber(parts, "year")).padStart(4, "0");
-  const month = String(partNumber(parts, "month")).padStart(2, "0");
-  const day = String(partNumber(parts, "day")).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-function contentDateAt(epochSeconds, timeZone, boundaryHour) {
-  return calendarDateAt(epochSeconds - boundaryHour * 3600, timeZone);
-}
-
-// src/db/diary-state.ts
-function readDreamCalendarBoundary(db) {
-  const timeZone = db.query(
-    "SELECT value FROM diary_state WHERE key = 'dream_timezone'"
-  ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
-  const boundaryHour = Number(
-    db.query(
-      "SELECT value FROM diary_state WHERE key = 'dream_hour'"
-    ).get()?.value ?? DEFAULT_DREAM_AGENT_HOUR
+  const epoch = Math.floor(
+    Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) / 1e3
   );
-  return { timeZone, boundaryHour };
+  return Number.isNaN(epoch) ? null : epoch;
 }
-function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
-  const { timeZone, boundaryHour } = readDreamCalendarBoundary(db);
-  const date5 = contentDateAt(createdAtEpoch, timeZone, boundaryHour);
-  db.query(
-    `UPDATE diary_day_state
-     SET needs_regen = 1,
-         attempt_count = 0,
-         next_attempt_epoch = NULL,
-         retry_disposition = NULL,
-         last_error = NULL
-     WHERE date = ?
-       AND settled_at_epoch IS NOT NULL
-       AND date >= COALESCE(
-         (SELECT value FROM diary_state WHERE key = 'cutover_date'),
-         '9999-12-31'
-       )`
-  ).run(date5);
+function parseTimeInput(time3) {
+  if (!time3) {
+    return {};
+  }
+  const trimmed = time3.trim();
+  if (!trimmed) {
+    return {};
+  }
+  const rangeMatch = trimmed.match(
+    /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/
+  );
+  if (rangeMatch) {
+    const start = parseUtcDate(rangeMatch[1]);
+    const end = parseUtcDate(rangeMatch[2]);
+    if (start === null || end === null) {
+      return { error: `invalid time selector "${time3}"` };
+    }
+    return {
+      range: {
+        after: start,
+        before: end + 86399
+      }
+    };
+  }
+  const relativeMatch = trimmed.match(/^-([0-9]+)([dw])$/);
+  if (relativeMatch) {
+    const amount = Number(relativeMatch[1]);
+    const unit = relativeMatch[2];
+    const secondsPerUnit = unit === "d" ? 86400 : 7 * 86400;
+    return {
+      range: {
+        after: Math.floor(Date.now() / 1e3) - amount * secondsPerUnit
+      }
+    };
+  }
+  const dateEpoch = parseUtcDate(trimmed);
+  if (dateEpoch !== null) {
+    return {
+      range: {
+        after: dateEpoch,
+        before: dateEpoch + 86399
+      }
+    };
+  }
+  return { error: `invalid time selector "${time3}"` };
+}
+function parseSessionFilter(value) {
+  if (value === void 0) {
+    return {};
+  }
+  const raw = typeof value === "number" ? String(value) : value.trim().replace(/^[Ss]/, "");
+  const sessionId = Number(raw);
+  if (Number.isInteger(sessionId) && sessionId > 0) {
+    return { sessionId };
+  }
+  return { error: `invalid filter.session "${value}"` };
+}
+function parseMemoryFilter(filter) {
+  const parsed = {};
+  if (!filter) {
+    return { parsed };
+  }
+  if (filter.type) {
+    parsed.type = filter.type;
+  }
+  if (filter.tag) {
+    parsed.tag = filter.tag;
+  }
+  if (filter.file) {
+    parsed.file = filter.file;
+  }
+  if (filter.session !== void 0) {
+    const { sessionId, error: error48 } = parseSessionFilter(filter.session);
+    if (error48) {
+      return { parsed, error: error48 };
+    }
+    parsed.sessionId = sessionId;
+  }
+  if (filter.time !== void 0) {
+    const { range, error: error48 } = parseTimeInput(filter.time);
+    if (error48) {
+      return { parsed, error: error48 };
+    }
+    parsed.after = range?.after;
+    parsed.before = range?.before;
+  }
+  if (filter.fields !== void 0) {
+    if (filter.fields.length === 0) {
+      return { parsed, error: `filter.fields must not be empty \u2014 ${describeRecallTurnFieldGrammar()}` };
+    }
+    const invalid = filter.fields.filter((field) => !isRecallTurnField(field));
+    if (invalid.length > 0) {
+      return {
+        parsed,
+        error: `invalid filter.fields entry "${invalid[0]}" \u2014 ${describeRecallTurnFieldGrammar()}`
+      };
+    }
+    parsed.fields = filter.fields;
+  }
+  return { parsed };
+}
+function hasFilterCriteria(filter) {
+  return filter.type !== void 0 || filter.tag !== void 0 || filter.file !== void 0 || filter.sessionId !== void 0 || filter.after !== void 0 || filter.before !== void 0;
+}
+function turnMatchesFilter(turn, filter) {
+  if (filter.type !== void 0 && !turn.type.includes(filter.type)) {
+    return false;
+  }
+  if (filter.tag !== void 0 && !turn.tags.includes(filter.tag)) {
+    return false;
+  }
+  if (filter.sessionId !== void 0 && turn.sessionId !== filter.sessionId) {
+    return false;
+  }
+  if (filter.file !== void 0) {
+    const hit = turn.filesRead.some((path2) => path2.includes(filter.file)) || turn.filesModified.some((path2) => path2.includes(filter.file));
+    if (!hit) {
+      return false;
+    }
+  }
+  if (filter.after !== void 0 && turn.createdAtEpoch < filter.after) {
+    return false;
+  }
+  if (filter.before !== void 0 && turn.createdAtEpoch > filter.before) {
+    return false;
+  }
+  return true;
 }
 
-// src/db/turns.ts
-var TURN_SELECT = `
-  SELECT
-    id,
-    session_id AS sessionId,
-    prompt_number AS promptNumber,
-    content_prompt_id AS contentPromptId,
-    transcript_line_start AS transcriptLineStart,
-    was_interrupted AS wasInterrupted,
-    was_rolled_back AS wasRolledBack,
-    status,
-    user_prompt AS userPrompt,
-    assistant_response AS assistantResponse,
-    assistant_transcript AS assistantTranscript,
-    title,
-    content,
-    insight,
-    type,
-    significance_grade AS significanceGrade,
-    tags,
-    files_read AS filesRead,
-    files_modified AS filesModified,
-    tool_call_count AS toolCallCount,
-    parent_turn_id AS parentTurnId,
-    compact_boundary_uuid AS compactBoundaryUuid,
-    created_at_epoch AS createdAtEpoch,
-    updated_at_epoch AS updatedAtEpoch
-  FROM turns
-`;
-function stringifyArray(values) {
-  return JSON.stringify(values);
+// src/mcp/segment-spine.ts
+var ORPHAN_GLYPH = "\u2691";
+var SPINE_ROW_INDENT = "   ";
+var SPINE_TAG_CAP = 2;
+function segmentTypeGlyph(type) {
+  if (type === null || type === void 0) {
+    return "\u2022";
+  }
+  return typeListGlyph(typeof type === "string" ? [type] : type);
 }
-function parseJsonArray(value) {
+function formatTags(tags) {
+  if (tags.length === 0) {
+    return "";
+  }
+  const shown = tags.slice(0, SPINE_TAG_CAP).map((tag) => `#${tag}`);
+  const hidden = tags.length - shown.length;
+  return `${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
+}
+function sanitize(value) {
+  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
+}
+function formatPhaseTrace(phaseTrace) {
+  return phaseTrace.map((types) => segmentTypeGlyph(types)).join("\u2192");
+}
+function formatSpan(row) {
+  if (row.firstPromptNumber === null || row.lastPromptNumber === null) {
+    return "";
+  }
+  return row.firstPromptNumber === row.lastPromptNumber ? `T${row.firstPromptNumber}` : `T${row.firstPromptNumber}\u2013T${row.lastPromptNumber}`;
+}
+function renderSpineRow(row, titleCap) {
+  const { segment } = row;
+  const parts = [
+    `[E${segment.id}]`,
+    segmentTypeGlyph(row.dominantType),
+    formatTags(segment.tags),
+    sanitize(truncateText(segment.title, { limit: titleCap })),
+    `[${segment.status}]`
+  ].filter((part) => part !== "");
+  const facts = [
+    `${row.memberCount} ${row.memberCount === 1 ? "turn" : "turns"}`,
+    formatSpan(row),
+    formatPhaseTrace(row.phaseTrace)
+  ].filter((part) => part !== "");
+  return `${SPINE_ROW_INDENT}${parts.join(" ")} \xB7 ${facts.join(" \xB7 ")}`.trimEnd();
+}
+function renderOrphanRow(row, titleCap) {
+  const { facts } = row;
+  const label = facts.title === null || facts.title.trim() === "" ? "(untitled)" : sanitize(truncateText(facts.title, { limit: titleCap }));
+  return `${SPINE_ROW_INDENT}${ORPHAN_GLYPH} T${facts.promptNumber} ${segmentTypeGlyph(
+    facts.type
+  )} ${label} (${row.signals.join(", ")})`;
+}
+function renderSegmentSpineBlock(input) {
+  const { spine, orphans, titleCap } = input;
+  if (spine.length === 0 && orphans.length === 0) {
+    return [];
+  }
+  const keptSegments = input.maxSegments === void 0 ? [...spine] : spine.slice(Math.max(0, spine.length - Math.max(0, input.maxSegments)));
+  const droppedSegments = spine.length - keptSegments.length;
+  const keptOrphans = input.maxOrphans === void 0 ? [...orphans] : orphans.slice(0, Math.max(0, input.maxOrphans));
+  const droppedOrphans = orphans.length - keptOrphans.length;
+  const headerParts = [
+    `${spine.length} ${spine.length === 1 ? "segment" : "segments"}`
+  ];
+  if (orphans.length > 0) {
+    headerParts.push(
+      `${orphans.length} orphan ${orphans.length === 1 ? "anchor" : "anchors"}`
+    );
+  }
+  const lines = ["", `\u2500\u2500 segment spine \xB7 ${headerParts.join(" \xB7 ")} \u2500\u2500`];
+  if (droppedSegments > 0) {
+    lines.push(
+      `${SPINE_ROW_INDENT}\u2026 +${droppedSegments} earlier ${droppedSegments === 1 ? "segment" : "segments"}`
+    );
+  }
+  for (const row of keptSegments) {
+    lines.push(renderSpineRow(row, titleCap));
+    const nested = input.milestoneLinesBySegmentId?.get(row.segment.id);
+    if (nested !== void 0 && nested.length > 0) {
+      lines.push(...nested);
+    }
+  }
+  for (const row of keptOrphans) {
+    lines.push(renderOrphanRow(row, titleCap));
+  }
+  if (droppedOrphans > 0) {
+    lines.push(
+      `${SPINE_ROW_INDENT}\u2026 +${droppedOrphans} orphan ${droppedOrphans === 1 ? "anchor" : "anchors"}`
+    );
+  }
+  return lines;
+}
+function legacyEraHeader(firstPromptNumber, lastPromptNumber) {
+  const span = firstPromptNumber === null || lastPromptNumber === null ? "" : ` \xB7 T${firstPromptNumber}\u2013T${lastPromptNumber}`;
+  return `\u2500\u2500 legacy era${span} \u2500\u2500`;
+}
+function renderSegmentHeaderLines(input) {
+  const { segment } = input;
+  const tags = formatTags(segment.tags);
+  const head = [
+    `- [E${segment.id}]`,
+    segmentTypeGlyph(input.dominantType),
+    tags,
+    sanitize(segment.title)
+  ].filter((part) => part !== "").join(" ");
+  const lines = [
+    `${head} | ${input.memberCount} ${input.memberCount === 1 ? "turn" : "turns"} | [${segment.status}] | rev ${segment.revision}`
+  ];
+  if (segment.content) {
+    lines.push(
+      `  - desc: ${truncateText(segment.content, { limit: input.charLimit })}`
+    );
+  }
+  if (segment.insight) {
+    lines.push(
+      `  - insight: ${truncateText(segment.insight, { limit: input.charLimit })}`
+    );
+  }
+  const trace = formatPhaseTrace(input.phaseTrace);
+  if (trace !== "") {
+    lines.push(`  - phases: ${trace}`);
+  }
+  if (input.anchorRefs.length > 0) {
+    lines.push(`  - anchors: ${input.anchorRefs.join(", ")}`);
+  }
+  return lines;
+}
+
+// src/shared/segment-fields.ts
+var SEGMENT_WORKING_STATE_FIELDS = [
+  "goal",
+  "constraints",
+  "decisions",
+  "done",
+  "next_steps",
+  "reference"
+];
+var SEGMENT_EDITABLE_FIELDS = [
+  ...SEGMENT_WORKING_STATE_FIELDS,
+  "content",
+  "insight"
+];
+
+// src/mcp/segment-card.ts
+var SEGMENT_CARD_DEFAULT_PAGE_BUDGET = 1e3;
+function chronologicalSegmentMembers(db, segment, eraCutoffEpoch) {
+  const members = rankSegmentMembers(db, segment.id, void 0, eraCutoffEpoch);
+  return [...members].sort((left, right) => {
+    if (left.createdAtEpoch !== right.createdAtEpoch) {
+      return left.createdAtEpoch - right.createdAtEpoch;
+    }
+    return left.turnId - right.turnId;
+  });
+}
+function resolveSegmentMembersByOrdinal(db, segment, eraCutoffEpoch, ordinals) {
+  const chronological = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  if (ordinals.length === 0) {
+    return chronological;
+  }
+  const wanted = new Set(ordinals);
+  return chronological.filter((_member, index) => wanted.has(index + 1));
+}
+function elideSegmentCardFields(fields, budgetTokens) {
+  const rowTokens = fields.map((entry) => entry.rows.map((row) => estimateTokens(row)));
+  const dropped = fields.map(() => 0);
+  let total = rowTokens.reduce((sum, tokens) => sum + tokens.reduce((s, t) => s + t, 0), 0);
+  while (total > budgetTokens) {
+    let largestIndex = -1;
+    let largestTokens = -1;
+    for (let index = 0; index < fields.length; index += 1) {
+      const remainingStart = dropped[index];
+      if (remainingStart >= rowTokens[index].length) {
+        continue;
+      }
+      const remainingTokens = rowTokens[index].slice(remainingStart).reduce((s, t) => s + t, 0);
+      if (remainingTokens > largestTokens) {
+        largestTokens = remainingTokens;
+        largestIndex = index;
+      }
+    }
+    if (largestIndex === -1) {
+      break;
+    }
+    total -= rowTokens[largestIndex][dropped[largestIndex]];
+    dropped[largestIndex] += 1;
+  }
+  return fields.map((entry, index) => ({
+    field: entry.field,
+    totalRows: entry.rows.length,
+    keptRows: entry.rows.slice(dropped[index]),
+    droppedCount: dropped[index]
+  }));
+}
+var WORKING_STATE_PROPERTY = {
+  goal: "goal",
+  constraints: "constraints",
+  decisions: "decisions",
+  done: "done",
+  next_steps: "nextSteps",
+  reference: "reference"
+};
+function segmentWorkingStateRows(segment) {
+  return SEGMENT_WORKING_STATE_FIELDS.map((field) => ({
+    field,
+    rows: splitBulletField(segment[WORKING_STATE_PROPERTY[field]])
+  }));
+}
+function summaryFieldRows(field, value) {
+  return { field, rows: value ? [value] : [] };
+}
+function renderElidedField(entry) {
+  const lines = [`  - ${entry.field}: ${entry.totalRows} ${entry.totalRows === 1 ? "row" : "rows"}`];
+  if (entry.droppedCount > 0) {
+    lines.push(`    - \u2026 +${entry.droppedCount} earlier`);
+  }
+  for (const row of entry.keptRows) {
+    lines.push(`    - ${row}`);
+  }
+  return lines;
+}
+function buildAttachedSessionRows(db, segment, members) {
+  const membersBySession = /* @__PURE__ */ new Map();
+  for (const member of members) {
+    const list = membersBySession.get(member.sessionId) ?? [];
+    list.push(member);
+    membersBySession.set(member.sessionId, list);
+  }
+  const attachedSessionIds = getAttachedSessionIds(db, segment.id);
+  const rows = [];
+  for (const sessionId of attachedSessionIds) {
+    const session = getSession(db, sessionId);
+    if (!session) {
+      continue;
+    }
+    const sessionMembers = membersBySession.get(sessionId) ?? [];
+    const consultedOnly = sessionMembers.length === 0;
+    const lastActiveEpoch = consultedOnly ? session.updatedAtEpoch ?? session.createdAtEpoch : Math.max(...sessionMembers.map((member) => member.createdAtEpoch));
+    rows.push({
+      sessionId,
+      title: session.title,
+      memberCount: sessionMembers.length,
+      lastActiveEpoch,
+      consultedOnly
+    });
+  }
+  return rows;
+}
+function maintenanceTurnsAgo(db, segment, attachedSessionIds) {
+  return attachedSessionIds.reduce(
+    (max, sessionId) => Math.max(max, countTurnsSince(db, sessionId, segment.updatedAtEpoch)),
+    0
+  );
+}
+var MAX_ATTACHED_SESSION_ROWS = DEFAULT_PREVIEW_COUNT;
+function renderSegmentCard(db, segmentId, options) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return "Segment not found.";
+  }
+  return renderSegmentCardRecord(db, segment, options);
+}
+function renderSegmentCardRecord(db, segment, options) {
+  const eraCutoffEpoch = options.eraCutoffEpoch ?? null;
+  const pageBudget = options.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
+  const page = Math.max(1, options.page ?? 1);
+  const elides = page <= 1;
+  const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  const facetCounts = computeSegmentMemberFacetCounts(db, segment.id, eraCutoffEpoch);
+  const attachedSessionIds = getAttachedSessionIds(db, segment.id);
+  const sessionRows = buildAttachedSessionRows(db, segment, members);
+  const maintenance = maintenanceTurnsAgo(db, segment, attachedSessionIds);
+  const headerLines = [];
+  const metaParts = [
+    `[${segment.status}]`,
+    `${members.length} ${members.length === 1 ? "turn" : "turns"}`,
+    `created ${formatEpoch(segment.createdAtEpoch)}`,
+    `last edit ${formatEpoch(segment.updatedAtEpoch)}`,
+    // Ticket 12's nudge half (T825 "每 20 轮还没更新，提醒一次") retired
+    // (ticket 13, spec "节奏与建段指导"): this header only ever reached a
+    // session with the card already in view (SessionStart, or `recall` on an
+    // ATTACHED segment) — silent for exactly the session that most needs the
+    // reminder, the one that has never attached anything. The universal
+    // 20-turn `remember` check (hooks/note-reminder.ts's
+    // `renderRememberReminder`, rendered on every UserPromptSubmit) carries
+    // that function now; this line states only the bare fact.
+    `maintenance ${maintenance} ${maintenance === 1 ? "turn" : "turns"} ago`
+  ];
+  headerLines.push(`  ${metaParts.join(" \xB7 ")}`);
+  if (facetCounts.tags.length > 0) {
+    headerLines.push(
+      `  - tags: ${facetCounts.tags.map((entry) => `#${entry.word}\xD7${entry.count}`).join(" ")}`
+    );
+  }
+  if (facetCounts.type.length > 0) {
+    headerLines.push(
+      `  - type: ${facetCounts.type.map((entry) => `${typeWordGlyph(entry.word)}${entry.word}\xD7${entry.count}`).join(" ")}`
+    );
+  }
+  const sessionsByRecency = [...sessionRows].sort(
+    (left, right) => right.lastActiveEpoch - left.lastActiveEpoch
+  );
+  const visibleSessionRows = elides ? sessionsByRecency.slice(0, MAX_ATTACHED_SESSION_ROWS) : sessionsByRecency;
+  const overflowSessionCount = sessionsByRecency.length - visibleSessionRows.length;
+  headerLines.push(`  - sessions: ${sessionRows.length === 0 ? "(none attached)" : ""}`.trimEnd());
+  for (const row of visibleSessionRows) {
+    const label = `S${row.sessionId}${row.title ? ` "${row.title}"` : ""}`;
+    const stats = row.consultedOnly ? "consulted only" : `${row.memberCount} ${row.memberCount === 1 ? "turn" : "turns"}`;
+    headerLines.push(`    - ${label}: ${stats}, last active ${formatEpoch(row.lastActiveEpoch)}`);
+  }
+  if (overflowSessionCount > 0) {
+    headerLines.push(
+      `    - \u2026 +${overflowSessionCount} more ${overflowSessionCount === 1 ? "session" : "sessions"}`
+    );
+  }
+  const cardFieldRows = [
+    summaryFieldRows("title", segment.title),
+    summaryFieldRows("content", segment.content),
+    summaryFieldRows("insight", segment.insight),
+    ...segmentWorkingStateRows(segment)
+  ];
+  const headerTokens = estimateTokens(headerLines.join("\n"));
+  const fieldsBudget = Math.max(0, pageBudget - headerTokens);
+  const elidedFields = elides ? elideSegmentCardFields(cardFieldRows, fieldsBudget) : cardFieldRows.map((entry) => ({
+    field: entry.field,
+    totalRows: entry.rows.length,
+    keptRows: entry.rows,
+    droppedCount: 0
+  }));
+  if (elides && (elidedFields.some((entry) => entry.droppedCount > 0) || overflowSessionCount > 0) && options.signal) {
+    options.signal.truncated = true;
+  }
+  const fieldByKey = new Map(elidedFields.map((entry) => [entry.field, entry]));
+  const titleField = fieldByKey.get("title");
+  const contentField = fieldByKey.get("content");
+  const insightField = fieldByKey.get("insight");
+  const titleText = titleField.keptRows[0];
+  const lines = [`- [E${segment.id}]${titleText ? ` ${titleText}` : ""}`];
+  lines.push(...headerLines);
+  const contentText = contentField.keptRows[0];
+  if (contentText) {
+    lines.push(`  - desc: ${contentText}`);
+  }
+  const insightText = insightField.keptRows[0];
+  if (insightText) {
+    lines.push(`  - insight: ${insightText}`);
+  }
+  for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+    lines.push(...renderElidedField(fieldByKey.get(field)));
+  }
+  if (!elides) {
+    lines.push(`  - member index (event order):`);
+    if (members.length === 0) {
+      lines.push(`    - (no members)`);
+    }
+    for (const [index, member] of members.entries()) {
+      const turn = getTurnById(db, member.turnId);
+      const title = turn?.title ?? turn?.userPrompt ?? "untitled";
+      lines.push(`    - ${index + 1}. S${member.sessionId}/T${member.promptNumber} "${title}"`);
+    }
+  }
+  return lines.join("\n");
+}
+function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return "Segment not found.";
+  }
+  const eraCutoffEpoch = options.eraCutoffEpoch ?? null;
+  const resolved = resolveSegmentMembersByOrdinal(db, segment, eraCutoffEpoch, ordinals);
+  if (resolved.length === 0) {
+    return ordinals.length === 0 ? "(no members)" : "Segment member not found.";
+  }
+  const chronological = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  const ordinalByTurnId = new Map(chronological.map((member, index) => [member.turnId, index + 1]));
+  const lines = [];
+  for (const member of resolved) {
+    const turn = getTurnById(db, member.turnId);
+    if (!turn) {
+      continue;
+    }
+    const view = {
+      id: turn.id,
+      promptNumber: turn.promptNumber,
+      transcriptLineStart: turn.transcriptLineStart,
+      title: turn.title,
+      content: turn.content,
+      status: turn.status,
+      promptPreview: turn.userPrompt,
+      responsePreview: turn.assistantResponse,
+      insight: turn.insight ? turn.insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, "")) : [],
+      filesRead: turn.filesRead,
+      filesModified: turn.filesModified,
+      observationCount: 0
+    };
+    const ordinal = ordinalByTurnId.get(member.turnId);
+    const rendered = renderNode(
+      { type: "turn", value: view },
+      {
+        fields: options.fields,
+        sessionId: member.sessionId,
+        includeDbTurnIds: options.includeDbTurnIds,
+        turnBudget: options.turnBudget,
+        signal: options.signal
+      }
+    );
+    lines.push(ordinal !== void 0 ? `  \u27E8E${segmentId}/T${ordinal}\u27E9 ${rendered.trimStart()}` : rendered);
+  }
+  return lines.join("\n");
+}
+
+// src/mcp/selectors.ts
+function expandNumericSelector(value) {
+  if (value === "*") {
+    return [];
+  }
+  if (/^\d+$/.test(value)) {
+    return [Number(value)];
+  }
+  const rangeMatch = /^(\d+)\.\.(\d+)$/i.exec(value);
+  if (!rangeMatch) {
+    return null;
+  }
+  const start = Number(rangeMatch[1]);
+  const end = Number(rangeMatch[2]);
+  const lower = Math.min(start, end);
+  const upper = Math.max(start, end);
+  const values = [];
+  for (let current = lower; current <= upper; current += 1) {
+    values.push(current);
+  }
+  return values;
+}
+
+// src/db/write-gate.ts
+function sessionWriterId(sessionDbId) {
+  return `session:${sessionDbId}`;
+}
+function snapshotWriteGateSequence(db) {
+  const row = db.query(`SELECT value FROM write_gate_sequence WHERE id = 1`).get();
+  return row?.value ?? 0;
+}
+function recordReadGrants(db, writer, entries, nowEpoch, sequence) {
+  if (entries.length === 0) {
+    return;
+  }
+  const stmt = db.query(
+    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
+       read_at_epoch = excluded.read_at_epoch,
+       read_sequence = excluded.read_sequence`
+  );
+  for (const entry of entries) {
+    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence);
+  }
+}
+function clearReadGrantsForWriter(db, writer) {
+  return db.query(`DELETE FROM write_gate_reads WHERE writer = ?`).run(writer).changes;
+}
+function sweepReadGrantsForCompletedSessions(db, limit) {
+  const rows = db.query(
+    `SELECT DISTINCT r.writer AS writer
+       FROM write_gate_reads r
+       JOIN sessions s ON s.id = CAST(substr(r.writer, 9) AS INTEGER)
+       WHERE r.writer LIKE 'session:%' AND s.completed_at_epoch IS NOT NULL
+       LIMIT ?`
+  ).all(limit);
+  let cleared = 0;
+  for (const row of rows) {
+    cleared += clearReadGrantsForWriter(db, row.writer);
+  }
+  return cleared;
+}
+
+// src/mcp/recall.ts
+var CHILD_PREVIEW_SIZE = 5;
+function splitInsight(insight) {
+  if (!insight) {
+    return [];
+  }
+  return insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
+}
+function buildSessionSummaryFields(session, eraCutoffEpoch = null) {
+  if (isSegmentEra(session.createdAtEpoch, eraCutoffEpoch)) {
+    return { content: null };
+  }
+  return { content: session.content };
+}
+function formatParameterError(message) {
+  return `Parameter error: ${message}`;
+}
+var ID_SELECTOR_GRAMMAR_HINT = 'each item must be one address: "S<n>", "S<n>/T<m>" (also T*, Ta..b), "E<n>" (also E*, Ea..b), "E<n>/T<m>" (also T*, Ta..b), "T<n>" (global), "O<n>", "S<n>/T<m>/O*", or "S<n>/T*/O*" \u2014 every item in the list must be the SAME kind.';
+function parseRoutedId(value) {
+  const trimmed = value.trim();
+  const sessionObservationListMatch = /^S(\d+)\/T\*\/O\*$/i.exec(trimmed);
+  if (sessionObservationListMatch) {
+    return {
+      kind: "session-observation-list",
+      sessionId: Number(sessionObservationListMatch[1])
+    };
+  }
+  const observationListMatch = /^S(\d+)\/T(\d+)\/O\*$/i.exec(trimmed);
+  if (observationListMatch) {
+    return {
+      kind: "observation-list",
+      sessionId: Number(observationListMatch[1]),
+      promptNumber: Number(observationListMatch[2])
+    };
+  }
+  const turnMatch = /^S(\d+)\/T(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (turnMatch) {
+    const promptNumbers = expandNumericSelector(turnMatch[2]);
+    if (promptNumbers === null) {
+      return null;
+    }
+    return {
+      kind: "turns",
+      sessionId: Number(turnMatch[1]),
+      promptNumbers
+    };
+  }
+  const observationMatch = /^O(\d+)$/i.exec(trimmed);
+  if (observationMatch) {
+    return {
+      kind: "observation",
+      observationId: Number(observationMatch[1])
+    };
+  }
+  const segmentMemberMatch = /^E(\d+)\/T(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (segmentMemberMatch) {
+    const ordinals = expandNumericSelector(segmentMemberMatch[2]);
+    if (ordinals === null) {
+      return null;
+    }
+    return {
+      kind: "segment-members",
+      segmentId: Number(segmentMemberMatch[1]),
+      ordinals
+    };
+  }
+  const segmentMatch = /^E(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (segmentMatch) {
+    const segmentIds = expandNumericSelector(segmentMatch[1]);
+    if (segmentIds === null) {
+      return null;
+    }
+    return { kind: "segments", segmentIds };
+  }
+  const turnByIdMatch = /^T(\d+)$/i.exec(trimmed);
+  if (turnByIdMatch) {
+    return {
+      kind: "turn-by-id",
+      turnId: Number(turnByIdMatch[1])
+    };
+  }
+  const sessionMatch = /^S(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (sessionMatch) {
+    const sessionIds = expandNumericSelector(sessionMatch[1]);
+    if (sessionIds === null) {
+      return null;
+    }
+    return {
+      kind: "sessions",
+      sessionIds
+    };
+  }
+  return null;
+}
+function buildSessionView(db, session, eraCutoffEpoch = null) {
+  const turns = getTurnsForSession(db, session.id).map(
+    (turn) => buildTurnView(db, turn, eraCutoffEpoch)
+  );
+  return {
+    id: session.id,
+    title: session.title,
+    project: session.project,
+    createdAtEpoch: session.createdAtEpoch,
+    ...buildSessionSummaryFields(session, eraCutoffEpoch),
+    turnCount: turns.length,
+    observationCount: turns.reduce(
+      (sum, turn) => sum + (turn.observationCount ?? 0),
+      0
+    ),
+    jsonlPath: resolveSessionTranscriptPath(session),
+    turns
+  };
+}
+function buildSessionSummary(db, sessionId, eraCutoffEpoch = null) {
+  const session = getSession(db, sessionId);
+  if (!session) {
+    return null;
+  }
+  const turnCount = db.query(
+    "SELECT COUNT(*) AS count FROM turns WHERE session_id = ?"
+  ).get(session.id)?.count ?? 0;
+  const observationCount = db.query(
+    `SELECT COUNT(*) AS count
+         FROM observations o
+         JOIN turns t ON t.id = o.turn_id
+         WHERE t.session_id = ? AND o.excluded_from_extraction = 0`
+  ).get(session.id)?.count ?? 0;
+  return {
+    id: session.id,
+    title: session.title,
+    project: session.project,
+    createdAtEpoch: session.createdAtEpoch,
+    ...buildSessionSummaryFields(session, eraCutoffEpoch),
+    turnCount,
+    observationCount,
+    jsonlPath: void 0
+  };
+}
+function buildTurnView(db, turn, eraCutoffEpoch = null) {
+  const observations = getExtractableObservationsForTurn(db, turn.id);
+  return {
+    id: turn.id,
+    promptNumber: turn.promptNumber,
+    transcriptLineStart: turn.transcriptLineStart,
+    title: turn.title,
+    content: turn.content,
+    observationCount: observations.length,
+    toolCallCount: turn.toolCallCount,
+    filesReadCount: turn.filesRead.length,
+    filesModifiedCount: turn.filesModified.length,
+    status: turn.status,
+    promptPreview: turn.userPrompt,
+    responsePreview: turn.assistantResponse,
+    insight: splitInsight(turn.insight),
+    filesRead: turn.filesRead,
+    filesModified: turn.filesModified,
+    observations: observations.map(
+      (observation) => buildObservationView(observation, turn.createdAtEpoch, eraCutoffEpoch)
+    ),
+    wasRolledBack: turn.wasRolledBack
+  };
+}
+function previewItems(items, size = 5) {
+  return {
+    items: items.slice(0, size),
+    omittedCount: Math.max(0, items.length - size)
+  };
+}
+function paginateItems(items, page, pageSize) {
+  const total = items.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const offset = (page - 1) * pageSize;
+  return {
+    items: items.slice(offset, offset + pageSize),
+    total,
+    pageCount
+  };
+}
+function formatPageHeader(page, pageCount, total) {
+  return `page ${page} / ${pageCount} (total ${total})`;
+}
+function joinPage(header, body, pageCount) {
+  if (pageCount <= 1) {
+    return body;
+  }
+  return body ? `${header}
+${body}` : header;
+}
+function deriveBreadcrumb(db, session) {
+  if (session.parentSessionId === null) {
+    return null;
+  }
+  const parentRef = `S${session.parentSessionId}`;
+  const firstTurn = getFirstTurn(db, session.id);
+  if (firstTurn !== null && firstTurn.parentTurnId !== null) {
+    const forkTurn = getTurnById(db, firstTurn.parentTurnId);
+    if (forkTurn !== null) {
+      return `continues from ${parentRef} (forked at T${forkTurn.promptNumber})`;
+    }
+  }
+  return `continues from ${parentRef}`;
+}
+function renderSession(db, session, fields, turnSelector, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget) {
+  const view = buildSessionView(db, session, eraCutoffEpoch);
+  const breadcrumb = deriveBreadcrumb(db, session);
+  const lines = [
+    renderNode(
+      { type: "session", value: view },
+      { includeRawPointer: true, turnBudget, signal }
+    )
+  ];
+  if (breadcrumb !== null) {
+    lines.push(`  ${breadcrumb}`);
+  }
+  const turns = getTurnsForSession(db, session.id).filter(
+    (turn) => turnSelector ? turnSelector.has(turn.promptNumber) : true
+  );
+  const preview = previewItems(turns, CHILD_PREVIEW_SIZE);
+  const turnIds = [];
+  for (const item of preview.items) {
+    const turnView = buildTurnView(db, item, eraCutoffEpoch);
+    const turnLines = renderNode(
+      { type: "turn", value: turnView },
+      {
+        fields,
+        sessionId: session.id,
+        includeDbTurnIds,
+        turnBudget,
+        signal
+      }
+    );
+    lines.push(turnLines);
+    turnIds.push(item.id);
+  }
+  if (preview.omittedCount > 0) {
+    lines.push(`  +${preview.omittedCount} more`);
+  }
+  return { text: lines.join("\n"), turnIds };
+}
+function renderTurnScope(db, turns, fields, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget) {
+  const lines = [];
+  const grouped = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    const list = grouped.get(turn.sessionId) ?? [];
+    list.push(turn);
+    grouped.set(turn.sessionId, list);
+  }
+  const sessions = Array.from(grouped.keys()).map((sessionId) => getSession(db, sessionId)).filter(
+    (session) => session !== null
+  );
+  for (const session of sessions) {
+    const view = buildSessionSummary(db, session.id, eraCutoffEpoch);
+    if (!view) {
+      continue;
+    }
+    lines.push(
+      renderNode({ type: "session", value: view }, { turnBudget, signal })
+    );
+    const sessionTurns = grouped.get(session.id) ?? [];
+    for (const item of sessionTurns) {
+      const turnView = buildTurnView(db, item, eraCutoffEpoch);
+      lines.push(
+        renderNode(
+          { type: "turn", value: turnView },
+          {
+            fields,
+            sessionId: session.id,
+            includeDbTurnIds,
+            signal,
+            turnBudget
+          }
+        )
+      );
+    }
+  }
+  return lines.join("\n");
+}
+function renderObservationScope(db, observations, includeParents, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget) {
+  const lines = [];
+  const grouped = /* @__PURE__ */ new Map();
+  for (const row of observations) {
+    const turnMap = grouped.get(row.sessionId) ?? /* @__PURE__ */ new Map();
+    const list = turnMap.get(row.turnId) ?? [];
+    list.push(row.observationId);
+    turnMap.set(row.turnId, list);
+    grouped.set(row.sessionId, turnMap);
+  }
+  if (!includeParents) {
+    for (const entry of observations) {
+      const row = entry;
+      const observation = getObservation(db, row.observationId);
+      if (!observation) {
+        continue;
+      }
+      const observationView = buildOwnedObservationView(
+        db,
+        observation,
+        eraCutoffEpoch
+      );
+      lines.push(
+        renderNode(
+          { type: "observation", value: observationView },
+          { turnBudget, signal }
+        )
+      );
+    }
+    return lines.join("\n");
+  }
+  const sessions = Array.from(grouped.keys()).map((sessionId) => getSession(db, sessionId)).filter(
+    (session) => session !== null
+  );
+  for (const session of sessions) {
+    const sessionView = buildSessionSummary(db, session.id, eraCutoffEpoch);
+    if (!sessionView) {
+      continue;
+    }
+    lines.push(
+      renderNode({ type: "session", value: sessionView }, { turnBudget, signal })
+    );
+    const turnMap = grouped.get(session.id) ?? /* @__PURE__ */ new Map();
+    const turns = getTurnsForSession(db, session.id).filter(
+      (turn) => turnMap.has(turn.id)
+    );
+    for (const turn of turns) {
+      const turnView = buildTurnView(db, turn, eraCutoffEpoch);
+      lines.push(
+        renderNode(
+          { type: "turn", value: turnView },
+          {
+            sessionId: session.id,
+            includeDbTurnIds,
+            turnBudget,
+            signal
+          }
+        )
+      );
+      const observationIds = turnMap.get(turn.id) ?? [];
+      for (const observationEntry of observationIds) {
+        const observationId = observationEntry;
+        const observation = getObservation(db, observationId);
+        if (!observation) {
+          continue;
+        }
+        const observationView = buildObservationView(
+          observation,
+          turn.createdAtEpoch,
+          eraCutoffEpoch
+        );
+        lines.push(
+          renderNode(
+            { type: "observation", value: observationView },
+            {
+              indent: "    ",
+              sessionId: session.id,
+              turnPromptNumber: turn.promptNumber,
+              turnBudget,
+              signal
+            }
+          )
+        );
+      }
+    }
+  }
+  return lines.join("\n");
+}
+function buildObservationView(observation, ownerCreatedAtEpoch, eraCutoffEpoch = null) {
+  const view = {
+    id: observation.id,
+    title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
+    content: observation.content
+  };
+  if (ownerCreatedAtEpoch !== null && isSegmentEra(ownerCreatedAtEpoch, eraCutoffEpoch)) {
+    view.toolName = observation.toolName;
+    view.toolInput = observation.toolInput;
+    view.toolResult = observation.toolResult;
+  }
+  return view;
+}
+function buildOwnedObservationView(db, observation, eraCutoffEpoch) {
+  return buildObservationView(
+    observation,
+    getTurnById(db, observation.turnId)?.createdAtEpoch ?? null,
+    eraCutoffEpoch
+  );
+}
+function renderSessionDetail(db, sessionId, fields, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget) {
+  const session = getSession(db, sessionId);
+  return session ? renderSession(
+    db,
+    session,
+    fields,
+    void 0,
+    includeDbTurnIds,
+    eraCutoffEpoch,
+    signal,
+    turnBudget
+  ) : { text: "Session not found.", turnIds: [] };
+}
+function renderObservationDetail(db, observationId, eraCutoffEpoch = null, signal, turnBudget) {
+  const observation = getObservation(db, observationId);
+  if (!observation || observation.excludedFromExtraction !== 0) {
+    return "Observation not found.";
+  }
+  const view = buildOwnedObservationView(db, observation, eraCutoffEpoch);
+  return renderNode({ type: "observation", value: view }, { turnBudget, signal });
+}
+function buildSegmentFacts(db, segment, eraCutoffEpoch = null) {
+  const members = rankSegmentMembers(db, segment.id, void 0, eraCutoffEpoch);
+  const chronological = [...members].sort((left, right) => {
+    if (left.createdAtEpoch !== right.createdAtEpoch) {
+      return left.createdAtEpoch - right.createdAtEpoch;
+    }
+    return left.turnId - right.turnId;
+  });
+  const dominantType = deriveDominantType(
+    chronological.flatMap((member) => member.type),
+    segment.type
+  );
+  const phaseTrace = [];
+  for (const member of chronological) {
+    if (member.type.length === 0) {
+      continue;
+    }
+    const previous = phaseTrace[phaseTrace.length - 1];
+    if (!previous || !typeListsEqual(previous, member.type)) {
+      phaseTrace.push([...member.type]);
+    }
+  }
+  const byTurnId = new Map(members.map((member) => [member.turnId, member]));
+  const anchorRefs = resolveSegmentAnchorTurnIds(db, segment).map((turnId) => byTurnId.get(turnId)).filter((member) => member !== void 0).map((member) => `S${member.sessionId}/T${member.promptNumber}`);
+  return {
+    memberCount: members.length,
+    dominantType,
+    phaseTrace,
+    anchorRefs,
+    members
+  };
+}
+function renderSegmentSummary(db, segmentId, turnBudget, eraCutoffEpoch = null) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return null;
+  }
+  const facts = buildSegmentFacts(db, segment, eraCutoffEpoch);
+  return renderSegmentHeaderLines({
+    segment,
+    memberCount: facts.memberCount,
+    dominantType: facts.dominantType,
+    phaseTrace: facts.phaseTrace,
+    anchorRefs: facts.anchorRefs,
+    charLimit: Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN)
+  }).join("\n");
+}
+function listSegmentIds(db, segmentIds) {
+  if (segmentIds && segmentIds.length === 1) {
+    return segmentIds;
+  }
+  if (segmentIds && segmentIds.length > 0) {
+    return segmentIds.filter((segmentId) => getSegment(db, segmentId) !== null);
+  }
+  return db.query("SELECT id FROM segments ORDER BY id DESC").all().map((row) => row.id);
+}
+function listSessionIds(db, sessionIds, after, before, filter) {
+  const hasExtraFilter = filter !== void 0 && (filter.type !== void 0 || filter.tag !== void 0 || filter.file !== void 0 || filter.sessionId !== void 0);
+  if (hasExtraFilter) {
+    const matched = new Set(
+      searchMemory(db, {
+        scope: "sessions",
+        type: filter.type,
+        tag: filter.tag,
+        file: filter.file,
+        sessionId: filter.sessionId,
+        after,
+        before
+      }).map((result) => result.sourceId)
+    );
+    const candidates = sessionIds && sessionIds.length > 0 ? sessionIds : [...matched];
+    return candidates.filter((sessionId) => matched.has(sessionId));
+  }
+  const sessions = sessionIds && sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
+    (session) => session !== null
+  ) : db.query(
+    `SELECT id, created_at_epoch AS createdAtEpoch
+           FROM sessions
+           ORDER BY created_at_epoch DESC`
+  ).all().map((row) => getSession(db, row.id)).filter(
+    (session) => session !== null
+  );
+  return sessions.filter((session) => {
+    if (after !== void 0 && session.createdAtEpoch < after) {
+      return false;
+    }
+    if (before !== void 0 && session.createdAtEpoch > before) {
+      return false;
+    }
+    return true;
+  }).map((session) => session.id);
+}
+function applyTurnSelector(db, sessionId, promptNumbers) {
+  const turns = getTurnsForSession(db, sessionId);
+  if (!promptNumbers || promptNumbers.length === 0) {
+    return turns;
+  }
+  const selected = new Set(promptNumbers);
+  return turns.filter((turn) => selected.has(turn.promptNumber));
+}
+function extractQueryTerms(query) {
+  return query.trim().split(/\s+/).map((term) => term.replace(/["*]/g, "")).filter(Boolean);
+}
+function escapeRegExp2(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function boldAllTermOccurrences(text, terms) {
+  const escaped = terms.map(escapeRegExp2).filter(Boolean);
+  if (escaped.length === 0) {
+    return text;
+  }
+  const pattern = new RegExp(`(${escaped.join("|")})`, "gi");
+  return text.replace(pattern, "**$1**");
+}
+function boldSearchSnippet(text, terms, windowChars, signal) {
+  if (terms.length === 0) {
+    return truncateText(text, { limit: windowChars, signal });
+  }
+  const lower = text.toLowerCase();
+  let matchStart = -1;
+  let matchLength = 0;
+  for (const term of terms) {
+    if (!term) continue;
+    const idx = lower.indexOf(term.toLowerCase());
+    if (idx !== -1 && (matchStart === -1 || idx < matchStart)) {
+      matchStart = idx;
+      matchLength = term.length;
+    }
+  }
+  if (matchStart === -1) {
+    return truncateText(text, { limit: windowChars, signal });
+  }
+  const halfWindow = Math.max(10, Math.floor(windowChars / 2));
+  const leftStart = Math.max(0, matchStart - halfWindow);
+  const rightEnd = Math.min(text.length, matchStart + matchLength + halfWindow);
+  let left = text.slice(leftStart, matchStart);
+  let right = text.slice(matchStart + matchLength, rightEnd);
+  const matched = text.slice(matchStart, matchStart + matchLength);
+  const leftTruncated = leftStart > 0;
+  const rightTruncated = rightEnd < text.length;
+  if (leftTruncated) {
+    const spaceIdx = left.indexOf(" ");
+    if (spaceIdx !== -1 && spaceIdx <= left.length * 0.2) {
+      left = left.slice(spaceIdx + 1);
+    }
+  }
+  if (rightTruncated) {
+    const spaceIdx = right.lastIndexOf(" ");
+    if (spaceIdx !== -1 && spaceIdx >= right.length * 0.8) {
+      right = right.slice(0, spaceIdx);
+    }
+  }
+  if ((leftTruncated || rightTruncated) && signal) {
+    signal.truncated = true;
+  }
+  const windowText = `${left}${matched}${right}`;
+  const bolded = boldAllTermOccurrences(windowText, terms);
+  return `${leftTruncated ? "\u2026" : ""}${bolded}${rightTruncated ? "\u2026" : ""}`;
+}
+function withBasicSearchSnippet(view, terms, windowChars, signal) {
+  if (terms.length === 0) {
+    return view;
+  }
+  return {
+    ...view,
+    title: view.title ? boldSearchSnippet(view.title, terms, windowChars, signal) : view.title,
+    content: view.content ? boldSearchSnippet(view.content, terms, windowChars, signal) : view.content
+  };
+}
+function withTurnSearchSnippet(view, terms, windowChars, signal) {
+  if (terms.length === 0) {
+    return view;
+  }
+  return {
+    ...view,
+    title: view.title ? boldSearchSnippet(view.title, terms, windowChars, signal) : view.title,
+    content: view.content ? boldSearchSnippet(view.content, terms, windowChars, signal) : view.content,
+    promptPreview: view.promptPreview ? boldSearchSnippet(view.promptPreview, terms, windowChars, signal) : view.promptPreview,
+    responsePreview: view.responsePreview ? boldSearchSnippet(view.responsePreview, terms, windowChars, signal) : view.responsePreview,
+    insight: view.insight?.map((row) => boldSearchSnippet(row, terms, windowChars, signal))
+  };
+}
+function renderGroupedSearchResults(db, results, fields, turnBudget, includeDbTurnIds, eraCutoffEpoch = null, signal, queryText, readerId, now = () => Math.floor(Date.now() / 1e3), sequence = 0) {
+  const terms = queryText ? extractQueryTerms(queryText) : [];
+  const snippetWindow = Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN);
+  const relevanceRank = /* @__PURE__ */ new Map();
+  results.forEach((result, index) => {
+    if (result.turnId !== null && !relevanceRank.has(result.turnId)) {
+      relevanceRank.set(result.turnId, index);
+    }
+  });
+  const grants = [];
+  const segmentLines = results.filter((result) => result.layer === "segment").map((result) => {
+    const line = renderSegmentSummary(db, result.sourceId, turnBudget, eraCutoffEpoch);
+    if (line !== null) {
+      grants.push({ entityType: "segment", entityId: result.sourceId });
+    }
+    return line;
+  }).filter((line) => line !== null);
+  const sessionGroups = /* @__PURE__ */ new Map();
+  const sessionOrder = [];
+  for (const result of results) {
+    if (result.layer === "segment" || result.sessionId === null) {
+      continue;
+    }
+    const sessionId = result.sessionId;
+    let group = sessionGroups.get(sessionId);
+    if (!group) {
+      group = {
+        sessionHit: false,
+        turnIds: /* @__PURE__ */ new Set(),
+        observationIdsByTurnId: /* @__PURE__ */ new Map()
+      };
+      sessionGroups.set(sessionId, group);
+      sessionOrder.push(sessionId);
+    }
+    if (result.layer === "session") {
+      group.sessionHit = true;
+      continue;
+    }
+    if (result.layer === "turn" && result.turnId !== null) {
+      group.turnIds.add(result.turnId);
+    }
+    if (result.layer === "observation" && result.turnId !== null && result.observationId !== null) {
+      const observationIds = group.observationIdsByTurnId.get(result.turnId) ?? [];
+      observationIds.push(result.observationId);
+      group.observationIdsByTurnId.set(result.turnId, observationIds);
+    }
+  }
+  const sessionLines = sessionOrder.map((sessionId) => {
+    const session = getSession(db, sessionId);
+    const group = sessionGroups.get(sessionId);
+    if (!session || !group) {
+      return "";
+    }
+    grants.push({ entityType: "session", entityId: session.id });
+    if (group.sessionHit && group.turnIds.size === 0) {
+      const sessionView2 = withBasicSearchSnippet(
+        buildSessionSummary(db, session.id, eraCutoffEpoch) ?? buildSessionView(db, session, eraCutoffEpoch),
+        terms,
+        snippetWindow,
+        signal
+      );
+      return renderNode(
+        { type: "session", value: sessionView2 },
+        { turnBudget, signal }
+      );
+    }
+    const sessionView = withBasicSearchSnippet(
+      buildSessionSummary(db, session.id, eraCutoffEpoch) ?? buildSessionView(db, session, eraCutoffEpoch),
+      terms,
+      snippetWindow,
+      signal
+    );
+    const lines = [
+      renderNode(
+        { type: "session", value: sessionView },
+        { turnBudget, signal }
+      )
+    ];
+    const turns = getTurnsForSession(db, session.id).filter(
+      (turn) => group.turnIds.has(turn.id) || group.observationIdsByTurnId.has(turn.id)
+    ).sort((left, right) => {
+      const leftRank = relevanceRank.get(left.id) ?? Number.POSITIVE_INFINITY;
+      const rightRank = relevanceRank.get(right.id) ?? Number.POSITIVE_INFINITY;
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      return left.promptNumber - right.promptNumber;
+    });
+    for (const turn of turns) {
+      grants.push({ entityType: "turn", entityId: turn.id });
+      const turnView = withTurnSearchSnippet(
+        buildTurnView(db, turn, eraCutoffEpoch),
+        terms,
+        snippetWindow,
+        signal
+      );
+      const turnFields = group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id) ? DEFAULT_TURN_RENDER_FIELDS : fields;
+      lines.push(
+        renderNode(
+          { type: "turn", value: turnView },
+          {
+            fields: turnFields,
+            sessionId: session.id,
+            includeDbTurnIds,
+            turnBudget,
+            signal
+          }
+        )
+      );
+      const observationIds = group.observationIdsByTurnId.get(turn.id) ?? [];
+      for (const observationId of observationIds) {
+        const observation = getObservation(db, observationId);
+        if (!observation) {
+          continue;
+        }
+        const observationView = withBasicSearchSnippet(
+          buildObservationView(observation, turn.createdAtEpoch, eraCutoffEpoch),
+          terms,
+          snippetWindow,
+          signal
+        );
+        lines.push(
+          renderNode(
+            { type: "observation", value: observationView },
+            {
+              indent: "    ",
+              sessionId: session.id,
+              turnPromptNumber: turn.promptNumber,
+              turnBudget,
+              signal
+            }
+          )
+        );
+      }
+    }
+    return lines.join("\n");
+  });
+  if (readerId && grants.length > 0) {
+    recordReadGrants(db, readerId, grants, now(), sequence);
+  }
+  return [...segmentLines, ...sessionLines].filter(Boolean).join("\n");
+}
+function renderRoutedId(db, routed, fields, page, pageSize, after, before, includeDbTurnIds, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, readerId, now = () => Math.floor(Date.now() / 1e3), sequence = 0) {
+  const recordGrants = (entries) => {
+    if (readerId && entries.length > 0) {
+      recordReadGrants(db, readerId, entries, now(), sequence);
+    }
+  };
+  if (routed.kind === "sessions") {
+    const paged = paginateItems(
+      listSessionIds(db, routed.sessionIds, after, before, filter),
+      page,
+      pageSize
+    );
+    const rendered = paged.items.map((sessionId) => ({
+      sessionId,
+      ...renderSessionDetail(
+        db,
+        sessionId,
+        fields,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        turnBudget
+      )
+    }));
+    recordGrants(
+      rendered.flatMap((entry) => [
+        { entityType: "session", entityId: entry.sessionId },
+        ...entry.turnIds.map((turnId) => ({ entityType: "turn", entityId: turnId }))
+      ])
+    );
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      rendered.map((entry) => entry.text).join("\n"),
+      paged.pageCount
+    );
+  }
+  if (routed.kind === "segments") {
+    if (routed.segmentIds && routed.segmentIds.length === 1) {
+      recordGrants([{ entityType: "segment", entityId: routed.segmentIds[0] }]);
+      return renderSegmentCard(db, routed.segmentIds[0], {
+        pageBudget,
+        page,
+        turnBudget,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal
+      });
+    }
+    const paged = paginateItems(
+      listSegmentIds(db, routed.segmentIds),
+      page,
+      pageSize
+    );
+    recordGrants(paged.items.map((segmentId) => ({ entityType: "segment", entityId: segmentId })));
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      paged.items.map(
+        (segmentId) => renderSegmentCard(db, segmentId, {
+          pageBudget,
+          page: 1,
+          turnBudget,
+          includeDbTurnIds,
+          eraCutoffEpoch,
+          signal
+        })
+      ).join("\n"),
+      paged.pageCount
+    );
+  }
+  if (routed.kind === "segment-members") {
+    const segment = getSegment(db, routed.segmentId);
+    if (!segment) {
+      return "Segment not found.";
+    }
+    const chronologicalMembers = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+    const wantedOrdinals = routed.ordinals && routed.ordinals.length > 0 ? routed.ordinals : chronologicalMembers.map((_member, index) => index + 1);
+    const paged = paginateItems(wantedOrdinals, page, pageSize);
+    recordGrants([
+      { entityType: "segment", entityId: segment.id },
+      ...paged.items.map((ordinal) => chronologicalMembers[ordinal - 1]).filter((member) => member !== void 0).map((member) => ({ entityType: "turn", entityId: member.turnId }))
+    ]);
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderSegmentMembersByOrdinal(db, routed.segmentId, paged.items, {
+        fields,
+        includeDbTurnIds,
+        turnBudget,
+        eraCutoffEpoch,
+        signal
+      }),
+      paged.pageCount
+    );
+  }
+  if (routed.kind === "turns") {
+    const turns = applyTurnSelector(db, routed.sessionId, routed.promptNumbers).filter((turn) => {
+      if (after !== void 0 && turn.createdAtEpoch < after) {
+        return false;
+      }
+      if (before !== void 0 && turn.createdAtEpoch > before) {
+        return false;
+      }
+      return turnMatchesFilter(turn, filter);
+    });
+    const paged = paginateItems(turns, page, pageSize);
+    recordGrants(paged.items.map((turn) => ({ entityType: "turn", entityId: turn.id })));
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderTurnScope(
+        db,
+        paged.items,
+        fields,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        turnBudget
+      ),
+      paged.pageCount
+    );
+  }
+  if (routed.kind === "turn-by-id") {
+    const turn = getTurnById(db, routed.turnId);
+    if (!turn) {
+      return "Turn not found.";
+    }
+    recordGrants([{ entityType: "turn", entityId: turn.id }]);
+    return renderTurnScope(
+      db,
+      [turn],
+      fields,
+      includeDbTurnIds,
+      eraCutoffEpoch,
+      signal,
+      turnBudget
+    );
+  }
+  if (routed.kind === "observation-list") {
+    const turn = getTurn(db, routed.sessionId, routed.promptNumber);
+    if (!turn) {
+      return "Turn not found.";
+    }
+    recordGrants([
+      { entityType: "turn", entityId: turn.id },
+      { entityType: "session", entityId: routed.sessionId }
+    ]);
+    const observations = getExtractableObservationsForTurn(db, turn.id).filter((observation) => {
+      if (after !== void 0 && observation.createdAtEpoch < after) {
+        return false;
+      }
+      if (before !== void 0 && observation.createdAtEpoch > before) {
+        return false;
+      }
+      return true;
+    }).map((observation) => ({
+      sessionId: routed.sessionId,
+      turnId: turn.id,
+      observationId: observation.id
+    }));
+    const paged = paginateItems(observations, page, pageSize);
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderObservationScope(
+        db,
+        paged.items,
+        true,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        turnBudget
+      ),
+      paged.pageCount
+    );
+  }
+  if (routed.kind === "session-observation-list") {
+    const observations = getTurnsForSession(db, routed.sessionId).flatMap(
+      (turn) => getExtractableObservationsForTurn(db, turn.id).filter((observation) => {
+        if (after !== void 0 && observation.createdAtEpoch < after) {
+          return false;
+        }
+        if (before !== void 0 && observation.createdAtEpoch > before) {
+          return false;
+        }
+        return true;
+      }).map((observation) => ({
+        sessionId: routed.sessionId,
+        turnId: turn.id,
+        observationId: observation.id
+      }))
+    );
+    const paged = paginateItems(observations, page, pageSize);
+    recordGrants([
+      { entityType: "session", entityId: routed.sessionId },
+      ...[...new Set(paged.items.map((entry) => entry.turnId))].map((turnId) => ({
+        entityType: "turn",
+        entityId: turnId
+      }))
+    ]);
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderObservationScope(
+        db,
+        paged.items,
+        true,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        turnBudget
+      ),
+      paged.pageCount
+    );
+  }
+  if (routed.kind === "observation") {
+    const observation = getObservation(db, routed.observationId);
+    if (observation && observation.excludedFromExtraction === 0) {
+      const owningTurn = getTurnById(db, observation.turnId);
+      if (owningTurn) {
+        recordGrants([
+          { entityType: "turn", entityId: owningTurn.id },
+          { entityType: "session", entityId: owningTurn.sessionId }
+        ]);
+      }
+    }
+    return renderObservationDetail(
+      db,
+      routed.observationId,
+      eraCutoffEpoch,
+      signal,
+      turnBudget
+    );
+  }
+  routed;
+  return formatParameterError(`unrecognized id kind`);
+}
+var DEFAULT_BROWSE_FIELDS = ["title", "content"];
+var BROWSE_CANDIDATE_CAP = 500;
+var BROWSE_CHARS_PER_TOKEN = 4;
+function browseFieldText(db, turn, field) {
+  switch (field) {
+    case "title":
+      return turn.title;
+    case "content":
+      return turn.content;
+    case "prompt":
+      return turn.userPrompt;
+    case "response":
+      return turn.assistantResponse;
+    case "insight": {
+      const lines = splitInsight(turn.insight);
+      return lines.length > 0 ? lines.join("; ") : null;
+    }
+    case "files": {
+      const files = [...turn.filesRead, ...turn.filesModified];
+      return files.length > 0 ? files.join(", ") : null;
+    }
+    case "observations": {
+      const count = getExtractableObservationsForTurn(db, turn.id).length;
+      return count > 0 ? `${count} observation${count === 1 ? "" : "s"}` : null;
+    }
+    default:
+      return null;
+  }
+}
+function formatBrowseTurnLabel(turn, sessionId, includeDbTurnIds) {
+  const turnId = turn.transcriptLineStart === null ? `T${turn.promptNumber}` : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
+  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
+  const statusSegment = turn.status ? ` [${turn.status}]` : "";
+  const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
+  return `  - [S${sessionId}][${turnId}]${statusSegment}${dbIdSegment}${rewindSegment}`;
+}
+function renderBrowseTurnBlock(db, turn, sessionId, fields, includeDbTurnIds, turnBudget, signal) {
+  const label = formatBrowseTurnLabel(turn, sessionId, includeDbTurnIds);
+  const values = fields.map((field) => ({ field, text: browseFieldText(db, turn, field) })).filter((entry) => Boolean(entry.text));
+  if (values.length === 0) {
+    return label;
+  }
+  const perFieldCharLimit = turnBudget !== void 0 ? Math.max(20, Math.floor(turnBudget * BROWSE_CHARS_PER_TOKEN / values.length)) : void 0;
+  const fieldLines = values.map(({ field, text }) => {
+    const rendered = perFieldCharLimit !== void 0 ? truncateText(text, { limit: perFieldCharLimit, signal }) : text;
+    return `    - ${field}: ${rendered}`;
+  });
+  return [label, ...fieldLines].join("\n");
+}
+function renderBrowseSessionHeader(session) {
+  return `- [S${session.id}] ${session.title ?? "Untitled"}`;
+}
+function browseUnitSessionId(unit) {
+  return unit.kind === "turn" ? unit.turn.sessionId : unit.session.id;
+}
+function buildBrowseFeed(db, page, pageSize, pageBudget, turnBudget, fields, includeDbTurnIds, signal, readerId, now, sequence) {
+  const turnIdRows = db.query(
+    `SELECT id FROM turns ORDER BY created_at_epoch DESC, id DESC LIMIT ?`
+  ).all(BROWSE_CANDIDATE_CAP);
+  const turnUnits = turnIdRows.map((row) => getTurnById(db, row.id)).filter((turn) => turn !== null).map((turn) => ({ kind: "turn", epoch: turn.createdAtEpoch, turn }));
+  const emptySessionRows = db.query(
+    `SELECT id, created_at_epoch AS createdAtEpoch FROM sessions
+       WHERE id NOT IN (SELECT DISTINCT session_id FROM turns)
+       ORDER BY created_at_epoch DESC LIMIT ?`
+  ).all(BROWSE_CANDIDATE_CAP);
+  const sessionCache = /* @__PURE__ */ new Map();
+  const sessionFor = (sessionId) => {
+    if (!sessionCache.has(sessionId)) {
+      sessionCache.set(sessionId, getSession(db, sessionId));
+    }
+    return sessionCache.get(sessionId) ?? null;
+  };
+  const emptySessionUnits = emptySessionRows.flatMap((row) => {
+    const session = sessionFor(row.id);
+    return session ? [{ kind: "session", epoch: row.createdAtEpoch, session }] : [];
+  });
+  const units = [...turnUnits, ...emptySessionUnits].sort((left, right) => {
+    if (left.epoch !== right.epoch) {
+      return right.epoch - left.epoch;
+    }
+    return browseUnitSessionId(right) - browseUnitSessionId(left);
+  });
+  if (units.length === 0) {
+    return joinPage(formatPageHeader(1, 1, 0), "", 1);
+  }
+  const resolvedFields = fields && fields.length > 0 ? fields : DEFAULT_BROWSE_FIELDS;
+  const renderForPage = (unit, seenSessions) => {
+    const sessionId = browseUnitSessionId(unit);
+    const isFirst = !seenSessions.has(sessionId);
+    if (unit.kind === "session") {
+      return isFirst ? renderBrowseSessionHeader(unit.session) : "";
+    }
+    const session = sessionFor(unit.turn.sessionId);
+    if (!session) {
+      return "";
+    }
+    const block = renderBrowseTurnBlock(
+      db,
+      unit.turn,
+      session.id,
+      resolvedFields,
+      includeDbTurnIds,
+      turnBudget,
+      signal
+    );
+    return isFirst ? `${renderBrowseSessionHeader(session)}
+${block}` : block;
+  };
+  const pages = [];
+  let current = [];
+  let seenInPage = /* @__PURE__ */ new Set();
+  let used = 0;
+  for (const unit of units) {
+    if (unit.kind === "turn" && !sessionFor(unit.turn.sessionId)) {
+      continue;
+    }
+    let rendered = renderForPage(unit, seenInPage);
+    let cost = estimateTokens(rendered);
+    const overflowsCount = current.length >= pageSize;
+    const overflowsBudget = current.length > 0 && used + cost > pageBudget;
+    if (current.length > 0 && (overflowsCount || overflowsBudget)) {
+      pages.push(current);
+      current = [];
+      seenInPage = /* @__PURE__ */ new Set();
+      used = 0;
+      rendered = renderForPage(unit, seenInPage);
+      cost = estimateTokens(rendered);
+    }
+    current.push({ unit, rendered });
+    seenInPage.add(browseUnitSessionId(unit));
+    used += cost;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  const pageCount = pages.length;
+  const clampedPage = Math.min(Math.max(1, page), pageCount);
+  const pageItems = pages[clampedPage - 1] ?? [];
+  if (readerId && pageItems.length > 0) {
+    const grants = [];
+    const grantedSessions = /* @__PURE__ */ new Set();
+    for (const item of pageItems) {
+      const sessionId = browseUnitSessionId(item.unit);
+      if (item.unit.kind === "turn") {
+        grants.push({ entityType: "turn", entityId: item.unit.turn.id });
+      }
+      if (!grantedSessions.has(sessionId)) {
+        grantedSessions.add(sessionId);
+        grants.push({ entityType: "session", entityId: sessionId });
+      }
+    }
+    recordReadGrants(db, readerId, grants, now(), sequence);
+  }
+  return joinPage(
+    formatPageHeader(clampedPage, pageCount, units.length),
+    pageItems.map((item) => item.rendered).filter(Boolean).join("\n"),
+    pageCount
+  );
+}
+function renderBareOverview(db, page, pageSize, includeDbTurnIds, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, readerId, now = () => Math.floor(Date.now() / 1e3), sequence = 0) {
+  const parts = [];
+  if (page === 1) {
+    const segments = listSegmentsByActivity(db, pageSize);
+    if (segments.length > 0) {
+      parts.push(`\u2500\u2500 segments (${segments.length}) \u2500\u2500`);
+      for (const segment of segments) {
+        if (readerId) {
+          recordReadGrants(
+            db,
+            readerId,
+            [{ entityType: "segment", entityId: segment.id }],
+            now(),
+            sequence
+          );
+        }
+        parts.push(
+          renderSegmentCard(db, segment.id, {
+            pageBudget,
+            page: 1,
+            turnBudget,
+            includeDbTurnIds,
+            eraCutoffEpoch,
+            signal
+          })
+        );
+      }
+    }
+  }
+  parts.push(`\u2500\u2500 turns \u2500\u2500`);
+  parts.push(
+    buildBrowseFeed(
+      db,
+      page,
+      pageSize,
+      pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+      turnBudget,
+      filter.fields,
+      includeDbTurnIds ?? false,
+      signal,
+      readerId,
+      now,
+      sequence
+    )
+  );
+  return parts.join("\n");
+}
+function searchQueryResults(db, text, filter, eraCutoffEpoch = null) {
+  return searchMemory(db, {
+    query: text,
+    type: filter.type,
+    file: filter.file,
+    tag: filter.tag,
+    sessionId: filter.sessionId,
+    after: filter.after,
+    before: filter.before,
+    // Only the observation layer reads this, and only to decide whether a
+    // status still means anything (db/search.ts).
+    eraCutoffEpoch
+    // A segment is not bound to a session (spec D6), so it legitimately carries
+    // a null `sessionId`; only session-layer rows that lost their session are
+    // dropped here.
+  }).filter((r) => r.layer === "segment" || r.sessionId !== null);
+}
+function recallMemory(db, input) {
+  const signal = createTruncationSignal();
+  return appendNavigationLegend(recallMemoryBody(db, input, signal), signal);
+}
+function recallMemoryBody(db, input, signal) {
+  const page = Math.max(1, input.page ?? 1);
+  const pageSize = input.pageSize ?? 10;
+  const includeDbTurnIds = input.includeDbTurnIds ?? false;
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const pageBudget = input.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
+  const turnBudget = input.turn ?? DEFAULT_TURN_TOKEN_BUDGET;
+  const fields = resolveTurnFields(input.filter?.fields);
+  const { parsed: filter, error: filterError } = parseMemoryFilter(input.filter);
+  if (filterError) {
+    return formatParameterError(filterError);
+  }
+  const sequence = snapshotWriteGateSequence(db);
+  const now = input.now ?? (() => Math.floor(Date.now() / 1e3));
+  if (input.id) {
+    const idItems = input.id.split(",").map((item) => item.trim()).filter((item) => item.length > 0);
+    if (idItems.length <= 1) {
+      const routed = parseRoutedId(input.id.trim());
+      if (!routed) {
+        return formatParameterError(`invalid id selector "${input.id}"`);
+      }
+      return renderRoutedId(
+        db,
+        routed,
+        fields,
+        page,
+        pageSize,
+        filter.after,
+        filter.before,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        pageBudget,
+        turnBudget,
+        filter,
+        input.readerId,
+        now,
+        sequence
+      );
+    }
+    const routedItems = [];
+    for (const item of idItems) {
+      const routed = parseRoutedId(item);
+      if (!routed) {
+        return formatParameterError(
+          `invalid id selector "${item}" in comma list "${input.id}" \u2014 ${ID_SELECTOR_GRAMMAR_HINT}`
+        );
+      }
+      routedItems.push(routed);
+    }
+    const firstKind = routedItems[0].kind;
+    if (routedItems.some((routed) => routed.kind !== firstKind)) {
+      return formatParameterError(
+        `mixed id kinds in comma list "${input.id}" \u2014 ${ID_SELECTOR_GRAMMAR_HINT}`
+      );
+    }
+    return routedItems.map(
+      (routed) => renderRoutedId(
+        db,
+        routed,
+        fields,
+        page,
+        pageSize,
+        filter.after,
+        filter.before,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        pageBudget,
+        turnBudget,
+        filter,
+        input.readerId,
+        now,
+        sequence
+      )
+    ).join("\n\n");
+  }
+  if (input.query || hasFilterCriteria(filter)) {
+    const text = (input.query ?? "").trim();
+    const hasCriteria = text.length > 0 || hasFilterCriteria(filter);
+    if (!hasCriteria) {
+      return formatParameterError(
+        `query "${input.query}" has no searchable terms or filters`
+      );
+    }
+    const results = searchQueryResults(
+      db,
+      text || void 0,
+      filter,
+      input.eraCutoffEpoch ?? null
+    );
+    const paged = paginateItems(results, page, pageSize);
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderGroupedSearchResults(
+        db,
+        paged.items,
+        fields,
+        turnBudget,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        text || void 0,
+        input.readerId,
+        now,
+        sequence
+      ),
+      paged.pageCount
+    );
+  }
+  return renderBareOverview(
+    db,
+    page,
+    pageSize,
+    includeDbTurnIds,
+    eraCutoffEpoch,
+    signal,
+    pageBudget,
+    turnBudget,
+    filter,
+    input.readerId,
+    now,
+    sequence
+  );
+}
+var DEFAULT_ROSTER_ITEM_BUDGET_TOKENS = 100;
+var DEFAULT_ROSTER_PAGE_BUDGET_TOKENS = 2e3;
+var ROSTER_CANDIDATE_CAP = 500;
+function renderRosterLine(segment, itemBudgetTokens, overflow) {
+  const tagsText = segment.tags.length > 0 ? ` \u2014 ${segment.tags.map((tag) => `#${tag}`).join(" ")}` : "";
+  const attachedNote = overflow.has(segment.id) ? ` (attached, not rendered here \u2014 recall(id="E${segment.id}"))` : "";
+  const full = `- E${segment.id} ${segment.title}${tagsText}${attachedNote}`;
+  const charLimit = Math.max(20, itemBudgetTokens * BROWSE_CHARS_PER_TOKEN);
+  return truncateText(full, { limit: charLimit });
+}
+function renderSegmentRosterFeed(db, options = {}) {
+  const page = Math.max(1, options.page ?? 1);
+  const pageBudget = options.pageBudget ?? DEFAULT_ROSTER_PAGE_BUDGET_TOKENS;
+  const itemBudget = options.itemBudget ?? DEFAULT_ROSTER_ITEM_BUDGET_TOKENS;
+  const segmentEraCutoffEpoch = options.segmentEraCutoffEpoch === void 0 ? SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH : options.segmentEraCutoffEpoch;
+  const overflow = options.overflowAttachedSegmentIds ?? /* @__PURE__ */ new Set();
+  const now = options.now ?? (() => Math.floor(Date.now() / 1e3));
+  const totalLive = countLiveSegments(db, segmentEraCutoffEpoch);
+  const candidates = listLiveSegmentsByActivity(db, ROSTER_CANDIDATE_CAP, segmentEraCutoffEpoch);
+  const header = `## Segment roster (${totalLive} live)`;
+  if (candidates.length === 0) {
+    return `${header}
+(no live segments yet \u2014 remember(create) mints one)`;
+  }
+  const rendered = candidates.map((entry) => ({
+    segmentId: entry.id,
+    text: renderRosterLine(entry, itemBudget, overflow)
+  }));
+  const pages = [];
+  let current = [];
+  let used = 0;
+  for (const item of rendered) {
+    const cost = estimateTokens(item.text) + 1;
+    if (current.length > 0 && used + cost > pageBudget) {
+      pages.push(current);
+      current = [];
+      used = 0;
+    }
+    current.push(item);
+    used += cost;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  const pageCount = pages.length;
+  const clampedPage = Math.min(Math.max(1, page), pageCount);
+  const pageItems = pages[clampedPage - 1] ?? [];
+  if (options.readerId && pageItems.length > 0) {
+    const sequence = snapshotWriteGateSequence(db);
+    recordReadGrants(
+      db,
+      options.readerId,
+      pageItems.map((item) => ({ entityType: "segment", entityId: item.segmentId })),
+      now(),
+      sequence
+    );
+  }
+  return joinPage(
+    formatPageHeader(clampedPage, pageCount, totalLive),
+    [header, ...pageItems.map((item) => item.text)].join("\n"),
+    pageCount
+  );
+}
+
+// src/shared/turn-phase.ts
+var TYPE_PHASE = {
+  research: "evidence",
+  measure: "evidence",
+  design: "decision",
+  discuss: "decision",
+  correction: "decision",
+  implement: "delivery",
+  refactor: "delivery",
+  fix: "delivery",
+  delegate: "delivery",
+  review: "delivery",
+  ops: "delivery"
+};
+function phasesForTypes(types) {
+  const phases = /* @__PURE__ */ new Set();
+  for (const raw of types) {
+    const phase = TYPE_PHASE[raw];
+    if (phase !== void 0) {
+      phases.add(phase);
+    }
+  }
+  return phases;
+}
+
+// src/db/edge-signals.ts
+function zeroSignals() {
+  return { overridden: false, refinesExcess: { decision: 0, delivery: 0 }, encodesCount: 0 };
+}
+function parseTypeArray(value) {
   if (!value) {
     return [];
   }
-  return JSON.parse(value);
-}
-function mapTurnRow(row) {
-  if (!row) {
-    return null;
-  }
-  return {
-    ...row,
-    wasInterrupted: row.wasInterrupted === 1,
-    wasRolledBack: row.wasRolledBack === 1,
-    type: parseJsonArray(row.type),
-    tags: parseJsonArray(row.tags),
-    filesRead: parseJsonArray(row.filesRead),
-    filesModified: parseJsonArray(row.filesModified),
-    parentTurnId: row.parentTurnId ?? null
-  };
-}
-function getTurnById(db, turnId) {
-  return mapTurnRow(
-    db.query(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null
-  );
-}
-function resolveNullable(value, existing) {
-  return value === void 0 ? existing : value;
-}
-function updateTurnById(db, turnId, input) {
-  const existing = getTurnById(db, turnId);
-  if (!existing) {
-    return null;
-  }
-  const mergedTitle = resolveNullable(input.title, existing.title);
-  const mergedContent = resolveNullable(input.content, existing.content);
-  const mergedInsight = resolveNullable(input.insight, existing.insight);
-  const mergedType = input.type === void 0 ? existing.type : input.type;
-  const mergedGrade = resolveNullable(
-    input.significanceGrade,
-    existing.significanceGrade
-  );
-  const hasSubstance = mergedTitle !== null || mergedContent !== null;
-  const nextStatus = input.status ?? (existing.status === "active" && hasSubstance ? "extracted" : existing.status);
-  const nextTags = input.tags === void 0 ? existing.tags : input.tags;
-  const updated = mapTurnRow(
-    db.query(
-      `
-          UPDATE turns
-          SET
-            status = ?,
-            was_interrupted = ?,
-            was_rolled_back = ?,
-            title = ?,
-            content = ?,
-            insight = ?,
-            type = ?,
-            significance_grade = ?,
-            transcript_line_start = ?,
-            tags = ?,
-            files_read = ?,
-            files_modified = ?,
-            tool_call_count = ?,
-            updated_at_epoch = ?
-          WHERE id = ?
-          RETURNING
-            id,
-            session_id AS sessionId,
-            prompt_number AS promptNumber,
-            content_prompt_id AS contentPromptId,
-            was_interrupted AS wasInterrupted,
-            was_rolled_back AS wasRolledBack,
-            status,
-            user_prompt AS userPrompt,
-            assistant_response AS assistantResponse,
-            assistant_transcript AS assistantTranscript,
-            title,
-            content,
-            insight,
-            type,
-            significance_grade AS significanceGrade,
-            transcript_line_start AS transcriptLineStart,
-            tags,
-            files_read AS filesRead,
-            files_modified AS filesModified,
-            tool_call_count AS toolCallCount,
-            parent_turn_id AS parentTurnId,
-            compact_boundary_uuid AS compactBoundaryUuid,
-            created_at_epoch AS createdAtEpoch,
-            updated_at_epoch AS updatedAtEpoch
-        `
-    ).get(
-      nextStatus,
-      input.wasInterrupted ?? existing.wasInterrupted ? 1 : 0,
-      input.wasRolledBack ?? existing.wasRolledBack ? 1 : 0,
-      mergedTitle,
-      mergedContent,
-      mergedInsight,
-      stringifyArray(mergedType),
-      mergedGrade,
-      input.transcriptLineStart ?? existing.transcriptLineStart,
-      stringifyArray(nextTags),
-      stringifyArray(input.filesRead ?? existing.filesRead),
-      stringifyArray(input.filesModified ?? existing.filesModified),
-      input.toolCallCount ?? existing.toolCallCount,
-      input.updatedAtEpoch ?? existing.updatedAtEpoch,
-      turnId
-    ) ?? null
-  );
-  if (!updated) {
-    return null;
-  }
-  indexTurnToFTS(db, updated);
-  if (JSON.stringify(existing.type) !== stringifyArray(mergedType) || JSON.stringify(existing.tags) !== stringifyArray(nextTags)) {
-    recomputeSegmentFacetsForTurn(db, turnId);
-  }
-  if (existing.status !== updated.status || existing.userPrompt !== updated.userPrompt || existing.assistantResponse !== updated.assistantResponse || existing.title !== updated.title || existing.content !== updated.content || existing.insight !== updated.insight) {
-    markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
-  }
-  return updated;
-}
-function resetTurnExtractionFields(db, turnId, updatedAtEpoch) {
-  const existing = getTurnById(db, turnId);
-  if (!existing) {
-    return;
-  }
-  const keptTags = existing.tags.filter((tag) => tag.includes(":"));
-  db.query(
-    `UPDATE turns
-       SET status = 'active',
-           title = NULL,
-           content = NULL,
-           insight = NULL,
-           type = '[]',
-           tags = ?,
-           updated_at_epoch = ?
-       WHERE id = ?`
-  ).run(stringifyArray(keptTags), updatedAtEpoch, turnId);
-  reindexTurnFromDb(db, turnId);
-  if (existing.type.length > 0 || JSON.stringify(existing.tags) !== stringifyArray(keptTags)) {
-    recomputeSegmentFacetsForTurn(db, turnId);
-  }
-  if (existing.status !== "active" || existing.title !== null || existing.content !== null || existing.insight !== null) {
-    markSettledDiaryDayStaleForTurn(db, existing.createdAtEpoch);
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
 }
-function getTurnsForSession(db, sessionId) {
-  return db.query(
-    `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC`
-  ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
-}
-function getStrandedTurns(db, sessionId) {
-  return db.query(
-    `${TURN_SELECT}
-       WHERE session_id = ?
-         AND assistant_response IS NOT NULL
-         AND ( status IN ('active','provisional')
-               OR (status = 'extracted' AND title IS NULL AND content IS NULL) )
-       ORDER BY prompt_number ASC`
-  ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
-}
-function getFirstTurn(db, sessionId) {
-  return mapTurnRow(
-    db.query(
-      `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC LIMIT 1`
-    ).get(sessionId) ?? null
-  );
-}
-function setTurnParent(db, turnId, parentTurnId) {
-  db.query("UPDATE turns SET parent_turn_id = ? WHERE id = ?").run(
-    parentTurnId,
-    turnId
-  );
-}
-function getMaxPromptNumber(db, sessionId) {
-  const row = db.query(
-    "SELECT MAX(prompt_number) AS max FROM turns WHERE session_id = ?"
-  ).get(sessionId);
-  return row?.max ?? null;
-}
-function getMaxTurnId(db, sessionId) {
-  const row = db.query(
-    "SELECT MAX(id) AS max FROM turns WHERE session_id = ?"
-  ).get(sessionId);
-  return row?.max ?? null;
-}
-function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount, contentPromptId, transcriptLineStart, assistantTranscript) {
-  const existing = getTurnById(db, turnId);
-  if (!existing) {
-    return;
+function primaryPhaseBucket(phases) {
+  if (phases.has("decision")) {
+    return "decision";
   }
-  const safeContentPromptId = contentPromptId && !hasOtherTurnWithContentPromptId(
-    db,
-    existing.sessionId,
-    turnId,
-    contentPromptId
-  ) ? contentPromptId : null;
-  db.query(
-    `UPDATE turns
-     SET assistant_response = ?,
-         assistant_transcript = COALESCE(?, assistant_transcript),
-         tool_call_count = ?,
-         content_prompt_id = COALESCE(content_prompt_id, ?),
-         transcript_line_start = COALESCE(?, transcript_line_start)
-     WHERE id = ?`
-  ).run(
-    assistantResponse,
-    assistantTranscript ?? null,
-    toolCallCount,
-    safeContentPromptId,
-    transcriptLineStart ?? null,
-    turnId
-  );
-  if (existing.assistantResponse !== assistantResponse) {
-    markSettledDiaryDayStaleForTurn(db, existing.createdAtEpoch);
+  if (phases.has("delivery")) {
+    return "delivery";
   }
+  return null;
 }
-function hasOtherTurnWithContentPromptId(db, sessionId, turnId, contentPromptId) {
-  return db.query(
-    `
-          SELECT id
-          FROM turns
-          WHERE session_id = ?
-            AND content_prompt_id = ?
-            AND id <> ?
-          LIMIT 1
-        `
-  ).get(sessionId, contentPromptId, turnId) !== null;
-}
-
-// src/mcp/turn-pointers.ts
-var TURN_POINTER_PATTERN = /\[T(\d+)\]/g;
-function resolveTurnPointers(db, sessionId, text) {
-  if (!text || !text.includes("[T")) {
-    return text;
+function getTurnEdgeSignals(db, turnIds) {
+  const result = /* @__PURE__ */ new Map();
+  const uniqueIds = [...new Set(turnIds)];
+  for (const id of uniqueIds) {
+    result.set(id, zeroSignals());
   }
-  return text.replace(TURN_POINTER_PATTERN, (literal2, idDigits) => {
-    const turn = getTurnById(db, Number.parseInt(idDigits, 10));
-    if (!turn || turn.sessionId !== sessionId || turn.status === "undone") {
-      return literal2;
+  if (uniqueIds.length === 0) {
+    return result;
+  }
+  const placeholders = uniqueIds.map(() => "?").join(",");
+  const overrideRows = db.query(
+    `SELECT DISTINCT e.cited_id AS targetId
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id
+       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+         AND e.relation = 'override'
+         AND citing.was_rolled_back = 0
+         AND e.cited_id IN (${placeholders})`
+  ).all(...uniqueIds);
+  for (const row of overrideRows) {
+    result.get(row.targetId).overridden = true;
+  }
+  const encodesRows = db.query(
+    `SELECT e.cited_id AS targetId, COUNT(*) AS count
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id
+       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+         AND e.relation = 'encodes'
+         AND citing.was_rolled_back = 0
+         AND e.cited_id IN (${placeholders})
+       GROUP BY e.cited_id`
+  ).all(...uniqueIds);
+  for (const row of encodesRows) {
+    result.get(row.targetId).encodesCount = row.count;
+  }
+  const refinesRows = db.query(
+    `SELECT e.cited_id AS targetId, citing.type AS citingType
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id
+       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+         AND e.relation = 'refines'
+         AND citing.was_rolled_back = 0
+         AND e.cited_id IN (${placeholders})
+       ORDER BY e.cited_id ASC, e.created_at_epoch ASC, e.citing_id ASC`
+  ).all(...uniqueIds);
+  let currentTarget = null;
+  let seenForTarget = 0;
+  for (const row of refinesRows) {
+    if (row.targetId !== currentTarget) {
+      currentTarget = row.targetId;
+      seenForTarget = 0;
     }
-    return `[S${sessionId}/T${turn.promptNumber}] "${turn.title ?? "untitled"}"`;
-  });
+    seenForTarget += 1;
+    if (seenForTarget === 1) {
+      continue;
+    }
+    const phases = phasesForTypes(parseTypeArray(row.citingType));
+    const bucket = primaryPhaseBucket(phases);
+    if (bucket) {
+      result.get(row.targetId).refinesExcess[bucket] += 1;
+    }
+  }
+  return result;
 }
 
 // src/diary/domain.ts
@@ -5753,11 +9468,2817 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
+// src/shared/transcript-parser.ts
+var import_node_fs5 = require("node:fs");
+function normalizeAssistantText(text) {
+  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+function getContentBlocks(entry) {
+  return Array.isArray(entry.content) ? entry.content : [];
+}
+function getFirstTextContent(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
+  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
+}
+function extractUserPrompt(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
+}
+function isCountedUserPrompt(entry) {
+  return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isInterruptedUserMarker(entry) {
+  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
+}
+function isKnownSystemInjectedContent(content) {
+  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
+}
+function isRealUserPrompt(entry) {
+  const promptText = extractUserPrompt(entry);
+  if (entry.permissionMode) {
+    return true;
+  }
+  if (isKnownSystemInjectedContent(promptText)) {
+    return false;
+  }
+  return promptText !== "";
+}
+function extractAssistantParts(entry) {
+  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
+    name: block.name,
+    input: block.input
+  }));
+  const assistantText = normalizeAssistantText(
+    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
+  );
+  return { assistantText, toolCalls };
+}
+function stringifyToolResultContent(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content.map((item) => {
+      if (typeof item === "string") {
+        return item;
+      }
+      if (item && typeof item === "object" && "text" in item) {
+        const text = item.text;
+        return typeof text === "string" ? text : JSON.stringify(item);
+      }
+      return JSON.stringify(item);
+    }).join("\n");
+  }
+  if (content === void 0) {
+    return "";
+  }
+  return JSON.stringify(content);
+}
+function isChainParticipant(entry) {
+  return entry.type !== "progress";
+}
+function collectInterruptedPromptIds(entries) {
+  const interruptedPromptIds = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (entry.promptId && isInterruptedUserMarker(entry)) {
+      interruptedPromptIds.add(entry.promptId);
+    }
+  }
+  return interruptedPromptIds;
+}
+function detectInterruptedPromptIdsInEntries(entries) {
+  return collectInterruptedPromptIds(entries);
+}
+function parseTranscriptLineWindow(lines, firstLineNumber) {
+  const entries = [];
+  lines.forEach((line, index) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) {
+      return;
+    }
+    let entry;
+    try {
+      entry = normalizeEntry(JSON.parse(trimmedLine));
+    } catch {
+      return;
+    }
+    if (entry.isApiErrorMessage) {
+      return;
+    }
+    entries.push({
+      ...entry,
+      lineNumber: firstLineNumber + index
+    });
+  });
+  return entries;
+}
+function dedupeTranscriptEntries(entries) {
+  const uuidToIndex = /* @__PURE__ */ new Map();
+  const deduped = [];
+  for (const entry of entries) {
+    if (entry.uuid) {
+      const existingIndex = uuidToIndex.get(entry.uuid);
+      if (existingIndex !== void 0) {
+        deduped[existingIndex] = mergeTranscriptEntries(
+          deduped[existingIndex],
+          entry
+        );
+        continue;
+      }
+      uuidToIndex.set(entry.uuid, deduped.length);
+    }
+    deduped.push(entry);
+  }
+  return deduped;
+}
+function readAllTranscriptEntries(transcriptPath) {
+  if (!(0, import_node_fs5.existsSync)(transcriptPath)) {
+    return [];
+  }
+  const rawTranscript = (0, import_node_fs5.readFileSync)(transcriptPath, "utf8");
+  if (rawTranscript.trim() === "") {
+    return [];
+  }
+  return dedupeTranscriptEntries(
+    parseTranscriptLineWindow(rawTranscript.split("\n"), 1)
+  );
+}
+function mergeUsage(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    inputTokens: later?.inputTokens ?? first?.inputTokens,
+    outputTokens: later?.outputTokens ?? first?.outputTokens,
+    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
+    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
+  };
+}
+function mergeCompactMetadata(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    trigger: later?.trigger ?? first?.trigger,
+    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
+    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
+  };
+}
+function mergeTranscriptEntries(first, later) {
+  return {
+    type: later.type ?? first.type,
+    subtype: later.subtype ?? first.subtype,
+    role: later.role ?? first.role,
+    model: later.model ?? first.model,
+    content: later.content ?? first.content,
+    promptId: first.promptId ?? later.promptId,
+    permissionMode: later.permissionMode ?? first.permissionMode,
+    // These flags must stay undefined when absent. mergeTranscriptEntries relies on
+    // ?? so that a later partial snapshot cannot silently overwrite an earlier true.
+    isSidechain: later.isSidechain ?? first.isSidechain,
+    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
+    uuid: first.uuid ?? later.uuid,
+    parentUuid: later.parentUuid ?? first.parentUuid,
+    logicalParentUuid: later.logicalParentUuid ?? first.logicalParentUuid,
+    timestamp: first.timestamp ?? later.timestamp,
+    usage: mergeUsage(first.usage, later.usage),
+    durationMs: later.durationMs ?? first.durationMs,
+    messageCount: later.messageCount ?? first.messageCount,
+    compactMetadata: mergeCompactMetadata(
+      first.compactMetadata,
+      later.compactMetadata
+    ),
+    lineNumber: first.lineNumber
+  };
+}
+function normalizeEntry(raw) {
+  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
+  return {
+    type: typeof raw.type === "string" ? raw.type : void 0,
+    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
+    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
+    model: typeof message?.model === "string" ? message.model : void 0,
+    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
+    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
+    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
+    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
+    logicalParentUuid: typeof raw.logicalParentUuid === "string" ? raw.logicalParentUuid : void 0,
+    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
+    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
+    // Preserve "absent" as undefined rather than false. The last-wins merge keeps
+    // an earlier true flag only because mergeTranscriptEntries uses ??.
+    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
+    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
+    usage: message?.usage && typeof message.usage === "object" ? {
+      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
+      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
+      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
+      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
+    } : void 0,
+    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
+    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
+    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
+      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
+      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
+      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
+    } : void 0
+  };
+}
+function collectOrderedPromptIds(entries) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  entries.forEach((entry, index) => {
+    if (entry.promptId && !seen.has(entry.promptId)) {
+      seen.add(entry.promptId);
+      out.push({ promptId: entry.promptId, index });
+    }
+  });
+  return out;
+}
+function startsNewTurn(entry, currentPromptId) {
+  if (!isCountedUserPrompt(entry)) {
+    return false;
+  }
+  if (entry.promptId) {
+    return entry.promptId !== currentPromptId;
+  }
+  return extractUserPrompt(entry) !== "";
+}
+function parseReplayTranscript(transcriptPath, preloadedEntries) {
+  const turns = [];
+  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
+  const interruptedPromptIds = collectInterruptedPromptIds(entries);
+  let promptNumber = 0;
+  let currentTurn = null;
+  let currentPromptId = null;
+  for (const entry of entries) {
+    if (startsNewTurn(entry, currentPromptId)) {
+      const userPrompt = extractUserPrompt(entry);
+      promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
+      currentTurn = {
+        promptNumber,
+        promptId: entry.promptId ?? null,
+        transcriptLineStart: entry.lineNumber,
+        userPrompt,
+        assistantText: "",
+        toolCalls: [],
+        isSidechain: Boolean(entry.isSidechain),
+        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId),
+        assistantModel: null
+      };
+      turns.push(currentTurn);
+      continue;
+    }
+    if (entry.role === "user") {
+      if (!currentTurn) {
+        continue;
+      }
+      const unresolvedToolCalls = currentTurn.toolCalls.filter(
+        (toolCall) => toolCall.result === ""
+      );
+      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
+      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
+        unresolvedToolCalls[index].result = toolResults[index] ?? "";
+      }
+      continue;
+    }
+    if (entry.role !== "assistant" || !currentTurn) {
+      continue;
+    }
+    const { assistantText, toolCalls } = extractAssistantParts(entry);
+    if (assistantText) {
+      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
+
+${assistantText}` : assistantText;
+    }
+    if (entry.model) {
+      currentTurn.assistantModel = entry.model;
+    }
+    currentTurn.toolCalls.push(
+      ...toolCalls.map((toolCall) => ({
+        ...toolCall,
+        result: ""
+      }))
+    );
+  }
+  return turns.map((turn) => ({
+    ...turn,
+    assistantText: normalizeAssistantText(turn.assistantText)
+  }));
+}
+function countUserPromptsInEntries(entries) {
+  const seenPromptIds = /* @__PURE__ */ new Set();
+  let count = 0;
+  for (const entry of entries) {
+    if (!isCountedUserPrompt(entry)) {
+      continue;
+    }
+    if (entry.promptId) {
+      if (seenPromptIds.has(entry.promptId)) {
+        continue;
+      }
+      seenPromptIds.add(entry.promptId);
+      count += 1;
+      continue;
+    }
+    if (extractUserPrompt(entry) !== "") {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+// src/task-causality-era.ts
+var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = 1784711427;
+function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
+  return createdAtEpoch >= cutoffEpoch;
+}
+
+// src/mcp/timeline.ts
+var DEFAULT_TIMELINE_PAGE_SIZE = 30;
+var PROMPT_COLUMN_CAP = 100;
+var BROKEN_PROMPT_MIN_PREFIX = 20;
+var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
+var TOOL_BURST_TOP_N = 3;
+var DEFAULT_TITLE_CAP = 100;
+var MILESTONE_UNIT_TOKEN_CAP = 150;
+var DEFAULT_MILESTONE_PAGE_BUDGET = 1e3;
+var MILESTONE_UNIT_PULLED_CAP = 4;
+var MILESTONE_PROMPT_PREFIX_CAP = 32;
+var MILESTONE_FILE_BASENAME_CAP = 3;
+var MILESTONE_NOTIFICATION_MARKER = "\u27E8notify\u27E9";
+var MILESTONE_OVER_BUDGET_NOTE = "  \u26A0 over budget: anchor rows kept in full";
+var MILESTONE_DESC_INDENT = "        ";
+var MILESTONE_DESC_WRAP_CHARS = 92;
+var OUTCOME_TAGS = /* @__PURE__ */ new Set([
+  "merged",
+  "shipped",
+  "released",
+  // `release` (singular/imperative stem) is how release turns tag themselves;
+  // `released`/`shipped` are already present. Do NOT add the bare verbs
+  // `push`/`pushed`/`merge`/`ship` — those occur mid-work and would mint false
+  // always-keep outcome markers.
+  "release",
+  "ready-to-merge",
+  "approved",
+  "finalized"
+]);
+var REVERSED_ROLE_TAGS = /* @__PURE__ */ new Set(["rolled-back"]);
+var PLUGIN_MANIFEST_SUFFIXES = [
+  "marketplace.json",
+  "plugin/.claude-plugin/plugin.json",
+  ".claude-plugin/plugin.json"
+];
+function isVersionBumpTurn(filesModified) {
+  const hasPackageJson = filesModified.some(
+    (path2) => path2.endsWith("package.json")
+  );
+  if (!hasPackageJson) {
+    return false;
+  }
+  return filesModified.some(
+    (path2) => PLUGIN_MANIFEST_SUFFIXES.some((suffix) => path2.endsWith(suffix))
+  );
+}
+var REVERSAL_KEYWORD_TAGS = /* @__PURE__ */ new Set([
+  "reversal",
+  "reversed",
+  "superseded",
+  "supersede",
+  "reframed",
+  "reframe",
+  "design-pivot",
+  "pivot"
+]);
+var PENDING_EMOJI = "\u23F3";
+var MISSING_LINE_ANCHOR = "\u2014";
+var MISSING_GRADE_CELL = "\u2014";
+var TURN_TABLE_HEADER = "T# | line | time | gap | stats | G | prompt \u2192 title";
+function typeEmoji(type) {
+  if (type.length === 0) {
+    return PENDING_EMOJI;
+  }
+  return typeListGlyph(type);
+}
+function paginateItems2(items, page, pageSize) {
+  const total = items.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const offset = (page - 1) * pageSize;
+  return {
+    items: items.slice(offset, offset + pageSize),
+    total,
+    pageCount
+  };
+}
+function emptyPaginatedItems(total, pageSize) {
+  return {
+    items: [],
+    total,
+    pageCount: Math.max(1, Math.ceil(total / pageSize))
+  };
+}
+function tailItems(items, pageSize) {
+  const start = Math.max(0, items.length - pageSize);
+  return {
+    items: items.slice(start),
+    total: items.length,
+    pageCount: Math.max(1, Math.ceil(items.length / pageSize))
+  };
+}
+function parseTimelineId(id) {
+  const trimmed = id.trim();
+  if (!trimmed) {
+    throw new Error("timeline id is empty");
+  }
+  const match = trimmed.match(/^S(\d+)(?:\/T(.+))?$/i);
+  if (!match) {
+    throw new Error(`timeline id does not match 'S<n>' or 'S<n>/T...': ${id}`);
+  }
+  const sessionId = Number(match[1]);
+  const rangeValue = match[2];
+  if (rangeValue === void 0) {
+    return { sessionId, range: { kind: "none" } };
+  }
+  if (rangeValue === "*") {
+    return { sessionId, range: { kind: "all" } };
+  }
+  const closed = rangeValue.match(/^(\d+)\.\.(\d+)$/);
+  if (closed) {
+    const start = parsePositiveBound(closed[1], id);
+    const end = parsePositiveBound(closed[2], id);
+    if (start > end) {
+      throw new Error(`timeline range start must be <= end: ${id}`);
+    }
+    return {
+      sessionId,
+      range: { kind: "closed", start, end }
+    };
+  }
+  const openStart = rangeValue.match(/^\.\.(\d+)$/);
+  if (openStart) {
+    const end = parsePositiveBound(openStart[1], id);
+    return {
+      sessionId,
+      range: { kind: "openStart", end }
+    };
+  }
+  const openEnd = rangeValue.match(/^(\d+)\.\.$/);
+  if (openEnd) {
+    const start = parsePositiveBound(openEnd[1], id);
+    return {
+      sessionId,
+      range: { kind: "openEnd", start }
+    };
+  }
+  if (/^\d+$/.test(rangeValue)) {
+    throw new Error(
+      `timeline does not accept single turn forms; use recall(id='S${sessionId}/T${rangeValue}') instead`
+    );
+  }
+  throw new Error(`timeline range syntax not recognized: T${rangeValue}`);
+}
+function resolveWindow(range, totalTurns, bounds = { first: 1, last: totalTurns }) {
+  const { first, last } = bounds;
+  if (totalTurns === 0) {
+    return {
+      startPromptNumber: first,
+      endPromptNumber: first - 1,
+      totalTurns: 0
+    };
+  }
+  if (range.kind === "none" || range.kind === "all") {
+    return {
+      startPromptNumber: first,
+      endPromptNumber: last,
+      totalTurns
+    };
+  }
+  if (range.kind === "closed") {
+    validateClosedRange(range);
+    const startPromptNumber = Math.max(first, range.start);
+    if (startPromptNumber > last) {
+      throw new Error(
+        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds last prompt T${last}`
+      );
+    }
+    return {
+      startPromptNumber,
+      endPromptNumber: Math.min(range.end, last),
+      totalTurns
+    };
+  }
+  if (range.kind === "openEnd") {
+    validateOpenEndRange(range);
+    const startPromptNumber = Math.max(first, range.start);
+    if (startPromptNumber > last) {
+      throw new Error(
+        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds last prompt T${last}`
+      );
+    }
+    return {
+      startPromptNumber,
+      endPromptNumber: last,
+      totalTurns
+    };
+  }
+  if (range.kind === "openStart") {
+    validateOpenStartRange(range);
+    const endPromptNumber = Math.min(range.end, last);
+    return {
+      startPromptNumber: first,
+      endPromptNumber,
+      totalTurns
+    };
+  }
+  throw new Error(`Unknown range kind: ${range.kind}`);
+}
+function extractCommandName(raw) {
+  const match = raw.match(/<command-name>\s*([^<]+?)\s*<\/command-name>/);
+  return match ? match[1].trim() : null;
+}
+function cleanPromptForLabel(raw) {
+  if (raw === null) {
+    return "";
+  }
+  const commandName = extractCommandName(raw);
+  if (commandName !== null) {
+    return commandName;
+  }
+  const stripped = raw.replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g, "").replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, "").replace(/<command-message>[\s\S]*?<\/command-message>/g, "").replace(/<command-args>[\s\S]*?<\/command-args>/g, "");
+  const firstLine = stripped.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+  return firstLine.replace(/\s+/g, " ").trim();
+}
+function formatDuration(ms) {
+  const totalSeconds = Math.floor(ms / 1e3);
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    const seconds = totalSeconds % 60;
+    return seconds === 0 ? `${totalMinutes}m` : `${totalMinutes}m${seconds}s`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}h ${minutes}m`;
+}
+function formatGap(currentEpochSeconds, previousEpochSeconds) {
+  if (previousEpochSeconds === null) {
+    return "(start)";
+  }
+  return `+${formatDuration((currentEpochSeconds - previousEpochSeconds) * 1e3)}`;
+}
+function formatLocalTime(epochSeconds) {
+  return new Intl.DateTimeFormat(void 0, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(new Date(epochSeconds * 1e3));
+}
+function formatLocalDate(epochSeconds) {
+  return new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date(epochSeconds * 1e3));
+}
+function formatLocalWeekday(epochSeconds) {
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short"
+  }).format(new Date(epochSeconds * 1e3));
+}
+function formatLocalDateWithWeekday(epochSeconds) {
+  return `${formatLocalDate(epochSeconds)} ${formatLocalWeekday(epochSeconds)}`;
+}
+function sameLocalDate(leftEpoch, rightEpoch) {
+  return formatLocalDate(leftEpoch) === formatLocalDate(rightEpoch);
+}
+function getSystemTimezone(referenceEpochSeconds = Math.floor(Date.now() / 1e3), source = {}) {
+  const ianaName = source.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const name = source.resolveTimeZoneName ? source.resolveTimeZoneName(referenceEpochSeconds, ianaName) : new Intl.DateTimeFormat("en-US", {
+    timeZone: ianaName,
+    timeZoneName: "short"
+  }).formatToParts(new Date(referenceEpochSeconds * 1e3)).find((part) => part.type === "timeZoneName")?.value ?? ianaName;
+  const offsetMinutes = source.resolveOffsetMinutes ? source.resolveOffsetMinutes(referenceEpochSeconds) : -new Date(referenceEpochSeconds * 1e3).getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absoluteMinutes = Math.abs(offsetMinutes);
+  const hours = String(Math.floor(absoluteMinutes / 60)).padStart(2, "0");
+  const minutes = String(absoluteMinutes % 60).padStart(2, "0");
+  return {
+    name,
+    offsetLabel: `${sign}${hours}:${minutes}`
+  };
+}
+function extractSourceTags(tags) {
+  return tags.filter((tag) => tag.startsWith("source:")).map((tag) => tag.slice("source:".length));
+}
+function milestoneMarker(turn, options = {}) {
+  if (turn.status === "undone" || turn.wasInterrupted) {
+    return "invalidated";
+  }
+  const keywordReversal = options.enableReversalKeyword === true && turn.type.includes("decision") && turn.tags.some((tag) => REVERSAL_KEYWORD_TAGS.has(tag));
+  const roleReversal = turn.tags.some((tag) => REVERSED_ROLE_TAGS.has(tag));
+  if (turn.wasRolledBack || roleReversal || keywordReversal) {
+    return "reversed";
+  }
+  if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag)) || isVersionBumpTurn(turn.filesModified)) {
+    return "outcome";
+  }
+  return null;
+}
+var MILESTONE_LEGACY_TYPE_GRADE = {
+  decision: 3,
+  feature: 2,
+  refactor: 2,
+  bugfix: 2,
+  change: 1,
+  discovery: 1
+};
+var MILESTONE_LEGACY_GRADE_CAP = 3;
+var MILESTONE_SPINE_MIN_EFF_GRADE = 3;
+var MILESTONE_POOL_MIN_EFF_GRADE = 2;
+var MILESTONE_PULL_MAX_EFF_GRADE = 2;
+var MILESTONE_TIE_CITED_WEIGHT = 0.25;
+var MILESTONE_TIE_CITED_CAP = 2;
+var MILESTONE_TIE_INSIGHT_WEIGHT = 0.25;
+var MILESTONE_TIE_PURE_SPEC_WEIGHT = 0.15;
+var MILESTONE_TIE_BREAK_MAX = 0.9;
+var MILESTONE_PURE_SPEC_RE = /^docs\/(?:plans|specs|superpowers)\/.*\.md$/;
+var MILESTONE_VERSION_RE = /\b0\.\d+\.\d+\b/g;
+var MILESTONE_PULLED_LABEL_CAP = 60;
+function milestoneEffGrade(turn, taskCausalityEraCutoffEpoch) {
+  if (isTaskCausalityEra(turn.createdAtEpoch, taskCausalityEraCutoffEpoch)) {
+    const grade = turn.significanceGrade;
+    if (grade === null || grade === void 0) {
+      return 0;
+    }
+    return Math.max(0, Math.min(4, grade));
+  }
+  return legacyEffGrade(turn);
+}
+function legacyEffGrade(turn) {
+  const legacyType = turn.type[0] ?? "";
+  let grade = MILESTONE_LEGACY_TYPE_GRADE[legacyType] ?? 0;
+  if ((legacyType === "feature" || legacyType === "refactor" || legacyType === "change") && turn.filesModified.length === 0) {
+    grade = 0;
+  }
+  if (hasMilestoneInsight(turn)) {
+    grade += 1;
+  }
+  return Math.min(grade, MILESTONE_LEGACY_GRADE_CAP);
+}
+function hasMilestoneInsight(turn) {
+  return typeof turn.insight === "string" && turn.insight.trim() !== "" && turn.insight !== "[]";
+}
+function isPureSpecTurn(turn) {
+  return turn.filesModified.length > 0 && turn.filesModified.every((path2) => MILESTONE_PURE_SPEC_RE.test(path2));
+}
+function milestoneTieBreak(turn, citedBy = 0) {
+  const raw = MILESTONE_TIE_CITED_WEIGHT * Math.min(Math.max(citedBy, 0), MILESTONE_TIE_CITED_CAP) + (hasMilestoneInsight(turn) ? MILESTONE_TIE_INSIGHT_WEIGHT : 0) + (isPureSpecTurn(turn) ? MILESTONE_TIE_PURE_SPEC_WEIGHT : 0);
+  return Math.min(raw, MILESTONE_TIE_BREAK_MAX);
+}
+function inlineCitationFallback(turns) {
+  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
+  const effective = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    effective.set(turn.id, {
+      citedTurnIds: parseInlineCitations(turn.content).filter(
+        (id) => id !== turn.id && sessionTurnIds.has(id)
+      ),
+      edges: []
+    });
+  }
+  return effective;
+}
+function citationInDegree(citations) {
+  const inDegree = /* @__PURE__ */ new Map();
+  for (const entry of citations.values()) {
+    for (const citedTurnId of entry.citedTurnIds) {
+      inDegree.set(citedTurnId, (inDegree.get(citedTurnId) ?? 0) + 1);
+    }
+  }
+  return inDegree;
+}
+function extractMilestoneVersion(title) {
+  if (!title) return null;
+  const matches = [...title.matchAll(MILESTONE_VERSION_RE)];
+  return matches.length > 0 ? matches[matches.length - 1][0] : null;
+}
+function demotedOutcomePrompts(seq) {
+  const byDay = /* @__PURE__ */ new Map();
+  for (const turn of seq) {
+    if (milestoneMarker(turn) !== "outcome") {
+      continue;
+    }
+    const day = formatLocalDate(turn.createdAtEpoch);
+    const bucket = byDay.get(day) ?? [];
+    bucket.push(turn);
+    byDay.set(day, bucket);
+  }
+  const demoted = /* @__PURE__ */ new Set();
+  const closeChain = (chain) => {
+    for (const turn of chain.slice(0, -1)) {
+      demoted.add(turn.promptNumber);
+    }
+  };
+  for (const turns of byDay.values()) {
+    const sorted = [...turns].sort((a, b) => a.promptNumber - b.promptNumber);
+    let chain = [];
+    for (const turn of sorted) {
+      if (chain.length === 0) {
+        chain = [turn];
+        continue;
+      }
+      const previous = chain[chain.length - 1];
+      const previousVersion = extractMilestoneVersion(previous.title);
+      const currentVersion = extractMilestoneVersion(turn.title);
+      const sameRelease = turn.promptNumber - previous.promptNumber <= 5 && !(previousVersion !== null && currentVersion !== null && previousVersion !== currentVersion);
+      if (sameRelease) {
+        chain.push(turn);
+      } else {
+        closeChain(chain);
+        chain = [turn];
+      }
+    }
+    closeChain(chain);
+  }
+  return demoted;
+}
+function buildCorrectionGraph(turns, options = {}) {
+  const correctors = /* @__PURE__ */ new Set();
+  const supersededVictims = /* @__PURE__ */ new Set();
+  const supersedersByVictim = /* @__PURE__ */ new Map();
+  const byDbId = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    byDbId.set(turn.id, turn);
+  }
+  const citations = options.citations ?? inlineCitationFallback(turns);
+  for (const corrector of turns) {
+    const entry = citations.get(corrector.id);
+    if (entry === void 0) {
+      continue;
+    }
+    const supersededIds = /* @__PURE__ */ new Set();
+    const structuredTargets = /* @__PURE__ */ new Set();
+    for (const edge of entry.edges) {
+      structuredTargets.add(edge.citedTurnId);
+      if (edge.relation === "supersedes") {
+        supersededIds.add(edge.citedTurnId);
+      }
+    }
+    if (!isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
+      for (const citedTurnId of entry.citedTurnIds) {
+        if (structuredTargets.has(citedTurnId)) {
+          continue;
+        }
+        const cited = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
+        if (cited && milestoneMarker(cited) === "reversed") {
+          supersededIds.add(citedTurnId);
+        }
+      }
+    }
+    for (const citedTurnId of supersededIds) {
+      const victim = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
+      if (!victim || victim.sessionId !== corrector.sessionId || // Predecessor guard: a causal reference points backward.
+      victim.promptNumber >= corrector.promptNumber) {
+        continue;
+      }
+      correctors.add(corrector.id);
+      supersededVictims.add(victim.id);
+      const bucket = supersedersByVictim.get(victim.id) ?? [];
+      bucket.push(corrector);
+      supersedersByVictim.set(victim.id, bucket);
+    }
+  }
+  const supersededBy = /* @__PURE__ */ new Map();
+  for (const [victimId, superseders] of supersedersByVictim) {
+    supersededBy.set(
+      victimId,
+      [...superseders].sort((left, right) => left.promptNumber - right.promptNumber).map((turn) => turn.id)
+    );
+  }
+  return { correctors, supersededVictims, supersededBy };
+}
+function getCompactMetadata(tags) {
+  let preTokens = 0;
+  let trigger = "manual";
+  let sawCompactTag = false;
+  for (const tag of tags) {
+    if (tag.startsWith("compact:pre_tokens=")) {
+      const rawValue = Number(tag.slice("compact:pre_tokens=".length));
+      if (Number.isFinite(rawValue) && rawValue >= 0) {
+        preTokens = rawValue;
+      }
+      sawCompactTag = true;
+      continue;
+    }
+    if (tag.startsWith("compact:trigger=")) {
+      trigger = tag.slice("compact:trigger=".length) || trigger;
+      sawCompactTag = true;
+    }
+  }
+  return sawCompactTag ? { preTokens, trigger } : null;
+}
+function formatCompactTokenCount(tokens) {
+  if (tokens >= 1e6) {
+    const millions = Math.round(tokens / 1e6 * 10) / 10;
+    return `${millions % 1 === 0 ? millions.toFixed(0) : millions.toFixed(1)}M`;
+  }
+  if (tokens >= 1e3) {
+    return `${Math.round(tokens / 1e3)}k`;
+  }
+  return String(tokens);
+}
+function formatTranscriptLineAnchor(lineNumber) {
+  return lineNumber === null ? MISSING_LINE_ANCHOR : `L${lineNumber}`;
+}
+function computeTypesDistribution(turns) {
+  const words = {};
+  let none = 0;
+  for (const turn of turns) {
+    if (!isTimelineLiveTurn(turn)) {
+      continue;
+    }
+    if (turn.type.length === 0) {
+      none += 1;
+      continue;
+    }
+    for (const word of turn.type) {
+      words[word] = (words[word] ?? 0) + 1;
+    }
+  }
+  return { words, none };
+}
+function renderTypesDistribution(distribution) {
+  const byGlyph = /* @__PURE__ */ new Map();
+  const counted = /* @__PURE__ */ new Set();
+  const accumulate = (word) => {
+    if (counted.has(word)) {
+      return;
+    }
+    counted.add(word);
+    const count = distribution.words[word] ?? 0;
+    if (count === 0) {
+      return;
+    }
+    const glyph = typeWordGlyph(word);
+    byGlyph.set(glyph, (byGlyph.get(glyph) ?? 0) + count);
+  };
+  for (const word of MEMORY_TYPES) {
+    accumulate(word);
+  }
+  for (const word of Object.keys(LEGACY_TYPE_GLYPH)) {
+    accumulate(word);
+  }
+  const parts = [...byGlyph].map(([glyph, count]) => `${glyph}${count}`);
+  let unrecognised = 0;
+  for (const [word, count] of Object.entries(distribution.words)) {
+    if (!counted.has(word)) {
+      unrecognised += count;
+    }
+  }
+  if (unrecognised > 0) {
+    parts.push(`?${unrecognised}`);
+  }
+  if (distribution.none > 0) {
+    parts.push(`\u2022${distribution.none}`);
+  }
+  return parts;
+}
+function detectBrokenPromptPairs(turns) {
+  const pairs = [];
+  const liveTurns = sortTurnsForAnalysis(turns).filter(
+    isTimelineLiveTurn
+  );
+  for (let index = 0; index < liveTurns.length - 1; index += 1) {
+    const current = liveTurns[index];
+    const next = liveTurns[index + 1];
+    const currentPrompt = cleanPromptForLabel(current.userPrompt);
+    const nextPrompt = cleanPromptForLabel(next.userPrompt);
+    if (currentPrompt.length < BROKEN_PROMPT_MIN_PREFIX || nextPrompt.length < BROKEN_PROMPT_MIN_PREFIX) {
+      continue;
+    }
+    if (sharedPrefixLength(currentPrompt, nextPrompt) < BROKEN_PROMPT_MIN_PREFIX) {
+      continue;
+    }
+    const gapMs = (next.createdAtEpoch - current.createdAtEpoch) * 1e3;
+    if (gapMs >= BROKEN_PROMPT_MAX_GAP_MS) {
+      continue;
+    }
+    pairs.push({
+      first: current.promptNumber,
+      second: next.promptNumber
+    });
+  }
+  return pairs;
+}
+function sharedPrefixLength(left, right) {
+  const limit = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < limit && left[index] === right[index]) {
+    index += 1;
+  }
+  return index;
+}
+function parsePositiveBound(raw, id) {
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`timeline range bounds must be positive integers: ${id}`);
+  }
+  return value;
+}
+function detectShapeSignals(turns) {
+  if (turns.length === 0) {
+    return {
+      fastestGap: null,
+      longestGap: null,
+      toolBursts: [],
+      toolBurstMedian: 0,
+      toolBurstThreshold: 0,
+      brokenPromptPairs: [],
+      undoneTurns: [],
+      externalInputs: []
+    };
+  }
+  const sortedTurns = sortTurnsForAnalysis(turns);
+  const liveTurns = sortedTurns.filter(isTimelineLiveTurn);
+  let fastestGap = null;
+  let longestGap = null;
+  for (let index = 0; index < liveTurns.length - 1; index += 1) {
+    const current = liveTurns[index];
+    const next = liveTurns[index + 1];
+    const gapMs = (next.createdAtEpoch - current.createdAtEpoch) * 1e3;
+    if (fastestGap === null || gapMs < fastestGap.ms) {
+      fastestGap = { afterPromptNumber: current.promptNumber, ms: gapMs };
+    }
+    if (longestGap === null || gapMs > longestGap.ms) {
+      longestGap = { afterPromptNumber: current.promptNumber, ms: gapMs };
+    }
+  }
+  const sortedToolCounts = liveTurns.map((turn) => turn.toolCallCount ?? 0).sort((left, right) => left - right);
+  let toolBurstMedian = 0;
+  if (sortedToolCounts.length > 0) {
+    const middle = Math.floor(sortedToolCounts.length / 2);
+    toolBurstMedian = sortedToolCounts.length % 2 === 1 ? sortedToolCounts[middle] : Math.round(
+      (sortedToolCounts[middle - 1] + sortedToolCounts[middle]) / 2
+    );
+  }
+  const toolBurstThreshold = toolBurstMedian * 2;
+  const toolBursts = liveTurns.map((turn) => ({
+    promptNumber: turn.promptNumber,
+    toolCallCount: turn.toolCallCount ?? 0
+  })).filter((turn) => turn.toolCallCount > toolBurstThreshold).sort((left, right) => right.toolCallCount - left.toolCallCount).slice(0, TOOL_BURST_TOP_N);
+  const undoneTurns = turns.filter((turn) => turn.status === "undone").map((turn) => turn.promptNumber);
+  const externalInputs = liveTurns.flatMap(
+    (turn) => extractSourceTags(turn.tags).map((source) => ({
+      promptNumber: turn.promptNumber,
+      source
+    }))
+  );
+  return {
+    fastestGap,
+    longestGap,
+    toolBursts,
+    toolBurstMedian,
+    toolBurstThreshold,
+    brokenPromptPairs: detectBrokenPromptPairs(turns),
+    undoneTurns,
+    externalInputs
+  };
+}
+function compareMilestoneRank(left, right) {
+  if (left.score !== right.score) return right.score - left.score;
+  return left.turn.promptNumber - right.turn.promptNumber;
+}
+function selectMilestoneTurns(view) {
+  const eraCutoff = view.taskCausalityEraCutoffEpoch;
+  const universe = view.sessionTurns ?? view.windowTurns;
+  const seq = sortTurnsForAnalysis(view.windowTurns).filter(
+    (turn) => turn.status !== "skipped" && !turn.type.includes("compact")
+  );
+  if (seq.length === 0) {
+    return {
+      kept: [],
+      ranked: [],
+      pulled: [],
+      overflowByDay: [],
+      effGradeByTurnId: /* @__PURE__ */ new Map()
+    };
+  }
+  const citations = view.citations ?? inlineCitationFallback(universe);
+  const inDegree = citationInDegree(citations);
+  const universeById = new Map(universe.map((turn) => [turn.id, turn]));
+  const inWindowById = new Map(seq.map((turn) => [turn.id, turn]));
+  const graph = buildCorrectionGraph(universe, {
+    citations,
+    resolveCited: (id) => universeById.get(id),
+    taskCausalityEraCutoffEpoch: eraCutoff
+  });
+  const effGradeOf = (turn) => milestoneEffGrade(turn, eraCutoff);
+  const endpoints = /* @__PURE__ */ new Set([seq[0].id]);
+  const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
+  endpoints.add((lastTitled ?? seq[seq.length - 1]).id);
+  const demotedOutcomes = demotedOutcomePrompts(seq);
+  const markerForSelection = (turn) => {
+    const marker = milestoneMarker(turn);
+    return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
+  };
+  const isAlwaysKeep = (turn) => {
+    if (endpoints.has(turn.id)) {
+      return true;
+    }
+    if (graph.correctors.has(turn.id)) {
+      return true;
+    }
+    if (milestoneMarker(turn) === "reversed") {
+      return true;
+    }
+    return isTaskCausalityEra(turn.createdAtEpoch, eraCutoff) && effGradeOf(turn) === 4;
+  };
+  const promptNumbersOf = (turnIds) => turnIds.map((id) => universeById.get(id)?.promptNumber ?? inWindowById.get(id)?.promptNumber).filter((promptNumber) => promptNumber !== void 0);
+  const keptIds = /* @__PURE__ */ new Set();
+  const rows = [];
+  const poolRows = [];
+  for (const turn of seq) {
+    const effGrade = effGradeOf(turn);
+    const alwaysKeep = isAlwaysKeep(turn);
+    const spine = effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
+    if (!alwaysKeep && !spine && effGrade < MILESTONE_POOL_MIN_EFF_GRADE) {
+      continue;
+    }
+    const superseders = graph.supersededBy.get(turn.id);
+    const row = {
+      turn,
+      score: effGrade + milestoneTieBreak(turn, inDegree.get(turn.id) ?? 0),
+      effGrade,
+      alwaysKeep,
+      spine,
+      marker: markerForSelection(turn),
+      ...superseders ? { supersededBy: promptNumbersOf(superseders) } : {}
+    };
+    poolRows.push(row);
+    if (alwaysKeep || spine) {
+      keptIds.add(turn.id);
+      rows.push(row);
+    }
+  }
+  const ranked = [...poolRows].sort(compareMilestoneRank);
+  const pulled = [];
+  const pulledIds = /* @__PURE__ */ new Set();
+  const pulledByTurnId = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const entry = citations.get(row.turn.id);
+    if (entry === void 0) {
+      continue;
+    }
+    for (const citedTurnId of entry.citedTurnIds) {
+      if (keptIds.has(citedTurnId)) {
+        continue;
+      }
+      const already = pulledByTurnId.get(citedTurnId);
+      if (already !== void 0) {
+        if (!already.citerPromptNumbers.includes(row.turn.promptNumber)) {
+          already.citerPromptNumbers.push(row.turn.promptNumber);
+        }
+        continue;
+      }
+      const cited = universeById.get(citedTurnId);
+      if (cited === void 0 || cited.type.includes("compact") || cited.sessionId !== row.turn.sessionId || // Predecessor guard: a causal reference points backward.
+      cited.promptNumber >= row.turn.promptNumber) {
+        continue;
+      }
+      const effGrade = effGradeOf(cited);
+      if (effGrade > MILESTONE_PULL_MAX_EFF_GRADE) {
+        continue;
+      }
+      pulledIds.add(citedTurnId);
+      const antecedent = {
+        turn: cited,
+        effGrade,
+        citedByPromptNumber: row.turn.promptNumber,
+        citerPromptNumbers: [row.turn.promptNumber],
+        label: pulledAntecedentLabel(cited),
+        supersededBy: promptNumbersOf(graph.supersededBy.get(citedTurnId) ?? [])
+      };
+      pulled.push(antecedent);
+      pulledByTurnId.set(citedTurnId, antecedent);
+    }
+  }
+  const overflowByDay = [];
+  const droppedByDay = /* @__PURE__ */ new Map();
+  for (const turn of seq) {
+    if (keptIds.has(turn.id) || pulledIds.has(turn.id)) {
+      continue;
+    }
+    const day = formatLocalDate(turn.createdAtEpoch);
+    const bucket = droppedByDay.get(day) ?? [];
+    bucket.push(turn);
+    droppedByDay.set(day, bucket);
+  }
+  for (const [date5, dropped] of droppedByDay) {
+    const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
+    overflowByDay.push({
+      date: date5,
+      count: byPrompt.length,
+      firstPrompt: byPrompt[0].promptNumber,
+      lastPrompt: byPrompt[byPrompt.length - 1].promptNumber,
+      labelEpoch: byPrompt[0].createdAtEpoch
+    });
+  }
+  const effGradeByTurnId = /* @__PURE__ */ new Map();
+  for (const turn of seq) {
+    effGradeByTurnId.set(turn.id, effGradeOf(turn));
+  }
+  return { kept: rows, ranked, pulled, overflowByDay, effGradeByTurnId };
+}
+function pulledAntecedentLabel(turn, signal) {
+  if (turn.title !== null && turn.title.trim() !== "") {
+    return turn.title;
+  }
+  const prompt = cleanPromptForLabel(turn.userPrompt);
+  return prompt === "" ? "(untitled)" : truncateText(prompt, { limit: MILESTONE_PULLED_LABEL_CAP, signal });
+}
+function sortTurnsForAnalysis(turns) {
+  return [...turns].sort((left, right) => {
+    if (left.promptNumber !== right.promptNumber) {
+      return left.promptNumber - right.promptNumber;
+    }
+    if (left.createdAtEpoch !== right.createdAtEpoch) {
+      return left.createdAtEpoch - right.createdAtEpoch;
+    }
+    return left.id - right.id;
+  });
+}
+function validateClosedRange(range) {
+  if (!Number.isInteger(range.start) || !Number.isInteger(range.end) || range.start < 1 || range.end < 1 || range.start > range.end) {
+    throw new Error(
+      `timeline range is invalid: closed ranges require positive integers with start <= end`
+    );
+  }
+}
+function validateOpenStartRange(range) {
+  if (!Number.isInteger(range.end) || range.end < 1) {
+    throw new Error(
+      `timeline range is invalid: open-start ranges require a positive integer end`
+    );
+  }
+}
+function validateOpenEndRange(range) {
+  if (!Number.isInteger(range.start) || range.start < 1) {
+    throw new Error(
+      `timeline range is invalid: open-end ranges require a positive integer start`
+    );
+  }
+}
+function deriveTimelineBreadcrumb(db, session) {
+  if (session.parentSessionId === null) {
+    return null;
+  }
+  const parentRef = `S${session.parentSessionId}`;
+  const firstTurn = getFirstTurn(db, session.id);
+  if (firstTurn !== null && firstTurn.parentTurnId !== null) {
+    const forkTurn = getTurnById(db, firstTurn.parentTurnId);
+    if (forkTurn !== null) {
+      return `continues from ${parentRef} (forked at T${forkTurn.promptNumber})`;
+    }
+  }
+  return `continues from ${parentRef}`;
+}
+function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
+  const parsed = parseTimelineId(input.id);
+  const viewKind = input.view ?? "turns";
+  const session = getSession(db, parsed.sessionId);
+  if (!session) {
+    throw new Error(`timeline: session S${parsed.sessionId} not found`);
+  }
+  const allTurns = preloadedTurns ?? getTurnsForSession(db, session.id);
+  const totalTurns = allTurns.length;
+  const totalToolCalls = allTurns.reduce(
+    (sum, turn) => sum + (turn.toolCallCount ?? 0),
+    0
+  );
+  const sorted = [...allTurns].sort((a, b) => a.promptNumber - b.promptNumber);
+  const bounds = totalTurns > 0 ? { first: sorted[0].promptNumber, last: sorted[totalTurns - 1].promptNumber } : { first: 1, last: 0 };
+  const window = resolveWindow(parsed.range, totalTurns, bounds);
+  const rangeWindowTurns = sorted.filter(
+    (turn) => turn.promptNumber >= window.startPromptNumber && turn.promptNumber <= window.endPromptNumber
+  );
+  const { parsed: memoryFilter, error: filterError } = parseMemoryFilter(input.filter);
+  if (filterError) {
+    throw new Error(filterError);
+  }
+  const windowTurns = hasFilterCriteria(memoryFilter) ? rangeWindowTurns.filter((turn) => turnMatchesFilter(turn, memoryFilter)) : rangeWindowTurns;
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const isEra = (turn) => isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch);
+  const eraWindowTurns = eraCutoffEpoch === null ? [] : windowTurns.filter(isEra);
+  const legacyWindowTurns = eraCutoffEpoch === null ? windowTurns : windowTurns.filter((turn) => !isEra(turn));
+  const legacySessionTurns = eraCutoffEpoch === null ? allTurns : allTurns.filter((turn) => !isEra(turn));
+  const page = Math.max(1, input.page ?? 1);
+  const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
+  const typesDistribution = computeTypesDistribution(allTurns);
+  const windowSignals = detectShapeSignals(windowTurns);
+  const compactBoundaries = [
+    ...new Set(
+      allTurns.filter((turn) => turn.type.includes("compact")).map((turn) => turn.promptNumber)
+    )
+  ].sort((a, b) => a - b);
+  if (compactBoundaries.length === 0 && session.lastCompactTurn !== null) {
+    compactBoundaries.push(session.lastCompactTurn);
+  }
+  const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
+  const tz = getSystemTimezone(session.createdAtEpoch);
+  const breadcrumb = deriveTimelineBreadcrumb(db, session);
+  const citations = preloadedCitations ?? getSessionEffectiveCitations(db, session.id);
+  const milestoneSelection = selectMilestoneTurns({
+    session,
+    windowTurns: legacyWindowTurns,
+    windowSignals,
+    compactBoundaries,
+    sessionTurns: legacySessionTurns,
+    citations
+  });
+  const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
+  const pagedTurns = viewKind === "turns" ? paginateItems2(nonSkippedTurns, page, pageSize) : emptyPaginatedItems(nonSkippedTurns.length, pageSize);
+  const milestoneTail = viewKind === "milestones" && input.milestoneTail === true;
+  const pagedMilestones = viewKind === "milestones" ? milestoneTail ? tailItems(milestoneSelection.kept, pageSize) : paginateItems2(milestoneSelection.kept, page, pageSize) : emptyPaginatedItems(milestoneSelection.kept.length, pageSize);
+  const milestoneDayGroups = viewKind === "milestones" ? buildMilestoneDayGroups(
+    pagedMilestones.items,
+    milestoneSelection.kept,
+    milestoneSelection.overflowByDay
+  ) : [];
+  const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
+  const eraWindowTurnIds = new Set(eraWindowTurns.map((turn) => turn.id));
+  const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
+  const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
+  const segmentMilestoneSelection = /* @__PURE__ */ new Map();
+  if (renderSegments) {
+    for (const row of segmentSpine) {
+      segmentMilestoneSelection.set(
+        row.segment.id,
+        selectSegmentMilestonesByEdgeSignals(
+          db,
+          chronologicalSegmentMembers(db, row.segment, eraCutoffEpoch),
+          DEFAULT_TIMELINE_PAGE_SIZE,
+          input.taskCausalityEraCutoffEpoch
+        )
+      );
+    }
+  }
+  const eraSegmentIdByTurnId = renderSegments ? getSegmentMembershipForTurns(db, eraWindowTurns.map((turn) => turn.id)) : /* @__PURE__ */ new Map();
+  const viewItemTotal = viewKind === "turns" ? pagedTurns.total : pagedMilestones.total;
+  const pageCount = viewKind === "turns" ? pagedTurns.pageCount : pagedMilestones.pageCount;
+  const pageAnchorEpoch = viewKind === "turns" ? pagedTurns.items[0]?.createdAtEpoch ?? null : pagedMilestones.items[0]?.turn.createdAtEpoch ?? null;
+  return {
+    view: viewKind,
+    session,
+    totalTurns,
+    firstPromptNumber: bounds.first,
+    lastPromptNumber: bounds.last,
+    totalToolCalls,
+    typesDistribution,
+    compactBoundaries,
+    window,
+    windowTurns,
+    pageTurns: pagedTurns.items,
+    pagedMilestones: pagedMilestones.items,
+    milestonePulled: viewKind === "milestones" ? milestoneSelection.pulled : [],
+    turnEffGrades: milestoneSelection.effGradeByTurnId,
+    milestoneDayGroups,
+    viewItemTotal,
+    pageAnchorEpoch,
+    page,
+    pageSize,
+    pageCount,
+    windowSignals,
+    jsonlPath,
+    tz,
+    hasEarlier: milestoneTail ? pagedMilestones.items.length < milestoneSelection.kept.length : false,
+    milestoneTail,
+    breadcrumb,
+    eraCutoffEpoch,
+    eraWindowTurns,
+    segmentSpine,
+    orphanAnchors,
+    segmentMilestoneSelection,
+    eraSegmentIdByTurnId
+  };
+}
+function buildMilestoneDayGroups(pagedMilestones, allMilestones, overflowByDay) {
+  if (pagedMilestones.length === 0) return [];
+  const dayKey = (m) => formatLocalDate(m.turn.createdAtEpoch);
+  const fullByDay = /* @__PURE__ */ new Map();
+  for (const m of allMilestones) {
+    const key = dayKey(m);
+    const bucket = fullByDay.get(key) ?? [];
+    bucket.push(m);
+    fullByDay.set(key, bucket);
+  }
+  const overflowFor = new Map(overflowByDay.map((o) => [o.date, o]));
+  const groups = [];
+  for (const m of pagedMilestones) {
+    const key = dayKey(m);
+    let group = groups.length > 0 && groups[groups.length - 1].date === key ? groups[groups.length - 1] : null;
+    if (group === null) {
+      const full = fullByDay.get(key) ?? [];
+      const fullPrompts = full.map((x) => x.turn.promptNumber);
+      group = {
+        date: key,
+        labelEpoch: m.turn.createdAtEpoch,
+        promptLo: Math.min(...fullPrompts),
+        promptHi: Math.max(...fullPrompts),
+        keptCount: full.length,
+        rows: [],
+        continued: false,
+        isFinalSliceForDay: false,
+        overflow: null
+      };
+      groups.push(group);
+    }
+    group.rows.push(m);
+  }
+  if (groups.length > 0) {
+    const spanFrom = groups[0].date;
+    const spanTo = groups[groups.length - 1].date;
+    const groupedDates = new Set(groups.map((group) => group.date));
+    let materialized = false;
+    for (const hint of overflowByDay) {
+      if (groupedDates.has(hint.date) || hint.date < spanFrom || hint.date > spanTo) {
+        continue;
+      }
+      groups.push({
+        date: hint.date,
+        labelEpoch: hint.labelEpoch,
+        promptLo: hint.firstPrompt,
+        promptHi: hint.lastPrompt,
+        keptCount: 0,
+        rows: [],
+        continued: false,
+        isFinalSliceForDay: false,
+        overflow: null
+      });
+      materialized = true;
+    }
+    if (materialized) {
+      groups.sort((left, right) => left.labelEpoch - right.labelEpoch);
+    }
+  }
+  for (const group of groups) {
+    const full = fullByDay.get(group.date) ?? [];
+    const dayFirstPrompt = full[0]?.turn.promptNumber ?? -1;
+    const dayLastPrompt = full[full.length - 1]?.turn.promptNumber ?? -1;
+    const firstRowPrompt = group.rows[0]?.turn.promptNumber ?? -1;
+    const lastRowPrompt = group.rows[group.rows.length - 1]?.turn.promptNumber ?? -1;
+    group.continued = firstRowPrompt !== dayFirstPrompt;
+    group.isFinalSliceForDay = lastRowPrompt === dayLastPrompt;
+    if (group.isFinalSliceForDay) {
+      group.overflow = overflowFor.get(group.date) ?? null;
+    }
+  }
+  return groups;
+}
+function renderSessionHeader(view) {
+  const sessionStart = view.session.createdAtEpoch;
+  const sessionEnd = view.session.updatedAtEpoch ?? view.session.completedAtEpoch ?? view.session.createdAtEpoch;
+  const compactSuffix = view.compactBoundaries.length > 0 ? `, compact at ${view.compactBoundaries.map((n) => `T${n}`).join(", ")}` : "";
+  const typesParts = renderTypesDistribution(view.typesDistribution);
+  const startDate = formatLocalDate(sessionStart);
+  const endDate = formatLocalDate(sessionEnd);
+  const endLabel = startDate === endDate ? formatLocalTime(sessionEnd) : `${endDate} ${formatLocalTime(sessionEnd)}`;
+  const lines = [
+    `- [S${view.session.id}] ${startDate} ${formatLocalTime(sessionStart)} \u2192 ${endLabel} (${formatDuration((sessionEnd - sessionStart) * 1e3)}${compactSuffix})`,
+    `  ${view.session.project} | ${view.totalTurns} turns | ${view.totalToolCalls} tool_calls`,
+    `  types: ${typesParts.join(" ")} (session-wide)`,
+    `  tz: ${view.tz.name} (${view.tz.offsetLabel})`,
+    `  raw: ${view.jsonlPath ?? "(unresolved)"}`
+  ];
+  const showingLine = formatShowingLine(view);
+  if (showingLine) {
+    lines.splice(3, 0, `  showing: ${showingLine}`);
+  }
+  if (view.breadcrumb !== null) {
+    lines.push(`  ${view.breadcrumb}`);
+  }
+  return lines;
+}
+function formatShowingLine(view) {
+  if (view.viewItemTotal === 0 || view.viewItemTotal <= view.pageSize) {
+    return null;
+  }
+  const anchor = view.pageAnchorEpoch === null ? "" : ` \xB7 ${formatLocalDateWithWeekday(view.pageAnchorEpoch)}`;
+  if (view.milestoneTail) {
+    return `${view.view} \xB7 last ${view.pagedMilestones.length}/${view.viewItemTotal}${anchor}`;
+  }
+  return `${view.view} \xB7 page ${view.page}/${view.pageCount} (${view.viewItemTotal})${anchor}`;
+}
+function renderTurnTable(view, promptCap, titleCap, signal) {
+  const renderedTurns = view.pageTurns.map((turn) => ({
+    turn,
+    marker: null
+  }));
+  return renderTurnRows(view, renderedTurns, promptCap, titleCap, signal);
+}
+var MILESTONE_MARKER_GLYPH = {
+  invalidated: "\u{1F6AB}",
+  reversed: "\u21A9\uFE0F",
+  outcome: "\u{1F3C1}"
+};
+function truncateToTokens(text, maxTokens) {
+  if (maxTokens <= 0) {
+    return "";
+  }
+  if (estimateDiaryTokens(text) <= maxTokens) {
+    return text;
+  }
+  const points = [...text];
+  let low = 0;
+  let high = points.length;
+  let best = "";
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = `${points.slice(0, mid).join("")}\u2026`;
+    if (estimateDiaryTokens(candidate) <= maxTokens) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best;
+}
+function wrapPlainText(text, width) {
+  const points = [...text];
+  const lines = [];
+  let start = 0;
+  while (start < points.length) {
+    if (points.length - start <= width) {
+      lines.push(points.slice(start).join(""));
+      break;
+    }
+    const hardEnd = start + width;
+    let breakAt = -1;
+    for (let index = hardEnd; index > start; index -= 1) {
+      if (points[index] === " ") {
+        breakAt = index;
+        break;
+      }
+    }
+    if (breakAt > start) {
+      lines.push(points.slice(start, breakAt).join(""));
+      start = breakAt + 1;
+    } else {
+      lines.push(points.slice(start, hardEnd).join(""));
+      start = hardEnd;
+    }
+  }
+  return lines;
+}
+function pathBasename(path2) {
+  const parts = path2.split("/");
+  return parts[parts.length - 1] || path2;
+}
+function renderModifiedFilesTail(turn) {
+  if (turn.filesModified.length === 0) {
+    return "";
+  }
+  const shown = turn.filesModified.slice(0, MILESTONE_FILE_BASENAME_CAP).map(pathBasename);
+  const hidden = turn.filesModified.length - shown.length;
+  return `  \u270F\uFE0F${shown.join(",")}${hidden > 0 ? `+${hidden}` : ""}`;
+}
+function milestonePromptPrefix(turn, signal) {
+  const raw = turn.userPrompt;
+  if (raw === null) {
+    return "";
+  }
+  const commandName = extractCommandName(raw);
+  if (commandName === null && isKnownSystemInjectedContent(raw.trimStart())) {
+    return MILESTONE_NOTIFICATION_MARKER;
+  }
+  return truncateText(cleanPromptForLabel(raw), {
+    limit: MILESTONE_PROMPT_PREFIX_CAP,
+    signal
+  });
+}
+function initialUnitTrim(unit) {
+  return {
+    showDesc: true,
+    descTokens: null,
+    pulledShown: Math.min(unit.pulled.length, MILESTONE_UNIT_PULLED_CAP),
+    pulledTitleTokens: null,
+    titleTokens: null,
+    promptTokens: null,
+    showFiles: true
+  };
+}
+function milestoneDescText(turn) {
+  return (turn.content ?? "").replace(/\s+/g, " ").trim();
+}
+function renderUnitLines(unit, trim, titleCap, signal) {
+  const { milestone } = unit;
+  const glyph = milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
+  let prompt = sanitizeTimelineField(milestonePromptPrefix(milestone.turn, signal));
+  if (trim.promptTokens !== null) {
+    prompt = truncateToTokens(prompt, trim.promptTokens);
+  }
+  let title = sanitizeTimelineField(
+    truncateText(milestone.turn.title ?? "(untitled)", { limit: titleCap, signal })
+  );
+  if (trim.titleTokens !== null) {
+    title = truncateToTokens(title, trim.titleTokens);
+  }
+  const head = prompt !== "" && title !== "" ? `${prompt} \u2192 ${title}` : `${prompt}${title}`;
+  const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
+  const mainBackLink = milestone.supersededBy && milestone.supersededBy.length > 0 ? ` \u2192\u88ABT${milestone.supersededBy.join("/T")}\u63A8\u7FFB` : "";
+  const lines = [
+    `   ${glyph} T${milestone.turn.promptNumber} ${typeEmoji(milestone.turn.type)} G${milestone.effGrade} ${head}${filesTail}${mainBackLink}`.trimEnd()
+  ];
+  if (trim.showDesc) {
+    const raw = milestoneDescText(milestone.turn);
+    const desc = trim.descTokens === null ? raw : truncateToTokens(raw, trim.descTokens);
+    if (desc !== "") {
+      for (const line of wrapPlainText(desc, MILESTONE_DESC_WRAP_CHARS)) {
+        lines.push(`${MILESTONE_DESC_INDENT}${line}`);
+      }
+    }
+  }
+  for (const antecedent of unit.pulled.slice(0, trim.pulledShown)) {
+    const superseded = antecedent.supersededBy.length > 0;
+    const reversalGlyph = superseded ? `${MILESTONE_MARKER_GLYPH.invalidated} ` : "";
+    let label = sanitizeTimelineField(
+      truncateText(pulledAntecedentLabel(antecedent.turn, signal), {
+        limit: titleCap,
+        signal
+      })
+    );
+    if (trim.pulledTitleTokens !== null) {
+      label = truncateToTokens(label, trim.pulledTitleTokens);
+    }
+    const backLink = superseded ? ` \u2192\u88ABT${antecedent.supersededBy.join("/T")}\u63A8\u7FFB` : "";
+    lines.push(
+      `      \u21B3 ${reversalGlyph}T${antecedent.turn.promptNumber} ${typeEmoji(antecedent.turn.type)} G${antecedent.effGrade} ${label}${backLink}`
+    );
+  }
+  const foldedPulled = unit.pulled.length - trim.pulledShown;
+  if (foldedPulled > 0) {
+    lines.push(`      \u21B3 +${foldedPulled} \u524D\u4EF6`);
+  }
+  return lines;
+}
+function unitTokens(unit, trim, titleCap, signal) {
+  return estimateDiaryTokens(renderUnitLines(unit, trim, titleCap, signal).join("\n"));
+}
+function largestFittingTokens(unit, trim, titleCap, cap, apply, signal) {
+  let low = 0;
+  let high = cap;
+  let best = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    apply(mid);
+    if (unitTokens(unit, trim, titleCap, signal) <= cap) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  apply(best < 0 ? 0 : best);
+  return best;
+}
+function fitUnitTrim(unit, titleCap, cap, base, signal) {
+  const trim = { ...base };
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
+    return trim;
+  }
+  if (trim.showDesc && milestoneDescText(unit.milestone.turn) !== "") {
+    const best = largestFittingTokens(
+      unit,
+      trim,
+      titleCap,
+      cap,
+      (value) => {
+        trim.descTokens = value;
+      },
+      signal
+    );
+    if (best <= 0) {
+      trim.showDesc = false;
+      trim.descTokens = null;
+    } else {
+      return trim;
+    }
+  }
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
+    return trim;
+  }
+  while (trim.pulledShown > 0 && unitTokens(unit, trim, titleCap, signal) > cap) {
+    trim.pulledShown -= 1;
+  }
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
+    return trim;
+  }
+  trim.showFiles = false;
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
+    return trim;
+  }
+  if (trim.pulledShown > 0) {
+    largestFittingTokens(
+      unit,
+      trim,
+      titleCap,
+      cap,
+      (value) => {
+        trim.pulledTitleTokens = value;
+      },
+      signal
+    );
+    if (unitTokens(unit, trim, titleCap, signal) <= cap) {
+      return trim;
+    }
+  }
+  largestFittingTokens(
+    unit,
+    trim,
+    titleCap,
+    cap,
+    (value) => {
+      trim.titleTokens = value;
+    },
+    signal
+  );
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
+    return trim;
+  }
+  largestFittingTokens(
+    unit,
+    trim,
+    titleCap,
+    cap,
+    (value) => {
+      trim.promptTokens = value;
+    },
+    signal
+  );
+  return trim;
+}
+function renderUnitFitted(unit, titleCap, descOff, signal) {
+  const base = initialUnitTrim(unit);
+  if (descOff) {
+    base.showDesc = false;
+  }
+  const trim = fitUnitTrim(unit, titleCap, MILESTONE_UNIT_TOKEN_CAP, base, signal);
+  const lines = renderUnitLines(unit, trim, titleCap, signal);
+  if (estimateDiaryTokens(lines.join("\n")) <= MILESTONE_UNIT_TOKEN_CAP) {
+    return lines;
+  }
+  return [truncateToTokens(lines[0] ?? "", MILESTONE_UNIT_TOKEN_CAP)];
+}
+var HAN_WEIGHT_TENTHS = 11;
+var OTHER_WEIGHT_TENTHS = 6;
+var NEWLINE_WEIGHT_TENTHS = OTHER_WEIGHT_TENTHS;
+function textWeightTenths(text) {
+  let total = 0;
+  for (const codePoint of text) {
+    total += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? HAN_WEIGHT_TENTHS : OTHER_WEIGHT_TENTHS;
+  }
+  return total;
+}
+function tokensFromWeightTenths(tenths) {
+  return Math.ceil(tenths * 12 / 100);
+}
+function createMilestoneBodyModel(view, titleCap, signal) {
+  const pagedPrompts = new Set(
+    view.pagedMilestones.map((milestone) => milestone.turn.promptNumber)
+  );
+  const milestoneByPrompt = new Map(
+    view.pagedMilestones.map((milestone) => [milestone.turn.promptNumber, milestone])
+  );
+  const mainRowTurnIds = new Set(
+    view.pagedMilestones.map((milestone) => milestone.turn.id)
+  );
+  const pullable = view.milestonePulled.filter(
+    (antecedent) => !mainRowTurnIds.has(antecedent.turn.id)
+  );
+  const pullOrder = new Map(
+    pullable.map((antecedent, index) => [antecedent, index])
+  );
+  const antecedentDates = new Map(
+    pullable.map(
+      (antecedent) => [antecedent, formatLocalDate(antecedent.turn.createdAtEpoch)]
+    )
+  );
+  const retainedPrompts = new Set(pagedPrompts);
+  const removed = /* @__PURE__ */ new Set();
+  const descOff = /* @__PURE__ */ new Set();
+  const homedPulled = /* @__PURE__ */ new Map();
+  const unitEntries = /* @__PURE__ */ new Map();
+  const sections = view.milestoneDayGroups.map((group) => ({
+    date: group.date,
+    labelEpoch: group.labelEpoch,
+    group
+  }));
+  const groupedDates = new Set(sections.map((section) => section.date));
+  const syntheticEpochs = /* @__PURE__ */ new Map();
+  for (const antecedent of pullable) {
+    const date5 = antecedentDates.get(antecedent);
+    if (groupedDates.has(date5)) {
+      continue;
+    }
+    const known = syntheticEpochs.get(date5);
+    if (known === void 0 || antecedent.turn.createdAtEpoch < known) {
+      syntheticEpochs.set(date5, antecedent.turn.createdAtEpoch);
+    }
+  }
+  for (const [date5, labelEpoch] of syntheticEpochs) {
+    sections.push({ date: date5, labelEpoch, group: null });
+  }
+  sections.sort((left, right) => left.labelEpoch - right.labelEpoch);
+  const orderedStates = sections.map((section, index) => {
+    const overflow = section.group?.overflow ?? null;
+    return {
+      section,
+      index,
+      rows: section.group === null ? [] : [...section.group.rows],
+      droppedCount: 0,
+      hiddenCount: overflow?.count ?? 0,
+      hiddenLo: overflow?.firstPrompt ?? Number.POSITIVE_INFINITY,
+      hiddenHi: overflow?.lastPrompt ?? Number.NEGATIVE_INFINITY,
+      frameTenths: 0,
+      unitTenths: 0,
+      run: null
+    };
+  });
+  const stateByDate = new Map(
+    orderedStates.map((state) => [state.section.date, state])
+  );
+  const stateOfMilestone = /* @__PURE__ */ new Map();
+  for (const state of orderedStates) {
+    for (const milestone of state.rows) {
+      stateOfMilestone.set(milestone, state);
+    }
+  }
+  let totalTenths = 0;
+  let priced = false;
+  let framed = false;
+  function lineTenths(line) {
+    return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
+  }
+  function unitEntryFor(milestone) {
+    const cached2 = unitEntries.get(milestone);
+    if (cached2 !== void 0) {
+      return cached2;
+    }
+    const pulled = [...homedPulled.get(milestone.turn.promptNumber) ?? []].sort(
+      (left, right) => (pullOrder.get(left) ?? 0) - (pullOrder.get(right) ?? 0)
+    );
+    const lines = renderUnitFitted(
+      { milestone, pulled },
+      titleCap,
+      descOff.has(milestone),
+      signal
+    );
+    const entry = {
+      lines,
+      tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0)
+    };
+    unitEntries.set(milestone, entry);
+    return entry;
+  }
+  function invalidateUnit(milestone) {
+    const previous = unitEntries.get(milestone);
+    unitEntries.delete(milestone);
+    const state = stateOfMilestone.get(milestone);
+    if (!priced || state === void 0 || removed.has(milestone)) {
+      return;
+    }
+    const delta = unitEntryFor(milestone).tenths - (previous?.tenths ?? 0);
+    state.unitTenths += delta;
+    totalTenths += delta;
+  }
+  function linesTenths(lines) {
+    return lines.reduce((sum, line) => sum + lineTenths(line), 0);
+  }
+  function hiddenHint(hidden, promptLo, promptHi) {
+    return `\u2026 +${hidden} more @ within T${promptLo}..T${promptHi}`;
+  }
+  function expandedFrameLines(state) {
+    const group = state.section.group;
+    const header = `\u2500\u2500 ${formatLocalDateWithWeekday(group.labelEpoch)} \xB7 T${group.promptLo}\u2013T${group.promptHi} \xB7 ${group.keptCount - state.droppedCount} kept${group.continued ? " (cont.)" : ""} \u2500\u2500`;
+    if (state.hiddenCount === 0) {
+      return [header];
+    }
+    return [
+      header,
+      `        ${hiddenHint(state.hiddenCount, state.hiddenLo, state.hiddenHi)}`
+    ];
+  }
+  function runLines(run) {
+    if (run.hidden === 0) {
+      return [];
+    }
+    const from = formatLocalDateWithWeekday(run.first.section.labelEpoch);
+    const to = formatLocalDateWithWeekday(run.last.section.labelEpoch);
+    const span = run.first === run.last ? from : `${from}\u2013${to}`;
+    return [
+      `\u2500\u2500 ${span} \xB7 0 kept \xB7 ${hiddenHint(run.hidden, run.promptLo, run.promptHi)} \u2500\u2500`
+    ];
+  }
+  function refreshExpandedFrame(state) {
+    const tenths = linesTenths(expandedFrameLines(state));
+    totalTenths += tenths - state.frameTenths;
+    state.frameTenths = tenths;
+  }
+  function priceRun(run) {
+    const tenths = linesTenths(runLines(run));
+    totalTenths += tenths - run.tenths;
+    run.tenths = tenths;
+  }
+  function collapseState(state) {
+    totalTenths -= state.frameTenths;
+    state.frameTenths = 0;
+    const left = state.index > 0 ? orderedStates[state.index - 1].run : null;
+    const right = state.index + 1 < orderedStates.length ? orderedStates[state.index + 1].run : null;
+    const absorbed = [];
+    let run;
+    if (left === null && right === null) {
+      run = {
+        members: [],
+        first: state,
+        last: state,
+        hidden: 0,
+        promptLo: Number.POSITIVE_INFINITY,
+        promptHi: Number.NEGATIVE_INFINITY,
+        tenths: 0
+      };
+    } else if (left !== null && right !== null) {
+      run = left.members.length >= right.members.length ? left : right;
+      absorbed.push(run === left ? right : left);
+    } else {
+      run = left ?? right;
+    }
+    run.members.push(state);
+    state.run = run;
+    for (const other of absorbed) {
+      totalTenths -= other.tenths;
+      for (const member of other.members) {
+        member.run = run;
+        run.members.push(member);
+      }
+      run.hidden += other.hidden;
+      run.promptLo = Math.min(run.promptLo, other.promptLo);
+      run.promptHi = Math.max(run.promptHi, other.promptHi);
+      if (other.first.index < run.first.index) {
+        run.first = other.first;
+      }
+      if (other.last.index > run.last.index) {
+        run.last = other.last;
+      }
+    }
+    run.hidden += state.hiddenCount;
+    run.promptLo = Math.min(run.promptLo, state.hiddenLo);
+    run.promptHi = Math.max(run.promptHi, state.hiddenHi);
+    if (state.index < run.first.index) {
+      run.first = state;
+    }
+    if (state.index > run.last.index) {
+      run.last = state;
+    }
+    priceRun(run);
+  }
+  function noteHidden(state, promptNumber) {
+    state.hiddenCount += 1;
+    state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
+    state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
+    if (!framed) {
+      return;
+    }
+    const { run } = state;
+    if (run === null) {
+      refreshExpandedFrame(state);
+      return;
+    }
+    run.hidden += 1;
+    run.promptLo = Math.min(run.promptLo, promptNumber);
+    run.promptHi = Math.max(run.promptHi, promptNumber);
+    priceRun(run);
+  }
+  function homeAntecedent(antecedent) {
+    const home = antecedent.citerPromptNumbers.find(
+      (promptNumber) => retainedPrompts.has(promptNumber)
+    );
+    if (home !== void 0) {
+      homedPulled.set(home, [...homedPulled.get(home) ?? [], antecedent]);
+      const host = milestoneByPrompt.get(home);
+      if (host !== void 0) {
+        invalidateUnit(host);
+      }
+      return;
+    }
+    if (!antecedent.citerPromptNumbers.some((promptNumber) => pagedPrompts.has(promptNumber))) {
+      return;
+    }
+    const state = stateByDate.get(antecedentDates.get(antecedent));
+    if (state === void 0) {
+      return;
+    }
+    noteHidden(state, antecedent.turn.promptNumber);
+  }
+  for (const antecedent of pullable) {
+    homeAntecedent(antecedent);
+  }
+  for (const state of orderedStates) {
+    state.unitTenths = state.rows.reduce(
+      (sum, milestone) => sum + unitEntryFor(milestone).tenths,
+      0
+    );
+    totalTenths += state.unitTenths;
+  }
+  priced = true;
+  for (const state of orderedStates) {
+    if (state.rows.length === 0) {
+      collapseState(state);
+    } else {
+      refreshExpandedFrame(state);
+    }
+  }
+  framed = true;
+  totalTenths += NEWLINE_WEIGHT_TENTHS;
+  return {
+    disableDesc(milestone) {
+      if (descOff.has(milestone) || removed.has(milestone)) {
+        return;
+      }
+      descOff.add(milestone);
+      invalidateUnit(milestone);
+    },
+    removeUnit(milestone) {
+      if (removed.has(milestone)) {
+        return;
+      }
+      const promptNumber = milestone.turn.promptNumber;
+      removed.add(milestone);
+      retainedPrompts.delete(promptNumber);
+      const state = stateOfMilestone.get(milestone);
+      if (state !== void 0) {
+        const entry = unitEntryFor(milestone);
+        state.unitTenths -= entry.tenths;
+        totalTenths -= entry.tenths;
+        state.rows = state.rows.filter((row) => row !== milestone);
+        state.droppedCount += 1;
+        state.hiddenCount += 1;
+        state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
+        state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
+        if (state.rows.length === 0) {
+          collapseState(state);
+        } else {
+          refreshExpandedFrame(state);
+        }
+      }
+      unitEntries.delete(milestone);
+      const orphaned = homedPulled.get(promptNumber) ?? [];
+      homedPulled.delete(promptNumber);
+      for (const antecedent of orphaned) {
+        homeAntecedent(antecedent);
+      }
+    },
+    weightTenths() {
+      return totalTenths;
+    },
+    lines() {
+      const out = [""];
+      for (const state of orderedStates) {
+        if (state.rows.length === 0) {
+          const { run } = state;
+          if (run !== null && run.first === state) {
+            out.push(...runLines(run));
+          }
+          continue;
+        }
+        const frame = expandedFrameLines(state);
+        out.push(frame[0]);
+        for (const milestone of state.rows) {
+          out.push(...unitEntryFor(milestone).lines);
+        }
+        if (frame[1] !== void 0) {
+          out.push(frame[1]);
+        }
+      }
+      return out;
+    },
+    hasHiddenTurns() {
+      return orderedStates.some((state) => state.hiddenCount > 0);
+    }
+  };
+}
+function renderMilestoneBody(view, titleCap, signal) {
+  if (view.milestoneDayGroups.length === 0) {
+    return { lines: [], hiddenTurns: false };
+  }
+  const body = createMilestoneBodyModel(view, titleCap, signal);
+  return { lines: body.lines(), hiddenTurns: body.hasHiddenTurns() };
+}
+function milestoneDegradationOrder(view) {
+  return [...view.pagedMilestones].sort(compareMilestoneRank).reverse();
+}
+function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightTenths, measure, signal) {
+  const body = createMilestoneBodyModel(view, titleCap, signal);
+  const fits = () => tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget && measure(body.lines(), body.hasHiddenTurns()) <= tokenBudget;
+  const result = () => ({
+    lines: body.lines(),
+    hiddenTurns: body.hasHiddenTurns()
+  });
+  if (fits()) {
+    return result();
+  }
+  for (const milestone of milestoneDegradationOrder(view)) {
+    body.disableDesc(milestone);
+    if (fits()) {
+      return result();
+    }
+  }
+  for (const milestone of milestoneDegradationOrder(view)) {
+    if (milestone.alwaysKeep) {
+      continue;
+    }
+    body.removeUnit(milestone);
+    if (fits()) {
+      return result();
+    }
+  }
+  return { lines: [...body.lines(), MILESTONE_OVER_BUDGET_NOTE], hiddenTurns: body.hasHiddenTurns() };
+}
+function renderTurnRows(view, renderedTurns, promptCap, titleCap, signal) {
+  if (renderedTurns.length === 0) {
+    return [];
+  }
+  const brokenPromptCandidates = /* @__PURE__ */ new Set();
+  for (const pair of view.windowSignals.brokenPromptPairs) {
+    brokenPromptCandidates.add(pair.first);
+    brokenPromptCandidates.add(pair.second);
+  }
+  const previousEpochByPrompt = computePreviousEpochByPrompt(view.windowTurns);
+  const lines = [
+    "",
+    TURN_TABLE_HEADER
+  ];
+  let previousRenderedEpoch = null;
+  for (let index = 0; index < renderedTurns.length; index += 1) {
+    const { turn, marker } = renderedTurns[index];
+    if (previousRenderedEpoch !== null && !sameLocalDate(previousRenderedEpoch, turn.createdAtEpoch)) {
+      lines.push(renderDayDivider(turn.createdAtEpoch, previousRenderedEpoch));
+    }
+    lines.push(
+      renderTurnRow(
+        turn,
+        previousEpochByPrompt.get(turn.promptNumber) ?? null,
+        brokenPromptCandidates.has(turn.promptNumber),
+        promptCap,
+        titleCap,
+        view.turnEffGrades.get(turn.id),
+        marker,
+        signal
+      )
+    );
+    previousRenderedEpoch = turn.createdAtEpoch;
+  }
+  return lines;
+}
+function computePreviousEpochByPrompt(turns) {
+  const out = /* @__PURE__ */ new Map();
+  let previous = null;
+  for (const turn of sortTurnsForAnalysis(turns)) {
+    out.set(turn.promptNumber, previous);
+    previous = turn.createdAtEpoch;
+  }
+  return out;
+}
+function renderDayDivider(currentEpoch, previousRenderedEpoch) {
+  return `\u2500\u2500 ${formatLocalDateWithWeekday(currentEpoch)} \xB7 ${formatGap(currentEpoch, previousRenderedEpoch)} idle \u2500\u2500`;
+}
+function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, titleCap, effGrade, marker = null, signal) {
+  const isUndone = turn.status === "undone";
+  const isCompactMarker = turn.type.includes("compact");
+  const compactMetadata = isCompactMarker ? getCompactMetadata(turn.tags) : null;
+  const gapSuffix = isBrokenPromptCandidate ? " \u203B" : "";
+  const sourceBadges = extractSourceTags(turn.tags).map((source) => `[ext:${source}]`).join(" ");
+  const promptCore = isCompactMarker ? "/compact" : cleanPromptForLabel(turn.userPrompt);
+  const promptWithBadges = isCompactMarker ? promptCore : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
+  const promptText = sanitizeTimelineField(
+    truncateText(promptWithBadges, { limit: promptCap, signal })
+  );
+  const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
+  const statusPrefix = isUndone ? "\u2A2F " : "";
+  const titleText = sanitizeTimelineField(
+    renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker, signal)
+  );
+  return [
+    `${statusPrefix}T${turn.promptNumber}`,
+    formatTranscriptLineAnchor(turn.transcriptLineStart),
+    formatLocalTime(turn.createdAtEpoch),
+    `${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`,
+    renderStats(turn),
+    // Grade column (spec §D): the arc view and the turn table print the same
+    // effGrade, so "how important" is read off the row instead of inferred from
+    // the type icon. `—` is a turn with no main-row candidacy (a compact marker).
+    effGrade === void 0 ? MISSING_GRADE_CELL : `G${effGrade}`,
+    `${renderedPrompt} \u2192 ${titleText}`
+  ].join(" | ");
+}
+function renderStats(turn) {
+  const stats = [];
+  const toolCallCount = turn.toolCallCount ?? 0;
+  if (toolCallCount > 0) {
+    stats.push(`\u{1F527}${toolCallCount}`);
+  }
+  if (turn.filesRead.length > 0) {
+    stats.push(`\u{1F4D6}${turn.filesRead.length}`);
+  }
+  if (turn.filesModified.length > 0) {
+    stats.push(`\u270F\uFE0F${turn.filesModified.length}`);
+  }
+  return stats.length > 0 ? stats.join(" ") : "\u2014";
+}
+function typeGlyph(type) {
+  return typeListGlyph(type);
+}
+function renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker = null, signal) {
+  const markerPrefix = marker ? `${marker} ` : "";
+  if (turn.type.includes("compact")) {
+    const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
+    const trigger = compactMetadata?.trigger ?? "manual";
+    return `${markerPrefix}${COMPACT_TYPE_GLYPH} /compact ${preTokens} tokens, ${trigger}`;
+  }
+  if (isUndone) {
+    if (turn.title !== null) {
+      const body = `${typeGlyph(turn.type)} ${truncateText(turn.title, { limit: titleCap, signal })}`;
+      return `${markerPrefix}~~${body}~~`;
+    }
+    return `${markerPrefix}\u2A2F`.trim();
+  }
+  if (turn.status === "extracted" && turn.title !== null) {
+    return `${markerPrefix}${typeGlyph(turn.type)} ${truncateText(turn.title, { limit: titleCap, signal })}`;
+  }
+  return `${markerPrefix}\u23F3`.trim();
+}
+function sanitizeTimelineField(value) {
+  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
+}
+function isTimelineLiveTurn(turn) {
+  return turn.status !== "undone" && turn.status !== "skipped";
+}
+function renderShapeSignals(view) {
+  const windowLabel = view.window.startPromptNumber === view.firstPromptNumber && view.window.endPromptNumber === view.lastPromptNumber ? " = full session" : "";
+  const lines = [
+    "",
+    `  shape signals (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}${windowLabel}):`
+  ];
+  if (view.windowSignals.fastestGap !== null) {
+    lines.push(
+      `    - fastest gap:   after T${view.windowSignals.fastestGap.afterPromptNumber} (+${formatDuration(view.windowSignals.fastestGap.ms)})`
+    );
+  }
+  if (view.windowSignals.longestGap !== null) {
+    lines.push(
+      `    - longest gap:   after T${view.windowSignals.longestGap.afterPromptNumber} (+${formatDuration(view.windowSignals.longestGap.ms)})`
+    );
+  }
+  if (view.windowSignals.toolBursts.length > 0) {
+    lines.push(
+      `    - tool bursts:   ${view.windowSignals.toolBursts.map((burst) => `T${burst.promptNumber} \u{1F527}${burst.toolCallCount}`).join(", ")}   [median \u{1F527}${view.windowSignals.toolBurstMedian}, threshold >\u{1F527}${view.windowSignals.toolBurstThreshold}]`
+    );
+  }
+  if (view.windowSignals.brokenPromptPairs.length > 0) {
+    lines.push(
+      `    - broken-prompt: ${view.windowSignals.brokenPromptPairs.map((pair) => `T${pair.first}\u2192T${pair.second}`).join(", ")}`
+    );
+  }
+  if (view.windowSignals.undoneTurns.length > 0) {
+    lines.push(
+      `    - undone turns:  ${view.windowSignals.undoneTurns.map((turn) => `T${turn}`).join(", ")}`
+    );
+  }
+  if (view.windowSignals.externalInputs.length > 0) {
+    lines.push(
+      `    - external inputs: ${view.windowSignals.externalInputs.map((input) => `T${input.promptNumber} [ext:${input.source}]`).join(", ")}`
+    );
+  }
+  const withinWindow = view.compactBoundaries.filter(
+    (boundary) => boundary >= view.window.startPromptNumber && boundary <= view.window.endPromptNumber
+  );
+  const outsideWindow = view.compactBoundaries.filter(
+    (boundary) => !withinWindow.includes(boundary)
+  );
+  if (withinWindow.length > 0 || outsideWindow.length > 0) {
+    lines.push(
+      `    - compact boundary: ${[
+        ...withinWindow.map((boundary) => `after T${boundary} (within window)`),
+        ...outsideWindow.map((boundary) => `after T${boundary} (outside window)`)
+      ].join("; ")}`
+    );
+  }
+  return lines;
+}
+function renderEarlierHint(view, options = {}) {
+  if (!options.showEarlierHint || !view.hasEarlier) {
+    return [];
+  }
+  const upperBound = view.view === "milestones" && view.pagedMilestones.length > 0 ? view.pagedMilestones[0].turn.promptNumber - 1 : view.window.startPromptNumber - 1;
+  return [
+    "",
+    `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${upperBound}") or recall(id="S${view.session.id}")`
+  ];
+}
+function renderLineagePointer(view) {
+  if (view.session.parentSessionId === null) {
+    return [];
+  }
+  return [
+    "",
+    `  earlier: recall(id="S${view.session.parentSessionId}")`
+  ];
+}
+function withLegacyEraHeader(view, bodyLines, hasSpine) {
+  if (!hasSpine || bodyLines.length === 0) {
+    return bodyLines;
+  }
+  const legacyPrompts = view.windowTurns.filter((turn) => !isSegmentEra(turn.createdAtEpoch, view.eraCutoffEpoch)).map((turn) => turn.promptNumber);
+  const header = legacyEraHeader(
+    legacyPrompts.length > 0 ? Math.min(...legacyPrompts) : null,
+    legacyPrompts.length > 0 ? Math.max(...legacyPrompts) : null
+  );
+  const [first, ...rest] = bodyLines;
+  return first === "" ? ["", header, ...rest] : [header, ...bodyLines];
+}
+function compareEdgeSignalRank(left, right, signals) {
+  const leftSignal = signals.get(left.turnId);
+  const rightSignal = signals.get(right.turnId);
+  if (leftSignal.encodesCount !== rightSignal.encodesCount) {
+    return rightSignal.encodesCount - leftSignal.encodesCount;
+  }
+  if (leftSignal.refinesExcess.decision !== rightSignal.refinesExcess.decision) {
+    return rightSignal.refinesExcess.decision - leftSignal.refinesExcess.decision;
+  }
+  if (leftSignal.refinesExcess.delivery !== rightSignal.refinesExcess.delivery) {
+    return rightSignal.refinesExcess.delivery - leftSignal.refinesExcess.delivery;
+  }
+  if (left.createdAtEpoch !== right.createdAtEpoch) {
+    return right.createdAtEpoch - left.createdAtEpoch;
+  }
+  return right.turnId - left.turnId;
+}
+function selectSegmentMilestonesByEdgeSignals(db, members, pageSize, taskCausalityEraCutoffEpoch) {
+  const eraEligible = members.filter(
+    (member) => isTaskCausalityEra(member.createdAtEpoch, taskCausalityEraCutoffEpoch)
+  );
+  if (eraEligible.length === 0) {
+    return { kept: [], demotedCount: 0 };
+  }
+  const signals = getTurnEdgeSignals(db, eraEligible.map((member) => member.turnId));
+  const candidates = eraEligible.filter((member) => !signals.get(member.turnId).overridden);
+  const ranked = [...candidates].sort(
+    (left, right) => compareEdgeSignalRank(left, right, signals)
+  );
+  const admitted = new Set(ranked.slice(0, Math.max(0, pageSize)).map((member) => member.turnId));
+  const chronologicalOrdinals = new Map(members.map((member, index) => [member.turnId, index + 1]));
+  const kept = members.filter((member) => admitted.has(member.turnId)).map((member) => ({ member, ordinal: chronologicalOrdinals.get(member.turnId) }));
+  return { kept, demotedCount: candidates.length - kept.length };
+}
+function renderSegmentMilestoneRow(row, titleCap, signal) {
+  const { member, ordinal } = row;
+  const flag = member.isCorrector ? "\u2691 " : "";
+  const glyph = typeEmoji(member.type);
+  const title = sanitizeTimelineField(
+    truncateText(member.title ?? "(untitled)", { limit: titleCap, signal })
+  );
+  const date5 = formatLocalDate(member.createdAtEpoch);
+  const time3 = formatLocalTime(member.createdAtEpoch);
+  return `   ${flag}T${ordinal} ${date5} ${time3} ${glyph} ${title}`.trimEnd();
+}
+function renderMilestoneDemotedPointer(demotedCount) {
+  if (demotedCount <= 0) {
+    return null;
+  }
+  return `   \u2026 +${demotedCount} more`;
+}
+function renderEraMilestoneLines(view, titleCap, signal) {
+  const bySegment = /* @__PURE__ */ new Map();
+  for (const [segmentId, selection] of view.segmentMilestoneSelection) {
+    const lines = selection.kept.map(
+      (row) => renderSegmentMilestoneRow(row, titleCap, signal)
+    );
+    const pointer = renderMilestoneDemotedPointer(selection.demotedCount);
+    if (pointer !== null) {
+      lines.push(pointer);
+      if (signal) {
+        signal.truncated = true;
+      }
+    }
+    if (lines.length > 0) {
+      bySegment.set(segmentId, lines);
+    }
+  }
+  return bySegment;
+}
+function renderTimeline(view, options = {}) {
+  const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
+  const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
+  const signal = createTruncationSignal();
+  const eraMilestoneLines = view.view === "milestones" ? renderEraMilestoneLines(view, titleCap, signal) : /* @__PURE__ */ new Map();
+  let spineLines = view.view === "milestones" ? renderSegmentSpineBlock({
+    spine: view.segmentSpine,
+    orphans: view.orphanAnchors,
+    titleCap,
+    milestoneLinesBySegmentId: eraMilestoneLines
+  }) : [];
+  const assemble = (bodyLines, spineOverride = spineLines) => [
+    ...renderSessionHeader(view),
+    ...spineOverride,
+    ...withLegacyEraHeader(view, bodyLines, spineOverride.length > 0),
+    ...renderShapeSignals(view),
+    ...renderEarlierHint(view, options),
+    ...renderLineagePointer(view)
+  ].join("\n");
+  if (view.view !== "milestones") {
+    return appendNavigationLegend(
+      assemble(renderTurnTable(view, promptCap, titleCap, signal)),
+      { truncated: signal.truncated }
+    );
+  }
+  if (options.tokenBudget === void 0) {
+    const body2 = renderMilestoneBody(view, titleCap, signal);
+    return appendNavigationLegend(assemble(body2.lines), {
+      truncated: body2.hiddenTurns || signal.truncated
+    });
+  }
+  if (spineLines.length > 0) {
+    shedSpineToBudget({
+      view,
+      titleCap,
+      tokenBudget: options.tokenBudget,
+      apply: (candidate) => {
+        spineLines = candidate;
+      },
+      measure: () => estimateDiaryTokens(assemble([])),
+      milestoneLinesBySegmentId: eraMilestoneLines
+    });
+  }
+  const body = fitMilestoneBodyToBudget(
+    view,
+    titleCap,
+    options.tokenBudget,
+    textWeightTenths(assemble([])),
+    (bodyLines, hiddenTurns) => estimateDiaryTokens(
+      appendNavigationLegend(assemble(bodyLines), {
+        truncated: hiddenTurns || signal.truncated
+      })
+    ),
+    signal
+  );
+  return appendNavigationLegend(assemble(body.lines), {
+    truncated: body.hiddenTurns || signal.truncated
+  });
+}
+function shedSpineToBudget(options) {
+  const { view, titleCap, tokenBudget, apply, measure, milestoneLinesBySegmentId } = options;
+  let segments = view.segmentSpine.length;
+  let orphans = view.orphanAnchors.length;
+  while (measure() > tokenBudget && (orphans > 0 || segments > 0)) {
+    if (orphans > 0) {
+      orphans -= 1;
+    } else {
+      segments -= 1;
+    }
+    apply(
+      renderSegmentSpineBlock({
+        spine: view.segmentSpine,
+        orphans: view.orphanAnchors,
+        titleCap,
+        maxSegments: segments,
+        maxOrphans: orphans,
+        milestoneLinesBySegmentId
+      })
+    );
+  }
+}
+function parseSegmentTimelineId(id) {
+  const match = id.trim().match(/^E(\d+)(?:\/T.*)?$/i);
+  if (!match) {
+    return null;
+  }
+  return { segmentId: Number(match[1]) };
+}
+var SEGMENT_TIMELINE_TITLE_CAP = DEFAULT_TITLE_CAP;
+function paginateByTokenBudget(items, page, pageSize, budgetTokens, measure) {
+  const pages = [];
+  let current = [];
+  let used = 0;
+  for (const item of items) {
+    const cost = measure(item);
+    const overflowsCount = current.length >= pageSize;
+    const overflowsBudget = current.length > 0 && used + cost > budgetTokens;
+    if (overflowsCount || overflowsBudget) {
+      pages.push(current);
+      current = [];
+      used = 0;
+    }
+    current.push(item);
+    used += cost;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  const pageCount = pages.length;
+  const clampedPage = Math.min(Math.max(1, page), pageCount);
+  return { items: pages[clampedPage - 1] ?? [], page: clampedPage, pageCount };
+}
+function renderSegmentTurnRow(row, turn, promptCap, titleCap, signal) {
+  const home = `[S${turn.sessionId}/T${turn.promptNumber}]`;
+  const time3 = formatLocalTime(turn.createdAtEpoch);
+  const glyph = typeEmoji(turn.type);
+  const excerpt = sanitizeTimelineField(
+    truncateText(cleanPromptForLabel(turn.userPrompt), { limit: promptCap, signal })
+  );
+  const title = sanitizeTimelineField(
+    truncateText(turn.title ?? "(untitled)", { limit: titleCap, signal })
+  );
+  const head = excerpt !== "" && title !== "" ? `${excerpt} \u2192 ${title}` : `${excerpt}${title}`;
+  return `  T${row.ordinal} ${home} ${time3} ${glyph} ${head}`.trimEnd();
+}
+function buildSegmentTimelineView(db, input) {
+  const segment = getSegment(db, input.segmentId);
+  if (!segment) {
+    throw new Error(`timeline: segment E${input.segmentId} not found`);
+  }
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const viewKind = input.view ?? "turns";
+  const pageBudget = input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET;
+  const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  const rows = members.map((member, index) => ({
+    member,
+    ordinal: index + 1
+  }));
+  let pageMembers = [];
+  let page = Math.max(1, input.page ?? 1);
+  let pageCount = 1;
+  let keptMilestones = [];
+  let demotedCount = 0;
+  if (viewKind === "turns") {
+    const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
+    const withTurns = rows.flatMap((row) => {
+      const turn = getTurnById(db, row.member.turnId);
+      return turn ? [{ row, turn }] : [];
+    });
+    const paged = paginateByTokenBudget(
+      withTurns,
+      page,
+      pageSize,
+      pageBudget,
+      (entry) => estimateDiaryTokens(
+        renderSegmentTurnRow(entry.row, entry.turn, PROMPT_COLUMN_CAP, SEGMENT_TIMELINE_TITLE_CAP)
+      )
+    );
+    pageMembers = paged.items.map((entry) => ({
+      member: entry.row.member,
+      ordinal: entry.row.ordinal,
+      turn: entry.turn
+    }));
+    page = paged.page;
+    pageCount = paged.pageCount;
+  } else {
+    const milestonePageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
+    const selection = selectSegmentMilestonesByEdgeSignals(
+      db,
+      members,
+      milestonePageSize,
+      input.taskCausalityEraCutoffEpoch
+    );
+    keptMilestones = selection.kept;
+    demotedCount = selection.demotedCount;
+  }
+  return {
+    view: viewKind,
+    segment,
+    totalMembers: members.length,
+    pageBudget,
+    titleCap: SEGMENT_TIMELINE_TITLE_CAP,
+    pageMembers,
+    page,
+    pageCount,
+    keptMilestones,
+    demotedCount
+  };
+}
+function renderSegmentTimeline(view) {
+  const signal = createTruncationSignal();
+  const header = [
+    `- [E${view.segment.id}] ${sanitizeTimelineField(
+      truncateText(view.segment.title, { limit: view.titleCap, signal })
+    )}`,
+    `  [${view.segment.status}] \xB7 ${view.totalMembers} ${view.totalMembers === 1 ? "member" : "members"}`
+  ];
+  if (view.view === "turns") {
+    const lines2 = [
+      ...header,
+      "",
+      ...view.pageMembers.map(
+        (entry) => renderSegmentTurnRow(
+          { member: entry.member, ordinal: entry.ordinal },
+          entry.turn,
+          PROMPT_COLUMN_CAP,
+          view.titleCap,
+          signal
+        )
+      )
+    ];
+    if (view.pageCount > 1) {
+      lines2.push("", `  showing: turns \xB7 page ${view.page}/${view.pageCount}`);
+    }
+    return appendNavigationLegend(lines2.join("\n"), { truncated: signal.truncated });
+  }
+  const lines = [
+    ...header,
+    "",
+    ...view.keptMilestones.map(
+      (row) => renderSegmentMilestoneRow(row, view.titleCap, signal)
+    )
+  ];
+  const pointer = renderMilestoneDemotedPointer(view.demotedCount);
+  if (pointer !== null) {
+    lines.push(pointer);
+    signal.truncated = true;
+  }
+  return appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated });
+}
+function recordTimelineReadGrants(db, readerId, now, entries, sequence) {
+  if (!readerId || entries.length === 0) {
+    return;
+  }
+  recordReadGrants(db, readerId, entries, (now ?? (() => Math.floor(Date.now() / 1e3)))(), sequence);
+}
+function timelineQuery(db, input) {
+  const sequence = snapshotWriteGateSequence(db);
+  try {
+    const segmentRoute = parseSegmentTimelineId(input.id);
+    if (segmentRoute !== null) {
+      const view2 = buildSegmentTimelineView(db, {
+        segmentId: segmentRoute.segmentId,
+        view: input.view,
+        page: input.page,
+        pageSize: input.pageSize,
+        pageBudget: input.pageBudget,
+        eraCutoffEpoch: input.eraCutoffEpoch,
+        taskCausalityEraCutoffEpoch: input.taskCausalityEraCutoffEpoch
+      });
+      recordTimelineReadGrants(
+        db,
+        input.readerId,
+        input.now,
+        [
+          { entityType: "segment", entityId: view2.segment.id },
+          ...view2.pageMembers.map((row) => ({ entityType: "turn", entityId: row.turn.id })),
+          ...view2.keptMilestones.map((row) => ({
+            entityType: "turn",
+            entityId: row.member.turnId
+          }))
+        ],
+        sequence
+      );
+      return renderSegmentTimeline(view2);
+    }
+    const view = buildTimelineView(db, input);
+    recordTimelineReadGrants(
+      db,
+      input.readerId,
+      input.now,
+      [
+        { entityType: "session", entityId: view.session.id },
+        ...view.pageTurns.map((turn) => ({ entityType: "turn", entityId: turn.id })),
+        ...view.pagedMilestones.map((row) => ({ entityType: "turn", entityId: row.turn.id }))
+      ],
+      sequence
+    );
+    return renderTimeline(view, { pageBudget: input.pageBudget });
+  } catch (error48) {
+    const message = error48 instanceof Error ? error48.message : String(error48);
+    return `timeline error: ${message}`;
+  }
+}
+
+// src/shared/memory-rubric.ts
+var import_node_crypto2 = require("node:crypto");
+var MEMORY_RUBRIC_VERSION = "v3";
+var MEMORY_RUBRIC_TEXT = `# Memory Rubric v3
+
+## type
+- \u8BCD\u8868,\u6BCF\u8BCD\u4E00\u4E49:
+  - discuss \u2014 \u63A2\u8BA8\u95EE\u9898\u4E0E\u65B9\u6848,\u4EA7\u751F\u7406\u89E3\u4F46\u672A\u843D\u88C1\u51B3;\u503E\u5411/\u6682\u5B9A\u800C\u672A\u627F\u8BFA,\u4ECD\u662F discuss
+  - research \u2014 \u67E5\u5916\u90E8\u8D44\u6599/\u6E90\u7801/\u6587\u732E,\u4EA7\u51FA\u300C\u4E16\u754C/\u4EE3\u7801\u73B0\u72B6\u662F\u4EC0\u4E48\u300D\u7684\u4E8B\u5B9E
+  - measure \u2014 \u672C\u8F6E\u8DD1\u51FA\u7684\u53EF\u590D\u6838\u7ED3\u679C:\u5B9E\u9A8C\u3001\u7EDF\u8BA1\u3001\u67E5\u6570
+  - design \u2014 \u505A\u51FA\u6216\u4FEE\u8BA2\u4E00\u4E2A\u6B64\u540E\u8981\u9075\u5B88\u7684\u627F\u8BFA:\u673A\u5236\u3001\u5951\u7EA6\u3001\u9608\u503C
+  - correction \u2014 \u7EA0\u6B63\u6B64\u524D\u9519\u8BEF\u7684\u7ED3\u8BBA\u6216\u65B9\u5411;\u9519\u7684\u662F\u5224\u65AD(\u4EE3\u7801\u7F3A\u9677\u5F52 fix;\u5B9E\u73B0\u504F\u79BB\u8BBE\u8BA1\u800C\u6539\u7801 = correction+fix)
+  - implement \u2014 \u628A\u5DF2\u5B9A\u8BBE\u8BA1\u5199\u6210\u65B0\u5DE5\u4EF6:\u4EE3\u7801\u3001\u6587\u6863\u3001\u6D4B\u8BD5
+  - refactor \u2014 \u51CF\u6CD5\u4E0E\u91CD\u6574:\u5220\u9664\u80FD\u529B\u3001\u8FC1\u79FB\u5F62\u6001,\u4E0D\u65B0\u589E\u884C\u4E3A\u627F\u8BFA(\u987A\u624B\u4FEE\u7F3A\u9677 = refactor+fix)
+  - fix \u2014 \u4FEE\u590D\u7F3A\u9677,\u8BA9\u65E2\u6709\u627F\u8BFA\u91CD\u65B0\u6210\u7ACB
+  - delegate \u2014 \u6D3E\u5DE5\u7ED9 subagent \u6216\u5916\u90E8\u6267\u884C\u8005(\u540C\u8F6E\u9A8C\u6536\u8FD4\u56DE = delegate+review)
+  - review \u2014 \u6838\u67E5\u5DE5\u4F5C\u4EA7\u7269\u662F\u5426\u8FBE\u6807;\u4EC5\u5F53\u5426\u5B9A\u4E86\u65E2\u6709\u8BBE\u8BA1\u88C1\u51B3\u624D +design/correction
+  - ops \u2014 \u4EA4\u4ED8(\u53D1\u5E03/\u63D0\u4EA4/\u53D1 spec/\u5F00\u7968)\u4E0E\u8FD0\u7EF4(\u63A2\u6D3B/\u91CD\u542F/\u4FEE\u6570\u636E);\u7EAF\u8F6C\u5199 spec = ops,\u517C\u6709\u65B0\u88C1\u51B3 = design+ops
+- \u9636\u6BB5:\u53D6\u8BC1 = research/measure \xB7 \u51B3\u7B56 = design/discuss/correction \xB7 \u843D\u5730 = \u5176\u4F59
+- \u8DE8\u9636\u6BB5\u52A8\u6447\u5FC5\u987B\u53CC type;\u591A type \u7684\u9636\u6BB5\u662F\u96C6\u5408,\u5B58\u5728\u5408\u6CD5\u5BF9\u5373\u53EF\u5199\u8FB9
+- \u6CA1\u6709\u8BCD\u9002\u914D\u5C31\u7559\u7A7A,\u4E0D\u786C\u8D34
+
+## tags
+- \u540D\u8BCD,\u547D\u540D\u7269:\u9879\u76EE\u4F18\u5148,\u518D\u5B50\u7CFB\u7EDF/\u5DE5\u4EF6;\u6D3B\u52A8\u8BCD\u5C5E type
+- \u5C0F\u5199\u8FDE\u5B57\u7B26;\u4F18\u5148\u590D\u7528\u65E2\u6709 tag;\u53D1\u73B0\u540C\u4E49\u5206\u88C2,\u5F52\u5E76\u5230\u5148\u5230\u7684\u8BCD
+
+## \u5173\u7CFB(turn\u2192turn;\u4ECE\u5F15\u7528\u65B9\u8BB0\u5411\u88AB\u5F15\u65B9)
+\u6BCF\u4E2A\u5B8C\u7ED3 turn \u8FC7\u4E09\u6B65:
+1. \u6709\u76F4\u63A5\u524D\u9A71\u5417?\u524D\u9A71 = \u76F4\u63A5\u5F15\u8D77\u8FD9\u4E00\u8F6E\u7684\u8282\u70B9;\u8DF3\u7EA7\u6307\u5411\u5F27\u8D77\u70B9\u662F\u9519\u6807\u3002
+   \u6CA1\u6709 \u2192 \u5B64\u513F\u4EC5\u4E24\u7C7B\u5408\u6CD5:\u672A\u66FE\u8BBE\u60F3\u7684\u5B50\u4EFB\u52A1\u8D77\u70B9 / \u65E0\u51B3\u7B56\u95F2\u6742;\u4E0D\u4E3A\u6D88\u706D\u5B64\u513F\u7F16\u8FB9\u3002
+2. \u6709 \u2192 \u54EA\u6761\u5173\u7CFB?\u5224\u522B\u95EE\u53E5,\u5148\u4E2D\u5148\u5F97:
+   \u2460 \u6211\u68C0\u9A8C\u4E86\u90A3\u6761\u4E3B\u5F20? \u2192 evidence-for / evidence-against
+   \u2461 \u6211\u7684\u51B3\u7B56\u9760\u90A3\u4E2A\u53D1\u73B0\u7ACB\u8DB3(\u5B83\u5047\u5219\u6211\u584C)? \u2192 grounded-on
+   \u2462 \u88AB\u5F15\u7ED3\u8BBA\u6574\u4F53\u662F\u9519\u7684? \u2192 override;\u53EA\u662F\u7EE7\u7EED\u6216\u6539\u5176\u4E2D\u4E00\u6BB5? \u2192 refines
+   \u2463 \u672C\u8F6E\u5DE5\u4EF6\u627F\u8F7D\u90A3\u6761\u51B3\u7B56? \u2192 encodes,\u53EA\u70B9\u540D\u53EF\u63A8\u51FA\u6700\u7EC8\u7ED3\u8BBA\u7684\u6700\u5C0F\u96C6
+   \u2464 \u7EAF\u5DE5\u5E8F\u56E0\u679C,\u65E0\u51B3\u7B56\u5185\u5BB9? \u2192 depends-on
+   \u2465 \u90FD\u4E0D\u662F \u2192 \u4E0D\u8BB0
+3. \u88AB\u62D2?\u5408\u6CD5\u6027\u7531\u6821\u9A8C\u5668\u673A\u5668\u68C0\u67E5,\u62D2\u7EDD\u4FE1\u606F\u8BF4\u660E\u7F3A\u54EA\u4E00\u534A \u2192 \u8865\u8DB3\u6700\u5C0F\u7F3A\u5931\u7684 type,\u6216\u6539\u5224\u5173\u7CFB\u3002
+- override/encodes \u662F\u8F6F\u65AD\u8A00:\u62FF\u4E0D\u51C6 override,\u7528 refines\u3002
+
+## \u5F52\u5C5E
+- turn \u5C5E\u4E8E\u5176\u5185\u5BB9\u670D\u52A1\u7684\u4EFB\u52A1\u6BB5,\u81F3\u591A\u4E00\u4E2A;\u95F2\u6742\u65E0\u5F52\u5C5E\u662F\u5408\u6CD5\u72B6\u6001
+- (\u7ED3\u7B97\u4FA7)\u503C\u57DF = \u8BE5\u4F1A\u8BDD\u5DF2\u6302\u9760\u6BB5 \u222A \u65E0\u5F52\u5C5E;\u53EA\u7EA0\u663E\u6027\u5931\u914D,\u5B58\u7591\u4E0D\u52A8
+  - \u6B63\u4F8B:turn \u901A\u7BC7\u4FEE\u6539 A \u6BB5\u7684\u6A21\u5757,\u5374\u6302\u5728 B \u6BB5 \u2192 \u6539\u6D3E A
+  - \u53CD\u4F8B:\u6807\u9898\u4E0E A \u6BB5\u76F8\u5173,\u4F46\u5185\u5BB9\u770B\u4E0D\u51FA\u670D\u52A1\u5B83 \u2192 \u4E0D\u52A8
+
+## \u5EFA\u6BB5
+- \u7410\u788E\u3001\u77ED\u65F6\u95F2\u804A\u7B49\u7EC4\u4E0D\u6210\u53EF\u547D\u540D\u5DE5\u4F5C\u6D41\u7684 turn \u65E0\u987B\u5EFA\u6BB5;\u65E0\u5F52\u5C5E\u662F\u5408\u6CD5\u72B6\u6001
+- \u9700\u8981\u5EFA\u6BB5\u65F6,\u5148\u67E5 roster \u6709\u65E0\u5408\u9002\u7684\u5DF2\u6709\u6BB5\u2014\u2014\u6302\u9760\u4F18\u5148\u4E8E\u65B0\u5EFA
+- \u65E0\u5408\u9002\u6BB5\u624D\u65B0\u5EFA;\u4EE5\u4EFB\u52A1\u5B9E\u9645\u5F62\u72B6\u547D\u540D,\u5F00\u573A\u81C6\u6D4B\u7684\u540D\u5B57\u4F1A\u951A\u5B9A\u9519\u8BEF
+`;
+function computeHash(text) {
+  return (0, import_node_crypto2.createHash)("sha256").update(text, "utf8").digest("hex").slice(0, 12);
+}
+var MEMORY_RUBRIC_HASH = computeHash(MEMORY_RUBRIC_TEXT);
+var MEMORY_RUBRIC_OPEN_TAG = `<mnemo-memory-rubric version="${MEMORY_RUBRIC_VERSION}" hash="${MEMORY_RUBRIC_HASH}">`;
+var MEMORY_RUBRIC_CLOSE_TAG = "</mnemo-memory-rubric>";
+function renderMemoryRubricBlock() {
+  return `${MEMORY_RUBRIC_OPEN_TAG}
+${MEMORY_RUBRIC_TEXT}${MEMORY_RUBRIC_CLOSE_TAG}`;
+}
+
+// src/hooks/session-composition.ts
+var MAX_INJECTED_BLOCK_CHARS = 9500;
+var SEGMENT_BLOCK_DEMOTE_BUDGETS = [2e3, 1e3, 500];
+var HARD_TRUNCATION_MARKER = "\n\n\u2026 [block truncated to fit the SessionStart size limit]";
+function enforceHardCharLimit(text, limit = MAX_INJECTED_BLOCK_CHARS) {
+  if (text.length <= limit) {
+    return text;
+  }
+  const budget = Math.max(0, limit - HARD_TRUNCATION_MARKER.length);
+  return `${text.slice(0, budget)}${HARD_TRUNCATION_MARKER}`;
+}
+var ATTACHED_SEGMENT_BLOCK_SLOTS = 3;
+function readerOutputAtBudget(db, kind, segmentId, eraCutoffEpoch, pageBudget, readerId) {
+  if (kind === "fields") {
+    return recallMemory(db, {
+      id: `E${segmentId}`,
+      pageBudget,
+      eraCutoffEpoch,
+      readerId
+    });
+  }
+  return timelineQuery(db, {
+    id: `E${segmentId}`,
+    view: "milestones",
+    pageBudget,
+    eraCutoffEpoch,
+    readerId
+  });
+}
+function segmentBlockHeader(segmentId, kind) {
+  return `[E${segmentId}] \xB7 ${kind}`;
+}
+function composeWithDemoteLadder(header, render, budgets = SEGMENT_BLOCK_DEMOTE_BUDGETS, limit = MAX_INJECTED_BLOCK_CHARS) {
+  let composed = "";
+  for (const pageBudget of budgets) {
+    composed = `${header}
+${render(pageBudget)}`;
+    if (composed.length < limit) {
+      return composed;
+    }
+  }
+  return enforceHardCharLimit(composed, limit);
+}
+function renderAttachedSegmentBlock(db, kind, segment, eraCutoffEpoch, readerId) {
+  const header = segmentBlockHeader(segment.id, kind);
+  return composeWithDemoteLadder(
+    header,
+    (pageBudget) => readerOutputAtBudget(db, kind, segment.id, eraCutoffEpoch, pageBudget, readerId)
+  );
+}
+function renderSegmentRosterBlock(db, options = {}) {
+  return enforceHardCharLimit(renderSegmentRosterFeed(db, options));
+}
+function renderRubricBlock() {
+  return enforceHardCharLimit(renderMemoryRubricBlock());
+}
+var PROPOSALS_HEADER = "## Proposals";
+var MAX_RENDERED_PROPOSALS = 3;
+var PROPOSAL_ASK_BOILERPLATE = "ask the user before adopting this \u2014 never auto-create";
+function renderProposalLine(proposal) {
+  return `- "${proposal.title}" \u2014 ${proposal.addresses.join(", ")} \u2014 ${PROPOSAL_ASK_BOILERPLATE}`;
+}
+function renderProposalsBlock(db, limit = MAX_RENDERED_PROPOSALS) {
+  const proposals = listRecentSettlementProposals(db, limit);
+  const lines = [PROPOSALS_HEADER];
+  if (proposals.length === 0) {
+    lines.push("(none pending)");
+  } else {
+    for (const proposal of proposals) {
+      lines.push(renderProposalLine(proposal));
+    }
+  }
+  return enforceHardCharLimit(lines.join("\n"));
+}
+
+// src/db/pending-queue.ts
+function enqueueQueueItem(db, input) {
+  const inserted = db.query(
+    `
+        INSERT INTO pending_queue (
+          kind,
+          target_id,
+          session_db_id,
+          enqueued_at_epoch
+        ) VALUES (?, ?, ?, ?)
+        RETURNING
+          seq,
+          kind,
+          target_id AS targetId,
+          session_db_id AS sessionDbId,
+          claimed_at_epoch AS claimedAtEpoch,
+          enqueued_at_epoch AS enqueuedAtEpoch
+      `
+  ).get(
+    input.kind,
+    input.targetId,
+    input.sessionDbId,
+    input.enqueuedAtEpoch
+  );
+  if (!inserted) {
+    throw new Error("Failed to enqueue pending queue item.");
+  }
+  return inserted;
+}
+function queueItemExistsForTurn(db, kind, targetId) {
+  const row = db.query(
+    "SELECT 1 AS one FROM pending_queue WHERE kind = ? AND target_id = ? LIMIT 1"
+  ).get(kind, targetId);
+  return row !== null;
+}
+
+// src/db/recover-stranded.ts
+function recoverStrandedTurns(db, sessionDbId, nowEpoch, eraCutoffEpoch = null) {
+  const stranded = getStrandedTurns(db, sessionDbId);
+  let recovered = 0;
+  for (const turn of stranded) {
+    if (queueItemExistsForTurn(db, "turn-stop", turn.id)) {
+      continue;
+    }
+    if (!isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch)) {
+      resetTurnExtractionFields(db, turn.id, nowEpoch);
+    }
+    enqueueQueueItem(db, {
+      kind: "turn-stop",
+      targetId: turn.id,
+      sessionDbId,
+      enqueuedAtEpoch: nowEpoch
+    });
+    recovered += 1;
+  }
+  return recovered;
+}
+function recoverStrandedAncestors(db, childSessionId, nowEpoch, eraCutoffEpoch = null, maxDepth = 16) {
+  let recovered = 0;
+  const visited = /* @__PURE__ */ new Set([childSessionId]);
+  let current = getSession(db, childSessionId)?.parentSessionId ?? null;
+  let depth = 0;
+  while (current != null && depth < maxDepth && !visited.has(current)) {
+    visited.add(current);
+    recovered += recoverStrandedTurns(db, current, nowEpoch, eraCutoffEpoch);
+    current = getSession(db, current)?.parentSessionId ?? null;
+    depth += 1;
+  }
+  return recovered;
+}
+
 // src/diary/persona-render.ts
-var import_node_path9 = require("node:path");
+var import_node_path8 = require("node:path");
 var PROFILE_INJECTION_TOKEN_BUDGET = 2e3;
-var DIARY_INDEX_INJECTION_TOKEN_BUDGET = 1e3;
-var SESSION_INJECTION_TOKEN_BUDGET = 2e3;
 var sectionPointer = (remainingLines, displayPath) => `\uFF08\u672C\u8282\u8FD8\u6709 ${remainingLines} \u884C\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
 var documentPointer = (remainingLines, displayPath) => `\uFF08\u5176\u4F59 ${remainingLines} \u884C\u7701\u7565\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
 function headingLine(section) {
@@ -5857,7 +12378,7 @@ function renderPersonaDocumentInjection(document, injectionTokenBudget, displayP
     )
   ];
   const alternateTargets = distinctTargets.length > 0 ? `\uFF1B\u53E6\u89C1 ${distinctTargets.join("\u3001")}` : "";
-  return `\uFF08${(0, import_node_path9.basename)(displayPath)} \u8FC7\u5927\uFF0C\u5B8C\u6574\u89C1 ${displayPath}${alternateTargets}\uFF09`;
+  return `\uFF08${(0, import_node_path8.basename)(displayPath)} \u8FC7\u5927\uFF0C\u5B8C\u6574\u89C1 ${displayPath}${alternateTargets}\uFF09`;
 }
 function renderBoundedInjectionBlock(input) {
   for (let documentBudget = input.tokenBudget; documentBudget >= 0; documentBudget -= 1) {
@@ -5881,246 +12402,6 @@ function renderSessionStartPersonaInjection(input) {
     displayPath: input.path,
     tokenBudget: PROFILE_INJECTION_TOKEN_BUDGET
   });
-}
-function renderSessionStartDiaryIndex(input) {
-  return renderPersonaDocumentInjection(
-    sortDiaryIndexRecentFirst(input.diaryIndex),
-    DIARY_INDEX_INJECTION_TOKEN_BUDGET,
-    input.path
-  );
-}
-function renderSessionStartRecentSessionsInjection(input) {
-  const diaryIndex = renderSessionStartDiaryIndex({
-    diaryIndex: input.diaryIndex,
-    path: input.paths.diaryIndex
-  });
-  const separator = input.recentSessions.trim().length > 0 && diaryIndex ? "\n\n" : "";
-  const diaryTokens = estimateDiaryTokens(`${separator}${diaryIndex}`);
-  let recentBudget = Math.max(
-    0,
-    SESSION_INJECTION_TOKEN_BUDGET - diaryTokens
-  );
-  while (recentBudget >= 0) {
-    const recentSessions = input.recentSessions.trim().length > 0 ? renderBoundedInjectionBlock({
-      heading: "## Recent Sessions",
-      document: input.recentSessions,
-      displayPath: input.paths.recentSessions,
-      tokenBudget: recentBudget
-    }) : "";
-    const combined = `${recentSessions}${separator}${diaryIndex}`;
-    if (estimateDiaryTokens(combined) <= SESSION_INJECTION_TOKEN_BUDGET) {
-      return combined;
-    }
-    recentBudget -= 1;
-  }
-  return diaryIndex;
-}
-
-// src/mcp/session-output.ts
-var CURRENT_SESSION_STATE_TOKEN_BUDGET = 2e3;
-function capCodePoints(value, max) {
-  if (!value) {
-    return value;
-  }
-  const codePoints = Array.from(value);
-  return codePoints.length <= max ? value : `${codePoints.slice(0, Math.max(0, max - 1)).join("")}\u2026`;
-}
-function buildSessionStateLines(input, capPriorityFields = false, includeHistoricalFields = true) {
-  const title = (capPriorityFields ? capCodePoints(input.title, 100) : input.title) ?? "(untitled session)";
-  const lines = [
-    `[S${input.id}] ${title}`
-  ];
-  const pushField = (label, value, cap) => {
-    const rendered = capPriorityFields && cap ? capCodePoints(value ?? null, cap) : value;
-    if (rendered) {
-      lines.push(`  ${label}: ${rendered}`);
-    }
-  };
-  const pushBulletField = (label, value) => {
-    const items = splitBulletField(value);
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  ${label}:`);
-    for (const item of items) {
-      lines.push(`    - ${item}`);
-    }
-  };
-  pushField("content", input.content, 400);
-  pushField("next", input.nextSteps, 200);
-  if (!includeHistoricalFields) {
-    return lines;
-  }
-  if (input.decision) {
-    pushBulletField("decision", input.decision);
-  }
-  if ((input.insight?.length ?? 0) > 0) {
-    lines.push("  insight:");
-    for (const item of input.insight ?? []) {
-      lines.push(`    - ${item}`);
-    }
-  }
-  pushBulletField("done", input.done);
-  pushBulletField("reference", input.reference);
-  return lines;
-}
-function renderSessionStateOutput(input) {
-  return buildSessionStateLines(input).join("\n");
-}
-function renderBoundedSessionStateOutput(input, tokenBudget = CURRENT_SESSION_STATE_TOKEN_BUDGET) {
-  const full = renderSessionStateOutput(input);
-  if (estimateDiaryTokens(full) <= tokenBudget) {
-    return full;
-  }
-  const pointer = `  \u2026 state truncated; full summary: recall(id="S${input.id}")`;
-  const uncappedStateLines = buildSessionStateLines(input, false, false);
-  const stateFitsUncapped = estimateDiaryTokens([...uncappedStateLines, pointer].join("\n")) <= tokenBudget;
-  const lines = buildSessionStateLines(input, !stateFitsUncapped);
-  const included = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const candidate = [
-      ...included,
-      lines[index],
-      pointer
-    ].join("\n");
-    if (estimateDiaryTokens(candidate) > tokenBudget) {
-      break;
-    }
-    included.push(lines[index]);
-  }
-  return [...included, pointer].join("\n");
-}
-function renderSessionStateInjection(input, tokenBudget) {
-  return renderBoundedSessionStateOutput(input, tokenBudget);
-}
-
-// src/hooks/session-injection.ts
-function splitInsight(insight) {
-  if (!insight) {
-    return [];
-  }
-  return insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
-}
-function buildCorpusHeader(db, primarySessionId) {
-  const sessionCount = db.query("SELECT COUNT(*) AS count FROM sessions").get()?.count ?? 0;
-  const observationCount = db.query(
-    // Excluded rows (a `note` call's observation) are captured for the raw
-    // axis only; counting them here would tell the reader a hidden call exists.
-    "SELECT COUNT(*) AS count FROM observations WHERE excluded_from_extraction = 0"
-  ).get()?.count ?? 0;
-  return [
-    `claude-mnemo: ${sessionCount} sessions, ${observationCount} observations${primarySessionId ? ` | current: S${primarySessionId}` : ""}`,
-    "Axes: recall (content) \xB7 timeline (temporal) \xB7 mnemo-replay (raw)"
-  ].join("\n");
-}
-var STATE_HEADING_LINES = ["## Current Session", ""];
-function renderMainAgentSessionInjection(db, input) {
-  const header = input.includeCorpusHeader ? buildCorpusHeader(db, input.currentSessionId) : null;
-  if (!input.session) {
-    return header ?? "";
-  }
-  const budget = input.tokenBudget ?? SESSION_INJECTION_TOKEN_BUDGET;
-  const stateTokenBudget = Math.max(
-    0,
-    budget - estimateDiaryTokens([...STATE_HEADING_LINES, ""].join("\n"))
-  );
-  const session = input.session;
-  const globalViewOnly = input.fields === "global-view";
-  const sessionDocument = [
-    ...STATE_HEADING_LINES,
-    renderSessionStateInjection(
-      {
-        id: session.id,
-        title: session.title,
-        content: session.content,
-        insight: splitInsight(session.insight),
-        // The recent-events group, written for the session resuming itself.
-        // A `global-view` reader is a different session looking in, so these
-        // are omitted rather than truncated — see `fields` above.
-        //
-        // Raw storage, not resolved pointers: state injection keeps the
-        // compact `[T<n>]` coordinates a reader can cite straight back.
-        decision: globalViewOnly ? null : session.decision,
-        done: globalViewOnly ? null : session.done,
-        nextSteps: globalViewOnly ? null : session.nextSteps,
-        reference: globalViewOnly ? null : session.reference
-      },
-      stateTokenBudget
-    ),
-    ""
-  ].join("\n");
-  return header ? [header, "", sessionDocument].join("\n") : sessionDocument;
-}
-
-// src/db/pending-queue.ts
-function enqueueQueueItem(db, input) {
-  const inserted = db.query(
-    `
-        INSERT INTO pending_queue (
-          kind,
-          target_id,
-          session_db_id,
-          enqueued_at_epoch
-        ) VALUES (?, ?, ?, ?)
-        RETURNING
-          seq,
-          kind,
-          target_id AS targetId,
-          session_db_id AS sessionDbId,
-          claimed_at_epoch AS claimedAtEpoch,
-          enqueued_at_epoch AS enqueuedAtEpoch
-      `
-  ).get(
-    input.kind,
-    input.targetId,
-    input.sessionDbId,
-    input.enqueuedAtEpoch
-  );
-  if (!inserted) {
-    throw new Error("Failed to enqueue pending queue item.");
-  }
-  return inserted;
-}
-function queueItemExistsForTurn(db, kind, targetId) {
-  const row = db.query(
-    "SELECT 1 AS one FROM pending_queue WHERE kind = ? AND target_id = ? LIMIT 1"
-  ).get(kind, targetId);
-  return row !== null;
-}
-
-// src/db/recover-stranded.ts
-function recoverStrandedTurns(db, sessionDbId, nowEpoch, eraCutoffEpoch = null) {
-  const stranded = getStrandedTurns(db, sessionDbId);
-  let recovered = 0;
-  for (const turn of stranded) {
-    if (queueItemExistsForTurn(db, "turn-stop", turn.id)) {
-      continue;
-    }
-    if (!isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch)) {
-      resetTurnExtractionFields(db, turn.id, nowEpoch);
-    }
-    enqueueQueueItem(db, {
-      kind: "turn-stop",
-      targetId: turn.id,
-      sessionDbId,
-      enqueuedAtEpoch: nowEpoch
-    });
-    recovered += 1;
-  }
-  return recovered;
-}
-function recoverStrandedAncestors(db, childSessionId, nowEpoch, eraCutoffEpoch = null, maxDepth = 16) {
-  let recovered = 0;
-  const visited = /* @__PURE__ */ new Set([childSessionId]);
-  let current = getSession(db, childSessionId)?.parentSessionId ?? null;
-  let depth = 0;
-  while (current != null && depth < maxDepth && !visited.has(current)) {
-    visited.add(current);
-    recovered += recoverStrandedTurns(db, current, nowEpoch, eraCutoffEpoch);
-    current = getSession(db, current)?.parentSessionId ?? null;
-    depth += 1;
-  }
-  return recovered;
 }
 
 // src/db/session-run.ts
@@ -6149,7 +12430,7 @@ function hasNewTurnSinceSessionRunStart(db, sessionDbId) {
 }
 
 // src/db/rules.ts
-var import_node_path10 = require("node:path");
+var import_node_path9 = require("node:path");
 
 // node_modules/zod/v4/classic/external.js
 var external_exports = {};
@@ -20000,7 +26281,7 @@ function validateRule(input) {
     throw new Error("claim must contain at most 300 characters");
   }
   if (input.rationale.length === 0) throw new Error("rationale is required");
-  if (input.scope !== "global" && !(0, import_node_path10.isAbsolute)(input.scope)) {
+  if (input.scope !== "global" && !(0, import_node_path9.isAbsolute)(input.scope)) {
     throw new Error("scope must be global or an absolute project path");
   }
   ruleStatusSchema.parse(input.status);
@@ -20222,7 +26503,7 @@ function createRuleStore(db) {
 }
 
 // src/rules/digest.ts
-var import_node_path11 = require("node:path");
+var import_node_path10 = require("node:path");
 var RULE_DIGEST_TOKEN_BUDGET = 500;
 var STATUS_PRIORITY = {
   confirmed: 0,
@@ -20268,9 +26549,9 @@ function compareRules(left, right) {
   return left.id - right.id;
 }
 function renderRuleDigest(input) {
-  const project = input.project ? (0, import_node_path11.resolve)(input.project) : null;
+  const project = input.project ? (0, import_node_path10.resolve)(input.project) : null;
   const candidates = input.rules.filter(
-    (rule) => ["confirmed", "provisional", "digest_only"].includes(rule.status) && (rule.triggerKind === "none" || rule.status === "digest_only") && (rule.scope === "global" || project !== null && (0, import_node_path11.resolve)(rule.scope) === project)
+    (rule) => ["confirmed", "provisional", "digest_only"].includes(rule.status) && (rule.triggerKind === "none" || rule.status === "digest_only") && (rule.scope === "global" || project !== null && (0, import_node_path10.resolve)(rule.scope) === project)
   ).sort(compareRules);
   if (candidates.length === 0) return "";
   const budget = input.tokenBudget ?? RULE_DIGEST_TOKEN_BUDGET;
@@ -20284,7 +26565,6 @@ function renderRuleDigest(input) {
 }
 
 // src/hooks/handlers/context.ts
-var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
 function hasDocumentBody(document) {
   return parseMarkdownSections(document).some(
     (section) => section.bodyLines.some((line) => line.trim().length > 0)
@@ -20298,7 +26578,7 @@ async function readPersonaContext(memoryStore) {
     }
     return renderSessionStartPersonaInjection({
       userProfile: memory.userProfile,
-      path: (0, import_node_path12.join)(memoryStore.dataRoot, "memory", "user-profile.md")
+      path: (0, import_node_path11.join)(memoryStore.dataRoot, "memory", "user-profile.md")
     });
   } catch {
     return void 0;
@@ -20308,147 +26588,6 @@ function hasSessionRunStart(db, sessionId) {
   return db.query(
     "SELECT 1 AS present FROM session_run_state WHERE session_db_id = ?"
   ).get(sessionId) !== null;
-}
-function resolvePrimarySessionRecord(db, input, recentSessions) {
-  const currentSession = input.sessionId ? getSessionByContentId(db, input.sessionId) : null;
-  return currentSession ?? recentSessions[0] ?? null;
-}
-function buildSessionMetricMap(db, sessionIds) {
-  if (sessionIds.length === 0) {
-    return /* @__PURE__ */ new Map();
-  }
-  const placeholders = sessionIds.map(() => "?").join(", ");
-  const metrics = /* @__PURE__ */ new Map();
-  for (const sessionId of sessionIds) {
-    metrics.set(sessionId, { turnCount: 0, observationCount: 0 });
-  }
-  const turnRows = db.query(
-    `SELECT session_id AS sessionId, COUNT(*) AS count
-       FROM turns
-       WHERE session_id IN (${placeholders})
-       GROUP BY session_id`
-  ).all(...sessionIds);
-  for (const row of turnRows) {
-    const metric = metrics.get(row.sessionId);
-    if (metric) {
-      metric.turnCount = row.count;
-    }
-  }
-  const observationRows = db.query(
-    `SELECT t.session_id AS sessionId, COUNT(*) AS count
-       FROM observations o
-       JOIN turns t ON t.id = o.turn_id
-       WHERE t.session_id IN (${placeholders})
-         AND o.excluded_from_extraction = 0
-       GROUP BY t.session_id`
-  ).all(...sessionIds);
-  for (const row of observationRows) {
-    const metric = metrics.get(row.sessionId);
-    if (metric) {
-      metric.observationCount = row.count;
-    }
-  }
-  return metrics;
-}
-function buildSessionView(db, session, metrics) {
-  return {
-    id: session.id,
-    title: session.title,
-    project: session.project,
-    createdAtEpoch: session.createdAtEpoch,
-    content: session.content,
-    insight: splitInsight(session.insight),
-    nextSteps: session.nextSteps,
-    decision: resolveTurnPointers(db, session.id, session.decision),
-    done: resolveTurnPointers(db, session.id, session.done),
-    reference: session.reference,
-    turnCount: metrics?.turnCount ?? 0,
-    observationCount: metrics?.observationCount ?? 0,
-    jsonlPath: resolveSessionTranscriptPath(session)
-  };
-}
-function classifyTimeGroup(epochSeconds, now) {
-  const target = new Date(epochSeconds * 1e3);
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterdayStart = new Date(todayStart.getTime() - 864e5);
-  const weekStart = new Date(todayStart.getTime() - 6 * 864e5);
-  if (target >= todayStart) {
-    return "Today";
-  }
-  if (target >= yesterdayStart) {
-    return "Yesterday";
-  }
-  if (target >= weekStart) {
-    return "Last 7 days";
-  }
-  return "Earlier";
-}
-function isHuskSession(session, sessionMetrics) {
-  const untitled = !session.title || session.title.trim().length === 0;
-  const turnCount = sessionMetrics.get(session.id)?.turnCount ?? 0;
-  return untitled && turnCount === 0;
-}
-function buildRecentSessionsOutput(db, recentSessions, sessionMetrics, currentSessionId) {
-  const others = recentSessions.filter((session) => session.id !== currentSessionId).filter((session) => !isHuskSession(session, sessionMetrics)).slice(0, 10);
-  if (others.length === 0) {
-    return [];
-  }
-  const now = /* @__PURE__ */ new Date();
-  const lines = [];
-  let currentGroup = "";
-  for (const session of others) {
-    const group = classifyTimeGroup(session.createdAtEpoch, now);
-    if (group !== currentGroup) {
-      currentGroup = group;
-      lines.push(`### ${group}`);
-    }
-    lines.push(
-      renderNode(
-        { type: "session", value: buildSessionView(db, session, sessionMetrics.get(session.id)) },
-        { depth: "collapsed", truncate: 120, mode: "unified" }
-      )
-    );
-  }
-  return lines;
-}
-async function readRecentContext(db, fileStore, input) {
-  try {
-    const recentSessions = getRecentSessions(db, {
-      project: input.cwd ?? void 0,
-      limit: 20
-    });
-    const currentSession = input.sessionId ? getSessionByContentId(db, input.sessionId) : null;
-    const sessionMetrics = buildSessionMetricMap(
-      db,
-      recentSessions.map((session) => session.id)
-    );
-    const recentSessionDocument = buildRecentSessionsOutput(
-      db,
-      recentSessions,
-      sessionMetrics,
-      currentSession?.id
-    ).join("\n");
-    let diaryIndex = "";
-    if (fileStore) {
-      try {
-        diaryIndex = new TextDecoder("utf-8", { fatal: true }).decode(await fileStore.readIndex());
-      } catch {
-      }
-    }
-    if (recentSessionDocument.trim() === "" && !hasDocumentBody(diaryIndex)) {
-      return void 0;
-    }
-    return renderSessionStartRecentSessionsInjection({
-      recentSessions: recentSessionDocument,
-      diaryIndex,
-      paths: {
-        recentSessions: "recall()",
-        diaryIndex: fileStore?.dataRoot ? (0, import_node_path12.join)(fileStore.dataRoot, "diary", "INDEX.md") : "diary/INDEX.md"
-      }
-    });
-  } catch {
-    return void 0;
-  }
 }
 function readRuleDigestContext(db, input) {
   try {
@@ -20490,34 +26629,23 @@ function buildContextOutput(db, input, eraCutoffEpoch) {
       eraCutoffEpoch
     );
   }
-  if (input.source !== "resume" && input.source !== "compact") {
-    return void 0;
-  }
-  const recentSessions = getRecentSessions(db, {
-    project: input.cwd ?? void 0,
-    limit: 20
-  });
-  const primarySessionRecord = resolvePrimarySessionRecord(
-    db,
-    input,
-    recentSessions
-  );
-  if (!primarySessionRecord) {
-    return EMPTY_CONTEXT_FALLBACK;
-  }
-  const sessionIds = Array.from(
-    /* @__PURE__ */ new Set([...recentSessions.map((session) => session.id), primarySessionRecord.id])
-  );
-  const sessionMetrics = buildSessionMetricMap(db, sessionIds);
-  const primaryTurnCount = sessionMetrics.get(primarySessionRecord.id)?.turnCount ?? 0;
-  return renderMainAgentSessionInjection(db, {
-    session: primaryTurnCount > 0 ? primarySessionRecord : null,
-    currentSessionId: input.sessionId ? primarySessionRecord.id : void 0,
-    includeCorpusHeader: true
+  const overflowAttachedSegmentIds = currentSession ? new Set(
+    listAttachedSegmentsByActivity(
+      db,
+      currentSession.id,
+      Number.MAX_SAFE_INTEGER
+    ).slice(ATTACHED_SEGMENT_BLOCK_SLOTS).map((segment) => segment.id)
+  ) : void 0;
+  return renderSegmentRosterBlock(db, {
+    overflowAttachedSegmentIds,
+    readerId: currentSession ? sessionWriterId(currentSession.id) : null
   });
 }
 function createReadOnlyContextHandler(dependencies, section) {
   return async function handleReadOnlyContextHook(_input) {
+    if (section === "rubric") {
+      return { continue: true, hookSpecificOutput: renderRubricBlock() };
+    }
     if (section === "persona") {
       if (!dependencies.memoryStore) {
         return { continue: true };
@@ -20530,16 +26658,8 @@ function createReadOnlyContextHandler(dependencies, section) {
     if (!dependencies.db) {
       return { continue: true };
     }
-    if (section === "digest") {
-      const hookSpecificOutput2 = readRuleDigestContext(
-        dependencies.db,
-        _input
-      );
-      return hookSpecificOutput2 ? { continue: true, hookSpecificOutput: hookSpecificOutput2 } : { continue: true };
-    }
-    const hookSpecificOutput = await readRecentContext(
+    const hookSpecificOutput = readRuleDigestContext(
       dependencies.db,
-      dependencies.fileStore,
       _input
     );
     return hookSpecificOutput ? { continue: true, hookSpecificOutput } : { continue: true };
@@ -20762,69 +26882,6 @@ function listOwedNoteTurns(db, sessionId, currentPromptNumber, options = {}) {
     ...row,
     pendingTurns: currentPromptNumber - row.promptNumber
   }));
-}
-
-// src/db/observations.ts
-var OBSERVATION_COLUMNS = `
-  id,
-  turn_id AS turnId,
-  tool_name AS toolName,
-  tool_input AS toolInput,
-  tool_result AS toolResult,
-  status,
-  title,
-  content,
-  excluded_from_extraction AS excludedFromExtraction,
-  created_at_epoch AS createdAtEpoch
-`;
-var OBSERVATION_SELECT = `
-  SELECT ${OBSERVATION_COLUMNS}
-  FROM observations
-`;
-function mapObservationRow(row) {
-  if (!row) {
-    return null;
-  }
-  return row;
-}
-function createObservation(db, input) {
-  const inserted = db.query(
-    `
-        INSERT INTO observations (
-          turn_id,
-          tool_name,
-          tool_input,
-          tool_result,
-          status,
-          title,
-          content,
-          excluded_from_extraction,
-          created_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING ${OBSERVATION_COLUMNS}
-      `
-  ).get(
-    input.turnId,
-    input.toolName ?? null,
-    input.toolInput ?? null,
-    input.toolResult ?? null,
-    input.status ?? "pending",
-    input.title ?? null,
-    input.content ?? null,
-    input.excludedFromExtraction ? 1 : 0,
-    input.createdAtEpoch
-  );
-  const observation = mapObservationRow(inserted);
-  if (!observation) {
-    throw new Error("Failed to create observation.");
-  }
-  indexObservationToFTS(db, observation);
-  return observation;
-}
-function getExtractableObservationsForTurn(db, turnId) {
-  return db.query(
-    `${OBSERVATION_SELECT} WHERE turn_id = ? AND excluded_from_extraction = 0 ORDER BY id ASC`
-  ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
 }
 
 // src/db/turn-completion.ts
@@ -21069,2893 +27126,47 @@ function createPostToolUseHandler(dependencies) {
   };
 }
 
-// src/db/segment-rank.ts
-var RANK_FACT_COLUMNS = `
-  t.id AS turnId,
-  t.session_id AS sessionId,
-  t.prompt_number AS promptNumber,
-  t.title AS title,
-  t.type AS type,
-  t.status AS status,
-  t.created_at_epoch AS createdAtEpoch,
-  (EXISTS (
-     SELECT 1 FROM memory_edges e
-     WHERE e.citing_kind = 'turn' AND e.citing_id = t.id
-       AND e.relation = 'supersedes'
-   )) AS isCorrector,
-  -- 'rolled-back' left the type vocabulary (ticket 02, spec B4): a reversal is
-  -- knowable only after the fact and is carried by a supersedes edge, never a
-  -- type a turn states about itself. The old scalar comparison against t.type,
-  -- a JSON-array column (spec B5), was therefore permanently false -- already
-  -- inert before the migration, since no legacy turn ever carried a bare
-  -- 'rolled-back' scalar either (it was a settlement-only, segment-only
-  -- value). Ticket 13 moves the test to what spec B4 always pointed at: an
-  -- INBOUND supersedes edge names this turn as another turn's victim, which is
-  -- exactly what "rolled back" means.
-  (EXISTS (
-     SELECT 1 FROM memory_edges e
-     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
-       AND e.relation = 'supersedes'
-   )) AS isRolledBack,
-  (SELECT COUNT(*) FROM (
-     SELECT DISTINCT e.citing_kind, e.citing_id
-     FROM memory_edges e
-     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
-   )) AS citedBy,
-  (EXISTS (
-     SELECT 1 FROM segment_members dm
-     JOIN segments ds ON ds.id = dm.segment_id
-     WHERE dm.turn_id = t.id AND ds.status = 'delivered'
-   )) AS isDeliveryMember,
-  (CASE WHEN json_valid(t.files_modified)
-        THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount
-`;
-function parseTypeList(raw) {
-  if (!raw) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-function mapMemberRankFactsRow(row) {
-  return { ...row, type: parseTypeList(row.type) };
-}
-var DERIVED_RANK_ORDER = `
-  ORDER BY isCorrector DESC,
-           isRolledBack ASC,
-           citedBy DESC,
-           isDeliveryMember DESC,
-           filesModifiedCount DESC,
-           t.created_at_epoch DESC,
-           t.id DESC
-`;
-function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch, windowTurnIds) {
-  if (eraCutoffEpoch === null) {
-    return [];
-  }
-  const memberRows = db.query(
-    `SELECT
-         sm.segment_id AS segmentId,
-         t.id AS turnId,
-         t.session_id AS sessionId,
-         t.prompt_number AS promptNumber,
-         t.type AS type,
-         t.created_at_epoch AS createdAtEpoch
-       FROM segment_members sm
-       JOIN turns t ON t.id = sm.turn_id
-       WHERE t.created_at_epoch >= ?
-         AND sm.segment_id IN (
-           SELECT sm2.segment_id
-           FROM segment_members sm2
-           JOIN turns t2 ON t2.id = sm2.turn_id
-           WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
-         )
-       ORDER BY t.created_at_epoch ASC, t.id ASC`
-  ).all(eraCutoffEpoch, sessionId, eraCutoffEpoch).map((row) => ({ ...row, type: parseTypeList(row.type) }));
-  const bySegment = /* @__PURE__ */ new Map();
-  for (const row of memberRows) {
-    const bucket = bySegment.get(row.segmentId) ?? [];
-    bucket.push(row);
-    bySegment.set(row.segmentId, bucket);
-  }
-  const rows = [];
-  for (const [segmentId, members] of bySegment) {
-    const segment = getSegment(db, segmentId);
-    if (!segment) {
-      continue;
-    }
-    const sessionMembers = members.filter((member) => member.sessionId === sessionId);
-    if (windowTurnIds !== void 0 && !sessionMembers.some((member) => windowTurnIds.has(member.turnId))) {
-      continue;
-    }
-    const prompts = sessionMembers.map((member) => member.promptNumber);
-    rows.push({
-      segment,
-      // Flattened: a multi-valued member contributes every one of its own
-      // words to the mode count (spec B5), not just a "first" pick —
-      // `deriveDominantType`'s own logic is untouched (pin: it stays).
-      dominantType: deriveDominantType(
-        members.flatMap((member) => member.type),
-        segment.type
-      ),
-      memberCount: members.length,
-      sessionMemberCount: sessionMembers.length,
-      firstPromptNumber: prompts.length > 0 ? Math.min(...prompts) : null,
-      lastPromptNumber: prompts.length > 0 ? Math.max(...prompts) : null,
-      firstEpoch: members[0].createdAtEpoch,
-      lastEpoch: members[members.length - 1].createdAtEpoch,
-      phaseTrace: collapseTypeListRuns(
-        members.map((member) => member.type).filter((type) => type.length > 0)
-      )
-    });
-  }
-  return rows.sort((left, right) => {
-    const leftPrompt = left.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
-    const rightPrompt = right.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
-    if (leftPrompt !== rightPrompt) {
-      return leftPrompt - rightPrompt;
-    }
-    return left.segment.id - right.segment.id;
-  });
-}
-function deriveDominantType(memberTypes, segmentTypes) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const type of memberTypes) {
-    if (type === null || type === "") {
-      continue;
-    }
-    counts.set(type, (counts.get(type) ?? 0) + 1);
-  }
-  let best = null;
-  let bestCount = 0;
-  let tied = false;
-  for (const [type, count] of counts) {
-    if (count > bestCount) {
-      best = type;
-      bestCount = count;
-      tied = false;
-    } else if (count === bestCount) {
-      tied = true;
-    }
-  }
-  if (best !== null && !tied) {
-    return best;
-  }
-  return segmentTypes[0] ?? null;
-}
-function collapseTypeListRuns(values) {
-  const out = [];
-  for (const value of values) {
-    const previous = out[out.length - 1];
-    if (!previous || !typeListsEqual(previous, value)) {
-      out.push([...value]);
-    }
-  }
-  return out;
-}
-function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch, windowTurnIds) {
-  if (eraCutoffEpoch === null) {
-    return [];
-  }
-  const rows = db.query(
-    `SELECT ${RANK_FACT_COLUMNS}
-       FROM turns t
-       WHERE t.session_id = ?
-         AND t.created_at_epoch >= ?
-         AND t.status NOT IN ('skipped', 'undone')
-         AND NOT EXISTS (
-           SELECT 1 FROM segment_members sm WHERE sm.turn_id = t.id
-         )
-       ${DERIVED_RANK_ORDER}`
-  ).all(sessionId, eraCutoffEpoch).map(mapMemberRankFactsRow);
-  return rows.filter((facts) => windowTurnIds === void 0 || windowTurnIds.has(facts.turnId)).map((facts) => ({ facts, signals: orphanSignals(facts) })).filter((row) => row.signals.length > 0);
-}
-function orphanSignals(facts) {
-  const signals = [];
-  if (facts.isCorrector) {
-    signals.push("corrector");
-  }
-  if (facts.isRolledBack) {
-    signals.push("rolled-back");
-  }
-  if (facts.citedBy > 0) {
-    signals.push(`cited ${facts.citedBy}`);
-  }
-  return signals;
-}
-function getSegmentMembershipForTurns(db, turnIds) {
-  const membership = /* @__PURE__ */ new Map();
-  if (turnIds.length === 0) {
-    return membership;
-  }
-  const placeholders = turnIds.map(() => "?").join(", ");
-  const rows = db.query(
-    `SELECT turn_id AS turnId, segment_id AS segmentId
-       FROM segment_members
-       WHERE turn_id IN (${placeholders})
-       ORDER BY turn_id ASC, segment_id ASC`
-  ).all(...turnIds);
-  for (const row of rows) {
-    if (!membership.has(row.turnId)) {
-      membership.set(row.turnId, row.segmentId);
-    }
-  }
-  return membership;
-}
-
-// src/shared/transcript-parser.ts
-var import_node_fs5 = require("node:fs");
-function normalizeAssistantText(text) {
-  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
-}
-function getContentBlocks(entry) {
-  return Array.isArray(entry.content) ? entry.content : [];
-}
-function getFirstTextContent(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
-  }
-  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
-  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
-}
-function extractUserPrompt(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
-  }
-  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
-}
-function isCountedUserPrompt(entry) {
-  return entry.role === "user" && isRealUserPrompt(entry);
-}
-function isInterruptedUserMarker(entry) {
-  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
-}
-function isKnownSystemInjectedContent(content) {
-  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
-}
-function isRealUserPrompt(entry) {
-  const promptText = extractUserPrompt(entry);
-  if (entry.permissionMode) {
-    return true;
-  }
-  if (isKnownSystemInjectedContent(promptText)) {
-    return false;
-  }
-  return promptText !== "";
-}
-function extractAssistantParts(entry) {
-  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
-    name: block.name,
-    input: block.input
-  }));
-  const assistantText = normalizeAssistantText(
-    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
-  );
-  return { assistantText, toolCalls };
-}
-function stringifyToolResultContent(content) {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content.map((item) => {
-      if (typeof item === "string") {
-        return item;
-      }
-      if (item && typeof item === "object" && "text" in item) {
-        const text = item.text;
-        return typeof text === "string" ? text : JSON.stringify(item);
-      }
-      return JSON.stringify(item);
-    }).join("\n");
-  }
-  if (content === void 0) {
-    return "";
-  }
-  return JSON.stringify(content);
-}
-function isChainParticipant(entry) {
-  return entry.type !== "progress";
-}
-function collectInterruptedPromptIds(entries) {
-  const interruptedPromptIds = /* @__PURE__ */ new Set();
-  for (const entry of entries) {
-    if (entry.promptId && isInterruptedUserMarker(entry)) {
-      interruptedPromptIds.add(entry.promptId);
-    }
-  }
-  return interruptedPromptIds;
-}
-function detectInterruptedPromptIdsInEntries(entries) {
-  return collectInterruptedPromptIds(entries);
-}
-function parseTranscriptLineWindow(lines, firstLineNumber) {
-  const entries = [];
-  lines.forEach((line, index) => {
-    const trimmedLine = line.trim();
-    if (!trimmedLine) {
-      return;
-    }
-    let entry;
-    try {
-      entry = normalizeEntry(JSON.parse(trimmedLine));
-    } catch {
-      return;
-    }
-    if (entry.isApiErrorMessage) {
-      return;
-    }
-    entries.push({
-      ...entry,
-      lineNumber: firstLineNumber + index
-    });
-  });
-  return entries;
-}
-function dedupeTranscriptEntries(entries) {
-  const uuidToIndex = /* @__PURE__ */ new Map();
-  const deduped = [];
-  for (const entry of entries) {
-    if (entry.uuid) {
-      const existingIndex = uuidToIndex.get(entry.uuid);
-      if (existingIndex !== void 0) {
-        deduped[existingIndex] = mergeTranscriptEntries(
-          deduped[existingIndex],
-          entry
-        );
-        continue;
-      }
-      uuidToIndex.set(entry.uuid, deduped.length);
-    }
-    deduped.push(entry);
-  }
-  return deduped;
-}
-function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs5.existsSync)(transcriptPath)) {
-    return [];
-  }
-  const rawTranscript = (0, import_node_fs5.readFileSync)(transcriptPath, "utf8");
-  if (rawTranscript.trim() === "") {
-    return [];
-  }
-  return dedupeTranscriptEntries(
-    parseTranscriptLineWindow(rawTranscript.split("\n"), 1)
-  );
-}
-function mergeUsage(first, later) {
-  if (!first && !later) {
-    return void 0;
-  }
-  return {
-    inputTokens: later?.inputTokens ?? first?.inputTokens,
-    outputTokens: later?.outputTokens ?? first?.outputTokens,
-    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
-    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
-  };
-}
-function mergeCompactMetadata(first, later) {
-  if (!first && !later) {
-    return void 0;
-  }
-  return {
-    trigger: later?.trigger ?? first?.trigger,
-    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
-    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
-  };
-}
-function mergeTranscriptEntries(first, later) {
-  return {
-    type: later.type ?? first.type,
-    subtype: later.subtype ?? first.subtype,
-    role: later.role ?? first.role,
-    model: later.model ?? first.model,
-    content: later.content ?? first.content,
-    promptId: first.promptId ?? later.promptId,
-    permissionMode: later.permissionMode ?? first.permissionMode,
-    // These flags must stay undefined when absent. mergeTranscriptEntries relies on
-    // ?? so that a later partial snapshot cannot silently overwrite an earlier true.
-    isSidechain: later.isSidechain ?? first.isSidechain,
-    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
-    uuid: first.uuid ?? later.uuid,
-    parentUuid: later.parentUuid ?? first.parentUuid,
-    logicalParentUuid: later.logicalParentUuid ?? first.logicalParentUuid,
-    timestamp: first.timestamp ?? later.timestamp,
-    usage: mergeUsage(first.usage, later.usage),
-    durationMs: later.durationMs ?? first.durationMs,
-    messageCount: later.messageCount ?? first.messageCount,
-    compactMetadata: mergeCompactMetadata(
-      first.compactMetadata,
-      later.compactMetadata
-    ),
-    lineNumber: first.lineNumber
-  };
-}
-function normalizeEntry(raw) {
-  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
-  return {
-    type: typeof raw.type === "string" ? raw.type : void 0,
-    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
-    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
-    model: typeof message?.model === "string" ? message.model : void 0,
-    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
-    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
-    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
-    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
-    logicalParentUuid: typeof raw.logicalParentUuid === "string" ? raw.logicalParentUuid : void 0,
-    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
-    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
-    // Preserve "absent" as undefined rather than false. The last-wins merge keeps
-    // an earlier true flag only because mergeTranscriptEntries uses ??.
-    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
-    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
-    usage: message?.usage && typeof message.usage === "object" ? {
-      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
-      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
-      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
-      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
-    } : void 0,
-    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
-    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
-    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
-      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
-      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
-      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
-    } : void 0
-  };
-}
-function collectOrderedPromptIds(entries) {
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  entries.forEach((entry, index) => {
-    if (entry.promptId && !seen.has(entry.promptId)) {
-      seen.add(entry.promptId);
-      out.push({ promptId: entry.promptId, index });
-    }
-  });
-  return out;
-}
-function startsNewTurn(entry, currentPromptId) {
-  if (!isCountedUserPrompt(entry)) {
-    return false;
-  }
-  if (entry.promptId) {
-    return entry.promptId !== currentPromptId;
-  }
-  return extractUserPrompt(entry) !== "";
-}
-function parseReplayTranscript(transcriptPath, preloadedEntries) {
-  const turns = [];
-  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
-  const interruptedPromptIds = collectInterruptedPromptIds(entries);
-  let promptNumber = 0;
-  let currentTurn = null;
-  let currentPromptId = null;
-  for (const entry of entries) {
-    if (startsNewTurn(entry, currentPromptId)) {
-      const userPrompt = extractUserPrompt(entry);
-      promptNumber += 1;
-      currentPromptId = entry.promptId ?? null;
-      currentTurn = {
-        promptNumber,
-        promptId: entry.promptId ?? null,
-        transcriptLineStart: entry.lineNumber,
-        userPrompt,
-        assistantText: "",
-        toolCalls: [],
-        isSidechain: Boolean(entry.isSidechain),
-        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId),
-        assistantModel: null
-      };
-      turns.push(currentTurn);
-      continue;
-    }
-    if (entry.role === "user") {
-      if (!currentTurn) {
-        continue;
-      }
-      const unresolvedToolCalls = currentTurn.toolCalls.filter(
-        (toolCall) => toolCall.result === ""
-      );
-      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
-      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
-        unresolvedToolCalls[index].result = toolResults[index] ?? "";
-      }
-      continue;
-    }
-    if (entry.role !== "assistant" || !currentTurn) {
-      continue;
-    }
-    const { assistantText, toolCalls } = extractAssistantParts(entry);
-    if (assistantText) {
-      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
-
-${assistantText}` : assistantText;
-    }
-    if (entry.model) {
-      currentTurn.assistantModel = entry.model;
-    }
-    currentTurn.toolCalls.push(
-      ...toolCalls.map((toolCall) => ({
-        ...toolCall,
-        result: ""
-      }))
-    );
-  }
-  return turns.map((turn) => ({
-    ...turn,
-    assistantText: normalizeAssistantText(turn.assistantText)
-  }));
-}
-function countUserPromptsInEntries(entries) {
-  const seenPromptIds = /* @__PURE__ */ new Set();
-  let count = 0;
-  for (const entry of entries) {
-    if (!isCountedUserPrompt(entry)) {
-      continue;
-    }
-    if (entry.promptId) {
-      if (seenPromptIds.has(entry.promptId)) {
-        continue;
-      }
-      seenPromptIds.add(entry.promptId);
-      count += 1;
-      continue;
-    }
-    if (extractUserPrompt(entry) !== "") {
-      count += 1;
-    }
-  }
-  return count;
-}
-
-// src/task-causality-era.ts
-var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = 1784711427;
-function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
-  return createdAtEpoch >= cutoffEpoch;
-}
-
-// src/mcp/segment-spine.ts
-var ORPHAN_GLYPH = "\u2691";
-var SPINE_ROW_INDENT = "   ";
-var SPINE_TAG_CAP = 2;
-function segmentTypeGlyph(type) {
-  if (type === null || type === void 0) {
-    return "\u2022";
-  }
-  return typeListGlyph(typeof type === "string" ? [type] : type);
-}
-function formatTags(tags) {
-  if (tags.length === 0) {
-    return "";
-  }
-  const shown = tags.slice(0, SPINE_TAG_CAP).map((tag) => `#${tag}`);
-  const hidden = tags.length - shown.length;
-  return `${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
-}
-function sanitize(value) {
-  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
-}
-function formatPhaseTrace(phaseTrace) {
-  return phaseTrace.map((types) => segmentTypeGlyph(types)).join("\u2192");
-}
-function formatSpan(row) {
-  if (row.firstPromptNumber === null || row.lastPromptNumber === null) {
-    return "";
-  }
-  return row.firstPromptNumber === row.lastPromptNumber ? `T${row.firstPromptNumber}` : `T${row.firstPromptNumber}\u2013T${row.lastPromptNumber}`;
-}
-function renderSpineRow(row, titleCap) {
-  const { segment } = row;
-  const parts = [
-    `[E${segment.id}]`,
-    segmentTypeGlyph(row.dominantType),
-    formatTags(segment.tags),
-    sanitize(truncateText(segment.title, { limit: titleCap })),
-    `[${segment.status}]`
-  ].filter((part) => part !== "");
-  const facts = [
-    `${row.memberCount} ${row.memberCount === 1 ? "turn" : "turns"}`,
-    formatSpan(row),
-    formatPhaseTrace(row.phaseTrace)
-  ].filter((part) => part !== "");
-  return `${SPINE_ROW_INDENT}${parts.join(" ")} \xB7 ${facts.join(" \xB7 ")}`.trimEnd();
-}
-function renderOrphanRow(row, titleCap) {
-  const { facts } = row;
-  const label = facts.title === null || facts.title.trim() === "" ? "(untitled)" : sanitize(truncateText(facts.title, { limit: titleCap }));
-  return `${SPINE_ROW_INDENT}${ORPHAN_GLYPH} T${facts.promptNumber} ${segmentTypeGlyph(
-    facts.type
-  )} ${label} (${row.signals.join(", ")})`;
-}
-function renderSegmentSpineBlock(input) {
-  const { spine, orphans, titleCap } = input;
-  if (spine.length === 0 && orphans.length === 0) {
-    return [];
-  }
-  const keptSegments = input.maxSegments === void 0 ? [...spine] : spine.slice(Math.max(0, spine.length - Math.max(0, input.maxSegments)));
-  const droppedSegments = spine.length - keptSegments.length;
-  const keptOrphans = input.maxOrphans === void 0 ? [...orphans] : orphans.slice(0, Math.max(0, input.maxOrphans));
-  const droppedOrphans = orphans.length - keptOrphans.length;
-  const headerParts = [
-    `${spine.length} ${spine.length === 1 ? "segment" : "segments"}`
-  ];
-  if (orphans.length > 0) {
-    headerParts.push(
-      `${orphans.length} orphan ${orphans.length === 1 ? "anchor" : "anchors"}`
-    );
-  }
-  const lines = ["", `\u2500\u2500 segment spine \xB7 ${headerParts.join(" \xB7 ")} \u2500\u2500`];
-  if (droppedSegments > 0) {
-    lines.push(
-      `${SPINE_ROW_INDENT}\u2026 +${droppedSegments} earlier ${droppedSegments === 1 ? "segment" : "segments"}`
-    );
-  }
-  for (const row of keptSegments) {
-    lines.push(renderSpineRow(row, titleCap));
-    const nested = input.milestoneLinesBySegmentId?.get(row.segment.id);
-    if (nested !== void 0 && nested.length > 0) {
-      lines.push(...nested);
-    }
-  }
-  for (const row of keptOrphans) {
-    lines.push(renderOrphanRow(row, titleCap));
-  }
-  if (droppedOrphans > 0) {
-    lines.push(
-      `${SPINE_ROW_INDENT}\u2026 +${droppedOrphans} orphan ${droppedOrphans === 1 ? "anchor" : "anchors"}`
-    );
-  }
-  return lines;
-}
-function legacyEraHeader(firstPromptNumber, lastPromptNumber) {
-  const span = firstPromptNumber === null || lastPromptNumber === null ? "" : ` \xB7 T${firstPromptNumber}\u2013T${lastPromptNumber}`;
-  return `\u2500\u2500 legacy era${span} \u2500\u2500`;
-}
-
-// src/mcp/timeline.ts
-var DEFAULT_TIMELINE_PAGE_SIZE = 30;
-var PROMPT_COLUMN_CAP = 100;
-var BROKEN_PROMPT_MIN_PREFIX = 20;
-var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
-var TOOL_BURST_TOP_N = 3;
-var DEFAULT_TITLE_CAP = 100;
-var MILESTONE_UNIT_TOKEN_CAP = 150;
-var MILESTONE_UNIT_PULLED_CAP = 4;
-var MILESTONE_PROMPT_PREFIX_CAP = 32;
-var MILESTONE_FILE_BASENAME_CAP = 3;
-var MILESTONE_NOTIFICATION_MARKER = "\u27E8notify\u27E9";
-var MILESTONE_OVER_BUDGET_NOTE = "  \u26A0 over budget: anchor rows kept in full";
-var MILESTONE_DESC_INDENT = "        ";
-var MILESTONE_DESC_WRAP_CHARS = 92;
-var OUTCOME_TAGS = /* @__PURE__ */ new Set([
-  "merged",
-  "shipped",
-  "released",
-  // `release` (singular/imperative stem) is how release turns tag themselves;
-  // `released`/`shipped` are already present. Do NOT add the bare verbs
-  // `push`/`pushed`/`merge`/`ship` — those occur mid-work and would mint false
-  // always-keep outcome markers.
-  "release",
-  "ready-to-merge",
-  "approved",
-  "finalized"
-]);
-var REVERSED_ROLE_TAGS = /* @__PURE__ */ new Set(["rolled-back"]);
-var PLUGIN_MANIFEST_SUFFIXES = [
-  "marketplace.json",
-  "plugin/.claude-plugin/plugin.json",
-  ".claude-plugin/plugin.json"
-];
-function isVersionBumpTurn(filesModified) {
-  const hasPackageJson = filesModified.some(
-    (path2) => path2.endsWith("package.json")
-  );
-  if (!hasPackageJson) {
-    return false;
-  }
-  return filesModified.some(
-    (path2) => PLUGIN_MANIFEST_SUFFIXES.some((suffix) => path2.endsWith(suffix))
-  );
-}
-var REVERSAL_KEYWORD_TAGS = /* @__PURE__ */ new Set([
-  "reversal",
-  "reversed",
-  "superseded",
-  "supersede",
-  "reframed",
-  "reframe",
-  "design-pivot",
-  "pivot"
-]);
-var EMPTY_MILESTONE_SELECTION = {
-  kept: [],
-  ranked: [],
-  pulled: [],
-  overflowByDay: [],
-  effGradeByTurnId: /* @__PURE__ */ new Map()
-};
-var EMPTY_TURN_ID_SET = /* @__PURE__ */ new Set();
-var PENDING_EMOJI = "\u23F3";
-var MISSING_LINE_ANCHOR = "\u2014";
-var MISSING_GRADE_CELL = "\u2014";
-var TURN_TABLE_HEADER = "T# | line | time | gap | stats | G | prompt \u2192 title";
-function typeEmoji(type) {
-  if (type.length === 0) {
-    return PENDING_EMOJI;
-  }
-  return typeListGlyph(type);
-}
-function paginateItems(items, page, pageSize) {
-  const total = items.length;
-  const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  const offset = (page - 1) * pageSize;
-  return {
-    items: items.slice(offset, offset + pageSize),
-    total,
-    pageCount
-  };
-}
-function emptyPaginatedItems(total, pageSize) {
-  return {
-    items: [],
-    total,
-    pageCount: Math.max(1, Math.ceil(total / pageSize))
-  };
-}
-function tailItems(items, pageSize) {
-  const start = Math.max(0, items.length - pageSize);
-  return {
-    items: items.slice(start),
-    total: items.length,
-    pageCount: Math.max(1, Math.ceil(items.length / pageSize))
-  };
-}
-function parseTimelineId(id) {
-  const trimmed = id.trim();
-  if (!trimmed) {
-    throw new Error("timeline id is empty");
-  }
-  const match = trimmed.match(/^S(\d+)(?:\/T(.+))?$/i);
-  if (!match) {
-    throw new Error(`timeline id does not match 'S<n>' or 'S<n>/T...': ${id}`);
-  }
-  const sessionId = Number(match[1]);
-  const rangeValue = match[2];
-  if (rangeValue === void 0) {
-    return { sessionId, range: { kind: "none" } };
-  }
-  if (rangeValue === "*") {
-    return { sessionId, range: { kind: "all" } };
-  }
-  const closed = rangeValue.match(/^(\d+)\.\.(\d+)$/);
-  if (closed) {
-    const start = parsePositiveBound(closed[1], id);
-    const end = parsePositiveBound(closed[2], id);
-    if (start > end) {
-      throw new Error(`timeline range start must be <= end: ${id}`);
-    }
-    return {
-      sessionId,
-      range: { kind: "closed", start, end }
-    };
-  }
-  const openStart = rangeValue.match(/^\.\.(\d+)$/);
-  if (openStart) {
-    const end = parsePositiveBound(openStart[1], id);
-    return {
-      sessionId,
-      range: { kind: "openStart", end }
-    };
-  }
-  const openEnd = rangeValue.match(/^(\d+)\.\.$/);
-  if (openEnd) {
-    const start = parsePositiveBound(openEnd[1], id);
-    return {
-      sessionId,
-      range: { kind: "openEnd", start }
-    };
-  }
-  if (/^\d+$/.test(rangeValue)) {
-    throw new Error(
-      `timeline does not accept single turn forms; use recall(id='S${sessionId}/T${rangeValue}', depth='expanded') instead`
-    );
-  }
-  throw new Error(`timeline range syntax not recognized: T${rangeValue}`);
-}
-function resolveWindow(range, totalTurns, bounds = { first: 1, last: totalTurns }) {
-  const { first, last } = bounds;
-  if (totalTurns === 0) {
-    return {
-      startPromptNumber: first,
-      endPromptNumber: first - 1,
-      totalTurns: 0
-    };
-  }
-  if (range.kind === "none" || range.kind === "all") {
-    return {
-      startPromptNumber: first,
-      endPromptNumber: last,
-      totalTurns
-    };
-  }
-  if (range.kind === "closed") {
-    validateClosedRange(range);
-    const startPromptNumber = Math.max(first, range.start);
-    if (startPromptNumber > last) {
-      throw new Error(
-        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds last prompt T${last}`
-      );
-    }
-    return {
-      startPromptNumber,
-      endPromptNumber: Math.min(range.end, last),
-      totalTurns
-    };
-  }
-  if (range.kind === "openEnd") {
-    validateOpenEndRange(range);
-    const startPromptNumber = Math.max(first, range.start);
-    if (startPromptNumber > last) {
-      throw new Error(
-        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds last prompt T${last}`
-      );
-    }
-    return {
-      startPromptNumber,
-      endPromptNumber: last,
-      totalTurns
-    };
-  }
-  if (range.kind === "openStart") {
-    validateOpenStartRange(range);
-    const endPromptNumber = Math.min(range.end, last);
-    return {
-      startPromptNumber: first,
-      endPromptNumber,
-      totalTurns
-    };
-  }
-  throw new Error(`Unknown range kind: ${range.kind}`);
-}
-function extractCommandName(raw) {
-  const match = raw.match(/<command-name>\s*([^<]+?)\s*<\/command-name>/);
-  return match ? match[1].trim() : null;
-}
-function cleanPromptForLabel(raw) {
-  if (raw === null) {
-    return "";
-  }
-  const commandName = extractCommandName(raw);
-  if (commandName !== null) {
-    return commandName;
-  }
-  const stripped = raw.replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g, "").replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, "").replace(/<command-message>[\s\S]*?<\/command-message>/g, "").replace(/<command-args>[\s\S]*?<\/command-args>/g, "");
-  const firstLine = stripped.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
-  return firstLine.replace(/\s+/g, " ").trim();
-}
-function formatDuration(ms) {
-  const totalSeconds = Math.floor(ms / 1e3);
-  if (totalSeconds < 60) {
-    return `${totalSeconds}s`;
-  }
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  if (totalMinutes < 60) {
-    const seconds = totalSeconds % 60;
-    return seconds === 0 ? `${totalMinutes}m` : `${totalMinutes}m${seconds}s`;
-  }
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return `${hours}h ${minutes}m`;
-}
-function formatGap(currentEpochSeconds, previousEpochSeconds) {
-  if (previousEpochSeconds === null) {
-    return "(start)";
-  }
-  return `+${formatDuration((currentEpochSeconds - previousEpochSeconds) * 1e3)}`;
-}
-function formatLocalTime(epochSeconds) {
-  return new Intl.DateTimeFormat(void 0, {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  }).format(new Date(epochSeconds * 1e3));
-}
-function formatLocalDate(epochSeconds) {
-  return new Intl.DateTimeFormat("en-CA", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).format(new Date(epochSeconds * 1e3));
-}
-function formatLocalWeekday(epochSeconds) {
-  return new Intl.DateTimeFormat("en-US", {
-    weekday: "short"
-  }).format(new Date(epochSeconds * 1e3));
-}
-function formatLocalDateWithWeekday(epochSeconds) {
-  return `${formatLocalDate(epochSeconds)} ${formatLocalWeekday(epochSeconds)}`;
-}
-function formatLocalMonthDay(epochSeconds) {
-  const [year, month, day] = formatLocalDate(epochSeconds).split("-");
-  void year;
-  return `${month}-${day}`;
-}
-function formatLocalMonthDayWithWeekday(epochSeconds) {
-  return `${formatLocalMonthDay(epochSeconds)} ${formatLocalWeekday(epochSeconds)}`;
-}
-function sameLocalDate(leftEpoch, rightEpoch) {
-  return formatLocalDate(leftEpoch) === formatLocalDate(rightEpoch);
-}
-function getSystemTimezone(referenceEpochSeconds = Math.floor(Date.now() / 1e3), source = {}) {
-  const ianaName = source.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const name = source.resolveTimeZoneName ? source.resolveTimeZoneName(referenceEpochSeconds, ianaName) : new Intl.DateTimeFormat("en-US", {
-    timeZone: ianaName,
-    timeZoneName: "short"
-  }).formatToParts(new Date(referenceEpochSeconds * 1e3)).find((part) => part.type === "timeZoneName")?.value ?? ianaName;
-  const offsetMinutes = source.resolveOffsetMinutes ? source.resolveOffsetMinutes(referenceEpochSeconds) : -new Date(referenceEpochSeconds * 1e3).getTimezoneOffset();
-  const sign = offsetMinutes >= 0 ? "+" : "-";
-  const absoluteMinutes = Math.abs(offsetMinutes);
-  const hours = String(Math.floor(absoluteMinutes / 60)).padStart(2, "0");
-  const minutes = String(absoluteMinutes % 60).padStart(2, "0");
-  return {
-    name,
-    offsetLabel: `${sign}${hours}:${minutes}`
-  };
-}
-function extractSourceTags(tags) {
-  return tags.filter((tag) => tag.startsWith("source:")).map((tag) => tag.slice("source:".length));
-}
-function milestoneMarker(turn, options = {}) {
-  if (turn.status === "undone" || turn.wasInterrupted) {
-    return "invalidated";
-  }
-  const keywordReversal = options.enableReversalKeyword === true && turn.type.includes("decision") && turn.tags.some((tag) => REVERSAL_KEYWORD_TAGS.has(tag));
-  const roleReversal = turn.tags.some((tag) => REVERSED_ROLE_TAGS.has(tag));
-  if (turn.wasRolledBack || roleReversal || keywordReversal) {
-    return "reversed";
-  }
-  if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag)) || isVersionBumpTurn(turn.filesModified)) {
-    return "outcome";
-  }
-  return null;
-}
-var MILESTONE_LEGACY_TYPE_GRADE = {
-  decision: 3,
-  feature: 2,
-  refactor: 2,
-  bugfix: 2,
-  change: 1,
-  discovery: 1
-};
-var MILESTONE_LEGACY_GRADE_CAP = 3;
-var MILESTONE_SPINE_MIN_EFF_GRADE = 3;
-var MILESTONE_POOL_MIN_EFF_GRADE = 2;
-var MILESTONE_PULL_MAX_EFF_GRADE = 2;
-var MILESTONE_TIE_CITED_WEIGHT = 0.25;
-var MILESTONE_TIE_CITED_CAP = 2;
-var MILESTONE_TIE_INSIGHT_WEIGHT = 0.25;
-var MILESTONE_TIE_PURE_SPEC_WEIGHT = 0.15;
-var MILESTONE_TIE_BREAK_MAX = 0.9;
-var MILESTONE_PURE_SPEC_RE = /^docs\/(?:plans|specs|superpowers)\/.*\.md$/;
-var MILESTONE_VERSION_RE = /\b0\.\d+\.\d+\b/g;
-var MILESTONE_PULLED_LABEL_CAP = 60;
-function milestoneEffGrade(turn, taskCausalityEraCutoffEpoch) {
-  if (isTaskCausalityEra(turn.createdAtEpoch, taskCausalityEraCutoffEpoch)) {
-    const grade = turn.significanceGrade;
-    if (grade === null || grade === void 0) {
-      return 0;
-    }
-    return Math.max(0, Math.min(4, grade));
-  }
-  return legacyEffGrade(turn);
-}
-function legacyEffGrade(turn) {
-  const legacyType = turn.type[0] ?? "";
-  let grade = MILESTONE_LEGACY_TYPE_GRADE[legacyType] ?? 0;
-  if ((legacyType === "feature" || legacyType === "refactor" || legacyType === "change") && turn.filesModified.length === 0) {
-    grade = 0;
-  }
-  if (hasMilestoneInsight(turn)) {
-    grade += 1;
-  }
-  return Math.min(grade, MILESTONE_LEGACY_GRADE_CAP);
-}
-function hasMilestoneInsight(turn) {
-  return typeof turn.insight === "string" && turn.insight.trim() !== "" && turn.insight !== "[]";
-}
-function isPureSpecTurn(turn) {
-  return turn.filesModified.length > 0 && turn.filesModified.every((path2) => MILESTONE_PURE_SPEC_RE.test(path2));
-}
-function milestoneTieBreak(turn, citedBy = 0) {
-  const raw = MILESTONE_TIE_CITED_WEIGHT * Math.min(Math.max(citedBy, 0), MILESTONE_TIE_CITED_CAP) + (hasMilestoneInsight(turn) ? MILESTONE_TIE_INSIGHT_WEIGHT : 0) + (isPureSpecTurn(turn) ? MILESTONE_TIE_PURE_SPEC_WEIGHT : 0);
-  return Math.min(raw, MILESTONE_TIE_BREAK_MAX);
-}
-function inlineCitationFallback(turns) {
-  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
-  const effective = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    effective.set(turn.id, {
-      citedTurnIds: parseInlineCitations(turn.content).filter(
-        (id) => id !== turn.id && sessionTurnIds.has(id)
-      ),
-      edges: []
-    });
-  }
-  return effective;
-}
-function citationInDegree(citations) {
-  const inDegree = /* @__PURE__ */ new Map();
-  for (const entry of citations.values()) {
-    for (const citedTurnId of entry.citedTurnIds) {
-      inDegree.set(citedTurnId, (inDegree.get(citedTurnId) ?? 0) + 1);
-    }
-  }
-  return inDegree;
-}
-function extractMilestoneVersion(title) {
-  if (!title) return null;
-  const matches = [...title.matchAll(MILESTONE_VERSION_RE)];
-  return matches.length > 0 ? matches[matches.length - 1][0] : null;
-}
-function demotedOutcomePrompts(seq) {
-  const byDay = /* @__PURE__ */ new Map();
-  for (const turn of seq) {
-    if (milestoneMarker(turn) !== "outcome") {
-      continue;
-    }
-    const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = byDay.get(day) ?? [];
-    bucket.push(turn);
-    byDay.set(day, bucket);
-  }
-  const demoted = /* @__PURE__ */ new Set();
-  const closeChain = (chain) => {
-    for (const turn of chain.slice(0, -1)) {
-      demoted.add(turn.promptNumber);
-    }
-  };
-  for (const turns of byDay.values()) {
-    const sorted = [...turns].sort((a, b) => a.promptNumber - b.promptNumber);
-    let chain = [];
-    for (const turn of sorted) {
-      if (chain.length === 0) {
-        chain = [turn];
-        continue;
-      }
-      const previous = chain[chain.length - 1];
-      const previousVersion = extractMilestoneVersion(previous.title);
-      const currentVersion = extractMilestoneVersion(turn.title);
-      const sameRelease = turn.promptNumber - previous.promptNumber <= 5 && !(previousVersion !== null && currentVersion !== null && previousVersion !== currentVersion);
-      if (sameRelease) {
-        chain.push(turn);
-      } else {
-        closeChain(chain);
-        chain = [turn];
-      }
-    }
-    closeChain(chain);
-  }
-  return demoted;
-}
-function buildCorrectionGraph(turns, options = {}) {
-  const correctors = /* @__PURE__ */ new Set();
-  const supersededVictims = /* @__PURE__ */ new Set();
-  const supersedersByVictim = /* @__PURE__ */ new Map();
-  const byDbId = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    byDbId.set(turn.id, turn);
-  }
-  const citations = options.citations ?? inlineCitationFallback(turns);
-  for (const corrector of turns) {
-    const entry = citations.get(corrector.id);
-    if (entry === void 0) {
-      continue;
-    }
-    const supersededIds = /* @__PURE__ */ new Set();
-    const structuredTargets = /* @__PURE__ */ new Set();
-    for (const edge of entry.edges) {
-      structuredTargets.add(edge.citedTurnId);
-      if (edge.relation === "supersedes") {
-        supersededIds.add(edge.citedTurnId);
-      }
-    }
-    if (!isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
-      for (const citedTurnId of entry.citedTurnIds) {
-        if (structuredTargets.has(citedTurnId)) {
-          continue;
-        }
-        const cited = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
-        if (cited && milestoneMarker(cited) === "reversed") {
-          supersededIds.add(citedTurnId);
-        }
-      }
-    }
-    for (const citedTurnId of supersededIds) {
-      const victim = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
-      if (!victim || victim.sessionId !== corrector.sessionId || // Predecessor guard: a causal reference points backward.
-      victim.promptNumber >= corrector.promptNumber) {
-        continue;
-      }
-      correctors.add(corrector.id);
-      supersededVictims.add(victim.id);
-      const bucket = supersedersByVictim.get(victim.id) ?? [];
-      bucket.push(corrector);
-      supersedersByVictim.set(victim.id, bucket);
-    }
-  }
-  const supersededBy = /* @__PURE__ */ new Map();
-  for (const [victimId, superseders] of supersedersByVictim) {
-    supersededBy.set(
-      victimId,
-      [...superseders].sort((left, right) => left.promptNumber - right.promptNumber).map((turn) => turn.id)
-    );
-  }
-  return { correctors, supersededVictims, supersededBy };
-}
-function getCompactMetadata(tags) {
-  let preTokens = 0;
-  let trigger = "manual";
-  let sawCompactTag = false;
-  for (const tag of tags) {
-    if (tag.startsWith("compact:pre_tokens=")) {
-      const rawValue = Number(tag.slice("compact:pre_tokens=".length));
-      if (Number.isFinite(rawValue) && rawValue >= 0) {
-        preTokens = rawValue;
-      }
-      sawCompactTag = true;
-      continue;
-    }
-    if (tag.startsWith("compact:trigger=")) {
-      trigger = tag.slice("compact:trigger=".length) || trigger;
-      sawCompactTag = true;
-    }
-  }
-  return sawCompactTag ? { preTokens, trigger } : null;
-}
-function formatCompactTokenCount(tokens) {
-  if (tokens >= 1e6) {
-    const millions = Math.round(tokens / 1e6 * 10) / 10;
-    return `${millions % 1 === 0 ? millions.toFixed(0) : millions.toFixed(1)}M`;
-  }
-  if (tokens >= 1e3) {
-    return `${Math.round(tokens / 1e3)}k`;
-  }
-  return String(tokens);
-}
-function formatTranscriptLineAnchor(lineNumber) {
-  return lineNumber === null ? MISSING_LINE_ANCHOR : `L${lineNumber}`;
-}
-function segmentPhases(turns) {
-  const sortedTurns = sortTurnsForAnalysis(turns);
-  const phases = [];
-  let current = null;
-  let currentStartEpoch = 0;
-  let currentEndEpoch = 0;
-  for (const turn of sortedTurns) {
-    if (!isTimelineLiveTurn(turn)) {
-      continue;
-    }
-    const kind = turn.type.length === 0 ? "pending" : "typed";
-    const emoji3 = typeEmoji(turn.type);
-    if (current === null || current.kind !== kind || !typeListsEqual(current.type, turn.type)) {
-      if (current !== null) {
-        current.durationMs = (currentEndEpoch - currentStartEpoch) * 1e3;
-      }
-      current = {
-        kind,
-        type: turn.type,
-        emoji: emoji3,
-        startPromptNumber: turn.promptNumber,
-        endPromptNumber: turn.promptNumber,
-        startEpoch: turn.createdAtEpoch,
-        endEpoch: turn.createdAtEpoch,
-        turnCount: 0,
-        totalToolCalls: 0,
-        totalFilesRead: 0,
-        totalFilesModified: 0,
-        durationMs: 0,
-        externalInputs: []
-      };
-      phases.push(current);
-      currentStartEpoch = turn.createdAtEpoch;
-    }
-    current.endPromptNumber = turn.promptNumber;
-    current.endEpoch = turn.createdAtEpoch;
-    current.turnCount += 1;
-    current.totalToolCalls += turn.toolCallCount ?? 0;
-    current.totalFilesRead += turn.filesRead.length;
-    current.totalFilesModified += turn.filesModified.length;
-    currentEndEpoch = turn.createdAtEpoch;
-    for (const source of extractSourceTags(turn.tags)) {
-      if (!current.externalInputs.includes(source)) {
-        current.externalInputs.push(source);
-      }
-    }
-  }
-  if (current !== null) {
-    current.durationMs = (currentEndEpoch - currentStartEpoch) * 1e3;
-  }
-  return phases;
-}
-function computeTypesDistribution(turns) {
-  const words = {};
-  let none = 0;
-  for (const turn of turns) {
-    if (!isTimelineLiveTurn(turn)) {
-      continue;
-    }
-    if (turn.type.length === 0) {
-      none += 1;
-      continue;
-    }
-    for (const word of turn.type) {
-      words[word] = (words[word] ?? 0) + 1;
-    }
-  }
-  return { words, none };
-}
-function renderTypesDistribution(distribution) {
-  const byGlyph = /* @__PURE__ */ new Map();
-  const counted = /* @__PURE__ */ new Set();
-  const accumulate = (word) => {
-    if (counted.has(word)) {
-      return;
-    }
-    counted.add(word);
-    const count = distribution.words[word] ?? 0;
-    if (count === 0) {
-      return;
-    }
-    const glyph = typeWordGlyph(word);
-    byGlyph.set(glyph, (byGlyph.get(glyph) ?? 0) + count);
-  };
-  for (const word of MEMORY_TYPES) {
-    accumulate(word);
-  }
-  for (const word of Object.keys(LEGACY_TYPE_GLYPH)) {
-    accumulate(word);
-  }
-  const parts = [...byGlyph].map(([glyph, count]) => `${glyph}${count}`);
-  let unrecognised = 0;
-  for (const [word, count] of Object.entries(distribution.words)) {
-    if (!counted.has(word)) {
-      unrecognised += count;
-    }
-  }
-  if (unrecognised > 0) {
-    parts.push(`?${unrecognised}`);
-  }
-  if (distribution.none > 0) {
-    parts.push(`\u2022${distribution.none}`);
-  }
-  return parts;
-}
-function detectBrokenPromptPairs(turns) {
-  const pairs = [];
-  const liveTurns = sortTurnsForAnalysis(turns).filter(
-    isTimelineLiveTurn
-  );
-  for (let index = 0; index < liveTurns.length - 1; index += 1) {
-    const current = liveTurns[index];
-    const next = liveTurns[index + 1];
-    const currentPrompt = cleanPromptForLabel(current.userPrompt);
-    const nextPrompt = cleanPromptForLabel(next.userPrompt);
-    if (currentPrompt.length < BROKEN_PROMPT_MIN_PREFIX || nextPrompt.length < BROKEN_PROMPT_MIN_PREFIX) {
-      continue;
-    }
-    if (sharedPrefixLength(currentPrompt, nextPrompt) < BROKEN_PROMPT_MIN_PREFIX) {
-      continue;
-    }
-    const gapMs = (next.createdAtEpoch - current.createdAtEpoch) * 1e3;
-    if (gapMs >= BROKEN_PROMPT_MAX_GAP_MS) {
-      continue;
-    }
-    pairs.push({
-      first: current.promptNumber,
-      second: next.promptNumber
-    });
-  }
-  return pairs;
-}
-function sharedPrefixLength(left, right) {
-  const limit = Math.min(left.length, right.length);
-  let index = 0;
-  while (index < limit && left[index] === right[index]) {
-    index += 1;
-  }
-  return index;
-}
-function parsePositiveBound(raw, id) {
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`timeline range bounds must be positive integers: ${id}`);
-  }
-  return value;
-}
-function detectShapeSignals(turns) {
-  if (turns.length === 0) {
-    return {
-      fastestGap: null,
-      longestGap: null,
-      toolBursts: [],
-      toolBurstMedian: 0,
-      toolBurstThreshold: 0,
-      brokenPromptPairs: [],
-      undoneTurns: [],
-      externalInputs: []
-    };
-  }
-  const sortedTurns = sortTurnsForAnalysis(turns);
-  const liveTurns = sortedTurns.filter(isTimelineLiveTurn);
-  let fastestGap = null;
-  let longestGap = null;
-  for (let index = 0; index < liveTurns.length - 1; index += 1) {
-    const current = liveTurns[index];
-    const next = liveTurns[index + 1];
-    const gapMs = (next.createdAtEpoch - current.createdAtEpoch) * 1e3;
-    if (fastestGap === null || gapMs < fastestGap.ms) {
-      fastestGap = { afterPromptNumber: current.promptNumber, ms: gapMs };
-    }
-    if (longestGap === null || gapMs > longestGap.ms) {
-      longestGap = { afterPromptNumber: current.promptNumber, ms: gapMs };
-    }
-  }
-  const sortedToolCounts = liveTurns.map((turn) => turn.toolCallCount ?? 0).sort((left, right) => left - right);
-  let toolBurstMedian = 0;
-  if (sortedToolCounts.length > 0) {
-    const middle = Math.floor(sortedToolCounts.length / 2);
-    toolBurstMedian = sortedToolCounts.length % 2 === 1 ? sortedToolCounts[middle] : Math.round(
-      (sortedToolCounts[middle - 1] + sortedToolCounts[middle]) / 2
-    );
-  }
-  const toolBurstThreshold = toolBurstMedian * 2;
-  const toolBursts = liveTurns.map((turn) => ({
-    promptNumber: turn.promptNumber,
-    toolCallCount: turn.toolCallCount ?? 0
-  })).filter((turn) => turn.toolCallCount > toolBurstThreshold).sort((left, right) => right.toolCallCount - left.toolCallCount).slice(0, TOOL_BURST_TOP_N);
-  const undoneTurns = turns.filter((turn) => turn.status === "undone").map((turn) => turn.promptNumber);
-  const externalInputs = liveTurns.flatMap(
-    (turn) => extractSourceTags(turn.tags).map((source) => ({
-      promptNumber: turn.promptNumber,
-      source
-    }))
-  );
-  return {
-    fastestGap,
-    longestGap,
-    toolBursts,
-    toolBurstMedian,
-    toolBurstThreshold,
-    brokenPromptPairs: detectBrokenPromptPairs(turns),
-    undoneTurns,
-    externalInputs
-  };
-}
-function compareMilestoneRank(left, right) {
-  if (left.score !== right.score) return right.score - left.score;
-  return left.turn.promptNumber - right.turn.promptNumber;
-}
-function selectMilestoneTurns(view) {
-  const eraCutoff = view.taskCausalityEraCutoffEpoch;
-  const universe = view.sessionTurns ?? view.windowTurns;
-  const seq = sortTurnsForAnalysis(view.windowTurns).filter(
-    (turn) => turn.status !== "skipped" && !turn.type.includes("compact")
-  );
-  if (seq.length === 0) {
-    return {
-      kept: [],
-      ranked: [],
-      pulled: [],
-      overflowByDay: [],
-      effGradeByTurnId: /* @__PURE__ */ new Map()
-    };
-  }
-  const citations = view.citations ?? inlineCitationFallback(universe);
-  const inDegree = citationInDegree(citations);
-  const universeById = new Map(universe.map((turn) => [turn.id, turn]));
-  const inWindowById = new Map(seq.map((turn) => [turn.id, turn]));
-  const graph = buildCorrectionGraph(universe, {
-    citations,
-    resolveCited: (id) => universeById.get(id),
-    taskCausalityEraCutoffEpoch: eraCutoff
-  });
-  const effGradeOf = (turn) => milestoneEffGrade(turn, eraCutoff);
-  const endpoints = /* @__PURE__ */ new Set([seq[0].id]);
-  const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
-  endpoints.add((lastTitled ?? seq[seq.length - 1]).id);
-  const demotedOutcomes = demotedOutcomePrompts(seq);
-  const markerForSelection = (turn) => {
-    const marker = milestoneMarker(turn);
-    return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
-  };
-  const isAlwaysKeep = (turn) => {
-    if (endpoints.has(turn.id)) {
-      return true;
-    }
-    if (graph.correctors.has(turn.id)) {
-      return true;
-    }
-    if (milestoneMarker(turn) === "reversed") {
-      return true;
-    }
-    return isTaskCausalityEra(turn.createdAtEpoch, eraCutoff) && effGradeOf(turn) === 4;
-  };
-  const promptNumbersOf = (turnIds) => turnIds.map((id) => universeById.get(id)?.promptNumber ?? inWindowById.get(id)?.promptNumber).filter((promptNumber) => promptNumber !== void 0);
-  const keptIds = /* @__PURE__ */ new Set();
-  const rows = [];
-  const poolRows = [];
-  for (const turn of seq) {
-    const effGrade = effGradeOf(turn);
-    const alwaysKeep = isAlwaysKeep(turn);
-    const spine = effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
-    if (!alwaysKeep && !spine && effGrade < MILESTONE_POOL_MIN_EFF_GRADE) {
-      continue;
-    }
-    const superseders = graph.supersededBy.get(turn.id);
-    const row = {
-      turn,
-      score: effGrade + milestoneTieBreak(turn, inDegree.get(turn.id) ?? 0),
-      effGrade,
-      alwaysKeep,
-      spine,
-      marker: markerForSelection(turn),
-      ...superseders ? { supersededBy: promptNumbersOf(superseders) } : {}
-    };
-    poolRows.push(row);
-    if (alwaysKeep || spine) {
-      keptIds.add(turn.id);
-      rows.push(row);
-    }
-  }
-  const ranked = [...poolRows].sort(compareMilestoneRank);
-  const pulled = [];
-  const pulledIds = /* @__PURE__ */ new Set();
-  const pulledByTurnId = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    const entry = citations.get(row.turn.id);
-    if (entry === void 0) {
-      continue;
-    }
-    for (const citedTurnId of entry.citedTurnIds) {
-      if (keptIds.has(citedTurnId)) {
-        continue;
-      }
-      const already = pulledByTurnId.get(citedTurnId);
-      if (already !== void 0) {
-        if (!already.citerPromptNumbers.includes(row.turn.promptNumber)) {
-          already.citerPromptNumbers.push(row.turn.promptNumber);
-        }
-        continue;
-      }
-      const cited = universeById.get(citedTurnId);
-      if (cited === void 0 || cited.type.includes("compact") || cited.sessionId !== row.turn.sessionId || // Predecessor guard: a causal reference points backward.
-      cited.promptNumber >= row.turn.promptNumber) {
-        continue;
-      }
-      const effGrade = effGradeOf(cited);
-      if (effGrade > MILESTONE_PULL_MAX_EFF_GRADE) {
-        continue;
-      }
-      pulledIds.add(citedTurnId);
-      const antecedent = {
-        turn: cited,
-        effGrade,
-        citedByPromptNumber: row.turn.promptNumber,
-        citerPromptNumbers: [row.turn.promptNumber],
-        label: pulledAntecedentLabel(cited),
-        supersededBy: promptNumbersOf(graph.supersededBy.get(citedTurnId) ?? [])
-      };
-      pulled.push(antecedent);
-      pulledByTurnId.set(citedTurnId, antecedent);
-    }
-  }
-  const overflowByDay = [];
-  const droppedByDay = /* @__PURE__ */ new Map();
-  for (const turn of seq) {
-    if (keptIds.has(turn.id) || pulledIds.has(turn.id)) {
-      continue;
-    }
-    const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = droppedByDay.get(day) ?? [];
-    bucket.push(turn);
-    droppedByDay.set(day, bucket);
-  }
-  for (const [date5, dropped] of droppedByDay) {
-    const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
-    overflowByDay.push({
-      date: date5,
-      count: byPrompt.length,
-      firstPrompt: byPrompt[0].promptNumber,
-      lastPrompt: byPrompt[byPrompt.length - 1].promptNumber,
-      labelEpoch: byPrompt[0].createdAtEpoch
-    });
-  }
-  const effGradeByTurnId = /* @__PURE__ */ new Map();
-  for (const turn of seq) {
-    effGradeByTurnId.set(turn.id, effGradeOf(turn));
-  }
-  return { kept: rows, ranked, pulled, overflowByDay, effGradeByTurnId };
-}
-function pulledAntecedentLabel(turn, signal) {
-  if (turn.title !== null && turn.title.trim() !== "") {
-    return turn.title;
-  }
-  const prompt = cleanPromptForLabel(turn.userPrompt);
-  return prompt === "" ? "(untitled)" : truncateText(prompt, { limit: MILESTONE_PULLED_LABEL_CAP, signal });
-}
-function sortTurnsForAnalysis(turns) {
-  return [...turns].sort((left, right) => {
-    if (left.promptNumber !== right.promptNumber) {
-      return left.promptNumber - right.promptNumber;
-    }
-    if (left.createdAtEpoch !== right.createdAtEpoch) {
-      return left.createdAtEpoch - right.createdAtEpoch;
-    }
-    return left.id - right.id;
-  });
-}
-function validateClosedRange(range) {
-  if (!Number.isInteger(range.start) || !Number.isInteger(range.end) || range.start < 1 || range.end < 1 || range.start > range.end) {
-    throw new Error(
-      `timeline range is invalid: closed ranges require positive integers with start <= end`
-    );
-  }
-}
-function validateOpenStartRange(range) {
-  if (!Number.isInteger(range.end) || range.end < 1) {
-    throw new Error(
-      `timeline range is invalid: open-start ranges require a positive integer end`
-    );
-  }
-}
-function validateOpenEndRange(range) {
-  if (!Number.isInteger(range.start) || range.start < 1) {
-    throw new Error(
-      `timeline range is invalid: open-end ranges require a positive integer start`
-    );
-  }
-}
-function deriveTimelineBreadcrumb(db, session) {
-  if (session.parentSessionId === null) {
-    return null;
-  }
-  const parentRef = `S${session.parentSessionId}`;
-  const firstTurn = getFirstTurn(db, session.id);
-  if (firstTurn !== null && firstTurn.parentTurnId !== null) {
-    const forkTurn = getTurnById(db, firstTurn.parentTurnId);
-    if (forkTurn !== null) {
-      return `continues from ${parentRef} (forked at T${forkTurn.promptNumber})`;
-    }
-  }
-  return `continues from ${parentRef}`;
-}
-function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
-  const parsed = parseTimelineId(input.id);
-  const viewKind = input.view ?? "turns";
-  const session = getSession(db, parsed.sessionId);
-  if (!session) {
-    throw new Error(`timeline: session S${parsed.sessionId} not found`);
-  }
-  const allTurns = preloadedTurns ?? getTurnsForSession(db, session.id);
-  const totalTurns = allTurns.length;
-  const totalToolCalls = allTurns.reduce(
-    (sum, turn) => sum + (turn.toolCallCount ?? 0),
-    0
-  );
-  const sorted = [...allTurns].sort((a, b) => a.promptNumber - b.promptNumber);
-  const bounds = totalTurns > 0 ? { first: sorted[0].promptNumber, last: sorted[totalTurns - 1].promptNumber } : { first: 1, last: 0 };
-  const window = resolveWindow(parsed.range, totalTurns, bounds);
-  const windowTurns = sorted.filter(
-    (turn) => turn.promptNumber >= window.startPromptNumber && turn.promptNumber <= window.endPromptNumber
-  );
-  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
-  const isEra = (turn) => isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch);
-  const eraWindowTurns = eraCutoffEpoch === null ? [] : windowTurns.filter(isEra);
-  const legacyWindowTurns = eraCutoffEpoch === null ? windowTurns : windowTurns.filter((turn) => !isEra(turn));
-  const legacySessionTurns = eraCutoffEpoch === null ? allTurns : allTurns.filter((turn) => !isEra(turn));
-  const eraSessionTurns = eraCutoffEpoch === null ? [] : allTurns.filter(isEra);
-  const page = Math.max(1, input.page ?? 1);
-  const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
-  const typesDistribution = computeTypesDistribution(allTurns);
-  const windowSignals = detectShapeSignals(windowTurns);
-  const compactBoundaries = [
-    ...new Set(
-      allTurns.filter((turn) => turn.type.includes("compact")).map((turn) => turn.promptNumber)
-    )
-  ].sort((a, b) => a - b);
-  if (compactBoundaries.length === 0 && session.lastCompactTurn !== null) {
-    compactBoundaries.push(session.lastCompactTurn);
-  }
-  const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
-  const tz = getSystemTimezone(session.createdAtEpoch);
-  const breadcrumb = deriveTimelineBreadcrumb(db, session);
-  const citations = preloadedCitations ?? getSessionEffectiveCitations(db, session.id);
-  const milestoneSelection = selectMilestoneTurns({
-    session,
-    windowTurns: legacyWindowTurns,
-    windowSignals,
-    compactBoundaries,
-    sessionTurns: legacySessionTurns,
-    citations
-  });
-  const phases = segmentPhases(windowTurns);
-  const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
-  const pagedTurns = viewKind === "turns" ? paginateItems(nonSkippedTurns, page, pageSize) : emptyPaginatedItems(nonSkippedTurns.length, pageSize);
-  const milestoneTail = viewKind === "milestones" && input.milestoneTail === true;
-  const pagedMilestones = viewKind === "milestones" ? milestoneTail ? tailItems(milestoneSelection.kept, pageSize) : paginateItems(milestoneSelection.kept, page, pageSize) : emptyPaginatedItems(milestoneSelection.kept.length, pageSize);
-  const milestoneDayGroups = viewKind === "milestones" ? buildMilestoneDayGroups(
-    pagedMilestones.items,
-    milestoneSelection.kept,
-    milestoneSelection.overflowByDay
-  ) : [];
-  const pagedPhases = viewKind === "phases" ? paginateItems(phases, page, pageSize) : emptyPaginatedItems(phases.length, pageSize);
-  const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
-  const eraWindowTurnIds = new Set(eraWindowTurns.map((turn) => turn.id));
-  const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
-  const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
-  const eraMilestoneSelection = renderSegments ? selectMilestoneTurns({
-    session,
-    windowTurns: eraWindowTurns,
-    windowSignals,
-    compactBoundaries,
-    sessionTurns: eraSessionTurns,
-    citations
-  }) : EMPTY_MILESTONE_SELECTION;
-  const eraSegmentIdByTurnId = renderSegments ? getSegmentMembershipForTurns(db, eraWindowTurns.map((turn) => turn.id)) : /* @__PURE__ */ new Map();
-  const viewItemTotal = viewKind === "turns" ? pagedTurns.total : viewKind === "milestones" ? pagedMilestones.total : pagedPhases.total;
-  const pageCount = viewKind === "turns" ? pagedTurns.pageCount : viewKind === "milestones" ? pagedMilestones.pageCount : pagedPhases.pageCount;
-  const pageAnchorEpoch = viewKind === "turns" ? pagedTurns.items[0]?.createdAtEpoch ?? null : viewKind === "milestones" ? pagedMilestones.items[0]?.turn.createdAtEpoch ?? null : pagedPhases.items[0]?.startEpoch ?? null;
-  return {
-    view: viewKind,
-    session,
-    totalTurns,
-    firstPromptNumber: bounds.first,
-    lastPromptNumber: bounds.last,
-    totalToolCalls,
-    typesDistribution,
-    compactBoundaries,
-    window,
-    windowTurns,
-    pageTurns: pagedTurns.items,
-    pagedMilestones: pagedMilestones.items,
-    milestonePulled: viewKind === "milestones" ? milestoneSelection.pulled : [],
-    turnEffGrades: milestoneSelection.effGradeByTurnId,
-    milestoneDayGroups,
-    pagedPhases: pagedPhases.items,
-    viewItemTotal,
-    pageAnchorEpoch,
-    page,
-    pageSize,
-    pageCount,
-    windowSignals,
-    jsonlPath,
-    tz,
-    hasEarlier: milestoneTail ? pagedMilestones.items.length < milestoneSelection.kept.length : false,
-    milestoneTail,
-    breadcrumb,
-    eraCutoffEpoch,
-    eraWindowTurns,
-    segmentSpine,
-    orphanAnchors,
-    eraKeptMilestones: eraMilestoneSelection.kept,
-    eraMilestonePulled: eraMilestoneSelection.pulled,
-    eraSegmentIdByTurnId
-  };
-}
-function buildMilestoneDayGroups(pagedMilestones, allMilestones, overflowByDay) {
-  if (pagedMilestones.length === 0) return [];
-  const dayKey = (m) => formatLocalDate(m.turn.createdAtEpoch);
-  const fullByDay = /* @__PURE__ */ new Map();
-  for (const m of allMilestones) {
-    const key = dayKey(m);
-    const bucket = fullByDay.get(key) ?? [];
-    bucket.push(m);
-    fullByDay.set(key, bucket);
-  }
-  const overflowFor = new Map(overflowByDay.map((o) => [o.date, o]));
-  const groups = [];
-  for (const m of pagedMilestones) {
-    const key = dayKey(m);
-    let group = groups.length > 0 && groups[groups.length - 1].date === key ? groups[groups.length - 1] : null;
-    if (group === null) {
-      const full = fullByDay.get(key) ?? [];
-      const fullPrompts = full.map((x) => x.turn.promptNumber);
-      group = {
-        date: key,
-        labelEpoch: m.turn.createdAtEpoch,
-        promptLo: Math.min(...fullPrompts),
-        promptHi: Math.max(...fullPrompts),
-        keptCount: full.length,
-        rows: [],
-        continued: false,
-        isFinalSliceForDay: false,
-        overflow: null
-      };
-      groups.push(group);
-    }
-    group.rows.push(m);
-  }
-  if (groups.length > 0) {
-    const spanFrom = groups[0].date;
-    const spanTo = groups[groups.length - 1].date;
-    const groupedDates = new Set(groups.map((group) => group.date));
-    let materialized = false;
-    for (const hint of overflowByDay) {
-      if (groupedDates.has(hint.date) || hint.date < spanFrom || hint.date > spanTo) {
-        continue;
-      }
-      groups.push({
-        date: hint.date,
-        labelEpoch: hint.labelEpoch,
-        promptLo: hint.firstPrompt,
-        promptHi: hint.lastPrompt,
-        keptCount: 0,
-        rows: [],
-        continued: false,
-        isFinalSliceForDay: false,
-        overflow: null
-      });
-      materialized = true;
-    }
-    if (materialized) {
-      groups.sort((left, right) => left.labelEpoch - right.labelEpoch);
-    }
-  }
-  for (const group of groups) {
-    const full = fullByDay.get(group.date) ?? [];
-    const dayFirstPrompt = full[0]?.turn.promptNumber ?? -1;
-    const dayLastPrompt = full[full.length - 1]?.turn.promptNumber ?? -1;
-    const firstRowPrompt = group.rows[0]?.turn.promptNumber ?? -1;
-    const lastRowPrompt = group.rows[group.rows.length - 1]?.turn.promptNumber ?? -1;
-    group.continued = firstRowPrompt !== dayFirstPrompt;
-    group.isFinalSliceForDay = lastRowPrompt === dayLastPrompt;
-    if (group.isFinalSliceForDay) {
-      group.overflow = overflowFor.get(group.date) ?? null;
-    }
-  }
-  return groups;
-}
-function renderSessionHeader(view) {
-  const sessionStart = view.session.createdAtEpoch;
-  const sessionEnd = view.session.updatedAtEpoch ?? view.session.completedAtEpoch ?? view.session.createdAtEpoch;
-  const compactSuffix = view.compactBoundaries.length > 0 ? `, compact at ${view.compactBoundaries.map((n) => `T${n}`).join(", ")}` : "";
-  const typesParts = renderTypesDistribution(view.typesDistribution);
-  const startDate = formatLocalDate(sessionStart);
-  const endDate = formatLocalDate(sessionEnd);
-  const endLabel = startDate === endDate ? formatLocalTime(sessionEnd) : `${endDate} ${formatLocalTime(sessionEnd)}`;
-  const lines = [
-    `- [S${view.session.id}] ${startDate} ${formatLocalTime(sessionStart)} \u2192 ${endLabel} (${formatDuration((sessionEnd - sessionStart) * 1e3)}${compactSuffix})`,
-    `  ${view.session.project} | ${view.totalTurns} turns | ${view.totalToolCalls} tool_calls`,
-    `  types: ${typesParts.join(" ")} (session-wide)`,
-    `  tz: ${view.tz.name} (${view.tz.offsetLabel})`,
-    `  raw: ${view.jsonlPath ?? "(unresolved)"}`
-  ];
-  const showingLine = formatShowingLine(view);
-  if (showingLine) {
-    lines.splice(3, 0, `  showing: ${showingLine}`);
-  }
-  if (view.breadcrumb !== null) {
-    lines.push(`  ${view.breadcrumb}`);
-  }
-  return lines;
-}
-function formatShowingLine(view) {
-  if (view.viewItemTotal === 0 || view.viewItemTotal <= view.pageSize) {
-    return null;
-  }
-  const anchor = view.pageAnchorEpoch === null ? "" : ` \xB7 ${formatLocalDateWithWeekday(view.pageAnchorEpoch)}`;
-  if (view.milestoneTail) {
-    return `${view.view} \xB7 last ${view.pagedMilestones.length}/${view.viewItemTotal}${anchor}`;
-  }
-  return `${view.view} \xB7 page ${view.page}/${view.pageCount} (${view.viewItemTotal})${anchor}`;
-}
-function renderTurnTable(view, promptCap, titleCap, signal) {
-  const renderedTurns = view.pageTurns.map((turn) => ({
-    turn,
-    marker: null
-  }));
-  return renderTurnRows(view, renderedTurns, promptCap, titleCap, signal);
-}
-var MILESTONE_MARKER_GLYPH = {
-  invalidated: "\u{1F6AB}",
-  reversed: "\u21A9\uFE0F",
-  outcome: "\u{1F3C1}"
-};
-function truncateToTokens(text, maxTokens) {
-  if (maxTokens <= 0) {
-    return "";
-  }
-  if (estimateDiaryTokens(text) <= maxTokens) {
-    return text;
-  }
-  const points = [...text];
-  let low = 0;
-  let high = points.length;
-  let best = "";
-  while (low <= high) {
-    const mid = Math.floor((low + high) / 2);
-    const candidate = `${points.slice(0, mid).join("")}\u2026`;
-    if (estimateDiaryTokens(candidate) <= maxTokens) {
-      best = candidate;
-      low = mid + 1;
-    } else {
-      high = mid - 1;
-    }
-  }
-  return best;
-}
-function wrapPlainText(text, width) {
-  const points = [...text];
-  const lines = [];
-  let start = 0;
-  while (start < points.length) {
-    if (points.length - start <= width) {
-      lines.push(points.slice(start).join(""));
-      break;
-    }
-    const hardEnd = start + width;
-    let breakAt = -1;
-    for (let index = hardEnd; index > start; index -= 1) {
-      if (points[index] === " ") {
-        breakAt = index;
-        break;
-      }
-    }
-    if (breakAt > start) {
-      lines.push(points.slice(start, breakAt).join(""));
-      start = breakAt + 1;
-    } else {
-      lines.push(points.slice(start, hardEnd).join(""));
-      start = hardEnd;
-    }
-  }
-  return lines;
-}
-function pathBasename(path2) {
-  const parts = path2.split("/");
-  return parts[parts.length - 1] || path2;
-}
-function renderModifiedFilesTail(turn) {
-  if (turn.filesModified.length === 0) {
-    return "";
-  }
-  const shown = turn.filesModified.slice(0, MILESTONE_FILE_BASENAME_CAP).map(pathBasename);
-  const hidden = turn.filesModified.length - shown.length;
-  return `  \u270F\uFE0F${shown.join(",")}${hidden > 0 ? `+${hidden}` : ""}`;
-}
-function milestonePromptPrefix(turn, signal) {
-  const raw = turn.userPrompt;
-  if (raw === null) {
-    return "";
-  }
-  const commandName = extractCommandName(raw);
-  if (commandName === null && isKnownSystemInjectedContent(raw.trimStart())) {
-    return MILESTONE_NOTIFICATION_MARKER;
-  }
-  return truncateText(cleanPromptForLabel(raw), {
-    limit: MILESTONE_PROMPT_PREFIX_CAP,
-    signal
-  });
-}
-function initialUnitTrim(unit) {
-  return {
-    showDesc: true,
-    descTokens: null,
-    pulledShown: Math.min(unit.pulled.length, MILESTONE_UNIT_PULLED_CAP),
-    pulledTitleTokens: null,
-    titleTokens: null,
-    promptTokens: null,
-    showFiles: true
-  };
-}
-function milestoneDescText(turn) {
-  return (turn.content ?? "").replace(/\s+/g, " ").trim();
-}
-function renderUnitLines(unit, trim, titleCap, signal) {
-  const { milestone } = unit;
-  const glyph = milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
-  let prompt = sanitizeTimelineField(milestonePromptPrefix(milestone.turn, signal));
-  if (trim.promptTokens !== null) {
-    prompt = truncateToTokens(prompt, trim.promptTokens);
-  }
-  let title = sanitizeTimelineField(
-    truncateText(milestone.turn.title ?? "(untitled)", { limit: titleCap, signal })
-  );
-  if (trim.titleTokens !== null) {
-    title = truncateToTokens(title, trim.titleTokens);
-  }
-  const head = prompt !== "" && title !== "" ? `${prompt} \u2192 ${title}` : `${prompt}${title}`;
-  const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
-  const mainBackLink = milestone.supersededBy && milestone.supersededBy.length > 0 ? ` \u2192\u88ABT${milestone.supersededBy.join("/T")}\u63A8\u7FFB` : "";
-  const lines = [
-    `   ${glyph} T${milestone.turn.promptNumber} ${typeEmoji(milestone.turn.type)} G${milestone.effGrade} ${head}${filesTail}${mainBackLink}`.trimEnd()
-  ];
-  if (trim.showDesc) {
-    const raw = milestoneDescText(milestone.turn);
-    const desc = trim.descTokens === null ? raw : truncateToTokens(raw, trim.descTokens);
-    if (desc !== "") {
-      for (const line of wrapPlainText(desc, MILESTONE_DESC_WRAP_CHARS)) {
-        lines.push(`${MILESTONE_DESC_INDENT}${line}`);
-      }
-    }
-  }
-  for (const antecedent of unit.pulled.slice(0, trim.pulledShown)) {
-    const superseded = antecedent.supersededBy.length > 0;
-    const reversalGlyph = superseded ? `${MILESTONE_MARKER_GLYPH.invalidated} ` : "";
-    let label = sanitizeTimelineField(
-      truncateText(pulledAntecedentLabel(antecedent.turn, signal), {
-        limit: titleCap,
-        signal
-      })
-    );
-    if (trim.pulledTitleTokens !== null) {
-      label = truncateToTokens(label, trim.pulledTitleTokens);
-    }
-    const backLink = superseded ? ` \u2192\u88ABT${antecedent.supersededBy.join("/T")}\u63A8\u7FFB` : "";
-    lines.push(
-      `      \u21B3 ${reversalGlyph}T${antecedent.turn.promptNumber} ${typeEmoji(antecedent.turn.type)} G${antecedent.effGrade} ${label}${backLink}`
-    );
-  }
-  const foldedPulled = unit.pulled.length - trim.pulledShown;
-  if (foldedPulled > 0) {
-    lines.push(`      \u21B3 +${foldedPulled} \u524D\u4EF6`);
-  }
-  return lines;
-}
-function unitTokens(unit, trim, titleCap, signal) {
-  return estimateDiaryTokens(renderUnitLines(unit, trim, titleCap, signal).join("\n"));
-}
-function largestFittingTokens(unit, trim, titleCap, cap, apply, signal) {
-  let low = 0;
-  let high = cap;
-  let best = -1;
-  while (low <= high) {
-    const mid = Math.floor((low + high) / 2);
-    apply(mid);
-    if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-      best = mid;
-      low = mid + 1;
-    } else {
-      high = mid - 1;
-    }
-  }
-  apply(best < 0 ? 0 : best);
-  return best;
-}
-function fitUnitTrim(unit, titleCap, cap, base, signal) {
-  const trim = { ...base };
-  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-    return trim;
-  }
-  if (trim.showDesc && milestoneDescText(unit.milestone.turn) !== "") {
-    const best = largestFittingTokens(
-      unit,
-      trim,
-      titleCap,
-      cap,
-      (value) => {
-        trim.descTokens = value;
-      },
-      signal
-    );
-    if (best <= 0) {
-      trim.showDesc = false;
-      trim.descTokens = null;
-    } else {
-      return trim;
-    }
-  }
-  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-    return trim;
-  }
-  while (trim.pulledShown > 0 && unitTokens(unit, trim, titleCap, signal) > cap) {
-    trim.pulledShown -= 1;
-  }
-  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-    return trim;
-  }
-  trim.showFiles = false;
-  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-    return trim;
-  }
-  if (trim.pulledShown > 0) {
-    largestFittingTokens(
-      unit,
-      trim,
-      titleCap,
-      cap,
-      (value) => {
-        trim.pulledTitleTokens = value;
-      },
-      signal
-    );
-    if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-      return trim;
-    }
-  }
-  largestFittingTokens(
-    unit,
-    trim,
-    titleCap,
-    cap,
-    (value) => {
-      trim.titleTokens = value;
-    },
-    signal
-  );
-  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-    return trim;
-  }
-  largestFittingTokens(
-    unit,
-    trim,
-    titleCap,
-    cap,
-    (value) => {
-      trim.promptTokens = value;
-    },
-    signal
-  );
-  return trim;
-}
-function renderUnitFitted(unit, titleCap, descOff, signal) {
-  const base = initialUnitTrim(unit);
-  if (descOff) {
-    base.showDesc = false;
-  }
-  const trim = fitUnitTrim(unit, titleCap, MILESTONE_UNIT_TOKEN_CAP, base, signal);
-  const lines = renderUnitLines(unit, trim, titleCap, signal);
-  if (estimateDiaryTokens(lines.join("\n")) <= MILESTONE_UNIT_TOKEN_CAP) {
-    return lines;
-  }
-  return [truncateToTokens(lines[0] ?? "", MILESTONE_UNIT_TOKEN_CAP)];
-}
-var HAN_WEIGHT_TENTHS = 11;
-var OTHER_WEIGHT_TENTHS = 6;
-var NEWLINE_WEIGHT_TENTHS = OTHER_WEIGHT_TENTHS;
-function textWeightTenths(text) {
-  let total = 0;
-  for (const codePoint of text) {
-    total += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? HAN_WEIGHT_TENTHS : OTHER_WEIGHT_TENTHS;
-  }
-  return total;
-}
-function tokensFromWeightTenths(tenths) {
-  return Math.ceil(tenths * 12 / 100);
-}
-function createMilestoneBodyModel(view, titleCap, signal) {
-  const pagedPrompts = new Set(
-    view.pagedMilestones.map((milestone) => milestone.turn.promptNumber)
-  );
-  const milestoneByPrompt = new Map(
-    view.pagedMilestones.map((milestone) => [milestone.turn.promptNumber, milestone])
-  );
-  const mainRowTurnIds = new Set(
-    view.pagedMilestones.map((milestone) => milestone.turn.id)
-  );
-  const pullable = view.milestonePulled.filter(
-    (antecedent) => !mainRowTurnIds.has(antecedent.turn.id)
-  );
-  const pullOrder = new Map(
-    pullable.map((antecedent, index) => [antecedent, index])
-  );
-  const antecedentDates = new Map(
-    pullable.map(
-      (antecedent) => [antecedent, formatLocalDate(antecedent.turn.createdAtEpoch)]
-    )
-  );
-  const retainedPrompts = new Set(pagedPrompts);
-  const removed = /* @__PURE__ */ new Set();
-  const descOff = /* @__PURE__ */ new Set();
-  const homedPulled = /* @__PURE__ */ new Map();
-  const unitEntries = /* @__PURE__ */ new Map();
-  const sections = view.milestoneDayGroups.map((group) => ({
-    date: group.date,
-    labelEpoch: group.labelEpoch,
-    group
-  }));
-  const groupedDates = new Set(sections.map((section) => section.date));
-  const syntheticEpochs = /* @__PURE__ */ new Map();
-  for (const antecedent of pullable) {
-    const date5 = antecedentDates.get(antecedent);
-    if (groupedDates.has(date5)) {
-      continue;
-    }
-    const known = syntheticEpochs.get(date5);
-    if (known === void 0 || antecedent.turn.createdAtEpoch < known) {
-      syntheticEpochs.set(date5, antecedent.turn.createdAtEpoch);
-    }
-  }
-  for (const [date5, labelEpoch] of syntheticEpochs) {
-    sections.push({ date: date5, labelEpoch, group: null });
-  }
-  sections.sort((left, right) => left.labelEpoch - right.labelEpoch);
-  const orderedStates = sections.map((section, index) => {
-    const overflow = section.group?.overflow ?? null;
-    return {
-      section,
-      index,
-      rows: section.group === null ? [] : [...section.group.rows],
-      droppedCount: 0,
-      hiddenCount: overflow?.count ?? 0,
-      hiddenLo: overflow?.firstPrompt ?? Number.POSITIVE_INFINITY,
-      hiddenHi: overflow?.lastPrompt ?? Number.NEGATIVE_INFINITY,
-      frameTenths: 0,
-      unitTenths: 0,
-      run: null
-    };
-  });
-  const stateByDate = new Map(
-    orderedStates.map((state) => [state.section.date, state])
-  );
-  const stateOfMilestone = /* @__PURE__ */ new Map();
-  for (const state of orderedStates) {
-    for (const milestone of state.rows) {
-      stateOfMilestone.set(milestone, state);
-    }
-  }
-  let totalTenths = 0;
-  let priced = false;
-  let framed = false;
-  function lineTenths(line) {
-    return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
-  }
-  function unitEntryFor(milestone) {
-    const cached2 = unitEntries.get(milestone);
-    if (cached2 !== void 0) {
-      return cached2;
-    }
-    const pulled = [...homedPulled.get(milestone.turn.promptNumber) ?? []].sort(
-      (left, right) => (pullOrder.get(left) ?? 0) - (pullOrder.get(right) ?? 0)
-    );
-    const lines = renderUnitFitted(
-      { milestone, pulled },
-      titleCap,
-      descOff.has(milestone),
-      signal
-    );
-    const entry = {
-      lines,
-      tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0)
-    };
-    unitEntries.set(milestone, entry);
-    return entry;
-  }
-  function invalidateUnit(milestone) {
-    const previous = unitEntries.get(milestone);
-    unitEntries.delete(milestone);
-    const state = stateOfMilestone.get(milestone);
-    if (!priced || state === void 0 || removed.has(milestone)) {
-      return;
-    }
-    const delta = unitEntryFor(milestone).tenths - (previous?.tenths ?? 0);
-    state.unitTenths += delta;
-    totalTenths += delta;
-  }
-  function linesTenths(lines) {
-    return lines.reduce((sum, line) => sum + lineTenths(line), 0);
-  }
-  function hiddenHint(hidden, promptLo, promptHi) {
-    return `\u2026 +${hidden} more @ within T${promptLo}..T${promptHi}`;
-  }
-  function expandedFrameLines(state) {
-    const group = state.section.group;
-    const header = `\u2500\u2500 ${formatLocalDateWithWeekday(group.labelEpoch)} \xB7 T${group.promptLo}\u2013T${group.promptHi} \xB7 ${group.keptCount - state.droppedCount} kept${group.continued ? " (cont.)" : ""} \u2500\u2500`;
-    if (state.hiddenCount === 0) {
-      return [header];
-    }
-    return [
-      header,
-      `        ${hiddenHint(state.hiddenCount, state.hiddenLo, state.hiddenHi)}`
-    ];
-  }
-  function runLines(run) {
-    if (run.hidden === 0) {
-      return [];
-    }
-    const from = formatLocalDateWithWeekday(run.first.section.labelEpoch);
-    const to = formatLocalDateWithWeekday(run.last.section.labelEpoch);
-    const span = run.first === run.last ? from : `${from}\u2013${to}`;
-    return [
-      `\u2500\u2500 ${span} \xB7 0 kept \xB7 ${hiddenHint(run.hidden, run.promptLo, run.promptHi)} \u2500\u2500`
-    ];
-  }
-  function refreshExpandedFrame(state) {
-    const tenths = linesTenths(expandedFrameLines(state));
-    totalTenths += tenths - state.frameTenths;
-    state.frameTenths = tenths;
-  }
-  function priceRun(run) {
-    const tenths = linesTenths(runLines(run));
-    totalTenths += tenths - run.tenths;
-    run.tenths = tenths;
-  }
-  function collapseState(state) {
-    totalTenths -= state.frameTenths;
-    state.frameTenths = 0;
-    const left = state.index > 0 ? orderedStates[state.index - 1].run : null;
-    const right = state.index + 1 < orderedStates.length ? orderedStates[state.index + 1].run : null;
-    const absorbed = [];
-    let run;
-    if (left === null && right === null) {
-      run = {
-        members: [],
-        first: state,
-        last: state,
-        hidden: 0,
-        promptLo: Number.POSITIVE_INFINITY,
-        promptHi: Number.NEGATIVE_INFINITY,
-        tenths: 0
-      };
-    } else if (left !== null && right !== null) {
-      run = left.members.length >= right.members.length ? left : right;
-      absorbed.push(run === left ? right : left);
-    } else {
-      run = left ?? right;
-    }
-    run.members.push(state);
-    state.run = run;
-    for (const other of absorbed) {
-      totalTenths -= other.tenths;
-      for (const member of other.members) {
-        member.run = run;
-        run.members.push(member);
-      }
-      run.hidden += other.hidden;
-      run.promptLo = Math.min(run.promptLo, other.promptLo);
-      run.promptHi = Math.max(run.promptHi, other.promptHi);
-      if (other.first.index < run.first.index) {
-        run.first = other.first;
-      }
-      if (other.last.index > run.last.index) {
-        run.last = other.last;
-      }
-    }
-    run.hidden += state.hiddenCount;
-    run.promptLo = Math.min(run.promptLo, state.hiddenLo);
-    run.promptHi = Math.max(run.promptHi, state.hiddenHi);
-    if (state.index < run.first.index) {
-      run.first = state;
-    }
-    if (state.index > run.last.index) {
-      run.last = state;
-    }
-    priceRun(run);
-  }
-  function noteHidden(state, promptNumber) {
-    state.hiddenCount += 1;
-    state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
-    state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
-    if (!framed) {
-      return;
-    }
-    const { run } = state;
-    if (run === null) {
-      refreshExpandedFrame(state);
-      return;
-    }
-    run.hidden += 1;
-    run.promptLo = Math.min(run.promptLo, promptNumber);
-    run.promptHi = Math.max(run.promptHi, promptNumber);
-    priceRun(run);
-  }
-  function homeAntecedent(antecedent) {
-    const home = antecedent.citerPromptNumbers.find(
-      (promptNumber) => retainedPrompts.has(promptNumber)
-    );
-    if (home !== void 0) {
-      homedPulled.set(home, [...homedPulled.get(home) ?? [], antecedent]);
-      const host = milestoneByPrompt.get(home);
-      if (host !== void 0) {
-        invalidateUnit(host);
-      }
-      return;
-    }
-    if (!antecedent.citerPromptNumbers.some((promptNumber) => pagedPrompts.has(promptNumber))) {
-      return;
-    }
-    const state = stateByDate.get(antecedentDates.get(antecedent));
-    if (state === void 0) {
-      return;
-    }
-    noteHidden(state, antecedent.turn.promptNumber);
-  }
-  for (const antecedent of pullable) {
-    homeAntecedent(antecedent);
-  }
-  for (const state of orderedStates) {
-    state.unitTenths = state.rows.reduce(
-      (sum, milestone) => sum + unitEntryFor(milestone).tenths,
-      0
-    );
-    totalTenths += state.unitTenths;
-  }
-  priced = true;
-  for (const state of orderedStates) {
-    if (state.rows.length === 0) {
-      collapseState(state);
-    } else {
-      refreshExpandedFrame(state);
-    }
-  }
-  framed = true;
-  totalTenths += NEWLINE_WEIGHT_TENTHS;
-  return {
-    disableDesc(milestone) {
-      if (descOff.has(milestone) || removed.has(milestone)) {
-        return;
-      }
-      descOff.add(milestone);
-      invalidateUnit(milestone);
-    },
-    removeUnit(milestone) {
-      if (removed.has(milestone)) {
-        return;
-      }
-      const promptNumber = milestone.turn.promptNumber;
-      removed.add(milestone);
-      retainedPrompts.delete(promptNumber);
-      const state = stateOfMilestone.get(milestone);
-      if (state !== void 0) {
-        const entry = unitEntryFor(milestone);
-        state.unitTenths -= entry.tenths;
-        totalTenths -= entry.tenths;
-        state.rows = state.rows.filter((row) => row !== milestone);
-        state.droppedCount += 1;
-        state.hiddenCount += 1;
-        state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
-        state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
-        if (state.rows.length === 0) {
-          collapseState(state);
-        } else {
-          refreshExpandedFrame(state);
-        }
-      }
-      unitEntries.delete(milestone);
-      const orphaned = homedPulled.get(promptNumber) ?? [];
-      homedPulled.delete(promptNumber);
-      for (const antecedent of orphaned) {
-        homeAntecedent(antecedent);
-      }
-    },
-    weightTenths() {
-      return totalTenths;
-    },
-    lines() {
-      const out = [""];
-      for (const state of orderedStates) {
-        if (state.rows.length === 0) {
-          const { run } = state;
-          if (run !== null && run.first === state) {
-            out.push(...runLines(run));
-          }
-          continue;
-        }
-        const frame = expandedFrameLines(state);
-        out.push(frame[0]);
-        for (const milestone of state.rows) {
-          out.push(...unitEntryFor(milestone).lines);
-        }
-        if (frame[1] !== void 0) {
-          out.push(frame[1]);
-        }
-      }
-      return out;
-    },
-    hasHiddenTurns() {
-      return orderedStates.some((state) => state.hiddenCount > 0);
-    }
-  };
-}
-function renderMilestoneBody(view, titleCap, signal) {
-  if (view.milestoneDayGroups.length === 0) {
-    return { lines: [], hiddenTurns: false };
-  }
-  const body = createMilestoneBodyModel(view, titleCap, signal);
-  return { lines: body.lines(), hiddenTurns: body.hasHiddenTurns() };
-}
-function milestoneDegradationOrder(view) {
-  return [...view.pagedMilestones].sort(compareMilestoneRank).reverse();
-}
-function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightTenths, measure, signal) {
-  const body = createMilestoneBodyModel(view, titleCap, signal);
-  const fits = () => tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget && measure(body.lines(), body.hasHiddenTurns()) <= tokenBudget;
-  const result = () => ({
-    lines: body.lines(),
-    hiddenTurns: body.hasHiddenTurns()
-  });
-  if (fits()) {
-    return result();
-  }
-  for (const milestone of milestoneDegradationOrder(view)) {
-    body.disableDesc(milestone);
-    if (fits()) {
-      return result();
-    }
-  }
-  for (const milestone of milestoneDegradationOrder(view)) {
-    if (milestone.alwaysKeep) {
-      continue;
-    }
-    body.removeUnit(milestone);
-    if (fits()) {
-      return result();
-    }
-  }
-  return { lines: [...body.lines(), MILESTONE_OVER_BUDGET_NOTE], hiddenTurns: body.hasHiddenTurns() };
-}
-function renderTurnRows(view, renderedTurns, promptCap, titleCap, signal) {
-  if (renderedTurns.length === 0) {
-    return [];
-  }
-  const brokenPromptCandidates = /* @__PURE__ */ new Set();
-  for (const pair of view.windowSignals.brokenPromptPairs) {
-    brokenPromptCandidates.add(pair.first);
-    brokenPromptCandidates.add(pair.second);
-  }
-  const previousEpochByPrompt = computePreviousEpochByPrompt(view.windowTurns);
-  const lines = [
-    "",
-    TURN_TABLE_HEADER
-  ];
-  let previousRenderedEpoch = null;
-  for (let index = 0; index < renderedTurns.length; index += 1) {
-    const { turn, marker } = renderedTurns[index];
-    if (previousRenderedEpoch !== null && !sameLocalDate(previousRenderedEpoch, turn.createdAtEpoch)) {
-      lines.push(renderDayDivider(turn.createdAtEpoch, previousRenderedEpoch));
-    }
-    lines.push(
-      renderTurnRow(
-        turn,
-        previousEpochByPrompt.get(turn.promptNumber) ?? null,
-        brokenPromptCandidates.has(turn.promptNumber),
-        promptCap,
-        titleCap,
-        view.turnEffGrades.get(turn.id),
-        marker,
-        signal
-      )
-    );
-    previousRenderedEpoch = turn.createdAtEpoch;
-  }
-  return lines;
-}
-function computePreviousEpochByPrompt(turns) {
-  const out = /* @__PURE__ */ new Map();
-  let previous = null;
-  for (const turn of sortTurnsForAnalysis(turns)) {
-    out.set(turn.promptNumber, previous);
-    previous = turn.createdAtEpoch;
-  }
-  return out;
-}
-function renderDayDivider(currentEpoch, previousRenderedEpoch) {
-  return `\u2500\u2500 ${formatLocalDateWithWeekday(currentEpoch)} \xB7 ${formatGap(currentEpoch, previousRenderedEpoch)} idle \u2500\u2500`;
-}
-function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, titleCap, effGrade, marker = null, signal) {
-  const isUndone = turn.status === "undone";
-  const isCompactMarker = turn.type.includes("compact");
-  const compactMetadata = isCompactMarker ? getCompactMetadata(turn.tags) : null;
-  const gapSuffix = isBrokenPromptCandidate ? " \u203B" : "";
-  const sourceBadges = extractSourceTags(turn.tags).map((source) => `[ext:${source}]`).join(" ");
-  const promptCore = isCompactMarker ? "/compact" : cleanPromptForLabel(turn.userPrompt);
-  const promptWithBadges = isCompactMarker ? promptCore : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
-  const promptText = sanitizeTimelineField(
-    truncateText(promptWithBadges, { limit: promptCap, signal })
-  );
-  const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
-  const statusPrefix = isUndone ? "\u2A2F " : "";
-  const titleText = sanitizeTimelineField(
-    renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker, signal)
-  );
-  return [
-    `${statusPrefix}T${turn.promptNumber}`,
-    formatTranscriptLineAnchor(turn.transcriptLineStart),
-    formatLocalTime(turn.createdAtEpoch),
-    `${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`,
-    renderStats(turn),
-    // Grade column (spec §D): the arc view and the turn table print the same
-    // effGrade, so "how important" is read off the row instead of inferred from
-    // the type icon. `—` is a turn with no main-row candidacy (a compact marker).
-    effGrade === void 0 ? MISSING_GRADE_CELL : `G${effGrade}`,
-    `${renderedPrompt} \u2192 ${titleText}`
-  ].join(" | ");
-}
-function renderStats(turn) {
-  const stats = [];
-  const toolCallCount = turn.toolCallCount ?? 0;
-  if (toolCallCount > 0) {
-    stats.push(`\u{1F527}${toolCallCount}`);
-  }
-  if (turn.filesRead.length > 0) {
-    stats.push(`\u{1F4D6}${turn.filesRead.length}`);
-  }
-  if (turn.filesModified.length > 0) {
-    stats.push(`\u270F\uFE0F${turn.filesModified.length}`);
-  }
-  return stats.length > 0 ? stats.join(" ") : "\u2014";
-}
-function typeGlyph(type) {
-  return typeListGlyph(type);
-}
-function renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker = null, signal) {
-  const markerPrefix = marker ? `${marker} ` : "";
-  if (turn.type.includes("compact")) {
-    const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
-    const trigger = compactMetadata?.trigger ?? "manual";
-    return `${markerPrefix}${COMPACT_TYPE_GLYPH} /compact ${preTokens} tokens, ${trigger}`;
-  }
-  if (isUndone) {
-    if (turn.title !== null) {
-      const body = `${typeGlyph(turn.type)} ${truncateText(turn.title, { limit: titleCap, signal })}`;
-      return `${markerPrefix}~~${body}~~`;
-    }
-    return `${markerPrefix}\u2A2F`.trim();
-  }
-  if (turn.status === "extracted" && turn.title !== null) {
-    return `${markerPrefix}${typeGlyph(turn.type)} ${truncateText(turn.title, { limit: titleCap, signal })}`;
-  }
-  return `${markerPrefix}\u23F3`.trim();
-}
-function sanitizeTimelineField(value) {
-  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
-}
-function isTimelineLiveTurn(turn) {
-  return turn.status !== "undone" && turn.status !== "skipped";
-}
-function renderPhases(view, titleCap, signal) {
-  if (view.pagedPhases.length === 0) {
-    return [];
-  }
-  const turnByPrompt = new Map(
-    view.windowTurns.map((turn) => [turn.promptNumber, turn])
-  );
-  const lines = [
-    "",
-    "  phases:",
-    "  # | date | type | turns | span | work | lead title"
-  ];
-  let previousPhaseEpoch = null;
-  const startIndex = (view.page - 1) * view.pageSize;
-  for (const [index, phase] of view.pagedPhases.entries()) {
-    if (previousPhaseEpoch !== null && !sameLocalDate(previousPhaseEpoch, phase.startEpoch)) {
-      lines.push(`  ${renderDayDivider(phase.startEpoch, previousPhaseEpoch)}`);
-    }
-    const range = phase.startPromptNumber === phase.endPromptNumber ? `T${phase.startPromptNumber}` : `T${phase.startPromptNumber}-T${phase.endPromptNumber}`;
-    const durationLabel = phase.durationMs > 0 ? `~${formatDuration(phase.durationMs)}` : "<1m";
-    const countsLabel = `${phase.turnCount} ${phase.turnCount === 1 ? "turn" : "turns"}`;
-    const stats = [];
-    if (phase.totalFilesRead > 0) {
-      stats.push(`\u{1F4D6}${phase.totalFilesRead}`);
-    }
-    if (phase.totalFilesModified > 0) {
-      stats.push(`\u270F\uFE0F${phase.totalFilesModified}`);
-    }
-    if (phase.totalToolCalls > 0) {
-      stats.push(`\u{1F527}${phase.totalToolCalls}`);
-    }
-    const extSuffix = phase.externalInputs.length > 0 ? `  [ext:${phase.externalInputs.join(",")}]` : "";
-    const dateLabel = sameLocalDate(phase.startEpoch, phase.endEpoch) ? formatLocalMonthDayWithWeekday(phase.startEpoch) : `${formatLocalMonthDay(phase.startEpoch)}\u2192${formatLocalMonthDay(phase.endEpoch)}`;
-    const leadTurn = turnByPrompt.get(phase.startPromptNumber);
-    const leadTextCandidate = leadTurn?.title ?? cleanPromptForLabel(leadTurn?.userPrompt ?? null);
-    const leadText = leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
-    const leadTitle = sanitizeTimelineField(truncateText(leadText, { limit: titleCap, signal }));
-    lines.push(
-      `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type.join(",")).padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd()
-    );
-    previousPhaseEpoch = phase.endEpoch;
-  }
-  return lines;
-}
-function renderShapeSignals(view) {
-  const windowLabel = view.window.startPromptNumber === view.firstPromptNumber && view.window.endPromptNumber === view.lastPromptNumber ? " = full session" : "";
-  const lines = [
-    "",
-    `  shape signals (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}${windowLabel}):`
-  ];
-  if (view.windowSignals.fastestGap !== null) {
-    lines.push(
-      `    - fastest gap:   after T${view.windowSignals.fastestGap.afterPromptNumber} (+${formatDuration(view.windowSignals.fastestGap.ms)})`
-    );
-  }
-  if (view.windowSignals.longestGap !== null) {
-    lines.push(
-      `    - longest gap:   after T${view.windowSignals.longestGap.afterPromptNumber} (+${formatDuration(view.windowSignals.longestGap.ms)})`
-    );
-  }
-  if (view.windowSignals.toolBursts.length > 0) {
-    lines.push(
-      `    - tool bursts:   ${view.windowSignals.toolBursts.map((burst) => `T${burst.promptNumber} \u{1F527}${burst.toolCallCount}`).join(", ")}   [median \u{1F527}${view.windowSignals.toolBurstMedian}, threshold >\u{1F527}${view.windowSignals.toolBurstThreshold}]`
-    );
-  }
-  if (view.windowSignals.brokenPromptPairs.length > 0) {
-    lines.push(
-      `    - broken-prompt: ${view.windowSignals.brokenPromptPairs.map((pair) => `T${pair.first}\u2192T${pair.second}`).join(", ")}`
-    );
-  }
-  if (view.windowSignals.undoneTurns.length > 0) {
-    lines.push(
-      `    - undone turns:  ${view.windowSignals.undoneTurns.map((turn) => `T${turn}`).join(", ")}`
-    );
-  }
-  if (view.windowSignals.externalInputs.length > 0) {
-    lines.push(
-      `    - external inputs: ${view.windowSignals.externalInputs.map((input) => `T${input.promptNumber} [ext:${input.source}]`).join(", ")}`
-    );
-  }
-  const withinWindow = view.compactBoundaries.filter(
-    (boundary) => boundary >= view.window.startPromptNumber && boundary <= view.window.endPromptNumber
-  );
-  const outsideWindow = view.compactBoundaries.filter(
-    (boundary) => !withinWindow.includes(boundary)
-  );
-  if (withinWindow.length > 0 || outsideWindow.length > 0) {
-    lines.push(
-      `    - compact boundary: ${[
-        ...withinWindow.map((boundary) => `after T${boundary} (within window)`),
-        ...outsideWindow.map((boundary) => `after T${boundary} (outside window)`)
-      ].join("; ")}`
-    );
-  }
-  return lines;
-}
-function renderEarlierHint(view, options = {}) {
-  if (!options.showEarlierHint || !view.hasEarlier) {
-    return [];
-  }
-  const upperBound = view.view === "milestones" && view.pagedMilestones.length > 0 ? view.pagedMilestones[0].turn.promptNumber - 1 : view.window.startPromptNumber - 1;
-  return [
-    "",
-    `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${upperBound}") or recall(id="S${view.session.id}")`
-  ];
-}
-function renderLineagePointer(view) {
-  if (view.session.parentSessionId === null) {
-    return [];
-  }
-  return [
-    "",
-    `  earlier: recall(id="S${view.session.parentSessionId}")`
-  ];
-}
-function withLegacyEraHeader(view, bodyLines, hasSpine) {
-  if (!hasSpine || bodyLines.length === 0) {
-    return bodyLines;
-  }
-  const legacyPrompts = view.windowTurns.filter((turn) => !isSegmentEra(turn.createdAtEpoch, view.eraCutoffEpoch)).map((turn) => turn.promptNumber);
-  const header = legacyEraHeader(
-    legacyPrompts.length > 0 ? Math.min(...legacyPrompts) : null,
-    legacyPrompts.length > 0 ? Math.max(...legacyPrompts) : null
-  );
-  const [first, ...rest] = bodyLines;
-  return first === "" ? ["", header, ...rest] : [header, ...bodyLines];
-}
-function renderEraMilestoneLines(view, titleCap, removed, descOff, signal) {
-  const bySegment = /* @__PURE__ */ new Map();
-  if (view.eraKeptMilestones.length === 0) {
-    return bySegment;
-  }
-  const renderable = view.eraKeptMilestones.filter(
-    (milestone) => !removed.has(milestone.turn.id) && view.eraSegmentIdByTurnId.has(milestone.turn.id)
-  );
-  const renderablePrompts = new Set(
-    renderable.map((milestone) => milestone.turn.promptNumber)
-  );
-  const homedPulled = /* @__PURE__ */ new Map();
-  for (const antecedent of view.eraMilestonePulled) {
-    const home = antecedent.citerPromptNumbers.find(
-      (promptNumber) => renderablePrompts.has(promptNumber)
-    );
-    if (home === void 0) {
-      continue;
-    }
-    const bucket = homedPulled.get(home) ?? [];
-    bucket.push(antecedent);
-    homedPulled.set(home, bucket);
-  }
-  for (const milestone of renderable) {
-    const segmentId = view.eraSegmentIdByTurnId.get(milestone.turn.id);
-    const pulled = homedPulled.get(milestone.turn.promptNumber) ?? [];
-    const lines = renderUnitFitted(
-      { milestone, pulled },
-      titleCap,
-      descOff.has(milestone.turn.id),
-      signal
-    );
-    const bucket = bySegment.get(segmentId) ?? [];
-    bucket.push(...lines);
-    bySegment.set(segmentId, bucket);
-  }
-  return bySegment;
-}
-function eraMilestoneDegradationOrder(kept) {
-  return [...kept].sort(compareMilestoneRank).reverse();
-}
-function fitEraMilestonesToBudget(view, titleCap, tokenBudget, measure, signal) {
-  if (view.eraKeptMilestones.length === 0) {
-    return /* @__PURE__ */ new Map();
-  }
-  const removed = /* @__PURE__ */ new Set();
-  const descOff = /* @__PURE__ */ new Set();
-  const build = () => {
-    const lines = renderEraMilestoneLines(view, titleCap, removed, descOff, signal);
-    const spineLines = renderSegmentSpineBlock({
-      spine: view.segmentSpine,
-      orphans: view.orphanAnchors,
-      titleCap,
-      milestoneLinesBySegmentId: lines
-    });
-    return { lines, spineLines };
-  };
-  let current = build();
-  if (measure(current.spineLines) <= tokenBudget) {
-    return current.lines;
-  }
-  for (const milestone of eraMilestoneDegradationOrder(view.eraKeptMilestones)) {
-    descOff.add(milestone.turn.id);
-    current = build();
-    if (measure(current.spineLines) <= tokenBudget) {
-      return current.lines;
-    }
-  }
-  for (const milestone of eraMilestoneDegradationOrder(view.eraKeptMilestones)) {
-    removed.add(milestone.turn.id);
-    current = build();
-    if (measure(current.spineLines) <= tokenBudget) {
-      return current.lines;
-    }
-  }
-  return current.lines;
-}
-function renderTimeline(view, options = {}) {
-  const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
-  const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
-  const signal = createTruncationSignal();
-  const eraMilestoneLinesFull = view.view === "milestones" ? renderEraMilestoneLines(view, titleCap, EMPTY_TURN_ID_SET, EMPTY_TURN_ID_SET, signal) : /* @__PURE__ */ new Map();
-  let spineLines = view.view === "milestones" ? renderSegmentSpineBlock({
-    spine: view.segmentSpine,
-    orphans: view.orphanAnchors,
-    titleCap,
-    milestoneLinesBySegmentId: eraMilestoneLinesFull
-  }) : [];
-  const assemble = (bodyLines, spineOverride = spineLines) => [
-    ...renderSessionHeader(view),
-    ...spineOverride,
-    ...withLegacyEraHeader(view, bodyLines, spineOverride.length > 0),
-    ...renderShapeSignals(view),
-    ...renderEarlierHint(view, options),
-    ...renderLineagePointer(view)
-  ].join("\n");
-  if (view.view === "phases") {
-    return appendNavigationLegend(assemble(renderPhases(view, titleCap, signal)), {
-      truncated: signal.truncated
-    });
-  }
-  if (view.view !== "milestones") {
-    return appendNavigationLegend(
-      assemble(renderTurnTable(view, promptCap, titleCap, signal)),
-      { truncated: signal.truncated }
-    );
-  }
-  if (options.tokenBudget === void 0) {
-    const body2 = renderMilestoneBody(view, titleCap, signal);
-    return appendNavigationLegend(assemble(body2.lines), {
-      truncated: body2.hiddenTurns || signal.truncated
-    });
-  }
-  if (spineLines.length > 0) {
-    const fittedMilestoneLines = fitEraMilestonesToBudget(
-      view,
-      titleCap,
-      options.tokenBudget,
-      (candidateSpineLines) => estimateDiaryTokens(assemble([], candidateSpineLines)),
-      signal
-    );
-    spineLines = renderSegmentSpineBlock({
-      spine: view.segmentSpine,
-      orphans: view.orphanAnchors,
-      titleCap,
-      milestoneLinesBySegmentId: fittedMilestoneLines
-    });
-    shedSpineToBudget({
-      view,
-      titleCap,
-      tokenBudget: options.tokenBudget,
-      apply: (candidate) => {
-        spineLines = candidate;
-      },
-      measure: () => estimateDiaryTokens(assemble([])),
-      milestoneLinesBySegmentId: fittedMilestoneLines
-    });
-  }
-  const body = fitMilestoneBodyToBudget(
-    view,
-    titleCap,
-    options.tokenBudget,
-    textWeightTenths(assemble([])),
-    (bodyLines, hiddenTurns) => estimateDiaryTokens(
-      appendNavigationLegend(assemble(bodyLines), {
-        truncated: hiddenTurns || signal.truncated
-      })
-    ),
-    signal
-  );
-  return appendNavigationLegend(assemble(body.lines), {
-    truncated: body.hiddenTurns || signal.truncated
-  });
-}
-function shedSpineToBudget(options) {
-  const { view, titleCap, tokenBudget, apply, measure, milestoneLinesBySegmentId } = options;
-  let segments = view.segmentSpine.length;
-  let orphans = view.orphanAnchors.length;
-  while (measure() > tokenBudget && (orphans > 0 || segments > 0)) {
-    if (orphans > 0) {
-      orphans -= 1;
-    } else {
-      segments -= 1;
-    }
-    apply(
-      renderSegmentSpineBlock({
-        spine: view.segmentSpine,
-        orphans: view.orphanAnchors,
-        titleCap,
-        maxSegments: segments,
-        maxOrphans: orphans,
-        milestoneLinesBySegmentId
-      })
-    );
-  }
-}
-
-// src/hooks/milestone-injection.ts
-var MILESTONE_INJECTION_TOKEN_BUDGET = 2500;
-function renderMilestoneInjection(view, options = {}) {
-  return renderTimeline(view, {
-    titleCap: DEFAULT_TITLE_CAP,
-    tokenBudget: options.tokenBudget ?? MILESTONE_INJECTION_TOKEN_BUDGET,
-    // The injection is not a paged surface: an "earlier" pointer would name a
-    // window the reader never asked for.
-    showEarlierHint: false
-  });
-}
-function renderSessionMilestoneInjection(db, sessionId, options = {}) {
-  const view = buildTimelineView(db, {
-    id: `S${sessionId}`,
-    view: "milestones",
-    // One page holding every selected row: the token budget, not pagination, is
-    // what sizes the injection.
-    pageSize: Number.MAX_SAFE_INTEGER,
-    eraCutoffEpoch: options.eraCutoffEpoch ?? null
-  });
-  return renderMilestoneInjection(view, options);
-}
-
-// src/hooks/handlers/context-milestones.ts
-function sessionHasTurns(db, sessionId) {
-  return db.query(
-    "SELECT 1 AS present FROM turns WHERE session_id = ? LIMIT 1"
-  ).get(sessionId) !== null;
-}
-function createMilestoneContextHandler(dependencies) {
+// src/hooks/handlers/context-segments.ts
+function createSegmentBlockContextHandler(dependencies, slotIndex, kind) {
   const eraCutoffEpoch = dependencies.eraCutoffEpoch !== void 0 ? dependencies.eraCutoffEpoch : resolveEraCutoff(dependencies.db);
-  return async function handleMilestoneContextHook(input) {
+  return async function handleSegmentBlockContextHook(input) {
     if (!input.sessionId || input.source !== "resume" && input.source !== "compact") {
       return { continue: true };
     }
     try {
       const session = getSessionByContentId(dependencies.db, input.sessionId);
-      if (!session || !sessionHasTurns(dependencies.db, session.id)) {
+      if (!session) {
         return { continue: true };
       }
-      const hookSpecificOutput = dependencies.renderMilestoneInjection ? dependencies.renderMilestoneInjection(dependencies.db, session.id) : renderSessionMilestoneInjection(dependencies.db, session.id, {
-        eraCutoffEpoch
-      });
-      return hookSpecificOutput ? { continue: true, hookSpecificOutput } : { continue: true };
+      const attached = listAttachedSegmentsByActivity(
+        dependencies.db,
+        session.id,
+        ATTACHED_SEGMENT_BLOCK_SLOTS
+      );
+      const segment = attached[slotIndex - 1];
+      if (!segment) {
+        return { continue: true };
+      }
+      const hookSpecificOutput = renderAttachedSegmentBlock(
+        dependencies.db,
+        kind,
+        segment,
+        eraCutoffEpoch,
+        sessionWriterId(session.id)
+      );
+      return { continue: true, hookSpecificOutput };
+    } catch {
+      return { continue: true };
+    }
+  };
+}
+function createProposalsContextHandler(dependencies) {
+  return async function handleProposalsContextHook(_input) {
+    try {
+      if (listRecentSettlementProposals(dependencies.db, 1).length === 0) {
+        return { continue: true };
+      }
+      return { continue: true, hookSpecificOutput: renderProposalsBlock(dependencies.db) };
     } catch {
       return { continue: true };
     }
@@ -23964,9 +27175,9 @@ function createMilestoneContextHandler(dependencies) {
 
 // src/hooks/handlers/context-note-taking.ts
 var NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
-You keep notes on your own turns. The injected "mnemo current turn" line,
-its owed suffix, and the backlog-relief block are the ONLY sources of a
-note address \u2014 never recall one from memory, never invent one.
+You keep notes on your own turns. The injected "mnemo current turn" line
+and the backlog-relief block are the ONLY sources of a note address \u2014
+never recall one from memory, never invent one.
 Timing, fields, budgets, the skip test and replace live in the note
 tool's description.
 </mnemo-note-taking>`;
@@ -23981,20 +27192,20 @@ function createNoteTakingContextHandler() {
 
 // src/rules/pretooluse-dispatcher.ts
 var import_node_fs7 = require("node:fs");
-var import_node_crypto3 = require("node:crypto");
-var import_node_path14 = require("node:path");
+var import_node_crypto4 = require("node:crypto");
+var import_node_path13 = require("node:path");
 
 // src/rules/sidecar-protocol.ts
-var import_node_crypto2 = require("node:crypto");
+var import_node_crypto3 = require("node:crypto");
 var import_node_fs6 = require("node:fs");
-var import_node_path13 = require("node:path");
+var import_node_path12 = require("node:path");
 var SIDECAR_LOCK_WAIT_MS = 5e3;
 var lockWaitArray = new Int32Array(new SharedArrayBuffer(4));
 function isErrorCode(error48, code) {
   return error48 instanceof Error && "code" in error48 && error48.code === code;
 }
 function resolveHitSidecarLockPath(dataRoot) {
-  return (0, import_node_path13.join)(dataRoot, "rules", "hits.lock");
+  return (0, import_node_path12.join)(dataRoot, "rules", "hits.lock");
 }
 function readLockOwner(path2) {
   try {
@@ -24008,12 +27219,12 @@ function readLockOwner(path2) {
 }
 function withHitSidecarLock(dataRoot, operation, options = {}) {
   const path2 = resolveHitSidecarLockPath(dataRoot);
-  (0, import_node_fs6.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
+  (0, import_node_fs6.mkdirSync)((0, import_node_path12.dirname)(path2), { recursive: true });
   const waitMs = options.waitMs ?? SIDECAR_LOCK_WAIT_MS;
   if (!Number.isFinite(waitMs) || waitMs < 0) {
     throw new Error("waitMs must be a non-negative finite number");
   }
-  const owner = { pid: process.pid, token: (0, import_node_crypto2.randomUUID)() };
+  const owner = { pid: process.pid, token: (0, import_node_crypto3.randomUUID)() };
   const temporary = `${path2}.${owner.pid}.${owner.token}.tmp`;
   (0, import_node_fs6.writeFileSync)(temporary, JSON.stringify(owner), { mode: 384 });
   const deadline = performance.now() + waitMs;
@@ -24055,10 +27266,10 @@ var SESSION_LOCK_WAIT_MS = 35;
 var STALE_SESSION_LOCK_MS = 3e4;
 var lockWaitArray2 = new Int32Array(new SharedArrayBuffer(4));
 function resolveTriggerIndexPath(dataRoot = DATA_DIR) {
-  return (0, import_node_path14.join)(dataRoot, "rules", "trigger-index.json");
+  return (0, import_node_path13.join)(dataRoot, "rules", "trigger-index.json");
 }
 function resolveSessionStateDirectory(dataRoot = DATA_DIR) {
-  return (0, import_node_path14.join)(dataRoot, "rules", "session-state");
+  return (0, import_node_path13.join)(dataRoot, "rules", "session-state");
 }
 function localDate(tsMs) {
   const date5 = new Date(tsMs);
@@ -24068,11 +27279,11 @@ function localDate(tsMs) {
   return `${year}-${month}-${day}`;
 }
 function resolveHitSidecarPath(dataRoot = DATA_DIR, tsMs = Date.now()) {
-  return (0, import_node_path14.join)(dataRoot, "rules", `hits-${localDate(tsMs)}.jsonl`);
+  return (0, import_node_path13.join)(dataRoot, "rules", `hits-${localDate(tsMs)}.jsonl`);
 }
 function sessionStatePath(dataRoot, sessionId) {
-  const digest = (0, import_node_crypto3.createHash)("sha256").update(sessionId).digest("hex");
-  return (0, import_node_path14.join)(resolveSessionStateDirectory(dataRoot), `${digest}.json`);
+  const digest = (0, import_node_crypto4.createHash)("sha256").update(sessionId).digest("hex");
+  return (0, import_node_path13.join)(resolveSessionStateDirectory(dataRoot), `${digest}.json`);
 }
 function readIndex(dataRoot) {
   try {
@@ -24100,8 +27311,8 @@ function readState(dataRoot, sessionId) {
 }
 function writeState(dataRoot, sessionId, ruleIds) {
   const path2 = sessionStatePath(dataRoot, sessionId);
-  (0, import_node_fs7.mkdirSync)((0, import_node_path14.dirname)(path2), { recursive: true });
-  const temporary = `${path2}.${process.pid}.${(0, import_node_crypto3.randomUUID)()}.tmp`;
+  (0, import_node_fs7.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
+  const temporary = `${path2}.${process.pid}.${(0, import_node_crypto4.randomUUID)()}.tmp`;
   (0, import_node_fs7.writeFileSync)(
     temporary,
     `${JSON.stringify({
@@ -24115,7 +27326,7 @@ function writeState(dataRoot, sessionId, ruleIds) {
 }
 function acquireSessionLock(dataRoot, sessionId) {
   const statePath = sessionStatePath(dataRoot, sessionId);
-  (0, import_node_fs7.mkdirSync)((0, import_node_path14.dirname)(statePath), { recursive: true });
+  (0, import_node_fs7.mkdirSync)((0, import_node_path13.dirname)(statePath), { recursive: true });
   const path2 = `${statePath}.lock`;
   const deadline = performance.now() + SESSION_LOCK_WAIT_MS;
   while (performance.now() <= deadline) {
@@ -24153,7 +27364,7 @@ function releaseSessionLock(lock) {
   }
 }
 function appendHits(path2, hits) {
-  (0, import_node_fs7.mkdirSync)((0, import_node_path14.dirname)(path2), { recursive: true });
+  (0, import_node_fs7.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
   const descriptor = (0, import_node_fs7.openSync)(
     path2,
     import_node_fs7.constants.O_APPEND | import_node_fs7.constants.O_CREAT | import_node_fs7.constants.O_WRONLY,
@@ -24198,16 +27409,16 @@ function createHits(input, ruleIds, timestamp, randomUuid) {
 function createDispatcher(eventName, dependencies) {
   const dataRoot = dependencies.dataRoot ?? DATA_DIR;
   const nowMs = dependencies.nowMs ?? Date.now;
-  const randomUuid = dependencies.randomUuid ?? import_node_crypto3.randomUUID;
+  const randomUuid = dependencies.randomUuid ?? import_node_crypto4.randomUUID;
   return (input) => {
     if (input.eventName !== eventName || !hasRequiredIdentity(input)) {
       return { continue: true };
     }
     const index = readIndex(dataRoot);
     if (!index) return { continue: true };
-    const project = (0, import_node_path14.resolve)(input.cwd);
+    const project = (0, import_node_path13.resolve)(input.cwd);
     const candidates = index.rules.filter(
-      (rule) => rule.scope === "global" || (0, import_node_path14.resolve)(rule.scope) === project
+      (rule) => rule.scope === "global" || (0, import_node_path13.resolve)(rule.scope) === project
     ).slice(0, TRIGGER_INDEX_SLOT_LIMIT).filter((rule) => triggerMatches(rule.trigger, input));
     if (candidates.length === 0) return { continue: true };
     const lock = acquireSessionLock(dataRoot, input.sessionId);
@@ -24269,173 +27480,6 @@ function createPromptDispatchHandler(dependencies = {}) {
     }
     return rules?.hookSpecificOutput ? { continue: true, hookSpecificOutput: rules.hookSpecificOutput } : { continue: true };
   };
-}
-
-// src/db/note-settlement.ts
-var NOTE_SETTLEMENT_CONSECUTIVE_TURNS = 50;
-var NOTE_SETTLEMENT_MIN_WINDOW_TURNS = 20;
-var NOTE_SETTLEMENT_LEASE_MS = 10 * 60 * 1e3;
-var NOTE_SETTLEMENT_RESIDUAL_IDLE_MS = 24 * 60 * 60 * 1e3;
-var JOB_COLUMNS = `
-    id,
-    session_id AS sessionId,
-    window_start AS windowStart,
-    window_end AS windowEnd,
-    trigger_type AS triggerType,
-    status,
-    attempts,
-    retry_at_epoch AS retryAtEpoch,
-    claimed_at_epoch AS claimedAtEpoch,
-    claim_generation AS claimGeneration,
-    last_error AS lastError,
-    created_at_epoch AS createdAtEpoch,
-    updated_at_epoch AS updatedAtEpoch`;
-var JOB_SELECT = `SELECT${JOB_COLUMNS} FROM note_settlement_jobs`;
-function getNoteSettlementCursor(db, sessionId) {
-  return db.query(
-    `SELECT last_settled_prompt_number AS cursor
-         FROM note_settlement_cursors WHERE session_id = ?`
-  ).get(sessionId)?.cursor ?? 0;
-}
-function getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch) {
-  return db.query(
-    `SELECT MAX(prompt_number) AS floor FROM turns
-         WHERE session_id = ? AND created_at_epoch < ?`
-  ).get(sessionId, eraCutoffEpoch)?.floor ?? 0;
-}
-function getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch) {
-  const highestEnqueued = db.query(
-    `SELECT MAX(window_end) AS windowEnd FROM note_settlement_jobs
-         WHERE session_id = ? AND trigger_type != 'backfill'`
-  ).get(sessionId)?.windowEnd ?? 0;
-  return Math.max(
-    getNoteSettlementCursor(db, sessionId),
-    highestEnqueued ?? 0,
-    getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch)
-  ) + 1;
-}
-function ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch) {
-  db.query(
-    `INSERT OR IGNORE INTO note_settlement_cursors (
-       session_id, last_settled_prompt_number, updated_at_epoch
-     )
-     SELECT ?, COALESCE(
-       (SELECT MAX(prompt_number) FROM turns
-        WHERE session_id = ? AND created_at_epoch < ?), 0
-     ), ?`
-  ).run(sessionId, sessionId, eraCutoffEpoch, nowEpoch);
-}
-function getMaxPromptNumber2(db, sessionId) {
-  return db.query(
-    `SELECT MAX(t.prompt_number) AS maxPromptNumber FROM turns t
-         WHERE t.session_id = ? AND ${realPromptPredicate("t")}`
-  ).get(sessionId)?.maxPromptNumber ?? 0;
-}
-function getDecidedPrefixEnd(db, sessionId, windowStart) {
-  const ended = getMaxPromptNumber2(db, sessionId) - 1;
-  return Math.max(windowStart - 1, ended);
-}
-function getCompactBoundaryPromptNumber(db, sessionId) {
-  return db.query(
-    "SELECT last_compact_turn AS boundary FROM sessions WHERE id = ?"
-  ).get(sessionId)?.boundary ?? null;
-}
-function planNoteSettlementWindows(db, sessionId, trigger, options) {
-  const consecutiveTurns = options.consecutiveTurns ?? NOTE_SETTLEMENT_CONSECUTIVE_TURNS;
-  const minWindowTurns = options.minWindowTurns ?? NOTE_SETTLEMENT_MIN_WINDOW_TURNS;
-  let windowStart = getNoteSettlementWindowStart(
-    db,
-    sessionId,
-    options.eraCutoffEpoch
-  );
-  let prefixEnd = getDecidedPrefixEnd(db, sessionId, windowStart);
-  if (trigger === "compact") {
-    const boundary = getCompactBoundaryPromptNumber(db, sessionId);
-    if (boundary !== null) {
-      prefixEnd = boundary;
-    }
-  } else if (trigger === "sessionend") {
-    prefixEnd = getMaxPromptNumber2(db, sessionId);
-  }
-  const plans = [];
-  while (prefixEnd - windowStart + 1 >= consecutiveTurns) {
-    const windowEnd = windowStart + consecutiveTurns - 1;
-    plans.push({
-      sessionId,
-      windowStart,
-      windowEnd,
-      triggerType: "consecutive"
-    });
-    windowStart = windowEnd + 1;
-  }
-  const remainderFloor = trigger === "sessionend" ? 1 : minWindowTurns;
-  if ((trigger === "compact" || trigger === "sessionend") && prefixEnd - windowStart + 1 >= remainderFloor) {
-    plans.push({
-      sessionId,
-      windowStart,
-      windowEnd: prefixEnd,
-      triggerType: trigger
-    });
-  }
-  return plans;
-}
-function enqueueSessionEndNoteSettlementWindow(db, sessionId, nowEpoch, eraCutoffEpoch) {
-  return planAndEnqueueNoteSettlementWindows(db, sessionId, "sessionend", nowEpoch, {
-    eraCutoffEpoch
-  });
-}
-function insertJob(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch, eraCutoffEpoch) {
-  if (windowEnd < windowStart) {
-    return { ok: false, reason: "inverted_range" };
-  }
-  if (windowStart <= getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch)) {
-    return { ok: false, reason: "below_era_floor" };
-  }
-  if (triggerType !== "backfill" && windowStart < getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch)) {
-    return { ok: false, reason: "below_window_floor" };
-  }
-  const job = db.query(
-    `INSERT OR IGNORE INTO note_settlement_jobs (
-           session_id, window_start, window_end, trigger_type,
-           status, attempts, retry_at_epoch,
-           created_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
-         RETURNING${JOB_COLUMNS}`
-  ).get(sessionId, windowStart, windowEnd, triggerType, nowEpoch, nowEpoch) ?? null;
-  if (job && triggerType !== "backfill") {
-    ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch);
-  }
-  if (!job) {
-    return { ok: false, reason: "duplicate_window" };
-  }
-  return { ok: true, job };
-}
-function insertJobs(db, plans, nowEpoch, eraCutoffEpoch) {
-  const created = [];
-  for (const plan of plans) {
-    const result = insertJob(
-      db,
-      plan.sessionId,
-      plan.windowStart,
-      plan.windowEnd,
-      plan.triggerType,
-      nowEpoch,
-      eraCutoffEpoch
-    );
-    if (result.ok) {
-      created.push(result.job);
-    }
-  }
-  return created;
-}
-function planAndEnqueueNoteSettlementWindows(db, sessionId, trigger, nowEpoch, options) {
-  return runWriteTransaction(db, () => {
-    const plans = planNoteSettlementWindows(db, sessionId, trigger, options);
-    if (plans.length === 0) {
-      return [];
-    }
-    return insertJobs(db, plans, nowEpoch, options.eraCutoffEpoch);
-  });
 }
 
 // src/db/orphan-turns.ts
@@ -25059,13 +28103,7 @@ function runCaptureRepair(db, session, transcriptPath, options) {
 }
 
 // src/hooks/handlers/session-end.ts
-function loadSettlementEnabled() {
-  try {
-    return loadConfig().settlementEnabled;
-  } catch {
-    return DEFAULT_CONFIG.settlementEnabled;
-  }
-}
+var WRITE_GATE_JANITOR_SWEEP_LIMIT = 20;
 var SESSION_END_SCAN_MAX_LINES = 500;
 var SESSION_END_REPAIR_BUDGET_MS = 400;
 var SESSION_END_SCAN_BATCH_LINES = 50;
@@ -25075,8 +28113,6 @@ function createSessionEndHandler(dependencies) {
   const nowMs = dependencies.nowMs ?? Date.now;
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   const captureRepairRunner = dependencies.captureRepairRunner ?? runCaptureRepair;
-  const eraCutoffEpoch = dependencies.eraCutoffEpoch !== void 0 ? dependencies.eraCutoffEpoch : resolveEraCutoff(dependencies.db);
-  const settlementEnabled = dependencies.settlementEnabled ?? loadSettlementEnabled();
   return async function handleSessionEndHook(input) {
     if (!input.sessionId) {
       return { continue: true };
@@ -25163,19 +28199,18 @@ function createSessionEndHandler(dependencies) {
         });
       }
     }
-    if (settlementEnabled && eraCutoffEpoch !== null) {
-      try {
-        enqueueSessionEndNoteSettlementWindow(
+    try {
+      writeTransaction(dependencies.db, () => {
+        clearReadGrantsForWriter(dependencies.db, sessionWriterId(session.id));
+        sweepReadGrantsForCompletedSessions(
           dependencies.db,
-          session.id,
-          now(),
-          eraCutoffEpoch
+          WRITE_GATE_JANITOR_SWEEP_LIMIT
         );
-      } catch (error48) {
-        repairLog(
-          `session-end note settlement enqueue failed for session ${session.id}: ${error48 instanceof Error ? error48.message : String(error48)}`
-        );
-      }
+      });
+    } catch (error48) {
+      repairLog(
+        `session-end write-gate cleanup failed for session ${session.id}: ${error48 instanceof Error ? error48.message : String(error48)}`
+      );
     }
     return {
       continue: true,
@@ -25233,19 +28268,18 @@ function formatPromptPrefix(userPrompt) {
   const characters = Array.from(collapsed);
   return characters.length > PROMPT_PREFIX_CHARACTERS ? `"${characters.slice(0, PROMPT_PREFIX_CHARACTERS).join("")}\u2026"` : `"${collapsed}"`;
 }
+var REMEMBER_REMINDER_INTERVAL_TURNS = 20;
+function isRememberReminderDue(turnsSinceRemember) {
+  return turnsSinceRemember > 0 && turnsSinceRemember % REMEMBER_REMINDER_INTERVAL_TURNS === 0;
+}
+function renderRememberReminder(turnsSinceRemember) {
+  return `mnemo remember check: ${turnsSinceRemember} turns since your last remember call \u2014 see the remember tool description for what to check.`;
+}
 function pendingSuffix(pendingTurns) {
   return pendingTurns === 1 ? "(pending 1 turn)" : `(pending ${pendingTurns} turns)`;
 }
 function formatDebtLine(turn) {
   return `  [${formatTurnAddress(turn)}] ${formatPromptPrefix(turn.userPrompt)} ${pendingSuffix(turn.pendingTurns)}`;
-}
-function formatOwedSuffix(owed) {
-  if (owed.length === 0) {
-    return "";
-  }
-  const newest = owed[owed.length - 1];
-  const address = formatTurnAddress(newest);
-  return owed.length === 1 ? ` \xB7 owed: ${address}` : ` \xB7 owed: ${address} +${owed.length - 1} older`;
 }
 function renderNoteBacklogRelief(owed, displayLimit = NOTE_REMINDER_DISPLAY_LIMIT) {
   const lines = ["mnemo pending notes (backlog relief):"];
@@ -25630,16 +28664,24 @@ function createSessionInitHandler(dependencies) {
         epoch,
         isSubagent
       );
-      let owedSuffix = "";
       let reliefText = null;
+      let rememberReminderText = null;
       if (!isSubagent && turnId !== null) {
         const owed = listOwedNoteTurns(dependencies.db, session.id, promptNumber);
-        owedSuffix = formatOwedSuffix(owed);
         if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
           reliefText = renderNoteBacklogRelief(owed);
         }
+        const rememberSinceEpoch = session.lastRememberEpoch ?? session.createdAtEpoch - 1;
+        const turnsSinceRemember = countTurnsSince(
+          dependencies.db,
+          session.id,
+          rememberSinceEpoch
+        );
+        if (isRememberReminderDue(turnsSinceRemember)) {
+          rememberReminderText = renderRememberReminder(turnsSinceRemember);
+        }
       }
-      return { sessionDbId: session.id, promptNumber, owedSuffix, reliefText };
+      return { sessionDbId: session.id, promptNumber, reliefText, rememberReminderText };
     });
     if (isSubagent) {
       return {
@@ -25648,10 +28690,13 @@ function createSessionInitHandler(dependencies) {
       };
     }
     const sections = [
-      `mnemo current turn: S${created.sessionDbId}/T${created.promptNumber}${created.owedSuffix}`
+      `mnemo current turn: S${created.sessionDbId}/T${created.promptNumber}`
     ];
     if (created.reliefText) {
       sections.push(created.reliefText);
+    }
+    if (created.rememberReminderText) {
+      sections.push(created.rememberReminderText);
     }
     return {
       continue: true,
@@ -26056,17 +29101,7 @@ function createStopHandler(dependencies) {
           enqueuedAtEpoch: epoch
         });
       }
-      upsertSession(dependencies.db, {
-        contentSessionId: session.contentSessionId,
-        project: session.project,
-        title: session.title,
-        content: session.content,
-        insight: session.insight,
-        nextSteps: session.nextSteps,
-        createdAtEpoch: session.createdAtEpoch,
-        updatedAtEpoch: epoch,
-        completedAtEpoch: epoch
-      });
+      touchSessionCompletion(dependencies.db, session.id, epoch, epoch);
       if (parsedTurns) {
         detectAndCleanSubagentTurnsFromParsed(
           dependencies.db,
@@ -26111,11 +29146,12 @@ function createStopHandler(dependencies) {
 }
 
 // src/hooks/hook-command.ts
+var SEGMENT_BLOCK_SECTION_PATTERN = /^segment([1-9][0-9]*)-(fields|milestones)$/;
 var defaultHandlers;
 var defaultReadOnlyContextHandlers;
-var defaultRecentContextHandler;
 var defaultDigestContextHandler;
-var defaultMilestoneContextHandler;
+var defaultProposalsContextHandler;
+var defaultSegmentBlockContextHandlers = /* @__PURE__ */ new Map();
 var defaultNoteTakingContextHandler;
 var defaultUserPromptSubmitDispatcher;
 var defaultHookDatabase;
@@ -26141,21 +29177,24 @@ function createDefaultHookHandlers({
   workerEnv,
   enableSessionEnvCapture = false
 }) {
-  const fileStore = new DiaryFileStore(dataRoot);
   const contextDependencies = {
     db,
     workerClientDeps,
     workerEnv,
     enableSessionEnvCapture
   };
+  const segmentBlockHandlers = {};
+  for (let slot = 1; slot <= ATTACHED_SEGMENT_BLOCK_SLOTS; slot += 1) {
+    for (const kind of ["fields", "milestones"]) {
+      segmentBlockHandlers[`SessionStart:segment${slot}-${kind}`] = createSegmentBlockContextHandler({ db }, slot, kind);
+    }
+  }
   return {
     ...createDefaultReadOnlyContextHandlers({ dataRoot }),
-    "SessionStart:recent": createReadOnlyContextHandler(
-      { db, fileStore },
-      "recent"
-    ),
+    ...segmentBlockHandlers,
     "SessionStart:digest": createReadOnlyContextHandler({ db }, "digest"),
-    "SessionStart:milestones": createMilestoneContextHandler({ db }),
+    "SessionStart:rubric": createReadOnlyContextHandler({}, "rubric"),
+    "SessionStart:proposals": createProposalsContextHandler({ db }),
     "SessionStart:notes": createNoteTakingContextHandler(),
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
@@ -26192,40 +29231,41 @@ function getDefaultReadOnlyContextHandlers() {
   }
   return defaultReadOnlyContextHandlers;
 }
-function getDefaultRecentContextHandler() {
-  if (defaultRecentContextHandler) {
-    return defaultRecentContextHandler;
+function getDefaultProposalsContextHandler() {
+  if (defaultProposalsContextHandler) {
+    return defaultProposalsContextHandler;
   }
   const databasePath = resolveDatabasePath();
   if (!(0, import_node_fs9.existsSync)(databasePath)) {
-    defaultRecentContextHandler = async () => ({ continue: true });
-    return defaultRecentContextHandler;
+    defaultProposalsContextHandler = async () => ({ continue: true });
+    return defaultProposalsContextHandler;
   }
   const db = new import_bun_sqlite2.Database(databasePath, {
     readonly: true,
     create: false
   });
-  defaultRecentContextHandler = createReadOnlyContextHandler(
-    { db, fileStore: new DiaryFileStore(DATA_DIR) },
-    "recent"
-  );
-  return defaultRecentContextHandler;
+  defaultProposalsContextHandler = createProposalsContextHandler({ db });
+  return defaultProposalsContextHandler;
 }
-function getDefaultMilestoneContextHandler() {
-  if (defaultMilestoneContextHandler) {
-    return defaultMilestoneContextHandler;
+function getDefaultSegmentBlockContextHandler(slotIndex, kind) {
+  const cacheKey = `${slotIndex}-${kind}`;
+  const cached2 = defaultSegmentBlockContextHandlers.get(cacheKey);
+  if (cached2) {
+    return cached2;
   }
   const databasePath = resolveDatabasePath();
   if (!(0, import_node_fs9.existsSync)(databasePath)) {
-    defaultMilestoneContextHandler = async () => ({ continue: true });
-    return defaultMilestoneContextHandler;
+    const noop = async () => ({ continue: true });
+    defaultSegmentBlockContextHandlers.set(cacheKey, noop);
+    return noop;
   }
   const db = new import_bun_sqlite2.Database(databasePath, {
     readonly: true,
     create: false
   });
-  defaultMilestoneContextHandler = createMilestoneContextHandler({ db });
-  return defaultMilestoneContextHandler;
+  const handler = createSegmentBlockContextHandler({ db }, slotIndex, kind);
+  defaultSegmentBlockContextHandlers.set(cacheKey, handler);
+  return handler;
 }
 function getDefaultDigestContextHandler() {
   if (defaultDigestContextHandler) {
@@ -26262,14 +29302,23 @@ function getDefaultHandler(handlerKey) {
   if (handlerKey === "SessionStart:notes") {
     return getDefaultNoteTakingContextHandler();
   }
-  if (handlerKey === "SessionStart:recent") {
-    return getDefaultRecentContextHandler();
-  }
   if (handlerKey === "SessionStart:digest") {
     return getDefaultDigestContextHandler();
   }
-  if (handlerKey === "SessionStart:milestones") {
-    return getDefaultMilestoneContextHandler();
+  if (handlerKey === "SessionStart:rubric") {
+    return createReadOnlyContextHandler({}, "rubric");
+  }
+  if (handlerKey === "SessionStart:proposals") {
+    return getDefaultProposalsContextHandler();
+  }
+  if (handlerKey.startsWith("SessionStart:")) {
+    const match = SEGMENT_BLOCK_SECTION_PATTERN.exec(handlerKey.slice("SessionStart:".length));
+    if (match) {
+      return getDefaultSegmentBlockContextHandler(
+        Number.parseInt(match[1], 10),
+        match[2]
+      );
+    }
   }
   if (handlerKey === "SessionStart:persona") {
     return getDefaultReadOnlyContextHandlers()[handlerKey];
@@ -26310,7 +29359,13 @@ function contextSectionFromCommandArguments(command, section) {
   if (command !== "context") {
     return "sessions";
   }
-  return section === "persona" || section === "recent" || section === "digest" || section === "milestones" || section === "notes" ? section : "sessions";
+  if (section === "persona" || section === "digest" || section === "rubric" || section === "proposals" || section === "notes") {
+    return section;
+  }
+  if (section && SEGMENT_BLOCK_SECTION_PATTERN.test(section)) {
+    return section;
+  }
+  return "sessions";
 }
 function writeHookResult(result, eventName, stdout = process.stdout) {
   const output = {

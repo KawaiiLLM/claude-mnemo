@@ -19,7 +19,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.11.2", () => {
+  test("release metadata is consistently bumped to 0.12.0", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -44,12 +44,12 @@ describe("release artifacts", () => {
       "utf8",
     );
 
-    expect(packageJson.version).toBe("0.11.2");
-    expect(pluginManifest.version).toBe("0.11.2");
-    expect(marketplace.metadata?.version).toBe("0.11.2");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.11.2");
-    expect(diarySdkQuery).toContain('version: "0.11.2"');
-    expect(settlementSdkQuery).toContain('version: "0.11.2"');
+    expect(packageJson.version).toBe("0.12.0");
+    expect(pluginManifest.version).toBe("0.12.0");
+    expect(marketplace.metadata?.version).toBe("0.12.0");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.12.0");
+    expect(diarySdkQuery).toContain('version: "0.12.0"');
+    expect(settlementSdkQuery).toContain('version: "0.12.0"');
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -141,11 +141,12 @@ describe("release artifacts", () => {
     // fails here instead of shipping a stale bundle.
     const hookCommand = readFileSync("plugin/scripts/hook-command.cjs", "utf8");
     expect(hookCommand).toContain("renderPersonaDocumentInjection");
-    // note-prompt-clock (ticket 03): the owed suffix and the backlog relief
-    // are rendered by session-init alone, from a derived query — a stale
-    // bundle would still carry the retired classification walk and the
-    // per-debt reminder's once marker instead.
-    expect(hookCommand).toContain("formatOwedSuffix");
+    // read-write-contract (tickets 03/13): the owed-suffix helper retired
+    // with the backlog cadence, and the universal 20-turn remember reminder
+    // renders on the UserPromptSubmit channel — a stale bundle would still
+    // carry the suffix helper and lack the reminder.
+    expect(hookCommand).not.toContain("formatOwedSuffix");
+    expect(hookCommand).toContain("renderRememberReminder");
     expect(hookCommand).toContain("listOwedNoteTurns");
     expect(hookCommand).not.toContain("reconcileNoteDebt");
     expect(hookCommand).not.toContain("NOTE_RELIEF_DRY_TURNS");
