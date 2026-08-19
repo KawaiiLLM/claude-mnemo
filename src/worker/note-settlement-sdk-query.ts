@@ -23,7 +23,7 @@ import {
   settlementMembershipWriteInputShape,
   type SettlementMembershipWriteInput,
 } from "./note-settlement-membership-facade";
-import { createSettlementStagingEngine } from "./note-settlement-staging";
+import { createSettlementDirectWriteEngine } from "./note-settlement-direct-write";
 import { createSettlementStopHook } from "./note-settlement-stop-hook";
 import {
   settlementTurnWriteInputShape,
@@ -59,35 +59,39 @@ const SETTLEMENT_ALLOWED_TOOLS = [
  * The duty-level instructions (which turns are reviewable) live in the
  * settlement prompt, not here — this text states the CALL contract only.
  *
- * "Staged" (spec A7): this call validates fully right now and tells you
- * exactly what it found, but nothing reaches a stored row until you call
- * `commit`.
+ * Ticket 05 (read-write-contract spec "结算(直写改造)"): DIRECT WRITE, not
+ * staged — this call validates fully right now AND lands, in this same
+ * transaction, before the tool result returns. There is no `commit` left to
+ * wait for a write's own durability; `commit` is repurposed by ticket 06 to
+ * claim validity + a run summary + the job's terminal mark (see its own
+ * description below).
  */
 const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
-  "STAGE a CORRECTION to a turn's grade/type/tags/relations, OR this " +
-  "session's narrative — validated now, written only when you call " +
-  "`commit`. This is a RE-CHECK, not a first write: the main agent already " +
-  "wrote every field below for this window's turns; call this only when " +
-  "the Memory Rubric says a stored value is wrong. " +
+  "WRITE a CORRECTION to a turn's grade/type/tags/relations, OR this " +
+  "session's narrative — lands immediately, in this same call. This is a " +
+  "RE-CHECK, not a first write: the main agent already wrote every field " +
+  "below for this window's turns; call this only when the Memory Rubric " +
+  "says a stored value is wrong. " +
   "Exactly one of `turn` (\"S<session>/T<prompt>\", from the window or " +
   "preceding-turns section) or `session` (\"S<session>\", this session). " +
-  "Either is also this call's KEY: staging the same turn or session again " +
-  "REPLACES what you staged for it before, so a lost-receipt retry or a " +
-  "same-run correction is just another call, not a new problem. " +
   "On `turn`: does NOT accept title/content/insight — turn prose is the " +
   "main agent's alone to write. " +
   "grade (0-4)/type/tags: only for a turn shown in this prompt (window or " +
   "preceding turns); each overwrites whole when present, omit to leave " +
-  "alone — there is no append. " +
+  "alone — there is no append. Each field is checked and applied " +
+  "INDEPENDENTLY: if another writer (the main agent's own later note, or a " +
+  "prior settlement attempt) touched a field since this dispatch's context " +
+  "was read, that ONE field yields (reported in the receipt, not written) " +
+  "while the others still land — grade in particular is not derived from " +
+  "any note, so it lands even when type/tags on the same call yield. " +
   "evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/" +
   "dependsOn: address lists — the SAME seven relations and phase-legality " +
   "validator the main agent's own `note` tool uses; a target must already " +
-  "be a pair that existed before this run started AND still exist when " +
-  "`commit` lands it, and its two ends' `type` must satisfy the relation's " +
-  "phase pair (a structurally illegal pair is rejected, naming which half " +
-  "is missing). Which relation, if any, is the Memory Rubric's own 关系 " +
-  "checklist above — this call only enforces address/eligibility/phase " +
-  "shape. " +
+  "be a pair that existed before this run started AND still exist right " +
+  "now, and its two ends' `type` must satisfy the relation's phase pair (a " +
+  "structurally illegal pair is rejected, naming which half is missing). " +
+  "Which relation, if any, is the Memory Rubric's own 关系 checklist " +
+  "above — this call only enforces address/eligibility/phase shape. " +
   "On `session`: `title`/`content` only, each overwritten whole when " +
   "present (no append — compose the incremented text yourself from what " +
   "you can already see) — grade/type/tags/relations are refused.";
@@ -100,34 +104,37 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
  * `note` facade already has to the main agent's `note` tool.
  */
 const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
-  "STAGE a text-only task proposal, OR a membership CORRECTION — validated " +
-  "now, written only when you call `commit`. action: \"propose\" or " +
-  "\"reassign\". " +
+  "WRITE a text-only task proposal, OR a membership CORRECTION — lands " +
+  "immediately, in this same call. action: \"propose\" or \"reassign\". " +
   "propose: addresses (one or more \"S<session>/T<prompt>\" turn " +
   "addresses — a single homeless turn may open its own proposal, or name a " +
   "cluster forming ONE coherent task) + title (a short suggested name) — " +
   "stores a text-only suggestion for the user to confirm next session. " +
-  "This call's KEY is the address SET (order-independent): re-staging the " +
-  "same set replaces the earlier proposal. NEVER creates a segment and is " +
-  "never auto-adopted — do not propose an incoherent grab-bag. " +
+  "Idempotent on the address SET (order-independent): repeating the same " +
+  "set (even after a retry) matches the earlier proposal instead of " +
+  "storing a second one. NEVER creates a segment and is never auto-adopted " +
+  "— do not propose an incoherent grab-bag. " +
   "reassign: turns (one or more \"S<session>/T<prompt>\" addresses to " +
-  "correct) + id (an \"E<n>\" already on this session's segment roster) or " +
-  "id omitted to clear ownership (homeless). This is a RE-CHECK, not a " +
-  "first assignment — the main agent already placed these turns; correct " +
-  "only a DISPLAYED mismatch. A segment not on the roster is refused, " +
+  "correct) + id (an \"E<n>\" CURRENTLY attached to this session) or id " +
+  "omitted to clear ownership (homeless). This is a RE-CHECK, not a first " +
+  "assignment — the main agent already placed these turns; correct only a " +
+  "DISPLAYED mismatch. A segment not attached right now is refused, " +
   "naming it as not attached — attaching a NEW segment to this session is " +
-  "the main agent's call alone. This call's KEY is the turns SET " +
-  "(order-independent): re-staging it replaces the earlier reassignment. " +
-  "Never required — this window may commit without ever calling this tool.";
+  "the main agent's call alone. Never required — this window may finish " +
+  "without ever calling this tool.";
 
-/** The completion gate exposed as commit's own precondition — settlement gets no separate `check` tool. */
+/** Ticket 06 (spec "commit 重定位"): claim validity + a run summary + the job's terminal mark — no separate `check` tool. */
 const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
-  "Land every staged `note`/`remember` write in one transaction. Call this " +
-  "once you believe the window is done — whether or not you staged " +
-  "anything; a window with nothing to propose or relate commits cleanly — " +
-  "it is the only way any of your work becomes durable. If your job lease " +
-  "has been reclaimed, commit refuses and no further commit from this run " +
-  "will ever succeed — stop making tool calls.";
+  "Finish this window: verify your job lease is still valid, report what " +
+  "this run actually wrote, and mark the job durably complete. Call this " +
+  "once you believe the window is done — whether or not you wrote " +
+  "anything; every `note`/`remember` call already landed the instant it " +
+  "ran, so an empty-handed `commit` (nothing to propose or correct) is a " +
+  "normal, clean finish, not a no-op to avoid. This is the ONLY way the " +
+  "job itself is marked done — without it, the window is retried later " +
+  "even though your writes already stand. If your job lease has been " +
+  "reclaimed, commit refuses and no further commit from this run will " +
+  "ever succeed — stop making tool calls.";
 
 export interface CreateNoteSettlementSdkQueryOptions {
   db: Database;
@@ -183,10 +190,9 @@ export function createNoteSettlementSdkQuery(
     // see those files' own comments. This closure is the only place these
     // values exist for this request, and they never travel through the
     // model's own input or output. It is also why the handlers above are
-    // built ONCE at module-call time while THIS context (and the staging
-    // engine built from it, ticket 10b) must be built per request: a job's
-    // identity — and its own staged-write list — does not exist until a
-    // request names one.
+    // built ONCE at module-call time while THIS context (and the direct-
+    // write engine built from it, ticket 05) must be built per request: a
+    // job's identity does not exist until a request names one.
     const turnFacadeContext: SettlementTurnFacadeContext = {
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
@@ -196,19 +202,26 @@ export function createNoteSettlementSdkQuery(
       eligibleRelationPairKeys: request.eligibleRelationPairKeys,
       attachedSegmentIds: request.attachedSegmentIds,
     };
-    const staging = createSettlementStagingEngine({
+    const writes = createSettlementDirectWriteEngine({
       db: options.db,
       context: turnFacadeContext,
       now: options.now,
     });
-    // Ticket 11 (spec G2's first layer): per REQUEST, like the staging engine
-    // it reads — the block count is a fact about this run's stops, and a
-    // shared one would let an earlier window's stops silence a later
-    // window's warning. Registered as an SDK hook rather than through
+    // Ticket 06 (spec "Stop hook 重实现"): per REQUEST, like the engine it
+    // reads — the block count is a fact about this run's stops, and a shared
+    // one would let an earlier window's stops silence a later window's
+    // warning. Registered as an SDK hook rather than through
     // `hooks/hook-command.ts`: that command short-circuits to success for
     // `CLAUDE_CODE_ENTRYPOINT === "sdk-ts"`, so mnemo's file-configured hooks
-    // deliberately never fire inside a spawned SDK child.
-    const stopHook = createSettlementStopHook({ engine: staging });
+    // deliberately never fire inside a spawned SDK child. Reads the job row
+    // directly (jobId + claim generation) rather than through the write
+    // engine — direct write means the hook's probe is "job claimed but not
+    // yet done", a plain read, not a re-run of any write-side logic.
+    const stopHook = createSettlementStopHook({
+      db: options.db,
+      jobId: request.jobId,
+      claimGeneration: request.claimGeneration,
+    });
 
     const server = createSdkMcpServerImpl({
       name: "mnemo",
@@ -238,19 +251,19 @@ export function createNoteSettlementSdkQuery(
           "note",
           SETTLEMENT_NOTE_TOOL_DESCRIPTION,
           settlementTurnWriteInputShape,
-          async (args: SettlementTurnWriteInput) => staging.stageNoteWrite(args),
+          async (args: SettlementTurnWriteInput) => writes.writeNote(args),
         ),
         toolImpl(
           "remember",
           SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
           settlementMembershipWriteInputShape,
-          async (args: SettlementMembershipWriteInput) => staging.stageMembershipWrite(args),
+          async (args: SettlementMembershipWriteInput) => writes.writeMembership(args),
         ),
         toolImpl(
           "commit",
           SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
           {},
-          async () => staging.commit(),
+          async () => writes.commit(),
         ),
       ],
     });
@@ -295,13 +308,14 @@ export function createNoteSettlementSdkQuery(
       if (envelope === null) {
         throw new Error("note settlement query returned no result envelope");
       }
-      // Ticket 10c: `commitMetrics` is read from the staging engine ONCE,
-      // here, after the model's run has fully ended (every message drained
-      // above) — never during it, and never through a tool the model could
-      // call. This is what makes it safe under spec G9 (invisible to the
-      // grading agent at every point in its run): the value did not exist
-      // anywhere the model could observe it until this line.
-      return { text: envelope, commitMetrics: staging.getLastCommitMetrics() };
+      // Ticket 10c (carried into ticket 05's direct-write engine):
+      // `commitMetrics` is read ONCE, here, after the model's run has fully
+      // ended (every message drained above) — never during it, and never
+      // through a tool the model could call. This is what makes it safe
+      // under spec G9 (invisible to the grading agent at every point in its
+      // run): the value did not exist anywhere the model could observe it
+      // until this line.
+      return { text: envelope, commitMetrics: writes.getLastCommitMetrics() };
     } finally {
       if (request.signal) {
         request.signal.removeEventListener("abort", forwardAbort);

@@ -20,6 +20,7 @@ import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { buildNoteSettlementContext } from "../../src/worker/note-settlement-context";
 import { renderNoteSettlementPrompt } from "../../src/worker/note-settlement-prompt";
 import {
+  classifySettlementFailure,
   createNoteSettlementDispatch,
   type NoteSettlementQuery,
   type NoteSettlementQueryRequest,
@@ -815,5 +816,75 @@ describe("settlement payload at the scheduler seam", () => {
       sessionNarrativeWritten: 0,
       membersReassigned: 0,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 06 (read-write-contract spec "重试"): failure classification, both
+// the pure classifier and its wiring into the dispatch's own outcome.
+// ---------------------------------------------------------------------------
+
+describe("classifySettlementFailure (ticket 06)", () => {
+  test("SQLITE_BUSY is transient", () => {
+    expect(classifySettlementFailure({ code: "SQLITE_BUSY", message: "database is locked" })).toBe(
+      "transient",
+    );
+  });
+
+  test("a connection-shaped error (ECONNRESET) is transient", () => {
+    expect(classifySettlementFailure({ code: "ECONNRESET", message: "socket hang up" })).toBe(
+      "transient",
+    );
+  });
+
+  test("an authentication/invalid-request-shaped error is deterministic", () => {
+    expect(classifySettlementFailure({ type: "invalid_request_error", status: 400 })).toBe(
+      "deterministic",
+    );
+  });
+
+  test("an unrecognised error defaults to deterministic (unknown failures do not retry forever)", () => {
+    expect(classifySettlementFailure(new Error("something this classifier has never seen"))).toBe(
+      "deterministic",
+    );
+  });
+});
+
+describe("the dispatch's own outcome carries a failureClass (ticket 06)", () => {
+  test("runQuery throwing a connection-shaped error reports failureClass: transient", async () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1, { note: { title: "design+seam: x", content: "y" } });
+    seedTurn(sessionDbId, 2, { userPrompt: "still open" });
+    classifyThrough(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const dispatch = dispatchWith(async () => {
+      throw Object.assign(new Error("fetch failed"), { code: "ECONNRESET" });
+    });
+    const outcome = await dispatch({ job });
+
+    expect(outcome.ok).toBe(false);
+    expect(!outcome.ok && outcome.failureClass).toBe("transient");
+  });
+
+  test("runQuery returning normally but the job never committing reports failureClass: deterministic", async () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1, { note: { title: "design+seam: x", content: "y" } });
+    seedTurn(sessionDbId, 2, { userPrompt: "still open" });
+    classifyThrough(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    // The model's run ends normally (no thrown error) but never calls commit
+    // — exactly what a Stop-hook-blocked-then-exhausted run looks like from
+    // the dispatch's own vantage point.
+    const dispatch = dispatchWith(
+      queryThatStages(() => {
+        /* never commits */
+      }),
+    );
+    const outcome = await dispatch({ job });
+
+    expect(outcome.ok).toBe(false);
+    expect(!outcome.ok && outcome.failureClass).toBe("deterministic");
   });
 });

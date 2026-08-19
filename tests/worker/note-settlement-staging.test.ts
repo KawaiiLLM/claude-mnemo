@@ -24,6 +24,7 @@ import {
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
+import { claimWriterId, recordReadGrant, sessionWriterId, stampField } from "../../src/db/write-gate";
 import { createSettlementStagingEngine } from "../../src/worker/note-settlement-staging";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
@@ -327,11 +328,20 @@ describe("acceptance criterion 3 — remember stages propose only; nothing about
 // ---------------------------------------------------------------------------
 
 describe("acceptance criterion 5 — commit re-validates inside its own transaction", () => {
+  // Ticket 05 (read-write-contract spec): yield is now the write gate's own
+  // per-field staleness, not a shadow-note timestamp comparison — this
+  // fixture reproduces the race using `recordReadGrant`/`stampField`
+  // directly (db/write-gate.ts), the same seam
+  // worker/note-settlement-context.ts uses for a real dispatch.
   test("a review staged before an agent note landed yields at commit, though stage time reported it would write", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(db, sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const claimWriter = claimWriterId(job.id, job.claimGeneration);
+    // Context build's own read grant (worker/note-settlement-context.ts) —
+    // taken before either the stage call or the note that lands later.
+    recordReadGrant(db, claimWriter, "turn", t1, NOW);
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
     const receipt = engine.stageNoteWrite({
@@ -342,17 +352,15 @@ describe("acceptance criterion 5 — commit re-validates inside its own transact
     });
     // Stage time's own report: it would write, plainly — nothing about the
     // world has moved yet.
-    expect(receipt.content[0]!.text).not.toContain("yielded");
+    expect(receipt.content[0]!.text).not.toContain("Yielded");
 
-    // The world moves: the main agent's own note lands, strictly after
-    // `contextBuiltAtEpoch` — the exact race the note-derived half of a
-    // review must yield to.
-    upsertShadowNote(db, {
-      turnId: t1,
-      title: "agent's own live account",
-      content: "written while the turn was still running",
-      nowEpoch: NOW + 5,
-    });
+    // The world moves: the main agent's own note lands, strictly after the
+    // read grant context build took — the exact race the note-derived half
+    // of a review must yield to. `note.ts`'s real subsumption stamps type
+    // and tags together; reproduced directly here.
+    const agentWriter = sessionWriterId(sessionDbId);
+    stampField(db, "turn", t1, "type", agentWriter, NOW + 5);
+    stampField(db, "turn", t1, "tags", agentWriter, NOW + 5);
     updateTurnById(db, t1, { type: ["research"] });
 
     const commitReceipt = engine.commit();
@@ -1040,16 +1048,6 @@ describe("ticket 08 — edge correction through the shared phase validator (requ
       NOW - 500,
       { eligibleForRelation: "unrestricted" },
     );
-    // The agent's own note lands AFTER this dispatch's context read: the
-    // review's note-derived half (type/tags) stands down. The proposed
-    // ["design"] below never reaches the database — so the refines edge may
-    // not ride on it either.
-    upsertShadowNote(db, {
-      turnId: t2,
-      title: "agent's own live account",
-      content: "written during the async gap between claim and this call",
-      nowEpoch: NOW + 5,
-    });
     const job = claimWindow(db, sessionDbId, 1, 2);
     const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
     const context = baseContext(job, {
@@ -1057,6 +1055,16 @@ describe("ticket 08 — edge correction through the shared phase validator (requ
       reviewableTurnIds: new Set([t2]),
       contextBuiltAtEpoch: NOW,
     });
+    // Context build's own read grant, taken at NOW. The agent's own note
+    // lands AFTER it (write-gate stamp, ticket 05) — the review's
+    // note-derived half (type/tags) stands down. The proposed ["design"]
+    // below never reaches the database — so the refines edge may not ride
+    // on it either.
+    const claimWriter = claimWriterId(job.id, job.claimGeneration);
+    recordReadGrant(db, claimWriter, "turn", t2, NOW);
+    const agentWriter = sessionWriterId(sessionDbId);
+    stampField(db, "turn", t2, "type", agentWriter, NOW + 5);
+    stampField(db, "turn", t2, "tags", agentWriter, NOW + 5);
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW + 6 });
 
     const receipt = engine.stageNoteWrite({

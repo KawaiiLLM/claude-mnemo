@@ -25,8 +25,15 @@ import { closePendingNoteDebtsAsClosed, realPromptPredicate } from "./note-debt"
  *     boundary therefore produce two ADJACENT windows, not two claims on the
  *     same turns — spec's "同一 turn 只属一个窗口";
  *   - attempts are consumed AT CLAIM, so a worker that dies holding a lease has
- *     still spent one. Three deaths exhaust the job; the reclaim path respects
- *     the cap instead of resurrecting a fourth attempt;
+ *     still spent one. Ticket 06 (read-write-contract spec "重试") splits what
+ *     happens next by failure CLASS: a deterministic failure counts against
+ *     the cap (`NOTE_SETTLEMENT_MAX_ATTEMPTS`, "1+1" — two deaths exhaust the
+ *     job) and the reclaim path respects it instead of resurrecting a third
+ *     attempt; a transient one (network/connection/SQLITE_BUSY,
+ *     `failNoteSettlementJob`'s own doc comment) gives the spent attempt back
+ *     and never counts toward the cap at all — see that function for the full
+ *     split. A lease that expires with NO report at all (the claimant simply
+ *     vanished) is treated as the conservative, deterministic case;
  *   - `claim_generation` rises on EVERY transition out of `claimed`, not only on
  *     a fresh claim. Ownership ends when the row stops being claimed — by
  *     reclamation or by terminalisation — and a fence that only moved on the
@@ -34,8 +41,10 @@ import { closePendingNoteDebtsAsClosed, realPromptPredicate } from "./note-debt"
  *     write-back still matched, resurrecting a terminal job to `done` and
  *     walking the cursor over a window nobody settled;
  *   - the cursor advances across CONSECUTIVE RESOLVED windows, where resolved
- *     includes terminally failed. Abandon and continue: parking the cursor on a
- *     dead window would wedge every later window behind it forever.
+ *     includes terminally `failed` (a legacy row, pre-ticket-06) and
+ *     `abandoned` (a deterministic failure that spent its capped attempts,
+ *     ticket 06). Abandon and continue: parking the cursor on a dead window
+ *     would wedge every later window behind it forever.
  *
  * Deliberately NOT the same table as `settlement_jobs` — see the schema comment.
  */
@@ -80,11 +89,30 @@ export const NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
 /** A `claimed` job older than this is presumed dead and returns to `pending`. */
 export const NOTE_SETTLEMENT_LEASE_MS = 10 * 60 * 1000;
 
-/** A job that has consumed this many attempts is terminal — never reclaimed. */
-export const NOTE_SETTLEMENT_MAX_ATTEMPTS = 3;
+/**
+ * Ticket 06 (read-write-contract spec, "重试"): the DETERMINISTIC failure
+ * cap — "确定性失败上限 1 次…1+1 后弃窗" reads as one retry after the first
+ * failure, so this is 2 total attempts, not 1. Once a claim's attempts reach
+ * this AND the failure that spent the last one was deterministic, the job
+ * goes `abandoned` with a debt row rather than back to `pending`.
+ *
+ * This cap governs the DETERMINISTIC class only. A transient failure
+ * (network/connection/SQLITE_BUSY) never counts against it at all —
+ * `failNoteSettlementJob`'s transient branch gives the spent attempt BACK
+ * (same mechanism `releaseNoteSettlementJobClaim` already uses for a
+ * graceful exit), so a job that fails transiently over and over never
+ * approaches this number.
+ *
+ * The old uniform "claim increments attempts, backoff always, cap 3 for any
+ * failure" semantics are retired by this same ticket — see
+ * `failNoteSettlementJob`'s own doc comment for the two-class replacement.
+ */
+export const NOTE_SETTLEMENT_MAX_ATTEMPTS = 2;
 
-/** First backoff step; doubles per consumed attempt (60s / 120s / 240s). */
+/** First backoff step; doubles per consumed attempt (60s / 120s). Deterministic failures only — see `failNoteSettlementJob`. */
 export const NOTE_SETTLEMENT_RETRY_BASE_MS = 60_000;
+
+export type NoteSettlementFailureClass = "transient" | "deterministic";
 
 /** Idle age past which an unregistered session counts as closed (R2#3). */
 export const NOTE_SETTLEMENT_RESIDUAL_IDLE_MS = 24 * 60 * 60 * 1000;
@@ -128,7 +156,8 @@ export type NoteSettlementJobStatus =
   | "pending"
   | "claimed"
   | "done"
-  | "failed";
+  | "failed"
+  | "abandoned";
 
 export interface NoteSettlementJob {
   id: number;
@@ -145,6 +174,8 @@ export interface NoteSettlementJob {
   claimedAtEpoch: number | null;
   claimGeneration: number;
   lastError: string | null;
+  /** Ticket 06: which class the LAST recorded failure belongs to; null until one has landed. */
+  failureClass: NoteSettlementFailureClass | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
 }
@@ -201,6 +232,7 @@ const JOB_COLUMNS = `
     claimed_at_epoch AS claimedAtEpoch,
     claim_generation AS claimGeneration,
     last_error AS lastError,
+    failure_class AS failureClass,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch`;
 
@@ -933,24 +965,38 @@ export function claimNextNoteSettlementJob(
     // holds the OLD generation, so its `done` (or its failure) matches nothing
     // once ownership has moved — including when ownership moved to nobody,
     // which is exactly the terminal case below.
-    db.query<unknown, [string, number, number, number, number]>(
-      `UPDATE note_settlement_jobs
-       SET status = 'failed',
-           claimed_at_epoch = NULL,
-           claim_generation = claim_generation + 1,
-           last_error = COALESCE(last_error, ?),
-           updated_at_epoch = ?
-       WHERE session_id = ?
-         AND status = 'claimed'
-         AND (claimed_at_epoch IS NULL OR claimed_at_epoch <= ?)
-         AND attempts >= ?`,
-    ).run(
-      LEASE_EXHAUSTED_ERROR,
-      nowEpoch,
-      sessionId,
-      leaseCutoffEpoch,
-      maxAttempts,
-    );
+    //
+    // Ticket 06: a lease that expired with the attempt cap already spent goes
+    // straight to `abandoned` (the same terminal state `failNoteSettlementJob`'s
+    // own deterministic-at-cap branch produces), with a debt row — a dispatch
+    // that vanished without reporting back at all is treated as the
+    // conservative (deterministic) case, same as the migration backfill for
+    // pre-ticket-06 `failed` rows (db/schema.ts's
+    // `ensureNoteSettlementJobsRetrySchema`): there is no report to classify,
+    // and assuming it would have self-resolved is the reading that could wedge
+    // a session behind a truly broken window forever.
+    const reclaimedAtCap = db
+      .query<
+        { id: number; sessionId: number; windowStart: number; windowEnd: number },
+        [string, number, number, number, number]
+      >(
+        `UPDATE note_settlement_jobs
+         SET status = 'abandoned',
+             claimed_at_epoch = NULL,
+             claim_generation = claim_generation + 1,
+             last_error = COALESCE(last_error, ?),
+             failure_class = 'deterministic',
+             updated_at_epoch = ?
+         WHERE session_id = ?
+           AND status = 'claimed'
+           AND (claimed_at_epoch IS NULL OR claimed_at_epoch <= ?)
+           AND attempts >= ?
+         RETURNING id, session_id AS sessionId, window_start AS windowStart, window_end AS windowEnd`,
+      )
+      .get(LEASE_EXHAUSTED_ERROR, nowEpoch, sessionId, leaseCutoffEpoch, maxAttempts);
+    if (reclaimedAtCap) {
+      recordNoteSettlementDebt(db, reclaimedAtCap, LEASE_EXHAUSTED_ERROR, nowEpoch);
+    }
 
     db.query<unknown, [number, number, number, number]>(
       `UPDATE note_settlement_jobs
@@ -1084,23 +1130,100 @@ export interface FailNoteSettlementJobOptions {
   maxAttempts?: number;
 }
 
+export interface NoteSettlementDebtRecord {
+  id: number;
+  jobId: number;
+  sessionId: number;
+  windowStart: number;
+  windowEnd: number;
+  reason: string;
+  createdAtEpoch: number;
+}
+
 /**
- * Record a failed attempt and stamp when the next one becomes claimable.
+ * Ticket 06's own debt row (spec "作业状态机相应扩展": "新增 abandoned 终态
+ * + 一个欠账记录(窗口区间+原因,供手动 /settle 补)") — recorded exactly once,
+ * by `failNoteSettlementJob`'s deterministic branch, at the moment a window
+ * is actually abandoned. Never written for a transient failure (it never
+ * reaches a terminal state at all) and never synthesized retroactively for a
+ * pre-migration `failed` row (see `ensureNoteSettlementJobsRetrySchema`'s own
+ * doc comment in db/schema.ts).
+ */
+function recordNoteSettlementDebt(
+  db: Database,
+  job: Pick<NoteSettlementJob, "id" | "sessionId" | "windowStart" | "windowEnd">,
+  reason: string,
+  nowEpoch: number,
+): void {
+  db.query<unknown, [number, number, number, number, string, number]>(
+    `INSERT INTO note_settlement_debts (
+       job_id, session_id, window_start, window_end, reason, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(job.id, job.sessionId, job.windowStart, job.windowEnd, reason.slice(0, 500), nowEpoch);
+}
+
+/** Debts for one session (newest first), or every session's when omitted — the manual-`/settle`-facing read. */
+export function listNoteSettlementDebts(
+  db: Database,
+  sessionId?: number,
+): NoteSettlementDebtRecord[] {
+  const DEBT_COLUMNS = `
+    id, job_id AS jobId, session_id AS sessionId,
+    window_start AS windowStart, window_end AS windowEnd,
+    reason, created_at_epoch AS createdAtEpoch`;
+  if (sessionId === undefined) {
+    return db
+      .query<NoteSettlementDebtRecord, []>(
+        `SELECT${DEBT_COLUMNS} FROM note_settlement_debts ORDER BY created_at_epoch DESC, id DESC`,
+      )
+      .all();
+  }
+  return db
+    .query<NoteSettlementDebtRecord, [number]>(
+      `SELECT${DEBT_COLUMNS} FROM note_settlement_debts
+       WHERE session_id = ? ORDER BY created_at_epoch DESC, id DESC`,
+    )
+    .all(sessionId);
+}
+
+/**
+ * Record a failed attempt, fenced on the generation like completion — and, as
+ * of ticket 06 (read-write-contract spec "重试"), branched entirely on
+ * `failureClass`:
  *
- * `attempts` is untouched — the claim already consumed it — so the backoff step
- * is derived from the attempts already spent: 60s after the first failure, 120s
- * after the second, and irrelevant after the third because the job is terminal.
- * Fenced on the generation, same as completion.
+ *   - `"transient"` (network/connection/SQLITE_BUSY): the attempt this claim
+ *     already spent is given BACK — same mechanism
+ *     `releaseNoteSettlementJobClaim` already uses for a graceful exit
+ *     (`attempts = MAX(0, attempts - 1)`) — and the job returns straight to
+ *     `pending` with `retry_at_epoch` set to NOW, not backed off. There is no
+ *     cap for this class at all: nothing here ever moves it toward
+ *     `abandoned`. "无主动重试——事件驱动": the next NATURAL trigger event
+ *     (this session's own next turn-stop, or the cross-session leak) is what
+ *     tries it again, never a timer.
+ *   - `"deterministic"`: `attempts` is left exactly as the claim set it. If it
+ *     has now reached `maxAttempts` (default `NOTE_SETTLEMENT_MAX_ATTEMPTS`,
+ *     "1+1"), the job goes `abandoned` and a debt row is written
+ *     (`recordNoteSettlementDebt`) — terminal, never reclaimed again, same
+ *     "abandon and continue" discipline `advanceNoteSettlementCursor` already
+ *     applies to a legacy exhausted `failed` row. Otherwise it goes `failed`
+ *     with the SAME exponential backoff this function always used (60s after
+ *     the first attempt), awaiting one more try.
+ *
+ * The old uniform "every failure counts, every failure backs off, cap 3"
+ * semantics — one function, one branch, no class — are retired by this same
+ * ticket.
  */
 export function failNoteSettlementJob(
   db: Database,
   jobId: number,
+  failureClass: NoteSettlementFailureClass,
   reason: string,
   nowEpoch: number,
   claimGeneration: number,
   options: FailNoteSettlementJobOptions = {},
 ): NoteSettlementJob | null {
   const retryBaseMs = options.retryBaseMs ?? NOTE_SETTLEMENT_RETRY_BASE_MS;
+  const maxAttempts = options.maxAttempts ?? NOTE_SETTLEMENT_MAX_ATTEMPTS;
 
   return runWriteTransaction(db, () => {
     const job = getNoteSettlementJob(db, jobId);
@@ -1111,6 +1234,44 @@ export function failNoteSettlementJob(
     ) {
       return null;
     }
+
+    if (failureClass === "transient") {
+      const changed = db
+        .query<unknown, [string, number, number, number, number]>(
+          `UPDATE note_settlement_jobs
+           SET status = 'pending', claimed_at_epoch = NULL,
+               attempts = MAX(0, attempts - 1),
+               claim_generation = claim_generation + 1,
+               last_error = ?, failure_class = 'transient',
+               retry_at_epoch = ?, updated_at_epoch = ?
+           WHERE id = ? AND status = 'claimed' AND claim_generation = ?`,
+        )
+        .run(reason.slice(0, 500), nowEpoch, nowEpoch, jobId, claimGeneration).changes;
+      if (changed === 0) {
+        return null;
+      }
+      return getNoteSettlementJob(db, jobId);
+    }
+
+    // Deterministic: `attempts` stays exactly as the claim left it.
+    if (job.attempts >= maxAttempts) {
+      const changed = db
+        .query<unknown, [string, number, number, number]>(
+          `UPDATE note_settlement_jobs
+           SET status = 'abandoned', claimed_at_epoch = NULL,
+               claim_generation = claim_generation + 1,
+               last_error = ?, failure_class = 'deterministic',
+               updated_at_epoch = ?
+           WHERE id = ? AND status = 'claimed' AND claim_generation = ?`,
+        )
+        .run(reason.slice(0, 500), nowEpoch, jobId, claimGeneration).changes;
+      if (changed === 0) {
+        return null;
+      }
+      recordNoteSettlementDebt(db, job, reason, nowEpoch);
+      return getNoteSettlementJob(db, jobId);
+    }
+
     const backoffSeconds = Math.max(
       1,
       Math.round((retryBaseMs * 2 ** Math.max(0, job.attempts - 1)) / 1000),
@@ -1118,7 +1279,8 @@ export function failNoteSettlementJob(
     const changed = db
       .query<unknown, [string, number, number, number, number]>(
         `UPDATE note_settlement_jobs
-         SET status = 'failed', claimed_at_epoch = NULL, last_error = ?,
+         SET status = 'failed', claimed_at_epoch = NULL,
+             last_error = ?, failure_class = 'deterministic',
              retry_at_epoch = ?, updated_at_epoch = ?
          WHERE id = ? AND status = 'claimed' AND claim_generation = ?`,
       )
@@ -1181,8 +1343,15 @@ export function advanceNoteSettlementCursor(
 
   let consecutive = 0;
   for (const row of rows) {
+    // Ticket 06: `abandoned` is ALSO a resolved terminal state (a deterministic
+    // failure that spent its capped attempts) — same "abandon and continue"
+    // rule the `failed`-at-cap reading already gave a pre-ticket-06 row, kept
+    // here for a legacy row this migration's data backfill left at `failed`
+    // rather than force-terminalising (see db/schema.ts's
+    // `ensureNoteSettlementJobsRetrySchema`).
     const resolved =
       row.status === "done" ||
+      row.status === "abandoned" ||
       (row.status === "failed" && row.attempts >= maxAttempts);
     if (!resolved) {
       break;

@@ -15,6 +15,7 @@ import {
   createSegment,
   getSegment,
   getSegmentMemberTurnIds,
+  toggleSegmentStatus,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import {
@@ -310,6 +311,60 @@ describe("propose — never creates a segment row, and is no longer a completion
     expect(proposals[0]!.title).toBe("a three-turn cluster");
   });
 
+  // Ticket 05 (spec "propose 携幂等键"): a RE-CLAIMED job (new job id after a
+  // lost lease) retrying the same propose must not duplicate the row.
+  test("a duplicate propose from a DIFFERENT job id (a re-claimed retry) lands on the same row, never a second one", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const firstJob = claimWindow(sessionDbId, 1, 2);
+
+    const first = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(firstJob, { reviewableTurnIds: new Set([t1, t2]) }),
+      {
+        action: "propose",
+        addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
+        title: "first attempt's title",
+      },
+      NOW,
+      { apply: true },
+    );
+    expect(first.ok).toBe(true);
+
+    // A retry after the lease was lost carries a DIFFERENT job id (the
+    // pinned reason a job-scoped key cannot dedupe) but the SAME session and
+    // the SAME canonical address set.
+    const retryContext = baseContext(firstJob, {
+      jobId: firstJob.id + 1000,
+      reviewableTurnIds: new Set([t1, t2]),
+    });
+    const retry = evaluateSettlementMembershipWrite(
+      db,
+      retryContext,
+      {
+        action: "propose",
+        addresses: [`S${sessionDbId}/T2`, `S${sessionDbId}/T1`],
+        title: "retry's own (different) title",
+      },
+      NOW + 10,
+      { apply: true },
+    );
+
+    expect(retry.ok).toBe(true);
+    expect(retry.ok && retry.outcome.proposeAlreadyExisted).toBe(true);
+    expect(retry.ok && first.ok && retry.outcome.proposalId).toBe(first.outcome.proposalId);
+    expect(
+      retry.ok
+        ? renderSettlementMembershipWriteReceipt(retry.outcome, { staged: false })
+        : "",
+    ).toContain("already exists");
+
+    const proposals = listRecentSettlementProposals(db, 5);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.title).toBe("first attempt's title");
+  });
+
   test("apply:false stores nothing and creates no segment", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
@@ -424,6 +479,59 @@ describe("reassign — domain boundary (ticket 08)", () => {
 
     expect(result.ok).toBe(false);
     expect(!result.ok && result.message).toContain("at least one turn address");
+  });
+
+  // Ticket 05 (spec: "写事务内重验该段仍挂靠本会话(roster 快照仅提示)"): the
+  // FROZEN `context.attachedSegmentIds` is advisory only — the gate re-reads
+  // live attachment/status every call.
+  test("a segment closed AFTER the roster snapshot was taken is refused, even though the frozen snapshot still names it", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const attached = createSegment(db, { title: "closes mid-run", nowEpoch: NOW });
+    attachSegmentToSession(db, sessionDbId, attached.id, NOW);
+
+    // The roster the PROMPT showed still names it attached...
+    const staleRoster = new Set([attached.id]);
+    // ...but the main agent closed it between context-build and this call.
+    toggleSegmentStatus(db, attached.id, NOW + 1);
+    expect(getSegment(db, attached.id)!.status).toBe("closed");
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]), attachedSegmentIds: staleRoster }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${attached.id}` },
+      NOW + 2,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain(`E${attached.id}`);
+    expect(!result.ok && result.message).toContain("closed");
+    expect(getSegmentMemberTurnIds(db, attached.id)).toEqual([]);
+  });
+
+  test("a segment attached AFTER the roster snapshot was taken is accepted — the frozen snapshot is advisory, not authoritative", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const freshlyAttached = createSegment(db, { title: "attached mid-run", nowEpoch: NOW });
+
+    // The frozen roster the prompt showed does NOT name it — it was attached
+    // by the main agent AFTER context build.
+    const staleRoster = new Set<number>();
+    attachSegmentToSession(db, sessionDbId, freshlyAttached.id, NOW + 1);
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]), attachedSegmentIds: staleRoster }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${freshlyAttached.id}` },
+      NOW + 2,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(getSegmentMemberTurnIds(db, freshlyAttached.id)).toEqual([t1]);
   });
 
   test("apply:false validates and reports without writing", () => {

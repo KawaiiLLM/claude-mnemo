@@ -18,6 +18,12 @@ import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import {
+  claimWriterId,
+  recordReadGrant,
+  sessionWriterId,
+  stampField,
+} from "../../src/db/write-gate";
+import {
   evaluateSettlementTurnWrite,
   renderSettlementTurnWriteReceipt,
   settlementTurnWriteInputShape,
@@ -242,10 +248,9 @@ describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A
 
     expect(evaluation.ok).toBe(true);
     expect(evaluation.ok && evaluation.outcome.review).toEqual({
-      kind: "written",
-      grade: 3,
-      type: ["design"],
-      tags: ["widgets"],
+      grade: { value: 3, landed: true },
+      type: { value: ["design"], landed: true },
+      tags: { value: ["widgets"], landed: true },
     });
     // The load-bearing assertion: nothing landed.
     const turn = getTurnById(db, t1)!;
@@ -423,18 +428,28 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
     expect(turn.tags).toEqual(["widgets"]);
   });
 
-  test("yields type/tags (but not grade) to a note landed after this dispatch's context was read", () => {
+  // Ticket 05 (read-write-contract spec): yield retired as a special check —
+  // the write gate's own per-field staleness IS the new yield semantics.
+  // `note.ts`'s real subsumption rule re-stamps BOTH `type` and `tags`
+  // (never `grade`) whenever the main agent writes ANY note on a turn —
+  // reproduced directly here via `stampField`/`recordReadGrant`
+  // (db/write-gate.ts) rather than through `note.ts` itself, since this file
+  // tests the facade in isolation.
+  test("yields type/tags (but not grade) when an agent note's subsumption stamp lands after this claim's own read grant", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    // Committed strictly after `contextBuiltAtEpoch` (NOW): the model never
-    // saw this note.
-    upsertShadowNote(db, {
-      turnId: t1,
-      title: "agent's own live account",
-      content: "written while the turn was still running",
-      nowEpoch: NOW + 5,
-    });
+    const claimWriter = claimWriterId(job.id, job.claimGeneration);
+
+    // Context build recorded this claim's read grant (ticket 05's own seam,
+    // worker/note-settlement-context.ts) at contextBuiltAtEpoch (NOW).
+    recordReadGrant(db, claimWriter, "turn", t1, NOW);
+
+    // The main agent's note lands AFTER that grant — its subsumption stamp
+    // (note.ts) touches type/tags together, never grade.
+    const agentWriter = sessionWriterId(sessionDbId);
+    stampField(db, "turn", t1, "type", agentWriter, NOW + 5);
+    stampField(db, "turn", t1, "tags", agentWriter, NOW + 5);
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW }),
@@ -442,26 +457,33 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
       NOW + 6,
     );
 
-    expect(resultText(result)).toContain("yielded");
+    // The gate's own "stale" message, naming the other writer and pointing
+    // at re-reading — this IS the new yield semantics, not a bespoke phrase.
+    expect(resultText(result)).toContain("Yielded for");
+    expect(resultText(result)).toContain(`recall(id="S${sessionDbId}/T1")`);
     const turn = getTurnById(db, t1)!;
-    // Grade is the review's own column — judged from raw material, not the
-    // note — so it lands regardless of the yield.
+    // Grade is checked by the SAME gate on its OWN field — nothing stamps
+    // "grade" from a note write, so its grant never goes stale here, and it
+    // lands regardless of type/tags yielding on the same call.
     expect(turn.significanceGrade).toBe(3);
     expect(turn.type).toEqual([]);
     expect(turn.tags).toEqual([]);
   });
 
-  test("does not yield to a note that predates the dispatch's context read", () => {
+  test("does not yield when this claim's read grant is recorded AFTER the note's subsumption stamp", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    // Written BEFORE the context was read — this IS what the model saw.
-    upsertShadowNote(db, {
-      turnId: t1,
-      title: "written before the window was claimed",
-      content: "visible in the prompt the reviewer answered",
-      nowEpoch: NOW - 60,
-    });
     const job = claimWindow(sessionDbId, 1, 1);
+    const claimWriter = claimWriterId(job.id, job.claimGeneration);
+
+    // The agent's note lands FIRST — this IS what the settlement prompt
+    // showed, since the window rendering happens after it.
+    const agentWriter = sessionWriterId(sessionDbId);
+    stampField(db, "turn", t1, "type", agentWriter, NOW - 60);
+    stampField(db, "turn", t1, "tags", agentWriter, NOW - 60);
+    // Context build's read grant postdates it (rule 1: granted after the
+    // last write admits).
+    recordReadGrant(db, claimWriter, "turn", t1, NOW);
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW }),
@@ -469,10 +491,43 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
       NOW + 1,
     );
 
-    expect(resultText(result)).not.toContain("yielded");
+    expect(resultText(result)).not.toContain("Yielded for");
     const turn = getTurnById(db, t1)!;
     expect(turn.type).toEqual(["fix"]);
     expect(turn.tags).toEqual(["settlement"]);
+  });
+
+  test("a lapsed claimant's write goes stale once the new claimant (a different claim generation) has written the same field — claim fencing via the gate, no separate CAS", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const staleJob = claimWindow(sessionDbId, 1, 1);
+    const staleWriter = claimWriterId(staleJob.id, staleJob.claimGeneration);
+    // A displaced claimant still holds a grant from ITS OWN context build.
+    recordReadGrant(db, staleWriter, "turn", t1, NOW);
+
+    // The NEW claimant (same job id, later generation — a real reclaim bumps
+    // claim_generation; simulated directly here) writes the SAME field first.
+    const freshWriter = claimWriterId(staleJob.id, staleJob.claimGeneration + 1);
+    recordReadGrant(db, freshWriter, "turn", t1, NOW + 1);
+    write(
+      baseContext(
+        { ...staleJob, claimGeneration: staleJob.claimGeneration + 1 },
+        { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW + 1 },
+      ),
+      { turn: `S${sessionDbId}/T1`, type: ["design"] },
+      NOW + 2,
+    );
+
+    // The STALE claimant's own attempt on the SAME field now yields — its
+    // grant predates the fresh claimant's write, no separate per-write CAS
+    // needed (pinned decision).
+    const staleResult = write(
+      baseContext(staleJob, { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW }),
+      { turn: `S${sessionDbId}/T1`, type: ["fix"] },
+      NOW + 3,
+    );
+    expect(resultText(staleResult)).toContain("Yielded for");
+    expect(getTurnById(db, t1)!.type).toEqual(["design"]);
   });
 });
 

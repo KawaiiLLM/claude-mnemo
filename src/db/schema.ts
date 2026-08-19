@@ -5,6 +5,7 @@ import { recordInitializerBuild } from "./build-state";
 import { isCitationRelation, type CitationRelation } from "./citations";
 import { runWriteTransaction } from "./database";
 import { rankEdgeProvenance, type EdgeProvenance } from "./memory-edges";
+import { canonicalizeSettlementProposalAddresses } from "./note-settlement-proposals";
 import { rebuildSearchIndex } from "./search";
 import { repairStaleSegmentFacets } from "./segments";
 
@@ -64,7 +65,9 @@ const NOTE_DEBT_INDEX_DDL = `
 // Parametrised by table name because the rebuild follows SQLite's 12-step ALTER
 // TABLE procedure: the NEW table is built under a temporary name and renamed
 // INTO place last (see `ensureNoteSettlementTriggerVocabulary` for why renaming
-// the old one away instead is unsafe here). One definition, two names.
+// the old one away instead is unsafe here). One definition, several names —
+// `ensureNoteSettlementJobsRetrySchema` (ticket 06) rebuilds from this SAME
+// template a second time, once trigger_type's own widening has already landed.
 const noteSettlementJobsTableDdl = (tableName: string): string => `
   CREATE TABLE IF NOT EXISTS ${tableName} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,13 +85,23 @@ const noteSettlementJobsTableDdl = (tableName: string): string => `
         'consecutive', 'compact', 'residual', 'sessionend', 'backfill'
       )
     ),
+    -- 'abandoned' (ticket 06, read-write-contract spec "作业状态机相应扩展"):
+    -- a DETERMINISTIC failure's own terminal state once it has spent its
+    -- capped attempts — distinct from 'failed', which after this ticket is a
+    -- retryable-pending-backoff intermediate state, never a resting place.
+    -- A CHECK constraint cannot be ALTERed, so this widening travels through
+    -- the same 12-step rebuild trigger_type's own history already uses
+    -- (ensureNoteSettlementJobsRetrySchema).
     status TEXT NOT NULL DEFAULT 'pending' CHECK (
-      status IN ('pending', 'claimed', 'done', 'failed')
+      status IN ('pending', 'claimed', 'done', 'failed', 'abandoned')
     ),
     attempts INTEGER NOT NULL DEFAULT 0,
     -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
     -- no clock for settlement, so a due retry is noticed in passing by the next
-    -- trigger event rather than woken by anything.
+    -- trigger event rather than woken by anything. Ticket 06: backoff now
+    -- applies to a DETERMINISTIC failure only — a transient one (see
+    -- failure_class) returns straight to 'pending' with this left at "now",
+    -- so the very next trigger event (not a timer) picks it up.
     retry_at_epoch INTEGER NOT NULL DEFAULT 0,
     claimed_at_epoch INTEGER,
     -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
@@ -96,6 +109,16 @@ const noteSettlementJobsTableDdl = (tableName: string): string => `
     -- under and so writes nothing over the attempt that displaced it.
     claim_generation INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
+    -- Ticket 06: which retry discipline the LAST recorded failure belongs to —
+    -- null until a failure has landed at all. A transient failure
+    -- (network/connection/SQLITE_BUSY, worker/note-settlement-dispatch.ts's
+    -- classifySettlementFailure) never leaves a 'failed' row behind (it goes
+    -- straight back to 'pending', uncounted); this column is populated only
+    -- by the deterministic path, plus the one-time migration backfill below
+    -- for rows that failed before the column existed.
+    failure_class TEXT CHECK (
+      failure_class IS NULL OR failure_class IN ('transient', 'deterministic')
+    ),
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL,
     UNIQUE(session_id, window_start, trigger_type)
@@ -574,17 +597,49 @@ const SCHEMA_SQL = `
   -- even if this project later reshapes turn identity, and validating the
   -- addresses is the READER's job (they are re-validated by remember(create)
   -- itself at adoption time regardless).
+  -- addresses_key (ticket 05, spec "propose 携幂等键"): the CANONICAL form of
+  -- addresses (sorted, de-duplicated, JSON-encoded —
+  -- db/note-settlement-proposals.ts's canonicalizeSettlementProposalAddresses)
+  -- alongside the display-order original. A re-claimed job has a NEW job id
+  -- (retry = new job, spec: "重试=新 job id,所以 job 作用域的 key 不能去重"),
+  -- so the idempotency key is (session_id, addresses_key), not job-scoped —
+  -- see the UNIQUE index below and ensureNoteSettlementProposalIdempotencyKey
+  -- for how an existing installation gains this column and index.
   CREATE TABLE IF NOT EXISTS note_settlement_proposals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     addresses TEXT NOT NULL CHECK (json_valid(addresses)),
+    addresses_key TEXT,
     created_at_epoch INTEGER NOT NULL
   );
 
   CREATE INDEX IF NOT EXISTS idx_note_settlement_proposals_created
     ON note_settlement_proposals(created_at_epoch);
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_note_settlement_proposals_session_addresses
+    ON note_settlement_proposals(session_id, addresses_key);
+
+  -- Settlement retry debt (ticket 06, spec "重试"/"作业状态机相应扩展"): one
+  -- row per window a DETERMINISTIC failure abandoned after spending its capped
+  -- attempts — the window range plus why, so an operator's manual
+  -- /settle backfill has something concrete to consume instead of having to
+  -- rediscover the gap from note_settlement_jobs.status = 'abandoned' rows
+  -- directly. Never written for a transient failure (it never reaches a
+  -- terminal state at all — see failNoteSettlementJob).
+  CREATE TABLE IF NOT EXISTS note_settlement_debts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    window_start INTEGER NOT NULL,
+    window_end INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_debts_session
+    ON note_settlement_debts(session_id, created_at_epoch);
 
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
@@ -1575,6 +1630,8 @@ export function initializeSchema(db: Database): void {
   ensureNoteDebtCursorReliefColumn(db);
   retireLegacyPendingNoteDebts(db);
   ensureNoteSettlementTriggerVocabulary(db);
+  ensureNoteSettlementJobsRetrySchema(db);
+  ensureNoteSettlementProposalIdempotencyKey(db);
   dropLegacyMemoriesTable(db);
   // Last on purpose: every other turns-column migration above (parent_turn_id,
   // compact_boundary_uuid, consulted_memories, ...) must have
@@ -1920,6 +1977,172 @@ function ensureNoteSettlementTriggerVocabulary(db: Database): void {
   } finally {
     db.exec("PRAGMA foreign_keys = ON;");
   }
+}
+
+// Ticket 06 (read-write-contract spec, "作业状态机相应扩展"): `status` grows a
+// fifth value (`abandoned`) and the table grows `failure_class` — both land
+// through the SAME rebuild template `ensureNoteSettlementTriggerVocabulary`
+// already established (`noteSettlementJobsTableDdl`), now updated to the
+// current shape. Detected independently of that function's own staleness
+// check: a database that already carries `'backfill'` (already migrated once)
+// but not yet `'abandoned'` must still be rebuilt, and a fresh database never
+// needs either rebuild at all.
+function noteSettlementJobsRetrySchemaIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        `SELECT sql FROM sqlite_master
+         WHERE type = 'table' AND name = 'note_settlement_jobs'`,
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'abandoned'");
+}
+
+/**
+ * Same 12-step rebuild shape as `ensureNoteSettlementTriggerVocabulary`, one
+ * schema generation later — see that function's own doc comment for why the
+ * NEW table is built under a temporary name and renamed INTO place rather
+ * than the old one renamed away (the FK from
+ * `note_settlement_segment_exclusions` would otherwise repoint and cascade-
+ * delete on the DROP).
+ *
+ * The copy's `failure_class` column is where the DATA migration lives (pinned
+ * decision: "既有 failed 行按确定性语义迁移") — every row already sitting at
+ * `status = 'failed'` is tagged `'deterministic'`; the column did not exist
+ * before this migration, so there is no recorded distinction to preserve, and
+ * treating every historical failure as the class that COUNTS toward the cap
+ * is the conservative reading (a mis-tagged transient failure only costs a
+ * future retry it would not otherwise have needed; the reverse would let a
+ * genuinely broken window retry forever). `status` itself is copied verbatim
+ * — an old `failed` row is NOT force-terminalised into `abandoned` by this
+ * migration; the new cap only governs failures recorded from here on, so a
+ * legacy row with attempts still under the new cap remains ordinarily
+ * reclaimable, and one already at or over it simply stops being selected by
+ * every claim/dispatch query (`attempts < maxAttempts`) exactly as it does
+ * today — no debt row is synthesized retroactively for it.
+ */
+function ensureNoteSettlementJobsRetrySchema(db: Database): void {
+  if (!noteSettlementJobsRetrySchemaIsStale(db)) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!noteSettlementJobsRetrySchemaIsStale(db)) {
+        return;
+      }
+
+      db.exec(noteSettlementJobsTableDdl("note_settlement_jobs_retry_rebuild"));
+      db.exec(
+        `INSERT INTO note_settlement_jobs_retry_rebuild (
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error, failure_class, created_at_epoch, updated_at_epoch
+         )
+         SELECT
+           id, session_id, window_start, window_end, trigger_type, status,
+           attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+           last_error,
+           CASE WHEN status = 'failed' THEN 'deterministic' ELSE NULL END,
+           created_at_epoch, updated_at_epoch
+         FROM note_settlement_jobs`,
+      );
+      db.exec("DROP TABLE note_settlement_jobs");
+      db.exec(
+        "ALTER TABLE note_settlement_jobs_retry_rebuild RENAME TO note_settlement_jobs",
+      );
+      db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `note_settlement_jobs rebuild left ${violations.length} foreign key violation(s) while adding failure_class/abandoned: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
+/**
+ * `note_settlement_proposals` gains `addresses_key` (ticket 05, spec "propose
+ * 携幂等键") — a plain `ALTER TABLE ADD COLUMN` (no CHECK referencing another
+ * column, so no 12-step rebuild is needed, same shape as
+ * `ensureSegmentWorkingStateColumns`). Existing rows are backfilled with the
+ * SAME canonicalization `recordNoteSettlementProposal` uses for a fresh
+ * insert (`canonicalizeSettlementProposalAddresses`), so a pre-existing row
+ * and a future retry of the same address set collide correctly from the
+ * first migration onward.
+ *
+ * The unique index is created AFTER the backfill, and the backfill
+ * deliberately disambiguates any pre-existing (session, canonical-address-set)
+ * COLLISION it finds among OLD rows (legal before this migration — nothing
+ * enforced uniqueness yet) by suffixing the losing rows' key with their own
+ * id: this migration's job is to make the constraint installable without
+ * throwing on real production data and without silently discarding a row,
+ * not to retroactively merge duplicate proposals a human never asked it to
+ * merge.
+ */
+function ensureNoteSettlementProposalIdempotencyKey(db: Database): void {
+  const columnAdded = addColumnIfMissing(
+    db,
+    "note_settlement_proposals",
+    "addresses_key",
+    "TEXT",
+  );
+  if (
+    !columnAdded &&
+    db
+      .query<{ name: string }, []>(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'index' AND name = 'idx_note_settlement_proposals_session_addresses'`,
+      )
+      .get()
+  ) {
+    // Both the column and the index already exist — nothing left to backfill.
+    return;
+  }
+
+  const rows = db
+    .query<{ id: number; sessionId: number; addresses: string }, []>(
+      `SELECT id, session_id AS sessionId, addresses FROM note_settlement_proposals
+       WHERE addresses_key IS NULL`,
+    )
+    .all();
+  const seen = new Set<string>();
+  for (const row of rows) {
+    let addresses: unknown;
+    try {
+      addresses = JSON.parse(row.addresses);
+    } catch {
+      addresses = [];
+    }
+    const list = Array.isArray(addresses)
+      ? addresses.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    let key = canonicalizeSettlementProposalAddresses(list);
+    const dedupeKey = `${row.sessionId}:${key}`;
+    if (seen.has(dedupeKey)) {
+      // A pre-existing duplicate the old, unconstrained table legally held —
+      // disambiguate rather than collide (see this function's own doc
+      // comment) so installing the unique index below never throws on real
+      // data.
+      key = `${key}#${row.id}`;
+    }
+    seen.add(dedupeKey);
+    db.query<unknown, [string, number]>(
+      `UPDATE note_settlement_proposals SET addresses_key = ? WHERE id = ?`,
+    ).run(key, row.id);
+  }
+
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_note_settlement_proposals_session_addresses
+       ON note_settlement_proposals(session_id, addresses_key)`,
+  );
 }
 
 // `shadow_notes` arrives whole from SCHEMA_SQL (CREATE TABLE IF NOT EXISTS), but
@@ -3182,6 +3405,8 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS shadow_notes");
   db.exec("DROP TABLE IF EXISTS note_id_exposures");
   db.exec("DROP TABLE IF EXISTS note_settlement_segment_exclusions");
+  db.exec("DROP TABLE IF EXISTS note_settlement_debts");
+  db.exec("DROP TABLE IF EXISTS note_settlement_proposals");
   db.exec("DROP TABLE IF EXISTS note_settlement_jobs");
   db.exec("DROP TABLE IF EXISTS note_settlement_cursors");
   db.exec("DROP TABLE IF EXISTS note_debt_cursor");

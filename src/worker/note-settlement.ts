@@ -15,6 +15,7 @@ import {
   planAndEnqueueNoteSettlementWindows,
   planNoteSettlementWindows,
   releaseNoteSettlementJobClaim,
+  type NoteSettlementFailureClass,
   type NoteSettlementJob,
   type NoteSettlementWindowPlan,
 } from "../db/note-settlement";
@@ -63,9 +64,17 @@ export interface NoteSettlementDispatchInput {
   job: NoteSettlementJob;
 }
 
+/**
+ * Ticket 06 (read-write-contract spec "重试"): a failed dispatch now states
+ * WHICH of the two retry classes it belongs to — `failNoteSettlementJob`
+ * (db/note-settlement.ts) branches its whole behaviour on this, so there is
+ * no default a caller may safely omit. `note-settlement-dispatch.ts`'s
+ * `classifySettlementFailure` is the only place this value is produced for
+ * the real payload.
+ */
 export type NoteSettlementDispatchOutcome =
   | { ok: true }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; failureClass: NoteSettlementFailureClass };
 
 export type NoteSettlementDispatch = (
   input: NoteSettlementDispatchInput,
@@ -251,11 +260,18 @@ export function createNoteSettlementScheduler(
       try {
         outcome = await dispatch({ job: claimed });
       } catch (error) {
+        // A dispatch throwing OUT OF its own try/catch (note-settlement-
+        // dispatch.ts already classifies every `runQuery` failure it sees)
+        // is a defensive backstop for a bug in the dispatch layer itself,
+        // not a classified network signal — deterministic by default so a
+        // genuine bug here cannot retry forever under the transient path's
+        // no-cap discipline.
         outcome = {
           ok: false,
           reason: `note settlement dispatch threw: ${
             error instanceof Error ? error.message : String(error)
           }`,
+          failureClass: "deterministic",
         };
       }
 
@@ -327,16 +343,23 @@ export function createNoteSettlementScheduler(
           const failed = failNoteSettlementJob(
             db,
             claimed.id,
+            outcome.failureClass,
             outcome.reason,
             now(),
             claimed.claimGeneration,
-            { retryBaseMs: deps.retryBaseMs },
+            { retryBaseMs: deps.retryBaseMs, maxAttempts: claimOptions.maxAttempts },
           );
           if (failed === null) {
             return "preempted";
           }
-          // A terminal failure must not park the session forever: the cursor
-          // walks past it and the audit trail stays on the row.
+          // A terminal failure (deterministic, cap spent -> `abandoned`) must
+          // not park the session forever: the cursor walks past it and the
+          // audit trail stays on the row (plus, for that case, the debt row
+          // `failNoteSettlementJob` itself wrote). A transient failure
+          // resolves to `pending`, which this same advance already treats as
+          // unresolved — the loop below breaks on any non-`settled`
+          // resolution, so a transient failure simply ends this pass without
+          // advancing anything, exactly as `pending` should.
           advanceNoteSettlementCursor(
             db,
             claimed.sessionId,

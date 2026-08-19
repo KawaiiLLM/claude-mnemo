@@ -99,17 +99,21 @@ describe("recordNoteSettlementProposal / listRecentSettlementProposals", () => {
       nowEpoch: NOW,
     });
 
-    expect(stored.title).toBe("the lease-fencing cluster");
-    expect(stored.addresses).toEqual([`S${sessionDbId}/T1`, `S${sessionDbId}/T2`]);
+    expect(stored.alreadyExisted).toBe(false);
+    expect(stored.record.title).toBe("the lease-fencing cluster");
+    expect(stored.record.addresses).toEqual([`S${sessionDbId}/T1`, `S${sessionDbId}/T2`]);
 
     const [proposal] = listRecentSettlementProposals(db, 3);
-    expect(proposal).toEqual(stored);
+    expect(proposal).toEqual(stored.record);
   });
 
   test("renders at most N, newest first", () => {
     const sessionDbId = seedSession();
     const jobId = claimJobId(sessionDbId);
-    for (let index = 0; index < 5; index += 1) {
+    // Ticket 05's idempotency key is (session, canonical address set) — each
+    // of these five proposals needs its OWN distinct address pair to count
+    // as five distinct rows under it.
+    for (let index = 0; index < 10; index += 1) {
       seedTurn(sessionDbId, index + 1);
     }
     for (let index = 0; index < 5; index += 1) {
@@ -117,13 +121,51 @@ describe("recordNoteSettlementProposal / listRecentSettlementProposals", () => {
         jobId,
         sessionId: sessionDbId,
         title: `cluster ${index}`,
-        addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
+        addresses: [`S${sessionDbId}/T${index * 2 + 1}`, `S${sessionDbId}/T${index * 2 + 2}`],
         nowEpoch: NOW + index,
       });
     }
 
     const top3 = listRecentSettlementProposals(db, 3);
     expect(top3.map((entry) => entry.title)).toEqual(["cluster 4", "cluster 3", "cluster 2"]);
+  });
+
+  test("ticket 05 — a duplicate propose (same session, same canonical address set) matches the earlier row instead of inserting a second", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    seedTurn(sessionDbId, 2);
+    const firstJobId = claimJobId(sessionDbId);
+
+    const first = recordNoteSettlementProposal(db, {
+      jobId: firstJobId,
+      sessionId: sessionDbId,
+      title: "first attempt's title",
+      addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
+      nowEpoch: NOW,
+    });
+    expect(first.alreadyExisted).toBe(false);
+
+    // A re-claimed job (lease lost, retry) gets a NEW job id — the key must
+    // survive that, since it is session + canonical addresses, not job-scoped.
+    const secondJobId = firstJobId + 1000;
+    const retry = recordNoteSettlementProposal(db, {
+      jobId: secondJobId,
+      sessionId: sessionDbId,
+      // Even the ORDER differs — canonicalization is order-independent.
+      title: "retry's own (different) title",
+      addresses: [`S${sessionDbId}/T2`, `S${sessionDbId}/T1`],
+      nowEpoch: NOW + 10,
+    });
+
+    expect(retry.alreadyExisted).toBe(true);
+    expect(retry.record.id).toBe(first.record.id);
+    // The EARLIER title survives — a retry's own title never overwrites it.
+    expect(retry.record.title).toBe("first attempt's title");
+
+    expect(
+      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM note_settlement_proposals").get()!
+        .count,
+    ).toBe(1);
   });
 
   test("a limit of 0 renders nothing", () => {
@@ -189,7 +231,7 @@ describe("acceptance criterion — remember(create) seeds exactly a proposal's a
       nowEpoch: NOW,
     });
     const [proposal] = listRecentSettlementProposals(db, 3);
-    expect(proposal!.id).toBe(stored.id);
+    expect(proposal!.id).toBe(stored.record.id);
 
     // The user approves it: the main agent calls remember(create) with the
     // proposal's OWN title and addresses, unmodified — no reformatting step.

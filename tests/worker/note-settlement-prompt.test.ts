@@ -132,12 +132,13 @@ describe("duty 1 — proposals, never assign, never forced (ticket 05)", () => {
   });
 });
 
-describe("commit is never gated on membership (ticket 05)", () => {
-  test("the prompt states commit lands whatever is staged, including nothing", () => {
+describe("commit is never gated on membership (ticket 05/06)", () => {
+  test("the prompt states commit finishes the window regardless of whether anything was written", () => {
     const prompt = renderPrompt();
 
     expect(prompt).toContain("Call `commit` once you believe this window is done");
-    expect(prompt).toContain("or nothing, if you staged nothing");
+    expect(prompt).toContain("whether\n   or not you wrote anything");
+    expect(prompt).toContain("always call it, even after a window where you wrote nothing");
     // The retired re-keyed gate's own wording must not survive.
     expect(prompt).not.toContain("attached segments — you");
     expect(prompt).not.toContain("membership call at all");

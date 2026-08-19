@@ -1,26 +1,52 @@
 import type { Database } from "bun:sqlite";
 
+import { isSqliteBusy } from "../db/database";
 import { getExistingEdgePairKeys } from "../db/memory-edges";
 import {
   getNoteSettlementJob,
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
+  type NoteSettlementFailureClass,
   type NoteSettlementJob,
 } from "../db/note-settlement";
 import type { MnemoConfig } from "../shared/config";
 import { DEFAULT_CONFIG } from "../shared/config";
+import { classifyWorkerError } from "./error-classifier";
 import {
   buildNoteSettlementContext,
   type NoteSettlementContext,
 } from "./note-settlement-context";
+import type { NoteSettlementCommitCounts } from "./note-settlement-direct-write";
 import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
 } from "./note-settlement-prompt";
-import type { NoteSettlementCommitCounts } from "./note-settlement-staging";
 import type {
   NoteSettlementDispatch,
   NoteSettlementDispatchOutcome,
 } from "./note-settlement";
+
+/**
+ * Ticket 06 (read-write-contract spec "重试"): map a `runQuery` failure onto
+ * settlement's own two-class retry vocabulary — reusing the extraction
+ * pipeline's already-audited signal classifier (`error-classifier.ts`,
+ * 0.6.6's retry philosophy) rather than a second, independently maintained
+ * set of network-error heuristics. `isSqliteBusy` is checked first because a
+ * local SQLITE_BUSY (the database's own writer lock, not an Anthropic API
+ * response) carries none of `classifyWorkerError`'s HTTP-shaped signals and
+ * would otherwise fall through to its conservative "unknown -> deterministic"
+ * default — exactly the one SQLITE_BUSY is named as transient for in the
+ * spec's own "网络/连接/SQLITE_BUSY" list. Every OTHER classification
+ * (`"deterministic" | "blocked" | "extraction-stall"`) collapses to
+ * settlement's `"deterministic"`: settlement's retry state machine has only
+ * two classes, and an unrecognised or account-level failure is exactly the
+ * kind that must not retry forever on its own.
+ */
+export function classifySettlementFailure(error: unknown): NoteSettlementFailureClass {
+  if (isSqliteBusy(error)) {
+    return "transient";
+  }
+  return classifyWorkerError(error) === "connection" ? "transient" : "deterministic";
+}
 
 /**
  * The real settlement payload: assemble the window's context, run ONE
@@ -203,7 +229,9 @@ export function createNoteSettlementDispatch(
 
   return async ({ job }): Promise<NoteSettlementDispatchOutcome> => {
     if (!config.settlementEnabled) {
-      return { ok: false, reason: "note settlement is disabled" };
+      // Configuration, not a runtime failure of any kind — deterministic by
+      // construction: retrying without a config change would fail identically.
+      return { ok: false, reason: "note settlement is disabled", failureClass: "deterministic" };
     }
 
     const nowEpoch = now();
@@ -211,9 +239,12 @@ export function createNoteSettlementDispatch(
       nowEpoch,
     });
     if (!context) {
+      // A structural data problem (the window's own session row is gone),
+      // not a network/connection signal — deterministic.
       return {
         ok: false,
         reason: `note settlement window has no session ${job.sessionId}`,
+        failureClass: "deterministic",
       };
     }
     if (context.windowTurns.length === 0) {
@@ -249,6 +280,7 @@ export function createNoteSettlementDispatch(
         reason: `note settlement call failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
+        failureClass: classifySettlementFailure(error),
       };
     }
 
@@ -285,9 +317,17 @@ export function createNoteSettlementDispatch(
     });
 
     if (!committed) {
+      // Ticket 06 (pinned decision): the run ENDED (no thrown/transient
+      // error — `runQuery` returned normally) but its window never landed —
+      // an agent that stopped without calling `commit`, or a `commit` that
+      // refused for a structural reason. There is no network/connection
+      // signal to classify here at all, so this is deterministic by
+      // construction, not merely by the classifier's own unknown-error
+      // default.
       return {
         ok: false,
         reason: `note settlement run ended without a successful commit (job status: ${settled?.status ?? "missing"})`,
+        failureClass: "deterministic",
       };
     }
     return { ok: true };

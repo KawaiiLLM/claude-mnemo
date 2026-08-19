@@ -22,6 +22,7 @@ import {
   getMaxPromptNumber,
   getNoteSettlementCursor,
   getNoteSettlementJob,
+  listNoteSettlementDebts,
   listNoteSettlementJobs,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
@@ -674,13 +675,13 @@ describe("note settlement job state machine", () => {
     db.close();
   });
 
-  test("failures back off on an exponential timetable read from the clock", async () => {
+  test("a deterministic failure backs off once, then abandons at the cap (ticket 06: 1+1)", async () => {
     const sessionDbId = seedSession(db, "content-backoff");
     const clock = createClock();
     let failures = 0;
     const { dispatch, calls } = recordingDispatch(async () => {
       failures += 1;
-      return { ok: false, reason: `boom ${failures}` };
+      return { ok: false, reason: `boom ${failures}`, failureClass: "deterministic" as const };
     });
     const scheduler = createNoteSettlementScheduler({
       db,
@@ -698,6 +699,7 @@ describe("note settlement job state machine", () => {
     expect(afterFirst.status).toBe("failed");
     expect(afterFirst.attempts).toBe(1);
     expect(afterFirst.lastError).toBe("boom 1");
+    expect(afterFirst.failureClass).toBe("deterministic");
     expect(afterFirst.retryAtEpoch).toBe(
       clock.now() + NOTE_SETTLEMENT_RETRY_BASE_MS / 1000,
     );
@@ -711,21 +713,70 @@ describe("note settlement job state machine", () => {
     expect(listNoteSettlementJobs(db, sessionDbId)[0]!.attempts).toBe(1);
 
     // Past the backoff the same trigger picks it up in passing — no timer ran.
+    // This is the "+1" of "1+1": the SECOND deterministic failure spends the
+    // cap (NOTE_SETTLEMENT_MAX_ATTEMPTS = 2) and abandons the window instead
+    // of backing off a second time.
     // Turn 101 already exists; +50 more (102..151) closes window 101-150,
-    // which is what makes this trigger non-empty and reaches the reclaim.
+    // which is what makes this trigger non-empty and reaches the retry.
     clock.advance(NOTE_SETTLEMENT_RETRY_BASE_MS + 1_000);
     seedTurns(db, sessionDbId, 2 * NOTE_SETTLEMENT_WINDOW_CAP_TURNS + 2, 50);
     await scheduler.onTurnStop(sessionDbId);
 
+    // `listNoteSettlementJobs` orders by window_start ASC — [0] is still the
+    // FIRST window (1-50); by this point the drain has also swept later
+    // windows the newly-seeded turns created (each starting its own
+    // fresh 1-attempt cycle), so more than one debt row can exist — the
+    // assertion below is scoped to THIS job's own id, not position in the list.
     const afterSecond = listNoteSettlementJobs(db, sessionDbId)[0]!;
-    expect(afterSecond.attempts).toBe(2);
-    // Second step doubles.
-    expect(afterSecond.retryAtEpoch).toBe(
-      clock.now() + (2 * NOTE_SETTLEMENT_RETRY_BASE_MS) / 1000,
+    expect(afterSecond.attempts).toBe(NOTE_SETTLEMENT_MAX_ATTEMPTS);
+    expect(afterSecond.status).toBe("abandoned");
+    expect(afterSecond.failureClass).toBe("deterministic");
+    // A debt row records the abandoned window for manual /settle backfill.
+    const ownDebt = listNoteSettlementDebts(db, sessionDbId).find(
+      (debt) => debt.jobId === afterSecond.id,
     );
+    expect(ownDebt).toBeDefined();
+    expect(ownDebt!.windowStart).toBe(afterSecond.windowStart);
+    expect(ownDebt!.windowEnd).toBe(afterSecond.windowEnd);
   });
 
-  test("an expired lease consumes attempts, caps at three, and the cursor walks past", async () => {
+  test("a transient failure never counts against the cap and returns to pending immediately, uncounted", async () => {
+    const sessionDbId = seedSession(db, "content-transient");
+    const clock = createClock();
+    const { dispatch, calls } = recordingDispatch(async () => ({
+      ok: false,
+      reason: "ECONNRESET",
+      failureClass: "transient" as const,
+    }));
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+    });
+
+    seedTurns(db, sessionDbId, 1, NOTE_SETTLEMENT_WINDOW_CAP_TURNS + 1);
+    await scheduler.onTurnStop(sessionDbId);
+
+    const afterFirst = listNoteSettlementJobs(db, sessionDbId)[0]!;
+    // Transient: back to `pending`, the SPENT attempt given back, due again
+    // immediately (no backoff) — event-driven, not timer-driven.
+    expect(afterFirst.status).toBe("pending");
+    expect(afterFirst.attempts).toBe(0);
+    expect(afterFirst.failureClass).toBe("transient");
+    expect(afterFirst.retryAtEpoch).toBeLessThanOrEqual(clock.now());
+
+    // The very next trigger tries it again — no cap ever trips for this class.
+    seedTurns(db, sessionDbId, NOTE_SETTLEMENT_WINDOW_CAP_TURNS + 2, 50);
+    await scheduler.onTurnStop(sessionDbId);
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    const afterSecond = listNoteSettlementJobs(db, sessionDbId)[0]!;
+    expect(afterSecond.status).toBe("pending");
+    expect(afterSecond.attempts).toBe(0);
+  });
+
+  test("an expired lease consumes attempts, caps at the deterministic limit, and abandons with a debt row", async () => {
     const sessionDbId = seedSession(db, "content-lease");
     const clock = createClock();
     const scheduler = createNoteSettlementScheduler({
@@ -744,7 +795,7 @@ describe("note settlement job state machine", () => {
     await scheduler.onTurnStop(sessionDbId);
 
     let previousGeneration = 0;
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
+    for (let attempt = 1; attempt <= NOTE_SETTLEMENT_MAX_ATTEMPTS; attempt += 1) {
       const claimed = claimNextNoteSettlementJob(
         db,
         sessionDbId,
@@ -769,9 +820,14 @@ describe("note settlement job state machine", () => {
     expect(exhausted).toBeNull();
 
     const terminal = listNoteSettlementJobs(db, sessionDbId)[0]!;
-    expect(terminal.status).toBe("failed");
-    expect(terminal.attempts).toBe(3);
+    // Ticket 06: a lease timeout with no report at all is treated as the
+    // conservative (deterministic) class — at the cap it goes `abandoned`,
+    // not the old `failed`, with a debt row recording the window.
+    expect(terminal.status).toBe("abandoned");
+    expect(terminal.attempts).toBe(NOTE_SETTLEMENT_MAX_ATTEMPTS);
+    expect(terminal.failureClass).toBe("deterministic");
     expect(terminal.lastError).toContain("lease expired");
+    expect(listNoteSettlementDebts(db, sessionDbId)).toHaveLength(1);
 
     // terminal-state-must-abandon-and-continue: the next trigger advances the
     // cursor past the dead window instead of parking the session on it forever.
@@ -892,11 +948,13 @@ describe("note settlement job state machine", () => {
       );
       clock.advance(NOTE_SETTLEMENT_LEASE_MS + 1_000);
     }
-    // The claim that finds an exhausted expired lease terminalises it.
+    // The claim that finds an exhausted expired lease terminalises it — ticket
+    // 06: `abandoned`, not the old `failed`, with a debt row (deterministic
+    // class, an unreported timeout).
     expect(
       claimNextNoteSettlementJob(db, sessionDbId, clock.now(), clock.nowMs()),
     ).toBeNull();
-    expect(getNoteSettlementJob(db, lastOwner!.id)!.status).toBe("failed");
+    expect(getNoteSettlementJob(db, lastOwner!.id)!.status).toBe("abandoned");
 
     expect(
       completeNoteSettlementJob(
@@ -907,7 +965,7 @@ describe("note settlement job state machine", () => {
       ),
     ).toBe(false);
     const terminal = getNoteSettlementJob(db, lastOwner!.id)!;
-    expect(terminal.status).toBe("failed");
+    expect(terminal.status).toBe("abandoned");
     expect(terminal.attempts).toBe(NOTE_SETTLEMENT_MAX_ATTEMPTS);
   });
 
@@ -930,6 +988,7 @@ describe("note settlement job state machine", () => {
       failNoteSettlementJob(
         db,
         owner.id,
+        "deterministic",
         "late boom",
         clock.now(),
         owner.claimGeneration,

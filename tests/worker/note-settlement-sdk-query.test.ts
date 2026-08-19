@@ -5,6 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
+  getNoteSettlementJob,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
@@ -175,8 +176,8 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
   });
 });
 
-describe("staging isolation holds through the real registered handlers (ticket 07)", () => {
-  test("a staged note call through the actual SDK tool touches no row until commit lands it", async () => {
+describe("direct write holds through the real registered handlers (ticket 05: staging is unwired)", () => {
+  test("a note call through the actual SDK tool lands IMMEDIATELY — no staging, commit only marks the job done", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -193,15 +194,17 @@ describe("staging isolation holds through the real registered handlers (ticket 0
             type: ["design"],
             tags: ["lease"],
           })) as { content: Array<{ text: string }> };
-          expect(noteReceipt.content[0]!.text).toContain("Staged");
+          expect(noteReceipt.content[0]!.text).toContain("Landed");
+          expect(noteReceipt.content[0]!.text).not.toContain("Staged");
+          expect(noteReceipt.content[0]!.text).not.toContain("pending commit");
 
-          // The completion gate is an empty shell after ticket 05 (fence +
-          // CAS only) — no membership/coverage call is required for commit
-          // to land this window.
+          // The load-bearing assertion: the write landed ALREADY, through the
+          // ACTUAL registered handler, before `commit` was ever called.
+          expect(getTurnById(capturedDb, t1)!.significanceGrade).toBe(2);
+          expect(getTurnById(capturedDb, t1)!.type).toEqual(["design"]);
 
-          // The load-bearing assertion: nothing landed yet, through the ACTUAL
-          // registered handler, not the engine called directly.
-          expect(getTurnById(capturedDb, t1)!.significanceGrade).toBeNull();
+          // The job itself is still open — only `commit` marks it done.
+          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
 
           const commitReceipt = (await handlers.get("commit")!({})) as {
             content: Array<{ text: string }>;
@@ -234,9 +237,10 @@ describe("staging isolation holds through the real registered handlers (ticket 0
         attachedSegmentIds: new Set(),
       });
 
-      // After commit: the write landed for real.
+      // After commit: the job itself is durably complete.
       expect(getTurnById(db, t1)!.significanceGrade).toBe(2);
       expect(getTurnById(db, t1)!.type).toEqual(["design"]);
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     } finally {
       db?.close();
     }

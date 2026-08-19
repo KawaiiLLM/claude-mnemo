@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { RECALL_TURN_FIELD_NAMES } from "./memory-filter";
 import { NOTE_TOKEN_BUDGET } from "../shared/note-budget";
 import {
   SEGMENT_EDITABLE_FIELDS,
@@ -45,6 +46,16 @@ export const memoryFilterShape = {
     .string()
     .optional()
     .describe("Substring match against files_read + files_modified."),
+  // Ticket 07 (read-write-contract spec, "视图(读面)"): field selection
+  // replaces the collapsed/expanded depth switch — any combination of turn
+  // fields, in any order. Not a scoping criterion: `filter: { fields: [...] }`
+  // alone does not force bare `recall()` off the browse path.
+  fields: z
+    .array(z.enum(RECALL_TURN_FIELD_NAMES))
+    .optional()
+    .describe(
+      `Which turn fields to render, any combination — replaces the collapsed/expanded field-set switch. One of: ${RECALL_TURN_FIELD_NAMES.join(", ")}.`,
+    ),
 };
 export const memoryFilterSchema = z.object(memoryFilterShape).strict();
 

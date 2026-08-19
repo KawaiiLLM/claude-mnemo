@@ -347,6 +347,138 @@ describe("note_settlement_jobs trigger vocabulary migration", () => {
     ).toBeNull();
   });
 
+  test("ticket 06 — widens status to accept 'abandoned', adds failure_class, and migrates existing 'failed' rows as deterministic", () => {
+    const sessionDbId = upsertSession(db, {
+      contentSessionId: "pre-retry-schema-note-settlement",
+      project: "/tmp/project-note-settlement-migration",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    // This database already carries the CURRENT (post-ticket-06) DDL from
+    // `initializeSchema` in `beforeEach` — downgrade it to what a
+    // pre-ticket-06 install would have (has 'backfill', no 'abandoned', no
+    // failure_class), the same rename-and-rebuild shape the OTHER downgrade
+    // fixtures in this file use.
+    db.exec("PRAGMA foreign_keys = OFF;");
+    db.exec(`
+      CREATE TABLE note_settlement_jobs_downgrade (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        window_start INTEGER NOT NULL,
+        window_end INTEGER NOT NULL,
+        trigger_type TEXT NOT NULL CHECK (
+          trigger_type IN ('consecutive', 'compact', 'residual', 'sessionend', 'backfill')
+        ),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (
+          status IN ('pending', 'claimed', 'done', 'failed')
+        ),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        retry_at_epoch INTEGER NOT NULL DEFAULT 0,
+        claimed_at_epoch INTEGER,
+        claim_generation INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER NOT NULL,
+        UNIQUE(session_id, window_start, trigger_type)
+      );
+      INSERT INTO note_settlement_jobs_downgrade (
+        id, session_id, window_start, window_end, trigger_type, status,
+        attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+        last_error, created_at_epoch, updated_at_epoch
+      )
+      SELECT
+        id, session_id, window_start, window_end, trigger_type, status,
+        attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+        last_error, created_at_epoch, updated_at_epoch
+      FROM note_settlement_jobs;
+      DROP TABLE note_settlement_jobs;
+      ALTER TABLE note_settlement_jobs_downgrade RENAME TO note_settlement_jobs;
+      CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
+        ON note_settlement_jobs(session_id, status, window_start);
+    `);
+    db.exec("PRAGMA foreign_keys = ON;");
+
+    const pendingJobId = seedJob(db, sessionDbId, 1, 50, "consecutive");
+    // A legacy `failed` row, as the OLD claim-increments-attempts + uniform-
+    // backoff + cap-3 machinery would have left one (attempts=1 of the old
+    // cap 3 — still short of it, a live retry candidate under either regime).
+    const failedJobId = seedJob(db, sessionDbId, 51, 100, "consecutive");
+    db.query<unknown, [number]>(
+      `UPDATE note_settlement_jobs SET status = 'failed', attempts = 1,
+         last_error = 'legacy boom', retry_at_epoch = 20 WHERE id = ?`,
+    ).run(failedJobId);
+
+    expect(() =>
+      db.exec(
+        `UPDATE note_settlement_jobs SET status = 'abandoned' WHERE id = ${failedJobId}`,
+      ),
+    ).toThrow();
+
+    initializeSchema(db);
+
+    // The widened CHECK now accepts 'abandoned'.
+    expect(() =>
+      db.exec(`UPDATE note_settlement_jobs SET status = 'abandoned' WHERE id = ${pendingJobId}`),
+    ).not.toThrow();
+
+    // The pre-existing 'failed' row survived VERBATIM (status/attempts/
+    // retry_at_epoch untouched — this migration tags CLASS, it does not
+    // force-terminalise a legacy row) except for the new failure_class
+    // backfill.
+    const migrated = db
+      .query<
+        { status: string; attempts: number; failureClass: string | null; retryAtEpoch: number },
+        [number]
+      >(
+        `SELECT status, attempts, failure_class AS failureClass, retry_at_epoch AS retryAtEpoch
+         FROM note_settlement_jobs WHERE id = ?`,
+      )
+      .get(failedJobId);
+    expect(migrated).toEqual({
+      status: "failed",
+      attempts: 1,
+      failureClass: "deterministic",
+      retryAtEpoch: 20,
+    });
+
+    // A row that never failed gets no failure_class at all.
+    const untouched = db
+      .query<{ failureClass: string | null }, [number]>(
+        `SELECT failure_class AS failureClass FROM note_settlement_jobs WHERE id = ?`,
+      )
+      .get(pendingJobId);
+    expect(untouched!.failureClass).toBeNull();
+
+    // The index and the dependent FK both survived the rebuild.
+    expect(
+      db
+        .query<{ name: string }, []>(
+          `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_note_settlement_jobs_claim'`,
+        )
+        .get() ?? null,
+    ).not.toBeNull();
+
+    // Idempotent — running it again changes nothing further.
+    const ddlAfterFirst = db
+      .query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_settlement_jobs'",
+      )
+      .get()!.sql;
+    initializeSchema(db);
+    expect(
+      db
+        .query<{ sql: string }, []>(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_settlement_jobs'",
+        )
+        .get()!.sql,
+    ).toBe(ddlAfterFirst);
+  });
+
   test("is a no-op on a database already carrying the current DDL", () => {
     const before = db
       .query<{ sql: string }, []>(

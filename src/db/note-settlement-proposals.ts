@@ -29,6 +29,23 @@ export interface NoteSettlementProposalRecord {
   createdAtEpoch: number;
 }
 
+/**
+ * The idempotency key's canonical form (ticket 05, spec "propose 携幂等键"):
+ * sorted, trimmed, de-duplicated, JSON-encoded — order-independent, so
+ * restating the SAME address set (in any order, with any duplicate) matches
+ * whatever an earlier attempt already stored. Shared by
+ * `recordNoteSettlementProposal` below and `db/schema.ts`'s
+ * `ensureNoteSettlementProposalIdempotencyKey` (the one-time backfill for
+ * rows written before this column existed) — one canonicalization, not two
+ * independently hand-kept copies that could drift apart.
+ */
+export function canonicalizeSettlementProposalAddresses(
+  addresses: readonly string[],
+): string {
+  const normalized = [...new Set(addresses.map((raw) => raw.trim()))].sort();
+  return JSON.stringify(normalized);
+}
+
 interface ProposalRow {
   id: number;
   jobId: number;
@@ -69,21 +86,48 @@ export interface RecordNoteSettlementProposalInput {
   nowEpoch: number;
 }
 
+export interface RecordNoteSettlementProposalResult {
+  record: NoteSettlementProposalRecord;
+  /**
+   * True when this call matched an EARLIER proposal (same session, same
+   * canonical address set) instead of inserting a new row — the re-claimed-
+   * job retry case the idempotency key exists for (spec: "重试回执'已存
+   * 在'"). The returned `record` is the ORIGINAL row in that case, not a
+   * second one; its `title` may differ from what this call asked for if an
+   * earlier attempt proposed the same turns under a different name — title
+   * is deliberately excluded from the key (spec: "key on session + canonical
+   * addresses payload"), so it is never what a retry re-lands.
+   */
+  alreadyExisted: boolean;
+}
+
 /**
- * Store one proposal. The caller (the membership facade's `propose` action)
- * has already validated every address resolves to a real turn this
- * dispatch reviewed — this function stores exactly what it is given, the
- * same "storage mechanics only" discipline `db/segments.ts` keeps for
- * segment writes.
+ * Store one proposal, idempotent on (session, canonical address set) — a
+ * RE-CLAIMED job (a fresh job id after a lease was reclaimed, spec: "重试=新
+ * job id") retrying the same `propose` call lands on the SAME row rather than
+ * a duplicate. The caller (the membership facade's `propose` action) has
+ * already validated every address resolves to a real turn this dispatch
+ * reviewed — this function stores exactly what it is given, the same
+ * "storage mechanics only" discipline `db/segments.ts` keeps for segment
+ * writes.
+ *
+ * `INSERT ... ON CONFLICT DO NOTHING` cannot itself report which row it left
+ * alone (SQLite's `RETURNING` produces no row on a no-op conflict), so a
+ * miss falls through to an ordinary `SELECT` under the same key — two
+ * statements, not a race: both run inside the caller's own write transaction
+ * (`evaluateSettlementMembershipWrite`'s `apply: true` path, itself inside
+ * `runWriteTransaction`), so nothing else can insert between them.
  */
 export function recordNoteSettlementProposal(
   db: Database,
   input: RecordNoteSettlementProposalInput,
-): NoteSettlementProposalRecord {
+): RecordNoteSettlementProposalResult {
+  const addressesKey = canonicalizeSettlementProposalAddresses(input.addresses);
   const inserted = db
-    .query<ProposalRow, [number, number, string, string, number]>(
-      `INSERT INTO note_settlement_proposals (job_id, session_id, title, addresses, created_at_epoch)
-       VALUES (?, ?, ?, ?, ?)
+    .query<ProposalRow, [number, number, string, string, string, number]>(
+      `INSERT INTO note_settlement_proposals (job_id, session_id, title, addresses, addresses_key, created_at_epoch)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, addresses_key) DO NOTHING
        RETURNING ${PROPOSAL_COLUMNS}`,
     )
     .get(
@@ -91,12 +135,26 @@ export function recordNoteSettlementProposal(
       input.sessionId,
       input.title,
       JSON.stringify(input.addresses),
+      addressesKey,
       input.nowEpoch,
     );
-  if (!inserted) {
+  if (inserted) {
+    return { record: mapProposalRow(inserted), alreadyExisted: false };
+  }
+
+  const existing = db
+    .query<ProposalRow, [number, string]>(
+      `SELECT ${PROPOSAL_COLUMNS} FROM note_settlement_proposals
+       WHERE session_id = ? AND addresses_key = ?`,
+    )
+    .get(input.sessionId, addressesKey);
+  if (!existing) {
+    // The conflict target matched nothing on re-select — a genuine storage
+    // bug (the row this call's own INSERT just conflicted against must
+    // exist), not a case the caller can meaningfully retry differently.
     throw new Error("Failed to record settlement proposal.");
   }
-  return mapProposalRow(inserted);
+  return { record: mapProposalRow(existing), alreadyExisted: true };
 }
 
 /**

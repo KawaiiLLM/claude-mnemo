@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { recordNoteSettlementProposal } from "../db/note-settlement-proposals";
 import { parseBareAddressReference, validateReferences } from "../db/references";
-import { reassignSegmentMembers } from "../db/segments";
+import { getAttachedSegmentIds, getSegment, reassignSegmentMembers } from "../db/segments";
 import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade";
 
 /**
@@ -94,8 +94,17 @@ export type SettlementMembershipWriteInput = z.infer<
 // ---------------------------------------------------------------------------
 
 export interface SettlementMembershipWriteOutcome {
-  /** `propose`: the stored proposal's id. `null` for a dry run or a `reassign` outcome. */
+  /** `propose`: the stored proposal's id (the EARLIER one, on a duplicate — see `proposeAlreadyExisted`). `null` for a dry run or a `reassign` outcome. */
   proposalId: number | null;
+  /**
+   * `propose` only (ticket 05, spec "propose 携幂等键") — true when this
+   * call's canonical address set already matched an earlier stored proposal
+   * for this session, so `proposalId` names that EARLIER row rather than a
+   * new one. `undefined` for a dry run (nothing is looked up without
+   * `apply`) and for a `reassign` outcome, same "absent means not this
+   * verb's concern" convention `reassign` itself already uses below.
+   */
+  proposeAlreadyExisted?: boolean;
   /** `propose`: addresses accepted. `reassign`: turns accepted — same "how many address tokens resolved" meaning either way. */
   addressesResolved: number;
   /**
@@ -187,7 +196,13 @@ function evaluatePropose(
   }
 
   let proposalId: number | null = null;
+  let proposeAlreadyExisted: boolean | undefined;
   if (options.apply) {
+    // Ticket 05 (spec "propose 携幂等键"): keyed on session + the canonical
+    // address set, NOT this job — a re-claimed job after a lost lease is a
+    // NEW job id, so a job-scoped key could never dedupe the retry. A
+    // duplicate call lands on the SAME row (`alreadyExisted: true`) instead
+    // of a second one.
     const stored = recordNoteSettlementProposal(db, {
       jobId: context.jobId,
       sessionId: context.sessionId,
@@ -195,13 +210,15 @@ function evaluatePropose(
       addresses: refs,
       nowEpoch,
     });
-    proposalId = stored.id;
+    proposalId = stored.record.id;
+    proposeAlreadyExisted = stored.alreadyExisted;
   }
 
   return {
     ok: true,
     outcome: {
       proposalId,
+      proposeAlreadyExisted,
       addressesResolved: refs.length,
     },
   };
@@ -216,10 +233,17 @@ function evaluatePropose(
  * transaction — the identical single-ownership guarantee the main agent's
  * own `remember(assign)` verb gets, on a narrower domain.
  *
- * Domain: `context.attachedSegmentIds` (this session's own roster) ∪
- * homeless (`id` omitted). Any other segment id is refused, naming it as not
- * attached — settlement cannot grow a session's attachment set, only the
- * main agent can.
+ * Domain: this session's CURRENTLY attached segments (a LIVE read, ticket 05
+ * pinned decision: "写事务内重验该段仍挂靠本会话(roster 快照仅提示)") ∪
+ * homeless (`id` omitted). `context.attachedSegmentIds` — the roster snapshot
+ * taken once at context-build time — is advisory only now: it is what the
+ * PROMPT shows the model, but the actual gate re-reads
+ * `db/segments.ts`'s `getAttachedSegmentIds` fresh, every call, so a segment
+ * the main agent detached (or a NEW one it attached) between context-build
+ * and this write is judged as it stands right now, not as it stood when the
+ * roster was rendered. Any segment id outside that live set is refused,
+ * naming it as not attached — settlement cannot grow a session's attachment
+ * set, only the main agent can.
  */
 function evaluateReassign(
   db: Database,
@@ -245,13 +269,32 @@ function evaluateReassign(
         message: `id must be an "E<n>" segment address; got "${rawInput.id}".`,
       };
     }
-    if (!context.attachedSegmentIds.has(parsedTarget.segmentId)) {
+    // Ticket 05: a LIVE read, not `context.attachedSegmentIds` (the frozen
+    // roster snapshot render time took) — the target must still be attached
+    // AT THE MOMENT this call is evaluated, dry run or commit alike.
+    const currentlyAttached = new Set(getAttachedSegmentIds(db, context.sessionId));
+    if (!currentlyAttached.has(parsedTarget.segmentId)) {
       return {
         ok: false,
         message:
           `E${parsedTarget.segmentId} is not attached to this session — settlement may only ` +
           "reassign a turn to a segment already on this session's roster, or to no segment " +
           "(omit id); attaching a NEW segment to this session is the main agent's call alone.",
+      };
+    }
+    // Ticket 05 (spec: "渲染后被 detach/close 的段不可再收成员"): attachment
+    // rows never expire (db/schema.ts's own comment on segment_attachments —
+    // "accumulate, never expire, no detach"), so CLOSE is the live half of
+    // this guard that actually fires in practice. A segment closed after the
+    // roster was rendered must refuse a new member the same way `remember`'s
+    // own append/replace already refuse one, for the same reason.
+    const targetSegment = getSegment(db, parsedTarget.segmentId);
+    if (!targetSegment || targetSegment.status === "closed") {
+      return {
+        ok: false,
+        message:
+          `E${parsedTarget.segmentId} is closed — settlement may not reassign a turn onto a ` +
+          "closed segment; it was open when the roster was rendered but has since been closed.",
       };
     }
     targetSegmentId = parsedTarget.segmentId;
@@ -371,8 +414,11 @@ export function renderSettlementMembershipWriteReceipt(
       `${options.staged ? " (pending commit)" : ""}${vacatedNote}${landedNote}.${replacedSuffix}`
     );
   }
+  const duplicateNote = outcome.proposeAlreadyExisted
+    ? " — already exists (matches an earlier proposal for the same turns; no second row created)"
+    : "";
   return (
     `${verb} propose: ${outcome.addressesResolved} address(es)${options.staged ? " (pending commit)" : ""}` +
-    `${outcome.proposalId !== null ? ` as proposal #${outcome.proposalId}` : ""} — creates no segment.${replacedSuffix}`
+    `${outcome.proposalId !== null ? ` as proposal #${outcome.proposalId}` : ""} — creates no segment.${duplicateNote}${replacedSuffix}`
   );
 }

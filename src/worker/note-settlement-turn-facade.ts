@@ -11,8 +11,8 @@ import {
 } from "../db/memory-edges";
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import { getSession, updateSessionFields } from "../db/sessions";
-import { getShadowNote } from "../db/shadow-notes";
 import { getTurn, getTurnById, updateTurnById } from "../db/turns";
+import { checkFieldGate, claimWriterId, stampField } from "../db/write-gate";
 import { settlementNoteInputShape } from "../mcp/definitions";
 import { parseSessionAddress, parseTurnAddress } from "../mcp/note";
 import {
@@ -76,21 +76,21 @@ import {
  * session `append` already carry, and this facade does not need to invent a
  * third case of it.
  *
- * STAGED COMMIT (spec A7): `evaluateSettlementTurnWrite` below is a plain
- * decision function — every READ it needs (turn lookup, shadow-note
- * freshness, reference resolution) always runs live against the database,
- * because a staged call must "still validate fully and return a real
- * receipt"; only the WRITES (`updateTurnById`, `writeMemoryEdges`) are
- * conditional on `apply: true`. The staging engine
- * (`note-settlement-staging.ts`) calls this function twice for the same
- * intent: once at stage time with `apply: false` (a dry run, for the
- * immediate receipt), and once inside `commit`'s own transaction with
- * `apply: true` (the write that actually lands, re-evaluated fresh against
- * whatever the database says at that later moment — "stage-time validation
- * is feedback, commit-time validation is truth"). There is deliberately no
- * third, separate "apply-only" code path: replaying the SAME evaluation
- * function rather than a cached stage-time decision is what makes
- * commit-time re-validation real rather than cosmetic.
+ * TICKET 05 (read-write-contract spec, "结算(直写改造)"): staging is UNWIRED.
+ * `note-settlement-sdk-query.ts` now calls `evaluateSettlementTurnWrite`
+ * directly with `apply: true`, inside its own `runWriteTransaction`, once per
+ * tool call — gate check, write, and stamp in the SAME transaction ("检查-写
+ * 入原子"), landing immediately with an immediate receipt. `note-settlement-
+ * staging.ts` (spec A7's staged-commit engine) still exists and still compiles
+ * against this function's `apply: false`/`true` split, but nothing calls it
+ * any more; the split itself is kept because `apply: false` remains a genuine
+ * dry run any caller could still use, not because anything still stages
+ * through it.
+ *
+ * `evaluateSettlementTurnWrite` stays a plain decision function either way —
+ * every READ it needs (turn lookup, reference resolution) always runs live
+ * against the database; only the WRITES (`updateTurnById`, `writeMemoryEdges`,
+ * the write gate's own `stampField`) are conditional on `apply: true`.
  *
  * TICKET 08 (edge-ownership-impl, "settlement four-field check-and-
  * correct"): the relation half now consumes THE SAME validator the main
@@ -212,11 +212,33 @@ const RELATION_FIELD_ENTRIES: ReadonlyArray<
   readonly [key: string, relation: TurnEdgeRelation]
 > = EDGE_RELATIONS.map((relation) => [RELATION_FIELD_NAME[relation], relation] as const);
 
+/**
+ * One reviewed field's own outcome (ticket 05, read-write-contract spec
+ * "结算(直写改造)"): `landed` is what the write gate's per-field
+ * three-judgment check (`checkFieldGate`, writer = this dispatch's claim
+ * identity) actually decided, checked and applied independently for
+ * grade/type/tags — never a single all-or-nothing verdict for the whole
+ * review. `yieldedReason` is the gate's own rejection text (never-read or
+ * stale) when `landed` is false; this IS the new yield semantics (spec:
+ * "门的'stale'拒绝就是新的yield 语义") — an agent note landing after this
+ * dispatch's context was read re-stamps `type`/`tags` (the note->turn field
+ * mapping, ticket 01), so this dispatch's own stale grant on those fields is
+ * what rejects the correction, with no separate `noteSupersedesReview` check
+ * left to duplicate that logic. `grade` is checked by the SAME gate, on its
+ * own field — it is not note-derived (nothing stamps `grade` from a note
+ * write), so in the ordinary case its grant simply never goes stale and it
+ * lands regardless of whether `type`/`tags` on the SAME call yield.
+ */
+export interface ReviewFieldOutcome<T> {
+  value: T;
+  landed: boolean;
+  yieldedReason?: string;
+}
+
 export interface ReviewOutcome {
-  kind: "written" | "yielded";
-  grade?: number;
-  type?: string[];
-  tags?: string[];
+  grade?: ReviewFieldOutcome<number>;
+  type?: ReviewFieldOutcome<string[]>;
+  tags?: ReviewFieldOutcome<string[]>;
 }
 
 export interface RelationOutcome {
@@ -593,46 +615,76 @@ export function evaluateSettlementTurnWrite(
           "written for a turn this prompt actually showed.",
       };
     }
-    // Re-read fresh, right here, right before the write it guards (the
-    // write-back's own two-half fence, ported verbatim):
-    //   1. freshness — a value merged into a write must come from a read
-    //      taken now, never from context-build time;
-    //   2. yield-when-the-document-changed — `type`/`tags` are facts
-    //      ABOUT the note, so a review of a turn whose note arrived
-    //      during the async gap between claim and this call is a review
-    //      of a document the model never saw. Grade still lands: it
-    //      judges what the turn DID, read off raw material no later note
-    //      can change; only the note-derived half stands down.
-    const currentNote = getShadowNote(db, turn.id);
-    const noteSupersedesReview =
-      currentNote !== null &&
-      currentNote.writerOrigin === "agent" &&
-      currentNote.updatedAtEpoch >= context.contextBuiltAtEpoch;
 
-    if (noteSupersedesReview) {
-      if (options.apply && rawInput.grade !== undefined) {
-        updateTurnById(db, turn.id, {
-          significanceGrade: rawInput.grade,
-          updatedAtEpoch: nowEpoch,
-        });
+    // Ticket 05 (read-write-contract spec "结算(直写改造)"): the write
+    // gate's per-field three-judgment check, writer = this dispatch's claim
+    // identity (`claimWriterId`, ticket 01's pinned encoding) — checked
+    // independently for each of grade/type/tags this call actually
+    // provided, replacing the old single `noteSupersedesReview` fence. The
+    // context build recorded a read grant on THIS turn for this same claim
+    // identity (worker/note-settlement-context.ts); a field the gate now
+    // finds stale means an agent note (or another claim) stamped it after
+    // that grant — this outcome's `yieldedReason` is exactly what teaches
+    // that, in the gate's own words.
+    const writer = claimWriterId(context.jobId, context.claimGeneration);
+    const outcome: ReviewOutcome = {};
+    const landedUpdate: {
+      significanceGrade?: number;
+      type?: string[];
+      tags?: string[];
+    } = {};
+
+    if (rawInput.grade !== undefined) {
+      const verdict = checkFieldGate(db, writer, "turn", turn.id, "grade", ref);
+      outcome.grade = verdict.ok
+        ? { value: rawInput.grade, landed: true }
+        : { value: rawInput.grade, landed: false, yieldedReason: verdict.message };
+      if (verdict.ok) {
+        landedUpdate.significanceGrade = rawInput.grade;
       }
-      review = { kind: "yielded", grade: rawInput.grade };
-    } else {
-      if (options.apply) {
-        updateTurnById(db, turn.id, {
-          significanceGrade: rawInput.grade,
-          type: normalizedType,
-          tags: rawInput.tags,
-          updatedAtEpoch: nowEpoch,
-        });
-      }
-      review = {
-        kind: "written",
-        grade: rawInput.grade,
-        type: normalizedType,
-        tags: rawInput.tags,
-      };
     }
+    if (normalizedType !== undefined) {
+      const verdict = checkFieldGate(db, writer, "turn", turn.id, "type", ref);
+      outcome.type = verdict.ok
+        ? { value: normalizedType, landed: true }
+        : { value: normalizedType, landed: false, yieldedReason: verdict.message };
+      if (verdict.ok) {
+        landedUpdate.type = normalizedType;
+      }
+    }
+    if (rawInput.tags !== undefined) {
+      const verdict = checkFieldGate(db, writer, "turn", turn.id, "tags", ref);
+      outcome.tags = verdict.ok
+        ? { value: rawInput.tags, landed: true }
+        : { value: rawInput.tags, landed: false, yieldedReason: verdict.message };
+      if (verdict.ok) {
+        landedUpdate.tags = rawInput.tags;
+      }
+    }
+
+    if (
+      options.apply &&
+      (landedUpdate.significanceGrade !== undefined ||
+        landedUpdate.type !== undefined ||
+        landedUpdate.tags !== undefined)
+    ) {
+      updateTurnById(db, turn.id, { ...landedUpdate, updatedAtEpoch: nowEpoch });
+      // Stamp gate (spec "检查-写入原子"): only the fields that actually
+      // landed, same writer identity the check above used — a yielded
+      // field must NOT be re-stamped, or a second correction attempt in
+      // this same run would find its own prior (rejected) call admitted.
+      if (landedUpdate.significanceGrade !== undefined) {
+        stampField(db, "turn", turn.id, "grade", writer, nowEpoch);
+      }
+      if (landedUpdate.type !== undefined) {
+        stampField(db, "turn", turn.id, "type", writer, nowEpoch);
+      }
+      if (landedUpdate.tags !== undefined) {
+        stampField(db, "turn", turn.id, "tags", writer, nowEpoch);
+      }
+    }
+
+    review = outcome;
   }
 
   let relations: RelationOutcome | null = null;
@@ -646,12 +698,15 @@ export function evaluateSettlementTurnWrite(
     // `refines` must be judged as a decision-phase turn, not by whatever it
     // carried before this write.
     //
-    // UNLESS the review just yielded: then the proposed type never reaches
-    // the database, and an edge judged by it would be a validator-endorsed
-    // illegal edge (citing type in the DB may carry no legal phase half at
-    // all). Post-write state IS the persisted `turn.type` in that branch —
-    // the same rule, followed to where the write actually landed.
-    const typeCorrectionLands = review === null || review.kind === "written";
+    // UNLESS the type field itself yielded (the write gate found it stale):
+    // then the proposed type never reaches the database, and an edge judged
+    // by it would be a validator-endorsed illegal edge (citing type in the
+    // DB may carry no legal phase half at all). Post-write state IS the
+    // persisted `turn.type` in that branch — the same rule, followed to
+    // where the write actually landed. A review that never touched `type`
+    // at all (`review?.type` undefined) is the ordinary case: the pre-write
+    // `turn.type` this call did not ask to change.
+    const typeCorrectionLands = review?.type === undefined || review.type.landed;
     const citingPhases = phasesForTypes(
       typeCorrectionLands ? (normalizedType ?? turn.type) : turn.type,
     );
@@ -745,22 +800,38 @@ export function renderSettlementTurnWriteReceipt(
     parts.push(`(replaces the earlier staged call for ${outcome.ref})`);
   }
   if (outcome.review) {
-    if (outcome.review.kind === "yielded") {
+    const landedBits: string[] = [];
+    const yieldedBits: string[] = [];
+    const describeArray = (value: string[]): string =>
+      value.length > 0 ? value.join(",") : "(none)";
+    if (outcome.review.grade) {
+      if (outcome.review.grade.landed) {
+        landedBits.push(`grade ${outcome.review.grade.value}`);
+      } else {
+        yieldedBits.push(`grade — ${outcome.review.grade.yieldedReason}`);
+      }
+    }
+    if (outcome.review.type) {
+      if (outcome.review.type.landed) {
+        landedBits.push(`type ${describeArray(outcome.review.type.value)}`);
+      } else {
+        yieldedBits.push(`type — ${outcome.review.type.yieldedReason}`);
+      }
+    }
+    if (outcome.review.tags) {
+      if (outcome.review.tags.landed) {
+        landedBits.push(`tags ${describeArray(outcome.review.tags.value)}`);
+      } else {
+        yieldedBits.push(`tags — ${outcome.review.tags.yieldedReason}`);
+      }
+    }
+    if (landedBits.length > 0) {
       parts.push(
-        outcome.review.grade !== undefined
-          ? `${outcome.ref} review ${options.staged ? "would yield" : "yielded"} (an agent note landed after this dispatch's ` +
-              "context was read) — grade recorded, type/tags left as the agent's own."
-          : `${outcome.ref} review ${options.staged ? "would yield" : "yielded"} (an agent note landed after this dispatch's ` +
-              "context was read) — nothing to write.",
+        `${verb} review for ${outcome.ref}: ${landedBits.join(", ")}${options.staged ? " (pending commit)" : ""}.`,
       );
-    } else {
-      const bits: string[] = [];
-      if (outcome.review.grade !== undefined) bits.push(`grade ${outcome.review.grade}`);
-      if (outcome.review.type !== undefined)
-        bits.push(`type ${outcome.review.type.length > 0 ? outcome.review.type.join(",") : "(none)"}`);
-      if (outcome.review.tags !== undefined)
-        bits.push(`tags ${outcome.review.tags.length > 0 ? outcome.review.tags.join(",") : "(none)"}`);
-      parts.push(`${verb} review for ${outcome.ref}: ${bits.join(", ")}${options.staged ? " (pending commit)" : ""}.`);
+    }
+    if (yieldedBits.length > 0) {
+      parts.push(`Yielded for ${outcome.ref}: ${yieldedBits.join("; ")}.`);
     }
   }
   if (outcome.relations) {

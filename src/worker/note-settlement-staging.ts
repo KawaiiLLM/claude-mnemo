@@ -538,7 +538,11 @@ export function createSettlementStagingEngine(
             }
             if (entry.input.action === "reassign") {
               counts.membersReassigned += 1;
-            } else {
+            } else if (!evaluation.outcome.proposeAlreadyExisted) {
+              // Ticket 05 (spec "propose 携幂等键"): a duplicate propose
+              // landed on an EARLIER row (dead code path — staging is
+              // unwired — kept honest for whatever still reads these counts
+              // in a test).
               counts.proposalsCreated += 1;
             }
           } else {
@@ -551,17 +555,24 @@ export function createSettlementStagingEngine(
             const outcome = evaluation.outcome;
             if (outcome.review) {
               counts.turnsReviewed += 1;
-              if (outcome.review.kind === "yielded") {
+              // Ticket 05: the write gate checks grade/type/tags
+              // INDEPENDENTLY now — "yielded" is per-field, not a single
+              // verdict for the whole review. Grade still lands regardless
+              // of whether type/tags on the SAME call yielded (it is not
+              // note-derived) — the histogram counts it only when IT
+              // ITSELF landed, since a rejected grade never reached a
+              // stored row (see note-settlement-direct-write.ts, the
+              // module that actually wires this now).
+              const anyYielded =
+                (outcome.review.grade !== undefined && !outcome.review.grade.landed) ||
+                (outcome.review.type !== undefined && !outcome.review.type.landed) ||
+                (outcome.review.tags !== undefined && !outcome.review.tags.landed);
+              if (anyYielded) {
                 counts.reviewsYieldedToLateNote += 1;
               }
-              // Grade always lands regardless of written/yielded — only the
-              // note-derived half (type/tags) stands down on a late agent
-              // note (see evaluateSettlementTurnWrite) — so the histogram
-              // counts it unconditionally, same as the retired write-back did
-              // when grade was a required field on every review directive.
-              if (outcome.review.grade !== undefined) {
-                counts.gradeHistogram[outcome.review.grade] =
-                  (counts.gradeHistogram[outcome.review.grade] ?? 0) + 1;
+              if (outcome.review.grade?.landed) {
+                const grade = outcome.review.grade.value;
+                counts.gradeHistogram[grade] = (counts.gradeHistogram[grade] ?? 0) + 1;
               }
             }
             if (outcome.relations) {

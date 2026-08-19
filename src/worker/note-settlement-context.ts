@@ -5,6 +5,7 @@ import { getTopic, listAttachedSegments } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getShadowNote, type ShadowNoteRecord } from "../db/shadow-notes";
 import { getTurnsForSession } from "../db/turns";
+import { claimWriterId, recordReadGrants, type ReadGrantEntry } from "../db/write-gate";
 import { renderSessionMilestoneInjection } from "../hooks/milestone-injection";
 import { formatTurnAddress } from "../hooks/note-reminder";
 import { renderMainAgentSessionInjection } from "../hooks/session-injection";
@@ -286,6 +287,26 @@ export function buildNoteSettlementContext(
     reviewableTurnIds: new Set(renderedTurns.map((turn) => turn.turnId)),
     builtAtEpoch: options.nowEpoch,
   };
+
+  // Ticket 05 (read-write-contract spec: "结算 context 构建记录读授权 for
+  // EVERY rendered turn (prior + window uniformly)... under the claim writer
+  // identity — the recording seam from ticket 01"). Rendering IS
+  // authorization (spec: "渲染即授权"), the same rule every other render path
+  // (recall/timeline) already follows via `recordReadGrants` — this is
+  // settlement's own render pass calling the identical seam, under its own
+  // per-claim writer identity rather than a session's. Recorded for every
+  // turn THIS prompt showed (`renderedTurns` = priorTurns + windowTurns,
+  // ticket 04's unified rendering), one batch, one sequence snapshot — the
+  // write gate's own `checkFieldGate` is what a settlement write later
+  // consumes this grant against (worker/note-settlement-turn-facade.ts).
+  if (renderedTurns.length > 0) {
+    const writer = claimWriterId(job.id, job.claimGeneration);
+    const entries: ReadGrantEntry[] = renderedTurns.map((turn) => ({
+      entityType: "turn",
+      entityId: turn.turnId,
+    }));
+    recordReadGrants(db, writer, entries, options.nowEpoch);
+  }
 
   return context;
 }

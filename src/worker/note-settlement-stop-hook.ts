@@ -1,69 +1,44 @@
-import type { SettlementStagingEngine } from "./note-settlement-staging";
+import type { Database } from "bun:sqlite";
+
+import { getNoteSettlementJob } from "../db/note-settlement";
 
 /**
- * The settlement agent's Stop hook (ticket 11, spec G2's first layer).
+ * The settlement agent's Stop hook (ticket 06, read-write-contract spec
+ * "Stop hook 重实现").
  *
- * G2 gives completion two layers with different trust. This is the one that
- * TRUSTS THE AGENT: it fires when the agent tries to end its run, and its
- * whole job is to make sure the agent knows what stopping right now costs.
- * The second layer is `commit`'s own precondition (spec A7/G8 amended), which
- * trusts nobody and is unchanged by this file.
+ * Direct write (ticket 05) made every `note`/`remember` call durable the
+ * instant it lands — nothing is discarded when the process exits any more,
+ * which is what retires the old staged-commit-preview design entirely
+ * (ticket 11's `previewCommit`/`SettlementCommitPreview`, and the
+ * connection-level busy_timeout dance that existed only to make THAT
+ * preview's own gate re-check answer inside a Stop hook's short budget —
+ * gone with it, because there is no gate re-check left to run here). What
+ * survives losing `commit` is exactly one fact the job row itself already
+ * states: `commit`'s own claim-CAS never ran, so the job is still `claimed`
+ * under this run's own generation, not `done`. THAT is the probe (spec:
+ * "直写模式的完整性探针=「job 已认领未终态」(staged 计数已无意义)") — a
+ * plain `SELECT`, no write, no busy-timeout budget to protect.
  *
- * WHAT IT SAYS, and why it is not a gap list. Under staged commit (spec A7)
- * nothing a settlement run does reaches a stored row until the agent's own
- * `commit` call replays it; an agent that stops without committing has
- * therefore produced literally NOTHING, and its staged work is discarded when
- * the process exits. So the message leads with that fact and names the single
- * action that changes it. The gap inventory ticket 11 originally specified is
- * demoted to a subordinate clause — it is `commit`'s own refusal, quoted, so
- * the agent can fix the gap and commit in one more step instead of committing,
- * being refused, and stopping again.
- *
- * THE CAP IS REAL (spec G2: "at most twice, to avoid a loop"). A hook that can
- * block a stop indefinitely is a hang, and this one runs against a subprocess
- * with a lease and a retry budget: the third stop is allowed through, the
- * window stays unsettled, and the job's own three-attempt policy — which
- * starts a retry from nothing, because nothing was committed — is what
- * eventually settles or abandons it. Deliberately counted here rather than
- * read off the SDK's `stop_hook_active`, which reports only "this stop follows
- * a blocked one" and so could express a cap of one, not two.
- *
- * WHEN IT DOES NOT BLOCK AT ALL: a run whose `commit` already landed (the work
- * is durable and the job is complete — there is nothing to warn about), and a
- * run whose lease has been reclaimed (no `commit` from this dispatch can ever
- * succeed again, so telling it to call one would be telling it to do the
- * impossible — the same distinction `commit`'s own refusal path draws).
- *
- * WHEN THE CHECK ITSELF CANNOT ANSWER (ticket 15 finding 5): `previewCommit`
- * can come back with `checkFailed: true` instead of a real verdict — a writer
- * lock elsewhere outlasted the preview's own bounded retry budget. Of the
- * three honest options (let the stop through, block with an "I could not
- * check" message, or retry the check again in here), this hook BLOCKS with
- * the honest message. Letting the stop through would hide exactly the
- * staged-work loss this hook exists to catch — a false "you're fine" is worse
- * than an occasional over-cautious block. Retrying again in here would just
- * repeat the wait the preview's own bounded transaction already paid out, for
- * no new information. Blocking costs the agent one more turn, capped by the
- * same `blocksIssued` counter as a genuine gap, and points it at `commit`
- * itself, which runs the ordinary, uncapped-budget write path and has a real
- * chance to succeed where the preview could not even look.
+ * The hook still BLOCKS on it (spec: "拦截上限行为保留") — up to
+ * `NOTE_SETTLEMENT_MAX_STOP_BLOCKS` times — because an agent that forgets
+ * `commit` leaves the job stuck `claimed` until its LEASE expires, which is
+ * a needless 10-minute wait for a mistake one more tool call fixes; the cap
+ * is what stops that block from becoming a hang. Past the cap, or once the
+ * job has moved (committed by this run, or reclaimed out from under it), the
+ * stop is let through — the scheduler's own dispatch layer
+ * (`note-settlement-dispatch.ts`) is what turns "run ended, job still not
+ * done" into the deterministic-failure accounting this scenario now costs
+ * (pinned decision: "agent stopping without commit → deterministic failure
+ * accounting"), not this hook.
  */
 
-/** Spec G2's "at most twice". */
+/** Spec G2's "at most twice", carried over unchanged by ticket 06. */
 export const NOTE_SETTLEMENT_MAX_STOP_BLOCKS = 2;
 
-/**
- * The subset of the staging engine this hook reads. Narrow on purpose: the
- * hook must never be able to write, and the only write verb on the engine
- * (`commit`) is deliberately absent from this type.
- */
-export type SettlementStopHookEngine = Pick<
-  SettlementStagingEngine,
-  "previewCommit" | "getLastCommitMetrics"
->;
-
 export interface CreateSettlementStopHookOptions {
-  engine: SettlementStopHookEngine;
+  db: Database;
+  jobId: number;
+  claimGeneration: number;
   /** Spec G2's cap; injectable so a test can prove the cap rather than the constant. */
   maxBlocks?: number;
 }
@@ -79,56 +54,37 @@ export interface SettlementStopHookResult {
   reason?: string;
 }
 
-/**
- * What is about to be lost if the agent stops now — shared by every Stop-hook
- * message (ticket 15 finding 5 factors this out of `renderStopReason`, not
- * new prose).
- */
-function renderStakes(staged: number): string {
-  return staged === 0
-    ? "You are stopping without having called `commit`, and you have staged nothing. " +
-        "This run has produced NOTHING: no note, no segment, no verdict."
-    : `You are stopping without having called \`commit\`. Nothing you staged is written — ` +
-        `${staged} staged call${staged === 1 ? "" : "s"} ${staged === 1 ? "is" : "are"} ` +
-        `discarded when this run ends, and this run will have produced NOTHING. ` +
-        "`commit` is the only writer.";
-}
-
-/** The hook's own view of what is about to be lost, for the message. */
-function renderStopReason(
-  staged: number,
-  wouldCommit: boolean,
-  refusal: string | null,
-): string {
-  const next = wouldCommit
-    ? "A `commit` right now would land this window. Call it."
-    : `A \`commit\` right now would refuse — ${refusal ?? "the window is not yet complete."} ` +
-      "Fill that with more `note`/`segment` calls (everything you staged is kept), then call `commit`.";
-
-  return `${renderStakes(staged)}\n\n${next}`;
-}
+const STOP_WITHOUT_COMMIT_REASON =
+  "You are stopping without having called `commit`. Every `note`/`remember` " +
+  "call you made already landed — nothing is lost — but this job's window " +
+  "stays open (not durably complete) until `commit` runs: it is the only " +
+  "thing that marks the job done. Call `commit` now, even if you have " +
+  "nothing further to correct — an empty-handed `commit` is a normal, " +
+  "clean way to finish this window.";
 
 /**
- * Ticket 15 finding 5: the preview could not answer at all — a writer lock
- * outlasted its bounded budget, `SQLITE_BUSY` never reached the model, and
- * `previewCommit` returned `checkFailed: true` instead of a real gate
- * verdict. Deliberately NOT `renderStopReason`'s "would refuse" branch: there
- * is no gap to name, and telling the agent to stage more `note`/`segment`
- * calls would be advice for a problem this is not. The honest sentence is
- * "try `commit` yourself" — it runs the ordinary, uncapped-budget write path,
- * not this preview's bounded one, so it has a real chance to succeed (or
- * refuse for a real, nameable reason) where the preview could not even look.
+ * `"open"` — the probe fires (job still `claimed` under THIS run's own
+ * generation): `commit` never ran. `"done"` — `commit` already landed;
+ * nothing to warn about. `"lost"` — the job moved out from under this run
+ * entirely (reclaimed, or no such job at all); no `commit` from here could
+ * ever succeed, so blocking would be telling the agent to do the impossible.
  */
-function renderCheckFailedStopReason(staged: number): string {
-  return (
-    `${renderStakes(staged)}\n\n` +
-    "The completion check itself could not run just now — the database was " +
-    "briefly locked by something else and the check's own bounded retry ran " +
-    "out before the lock cleared. This is NOT a statement that your work is " +
-    "incomplete; the check simply could not answer either way. Call `commit` " +
-    "directly — it has a longer retry budget and will either land your " +
-    "window or tell you exactly what is still missing."
-  );
+function probeJobOpen(
+  db: Database,
+  jobId: number,
+  claimGeneration: number,
+): "open" | "done" | "lost" {
+  const job = getNoteSettlementJob(db, jobId);
+  if (!job) {
+    return "lost";
+  }
+  if (job.status === "done") {
+    return "done";
+  }
+  if (job.status === "claimed" && job.claimGeneration === claimGeneration) {
+    return "open";
+  }
+  return "lost";
 }
 
 /**
@@ -139,42 +95,21 @@ function renderCheckFailedStopReason(staged: number): string {
 export function createSettlementStopHook(
   options: CreateSettlementStopHookOptions,
 ): () => Promise<SettlementStopHookResult> {
-  const { engine } = options;
+  const { db, jobId, claimGeneration } = options;
   const maxBlocks = options.maxBlocks ?? NOTE_SETTLEMENT_MAX_STOP_BLOCKS;
   let blocksIssued = 0;
 
   return async function handleSettlementStop(): Promise<SettlementStopHookResult> {
-    // Committed already: the work is durable and the job is complete.
-    if (engine.getLastCommitMetrics() !== null) {
-      return { continue: true };
-    }
-    // The cap, checked BEFORE the preview: past it the answer is "let it
-    // stop" regardless, and a preview costs a write transaction.
     if (blocksIssued >= maxBlocks) {
       return { continue: true };
     }
 
-    const preview = engine.previewCommit();
-    if (preview.fenceLost) {
+    const probe = probeJobOpen(db, jobId, claimGeneration);
+    if (probe !== "open") {
       return { continue: true };
     }
 
     blocksIssued += 1;
-    if (preview.checkFailed) {
-      return {
-        continue: true,
-        decision: "block",
-        reason: renderCheckFailedStopReason(preview.staged),
-      };
-    }
-    return {
-      continue: true,
-      decision: "block",
-      reason: renderStopReason(
-        preview.staged,
-        preview.wouldCommit,
-        preview.refusal,
-      ),
-    };
+    return { continue: true, decision: "block", reason: STOP_WITHOUT_COMMIT_REASON };
   };
 }
