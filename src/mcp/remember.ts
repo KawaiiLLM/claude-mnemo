@@ -17,9 +17,11 @@ import {
   replaceInSegmentWorkingStateField,
   toggleSegmentStatus,
   upsertTopic,
+  type ReplaceSegmentWorkingStateFieldResult,
   type SegmentRecord,
 } from "../db/segments";
 import { countTurnsSince } from "../db/sessions";
+import { checkFieldGate, sessionWriterId, stampField } from "../db/write-gate";
 import { decodeHtmlEntities } from "./note";
 import { renderSegmentCard } from "./segment-card";
 import {
@@ -440,6 +442,51 @@ function closedSegmentRejection(segmentId: number): string {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Write gate (ticket 02, read-write-contract spec "门(写面)") — the first
+// consumer of `db/write-gate.ts`'s three-judgment check. `remember`'s own
+// segment-field surface (append/replace, both Working State and content/
+// insight): each call runs the gate for the ONE field it is about to touch,
+// INSIDE the same write transaction as the field mutation and the stamp that
+// follows it — no gap between the check passing and the write landing.
+// ---------------------------------------------------------------------------
+
+/**
+ * `null` when the write may proceed (either the gate admits it, or `writer`
+ * is unknown — the same "unknown always admits" latitude `note`'s own
+ * cross-session guard gives an unidentified caller, since there is no writer
+ * to attribute a stamp or a rejection to). Otherwise the rejection message,
+ * already distinguishing "never-read" from "stale" in its own text.
+ */
+function checkSegmentFieldGate(
+  db: Database,
+  writer: string | null,
+  segmentId: number,
+  field: SegmentEditableField,
+): string | null {
+  if (!writer) {
+    return null;
+  }
+  const verdict = checkFieldGate(db, writer, "segment", segmentId, field, `E${segmentId}`);
+  return verdict.ok ? null : verdict.message;
+}
+
+function stampSegmentField(
+  db: Database,
+  writer: string | null,
+  segmentId: number,
+  field: SegmentEditableField,
+  nowEpoch: number,
+): void {
+  if (writer) {
+    stampField(db, "segment", segmentId, field, writer, nowEpoch);
+  }
+}
+
+function callerWriterId(callerSessionId: number | null | undefined): string | null {
+  return typeof callerSessionId === "number" ? sessionWriterId(callerSessionId) : null;
+}
+
 function handleAppend(
   db: Database,
   input: RememberToolInput,
@@ -493,13 +540,33 @@ function handleAppend(
   const priorUpdatedAtEpoch = resolution.segment.updatedAtEpoch;
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const updated = writeTransaction(db, () =>
-    appendSegmentWorkingStateRows(db, resolution.segment.id, field, rows, nowEpoch),
-  );
+  const writer = callerWriterId(options.callerSessionId);
 
-  if (!updated) {
+  type AppendOutcome =
+    | { kind: "gate-rejected"; message: string }
+    | { kind: "missing" }
+    | { kind: "ok"; segment: SegmentRecord };
+
+  const outcome = writeTransaction(db, (): AppendOutcome => {
+    const rejection = checkSegmentFieldGate(db, writer, resolution.segment.id, field);
+    if (rejection) {
+      return { kind: "gate-rejected", message: rejection };
+    }
+    const updated = appendSegmentWorkingStateRows(db, resolution.segment.id, field, rows, nowEpoch);
+    if (!updated) {
+      return { kind: "missing" };
+    }
+    stampSegmentField(db, writer, resolution.segment.id, field, nowEpoch);
+    return { kind: "ok", segment: updated };
+  });
+
+  if (outcome.kind === "gate-rejected") {
+    return parameterError(outcome.message);
+  }
+  if (outcome.kind === "missing") {
     return parameterError(`E${resolution.segment.id} no longer exists.`);
   }
+  const updated = outcome.segment;
 
   // decisions appends are exempt from the too-soon reminder ONLY (ADR-0002:
   // "a lost ruling is the costliest loss") — the 20+ nudge still applies.
@@ -559,21 +626,47 @@ function handleReplace(
   const priorUpdatedAtEpoch = resolution.segment.updatedAtEpoch;
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const outcome = writeTransaction(db, () =>
-    replaceInSegmentWorkingStateField(db, resolution.segment.id, field, oldString, newString, nowEpoch),
-  );
+  const writer = callerWriterId(options.callerSessionId);
 
-  if (!outcome.segment) {
+  type ReplaceOutcome =
+    | { kind: "gate-rejected"; message: string }
+    | { kind: "replaced"; result: ReplaceSegmentWorkingStateFieldResult };
+
+  const outcome = writeTransaction(db, (): ReplaceOutcome => {
+    const rejection = checkSegmentFieldGate(db, writer, resolution.segment.id, field);
+    if (rejection) {
+      return { kind: "gate-rejected", message: rejection };
+    }
+    const result = replaceInSegmentWorkingStateField(
+      db,
+      resolution.segment.id,
+      field,
+      oldString,
+      newString,
+      nowEpoch,
+    );
+    if (result.segment && !result.rejection) {
+      stampSegmentField(db, writer, resolution.segment.id, field, nowEpoch);
+    }
+    return { kind: "replaced", result };
+  });
+
+  if (outcome.kind === "gate-rejected") {
+    return parameterError(outcome.message);
+  }
+  const { result } = outcome;
+
+  if (!result.segment) {
     return parameterError(`E${resolution.segment.id} no longer exists.`);
   }
-  if (outcome.rejection === "missing") {
+  if (result.rejection === "missing") {
     return parameterError(
       `oldString ${JSON.stringify(oldString)} not found in ${field} on E${resolution.segment.id}.`,
     );
   }
-  if (outcome.rejection === "ambiguous") {
+  if (result.rejection === "ambiguous") {
     return parameterError(
-      `oldString ${JSON.stringify(oldString)} matches ${outcome.occurrences} times in ${field} on ` +
+      `oldString ${JSON.stringify(oldString)} matches ${result.occurrences} times in ${field} on ` +
         `E${resolution.segment.id} — narrow it so it matches exactly once.`,
     );
   }

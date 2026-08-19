@@ -536,6 +536,31 @@ export function getRecentSessions(
     .all(...params, limit);
 }
 
+/**
+ * Stop's own end-of-turn stamp (ticket 03, read-write-contract spec "受管写者
+ * 含 hook"). Touches ONLY its own two columns — never title/content/insight/
+ * next_steps, which a settlement write may already have moved past whatever
+ * `stop.ts` read at hook entry.
+ *
+ * The prior call site here used `upsertSession`, which re-wrote every summary
+ * field from that stale, hook-entry snapshot: its `COALESCE(excluded.content,
+ * sessions.content)` prefers the PASSED-IN value whenever it is non-null, so
+ * a same-window settlement write landing between the hook's session read and
+ * this write's own commit would be silently stomped back to the old value —
+ * "开场读、收尾整行 upsert" is exactly this TOCTOU. A function with no columns
+ * to stomp cannot repeat the mistake.
+ */
+export function touchSessionCompletion(
+  db: Database,
+  sessionId: number,
+  updatedAtEpoch: number,
+  completedAtEpoch: number,
+): void {
+  db.query<unknown, [number, number, number]>(
+    `UPDATE sessions SET updated_at_epoch = ?, completed_at_epoch = ? WHERE id = ?`,
+  ).run(updatedAtEpoch, completedAtEpoch, sessionId);
+}
+
 export function updateCompactAnchor(db: Database, sessionId: number): void {
   db.query(
     `UPDATE sessions

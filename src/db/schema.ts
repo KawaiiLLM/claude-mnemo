@@ -890,6 +890,53 @@ const SCHEMA_SQL = `
       SELECT RAISE(ABORT, 'rule_events is append-only');
     END;
 
+  -- Read-write contract (db/write-gate.ts). A writer's license to write an
+  -- entity, earned by that entity appearing in its injected context or a
+  -- recall/timeline render (CONTEXT.md "Read grant"). Entity-level: one row
+  -- per (writer, entity) — one appearance licenses every field. Non-
+  -- destructive: a write does not delete another writer's grant row, it just
+  -- leaves it behind the field's stamp sequence, which is what
+  -- checkFieldGate compares to tell a genuinely never-read entity from one
+  -- this writer read but that moved since ("Stale" vs "never-read",
+  -- CONTEXT.md). entity_type widens to session up front — a CHECK
+  -- constraint cannot be ALTERed, and ticket 05's settlement narrative write
+  -- is the same table, not a second one.
+  CREATE TABLE IF NOT EXISTS write_gate_reads (
+    writer TEXT NOT NULL,
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('segment', 'turn', 'session')),
+    entity_id INTEGER NOT NULL,
+    read_at_epoch INTEGER NOT NULL,
+    read_sequence INTEGER NOT NULL,
+    PRIMARY KEY (writer, entity_type, entity_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_write_gate_reads_entity
+    ON write_gate_reads (entity_type, entity_id);
+
+  -- One field's freshness stamp: who wrote it last, and at what point in the
+  -- monotonic write sequence (CONTEXT.md "Stale") — never epoch seconds, so
+  -- two writes landing in the same wall-clock second stay ordered (spec: the
+  -- legacy yield gate's >= second comparison mis-ranks a same-second early
+  -- write as late; this sequence has no such tie).
+  CREATE TABLE IF NOT EXISTS write_gate_stamps (
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('segment', 'turn', 'session')),
+    entity_id INTEGER NOT NULL,
+    field TEXT NOT NULL,
+    writer TEXT NOT NULL,
+    write_sequence INTEGER NOT NULL,
+    written_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (entity_type, entity_id, field)
+  );
+
+  -- The write gate's single monotonic counter (db/write-gate.ts). One row,
+  -- incremented inside the SAME transaction as the field stamp it numbers —
+  -- never read at epoch-second granularity, so two writers committing in the
+  -- same second are still totally ordered against each other.
+  CREATE TABLE IF NOT EXISTS write_gate_sequence (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    value INTEGER NOT NULL DEFAULT 0
+  );
+
   ${MEMORY_FTS_DDL}
 `;
 

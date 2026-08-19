@@ -6,7 +6,6 @@ import { createObservation } from "../../src/db/observations";
 import {
   getNoteSettlementCursor,
   listNoteSettlementJobs,
-  NOTE_SETTLEMENT_MIN_WINDOW_TURNS,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
@@ -14,6 +13,12 @@ import { createContextHandler } from "../../src/hooks/handlers/context";
 import { createSessionEndHandler } from "../../src/hooks/handlers/session-end";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import { BUILD_ID } from "../../src/shared/build-id";
+import {
+  checkFieldGate,
+  recordReadGrant,
+  sessionWriterId,
+  stampField,
+} from "../../src/db/write-gate";
 
 function createInput(
   overrides: Partial<NormalizedHookInput> = {},
@@ -477,18 +482,17 @@ describe("handleSessionEndHook", () => {
 });
 
 /**
- * The sessionend settlement boundary (spec note-prompt-clock D7, ticket 05):
- * the hook freezes and enqueues its own window SYNCHRONOUSLY, before the
- * async worker flush is ever notified — the async half only ever leaks
- * whatever is already due, never plans anything of its own. These tests
- * assert directly on `note_settlement_jobs`, deliberately bypassing the async
- * flush entirely, so a passing assertion can only be explained by the hook's
- * own write transaction.
+ * The sessionend settlement boundary is RETIRED (ticket 04, [S15069/T963]):
+ * the hook used to freeze and enqueue its own window synchronously here, but
+ * turn-stop planning is the only automatic trigger now — settlement reads the
+ * database, not live context, so a session ending carries no settlement
+ * urgency of its own any more. These tests assert directly on
+ * `note_settlement_jobs`, bypassing the async flush entirely, so a passing
+ * assertion can only be explained by the hook writing nothing at all.
  */
-describe("handleSessionEndHook — note settlement boundary", () => {
+describe("handleSessionEndHook — note settlement boundary (retired, ticket 04)", () => {
   let db: Database;
   let sessionId: number;
-  const ERA_CUTOFF_EPOCH = 1;
 
   beforeEach(() => {
     db = createDatabase(":memory:");
@@ -521,77 +525,10 @@ describe("handleSessionEndHook — note settlement boundary", () => {
     }
   }
 
-  test("a tail under the 20-turn floor opens NO window — the sessionend exemption is dead (ticket 05)", async () => {
-    seedTurns(1, 7);
-    const handler = createSessionEndHandler({
-      db,
-      eraCutoffEpoch: ERA_CUTOFF_EPOCH,
-      settlementEnabled: true,
-    });
-
-    await handler(createInput({ sessionId: "session-boundary-1" }));
-
-    // Well under NOTE_SETTLEMENT_MIN_WINDOW_TURNS — ticket 05 kills the old
-    // "sessionend is exempt from the floor" carve-out, so this tail leaves
-    // no trace at all; it waits to accumulate into a later window.
-    expect(7).toBeLessThan(NOTE_SETTLEMENT_MIN_WINDOW_TURNS);
-    const jobs = listNoteSettlementJobs(db, sessionId);
-    expect(jobs).toHaveLength(0);
-  });
-
-  test("a repeat SessionEnd with no new activity is idempotent", async () => {
-    // Over the floor (ticket 05: sessionend is no longer exempt), so this
-    // still exercises a REAL window's idempotency, not merely "nothing
-    // happened three times".
-    seedTurns(1, 22);
-    const handler = createSessionEndHandler({
-      db,
-      eraCutoffEpoch: ERA_CUTOFF_EPOCH,
-      settlementEnabled: true,
-    });
-
-    await handler(createInput({ sessionId: "session-boundary-1" }));
-    await handler(createInput({ sessionId: "session-boundary-1" }));
-    await handler(createInput({ sessionId: "session-boundary-1" }));
-
-    const jobs = listNoteSettlementJobs(db, sessionId);
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.windowStart).toBe(1);
-    expect(jobs[0]!.windowEnd).toBe(22);
-  });
-
-  test("end then resume with new turns opens a SECOND window; the first job is untouched", async () => {
-    // Both phases over the floor (ticket 05: sessionend is no longer
-    // exempt), so each end event genuinely opens its own window.
-    seedTurns(1, 22);
-    const handler = createSessionEndHandler({
-      db,
-      eraCutoffEpoch: ERA_CUTOFF_EPOCH,
-      settlementEnabled: true,
-    });
-
-    await handler(createInput({ sessionId: "session-boundary-1" }));
-    const firstJob = listNoteSettlementJobs(db, sessionId)[0]!;
-
-    // Resume is a normal shape (spec D7): new turns belong to the NEXT window.
-    seedTurns(23, 20);
-    await handler(createInput({ sessionId: "session-boundary-1" }));
-
-    const jobs = listNoteSettlementJobs(db, sessionId);
-    expect(jobs).toHaveLength(2);
-    expect(jobs[0]!.id).toBe(firstJob.id);
-    expect(jobs[0]!.windowStart).toBe(1);
-    expect(jobs[0]!.windowEnd).toBe(22);
-    expect(jobs[0]!.status).toBe("pending"); // untouched by the second end event
-    expect(jobs[1]!.windowStart).toBe(23);
-    expect(jobs[1]!.windowEnd).toBe(42);
-    expect(jobs[1]!.triggerType).toBe("sessionend");
-  });
-
-  test("an inert install (no era) writes no boundary and no job", async () => {
-    seedTurns(1, 5);
-    // No eraCutoffEpoch override: resolves via resolveEraCutoff(db), which is
-    // null on a fresh database — the product default (spec D9).
+  test("SessionEnd opens no window however many decided turns accumulated", async () => {
+    // Well past both the old 20-turn floor and the new 25-turn threshold —
+    // if any settlement path survived here, this would trip it.
+    seedTurns(1, 90);
     const handler = createSessionEndHandler({ db });
 
     await handler(createInput({ sessionId: "session-boundary-1" }));
@@ -600,16 +537,112 @@ describe("handleSessionEndHook — note settlement boundary", () => {
     expect(getNoteSettlementCursor(db, sessionId)).toBe(0);
   });
 
-  test("the kill switch stops the boundary write while the era stays up", async () => {
-    seedTurns(1, 5);
-    const handler = createSessionEndHandler({
-      db,
-      eraCutoffEpoch: ERA_CUTOFF_EPOCH,
-      settlementEnabled: false,
-    });
+  test("a repeat SessionEnd with new activity in between still opens nothing", async () => {
+    seedTurns(1, 22);
+    const handler = createSessionEndHandler({ db });
 
+    await handler(createInput({ sessionId: "session-boundary-1" }));
+    seedTurns(23, 20);
+    await handler(createInput({ sessionId: "session-boundary-1" }));
     await handler(createInput({ sessionId: "session-boundary-1" }));
 
     expect(listNoteSettlementJobs(db, sessionId)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Write gate cleanup (ticket 01, read-write-contract spec: "session 终结时
+// 清理其读集;janitor 兜底").
+// ---------------------------------------------------------------------------
+
+describe("handleSessionEndHook — write gate cleanup", () => {
+  let db: Database;
+  let sessionId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    sessionId = upsertSession(db, {
+      contentSessionId: "write-gate-end-1",
+      project: "/tmp/write-gate",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("clears the ending session's own read grants", async () => {
+    // Someone else wrote the field, THEN this session read it — the grant
+    // covers the current state, so it may write the field ungranted-free.
+    stampField(db, "segment", 1, "goal", "session:9999", 100);
+    recordReadGrant(db, sessionWriterId(sessionId), "segment", 1, 150);
+    expect(checkFieldGate(db, sessionWriterId(sessionId), "segment", 1, "goal", "E1").ok).toBe(
+      true,
+    );
+
+    const handler = createSessionEndHandler({ db });
+    await handler(createInput({ sessionId: "write-gate-end-1" }));
+
+    const verdict = checkFieldGate(db, sessionWriterId(sessionId), "segment", 1, "goal", "E1");
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("never-read");
+    }
+  });
+
+  test("janitor backstop sweeps another already-completed session's grants too", async () => {
+    const staleSessionId = upsertSession(db, {
+      contentSessionId: "write-gate-stale-1",
+      project: "/tmp/write-gate",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 50,
+      updatedAtEpoch: 60,
+      completedAtEpoch: 60,
+    }).id;
+    recordReadGrant(db, sessionWriterId(staleSessionId), "segment", 2, 55);
+
+    const handler = createSessionEndHandler({ db });
+    await handler(createInput({ sessionId: "write-gate-end-1" }));
+
+    const rows = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ?",
+      )
+      .get(sessionWriterId(staleSessionId));
+    expect(rows?.count).toBe(0);
+  });
+
+  test("does not touch a still-live session's grants", async () => {
+    const liveSessionId = upsertSession(db, {
+      contentSessionId: "write-gate-live-1",
+      project: "/tmp/write-gate",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 50,
+      updatedAtEpoch: 60,
+      completedAtEpoch: null,
+    }).id;
+    recordReadGrant(db, sessionWriterId(liveSessionId), "segment", 3, 55);
+
+    const handler = createSessionEndHandler({ db });
+    await handler(createInput({ sessionId: "write-gate-end-1" }));
+
+    const rows = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ?",
+      )
+      .get(sessionWriterId(liveSessionId));
+    expect(rows?.count).toBe(1);
   });
 });

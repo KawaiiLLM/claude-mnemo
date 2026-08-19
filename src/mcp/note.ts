@@ -26,6 +26,7 @@ import {
   updateTurnById,
   type TurnRecord,
 } from "../db/turns";
+import { checkFieldGate, sessionWriterId, stampField } from "../db/write-gate";
 import { isSegmentEra } from "../segment-era";
 import {
   budgetOverageRejection,
@@ -826,6 +827,17 @@ function handleTurnWrite(
   const rideTurnId = current?.id ?? null;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const promotesTurnRecord = isSegmentEra(turn.createdAtEpoch, options.eraCutoffEpoch);
+  // Write gate (ticket 03, read-write-contract spec "受管面"): the caller's
+  // own write-gate identity, `null` when unknown — the same "unknown always
+  // admits" latitude the crossSession guard above already gives it. Covers
+  // BOTH cross- and same-session writes uniformly (no special-case bypass
+  // for same-session — the three-judgment check's own rule 2/3 admit a
+  // first write or a self-rewrite without ever needing a grant).
+  const writer =
+    typeof options.callerSessionId === "number"
+      ? sessionWriterId(options.callerSessionId)
+      : null;
+  const addressLabel = `S${turn.sessionId}/T${turn.promptNumber}`;
 
   // Prose on a pre-cutoff turn is REFUSED, not written somewhere quiet (user
   // ruling). A legacy turn never promotes, so its title/content/insight could
@@ -871,6 +883,21 @@ function handleTurnWrite(
   let result: TurnWriteTransactionResult;
   try {
     result = writeTransaction(db, (): TurnWriteTransactionResult => {
+      // Write gate (ticket 03): checked first, inside this transaction, for
+      // every field the call actually provided — "检查-写入原子", no gap
+      // between this passing and the fields it guards actually landing
+      // below. `fail()` throws and unwinds the WHOLE transaction, the same
+      // all-or-nothing shape every other whole-call validation in this
+      // function already has: one rejected field blocks the rest too.
+      if (writer) {
+        for (const field of providedFields) {
+          const verdict = checkFieldGate(db, writer, "turn", turn.id, field, addressLabel);
+          if (!verdict.ok) {
+            fail(verdict.message);
+          }
+        }
+      }
+
       const freshTurn = getTurnById(db, turn.id)!;
       const existingNote = getShadowNote(db, turn.id);
       const noteExisted = existingNote !== null;
@@ -1063,6 +1090,31 @@ function handleTurnWrite(
         citations,
         nowEpoch,
       );
+
+      // Write gate (ticket 01, read-write-contract spec "字段映射"): stamp
+      // whichever fields this write actually touched, writer = the caller's
+      // own session. Skipped entirely when the caller identity is unknown
+      // (every channel but the MCP direct-execution entry point) — there is
+      // no writer to attribute the stamp to, same "unknown always admits"
+      // latitude `isCrossSessionWrite` already gives this identity.
+      if ((touchedProse || wantsFieldsWrite) && writer) {
+        if (titleResolution !== undefined) {
+          stampField(db, "turn", turn.id, "title", writer, nowEpoch);
+        }
+        if (contentResolution !== undefined) {
+          stampField(db, "turn", turn.id, "content", writer, nowEpoch);
+        }
+        if (insightResolution !== undefined) {
+          stampField(db, "turn", turn.id, "insight", writer, nowEpoch);
+        }
+        // Subsumption: ANY note write on this turn re-stamps type/tags too,
+        // even when this call did not touch them itself — settlement's own
+        // yield gate (ticket 05) reads this as "the agent has fresher
+        // knowledge of this turn than my pre-run snapshot", the field-level
+        // generalization of the old per-turn yield check.
+        stampField(db, "turn", turn.id, "type", writer, nowEpoch);
+        stampField(db, "turn", turn.id, "tags", writer, nowEpoch);
+      }
 
       return {
         turn: updatedTurn,

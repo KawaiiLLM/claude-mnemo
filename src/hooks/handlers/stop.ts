@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { runHookWriteTransaction } from "../../db/database";
 import { markSettledDiaryDayStaleForTurn } from "../../db/diary-state";
 import { settleOutstandingTurns } from "../../db/turn-settlement";
-import { getSessionByContentId, upsertSession } from "../../db/sessions";
+import { getSessionByContentId, touchSessionCompletion } from "../../db/sessions";
 import { enqueueQueueItem } from "../../db/pending-queue";
 import {
   enqueueOrphanTurnStops,
@@ -226,17 +226,12 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
         });
       }
 
-      upsertSession(dependencies.db, {
-        contentSessionId: session.contentSessionId,
-        project: session.project,
-        title: session.title,
-        content: session.content,
-        insight: session.insight,
-        nextSteps: session.nextSteps,
-        createdAtEpoch: session.createdAtEpoch,
-        updatedAtEpoch: epoch,
-        completedAtEpoch: epoch,
-      });
+      // Write gate (ticket 03, read-write-contract spec "受管写者含 hook"):
+      // narrow update — completedAtEpoch/updatedAtEpoch are Stop's own
+      // fields, never a whole-row upsert of title/content/insight/nextSteps
+      // re-read from the stale `session` snapshot captured at hook entry
+      // (see `touchSessionCompletion`'s own doc for the TOCTOU this closes).
+      touchSessionCompletion(dependencies.db, session.id, epoch, epoch);
 
       if (parsedTurns) {
         detectAndCleanSubagentTurnsFromParsed(

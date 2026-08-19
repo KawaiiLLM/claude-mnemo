@@ -6,6 +6,7 @@ import { recallMemory, type RecallInput } from "./recall";
 import { rememberTool } from "./remember";
 import { timelineQuery } from "./timeline";
 import { resolveEraCutoff } from "../db/era";
+import { sessionWriterId } from "../db/write-gate";
 import { stripPrivateTags } from "../shared/tag-stripping";
 
 
@@ -133,6 +134,15 @@ export function createDatabaseBackedHandlers(
     options.eraCutoffEpoch !== undefined
       ? options.eraCutoffEpoch
       : resolveEraCutoff(database);
+  // Write gate (ticket 01): the SAME caller-session resolution `note`/
+  // `remember` already use, re-encoded as this identity's write-gate writer
+  // id. Resolved fresh per call, not once here, for the identical reason
+  // `note`'s own `callerSessionId` is — the process-session mapping this
+  // reads can be written by a hook that runs after these handlers are built.
+  const readerId = (): string | null => {
+    const callerSessionId = options.resolveCallerSessionId?.() ?? null;
+    return typeof callerSessionId === "number" ? sessionWriterId(callerSessionId) : null;
+  };
   const workerTextResult = (text: string): ToolResult => {
     if (!includeDbTurnIds) {
       return textResult(text);
@@ -172,6 +182,7 @@ export function createDatabaseBackedHandlers(
           includeDbTurnIds,
           truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : undefined,
           eraCutoffEpoch: eraCutoff(),
+          readerId: readerId(),
         }),
       ),
     timeline: (args) =>
@@ -179,6 +190,7 @@ export function createDatabaseBackedHandlers(
         timelineQuery(database, {
           ...toTimelineQueryInput(args),
           eraCutoffEpoch: eraCutoff(),
+          readerId: readerId(),
         }),
       ),
     // Not wrapped in workerTextResult: `note` is a main-agent-only write, and

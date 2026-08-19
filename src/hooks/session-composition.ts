@@ -78,6 +78,7 @@ function readerOutputAtBudget(
   segmentId: number,
   eraCutoffEpoch: number | null,
   pageBudget: number,
+  readerId: string | null | undefined,
 ): string {
   if (kind === "fields") {
     return recallMemory(db, {
@@ -85,6 +86,7 @@ function readerOutputAtBudget(
       depth: "collapsed",
       pageBudget,
       eraCutoffEpoch,
+      readerId,
     });
   }
   return timelineQuery(db, {
@@ -92,6 +94,7 @@ function readerOutputAtBudget(
     view: "milestones",
     pageBudget,
     eraCutoffEpoch,
+    readerId,
   });
 }
 
@@ -141,10 +144,19 @@ export function renderAttachedSegmentBlock(
   segment: Pick<SegmentRecord, "id">,
   topicName: string | null,
   eraCutoffEpoch: number | null,
+  /**
+   * Write gate (ticket 01): the reading session's own write-gate identity
+   * (`db/write-gate.ts`'s `sessionWriterId`) — SessionStart injection is a
+   * render like recall/timeline's own tool calls, so it records the SAME
+   * read grant for whatever segment it shows. Omitted only by tests that
+   * predate this ticket and by any caller with no session id to attribute a
+   * grant to.
+   */
+  readerId?: string | null,
 ): string {
   const header = segmentBlockHeader(segment.id, topicName, kind);
   return composeWithDemoteLadder(header, (pageBudget) =>
-    readerOutputAtBudget(db, kind, segment.id, eraCutoffEpoch, pageBudget),
+    readerOutputAtBudget(db, kind, segment.id, eraCutoffEpoch, pageBudget, readerId),
   );
 }
 

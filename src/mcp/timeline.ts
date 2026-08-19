@@ -47,6 +47,7 @@ import {
   legacyEraHeader,
   renderSegmentSpineBlock,
 } from "./segment-spine";
+import { recordReadGrants, type ReadGrantEntry } from "../db/write-gate";
 
 export interface TimelineInput {
   id: string;
@@ -92,6 +93,15 @@ export interface TimelineInput {
    * this ticket's report for the schema addition still owed.
    */
   pageBudget?: number;
+  /**
+   * Write gate (ticket 01, read-write-contract spec): same seam as
+   * `RecallInput.readerId` — the writer identity whose read grant this
+   * render should record for whatever it ends up showing. Absent/null
+   * records nothing.
+   */
+  readerId?: string | null;
+  /** Test seam for the read-grant timestamp; defaults to the real clock. */
+  now?: () => number;
 }
 
 // Ticket 04 (spec "Tools"): `phases` retired — a parse error at the schema
@@ -4300,22 +4310,52 @@ export function renderSegmentTimeline(view: SegmentTimelineView): string {
   return appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated });
 }
 
+function recordTimelineReadGrants(
+  db: Database,
+  readerId: string | null | undefined,
+  now: (() => number) | undefined,
+  entries: readonly ReadGrantEntry[],
+): void {
+  if (!readerId || entries.length === 0) {
+    return;
+  }
+  recordReadGrants(db, readerId, entries, (now ?? (() => Math.floor(Date.now() / 1000)))());
+}
+
 export function timelineQuery(db: Database, input: TimelineInput): string {
   try {
     const segmentRoute = parseSegmentTimelineId(input.id);
     if (segmentRoute !== null) {
-      return renderSegmentTimeline(
-        buildSegmentTimelineView(db, {
-          segmentId: segmentRoute.segmentId,
-          view: input.view,
-          page: input.page,
-          pageSize: input.pageSize,
-          pageBudget: input.pageBudget,
-          eraCutoffEpoch: input.eraCutoffEpoch,
-        }),
-      );
+      const view = buildSegmentTimelineView(db, {
+        segmentId: segmentRoute.segmentId,
+        view: input.view,
+        page: input.page,
+        pageSize: input.pageSize,
+        pageBudget: input.pageBudget,
+        eraCutoffEpoch: input.eraCutoffEpoch,
+      });
+      // Write gate (ticket 01): the segment itself, plus whichever member
+      // turns this page actually rendered — the turns view's `pageMembers`
+      // or the milestones view's `keptMilestones`, never both (one is always
+      // empty depending on `view.view`).
+      recordTimelineReadGrants(db, input.readerId, input.now, [
+        { entityType: "segment", entityId: view.segment.id },
+        ...view.pageMembers.map((row) => ({ entityType: "turn" as const, entityId: row.turn.id })),
+        ...view.keptMilestones.map((row) => ({
+          entityType: "turn" as const,
+          entityId: row.member.turnId,
+        })),
+      ]);
+      return renderSegmentTimeline(view);
     }
-    return renderTimeline(buildTimelineView(db, input), { pageBudget: input.pageBudget });
+    const view = buildTimelineView(db, input);
+    // Write gate (ticket 01): the turns view's own page, or the milestones
+    // view's kept selection — whichever `view.view` actually rendered.
+    recordTimelineReadGrants(db, input.readerId, input.now, [
+      ...view.pageTurns.map((turn) => ({ entityType: "turn" as const, entityId: turn.id })),
+      ...view.pagedMilestones.map((row) => ({ entityType: "turn" as const, entityId: row.turn.id })),
+    ]);
+    return renderTimeline(view, { pageBudget: input.pageBudget });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return `timeline error: ${message}`;

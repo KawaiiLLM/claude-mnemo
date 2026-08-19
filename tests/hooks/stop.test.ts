@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
-import { createDatabase } from "../../src/db/database";
+import { createDatabase, runHookWriteTransaction } from "../../src/db/database";
 import { createDiaryStateStore } from "../../src/db/diary-state";
 import { initializeSchema } from "../../src/db/schema";
 import {
@@ -984,5 +984,41 @@ describe("handleStopHook", () => {
     expect(queueItemExistsForTurn(db, "turn-stop", parentStranded)).toBe(true);
 
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
+  });
+
+  // -------------------------------------------------------------------
+  // Write gate (ticket 03, read-write-contract spec "受管写者含 hook"):
+  // Stop's session-completion write is narrow now — it must not repeat the
+  // whole-row upsert TOCTOU that used to stomp a concurrent settlement
+  // write with the stale `session` snapshot read at hook entry.
+  // -------------------------------------------------------------------
+
+  test("a concurrent settlement write to session content between hook entry and this hook's own write survives — Stop's write touches only completedAtEpoch/updatedAtEpoch", async () => {
+    db.query(
+      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+       VALUES (?, 1, 'active', 'p', 100)`,
+    ).run(sessionId);
+
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      // Simulates a settlement write landing in the window between this
+      // hook's session read (getSessionByContentId, at handler entry) and
+      // its own write transaction below — the TOCTOU the old whole-row
+      // `upsertSession(session.content, ...)` call was exposed to.
+      runHookWriteTransaction: (database, fn, options) => {
+        database
+          .query(`UPDATE sessions SET content = ? WHERE id = ?`)
+          .run("settlement wrote fresher content mid-window", sessionId);
+        return runHookWriteTransaction(database, fn, options);
+      },
+    });
+
+    await handler(createInput());
+
+    const after = getSession(db, sessionId)!;
+    expect(after.content).toBe("settlement wrote fresher content mid-window");
+    // Stop's own field still lands.
+    expect(after.completedAtEpoch).toBe(500);
   });
 });

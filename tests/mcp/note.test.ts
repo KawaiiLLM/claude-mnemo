@@ -9,9 +9,11 @@ import { createSegment } from "../../src/db/segments";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
+import { sessionWriterId } from "../../src/db/write-gate";
 import { noteInputSchema } from "../../src/mcp/definitions";
 import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
 import { isNoteSuccess, noteTool } from "../../src/mcp/note";
+import { recallMemory } from "../../src/mcp/recall";
 import { registerMainMcpTools } from "../../src/mcp/server";
 
 function resultText(result: { content: Array<{ text: string }> }): string {
@@ -1968,5 +1970,197 @@ describe("note(session) is retired — settlement is the session's sole writer n
     ).get(sessionId);
     const result = noteTool(db, { turn: `S${sessionId}/T1`, title: "t", content: "c" });
     expect(isNoteSuccess(result)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Write gate (ticket 03, read-write-contract spec) — `note`'s turn-write
+// surface, both cross- and same-session. `.scratch/read-write-contract/
+// spec.md` "受管面" / "crossSession 旗保留".
+// ---------------------------------------------------------------------------
+
+describe("note tool write gate (ticket 03)", () => {
+  let db: Database;
+  let sessionA: number;
+  let sessionB: number;
+
+  function insertTurn(sessionId: number, promptNumber: number, createdAtEpoch = 100): number {
+    return db
+      .query<{ id: number }, [number, number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, ?, 'active', 'p', ?) RETURNING id`,
+      )
+      .get(sessionId, promptNumber, createdAtEpoch)!.id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionA = upsertSession(db, {
+      contentSessionId: "gate-a",
+      project: "/tmp/gate",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+    sessionB = upsertSession(db, {
+      contentSessionId: "gate-b",
+      project: "/tmp/gate",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  describe("same-session writes hit zero gate friction", () => {
+    test("first write on a field never written by anyone admits with no read at all", () => {
+      insertTurn(sessionA, 1);
+      const result = noteTool(
+        db,
+        { turn: `S${sessionA}/T1`, type: ["design"] },
+        { callerSessionId: sessionA },
+      );
+      expect(isNoteSuccess(result)).toBe(true);
+    });
+
+    test("the same session may keep rewriting a field it last wrote, with no read in between", () => {
+      const turnId = insertTurn(sessionA, 1);
+      noteTool(db, { turn: `S${sessionA}/T1`, type: ["design"] }, { callerSessionId: sessionA });
+      const result = noteTool(
+        db,
+        { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "overwrite" } },
+        { callerSessionId: sessionA },
+      );
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(getTurnById(db, turnId)?.type).toEqual(["fix"]);
+    });
+  });
+
+  describe("cross-session writes: three combinations of grant and the crossSession flag", () => {
+    test("no read at all: rejected by the gate itself even with crossSession declared — never-read", () => {
+      const turnId = insertTurn(sessionA, 1);
+      noteTool(db, { turn: `S${sessionA}/T1`, type: ["design"] }, { callerSessionId: sessionA });
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "overwrite" }, crossSession: true },
+        { callerSessionId: sessionB },
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("recall");
+      expect(getTurnById(db, turnId)?.type).toEqual(["design"]);
+    });
+
+    test("read, but no crossSession flag: blocked by the flag, before the gate ever runs", () => {
+      const turnId = insertTurn(sessionA, 1);
+      recallMemory(db, { id: `S${sessionA}/T1`, readerId: sessionWriterId(sessionB) });
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionA}/T1`, type: ["design"] },
+        { callerSessionId: sessionB },
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("crossSession: true");
+      expect(getTurnById(db, turnId)?.type).toEqual([]);
+    });
+
+    test("both read AND crossSession declared: admitted", () => {
+      insertTurn(sessionA, 1);
+      recallMemory(db, { id: `S${sessionA}/T1`, readerId: sessionWriterId(sessionB) });
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionA}/T1`, type: ["design"], crossSession: true },
+        { callerSessionId: sessionB },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+    });
+  });
+
+  test("a grant that predates a later write by someone else is stale — distinguishable from never-read", () => {
+    const turnId = insertTurn(sessionA, 1);
+    recallMemory(db, { id: `S${sessionA}/T1`, readerId: sessionWriterId(sessionB) });
+    noteTool(db, { turn: `S${sessionA}/T1`, type: ["design"] }, { callerSessionId: sessionA });
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "overwrite" }, crossSession: true },
+      { callerSessionId: sessionB },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("type");
+    expect(resultText(result)).toContain(`S${sessionA}`);
+    expect(resultText(result)).toContain("recall");
+    expect(getTurnById(db, turnId)?.type).toEqual(["design"]);
+
+    // Re-reading clears the staleness — the write proceeds.
+    recallMemory(db, { id: `S${sessionA}/T1`, readerId: sessionWriterId(sessionB) });
+    const retried = noteTool(
+      db,
+      { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "overwrite" }, crossSession: true },
+      { callerSessionId: sessionB },
+    );
+    expect(isNoteSuccess(retried)).toBe(true);
+    expect(getTurnById(db, turnId)?.type).toEqual(["fix"]);
+  });
+
+  test("posting a note stamps type/tags too even when this call only touched prose — subsumption", () => {
+    const turnId = insertTurn(sessionA, 1);
+    noteTool(
+      db,
+      { turn: `S${sessionA}/T1`, title: "t", content: "c" },
+      { callerSessionId: sessionA },
+    );
+
+    const stampedFields = db
+      .query<{ field: string }, [number]>(
+        `SELECT field FROM write_gate_stamps WHERE entity_type = 'turn' AND entity_id = ? ORDER BY field`,
+      )
+      .all(turnId)
+      .map((row) => row.field);
+
+    expect(stampedFields).toContain("type");
+    expect(stampedFields).toContain("tags");
+  });
+
+  test("an explicit null-clear stamps the field — 'cleared' reads as written, not as never-written", () => {
+    const turnId = insertTurn(sessionA, 1);
+    noteTool(
+      db,
+      { turn: `S${sessionA}/T1`, title: "t", content: "c", insight: "first insight" },
+      { callerSessionId: sessionA },
+    );
+    noteTool(
+      db,
+      { turn: `S${sessionA}/T1`, insight: null, mode: { insight: "overwrite" } },
+      { callerSessionId: sessionA },
+    );
+
+    // A second session, never having read this turn, tries to write insight.
+    // If the clear had left the field looking "never written", rule 3 would
+    // wrongly admit this blind write; instead it is rejected as never-read.
+    const result = noteTool(
+      db,
+      { turn: `S${sessionA}/T1`, insight: "blind overwrite", crossSession: true },
+      { callerSessionId: sessionB },
+    );
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("recall");
+    // The blocked write never landed — insight is still cleared, not
+    // overwritten with the blind session's text.
+    expect(getShadowNote(db, turnId)?.insight ?? null).toBeNull();
   });
 });

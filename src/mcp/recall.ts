@@ -50,6 +50,7 @@ import {
   SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
 } from "./segment-card";
 import { expandNumericSelector } from "./selectors";
+import { recordReadGrants, type ReadGrantEntry } from "../db/write-gate";
 
 export interface RecallInput {
   id?: string;
@@ -107,6 +108,17 @@ export interface RecallInput {
    * the legacy path.
    */
   eraCutoffEpoch?: number | null;
+  /**
+   * Write gate (ticket 01, read-write-contract spec): the writer identity
+   * (`session:<id>`, from `db/write-gate.ts`) whose read grant this render
+   * should record for whatever it ends up showing — the "统一渲染器渲染即
+   *记录" seam. `undefined`/`null` (every worker/test call site that has no
+   * caller identity to attribute a grant to) means "record nothing", same
+   * latitude `note`'s own `callerSessionId` gives an unknown caller.
+   */
+  readerId?: string | null;
+  /** Test seam for the read-grant timestamp; defaults to the real clock. */
+  now?: () => number;
 }
 
 const CHILD_PREVIEW_SIZE = 5;
@@ -1252,7 +1264,18 @@ function renderRoutedId(
   // filter can empty out (see the segment route's own single-id comment
   // below).
   filter: ParsedMemoryFilter = {},
+  // Write gate (ticket 01): who this render's grants belong to, and the read
+  // path's own time seam. `readerId` absent/null records nothing — see
+  // `RecallInput.readerId`.
+  readerId?: string | null,
+  now: () => number = () => Math.floor(Date.now() / 1000),
 ): string {
+  const recordGrants = (entries: readonly ReadGrantEntry[]): void => {
+    if (readerId && entries.length > 0) {
+      recordReadGrants(db, readerId, entries, now());
+    }
+  };
+
   if (routed.kind === "sessions") {
     const paged = paginateItems(
       listSessionIds(db, routed.sessionIds, after, before, filter),
@@ -1287,6 +1310,7 @@ function renderRoutedId(
     // spec "Overflow ALWAYS paginates... stable page 2") — rather than
     // picking which of several records to show, since there is only one.
     if (routed.segmentIds && routed.segmentIds.length === 1) {
+      recordGrants([{ entityType: "segment", entityId: routed.segmentIds[0]! }]);
       return renderSegmentCard(db, routed.segmentIds[0]!, {
         depth,
         pageBudget,
@@ -1308,6 +1332,7 @@ function renderRoutedId(
       page,
       pageSize,
     );
+    recordGrants(paged.items.map((segmentId) => ({ entityType: "segment", entityId: segmentId })));
 
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
@@ -1340,11 +1365,22 @@ function renderRoutedId(
     // `S<n>/T*` convention — then page that ordinal list itself, so a large
     // range (`E31/T1..80`) still respects `pageSize` the same way `S<n>/T*`
     // does.
+    const chronologicalMembers = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
     const wantedOrdinals =
       routed.ordinals && routed.ordinals.length > 0
         ? routed.ordinals
-        : chronologicalSegmentMembers(db, segment, eraCutoffEpoch).map((_member, index) => index + 1);
+        : chronologicalMembers.map((_member, index) => index + 1);
     const paged = paginateItems(wantedOrdinals, page, pageSize);
+    // The segment itself, plus the specific member turns THIS page actually
+    // shows — a reader can address those members individually via
+    // `S<n>/T<m>` from here on.
+    recordGrants([
+      { entityType: "segment", entityId: segment.id },
+      ...paged.items
+        .map((ordinal) => chronologicalMembers[ordinal - 1])
+        .filter((member): member is NonNullable<typeof member> => member !== undefined)
+        .map((member) => ({ entityType: "turn" as const, entityId: member.turnId })),
+    ]);
 
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
@@ -1372,6 +1408,7 @@ function renderRoutedId(
       return turnMatchesFilter(turn, filter);
     });
     const paged = paginateItems(turns, page, pageSize);
+    recordGrants(paged.items.map((turn) => ({ entityType: "turn" as const, entityId: turn.id })));
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderTurnScope(
@@ -1391,19 +1428,21 @@ function renderRoutedId(
 
   if (routed.kind === "turn-by-id") {
     const turn = getTurnById(db, routed.turnId);
-    return turn
-      ? renderTurnScope(
-          db,
-          [turn],
-          depth,
-          truncate,
-          includeDbTurnIds,
-          truncateCap,
-          eraCutoffEpoch,
-          signal,
-          turnBudget,
-        )
-      : "Turn not found.";
+    if (!turn) {
+      return "Turn not found.";
+    }
+    recordGrants([{ entityType: "turn", entityId: turn.id }]);
+    return renderTurnScope(
+      db,
+      [turn],
+      depth,
+      truncate,
+      includeDbTurnIds,
+      truncateCap,
+      eraCutoffEpoch,
+      signal,
+      turnBudget,
+    );
   }
 
   if (routed.kind === "observation-list") {
@@ -1668,6 +1707,8 @@ function recallMemoryBody(
       pageBudget,
       turnBudget,
       filter,
+      input.readerId,
+      input.now ?? (() => Math.floor(Date.now() / 1000)),
     );
   }
 

@@ -10,7 +10,9 @@ import {
   getSegmentMemberTurnIds,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { sessionWriterId } from "../../src/db/write-gate";
 import { rememberInputSchema } from "../../src/mcp/definitions";
+import { recallMemory } from "../../src/mcp/recall";
 import { rememberTool } from "../../src/mcp/remember";
 
 function resultText(result: { content: Array<{ text: string }> }): string {
@@ -801,5 +803,204 @@ describe("remember tool (ticket 02)", () => {
         ),
       ).toStartWith("Parameter error:");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Write gate (ticket 02, read-write-contract spec) — the gate's first
+// consumer surface: `remember`'s segment field writes (append/replace,
+// Working State included). `.scratch/read-write-contract/spec.md` "门(写面)".
+// ---------------------------------------------------------------------------
+
+describe("remember write gate (ticket 02)", () => {
+  let db: Database;
+  let sessionA: number;
+  let sessionB: number;
+
+  function createSegmentAs(topic: string): number {
+    const text = resultText(
+      rememberTool(db, { verb: "create", title: topic, topic }, { callerSessionId: sessionA }),
+    );
+    return Number(/Created E(\d+)/.exec(text)![1]);
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionA = upsertSession(db, {
+      contentSessionId: "write-gate-a",
+      project: "/tmp/write-gate",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+    sessionB = upsertSession(db, {
+      contentSessionId: "write-gate-b",
+      project: "/tmp/write-gate",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("first write on a field admits with no read at all — a create needs no prior recall", () => {
+    const segmentId = createSegmentAs("first-write");
+    const text = resultText(
+      rememberTool(
+        db,
+        { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["ship it"] },
+        { callerSessionId: sessionB },
+      ),
+    );
+    expect(text).toStartWith("Appended");
+  });
+
+  test("the same session may keep rewriting its own field with no read in between", () => {
+    const segmentId = createSegmentAs("self-rewrite");
+    rememberTool(
+      db,
+      { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["first"] },
+      { callerSessionId: sessionA },
+    );
+    const text = resultText(
+      rememberTool(
+        db,
+        { verb: "replace", id: `E${segmentId}`, field: "goal", oldString: "- first", newString: "- second" },
+        { callerSessionId: sessionA },
+      ),
+    );
+    expect(text).toStartWith("Replaced text in");
+  });
+
+  test("a second session writing a field someone else already wrote, without ever reading it, is rejected — never-read", () => {
+    const segmentId = createSegmentAs("never-read");
+    rememberTool(
+      db,
+      { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["from A"] },
+      { callerSessionId: sessionA },
+    );
+
+    const text = resultText(
+      rememberTool(
+        db,
+        { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["from B, blind"] },
+        { callerSessionId: sessionB },
+      ),
+    );
+
+    expect(text).toStartWith("Parameter error:");
+    expect(text).toContain(`E${segmentId}`);
+    expect(text).toContain("recall");
+    // Nothing landed — the field is unchanged from A's write.
+    expect(getSegment(db, segmentId)?.goal).toBe("- from A");
+  });
+
+  test("concurrent dual sessions on the same segment: the later blind writer is rejected as stale after recall, then admitted once it re-recalls", () => {
+    const segmentId = createSegmentAs("dual-session");
+    // Both sessions discover the segment first (read-before-write, ADR-0002).
+    recallMemory(db, { id: `E${segmentId}`, readerId: sessionWriterId(sessionA) });
+    recallMemory(db, { id: `E${segmentId}`, readerId: sessionWriterId(sessionB) });
+
+    // A writes first.
+    rememberTool(
+      db,
+      { verb: "append", id: `E${segmentId}`, field: "decisions", rows: ["A ruled first"] },
+      { callerSessionId: sessionA },
+    );
+
+    // B's grant predates A's write — B is stale on `decisions`, and the
+    // message names A and points back at recall (distinguishable from
+    // never-read by its own text).
+    const staleAttempt = resultText(
+      rememberTool(
+        db,
+        { verb: "append", id: `E${segmentId}`, field: "decisions", rows: ["B ruled blind"] },
+        { callerSessionId: sessionB },
+      ),
+    );
+    expect(staleAttempt).toStartWith("Parameter error:");
+    expect(staleAttempt).toContain("decisions");
+    expect(staleAttempt).toContain(`S${sessionA}`);
+    expect(staleAttempt).toContain("recall");
+    expect(getSegment(db, segmentId)?.decisions).toBe("- A ruled first");
+
+    // B recalls again, now sees A's write, and may proceed.
+    recallMemory(db, { id: `E${segmentId}`, readerId: sessionWriterId(sessionB) });
+    const retried = resultText(
+      rememberTool(
+        db,
+        { verb: "append", id: `E${segmentId}`, field: "decisions", rows: ["B ruled after re-reading"] },
+        { callerSessionId: sessionB },
+      ),
+    );
+    expect(retried).toStartWith("Appended");
+    expect(getSegment(db, segmentId)?.decisions).toBe(
+      "- A ruled first\n- B ruled after re-reading",
+    );
+  });
+
+  test("a read grant on the segment covers a DIFFERENT field too — entity-level, not per-field", () => {
+    const segmentId = createSegmentAs("entity-level-grant");
+    rememberTool(
+      db,
+      { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["from A"] },
+      { callerSessionId: sessionA },
+    );
+    // B reads the segment card once — it covers every field, not just `goal`.
+    recallMemory(db, { id: `E${segmentId}`, readerId: sessionWriterId(sessionB) });
+
+    const text = resultText(
+      rememberTool(
+        db,
+        { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["from B, after reading"] },
+        { callerSessionId: sessionB },
+      ),
+    );
+    expect(text).toStartWith("Appended");
+  });
+
+  test("atomicity: a write that fails after the gate check leaves no stamp behind — check and write commit or fail together", () => {
+    const segmentId = createSegmentAs("atomic-check-write");
+    recallMemory(db, { id: `E${segmentId}`, readerId: sessionWriterId(sessionA) });
+
+    // A hostile write transaction: the gate check runs (and passes), then the
+    // actual mutation throws instead of completing. If check-and-write were
+    // NOT one transaction, the gate's own bookkeeping (or a partial field
+    // write) could still land. bun:sqlite's `db.transaction()` rolls the
+    // whole callback back on a thrown error, so nothing here may survive.
+    expect(() =>
+      rememberTool(
+        db,
+        { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["should not land"] },
+        {
+          callerSessionId: sessionA,
+          runWriteTransaction: (database, fn) => {
+            const txn = database.transaction(() => {
+              fn();
+              throw new Error("simulated failure after the gate check passed");
+            });
+            return txn.immediate();
+          },
+        },
+      ),
+    ).toThrow("simulated failure after the gate check passed");
+
+    // Nothing landed: not the row, not a stamp that would make a later,
+    // legitimate write see a phantom prior writer.
+    expect(getSegment(db, segmentId)?.goal).toBeNull();
+    const stampRow = db
+      .query<{ count: number }, [number]>(
+        "SELECT COUNT(*) AS count FROM write_gate_stamps WHERE entity_type = 'segment' AND entity_id = ? AND field = 'goal'",
+      )
+      .get(segmentId);
+    expect(stampRow?.count).toBe(0);
   });
 });

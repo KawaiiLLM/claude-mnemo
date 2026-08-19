@@ -1,8 +1,6 @@
 import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
-import { resolveEraCutoff } from "../../db/era";
-import { enqueueSessionEndNoteSettlementWindow } from "../../db/note-settlement";
 import { getSessionByContentId } from "../../db/sessions";
 import { hasNewTurnSinceSessionRunStart } from "../../db/session-run";
 import {
@@ -15,24 +13,24 @@ import {
   type WorkerClientDeps,
 } from "../../worker/client";
 import { getMaxTurnId } from "../../db/turns";
-import { DEFAULT_CONFIG, loadConfig } from "../../shared/config";
 import { resolveSessionTranscriptPath } from "../../shared/paths";
+import {
+  clearReadGrantsForWriter,
+  sessionWriterId,
+  sweepReadGrantsForCompletedSessions,
+} from "../../db/write-gate";
 import { runCaptureRepair, type CaptureRepairLog } from "../capture-repair";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 /**
- * A config read must never cost a hook (era.ts's own rule, mirrored here): the
- * default is the safe answer on any failure, and the PRODUCT default
- * (`eraCutoffEpoch: null`) is what keeps this whole path inert regardless —
- * see the gate at the call site below.
+ * Read-write contract (ticket 01): how many OTHER completed sessions' read
+ * grants a single SessionEnd call sweeps as its janitor backstop, beside
+ * clearing its own. Small and bounded — this runs on every session's exit,
+ * so it must never turn into a table scan; it only needs to catch up on a
+ * rare miss (e.g. a crash between an earlier session's completion and its
+ * own SessionEnd call), not clear a backlog in one pass.
  */
-function loadSettlementEnabled(): boolean {
-  try {
-    return loadConfig().settlementEnabled;
-  } catch {
-    return DEFAULT_CONFIG.settlementEnabled;
-  }
-}
+export const WRITE_GATE_JANITOR_SWEEP_LIMIT = 20;
 
 /** SessionEnd runs under a 2s hook budget; the backstop scan stays well inside it. */
 export const SESSION_END_SCAN_MAX_LINES = 500;
@@ -68,15 +66,6 @@ export interface SessionEndHandlerDependencies {
   captureRepairBatchLines?: number;
   /** Seam for the repair itself (default `runCaptureRepair`). */
   captureRepairRunner?: typeof runCaptureRepair;
-  /**
-   * P2 era boundary (spec D11), read once at handler construction — same idiom
-   * as `stop.ts`. Omitted, it comes from `resolveEraCutoff`, whose default
-   * (`null`) leaves the sessionend window-freeze inert, same as every other
-   * settlement path.
-   */
-  eraCutoffEpoch?: number | null;
-  /** The kill switch on top of a live era (spec D9); defaults to config. */
-  settlementEnabled?: boolean;
 }
 
 export function createSessionEndHandler(
@@ -88,12 +77,6 @@ export function createSessionEndHandler(
     dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   const captureRepairRunner =
     dependencies.captureRepairRunner ?? runCaptureRepair;
-  const eraCutoffEpoch =
-    dependencies.eraCutoffEpoch !== undefined
-      ? dependencies.eraCutoffEpoch
-      : resolveEraCutoff(dependencies.db);
-  const settlementEnabled =
-    dependencies.settlementEnabled ?? loadSettlementEnabled();
 
   return async function handleSessionEndHook(
     input: NormalizedHookInput,
@@ -233,31 +216,37 @@ export function createSessionEndHandler(
       }
     }
 
-    // The sessionend settlement boundary (spec D7, ticket 05): the hook
-    // freezes and enqueues this session's window synchronously, right here —
-    // never through the async worker notification below, which only ever
-    // asks the worker to LEAK whatever is already due. Gated on the same
-    // era/kill-switch pair every other settlement path checks, so an inert
-    // install (the product default) takes this branch and writes nothing.
-    // Naturally idempotent: a repeat SessionEnd with no new activity re-derives
-    // the identical, already-consumed window and enqueues nothing (see
-    // `enqueueSessionEndNoteSettlementWindow`'s own doc).
-    if (settlementEnabled && eraCutoffEpoch !== null) {
-      try {
-        enqueueSessionEndNoteSettlementWindow(
+    // Write gate (ticket 01, read-write-contract spec "回收"): this session
+    // is terminating, so its own read grants are cleared, plus an
+    // opportunistic bounded sweep of any OTHER completed session's grants —
+    // the janitor backstop for a miss (a crash between an earlier session's
+    // completion and its own SessionEnd call). Best-effort and strictly
+    // subordinate, same discipline as the repair above: a failure here must
+    // never block orphan finalization, which the diary readiness gate is
+    // waiting on.
+    try {
+      writeTransaction(dependencies.db, () => {
+        clearReadGrantsForWriter(dependencies.db, sessionWriterId(session.id));
+        sweepReadGrantsForCompletedSessions(
           dependencies.db,
-          session.id,
-          now(),
-          eraCutoffEpoch,
+          WRITE_GATE_JANITOR_SWEEP_LIMIT,
         );
-      } catch (error) {
-        repairLog(
-          `session-end note settlement enqueue failed for session ${session.id}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
+      });
+    } catch (error) {
+      repairLog(
+        `session-end write-gate cleanup failed for session ${session.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
+
+    // No settlement window is frozen or enqueued here any more (ticket 04,
+    // [S15069/T963]): turn-stop planning is the only automatic trigger, and
+    // settlement reads the database rather than live context, so SessionEnd
+    // carries no urgency the next turn-stop (this session's own, or another
+    // session's leak) cannot satisfy just as well. The accepted consequence:
+    // a session that ends with an undecided tail under the threshold leaves
+    // that tail unsettled until it accumulates into a later window.
 
     return {
       continue: true,
