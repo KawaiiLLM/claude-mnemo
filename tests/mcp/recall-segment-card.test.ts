@@ -274,11 +274,17 @@ describe("recall(id=\"E<n>\") segment card", () => {
     }).id;
     attachSegmentToSession(db, other, segmentId, CUTOFF);
 
+    // Spec 金样例: the card's `- sessions:` row is a BARE id list — the
+    // per-session turn count / last-active / consulted-only annotations were
+    // the card's second rendering of facts each session states for itself.
     const output = recallMemory(db, { id: `E${segmentId}` });
-    expect(output).toContain(`S${sessionId}`);
-    expect(output).toMatch(new RegExp(`S${sessionId}[^\\n]*2 turns`));
-    expect(output).toContain(`S${other}`);
-    expect(output).toMatch(new RegExp(`S${other}[^\\n]*consulted only`));
+    const sessionsLine = output
+      .split("\n")
+      .find((line) => line.trimStart().startsWith("- sessions:"))!;
+    expect(sessionsLine).toContain(`S${sessionId}`);
+    expect(sessionsLine).toContain(`S${other}`);
+    expect(output).not.toContain("consulted only");
+    expect(output).not.toContain("last active");
   });
 
   test("collapsed shows per-field row counts and elides an over-budget field with the ellipsis at the top, newest rows kept", () => {
@@ -303,7 +309,9 @@ describe("recall(id=\"E<n>\") segment card", () => {
     const output = recallMemory(db, { id: `E${segmentId}`, pageBudget });
     const decisionsBlock = output.split("- decisions:")[1]?.split(/- (goal|constraints|done|next_steps|reference):/)[0] ?? "";
 
-    expect(decisionsBlock).toContain("5 rows");
+    // Spec 金样例: a field that HOLDS rows names itself and lets the rows
+    // speak; only a 0-row field states a count.
+    expect(decisionsBlock).not.toContain("5 rows");
     // Ellipsis sits at the TOP of the field.
     const ellipsisIndex = decisionsBlock.indexOf("… +");
     const newestRowIndex = decisionsBlock.indexOf("decision number 4");
@@ -347,6 +355,7 @@ describe("recall(id=\"E<n>\") segment card", () => {
 
   test("attached-session rows are capped with overflow folded into a count — the header no longer grows unbounded with attachment count", () => {
     const extra = MAX_ATTACHED_SESSION_ROWS + 3;
+    const overflowIds: number[] = [];
     for (let index = 0; index < extra; index += 1) {
       const other = upsertSession(db, {
         contentSessionId: `session-overflow-${index}`,
@@ -359,20 +368,28 @@ describe("recall(id=\"E<n>\") segment card", () => {
         updatedAtEpoch: CUTOFF + index,
         completedAtEpoch: null,
       }).id;
+      overflowIds.push(other);
       attachSegmentToSession(db, other, segmentId, CUTOFF + index);
     }
 
     const output = recallMemory(db, { id: `E${segmentId}` });
-    const sessionLines = output.split("\n").filter((line) => /^\s+- S\d+/.test(line));
-    expect(sessionLines.length).toBe(MAX_ATTACHED_SESSION_ROWS);
-    expect(output).toMatch(/… \+\d+ more sessions?/);
-    // The cap keeps the FRESHEST rows, not merely five rows: with 8 overflow
-    // sessions at ascending lastActive, the survivors are exactly the top
-    // five (indices 3..7) and the colder tail folds into the count line.
-    // An implementation that capped in attachment order (or sorted the wrong
-    // way) passes the two counts above and fails here.
-    expect(output).toContain("Overflow session 7");
-    expect(output).toContain("Overflow session 3");
+    const sessionsLine = output
+      .split("\n")
+      .find((line) => line.trimStart().startsWith("- sessions:"))!;
+    const ids = sessionsLine
+      .slice(sessionsLine.indexOf(":") + 1)
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.startsWith("S"));
+    expect(ids.length).toBe(MAX_ATTACHED_SESSION_ROWS);
+    expect(sessionsLine).toMatch(/\+\d+ more/);
+    // The cap keeps the FRESHEST ids, not merely five: with 8 overflow
+    // sessions at ascending lastActive, the survivors are the top five and
+    // the colder tail folds into the count. An implementation that capped in
+    // attachment order (or sorted the wrong way) passes the count above and
+    // fails here.
+    expect(ids).toContain(`S${overflowIds[overflowIds.length - 1]}`);
+    expect(ids).not.toContain(`S${overflowIds[0]}`);
     expect(output).not.toContain("Overflow session 2");
   });
 
@@ -571,11 +588,15 @@ describe("turn field-set switch (collapsed = prompt/title/content; expanded adds
     db.close();
   });
 
-  test("collapsed carries exactly prompt/title/content — no insight, no response", () => {
+  test("the default field set is exactly title + content — no prompt, no insight, no response", () => {
+    // Spec 金样例 补充: "其他字段槽位（默认只有content）". The prompt bullet
+    // left the default with the row redesign — the row label already falls
+    // back to the prompt when no title exists, so the bullet only ever
+    // restated what the reader had.
     const output = recallMemory(db, { id: `S${sessionId}/T1` });
     expect(output).toContain("the note title");
     expect(output).toContain("the note content");
-    expect(output).toContain("the raw user prompt");
+    expect(output).not.toContain("the raw user prompt");
     expect(output).not.toContain("the raw assistant response");
     expect(output).not.toContain("a lesson learned");
   });

@@ -36,8 +36,11 @@ import {
   createTruncationSignal,
   DEFAULT_TURN_RENDER_FIELDS,
   DEFAULT_TURN_TOKEN_BUDGET,
+  RENDER_INDENT_STEP,
   REWIND_MARKER,
   renderNode,
+  renderSessionTransitionLine,
+  renderTurnAddress,
   resolveTurnFields,
   truncateText,
   type FormattedObservation,
@@ -56,6 +59,10 @@ import {
 } from "./memory-filter";
 import { estimateTokens } from "../utils/token-estimate";
 import { renderSegmentHeaderLines } from "./segment-spine";
+// The `metadata` field slot's one composer (spec 金样例 补充). It lives in
+// `timeline.ts` because that module owns this codebase's local-time rendering;
+// importing it is what keeps recall from growing a second one.
+import { composeTurnMetadata } from "./timeline";
 import {
   chronologicalSegmentMembers,
   renderSegmentCard,
@@ -472,6 +479,10 @@ export function buildTurnView(
       buildObservationView(observation, turn.createdAtEpoch, eraCutoffEpoch),
     ),
     wasRolledBack: turn.wasRolledBack,
+    // No previous-turn epoch here: recall addresses turns by selector, not as
+    // a session-ordered walk, so there is no "previous" this builder can name
+    // honestly. The gap belongs to timeline's own session-scoped turn view.
+    metadata: composeTurnMetadata(turn, null),
   };
 }
 
@@ -578,7 +589,7 @@ function renderSession(
   ];
 
   if (breadcrumb !== null) {
-    lines.push(`  ${breadcrumb}`);
+    lines.push(`${RENDER_INDENT_STEP}${breadcrumb}`);
   }
 
   const turns = getTurnsForSession(db, session.id).filter((turn) =>
@@ -592,6 +603,7 @@ function renderSession(
     const turnLines = renderNode(
       { type: "turn", value: turnView },
       {
+        indent: RENDER_INDENT_STEP,
         fields,
         sessionId: session.id,
         includeDbTurnIds,
@@ -604,7 +616,7 @@ function renderSession(
   }
 
   if (preview.omittedCount > 0) {
-    lines.push(`  +${preview.omittedCount} more`);
+    lines.push(`${RENDER_INDENT_STEP}+${preview.omittedCount} more`);
   }
 
   return { text: lines.join("\n"), turnIds };
@@ -650,6 +662,7 @@ function renderTurnScope(
         renderNode(
           { type: "turn", value: turnView },
           {
+            indent: RENDER_INDENT_STEP,
             fields,
             sessionId: session.id,
             includeDbTurnIds,
@@ -735,6 +748,7 @@ function renderObservationScope(
         renderNode(
           { type: "turn", value: turnView },
           {
+            indent: RENDER_INDENT_STEP,
             sessionId: session.id,
             includeDbTurnIds,
             turnBudget,
@@ -761,7 +775,7 @@ function renderObservationScope(
           renderNode(
             { type: "observation", value: observationView },
             {
-              indent: "    ",
+              indent: `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`,
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
               turnBudget,
@@ -1395,6 +1409,7 @@ function renderGroupedSearchResults(
         renderNode(
           { type: "turn", value: turnView },
           {
+            indent: RENDER_INDENT_STEP,
             fields: turnFields,
             sessionId: session.id,
             includeDbTurnIds,
@@ -1421,7 +1436,7 @@ function renderGroupedSearchResults(
           renderNode(
             { type: "observation", value: observationView },
             {
-              indent: "    ",
+              indent: `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`,
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
               turnBudget,
@@ -1595,6 +1610,14 @@ function renderRoutedId(
         .map((member) => ({ entityType: "turn" as const, entityId: member.turnId })),
     ]);
 
+    // The member one slot BEFORE this page's first — what tells the renderer
+    // whether the page opens mid-session-run (spec 补充裁决 "跨页引用自足").
+    const firstOrdinal = paged.items[0];
+    const precedingSessionId =
+      firstOrdinal !== undefined && firstOrdinal > 1
+        ? chronologicalMembers[firstOrdinal - 2]?.sessionId ?? null
+        : null;
+
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderSegmentMembersByOrdinal(db, routed.segmentId, paged.items, {
@@ -1603,6 +1626,7 @@ function renderRoutedId(
         turnBudget,
         eraCutoffEpoch,
         signal,
+        precedingSessionId,
       }),
       paged.pageCount,
     );
@@ -1827,24 +1851,39 @@ function browseFieldText(
       const count = getExtractableObservationsForTurn(db, turn.id).length;
       return count > 0 ? `${count} observation${count === 1 ? "" : "s"}` : null;
     }
+    case "metadata":
+      // No previous-turn epoch in a GLOBAL chronological feed: the unit before
+      // this one is usually another session's turn, and a gap measured across
+      // that boundary would be a number about nothing. The timeline's own turn
+      // view, which is session-scoped, is where the gap belongs.
+      return composeTurnMetadata(turn, null);
     default:
       return null;
   }
 }
 
+const BROWSE_TURN_INDENT = RENDER_INDENT_STEP;
+const BROWSE_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
+
+/**
+ * The browse row's label (spec 金样例): the bracketed address, the turn's own
+ * identifying text, then tail status markers. `title` never renders as a field
+ * line here — it IS the row — so the label falls back to the prompt the same
+ * way `format.ts`'s own turn label does when no title is stored.
+ */
 function formatBrowseTurnLabel(
   turn: TurnRecord,
   sessionId: number,
+  includeSessionPrefix: boolean,
   includeDbTurnIds: boolean,
+  titleText: string | null,
 ): string {
-  // Bare `T<n>` — see format.ts's renderTurnNode comment: the `:L` suffix was
-  // the retired JSONL-first replay coordinate, and the replay skill forbids
-  // using it.
-  const turnId = `T${turn.promptNumber}`;
+  const address = renderTurnAddress(turn.promptNumber, sessionId, includeSessionPrefix);
+  const label = titleText ?? (turn.userPrompt ? `"${turn.userPrompt.replace(/\s+/g, " ").trim()}"` : "Untitled");
   const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
   const statusSegment = turn.status ? ` [${turn.status}]` : "";
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
-  return `  - [S${sessionId}][${turnId}]${statusSegment}${dbIdSegment}${rewindSegment}`;
+  return `${BROWSE_TURN_INDENT}${address} ${label}${statusSegment}${dbIdSegment}${rewindSegment}`;
 }
 
 /**
@@ -1859,14 +1898,27 @@ function renderBrowseTurnBlock(
   turn: TurnRecord,
   sessionId: number,
   fields: readonly RecallTurnField[],
+  includeSessionPrefix: boolean,
   includeDbTurnIds: boolean,
   turnBudget: number | undefined,
   signal: TruncationSignal | undefined,
 ): string {
-  const label = formatBrowseTurnLabel(turn, sessionId, includeDbTurnIds);
-  const values = fields
-    .map((field) => ({ field, text: browseFieldText(db, turn, field) }))
-    .filter((entry): entry is { field: RecallTurnField; text: string } => Boolean(entry.text));
+  const titleText = fields.includes("title") ? turn.title : null;
+  const label = formatBrowseTurnLabel(
+    turn,
+    sessionId,
+    includeSessionPrefix,
+    includeDbTurnIds,
+    titleText,
+  );
+  // `title` never renders as a field line — it is the row label above.
+  const values = fields.flatMap((field) => {
+    if (field === "title") {
+      return [];
+    }
+    const text = browseFieldText(db, turn, field);
+    return text ? [{ field, text }] : [];
+  });
 
   if (values.length === 0) {
     return label;
@@ -1882,14 +1934,21 @@ function renderBrowseTurnBlock(
       perFieldCharLimit !== undefined
         ? truncateText(text, { limit: perFieldCharLimit, signal })
         : text;
-    return `    - ${field}: ${rendered}`;
+    // `metadata` is the one unprefixed field line (spec 金样例 补充): it
+    // annotates the row above rather than naming a stored field.
+    return field === "metadata"
+      ? `${BROWSE_FIELD_INDENT}${rendered}`
+      : `${BROWSE_FIELD_INDENT}- ${field}: ${rendered}`;
   });
 
   return [label, ...fieldLines].join("\n");
 }
 
-function renderBrowseSessionHeader(session: NonNullable<ReturnType<typeof getSession>>): string {
-  return `- [S${session.id}] ${session.title ?? "Untitled"}`;
+function renderBrowseSessionHeader(
+  session: NonNullable<ReturnType<typeof getSession>>,
+  withTitle: boolean,
+): string {
+  return renderSessionTransitionLine(session.id, withTitle ? session.title : null);
 }
 
 /**
@@ -1981,13 +2040,43 @@ function buildBrowseFeed(
 
   const resolvedFields = fields && fields.length > 0 ? fields : DEFAULT_BROWSE_FIELDS;
 
-  const renderForPage = (unit: BrowseUnit, seenSessions: ReadonlySet<number>): string => {
+  /**
+   * `carriedSessionId` is the session the PREVIOUS page ended inside. When
+   * this page's first unit belongs to it, the run continues across the page
+   * break: no transition line is repeated, and the row carries the full
+   * `[S<n>][T<m>]` address instead, so the page stays self-contained for a
+   * citation join (spec 补充裁决 "跨页引用自足").
+   */
+  /**
+   * A transition line is emitted on every session CHANGE, carrying the title
+   * only on that session's FIRST appearance in the page (spec 金样例) — an
+   * alternation back to a session already shown gets a bare `[S<n>]`, which is
+   * what keeps the reader's "whose turn is this" answer on-screen without
+   * paying for the title twice.
+   *
+   * `runSessionId` is the session the previous unit belonged to; at the top of
+   * a page it is the session the PREVIOUS PAGE ended inside, so a run that
+   * spans the page break repeats no transition line and instead gives the
+   * opening row the full `[S<n>][T<m>]` address (spec 补充裁决 "跨页引用自足").
+   */
+  const renderForPage = (
+    unit: BrowseUnit,
+    seenSessions: ReadonlySet<number>,
+    runSessionId: number | null,
+    atPageTop: boolean,
+  ): string => {
     const sessionId = browseUnitSessionId(unit);
-    const isFirst = !seenSessions.has(sessionId);
+    const continuesRun = runSessionId === sessionId;
+    const header = continuesRun
+      ? null
+      : renderBrowseSessionHeader(
+          unit.kind === "session" ? unit.session : sessionFor(sessionId)!,
+          !seenSessions.has(sessionId),
+        );
     if (unit.kind === "session") {
-      // A first-appearance-only header IS the whole render for a turnless
-      // session — there is no turn body to show.
-      return isFirst ? renderBrowseSessionHeader(unit.session) : "";
+      // The transition line IS the whole render for a turnless session — there
+      // is no turn body to show.
+      return header ?? "";
     }
     const session = sessionFor(unit.turn.sessionId);
     if (!session) {
@@ -1998,16 +2087,18 @@ function buildBrowseFeed(
       unit.turn,
       session.id,
       resolvedFields,
+      continuesRun && atPageTop,
       includeDbTurnIds,
       turnBudget,
       signal,
     );
-    return isFirst ? `${renderBrowseSessionHeader(session)}\n${block}` : block;
+    return header === null ? block : `${header}\n${block}`;
   };
 
   const pages: BrowsePackedUnit[][] = [];
   let current: BrowsePackedUnit[] = [];
   let seenInPage = new Set<number>();
+  let runSessionId: number | null = null;
   let used = 0;
 
   for (const unit of units) {
@@ -2015,7 +2106,7 @@ function buildBrowseFeed(
       continue;
     }
 
-    let rendered = renderForPage(unit, seenInPage);
+    let rendered = renderForPage(unit, seenInPage, runSessionId, current.length === 0);
     let cost = estimateTokens(rendered);
     const overflowsCount = current.length >= pageSize;
     const overflowsBudget = current.length > 0 && used + cost > pageBudget;
@@ -2025,12 +2116,13 @@ function buildBrowseFeed(
       current = [];
       seenInPage = new Set();
       used = 0;
-      rendered = renderForPage(unit, seenInPage);
+      rendered = renderForPage(unit, seenInPage, runSessionId, true);
       cost = estimateTokens(rendered);
     }
 
     current.push({ unit, rendered });
     seenInPage.add(browseUnitSessionId(unit));
+    runSessionId = browseUnitSessionId(unit);
     used += cost;
   }
   if (current.length > 0 || pages.length === 0) {

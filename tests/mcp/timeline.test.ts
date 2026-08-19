@@ -42,7 +42,6 @@ import {
   selectMilestoneTurns,
   timelineQuery,
   truncateToTokens,
-  TURN_TABLE_HEADER,
   type KeptMilestone,
   type MilestoneSelection,
   type TimelineView,
@@ -2870,7 +2869,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1/T1..5" });
     const output = renderTimeline(view);
 
-    expect(output).toContain(TURN_TABLE_HEADER);
+    expect(output).toMatch(TURN_VIEW_METADATA_RE);
   });
 
   it("showing line reports page counts when the candidate set exceeds pageSize", () => {
@@ -2936,9 +2935,7 @@ describe("renderTimeline", () => {
 
     const view = buildTimelineView(db, { id: "S1/T19..21" });
     const output = renderTimeline(view);
-    const turn21Line = output
-      .split("\n")
-      .find((line) => line.startsWith("T21 |"));
+    const turn21Line = turnBlock(output, 21);
 
     expect(turn21Line).toBeDefined();
     expect(turn21Line).toContain("⏳");
@@ -2958,12 +2955,10 @@ describe("renderTimeline", () => {
     );
 
     const output = renderTimeline(buildTimelineView(db, { id: "S1/T19..21" }));
-    const turn21Line = output
-      .split("\n")
-      .find((line) => line.startsWith("T21 |"));
+    const turn21Line = turnBlock(output, 21);
 
     expect(turn21Line).toContain("reviewed later");
-    expect(turn21Line).toContain("•");
+    expect(turn21Line).toContain("[T21] reviewed later");
     expect(turn21Line).not.toContain("⏳");
   });
 
@@ -2974,9 +2969,7 @@ describe("renderTimeline", () => {
 
     const view = buildTimelineView(db, { id: "S1/T1..1" });
     const output = renderTimeline(view);
-    const turn1Line = output
-      .split("\n")
-      .find((line) => line.startsWith("T1 |"));
+    const turn1Line = turnBlock(output, 1);
 
     expect(turn1Line).toBeDefined();
     // The seeded turn's transcript_line_start is 10; no rendered coordinate.
@@ -2991,12 +2984,10 @@ describe("renderTimeline", () => {
 
     const view = buildTimelineView(db, { id: "S1/T1..1" });
     const output = renderTimeline(view);
-    const turn1Line = output
-      .split("\n")
-      .find((line) => line.startsWith("T1 |"));
+    const turn1Line = turnBlock(output, 1);
 
     expect(turn1Line).toBeDefined();
-    expect(turn1Line).toContain("🔵 title for T1");
+    expect(turn1Line).toContain("[S1][T1] title for T1");
   });
 
   it("renders titles longer than the legacy 37-char cap without truncation", () => {
@@ -3012,9 +3003,7 @@ describe("renderTimeline", () => {
 
     const view = buildTimelineView(db, { id: "S1/T1..1" });
     const output = renderTimeline(view);
-    const turn1Line = output
-      .split("\n")
-      .find((line) => line.startsWith("T1 |"));
+    const turn1Line = turnBlock(output, 1);
 
     expect(turn1Line).toBeDefined();
     expect(turn1Line).toContain(longTitle);
@@ -3031,12 +3020,10 @@ describe("renderTimeline", () => {
 
     const view = buildTimelineView(db, { id: "S1/T19..21" });
     const output = renderTimeline(view);
-    const turn19Line = output
-      .split("\n")
-      .find((line) => line.startsWith("⨯ T19 |"));
+    const turn19Line = turnBlock(output, 19);
 
     expect(turn19Line).toBeDefined();
-    expect(turn19Line).toContain("~~⚖️ title for T19~~");
+    expect(turn19Line).toContain("~~title for T19~~");
   });
 
   it("renders compact turns as structural rows with line anchors and parsed tags", () => {
@@ -3060,9 +3047,7 @@ describe("renderTimeline", () => {
 
     const view = buildTimelineView(db, { id: "S1/T19..21" });
     const output = renderTimeline(view);
-    const compactLine = output
-      .split("\n")
-      .find((line) => line.startsWith("T21 |"));
+    const compactLine = turnBlock(output, 21);
 
     expect(compactLine).toBeDefined();
     expect(compactLine).toContain("/compact");
@@ -3096,14 +3081,14 @@ describe("renderTimeline", () => {
     const turnPromptNumbers = (output: string) =>
       output
         .split("\n")
-        .filter((line) => /^T\d+ \|/.test(line))
-        .map((line) => Number(line.match(/^T(\d+)/)?.[1]));
-    // Milestone rows are day-grouped, title-only, front-gutter lines:
-    //   "   <glyph> T<n> <emoji> <title>" (no turn-table "|" columns).
+        .filter((line) => /^ {8}(?:⨯ )?(?:\[S\d+\])?\[T\d+\] /.test(line))
+        .map((line) => Number(line.match(/\[T(\d+)\]/)?.[1]));
+    // Milestone rows are day-grouped `[T<n>] <date> <time> <emoji> <title>`
+    // lines; the turn view's rows are told apart by their `metadata` line.
     const milestonePromptNumbers = (output: string) =>
       output
         .split("\n")
-        .map((line) => line.match(/^\s+(?:\S+ )?T(\d+) /)?.[1])
+        .map((line) => line.match(/^ {8}(?:\S+ )?\[T(\d+)\] \d/)?.[1])
         .filter((n): n is string => n !== undefined)
         .map(Number);
 
@@ -3115,15 +3100,15 @@ describe("renderTimeline", () => {
       buildTimelineView(db, { id: "S1", view: "milestones" }),
     );
 
-    expect(defaultOutput).toContain(TURN_TABLE_HEADER);
+    expect(defaultOutput).toMatch(TURN_VIEW_METADATA_RE);
     expect(defaultOutput).toContain("shape signals");
     expect(defaultOutput).not.toMatch(/\n\s+phases[:(]/);
-    expect(turnsOutput).toContain(TURN_TABLE_HEADER);
+    expect(turnsOutput).toMatch(TURN_VIEW_METADATA_RE);
     expect(turnsOutput).toContain("shape signals");
     expect(turnsOutput).not.toMatch(/\n\s+phases[:(]/);
     expect(turnPromptNumbers(turnsOutput)).toEqual([1, 2, 3, 4, 5]);
     expect(milestonePromptNumbers(milestoneOutput)).toEqual([1, 3, 5]);
-    expect(milestoneOutput).not.toContain(TURN_TABLE_HEADER);
+    expect(milestoneOutput).not.toMatch(TURN_VIEW_METADATA_RE);
     expect(milestoneOutput).toContain("shape signals");
     expect(milestoneOutput).not.toMatch(/\n\s+phases[:(]/);
   });
@@ -3207,9 +3192,7 @@ describe("renderTimeline", () => {
 
     const view = buildContextTimelineView(db, session.id);
     const output = renderTimeline(view, { promptCap: 80, showEarlierHint: true });
-    const turn40Line = output
-      .split("\n")
-      .find((line) => line.startsWith("T40 |"));
+    const turn40Line = turnBlock(output, 40);
 
     expect(turn40Line).toBeDefined();
     expect(turn40Line).toContain("…");
@@ -3223,7 +3206,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1/T19..21" });
     const output = renderTimeline(view);
 
-    expect(output).toContain(TURN_TABLE_HEADER);
+    expect(output).toMatch(TURN_VIEW_METADATA_RE);
     expect(output).not.toContain("───");
   });
 
@@ -3237,9 +3220,7 @@ describe("renderTimeline", () => {
 
     const view = buildTimelineView(db, { id: "S1/T21..21" });
     const output = renderTimeline(view);
-    const line = output
-      .split("\n")
-      .find((row) => row.startsWith("T21 |"));
+    const line = turnBlock(output, 21);
 
     expect(line).toBeDefined();
     expect(line).toContain("rg foo / sed");
@@ -3256,12 +3237,11 @@ describe("renderTimeline", () => {
 
     const view = buildTimelineView(db, { id: "S1/T21..21" });
     const output = renderTimeline(view);
-    const line = output
-      .split("\n")
-      .find((row) => row.startsWith("T21 |"));
+    const line = turnBlock(output, 21);
 
     expect(line).toBeDefined();
-    expect(line).toContain("raw prompt 21 → 🔵 left -> right");
+    expect(line).toContain("[S1][T21] left -> right");
+    expect(line).toContain("- prompt: raw prompt 21");
     expect(line).not.toContain("left → right");
   });
 
@@ -3285,14 +3265,12 @@ describe("renderTimeline", () => {
 
     const view = buildTimelineView(db, { id: "S1/T19..21" });
     const output = renderTimeline(view);
-    const turn21Line = output
-      .split("\n")
-      .find((line) => line.startsWith("T21 |"));
+    const turn21Line = turnBlock(output, 21);
 
     expect(view.viewItemTotal).toBe(2);
     expect(view.pageTurns.map((row) => row.promptNumber)).toEqual([19, 21]);
     expect(turn21Line).toBeDefined();
-    expect(turn21Line).toContain("| +50s |");
+    expect(turn21Line).toContain("· +50s ·");
     expect(output).not.toContain("⏭");
     expect(output).not.toContain("T20 |");
   });
@@ -3314,10 +3292,11 @@ describe("renderTimeline", () => {
     seedSession(db);
 
     const turnRowCount = (s: string) =>
-      s.split("\n").filter((l) => /^T\d+ \|/.test(l)).length;
-    // Milestone rows are day-grouped front-gutter lines, not turn-table "|" rows.
+      s.split("\n").filter((l) => /^ {8}(?:⨯ )?\[T\d+\] /.test(l)).length;
+    // A milestone row states its stamp inline; a turn row defers it to the
+    // `metadata` line below, so the trailing `\d` tells the two apart.
     const milestoneRowCount = (s: string) =>
-      s.split("\n").filter((l) => /^\s+(?:\S+ )?T\d+ /.test(l)).length;
+      s.split("\n").filter((l) => /^ {8}(?:\S+ )?\[T\d+\] \d/.test(l)).length;
 
     const full = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
     const milestone = renderTimeline(
@@ -3325,12 +3304,12 @@ describe("renderTimeline", () => {
     );
 
     expect(milestoneRowCount(milestone)).toBeLessThan(turnRowCount(full));
-    expect(milestone).not.toContain(TURN_TABLE_HEADER);
+    expect(milestone).not.toMatch(TURN_VIEW_METADATA_RE);
     // T6 is kept (front-gutter milestone row); T2 is suppressed; T11 is folded
     // into the day's overflow rather than rendered as its own row.
-    expect(milestone).toMatch(/^\s+(?:\S+ )?T6 /m);
-    expect(milestone).not.toMatch(/^\s+(?:\S+ )?T11 /m);
-    expect(milestone).not.toMatch(/^\s+(?:\S+ )?T2 /m);
+    expect(milestone).toMatch(/^ {8}(?:\S+ )?\[T6\] /m);
+    expect(milestone).not.toMatch(/^ {8}(?:\S+ )?\[T11\] /m);
+    expect(milestone).not.toMatch(/^ {8}(?:\S+ )?\[T2\] /m);
     expect(milestone).not.toMatch(/\n\s+phases[:(]/);
   });
 
@@ -3350,10 +3329,10 @@ describe("renderMilestoneDigest layout", () => {
 
     // The spine row now carries the user's own words (spec §D): the reader sees
     // the turn-of-phrase that opened the turn, not just the extractor's title.
-    expect(out).toContain("PROMPTTEXT → kick off the design");
+    expect(out).toContain('kick off the design · "PROMPTTEXT"');
     expect(out).not.toContain("T# | line | time | gap"); // not the turn table
-    expect(out).toContain("↩️ T2"); // reversed marker in front gutter
-    expect(out).toContain("🏁 T3"); // outcome marker in front gutter
+    expect(out).toContain("↩️ [T2]"); // reversed marker in front gutter
+    expect(out).toContain("🏁 [T3]"); // outcome marker in front gutter
     expect(out).toContain("✏️a.ts"); // modified-file basenames ride the row
     expect(out).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T1–T3 · \d+ kept/); // day header (full date, matches day-divider style)
   });
@@ -3389,7 +3368,7 @@ describe("timelineQuery", () => {
 
     // The milestone view dispatches to the day-grouped digest, not the turn table.
     const milestoneOut = timelineQuery(db, { id: "S1", view: "milestones" });
-    expect(milestoneOut).not.toContain(TURN_TABLE_HEADER);
+    expect(milestoneOut).not.toMatch(TURN_VIEW_METADATA_RE);
     expect(milestoneOut).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
   });
 
@@ -3430,8 +3409,9 @@ describe("timelineQuery", () => {
 
     const out = timelineQuery(db, { id: "S1" });
     const row = out.split("\n").find((line) => line.includes("alpha"))!;
-    // The title closes the row, behind `<prompt> → <type emoji> `.
-    const shown = row.slice(row.lastIndexOf("⚖️ ") + 3);
+    // The title IS the rest of the row after its bracketed address (spec 金样
+    // 例 `[T823] title`); the prompt rides a `- prompt:` line below.
+    const shown = row.slice(row.lastIndexOf("] ") + 2);
 
     expect(shown).toEndWith("…");
     // Whatever survived is whole words: it is a prefix of the source that ends
@@ -3651,6 +3631,36 @@ describe("parseContentReferences", () => {
 // ---------------------------------------------------------------------------
 
 /** Comfortably inside the task-causality era, so stored grades are read verbatim. */
+/**
+ * The turn view's own signature after the table dissolved (spec 补充裁决
+ * "turns 表溶解"): every row carries an UNPREFIXED `metadata` line at the
+ * field rung. A milestone row states its stamp inline instead, so this
+ * distinguishes the two views without a table header to look for.
+ */
+/**
+ * One turn's whole rendered unit in the turn view (spec 补充裁决 "turns 表溶
+ * 解"): the address row, its unprefixed `metadata` line, and any field rows
+ * under it. The table row this replaces was one line, so every assertion that
+ * used to `.find(line.startsWith("T21 |"))` reads the block instead.
+ */
+function turnBlock(output: string, promptNumber: number): string | undefined {
+  const lines = output.split("\n");
+  const start = lines.findIndex((line) => /\[T\d+\]/.test(line) && line.includes(`[T${promptNumber}]`));
+  if (start === -1) {
+    return undefined;
+  }
+  const block = [lines[start]!];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^\s*(?:⨯ )?\[[ST]\d+\]/.test(lines[index]!) || lines[index]!.trim() === "") {
+      break;
+    }
+    block.push(lines[index]!);
+  }
+  return block.join("\n");
+}
+
+const TURN_VIEW_METADATA_RE = /^ {12}\d{2}-\d{2} \d{2}:\d{2}/m;
+
 const ERA_BASE = 1_785_000_000;
 
 /**
@@ -3707,10 +3717,10 @@ function citeTurns(
   );
 }
 
-// A spine row is `   <glyph> T<n> <emoji> G<g> …`; the glyph slot is two blanks
-// when the row carries no marker. ↳ rows, desc lines and the `… +N more` hint
-// all sit further in and never match.
-const SPINE_ROW_RE = /^ {3}(?:.{1,2} )?T\d+ /u;
+// A spine row is `        <marker?>[T<n>] <date> <time> <emoji> <title>` (spec
+// 金样例); the `↳` address line, desc lines and the `… +N more` hint all sit
+// further in and never match.
+const SPINE_ROW_RE = /^ {8}(?:.{1,2} )?\[T\d+\] /u;
 const PULLED_ROW_RE = /^\s+↳ /u;
 const OVERFLOW_HINT_RE = /^\s+… \+(\d+) more/u;
 // The same count also rides the one line a run of zero-row days collapses to,
@@ -3729,10 +3739,11 @@ function pulledRowLines(output: string): string[] {
   return output.split("\n").filter((line) => PULLED_ROW_RE.test(line));
 }
 
+/** Every antecedent ADDRESS on every `↳` line, in order (spec 金样例 `↳ T811, T812`). */
 function pulledPromptNumbers(output: string): number[] {
-  return pulledRowLines(output)
-    .filter((line) => !line.includes("前件"))
-    .map((line) => Number(line.match(/T(\d+)/)![1]));
+  return pulledRowLines(output).flatMap((line) =>
+    [...line.matchAll(/T(\d+)/g)].map((match) => Number(match[1])),
+  );
 }
 
 /** Every `+N more` hint's N, summed — the fully hidden turns. */
@@ -3749,12 +3760,10 @@ function dayHeaderLines(output: string): string[] {
   return output.split("\n").filter((line) => /^── .+ kept.* ──$/u.test(line));
 }
 
-/** Every `↳ +N 前件` fold's N, summed. */
+/** Every `↳ …, +N` address fold's N, summed. */
 function foldedAntecedentTotal(output: string): number {
-  return output
-    .split("\n")
-    .map((line) => line.match(/↳ \+(\d+) 前件/))
-    .filter((match): match is RegExpMatchArray => match !== null)
+  return pulledRowLines(output)
+    .flatMap((line) => [...line.matchAll(/\+(\d+)/g)])
     .reduce((sum, match) => sum + Number(match[1]), 0);
 }
 
@@ -3774,7 +3783,8 @@ function renderUnitBlocks(output: string): string[][] {
       current = null;
       continue;
     }
-    if (PULLED_ROW_RE.test(line) || /^ {8}\S/u.test(line)) {
+    // The desc block and the `↳` address line both sit at the field rung.
+    if (PULLED_ROW_RE.test(line) || /^ {12}\S/u.test(line)) {
       current.push(line);
       continue;
     }
@@ -3786,7 +3796,7 @@ function renderUnitBlocks(output: string): string[][] {
 
 function unitBlockFor(output: string, promptNumber: number): string[] {
   const block = renderUnitBlocks(output).find((lines) =>
-    new RegExp(`T${promptNumber} `).test(lines[0]!),
+    new RegExp(`\\[T${promptNumber}\\] `).test(lines[0]!),
   );
   if (block === undefined) throw new Error(`no render unit for T${promptNumber}`);
   return block;
@@ -3874,10 +3884,10 @@ describe("unified row renderer — row formats (spec §D)", () => {
     const block = unitBlockFor(out, 1);
 
     expect(block[0]).toBe(
-      "      T1 ⚖️ G4 卷号锚定要解决什么 → Framed the slicing problem  ✏️slicing.md",
+      '        [T1] 07-25 17:20 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
     );
     // The desc rides underneath, indented, carrying process and evidence.
-    expect(block[1]).toMatch(/^ {8}Opened the arc: what does downstream/);
+    expect(block[1]).toMatch(/^ {12}Opened the arc: what does downstream/);
   });
 
   it("renders a pulled row as ↳ 🚫 T# emoji grade title →被T<n>推翻, title only", () => {
@@ -3886,7 +3896,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
     // A non-victim antecedent renders with no glyph and no back-link.
-    expect(out).toContain("      ↳ T2 🔵 G2 12-14% error");
+    expect(out).toContain("            ↳ T2");
     // ↳ rows are title-only: the antecedent's desc never renders.
     expect(out).not.toContain("Sampled 200 cards");
   });
@@ -3934,7 +3944,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
     expect(out).toContain(
-      "      ↳ 🚫 T2 🔵 G1 Guessed the volume count →被T3推翻",
+      "            ↳ T2",
     );
   });
 
@@ -3962,7 +3972,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
     expect(out).toContain(
-      `T1 ⚖️ G4 ${MILESTONE_NOTIFICATION_MARKER} → Read the worker report and locked the plan`,
+      `[T1] 07-25 17:20 ⚖️ Read the worker report and locked the plan · "${MILESTONE_NOTIFICATION_MARKER}"`,
     );
     expect(out).not.toContain("task-notification>");
     expect(out).not.toContain("general-purpose");
@@ -3993,7 +4003,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
 
     // A slash-command envelope IS harness-injected XML, but which command ran is
     // a real user act — the same extraction the turns view does keeps it.
-    expect(out).toContain("T2 ⚖️ G3 /review-pr → Reviewed the PR and asked for a rebase");
+    expect(out).toContain('[T2] 07-25 17:21 ⚖️ Reviewed the PR and asked for a rebase · "/review-pr"');
     expect(out).not.toContain(MILESTONE_NOTIFICATION_MARKER);
     expect(out).not.toContain("command-name>");
     expect(out).not.toContain("1421");
@@ -4021,36 +4031,23 @@ describe("unified row renderer — row formats (spec §D)", () => {
     ]);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
-    expect(out).toContain(`T1 ⚖️ G4 ${MILESTONE_NOTIFICATION_MARKER} → origin`);
+    expect(out).toContain(`[T1] 07-25 17:20 ⚖️ origin · "${MILESTONE_NOTIFICATION_MARKER}"`);
   });
 
-  it("renders the grade column in the turns view alongside time/gap/stats", () => {
+  it("the turns view carries time/gap/stats on a metadata line, and no grade anywhere", () => {
     const db = createDatabase(":memory:");
     seedDesignArc(db);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
 
-    expect(out).toContain(TURN_TABLE_HEADER);
-    expect(TURN_TABLE_HEADER.split(" | ")).toEqual([
-      "T#",
-      "time",
-      "gap",
-      "stats",
-      "G",
-      "prompt → title",
-    ]);
-    const row = out.split("\n").find((line) => line.startsWith("T5 |"))!;
-    const cells = row.split(" | ");
-    expect(cells).toHaveLength(6);
-    expect(cells[4]).toBe("G3");
-    // The turn table prints the SAME effGrade the arc view does — T3 was
-    // superseded, but an edge no longer moves a grade (spec H1), so both
-    // surfaces show it at its own stored 3, not demoted.
-    expect(out.split("\n").find((line) => line.startsWith("T3 |"))!.split(" | ")[4]).toBe(
-      "G3",
-    );
+    // Spec 补充裁决: the table's columns became the `metadata` field slot, and
+    // the `G` column left with the grade DISPLAY.
+    expect(out).toMatch(TURN_VIEW_METADATA_RE);
+    expect(out).not.toMatch(/\bG[0-4]\b/);
+    const block = turnBlock(out, 5)!;
+    expect(block.split("\n")[1]).toMatch(/^ {12}\d{2}-\d{2} \d{2}:\d{2}/);
   });
 
-  it("prints — in the grade column for a turn with no main-row candidacy", () => {
+  it("a turn with no main-row candidacy still renders its row and metadata", () => {
     const db = createDatabase(":memory:");
     const session = seedSession(db);
     db.query(
@@ -4058,9 +4055,10 @@ describe("unified row renderer — row formats (spec §D)", () => {
     ).run(session.id);
 
     const out = renderTimeline(buildTimelineView(db, { id: "S1/T19..21" }));
-    const row = out.split("\n").find((line) => line.startsWith("T21 |"))!;
+    const block = turnBlock(out, 21)!;
 
-    expect(row.split(" | ")[4]).toBe("—");
+    expect(block).toContain("/compact");
+    expect(block).not.toMatch(/\bG[0-4]\b/);
   });
 
   it("caps the prompt prefix by characters and the ✏️ tail by file count", () => {
@@ -4087,7 +4085,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
     const head = unitBlockFor(out, 1)[0]!;
 
-    expect(head).toContain(`${"长".repeat(MILESTONE_PROMPT_PREFIX_CAP)}… → origin`);
+    expect(head).toContain(`origin · "${"长".repeat(MILESTONE_PROMPT_PREFIX_CAP)}…"`);
     expect(head).not.toContain("长".repeat(MILESTONE_PROMPT_PREFIX_CAP + 1));
     // Basenames, capped, with the remainder as a count — the row is a pointer.
     expect(head).toContain("✏️one.ts,two.ts,three.ts+2");
@@ -4212,7 +4210,9 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     // The 100-token cap could not have fitted this: a full spine row plus two
     // ~25-32-token antecedents overruns it, so both ↳ rows would have folded
     // into `+2 前件` and pull-through would have been decorative.
-    expect(block.filter((line) => PULLED_ROW_RE.test(line))).toHaveLength(2);
+    const pulledLines = block.filter((line) => PULLED_ROW_RE.test(line));
+    expect(pulledLines).toHaveLength(1);
+    expect([...pulledLines[0]!.matchAll(/T\d+/g)]).toHaveLength(2);
     expect(block.join("\n")).not.toContain("前件");
     expect(estimateDiaryTokens(block.join("\n"))).toBeLessThanOrEqual(
       MILESTONE_UNIT_TOKEN_CAP,
@@ -4312,7 +4312,7 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     );
     expect(block[0]).toContain("…"); // token-level title truncation fired
     // Folding the ↳ rows into the counter is what freed the room for it.
-    expect(block.join("\n")).toContain("↳ +4 前件");
+    expect(block.join("\n")).toContain("↳ +4");
   });
 
   it("drops a pathological ✏️ tail rather than let it breach the cap", () => {
@@ -4352,7 +4352,7 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     // The point of the reorder: the decorative tail is sacrificed BEFORE the
     // title steps, so the row keeps the text it exists to carry instead of
     // arriving at the tail already stripped to its identity columns.
-    expect(block[0]).toBe("      T2 🟣 G3 生成 → Generated the fixture set");
+    expect(block[0]).toBe('        [T2] 07-25 17:21 🟣 Generated the fixture set · "生成"');
   });
 
   it("caps rendered ↳ rows at four and folds the rest into +N 前件", () => {
@@ -4396,9 +4396,11 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
     const block = unitBlockFor(out, 8);
 
-    expect(block.filter((line) => PULLED_ROW_RE.test(line) && !line.includes("前件")))
-      .toHaveLength(MILESTONE_UNIT_PULLED_CAP);
-    expect(block.join("\n")).toContain("↳ +2 前件");
+    // One `↳` LINE holds every address (spec 金样例), so the cap is counted in
+    // addresses on that line, not in rows.
+    const pulledLine = block.find((line) => PULLED_ROW_RE.test(line))!;
+    expect([...pulledLine.matchAll(/T\d+/g)]).toHaveLength(MILESTONE_UNIT_PULLED_CAP);
+    expect(block.join("\n")).toContain("↳ T2, T3, T4, T5, +2");
   });
 
   it("never renders a turn twice: a kept G2 row is a main row, not also a ↳ row", () => {
@@ -5002,9 +5004,9 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
       // Shape signals survive on every view.
       expect(out).toContain("shape signals (window T1-T6");
       if (view === "turns") {
-        expect(out).toContain(TURN_TABLE_HEADER);
+        expect(out).toMatch(TURN_VIEW_METADATA_RE);
       } else {
-        expect(out).not.toContain(TURN_TABLE_HEADER);
+        expect(out).not.toMatch(TURN_VIEW_METADATA_RE);
       }
       // ticket 04: `phases` retired — no view emits its digest header any more.
       expect(out).not.toContain("# | date | type | turns | span | work | lead title");
@@ -5121,11 +5123,11 @@ describe("unified row renderer — frozen shapes", () => {
     // homes under its EARLIEST kept citer — now T3, not T5, since T3 itself
     // is kept where it used to be excluded.
     expect(bodyRows(out)).toEqual([
-      "      T1 ⚖️ G4 卷号锚定要解决什么 → Framed the slicing problem  ✏️slicing.md",
-      "      T3 ⚖️ G3 按卷号锚 → Volume anchoring →被T5推翻",
-      "      ↳ T2 🔵 G2 12-14% error",
-      "      T5 ⚖️ G3 没有卷数怎么办 → Cursor slicing",
-      "   🏁 T6 🟣 G2 发布 → 0.9.0 released  ✏️package.json,plugin.json",
+      '        [T1] 07-25 17:20 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
+      '        [T3] 07-25 17:22 ⚖️ Volume anchoring · "按卷号锚" →被T5推翻',
+      "            ↳ T2",
+      '        [T5] 07-25 17:24 ⚖️ Cursor slicing · "没有卷数怎么办"',
+      '        🏁 [T6] 07-25 17:25 🟣 0.9.0 released · "发布"  ✏️package.json,plugin.json',
       '        … +1 more @ within T4..T4',
     ]);
   });
@@ -5171,9 +5173,9 @@ describe("unified row renderer — frozen shapes", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
     expect(bodyRows(out)).toEqual([
-      "      T1 ⚖️ G4 调研一下三种切分方案 → Opened the slicing survey",
-      "      T4 ⚖️ G3 ⟨notify⟩ → Picked cursor slicing on the survey evidence",
-      "      ↳ T2 🔵 G2 Worker A: cursor slicing wins on recall",
+      '        [T1] 07-25 17:20 ⚖️ Opened the slicing survey · "调研一下三种切分方案"',
+      '        [T4] 07-25 17:23 ⚖️ Picked cursor slicing on the survey evidence · "⟨notify⟩"',
+      "            ↳ T2",
       '        … +1 more @ within T3..T3',
     ]);
   });
@@ -5216,9 +5218,9 @@ describe("unified row renderer — frozen shapes", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
     expect(bodyRows(out)).toEqual([
-      "      T1 🔵 G1 先看看现状 → surveyed the loader",
-      "      T2 ⚖️ G3 就这么定 → legacy decision",
-      "      T3 🟣 G2 实现 → legacy feature  ✏️loader.ts",
+      '        [T1] 05-26 08:00 🔵 surveyed the loader · "先看看现状"',
+      '        [T2] 05-26 08:01 ⚖️ legacy decision · "就这么定"',
+      '        [T3] 05-26 08:02 🟣 legacy feature · "实现"  ✏️loader.ts',
     ]);
     // A legacy grade never reaches 4: it can never claim the anchor tier.
     expect(out).not.toContain("G4");
@@ -5406,7 +5408,7 @@ describe("timeline filter (ticket 04, spec \"Tools\")", () => {
   }
 
   const turnLine = (output: string, n: number) =>
-    new RegExp(`^T${n} \\|`, "m").test(output);
+    new RegExp(`^ {8}(?:⨯ )?(?:\\[S\\d+\\])?\\[T${n}\\] `, "m").test(output);
 
   it("with no filter, every turn renders (the mutation baseline)", () => {
     const db = createDatabase(":memory:");

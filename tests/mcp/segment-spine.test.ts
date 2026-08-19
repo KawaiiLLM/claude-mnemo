@@ -257,7 +257,7 @@ describe("timeline dual-path rendering across the era boundary", () => {
     // union's first entry (frequency, then vocabulary order), not a type the
     // settlement pass stated over its members' heads (spec K5a).
     expect(row).toBe(
-      "   [E1] 🔍 #extraction-redesign #rendering implement the segment spine [open] · 3 turns · T10–T12 · 🔍→⚖️→🔧",
+      "[E1] 🔍 #extraction-redesign #rendering implement the segment spine [open] · 3 turns · T10–T12 · 🔍→⚖️→🔧",
     );
   });
 
@@ -279,7 +279,7 @@ describe("timeline dual-path rendering across the era boundary", () => {
     const output = renderArc(CUTOFF);
 
     expect(output.split("\n").find((line) => line.includes(`[E${ids.segment}]`))).toBe(
-      "   [E1] 🔍 #extraction-redesign #rendering implement the segment spine [open] · 3 turns · T10–T12 · 🔍→⚖️→🔧",
+      "[E1] 🔍 #extraction-redesign #rendering implement the segment spine [open] · 3 turns · T10–T12 · 🔍→⚖️→🔧",
     );
     expect(output.split("── legacy era")[1]).toContain("legacy feature two");
   });
@@ -389,7 +389,7 @@ describe("timeline dual-path rendering across the era boundary", () => {
     expect(observed.some((step) => step.orphan)).toBe(true);
   });
 
-  test("the turn table refuses to give an era turn a legacy grade", () => {
+  test("the turn view is the unified row form — no tabular surface, no grade cell on either side of the cutoff", () => {
     const output = renderTimeline(
       buildTimelineView(db, {
         id: `S${sessionId}`,
@@ -398,10 +398,19 @@ describe("timeline dual-path rendering across the era boundary", () => {
       }),
     );
 
-    const eraRow = output.split("\n").find((line) => line.startsWith("T12 |"))!;
-    const legacyRow = output.split("\n").find((line) => line.startsWith("T1 |"))!;
-    expect(eraRow).toContain("| — |");
-    expect(legacyRow).toContain("| G3 |");
+    // Spec 补充裁决: the turns TABLE dissolved, and the `G` column dissolved
+    // with the grade DISPLAY — so there is no cell left for either era to
+    // disagree about.
+    const rows = output.split("\n").filter((line) => /\[T\d+\]/.test(line));
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row).not.toContain(" | ");
+    }
+    expect(output).not.toMatch(/\bG[0-4]\b/);
+    expect(output).toContain("        [T12] ");
+    // The page's first row carries the full address so the page is
+    // self-contained for a citation join (spec 补充裁决).
+    expect(output).toContain("        [S1][T1] ");
   });
 });
 
@@ -440,11 +449,11 @@ describe("a null era cutoff is byte-identical to the pre-segment renderer", () =
   raw: /tmp/project/session-era.jsonl
 
 ── 2030-03-17 Sun · T1–T14 · 2 kept ──
-      T1 ⚖️ G3 the user asked something → legacy decision one
-        body text
-      T14 ✅ G0 the user asked something → review the fix
-        body text
-      ↳ T13 🔴 G0 fix the watchdog race
+        [T1] 03-17 16:23 ⚖️ legacy decision one · "the user asked something"
+            body text
+        [T14] 03-17 17:46 ✅ review the fix · "the user asked something"
+            body text
+            ↳ T13
         … +4 more @ within T2..T12
 
   shape signals (window T1-T14 = full session):

@@ -29,6 +29,12 @@ export const RECALL_TURN_FIELD_NAMES = [
   "insight",
   "observations",
   "files",
+  // The dissolved turn table's audit columns, as one selectable field (spec
+  // 金样例 补充, "turns 表溶解"): local time, gap from the previous turn, tool
+  // and file counts. Selectable like any other field, so it is a member of
+  // this vocabulary rather than a view-only switch — `recall` leaves it out of
+  // its default set, `timeline`'s turn view includes it.
+  "metadata",
 ] as const;
 
 export type RecallTurnField = (typeof RECALL_TURN_FIELD_NAMES)[number];

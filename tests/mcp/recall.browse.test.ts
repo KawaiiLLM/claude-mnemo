@@ -162,8 +162,11 @@ describe("recall() browse shape", () => {
     expect(promptAndResponse).not.toContain("- title:");
     expect(promptAndResponse).not.toContain("- content:");
 
+    // `title` never renders as a field LINE — it is the row label itself
+    // (spec 金样例 `[T823] title`), so selecting it alone leaves a bare row.
     const titleOnly = recallMemory(db, { filter: { fields: ["title"] } });
-    expect(titleOnly).toContain("- title:");
+    expect(titleOnly).toContain("[T1] short title");
+    expect(titleOnly).not.toContain("- title:");
     expect(titleOnly).not.toContain("- content:");
     expect(titleOnly).not.toContain("- prompt:");
   });
@@ -213,11 +216,14 @@ describe("recall() browse shape", () => {
     const rewoundLine = output.split("\n").find((line) => line.includes("Rewound turn"))!;
     const normalLine = output.split("\n").find((line) => line.includes("Normal turn"));
     void normalLine;
+    // Spec 金样例: the marker is the tail `[rewind]`. The long "transcript
+    // pointer stale — do not trust replay" sentence moved to the replay
+    // skill doc, which is where a standing rule belongs.
     const rewoundLabelLine = output.split("\n").find((line) => line.includes(`T1]`));
-    expect(rewoundLabelLine).toContain("rewound");
-    expect(rewoundLabelLine).toContain("stale");
+    expect(rewoundLabelLine).toEndWith("[rewind]");
+    expect(rewoundLabelLine).not.toContain("stale");
     const normalLabelLine = output.split("\n").find((line) => line.includes(`T2]`));
-    expect(normalLabelLine).not.toContain("rewound");
+    expect(normalLabelLine).not.toContain("[rewind]");
     void rewoundLine;
   });
 

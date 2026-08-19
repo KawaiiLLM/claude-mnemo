@@ -36,15 +36,22 @@ export const DEFAULT_TURN_TOKEN_BUDGET = 150;
 const TURN_BUDGET_TRUNCATION_MARKER = "  … truncated to fit the per-item token budget";
 
 /**
- * Ticket 07 (read-write-contract spec): the rewind marker on a `was_rolled_back`
- * turn — its raw-transcript coordinate (the DB's `transcript_line_start` /
- * `jsonlPath`) is stale and the replay skill must not trust it (spec: "rewind
- * 撤销后 transcript 指针视为失效坐标"). Renderers no longer carry that
- * coordinate at all ([S15069/T1020]); this marker is the surviving read-side
- * warning. No period at the end — it rides mid-line, next to the bracketed
- * ids, same convention `formatStatus` already uses.
+ * The indentation step of the one row hierarchy (spec 金样例): `[E]` → `[S]`
+ * → `[T]` → field rows, four spaces per level. Every read surface indents by
+ * multiples of this and by nothing else.
  */
-export const REWIND_MARKER = " ⤺ rewound (transcript pointer stale — do not trust replay)";
+export const RENDER_INDENT_STEP = "    ";
+
+/**
+ * Ticket 07 (read-write-contract spec): the rewind marker on a `was_rolled_back`
+ * turn. A tail status marker like `[extracted]`/`[skipped]` (spec 金样例:
+ * `[T823] title [rewind]`) — the long "transcript pointer stale — do not trust
+ * replay" sentence it used to carry now lives ONCE, in
+ * `plugin/skills/mnemo-replay/SKILL.md`, instead of on every rewound row: the
+ * warning is a standing rule about the replay path, not a per-row fact, and
+ * paying for it per row is what pushed the row off the sample's shape.
+ */
+export const REWIND_MARKER = " [rewind]";
 
 /**
  * Render-scoped "did anything get cut" flag (spec D1). Discoverability — "you
@@ -81,10 +88,10 @@ function markTruncated(signal?: TruncationSignal): void {
  * day groups) are reachable with `timeline(..., view="turns")`.
  *
  * It deliberately does NOT spell out an id format. An earlier wording promised
- * `[S<n>/T<n>]`, a form this renderer never emits — turn lines carry
- * `[S<n>][T<n>]`. A legend that names a shape has to be re-checked against the
- * renderer every time a label changes; pointing at "the ids on that line"
- * cannot go stale.
+ * `[S<n>/T<n>]`, a form this renderer never emits — and a turn row is bare
+ * `[T<n>]` under its session's transition line now. A legend that names a
+ * shape has to be re-checked against the renderer every time a label changes;
+ * pointing at "the ids on that line" cannot go stale.
  * Appended only when `TruncationSignal.truncated` is set — a response with
  * nothing cut gets no legend.
  */
@@ -152,6 +159,16 @@ export interface FormattedTurn {
    * that never populates this field is byte-identical to before this ticket.
    */
   wasRolledBack?: boolean;
+  /**
+   * The `metadata` field slot (spec 金样例 补充, "turns 表溶解"): the audit
+   * facts the dissolved turn table used to carry as columns — local time, gap
+   * from the previous turn, tool/file counts — as ONE unprefixed line under
+   * the turn row. Composed by the caller (`timeline.ts`'s
+   * `composeTurnMetadata`, which owns this codebase's local-time rendering)
+   * rather than here, so there is one implementation of "what time is it" and
+   * not a second one inside the node renderer.
+   */
+  metadata?: string | null;
 }
 
 export interface FormattedSession {
@@ -178,6 +195,16 @@ export interface FormattedSession {
 export interface RenderNodeOptions {
   indent?: string;
   sessionId?: number;
+  /**
+   * The cross-page citation escape (spec 补充裁决 "跨页引用自足"): render this
+   * turn's address in the full `[S<n>][T<m>]` form instead of the bare
+   * `[T<m>]`. Set by a caller for the FIRST row of a page that opens in the
+   * middle of a session run — the row then carries the session join a
+   * transition line would otherwise have supplied. Every later row in the same
+   * run leaves it unset. `sessionId` alone no longer implies the prefix: a
+   * turn row is bare by default everywhere (spec 金样例).
+   */
+  includeSessionPrefix?: boolean;
   turnPromptNumber?: number;
   /** Worker-only: append a `dbid:T<dbid>` token to a turn label. */
   includeDbTurnIds?: boolean;
@@ -226,71 +253,12 @@ export function formatEpoch(epoch: number): string {
   return `${year}-${month}-${day}`;
 }
 
-function normalizeCount(value?: number | null): number {
-  if (!value || value < 0) {
-    return 0;
-  }
-
-  return value;
-}
-
-function formatStats(parts: string[]): string {
-  return parts.join(" ");
-}
-
-function formatSessionStats(session: FormattedSession): string {
-  const parts: string[] = [];
-  const turnCount = normalizeCount(session.turnCount ?? session.turns?.length);
-  const observationCount = normalizeCount(
-    session.observationCount ??
-      session.turns?.reduce(
-        (sum, turn) => sum + normalizeCount(turn.observationCount),
-        0,
-      ),
-  );
-
-  if (turnCount > 0) {
-    parts.push(`💬${turnCount}`);
-  }
-
-  if (observationCount > 0) {
-    parts.push(`💡${observationCount}`);
-  }
-
-  return formatStats(parts);
-}
-
-function formatTurnStats(turn: FormattedTurn): string {
-  const parts: string[] = [];
-  const observationCount = normalizeCount(
-    turn.observationCount ?? turn.observations?.length,
-  );
-  const filesReadCount = normalizeCount(
-    turn.filesReadCount ?? turn.filesRead?.length,
-  );
-  const filesModifiedCount = normalizeCount(
-    turn.filesModifiedCount ?? turn.filesModified?.length,
-  );
-  const toolCallCount = normalizeCount(turn.toolCallCount);
-
-  if (observationCount > 0) {
-    parts.push(`💡${observationCount}`);
-  }
-
-  if (filesReadCount > 0) {
-    parts.push(`📖${filesReadCount}`);
-  }
-
-  if (filesModifiedCount > 0) {
-    parts.push(`✏️${filesModifiedCount}`);
-  }
-
-  if (toolCallCount > 0) {
-    parts.push(`🔧${toolCallCount}`);
-  }
-
-  return formatStats(parts);
-}
+// Count badges (`💬1017 💡5950` on a session header, `💡32 ✏️3 🔧32` on a turn
+// row) are retired from every read surface (spec 金样例: "无计数徽章"). The
+// same facts survive where they are actually read: the turn view's `metadata`
+// field slot, and the segment card's `stats` row. Tail STATUS markers
+// (`[extracted]`, `[skipped]`, `[rewind]`) stay — they say what state a row is
+// in, not how big it is.
 
 function pushBullets(lines: string[], indent: string, values: string[]): void {
   for (const value of values) {
@@ -404,7 +372,7 @@ export function truncateTextToTokenBudget(text: string, maxTokens: number): stri
  * budget — the SOLE size mechanism now that per-field character caps have
  * retired (ticket 11, spec: "字段截断只由 turn token 预算驱动，词边界").
  *
- * The label line (line 0 — `[S<n>][T<n>] title | stats`) is never dropped:
+ * The label line (line 0 — `[T<n>] title`) is never dropped:
  * it is the only thing that identifies WHICH row this is, so a budget too
  * small even for it still keeps it whole. Every subsequent line is kept
  * whole while it fits; the first line that does NOT fit whole is cut at a
@@ -480,12 +448,13 @@ export function capRenderToTokenBudget(
 export type TurnRenderFields = ReadonlySet<RecallTurnField>;
 
 /**
- * Default when `filter.fields` is unset — mirrors the retired collapsed
- * default EXACTLY (ticket 03's own field-set switch: "collapsed carries
- * exactly prompt/title/content" — the prompt bullet rendered in collapsed
- * mode too, whenever a real title already occupied the label). A caller
- * after what `expanded` used to ADD beyond this (response/insight/
- * observations/files) asks for those fields explicitly. `filter.fields` is
+ * Default when `filter.fields` is unset: the row's own title plus `content`,
+ * and nothing else (spec 金样例 补充: "其他字段槽位（默认只有content）"). The
+ * `prompt` bullet left this default with the row redesign — the row label
+ * already falls back to the prompt text when no title exists, so the bullet
+ * only ever restated something the reader had. A caller after `prompt`,
+ * `response`, `insight`, `files`, `observations` or `metadata` asks for it
+ * explicitly. `filter.fields` is
  * the SOLE field-selection mechanism (spec: "07 的 filter.fields 从加法机制
  * 升为唯一机制") — there is no longer a second, depth-driven default field
  * set for a caller to fall back on. (The browse feed's own default,
@@ -495,7 +464,6 @@ export type TurnRenderFields = ReadonlySet<RecallTurnField>;
 export const DEFAULT_TURN_RENDER_FIELDS: TurnRenderFields = new Set<RecallTurnField>([
   "title",
   "content",
-  "prompt",
 ]);
 
 export function resolveTurnFields(
@@ -553,44 +521,74 @@ export function extractKeyParam(name: string, input: unknown): string | null {
   }
 }
 
+/**
+ * The session TRANSITION LINE (spec 金样例): `[S15069] title` and nothing
+ * else. It is a navigation marker between turn runs, not a record with its own
+ * facts — the count badges, the creation date and the project name it used to
+ * carry all left with the badge retirement, because a reader scanning turn
+ * rows pays for that line on every alternation.
+ */
 function formatSessionBlock(
   session: FormattedSession,
   options: RenderNodeOptions,
 ): string {
-  const stats = formatSessionStats(session);
-  const statsSegment = stats ? ` | ${stats}` : "";
-  const lines = [
-    `- [S${session.id}] ${session.title ?? "Untitled"}${statsSegment} | ${formatEpoch(session.createdAtEpoch)} | ${session.project}`,
-  ];
+  const { indent = "" } = options;
+  const fieldIndent = `${indent}${RENDER_INDENT_STEP}`;
+  const lines = [renderSessionTransitionLine(session.id, session.title, indent)];
 
   if (session.content) {
-    lines.push(`  - desc: ${session.content}`);
+    lines.push(`${fieldIndent}- content: ${session.content}`);
   }
 
   if (options.includeRawPointer && session.jsonlPath) {
-    lines.push(`  raw: ${session.jsonlPath}`);
+    lines.push(`${fieldIndent}raw: ${session.jsonlPath}`);
   }
 
   return lines.join("\n");
 }
 
+/**
+ * The transition line for a session the caller holds nothing but an id and a
+ * title for — the `[S<n>]` rung of the hierarchy, on any surface that groups
+ * turn rows by session (recall's browse/search feeds, the segment member
+ * listing, the timeline's milestone and turn views). `title` is rendered only
+ * on a session's FIRST appearance in a page; a re-appearance passes `null`.
+ */
+export function renderSessionTransitionLine(
+  sessionId: number,
+  title: string | null,
+  indent = "",
+): string {
+  return `${indent}[S${sessionId}]${title ? ` ${title}` : ""}`;
+}
+
+/** The bracketed turn address: bare `[T<m>]`, or the page-open `[S<n>][T<m>]` form. */
+export function renderTurnAddress(
+  promptNumber: number,
+  sessionId?: number,
+  includeSessionPrefix = false,
+): string {
+  return includeSessionPrefix && sessionId !== undefined
+    ? `[S${sessionId}][T${promptNumber}]`
+    : `[T${promptNumber}]`;
+}
+
 function formatTurnLabel(
   turn: FormattedTurn,
   fields: TurnRenderFields,
-  { indent = "  ", sessionId, includeDbTurnIds = false }: RenderNodeOptions,
+  {
+    indent = "",
+    sessionId,
+    includeSessionPrefix = false,
+    includeDbTurnIds = false,
+  }: RenderNodeOptions,
 ): string {
   // Bare `T<n>` on purpose: the `:L<line>` suffix this once carried was the
   // JSONL-first replay handoff coordinate, retired when replay went
   // SQLite-first — the replay skill itself forbids locating content by
   // transcript_line_start (stale/duplicated, dangerously so on rewound
   // turns), so rendering it taught the exact anti-pattern.
-  const turnId = `T${turn.promptNumber}`;
-  const prefix =
-    sessionId === undefined
-      ? `${indent}- [${turnId}]`
-      : `${indent}- [S${sessionId}][${turnId}]`;
-  const stats = formatTurnStats(turn);
-  const statsSegment = stats ? ` | ${stats}` : "";
+  const prefix = `${indent}${renderTurnAddress(turn.promptNumber, sessionId, includeSessionPrefix)}`;
 
   // The label always needs SOME identifying text: the stored title when
   // `fields` selects it and one exists, else the raw prompt (collapsed to
@@ -609,7 +607,7 @@ function formatTurnLabel(
   const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
 
-  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}${rewindSegment}`;
+  return `${prefix} ${title}${formatStatus(turn.status)}${dbIdSegment}${rewindSegment}`;
 }
 
 function formatObservationLabel(
@@ -617,7 +615,7 @@ function formatObservationLabel(
   indent: string,
   header?: string,
 ): string {
-  return `${indent}- [O${observation.id}] ${header ?? observation.title}`;
+  return `${indent}[O${observation.id}] ${header ?? observation.title}`;
 }
 
 /**
@@ -626,7 +624,7 @@ function formatObservationLabel(
  * does not merely look wrong: it produces a line neither a reader nor a
  * downstream parser can attribute to the observation it came from.
  */
-const OBSERVATION_BODY_INDENT = "    ";
+const OBSERVATION_BODY_INDENT = RENDER_INDENT_STEP;
 
 /**
  * The projection applies only to a row that carries raw tool fields, which are
@@ -679,7 +677,7 @@ function formatObservationBlock(
   ];
 
   if (observation.content) {
-    lines.push(`${indent}  - desc: ${observation.content}`);
+    lines.push(`${indent}${RENDER_INDENT_STEP}- content: ${observation.content}`);
   }
 
   // D3: the label above already fell back to the tool name when there was no
@@ -694,7 +692,7 @@ function formatObservationBlock(
       ? observation.toolName
       : null;
   if (toolLine) {
-    lines.push(`${indent}  - tool: 🔧 ${toolLine}`);
+    lines.push(`${indent}${RENDER_INDENT_STEP}- tool: 🔧 ${toolLine}`);
   }
 
   if (projection) {
@@ -711,11 +709,11 @@ function formatObservationBlock(
 
 function formatToolCallBlock(
   toolCall: FormattedToolCall,
-  { indent = "    " }: RenderNodeOptions,
+  { indent = RENDER_INDENT_STEP }: RenderNodeOptions,
 ): string {
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
   const suffix = keyParam ? ` ${keyParam}` : "";
-  const detailIndent = `${indent}  `;
+  const detailIndent = `${indent}${RENDER_INDENT_STEP}`;
   const lines = [`${indent}- 🔧 ${toolCall.name}${suffix}`];
 
   if (toolCall.input !== undefined) {
@@ -733,8 +731,8 @@ function renderTurnChildren(
   turn: FormattedTurn,
   options: RenderNodeOptions,
 ): string {
-  const { indent = "  ", sessionId } = options;
-  const childIndent = `${indent}  `;
+  const { indent = "", sessionId } = options;
+  const childIndent = `${indent}${RENDER_INDENT_STEP}`;
   const childLines: string[] = [];
 
   if (turn.observations && turn.observations.length > 0) {
@@ -786,11 +784,20 @@ function formatTurnBody(
   fields: TurnRenderFields,
   options: RenderNodeOptions,
 ): string {
-  const { indent = "  " } = options;
+  const { indent = "" } = options;
+  const fieldIndent = `${indent}${RENDER_INDENT_STEP}`;
+  const bulletIndent = `${fieldIndent}${RENDER_INDENT_STEP}`;
   const lines = [formatTurnLabel(turn, fields, options)];
 
+  // `metadata` leads, and it is the ONE unprefixed field line (spec 金样例
+  // 补充): it annotates the row above it rather than naming a stored field,
+  // which is exactly what the dissolved turn table's audit columns did.
+  if (fields.has("metadata") && turn.metadata) {
+    lines.push(`${fieldIndent}${turn.metadata}`);
+  }
+
   if (fields.has("content") && turn.content) {
-    lines.push(`${indent}  - desc: ${turn.content}`);
+    lines.push(`${fieldIndent}- content: ${turn.content}`);
   }
 
   // The prompt bullet only ADDS information when the label is showing the
@@ -800,31 +807,31 @@ function formatTurnBody(
   const titleSelected = fields.has("title") && turn.title !== null;
   if (fields.has("prompt") && titleSelected && turn.promptPreview) {
     lines.push(
-      `${indent}  - prompt: "${collapseToSingleLine(turn.promptPreview)}"`,
+      `${fieldIndent}- prompt: "${collapseToSingleLine(turn.promptPreview)}"`,
     );
   }
 
   if (fields.has("response") && turn.responsePreview) {
     lines.push(
-      `${indent}  - response: "${collapseToSingleLine(turn.responsePreview)}"`,
+      `${fieldIndent}- response: "${collapseToSingleLine(turn.responsePreview)}"`,
     );
   }
 
   if (fields.has("insight") && turn.insight && turn.insight.length > 0) {
-    lines.push(`${indent}  - insight:`);
-    pushBullets(lines, `${indent}    `, turn.insight);
+    lines.push(`${fieldIndent}- insight:`);
+    pushBullets(lines, bulletIndent, turn.insight);
   }
 
   if (fields.has("files") && turn.filesRead && turn.filesRead.length > 0) {
-    lines.push(`${indent}  - files_read:`);
-    pushBullets(lines, `${indent}    `, renderFileTree(turn.filesRead).split("\n"));
+    lines.push(`${fieldIndent}- files_read:`);
+    pushBullets(lines, bulletIndent, renderFileTree(turn.filesRead).split("\n"));
   }
 
   if (fields.has("files") && turn.filesModified && turn.filesModified.length > 0) {
-    lines.push(`${indent}  - files_modified:`);
+    lines.push(`${fieldIndent}- files_modified:`);
     pushBullets(
       lines,
-      `${indent}    `,
+      bulletIndent,
       renderFileTree(turn.filesModified).split("\n"),
     );
   }

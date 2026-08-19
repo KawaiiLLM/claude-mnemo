@@ -49,35 +49,35 @@ describe("MCP format renderer", () => {
 
     expect(renderNode({ type: "session", value: session })).toBe(
       [
-        "- [S142] Auth refactor | 💬3 💡8 | 2026-04-05 | claude-mnemo",
-        "  - desc: Fix race + add tests",
+        "[S142] Auth refactor",
+        "    - content: Fix race + add tests",
       ].join("\n"),
     );
 
     expect(renderNode({ type: "turn", value: turn })).toBe(
       [
-        "  - [T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
-        "    - desc: Refresh overlap diagnosed",
+        "[T1] Diagnose auth [extracted]",
+        "    - content: Refresh overlap diagnosed",
       ].join("\n"),
     );
 
     expect(
-      renderNode({ type: "turn", value: turn }, { indent: "", sessionId: 142 }),
+      renderNode({ type: "turn", value: turn }, { indent: "", sessionId: 142, includeSessionPrefix: true }),
     ).toBe(
       [
-        "- [S142][T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
-        "  - desc: Refresh overlap diagnosed",
+        "[S142][T1] Diagnose auth [extracted]",
+        "    - content: Refresh overlap diagnosed",
       ].join("\n"),
     );
 
     expect(renderNode({ type: "observation", value: observation })).toBe(
-      ["- [O7] Added mutex", "  - desc: Guards refresh"].join("\n"),
+      ["[O7] Added mutex", "    - content: Guards refresh"].join("\n"),
     );
 
     expect(
       renderNode({ type: "observation", value: observation }, { indent: "    " }),
     ).toBe(
-      ["    - [O7] Added mutex", "      - desc: Guards refresh"].join("\n"),
+      ["    [O7] Added mutex", "        - content: Guards refresh"].join("\n"),
     );
   });
 
@@ -105,15 +105,15 @@ describe("MCP format renderer", () => {
 
     expect(renderNode({ type: "session", value: session })).toBe(
       [
-        "- [S9] Empty stats | 2026-04-05 | claude-mnemo",
-        "  - desc: Collapsed description stays visible",
+        "[S9] Empty stats",
+        "    - content: Collapsed description stays visible",
       ].join("\n"),
     );
 
     expect(renderNode({ type: "turn", value: turn })).toBe(
       [
-        "  - [T2] No stats [pending]",
-        "    - desc: Collapsed description stays visible",
+        "[T2] No stats [pending]",
+        "    - content: Collapsed description stays visible",
       ].join("\n"),
     );
   });
@@ -182,30 +182,30 @@ describe("MCP format renderer", () => {
     // off, matching every session HEADER embed.
     expect(renderNode({ type: "session", value: session })).toBe(
       [
-        "- [S142] Auth refactor | 💬3 💡8 | 2026-04-05 | claude-mnemo",
-        "  - desc: Fix race + add tests",
+        "[S142] Auth refactor",
+        "    - content: Fix race + add tests",
       ].join("\n"),
     );
 
     expect(renderNode({ type: "turn", value: turn }, { fields: ALL_FIELDS })).toBe(
       [
-        "  - [T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
-        "    - desc: Refresh overlap diagnosed",
+        "[T1] Diagnose auth [extracted]",
+        "    - content: Refresh overlap diagnosed",
         '    - prompt: "Why am I getting 401 errors?"',
         '    - response: "I found a race condition in refresh logic."',
         "    - insight:",
-        "      - concurrent refreshes collide",
+        "        - concurrent refreshes collide",
         "    - files_read:",
-        "      - src/auth.ts",
+        "        - src/auth.ts",
         "    - files_modified:",
-        "      - .",
-        "      - src/auth.ts",
-        "      - tests/auth.test.ts",
+        "        - .",
+        "        - src/auth.ts",
+        "        - tests/auth.test.ts",
       ].join("\n"),
     );
 
     expect(renderNode({ type: "observation", value: observation })).toBe(
-      ["- [O7] Added mutex", "  - desc: Guards refresh"].join("\n"),
+      ["[O7] Added mutex", "    - content: Guards refresh"].join("\n"),
     );
   });
 
@@ -226,9 +226,9 @@ describe("MCP format renderer", () => {
       renderNode({ type: "session", value: session }, { includeRawPointer: true }),
     ).toBe(
       [
-        "- [S200] Session redesign | 💬5 💡12 | 2026-04-05 | claude-mnemo",
-        "  - desc: Reworking the session summary schema",
-        "  raw: /tmp/session-200.jsonl",
+        "[S200] Session redesign",
+        "    - content: Reworking the session summary schema",
+        "    raw: /tmp/session-200.jsonl",
       ].join("\n"),
     );
   });
@@ -280,15 +280,15 @@ describe("MCP format renderer", () => {
       ),
     ).toBe(
       [
-        "  - [T14] tree render | 📖3 ✏️1 [extracted]",
+        "[T14] tree render [extracted]",
         "    - files_read:",
-        "      - /Users/zhaoqixuan/Projects/claude-mnemo/src",
-        "      - db/pending-queue.ts",
-        "      - worker/",
-        "      -   processors.ts",
-        "      -   server.ts",
+        "        - /Users/zhaoqixuan/Projects/claude-mnemo/src",
+        "        - db/pending-queue.ts",
+        "        - worker/",
+        "        -   processors.ts",
+        "        -   server.ts",
         "    - files_modified:",
-        "      - /Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
+        "        - /Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
       ].join("\n"),
     );
   });
@@ -310,11 +310,11 @@ describe("MCP format renderer", () => {
       ),
     ).toBe(
       [
-        "  - [T17] relative tree | 📖2 [extracted]",
+        "[T17] relative tree [extracted]",
         "    - files_read:",
-        "      - src",
-        "      - auth.ts",
-        "      - server.ts",
+        "        - src",
+        "        - auth.ts",
+        "        - server.ts",
       ].join("\n"),
     );
   });
@@ -364,10 +364,10 @@ describe("MCP format renderer", () => {
       '- prompt: "<task-notification> <task-id>a1758e6c</task-id> </task-notification>"',
     );
     expect(rendered).toContain('- response: "the answer with a blank line in it"');
-    // Every line of this view is a `- label:` bullet or a bullet under one. A
-    // raw newline inside a value does not just look wrong, it produces a line
-    // no reader (and no downstream parser) can attribute to a field.
-    for (const line of rendered.split("\n")) {
+    // Every line under the row label is a `- label:` bullet or a bullet under
+    // one. A raw newline inside a value does not just look wrong, it produces
+    // a line no reader (and no downstream parser) can attribute to a field.
+    for (const line of rendered.split("\n").slice(1)) {
       expect(line.trimStart()).toStartWith("-");
     }
   });
@@ -492,7 +492,7 @@ describe("per-item token budget (`turnBudget` — the `turn` param at the MCP se
     expect(
       renderNode(
         { type: "turn", value: anchoredTurn },
-        { sessionId: 17, turnBudget: 1 },
+        { sessionId: 17, includeSessionPrefix: true, turnBudget: 1 },
       ),
     ).toContain("[S17][T13] Anchored turn");
   });
@@ -556,7 +556,7 @@ describe("an observation renders as the call it was", () => {
 
     expect(rendered).toBe(
       [
-        "- [O7] Bash(git diff --stat)",
+        "[O7] Bash(git diff --stat)",
         "    src/mcp/format.ts | 42 ++++---",
         "    src/mcp/recall.ts |  8 +--",
       ].join("\n"),
@@ -621,7 +621,7 @@ describe("an observation renders as the call it was", () => {
 
     expect(rendered).toBe(
       [
-        "- [O7] Edit(recall.ts)",
+        "[O7] Edit(recall.ts)",
         "    -   const limit = 10;",
         "    +   const limit = 20;",
       ].join("\n"),
@@ -651,7 +651,7 @@ describe("an observation renders as the call it was", () => {
 
     expect(rendered).toBe(
       [
-        "- [O7] Write(plan.md)",
+        "[O7] Write(plan.md)",
         "    # Plan",
         "    - step one",
         "    - step two",
@@ -678,7 +678,7 @@ describe("an observation renders as the call it was", () => {
     );
 
     expect(rendered).toBe(
-      ["- [O7] Read(format.ts)", "    45 lines (124–168 of 237)"].join("\n"),
+      ["[O7] Read(format.ts)", "    45 lines (124–168 of 237)"].join("\n"),
     );
   });
 
@@ -697,7 +697,7 @@ describe("an observation renders as the call it was", () => {
 
     expect(rendered).toBe(
       [
-        "- [O7] mcp__plugin_claude-mnemo_mnemo__note(S15069/T485 fix+render: the observation body is the call's output)",
+        "[O7] mcp__plugin_claude-mnemo_mnemo__note(S15069/T485 fix+render: the observation body is the call's output)",
         "    Noted S15069/T485. ride_turn: S15069/T485.",
       ].join("\n"),
     );
@@ -726,7 +726,7 @@ describe("an observation renders as the call it was", () => {
       ),
     );
 
-    expect(rendered).toStartWith("- [O7] Agent(Tear down observation queue)");
+    expect(rendered).toStartWith("[O7] Agent(Tear down observation queue)");
     expect(rendered.split("\n")[1]).toContain("not stored with this call");
     expect(rendered).not.toContain("outputFile");
   });
@@ -740,7 +740,7 @@ describe("an observation renders as the call it was", () => {
       ),
     );
 
-    expect(rendered).toStartWith("- [O7] ToolSearch(");
+    expect(rendered).toStartWith("[O7] ToolSearch(");
     expect(rendered).toContain("select:Read,Edit");
     expect(rendered).toContain("matches:");
   });
@@ -756,7 +756,7 @@ describe("an observation renders as the call it was", () => {
     };
 
     expect(render(legacy)).toBe(
-      ["- [O7] Added mutex", "  - desc: Guards refresh"].join("\n"),
+      ["[O7] Added mutex", "    - content: Guards refresh"].join("\n"),
     );
   });
 
@@ -773,7 +773,7 @@ describe("an observation renders as the call it was", () => {
     });
 
     expect(rendered).toBe(
-      ["- [O7] Added mutex", "  - tool: 🔧 Bash(bun test)", "    3 pass"].join("\n"),
+      ["[O7] Added mutex", "    - tool: 🔧 Bash(bun test)", "    3 pass"].join("\n"),
     );
   });
 

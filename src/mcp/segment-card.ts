@@ -20,7 +20,9 @@ import {
   DEFAULT_PREVIEW_COUNT,
   DEFAULT_TURN_TOKEN_BUDGET,
   formatEpoch,
+  RENDER_INDENT_STEP,
   renderNode,
+  renderSessionTransitionLine,
   splitBulletField,
   truncateTextToTokenBudget,
   type FormattedTurn,
@@ -42,6 +44,10 @@ import {
  */
 
 export const SEGMENT_CARD_DEFAULT_PAGE_BUDGET = 1000;
+
+/** The card's field rows sit one hierarchy rung under `[E<n>]`; a field's own rows, one rung under that (spec 金样例). */
+const CARD_FIELD_INDENT = RENDER_INDENT_STEP;
+const CARD_ROW_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
 
 /**
  * "card-scale" (spec "Budgets"): the same order of magnitude the segment
@@ -207,15 +213,25 @@ function summaryFieldRows(field: "title" | "content" | "insight", value: string 
   return { field, rows: value ? [value] : [] };
 }
 
+/**
+ * One Working State field (spec 金样例 card block). A field that HOLDS rows
+ * names itself and lets the rows speak (`- goal:` then one bullet each); an
+ * EMPTY field still renders, as `- constraints: 0 rows` — the sample keeps
+ * every zero-row line unfolded, because "we never wrote a constraint down" is
+ * itself the answer a reader came for.
+ */
 function renderElidedField(entry: ElidedSegmentCardField): string[] {
-  const lines = [`  - ${entry.field}: ${entry.totalRows} ${entry.totalRows === 1 ? "row" : "rows"}`];
+  if (entry.totalRows === 0) {
+    return [`${CARD_FIELD_INDENT}- ${entry.field}: 0 rows`];
+  }
+  const lines = [`${CARD_FIELD_INDENT}- ${entry.field}:`];
   if (entry.droppedCount > 0) {
     // The ellipsis sits at the TOP of the field (spec pinned decision): the
     // rows below it are what survived, oldest-of-the-survivors first.
-    lines.push(`    - … +${entry.droppedCount} earlier`);
+    lines.push(`${CARD_ROW_INDENT}- … +${entry.droppedCount} earlier`);
   }
   for (const row of entry.keptRows) {
-    lines.push(`    - ${row}`);
+    lines.push(`${CARD_ROW_INDENT}- ${row}`);
   }
   return lines;
 }
@@ -224,12 +240,10 @@ function renderElidedField(entry: ElidedSegmentCardField): string[] {
 // Header facts
 // ---------------------------------------------------------------------------
 
+/** Only what the bare `- sessions:` id list needs: the id, and the recency the cap sorts on. */
 interface AttachedSessionRow {
   sessionId: number;
-  title: string | null;
-  memberCount: number;
   lastActiveEpoch: number;
-  consultedOnly: boolean;
 }
 
 function buildAttachedSessionRows(
@@ -252,18 +266,14 @@ function buildAttachedSessionRows(
       continue;
     }
     const sessionMembers = membersBySession.get(sessionId) ?? [];
-    const consultedOnly = sessionMembers.length === 0;
-    const lastActiveEpoch = consultedOnly
-      ? (session.updatedAtEpoch ?? session.createdAtEpoch)
-      : Math.max(...sessionMembers.map((member) => member.createdAtEpoch));
+    // A consulted-only session (attached, no member turn) has no member
+    // timestamp to date itself by, so it falls back to the session's own.
+    const lastActiveEpoch =
+      sessionMembers.length === 0
+        ? (session.updatedAtEpoch ?? session.createdAtEpoch)
+        : Math.max(...sessionMembers.map((member) => member.createdAtEpoch));
 
-    rows.push({
-      sessionId,
-      title: session.title,
-      memberCount: sessionMembers.length,
-      lastActiveEpoch,
-      consultedOnly,
-    });
+    rows.push({ sessionId, lastActiveEpoch });
   }
   return rows;
 }
@@ -381,7 +391,10 @@ export function renderSegmentCardRecord(
     // that function now; this line states only the bare fact.
     `maintenance ${maintenance} ${maintenance === 1 ? "turn" : "turns"} ago`,
   ];
-  headerLines.push(`  ${metaParts.join(" · ")}`);
+  // The sample's `- stats:` row (金样例 card block): the card's meta facts are
+  // a NAMED field like every other row on the card, not a bare header line
+  // floating under the title.
+  headerLines.push(`${CARD_FIELD_INDENT}- stats: ${metaParts.join(" · ")}`);
 
   // Facet lines take the SAME item knife every other rendered unit takes
   // (spec "Budgets": the card must fit the page budget; roster precedent:
@@ -404,21 +417,24 @@ export function renderSegmentCardRecord(
   };
   if (facetCounts.tags.length > 0) {
     pushFacetLine(
-      `  - tags: ${facetCounts.tags.map((entry) => `#${entry.word}×${entry.count}`).join(" ")}`,
+      `${CARD_FIELD_INDENT}- tags: ${facetCounts.tags.map((entry) => `#${entry.word}×${entry.count}`).join(" ")}`,
     );
   }
   if (facetCounts.type.length > 0) {
     pushFacetLine(
-      `  - type: ${facetCounts.type
+      `${CARD_FIELD_INDENT}- type: ${facetCounts.type
         .map((entry) => `${typeWordGlyph(entry.word)}${entry.word}×${entry.count}`)
         .join(" ")}`,
     );
   }
 
-  // Newest-active first, capped (ticket 08 checklist item 3): a session's
-  // own row survives in preference to an older, colder one; the remainder
-  // folds into one count line instead of vanishing or growing the header
-  // without bound.
+  // A BARE ID LIST on one row (spec 金样例: `- sessions: Sxxx, Sxxx`). The
+  // per-session title/turn-count/last-active rows this replaces were the
+  // card's own second listing of facts every one of those sessions already
+  // renders for itself — one `recall(id="S<n>")` away — and they were what
+  // made attachment count alone able to starve the field ladder below.
+  // Newest-active first, so the cap keeps the sessions still in play; the
+  // remainder folds into a count rather than vanishing.
   const sessionsByRecency = [...sessionRows].sort(
     (left, right) => right.lastActiveEpoch - left.lastActiveEpoch,
   );
@@ -426,20 +442,14 @@ export function renderSegmentCardRecord(
     ? sessionsByRecency.slice(0, MAX_ATTACHED_SESSION_ROWS)
     : sessionsByRecency;
   const overflowSessionCount = sessionsByRecency.length - visibleSessionRows.length;
+  const sessionIdList = [
+    ...visibleSessionRows.map((row) => `S${row.sessionId}`),
+    ...(overflowSessionCount > 0 ? [`+${overflowSessionCount} more`] : []),
+  ].join(", ");
 
-  headerLines.push(`  - sessions: ${sessionRows.length === 0 ? "(none attached)" : ""}`.trimEnd());
-  for (const row of visibleSessionRows) {
-    const label = `S${row.sessionId}${row.title ? ` "${row.title}"` : ""}`;
-    const stats = row.consultedOnly
-      ? "consulted only"
-      : `${row.memberCount} ${row.memberCount === 1 ? "turn" : "turns"}`;
-    headerLines.push(`    - ${label}: ${stats}, last active ${formatEpoch(row.lastActiveEpoch)}`);
-  }
-  if (overflowSessionCount > 0) {
-    headerLines.push(
-      `    - … +${overflowSessionCount} more ${overflowSessionCount === 1 ? "session" : "sessions"}`,
-    );
-  }
+  headerLines.push(
+    `${CARD_FIELD_INDENT}- sessions: ${sessionRows.length === 0 ? "(none attached)" : sessionIdList}`,
+  );
 
   // -----------------------------------------------------------------------
   // The elision ladder (ticket 08): the summary trio (title/content/
@@ -481,7 +491,7 @@ export function renderSegmentCardRecord(
   const insightField = fieldByKey.get("insight")!;
 
   const titleText = titleField.keptRows[0];
-  const lines: string[] = [`- [E${segment.id}]${titleText ? ` ${titleText}` : ""}`];
+  const lines: string[] = [`[E${segment.id}]${titleText ? ` ${titleText}` : ""}`];
   lines.push(...headerLines);
 
   // The summary trio's own two prose fields — unchanged in spirit from the
@@ -492,11 +502,11 @@ export function renderSegmentCardRecord(
   // every other renderer in this codebase).
   const contentText = contentField.keptRows[0];
   if (contentText) {
-    lines.push(`  - desc: ${contentText}`);
+    lines.push(`${CARD_FIELD_INDENT}- content: ${contentText}`);
   }
   const insightText = insightField.keptRows[0];
   if (insightText) {
-    lines.push(`  - insight: ${insightText}`);
+    lines.push(`${CARD_FIELD_INDENT}- insight: ${insightText}`);
   }
 
   for (const field of SEGMENT_WORKING_STATE_FIELDS) {
@@ -504,14 +514,16 @@ export function renderSegmentCardRecord(
   }
 
   if (!elides) {
-    lines.push(`  - member index (event order):`);
+    lines.push(`${CARD_FIELD_INDENT}- member index (event order):`);
     if (members.length === 0) {
-      lines.push(`    - (no members)`);
+      lines.push(`${CARD_ROW_INDENT}- (no members)`);
     }
     for (const [index, member] of members.entries()) {
       const turn = getTurnById(db, member.turnId);
       const title = turn?.title ?? turn?.userPrompt ?? "untitled";
-      lines.push(`    - ${index + 1}. S${member.sessionId}/T${member.promptNumber} "${title}"`);
+      lines.push(
+        `${CARD_ROW_INDENT}- ${index + 1}. S${member.sessionId}/T${member.promptNumber} "${title}"`,
+      );
     }
   }
 
@@ -530,14 +542,25 @@ export interface RenderSegmentMembersOptions {
   turnBudget?: number;
   eraCutoffEpoch?: number | null;
   signal?: TruncationSignal;
+  /**
+   * Session id of the member immediately BEFORE this page's first one, when a
+   * previous page exists. Equal to the first rendered member's session means
+   * the page opens in the MIDDLE of a session run: the run's transition line
+   * was spent on the previous page, so this page's first row carries the full
+   * `[S<n>][T<m>]` address instead (spec 补充裁决 "跨页引用自足").
+   */
+  precedingSessionId?: number | null;
 }
 
 /**
  * Render the segment's members at the given 1-based EVENT-ORDER ordinals
- * (empty = every member), each row carrying its own `[S<n>][T<n>]` home
- * address — the ordinal is a navigation handle only (spec D9: "citations
- * always S/T because late-settling members shift event order"), never the
- * identity a citation should use.
+ * (empty = every member) in the one row hierarchy (spec 金样例
+ * `recall(id="E31/T1..10")`): the `[E<n>]` line, a `[S<n>]` transition line
+ * whenever the run changes session, then bare `[T<m>]` rows. The event-order
+ * ordinal is a selection handle only (spec D9: "citations always S/T because
+ * late-settling members shift event order") and no longer occupies the row —
+ * the transition line plus the bare address IS the `S<n>/T<m>` citation, split
+ * across two rungs instead of repeated on every row.
  */
 export function renderSegmentMembersByOrdinal(
   db: Database,
@@ -556,14 +579,29 @@ export function renderSegmentMembersByOrdinal(
     return ordinals.length === 0 ? "(no members)" : "Segment member not found.";
   }
 
-  const chronological = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
-  const ordinalByTurnId = new Map(chronological.map((member, index) => [member.turnId, index + 1] as const));
+  const lines: string[] = [`[E${segment.id}] ${segment.title}`];
+  const seenSessionIds = new Set<number>();
+  let runSessionId: number | null = options.precedingSessionId ?? null;
+  let pageOpensMidSession =
+    options.precedingSessionId !== undefined &&
+    options.precedingSessionId !== null &&
+    options.precedingSessionId === resolved[0]!.sessionId;
 
-  const lines: string[] = [];
   for (const member of resolved) {
     const turn = getTurnById(db, member.turnId);
     if (!turn) {
       continue;
+    }
+    if (member.sessionId !== runSessionId) {
+      lines.push(
+        renderSessionTransitionLine(
+          member.sessionId,
+          seenSessionIds.has(member.sessionId) ? null : getSession(db, member.sessionId)?.title ?? null,
+          RENDER_INDENT_STEP,
+        ),
+      );
+      seenSessionIds.add(member.sessionId);
+      runSessionId = member.sessionId;
     }
     const view: FormattedTurn = {
       id: turn.id,
@@ -583,19 +621,23 @@ export function renderSegmentMembersByOrdinal(
       filesRead: turn.filesRead,
       filesModified: turn.filesModified,
       observationCount: 0,
+      wasRolledBack: turn.wasRolledBack,
     };
-    const ordinal = ordinalByTurnId.get(member.turnId);
-    const rendered = renderNode(
-      { type: "turn", value: view },
-      {
-        fields: options.fields,
-        sessionId: member.sessionId,
-        includeDbTurnIds: options.includeDbTurnIds,
-        turnBudget: options.turnBudget,
-        signal: options.signal,
-      },
+    lines.push(
+      renderNode(
+        { type: "turn", value: view },
+        {
+          indent: `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`,
+          fields: options.fields,
+          sessionId: member.sessionId,
+          includeSessionPrefix: pageOpensMidSession,
+          includeDbTurnIds: options.includeDbTurnIds,
+          turnBudget: options.turnBudget,
+          signal: options.signal,
+        },
+      ),
     );
-    lines.push(ordinal !== undefined ? `  ⟨E${segmentId}/T${ordinal}⟩ ${rendered.trimStart()}` : rendered);
+    pageOpensMidSession = false;
   }
 
   return lines.join("\n");

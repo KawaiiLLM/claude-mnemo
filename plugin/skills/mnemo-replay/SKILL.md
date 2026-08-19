@@ -67,7 +67,7 @@ ORDER BY id;
 - Field semantics: `NULL` = never captured; `''` = captured empty (e.g. an interrupted turn).
 - `observations.tool_input` / `tool_result` are stored **uncapped**, even for `skipped` rows.
 - **Locate turns by DB keys only** — `(session_id, prompt_number)` for turns, `turn_id` for observations. `turns.transcript_line_start` is a best-effort JSONL line hint and is known to duplicate/go stale (notably on notification-driven turns); never use it for content lookup.
-- **A rewound turn's transcript pointer is stale, not just imprecise.** `recall`/`timeline` mark a rolled-back turn `⤺ rewound (transcript pointer stale — do not trust replay)`. Do not reconstruct that turn's content from its `transcript_line_start` hint or from the `raw:` JSONL path — the branch it pointed at was undone; read only the DB row's own stored fields (which reflect the corrected state), never the transcript coordinate.
+- **A rewound turn's transcript pointer is stale, not just imprecise.** `recall`/`timeline` mark a rolled-back turn with the tail marker `[rewind]` on its row — that marker is the whole warning, and this bullet is what it means. Do not reconstruct such a turn's content from its `transcript_line_start` hint or from the `raw:` JSONL path — the branch they pointed at was undone; read only the DB row's own stored fields (which reflect the corrected state), never the transcript coordinate. Treat the turn's content itself as an ABANDONED path, not as the record of what happened.
 
 ### Other useful queries
 

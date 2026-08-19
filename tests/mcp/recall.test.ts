@@ -286,18 +286,23 @@ describe("recallMemory", () => {
       `raw: ${resolveTranscriptPath("claude-mnemo", "session-2")}`,
     );
     expect(sessionOutput).toContain("[T1] Diagnose auth race");
-    // The default field set (title/content/prompt) already carries the
-    // prompt line on the session's own turn preview — no `filter.fields`
-    // needed to see it there.
-    expect(sessionOutput).toContain('prompt: "Why am I getting 401 errors?"');
+    // The default field set is title+content now (spec 金样例 补充: "默认只有
+    // content"), so the prompt bullet is opt-in — `filter.fields` is the one
+    // way to ask for it.
+    expect(sessionOutput).not.toContain("prompt:");
     expect(sessionOutput).not.toContain("[O1] Auth mutex");
 
     expect(turnOutput).toContain(`[T1] Diagnose auth race`);
-    expect(turnOutput).toContain('prompt: "Why am I getting 401 errors?"');
+    expect(
+      recallMemory(db, {
+        id: `S${authSessionId}/T1`,
+        filter: { fields: ["title", "prompt"] },
+      }),
+    ).toContain('- prompt: "Why am I getting 401 errors?"');
     expect(turnOutput).toContain("[O1] Auth mutex");
 
     expect(observationOutput).toContain(`[O${authObservationId}] Auth mutex`);
-    expect(observationOutput).toContain("desc: Guards refresh");
+    expect(observationOutput).toContain("- content: Guards refresh");
   });
 
   test("prefers a session's recorded transcript path over the cwd-derived one", () => {
@@ -335,8 +340,8 @@ describe("recallMemory", () => {
       depth: "collapsed",
     });
 
-    expect(output).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
-    expect(output).toContain(`[S${authSessionId}][T2] Follow-up`);
+    expect(output).toContain(`[T1] Diagnose auth race`);
+    expect(output).toContain("[T2] Follow-up");
   });
 
   // [S15069/T1021]: `T1..T2` ≡ `T1..2` — remember's interval grammar writes the
@@ -347,8 +352,8 @@ describe("recallMemory", () => {
       id: `S${authSessionId}/T1..T2`,
       depth: "collapsed",
     });
-    expect(natural).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
-    expect(natural).toContain(`[S${authSessionId}][T2] Follow-up`);
+    expect(natural).toContain(`[T1] Diagnose auth race`);
+    expect(natural).toContain("[T2] Follow-up");
 
     expect(
       recallMemory(db, { id: `S${authSessionId}/T1..O2`, depth: "collapsed" }),
@@ -426,7 +431,7 @@ describe("recallMemory", () => {
     expect(turnsOutput).not.toContain("[T10] Turn 10");
 
     expect(observationsOutput).toContain(`[O${authObservationId}] Auth mutex`);
-    expect(observationsOutput).toContain("desc: Guards refresh");
+    expect(observationsOutput).toContain("- content: Guards refresh");
     expect(observationsOutput).toContain("[T1] Diagnose auth race");
     expect(sessionObservationsOutput).not.toContain("page 1 / 1 (total 60)");
     expect(sessionObservationsOutput).toContain(`[S${floodSessionId}] Observation flood`);
@@ -449,9 +454,11 @@ describe("recallMemory", () => {
     });
 
     expect(typeQuery).toContain(`[S${authSessionId}] Auth race fix`);
-    expect(typeQuery).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
+    expect(typeQuery).toContain(`[T1] Diagnose auth race`);
 
-    const hitCount = (timeScopedQuery.match(/\n- \[/g) ?? []).length + (timeScopedQuery.startsWith("- [") ? 1 : 0);
+    const hitCount =
+      (timeScopedQuery.match(/\n\[S/g) ?? []).length +
+      (timeScopedQuery.startsWith("[S") ? 1 : 0);
     expect(hitCount).toBe(1);
     expect(timeScopedQuery).toContain("Auth");
   });
@@ -626,7 +633,7 @@ describe("recallMemory", () => {
     expect(byQuery).toContain(`dbid:T${driverTurn.id}`);
     // The DB-id token rides alongside the existing prompt-number label, not in
     // place of it.
-    expect(byQuery).toContain(`[S${driverSession.id}][T${driverTurn.promptNumber}] Driver discovery turn`);
+    expect(byQuery).toContain(`[T${driverTurn.promptNumber}] Driver discovery turn`);
 
     // S/T id route also surfaces the DB id under worker audience.
     const byPromptId = recallMemory(db, {
@@ -640,7 +647,7 @@ describe("recallMemory", () => {
   test("main audience (default) keeps prompt-number labels and emits no dbid: token", () => {
     // Regression on the existing public form pinned around line 369 (`[S...][T<prompt_number>]`).
     const byQuery = recallMemory(db, { filter: { type: "bugfix" } });
-    expect(byQuery).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
+    expect(byQuery).toContain(`[T1] Diagnose auth race`);
     expect(byQuery).not.toContain("dbid:");
 
     const byPromptId = recallMemory(db, {
@@ -760,11 +767,13 @@ describe("recallMemory", () => {
     // Findability is met: the turn's session surfaces.
     expect(output).toContain(`[S${session.id}`);
     expect(output).toContain("Cookie sync setup");
-    // ticket 03: collapsed now carries prompt/title/content (the turn
-    // field-set switch), so the matched Chinese prompt fragment surfaces
-    // directly on the matched turn's own collapsed row — the prior
-    // "English-summary-only" limitation this test used to pin is resolved.
-    expect(output).toContain("浏览器插件");
+    // The DEFAULT field set is title+content (spec 金样例 补充), so a
+    // prompt-only match surfaces the row but not the matched words; asking
+    // for the `prompt` field is what shows the evidence, bolded.
+    expect(output).not.toContain("浏览器插件");
+    expect(
+      recallMemory(db, { query: "浏览器插件", filter: { fields: ["title", "prompt"] } }),
+    ).toContain("**浏览器插件**");
   });
 
   test("recall search totals exclude memory-layer FTS rows (null session_id)", () => {
@@ -1290,7 +1299,7 @@ describe("session semantic fields retire ([S15069/T910]-[T913]); content keeps i
 
     // content keeps its existing (era-gated) read path: a pre-cutoff session
     // still renders it.
-    expect(output).toContain("desc: The summary layer's compressed view");
+    expect(output).toContain("- content: The summary layer's compressed view");
     // insight/decision/done/next/reference retire unconditionally — legacy
     // row or not, still sitting in storage (seedSessionWithFields wrote all
     // of them) but rendered nowhere.
@@ -1330,11 +1339,11 @@ describe("session semantic fields retire ([S15069/T910]-[T913]); content keeps i
     });
 
     expect(output).toContain("Ticket 09 fixture");
-    // Stats survive: the turn just seeded still counts.
-    expect(output).toContain("💬1");
+    // Count badges are retired everywhere (spec 金样例: "无计数徽章").
+    expect(output).not.toContain("💬");
     // The turn's own `content` still renders — only the SESSION's six
     // retired fields are gated.
-    expect(output).toContain("desc: turn content");
+    expect(output).toContain("- content: turn content");
     // None of the six retired session fields leak through, even though they
     // are still sitting in storage (seedSessionWithFields wrote all of them).
     expect(output).not.toContain("The summary layer's compressed view");
@@ -1378,7 +1387,7 @@ describe("session semantic fields retire ([S15069/T910]-[T913]); content keeps i
       depth: "expanded",
     });
 
-    expect(output).toContain("desc: The summary layer's compressed view");
+    expect(output).toContain("- content: The summary layer's compressed view");
     expect(output).not.toContain("- shipped the fix");
     expect(output).not.toContain("- decision:");
     expect(output).not.toContain("next:");

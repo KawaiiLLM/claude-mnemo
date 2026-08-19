@@ -251,9 +251,9 @@ describe("claude-mnemo smoke test", () => {
       depth: "expanded",
     });
     expect(recallSessions).toContain("[S1] Auth race fix");
-    expect(recallSessionTree).toContain("[S1][T1] Diagnose auth");
-    expect(recallSessionTree).toContain("[S1][T2] Fix auth race");
+    expect(recallSessionTree).toContain("[S1] Auth race fix");
+    expect(recallSessionTree).toContain("    [T1] Diagnose auth");
+    expect(recallSessionTree).toContain("    [T2] Fix auth race");
     expect(recallTurn).toContain("[O2] Mutex added");
-    expect(recallSessionTree).toContain("- [S1] Auth race fix");
   });
 });

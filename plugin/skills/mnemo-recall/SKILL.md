@@ -91,24 +91,44 @@ citation**: a member that settles into the segment later shifts every ordinal
 after it. Cite the rendered `S<session>/T<prompt>` address instead; `E<n>/T<m>`
 is only for picking a member out while you are looking at the card.
 
-A turn marked **rewound** (`⤺ rewound (transcript pointer stale — do not trust
-replay)`) had its branch undone — treat its content as an abandoned path, and do
-not hand its transcript pointer to `mnemo-replay`: the pointer is a stale
-coordinate once a turn has been rewound.
+### Row shape
+
+Every read surface renders the same hierarchy, four spaces per level, with no
+count badges anywhere:
+
+```markdown
+[E31] the arc's title
+    [S15069] the session's title
+        [T823] the turn's title [rewind]
+            - content: the turn's stored body
+```
+
+`[S…]` is a **transition line**, not a record: it appears whenever the run
+changes session, and carries the session title only on that session's first
+appearance in the page. Turn rows are bare `[T<m>]` — the `S<n>/T<m>` citation
+is the transition line plus the row. The one exception is a page that opens in
+the middle of a session run: its first row carries the full `[S<n>][T<m>]` form
+so the page stands alone for a citation.
+
+Tail markers on a turn row state its state: `[extracted]`, `[skipped]`,
+`[rewind]`. A `[rewind]` turn had its branch undone — treat its content as an
+abandoned path, and never hand its transcript pointer to `mnemo-replay` (see
+that skill for why).
 
 ## Browse vs Search
 
 `recall` has exactly two output shapes, selected by whether `query` is set:
 
 - **Browse** (`id` and `query` both omitted): a global, chronological feed
-  across every session — not one session's worth. A session's title renders
-  only the first time its turns appear in the feed; later turns from the same
-  session in the same page omit the repeated header. Segments list before
-  sessions.
+  across every session — not one session's worth. Segments list before turns.
 - **Search** (`query` set): results rank by relevance (bm25). Every matched
   term is **bolded**, with a word-boundary neighborhood shown around the hit
   instead of a fixed truncation window — you see the evidence, not an
   arbitrary slice.
+
+**The two shapes differ in ORDERING ONLY** — same rows, same transition lines,
+same field lines. Bolding and the neighborhood excerpt are behaviour *inside*
+the `content` field, not a second layout.
 
 `filter` narrows either shape the same way; it is not what selects between them.
 
@@ -158,8 +178,12 @@ recall(id="E5..9")                              # segment range
 recall(id="E31, E32")                           # multiple segments, one call
 ```
 
-A segment row leads with its title, `[open]`/`[delivered]` status and member
-count, then its conclusion and the member turns that carry it. Drill into a
+A segment card leads with `[E<n>] <title>`, then one `- <field>:` row per
+stored field — `stats` (status, member count, dates), `tags`, `type`,
+`sessions` (a bare id list: `S15069, S15088`), `content`, `insight`, and the
+six Working State fields. A field with rows names itself and lets the rows
+speak; an empty one still renders, as `- constraints: 0 rows`, because "we
+never wrote one down" is itself an answer. Drill into a
 member with the ordinary `S12/T3` form (not the segment's own `E47/T3`
 ordinal — see Data Model above). Segments also come back from `query=`
 search alongside sessions and turns, and `filter.tag`/`filter.type` apply to
@@ -246,14 +270,22 @@ order and share this call's `page`/`pageBudget`/`turn` budgets.
 
 | Field | Meaning |
 |---|---|
-| `fields` | Any combination of `title`, `content`, `prompt`, `response`, `insight`, `observations`, `files` — which turn fields to render. Default `title` + `content`. |
+| `fields` | Any combination of `title`, `content`, `prompt`, `response`, `insight`, `observations`, `files`, `metadata` — which turn fields to render. Default `title` + `content`. |
+
+`title` is never a field LINE — it is the row label itself, so selecting it
+alone gives you bare rows. `metadata` renders as one UNPREFIXED line directly
+under the row (`08-17 18:19 · 🔧20 ✏️3`): it is `timeline`'s turn-view default
+and `recall`'s opt-in, and it is where the retired turn table's time/gap/stats
+columns went.
 
 ## Common Patterns
 
 **"Did we already fix the auth race?"**
 ```text
 recall(query="auth race")
-# → sees [S12/T3] "Fixed auth mutex"
+# → [S12] Auth session
+# →     [T3] Fixed auth mutex [extracted]
+# →         - content: …the **auth race**…
 recall(id="S12/T3", filter={fields: ["prompt", "response"]})
 ```
 
@@ -281,4 +313,4 @@ recall(id="S8")
 - Narrow with `id`, `query`, or `filter` before raising `pageSize`, `pageBudget`, or `turn`.
 - Never rely on prefixes inside `query` — they do not scope, and the failure is silent. Reach for `filter` instead.
 - When `recall` shows a `raw:` path, or a page-overflow hint, that `raw:` path is your signal to switch to `mnemo-replay`; the overflow hint is your signal to ask for the next `page`.
-- A `⤺ rewound` turn's transcript pointer is stale — do not hand it to `mnemo-replay`.
+- A `[rewind]` turn's transcript pointer is stale — do not hand it to `mnemo-replay`.

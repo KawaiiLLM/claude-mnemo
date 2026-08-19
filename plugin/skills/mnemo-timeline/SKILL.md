@@ -5,7 +5,7 @@ description: Render the temporal/decision shape of a past session - phases, gaps
 
 # Mnemo Timeline
 
-Timeline is the temporal axis of the three-axis read model. It answers "how did this session unfold" (or "how did this task unfold across sessions") by rendering a turn table or a milestone digest, plus window-scoped shape signals.
+Timeline is the temporal axis of the three-axis read model. It answers "how did this session unfold" (or "how did this task unfold across sessions") by rendering turn rows or a milestone digest, plus window-scoped shape signals.
 
 Three axes of read access:
 
@@ -51,7 +51,7 @@ timeline(id="E47", view="milestones")      # the same segment, milestone-selecte
 
 Views:
 
-- `turns` - full time-ordered turn table.
+- `turns` - every candidate turn, time-ordered, in the same row form `recall` renders, plus a `metadata` line per row.
 - `milestones` - key-turn digest. Selection is a fixed lexicographic order over edge signals, not a score: any turn with a live `override` edge against it is excluded outright, then turns rank by how many delivery-phase turns `encodes` them (descending), then by excess `refines` in-degree — decision-phase excess ranked before delivery-phase excess — then by recency; admission fills `pageSize` in that order. A session or segment with no edges at all degrades safely to a flat chronological list. Turns from before the segment-era cutoff never enter milestone rendering.
 
 ### Range syntax
@@ -68,7 +68,7 @@ Views:
 
 Range produces the full candidate set with no truncation; `pageSize` then slices (`turns` view) or admits (`milestones` view) from it.
 
-A segment view (`id="E<n>"`) draws its candidates from every session the segment's members occurred in, not one session — this is the one place `timeline` crosses session boundaries. Its turn table identifies each row by the member's own `S<n>/T<m>` address (there is no single local turn numbering across sessions), and pagination works the same way the session view's does.
+A segment view (`id="E<n>"`) draws its candidates from every session the segment's members occurred in, not one session — this is the one place `timeline` crosses session boundaries. It groups its rows under one `[S<n>]` transition line per session run (there is no single local turn numbering across sessions), and pagination works the same way the session view's does.
 
 `timeline(id="S42/T10")` is an error. Use `recall(id="S42/T10")` for single-turn detail.
 
@@ -84,22 +84,45 @@ The header includes:
 - Explicit timezone line with abbreviation and UTC offset
 - `raw:` line with the absolute JSONL path for `mnemo-replay`
 
-### Turn table
+### Turn rows
 
-The turn table has two content columns: `prompt` and `title`.
+There is no table. A turn renders as the same three rungs `recall` uses — the
+bracketed address, an unprefixed `metadata` line, then its field rows:
 
-- `prompt` column: cleaned raw user prompt, capped at 100 chars
-- `title` column: `<type_emoji> <Mnemosyne title>` when extracted, `⏳` when pending, strikethrough when undone
+```markdown
+    [S15069] the session's title
+        [T823] the turn's title
+            08-17 18:19 · +6m · 🔧20 ✏️3
+            - prompt: the cleaned raw user prompt, capped at 100 chars
+```
+
+The `metadata` line carries what the retired table spent columns on: local
+date and time, the gap from the previous turn, and tool/file counts.
 
 Markers:
 
-- `⨯` prefix on `T#` for undone turns
-- `※` in the gap column for broken-prompt candidates
-- `[ext:<name>]` prefix in the prompt column for external-source turns
-- `↩️` on a decision that reverses or supersedes an earlier decision
-- `🚫` on an invalidated or rolled-back turn
+- `⨯` before the address for undone turns; the title renders struck through
+- `⏳` in place of a title when the turn is not extracted yet
+- `※` after the gap on the `metadata` line for broken-prompt candidates
+- `[ext:<name>]` prefix on the `- prompt:` line for external-source turns
+- `[rewind]` tail marker on a rolled-back turn — its transcript pointer is
+  stale; never hand that turn's coordinate to `mnemo-replay`
 
-A turn's own `⤺ rewound` state (shown by `recall`) means its transcript pointer is stale — do not hand a rewound turn's coordinate to `mnemo-replay`.
+### Milestone rows
+
+```markdown
+[E31] the arc's title
+    [S15069]
+        [T821] 08-17 18:19 ⚖️ the turn's title
+            ↳ T811, T812
+```
+
+A milestone row states its stamp inline (that is what tells it apart from a
+turn row) and carries a type glyph. `↳` lists that row's antecedent
+ADDRESSES and nothing else — a bare `T<m>` inside the same session, a
+session-qualified `S<n>/T<m>` when the antecedent lives elsewhere, and a
+trailing `+N` when there are more than four. `⚑` marks a row that is itself a
+corrector. No importance value renders on any row.
 
 ### Shape signals
 

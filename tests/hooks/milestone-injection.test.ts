@@ -111,9 +111,10 @@ function cite(
   );
 }
 
-// A spine row is `   <glyph> T<n> <emoji> G<g> …`; ↳ rows, desc lines and the
-// `… +N more` hint all sit further in and never match.
-const SPINE_ROW_RE = /^ {3}(?:.{1,2} )?T\d+ /u;
+// A spine row is `        <marker?>[T<n>] <date> <time> <emoji> <title>` (spec
+// 金样例); the `↳` address line, desc lines and the `… +N more` hint all sit
+// further in and never match.
+const SPINE_ROW_RE = /^ {8}(?:.{1,2} )?\[T\d+\] /u;
 
 function spinePromptNumbers(output: string): number[] {
   return output
@@ -272,16 +273,21 @@ describe("SessionStart milestone injection = the arc view", () => {
     db.close();
   });
 
-  test("emits unified rows: grade column, desc block, ↳ antecedent, ✏️ tail", () => {
+  test("emits unified rows: sample baseline, desc block, ↳ antecedent ADDRESSES, ✏️ tail", () => {
     const db = createDatabase(":memory:");
     const sessionId = seedInjectionArc(db);
 
     const injected = renderSessionMilestoneInjection(db, sessionId);
 
+    // Spec 金样例 baseline `[T821] 08-17 18:19 ⚖️ title`, plus the
+    // budget-permitting enrichments (the user's own words, the ✏️ tail).
     expect(injected).toContain(
-      "T1 ⚖️ G4 卷号锚定要解决什么 → Framed the slicing problem",
+      '[T1] 07-25 17:21 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"',
     );
-    expect(injected).toContain("↳ T2 🔵 G2 Measured a 12-14% error");
+    // `↳` is an ADDRESS index; no grade, no title, no `前件` count.
+    expect(injected).toContain("↳ T2");
+    expect(injected).not.toMatch(/\bG[0-4]\b/);
+    expect(injected).not.toContain("前件");
     expect(injected).toContain("Weighed the evidence and switched the anchor.");
     expect(injected).toContain("✏️cursor.ts");
     // Shape signals survive: the old stage-2 strip is gone.

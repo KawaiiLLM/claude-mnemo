@@ -2,7 +2,7 @@ import type { SegmentRecord } from "../db/segments";
 import type { OrphanAnchorRow, SegmentSpineRow } from "../db/segment-rank";
 import { typeListGlyph } from "../shared/type-vocabulary";
 
-import { truncateText } from "./format";
+import { RENDER_INDENT_STEP, truncateText } from "./format";
 
 /**
  * The segment spine (spec D11): the new era's default reading surface.
@@ -23,7 +23,7 @@ import { truncateText } from "./format";
 
 /** `⚑` marks a row that is a bare turn on a surface made of segments. */
 const ORPHAN_GLYPH = "⚑";
-const SPINE_ROW_INDENT = "   ";
+const SPINE_ROW_INDENT = "";
 /** Tags shown inline on a spine row before the rest collapse to `+N`. */
 export const SPINE_TAG_CAP = 2;
 
@@ -231,7 +231,7 @@ export function renderSegmentHeaderLines(input: SegmentHeaderInput): string[] {
   const { segment } = input;
   const tags = formatTags(segment.tags);
   const head = [
-    `- [E${segment.id}]`,
+    `[E${segment.id}]`,
     segmentTypeGlyph(input.dominantType),
     tags,
     sanitize(segment.title),
@@ -239,15 +239,20 @@ export function renderSegmentHeaderLines(input: SegmentHeaderInput): string[] {
     .filter((part) => part !== "")
     .join(" ");
 
+  // The card's own `- stats:` row, on the one-line form (spec 金样例): the
+  // facts that used to ride the head line as ` | N turns | [status] | rev N`
+  // now sit where the card puts them, so a segment reads the same whether it
+  // arrived through `recall(id="E<n>")` or through a search hit.
   const lines = [
-    `${head} | ${input.memberCount} ${
+    head,
+    `${RENDER_INDENT_STEP}- stats: [${segment.status}] · ${input.memberCount} ${
       input.memberCount === 1 ? "turn" : "turns"
-    } | [${segment.status}] | rev ${segment.revision}`,
+    } · rev ${segment.revision}`,
   ];
 
   if (segment.content) {
     lines.push(
-      `  - desc: ${truncateText(segment.content, { limit: input.charLimit })}`,
+      `${RENDER_INDENT_STEP}- content: ${truncateText(segment.content, { limit: input.charLimit })}`,
     );
   }
   // Ticket 14 (spec K5): a segment's `insight` is the most reusable thing it
@@ -257,15 +262,15 @@ export function renderSegmentHeaderLines(input: SegmentHeaderInput): string[] {
   // arriving here for the third time.
   if (segment.insight) {
     lines.push(
-      `  - insight: ${truncateText(segment.insight, { limit: input.charLimit })}`,
+      `${RENDER_INDENT_STEP}- insight: ${truncateText(segment.insight, { limit: input.charLimit })}`,
     );
   }
   const trace = formatPhaseTrace(input.phaseTrace);
   if (trace !== "") {
-    lines.push(`  - phases: ${trace}`);
+    lines.push(`${RENDER_INDENT_STEP}- phases: ${trace}`);
   }
   if (input.anchorRefs.length > 0) {
-    lines.push(`  - anchors: ${input.anchorRefs.join(", ")}`);
+    lines.push(`${RENDER_INDENT_STEP}- anchors: ${input.anchorRefs.join(", ")}`);
   }
 
   return lines;

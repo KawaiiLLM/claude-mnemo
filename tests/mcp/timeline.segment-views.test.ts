@@ -166,8 +166,10 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(output).not.toMatch(/G[0-4]/);
       // No prompt excerpt.
       expect(output).not.toContain("user prompt text");
-      // No antecedent counters.
-      expect(output).not.toContain("↳");
+      // `↳` carries antecedent ADDRESSES now (spec 金样例 `↳ T811, T812`) —
+      // never a `+N 前件` count, and never a titled sub-row.
+      expect(output).toContain("            ↳ T1");
+      expect(output).not.toContain("前件");
 
       const correctorLine = output
         .split("\n")
@@ -175,15 +177,18 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(correctorLine).toContain("⚑");
     });
 
-    test("every kept row exposes its segment ordinal, date and time", () => {
+    test("every kept row exposes its bracketed session address, date and time", () => {
       const t1 = makeTurn(1, { title: "first member" });
       addSegmentMembers(db, segmentId, [t1], CUTOFF);
 
       const output = timelineQuery(db, { id: `E${segmentId}`, view: "milestones" });
       const row = output.split("\n").find((line) => line.includes("first member"))!;
-      expect(row).toContain("T1 ");
-      expect(row).toMatch(/\d{4}-\d{2}-\d{2}/);
+      // Spec 金样例: the row's address is its SESSION prompt number, bracketed
+      // — the segment ordinal is a selection handle and never occupies a row.
+      expect(row).toContain("[T1] ");
+      expect(row).toMatch(/\d{2}-\d{2}/);
       expect(row).toMatch(/\d{2}:\d{2}/);
+      expect(output.split("\n")).toContain(`    [S${sessionId}] E-view session`);
     });
 
     test("key 0: an overridden turn is excluded outright, even with a strong encodes signal", () => {
@@ -318,21 +323,24 @@ describe("timeline(id=\"E<n>\") segment views", () => {
   });
 
   describe("turns view", () => {
-    test("every member renders one-per-line, in event order, with its ordinal, S/T home and prompt excerpt", () => {
+    test("every member renders in the unified row form, in event order, under its session transition line", () => {
       const t1 = makeTurn(1, { title: "first", promptText: "please build the first thing" });
       const t2 = makeTurn(2, { title: "second", promptText: "now the second thing" });
       addSegmentMembers(db, segmentId, [t1, t2], CUTOFF);
 
       const output = timelineQuery(db, { id: `E${segmentId}`, view: "turns" });
-      expect(output).toContain(`[S${sessionId}/T1]`);
-      expect(output).toContain("please build the first thing");
-      expect(output).toContain("first");
-      expect(output).toContain(`[S${sessionId}/T2]`);
-      expect(output).toContain("now the second thing");
-
       const lines = output.split("\n");
-      const i1 = lines.findIndex((line) => line.includes(`[S${sessionId}/T1]`));
-      const i2 = lines.findIndex((line) => line.includes(`[S${sessionId}/T2]`));
+      // Spec 补充裁决 "turns 表溶解": no tabular surface — the `S<n>/T<m>`
+      // citation is split across a transition line and a bare `[T<m>]` row.
+      expect(output).not.toContain(" | ");
+      expect(lines).toContain(`    [S${sessionId}] E-view session`);
+      expect(output).toContain("        [T1] first");
+      expect(output).toContain("            - content: please build the first thing");
+      expect(output).toContain("        [T2] second");
+      expect(output).toContain("            - content: now the second thing");
+
+      const i1 = lines.findIndex((line) => line.includes("[T1] first"));
+      const i2 = lines.findIndex((line) => line.includes("[T2] second"));
       expect(i1).toBeGreaterThan(-1);
       expect(i2).toBeGreaterThan(i1);
     });

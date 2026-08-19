@@ -175,10 +175,14 @@ describe("recall segment selector and cross-granularity filters", () => {
     const first = recallMemory(db, { id: `E${segmentId}/T1` });
     const third = recallMemory(db, { id: `E${segmentId}/T3` });
 
+    // Spec 金样例: the member listing splits the `S<n>/T<m>` citation across
+    // two rungs — a `[S<n>]` transition line, then bare `[T<m>]` rows.
     expect(first).toContain("research the ledger");
-    expect(first).toContain(`[S${sessionId}][T1]`);
+    expect(first).toContain(`[S${sessionId}]`);
+    expect(first).toContain("[T1]");
     expect(third).toContain("implement the ledger");
-    expect(third).toContain(`[S${sessionId}][T3]`);
+    expect(third).toContain(`[S${sessionId}]`);
+    expect(third).toContain("[T3]");
   });
 
   test("a cross-era segment's member count and member index drill down to its era half only", () => {

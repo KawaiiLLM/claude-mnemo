@@ -225,7 +225,7 @@ describe("remember tool (ticket 02)", () => {
       // 02's provisional plain render (`goal:` / `(empty)` placeholders) is
       // gone; a populated field shows its row, an empty one shows "0 rows".
       expect(text).toContain(`[E${segmentId}]`);
-      expect(text).toContain("goal: 1 row");
+      expect(text).toContain("- goal:");
       expect(text).toContain("- land the tool");
       expect(text).toContain("constraints: 0 rows");
 

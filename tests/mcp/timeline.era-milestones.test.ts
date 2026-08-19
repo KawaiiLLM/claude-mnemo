@@ -235,15 +235,16 @@ describe("milestone rows nest under segment lines, lexicographic edge-signal adm
     expect(citedRow).not.toContain("⚑");
   });
 
-  test("minimal row: no grade label, no prompt excerpt, no antecedent counters", () => {
+  test("minimal row: no grade label, no prompt excerpt, and `↳` carries ADDRESSES", () => {
     const output = renderArc();
-    // Scoped to the era spine block (before the legacy divider): the LEGACY
-    // block still prints its own pre-existing `G<n>` grade column — this
-    // only strips it from the NEW segment-nested rows.
     const spineBlock = output.split("── legacy era")[0]!;
+    // The grade DISPLAY is retired on EVERY surface now, legacy block included.
     expect(spineBlock).not.toMatch(/G[0-4]/);
+    expect(output).not.toMatch(/G[0-4]/);
     expect(spineBlock).not.toContain("the user asked something"); // the shared prompt text — never on a milestone row
-    expect(spineBlock).not.toContain("↳");
+    // Spec 金样例: `↳` is a pure address index, never a `+N 前件` count.
+    expect(spineBlock).toContain("↳ T19");
+    expect(output).not.toContain("前件");
   });
 
   test("an edge-free segment admits all its members, in event order — edge-free degrades to flat chronology", () => {
@@ -315,7 +316,7 @@ describe("milestone rows nest under segment lines, lexicographic edge-signal adm
     // rows so the spine header line, the legacy block and the shape-signals
     // footer — everything else the two full renders otherwise disagree on —
     // never enter the comparison.
-    const rowPattern = /^\s*(⚑ )?T\d+ /;
+    const rowPattern = /^\s*(⚑ )?\[T\d+\] /;
     const nestedLines = sOutput
       .split(`[E${ids.segCorrector}]`)[1]!
       .split("── legacy era")[0]!
