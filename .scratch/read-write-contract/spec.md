@@ -140,7 +140,29 @@ timeline 里程碑视图:
         - content: xxx
 ```
 
-样例确立的行级契约:缩进层级([E]→[S]→[T]→字段行);会话作过渡行(仅首现带 title),turn 行**不带** S 前缀;turn 行=方括号地址+(里程碑视图)日期时间+type 字形+title+尾部状态标;无计数徽章;↳ 行列前件**地址**;字段行与 filter.fields 词表同名(content,非 desc);卡片 sessions 行=裸 id 列表;0-row 行保留不折叠。与后续 arc-spine 裁决(G 直读、日框架折叠、脊柱 desc 行、turns 表列集)的冲突点为待裁清单,见修复票。
+样例确立的行级契约:缩进层级([E]→[S]→[T]→字段行);会话作过渡行(仅首现带 title),turn 行**不带** S 前缀;turn 行=方括号地址+(里程碑视图)日期时间+type 字形+title+尾部状态标;无计数徽章;↳ 行列前件**地址**;字段行与 filter.fields 词表同名(content,非 desc);卡片 sessions 行=裸 id 列表;0-row 行保留不折叠。
+
+补充裁决([S15069/T1032][S15069/T1035]):
+
+- **跨页引用自足**:开页落在会话中段时,该页首个 turn 行带全形 `[Sxx][Txx]`,同会话后续行保持裸形;过渡行契约不变。
+- **里程碑分级整体退役,不留历史债**:G0–G4 非但不渲染,评级机器本身(结算评级职责、等级直读)一并拆除;里程碑选举只走边信号字典序(第 0 键 overridden 除名、encodes 降序、refines 桶、时近)。
+- **turns 表溶解**:无表格形面;timeline 的 turn 视图=统一行形 + `metadata` 字段槽(time/gap/stats 之类),其他字段槽位默认只有 content(用户样例,逐字):
+
+```markdown
+[E31] title
+      
+    [S15069]
+        [T823] title [rewind]
+            metadata
+            - content: xxx
+            - 其他字段槽位（默认只有content）
+        [T824] title [rewind]
+            metadata
+            - content: xxx
+            - 其他字段槽位（默认只有content）
+```
+
+- **搜索形态与浏览形态的唯一差异=排序**(时间序 vs 相关性序);行形同一——命中加粗+邻域是 content 字段内的摘录规则,不构成第二形。
 
 ### 节奏与建段指导([S15069/T978] 增补)
 
