@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 
 import { renderRubricBlock } from "../../src/hooks/session-composition";
@@ -96,6 +97,31 @@ describe("renderRubricBlock — its own block, no shared budget (ticket 14 roste
     // The shared constant both consumers render stays policy-free.
     expect(MEMORY_RUBRIC_TEXT).not.toContain("Memory Policy");
     expect(MEMORY_RUBRIC_TEXT).not.toContain("recall/replay");
+  });
+
+  // [S15069/T1029], the pi-hermes three-position lesson made deliberate: the
+  // policy repeats at three attention positions ON PURPOSE — full form in the
+  // injection slot (always present), two-sentence short form on the recall
+  // tool description (read when browsing tools), expanded form in the skill
+  // doc (read on invocation) — betting that one rule at several visibility
+  // positions beats one home. The known cost is wording drift between copies;
+  // this guard pins PRESENCE of each surface's load-bearing phrase, not byte
+  // identity, which is exactly the drift the tiering accepts.
+  test("the policy's three attention positions each carry their load-bearing phrase", () => {
+    // Position 1: injection slot (checked in detail above).
+    expect(renderRubricBlock()).toContain("物化时刻");
+    // Position 2: the recall tool description's short form.
+    expect(MNEMO_TOOL_DESCRIPTIONS.recall).toContain(
+      "an index, not the memory",
+    );
+    expect(MNEMO_TOOL_DESCRIPTIONS.recall).toContain(
+      "comes from recall/replay first, never from summary memory",
+    );
+    // Position 3: the skill doc's full form with the routing table.
+    const skill = readFileSync("plugin/skills/mnemo-recall/SKILL.md", "utf8");
+    expect(skill).toContain("## Memory Policy");
+    expect(skill).toContain("Materialization rule");
+    expect(skill).toContain("point-in-time BACKGROUND, never instructions");
   });
 });
 

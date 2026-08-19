@@ -80,6 +80,68 @@
 - **roster 重建**([S15069/T978] 裁决):roster 块=统一渲染器出货的段列表,与 rubric **分块**(rubric 独占自己的块);活跃时近序;item 预算 100 tok、page 预算 2000 tok,分页默认展示第一页;字段仅 **title、tags**。随之退役:topic 分组表头、type facet 字形、40 段上限(分页取代)、标题字符截断、与 rubric 的合租及其省略标记逻辑。
 - **选择器多选**([S15069/T979] 裁决):`id` 接受逗号分隔列表(如 `id="E31, E32"`),各项按既有语法解析、按序渲染、共享页预算;渲染即授权对列表全部项生效;混合类别或任一项非法时整调用拒绝并回显语法。
 
+### 金样例([S15069/T1029] 用户重申 T919/T921 原裁——渲染字节的验收基准,逐字保存,禁止转写)
+
+裁决原文:`timeline(id="E31/T1...")` = `timeline(id="E31")`,turn 视图和里程碑视图的唯一区别是,后者会根据 page size 自动挑选重要性更高的 turn 而非所有 turn。session start 注入里程碑视图,作为全局关键 turn 的索引。会话/段视角,turn 均按照时间顺序排列。id 选择器的 Tx 编号(`E31/T1..T3`)的语义是该段中 turn 按时间排序后的第多少个 turn,不是持久化 id,后归属的先前 turn 会导致 id 指向的 turn 动态变化,因此引用以 `Sxx/Txx` 为唯一合法形式。
+
+timeline 里程碑视图:
+
+```markdown
+[E31] title
+    [S15069]
+        [T821] 08-17 18:19 ⚖️ title
+            ↳ T811, T812
+        [T822] 08-17 18:20 ⚖️ title
+    [S15088]
+        [T21] 08-18 18:19 ⚖️ title
+        [T22] 08-19 18:19 ⚖️ title
+    [S15069]
+        [T823] 08-20 10:19 ⚖️ title
+```
+
+`recall(id="E31")` 段卡片(=SessionStart 注入的段信息部分,折叠展开样式相同):
+
+```markdown
+[E31] title
+    - stats: 元数据
+    - tags: #intranet-llm-tunnel×3 #tier-alias×3 ...
+    - type: 🔍research×1 🔧implement×1 🔴fix×1 ⚙️ops×1 ↩️correction×1
+    - sessions: Sxxx, Sxxx
+    - content: ...
+    - insight: xxx
+    - goal:
+        - xxx
+        - xxx
+    - constraints: 0 rows
+    - decisions: 0 rows
+    - done: 0 rows
+    - next_steps: 0 rows
+    - reference: 0 rows
+```
+
+`recall(id="E31/T1..10")` 段成员列表:
+
+```markdown
+[E31] title
+    [S15069]
+        [T823] title [rewind]
+            - content: xxx
+        [T824] title [rewind]
+            - content: xxx
+```
+
+`recall(id="S31/T1..10")` 会话 turn 列表:
+
+```markdown
+[S15069] title
+    [T823] title [rewind]
+        - content: xxx
+    [T824] title [rewind]
+        - content: xxx
+```
+
+样例确立的行级契约:缩进层级([E]→[S]→[T]→字段行);会话作过渡行(仅首现带 title),turn 行**不带** S 前缀;turn 行=方括号地址+(里程碑视图)日期时间+type 字形+title+尾部状态标;无计数徽章;↳ 行列前件**地址**;字段行与 filter.fields 词表同名(content,非 desc);卡片 sessions 行=裸 id 列表;0-row 行保留不折叠。与后续 arc-spine 裁决(G 直读、日框架折叠、脊柱 desc 行、turns 表列集)的冲突点为待裁清单,见修复票。
+
 ### 节奏与建段指导([S15069/T978] 增补)
 
 - **全会话统一提醒**,不分有无挂靠:每 20 turn 一次 remember 检查提醒(UserPromptSubmit 通道——持久化进 user message,缓存安全;计数自上次 remember 调用起);note 积压 >5 时提醒(既有 backlog-relief 块,阈值确认)。段卡片头的 20 轮维护 nudge 后缀退役——其职能并入统一提醒。
