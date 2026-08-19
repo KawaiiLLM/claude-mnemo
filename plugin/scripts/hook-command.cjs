@@ -390,7 +390,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.12.0-mt05zv1j" : "dev";
+var BUILD_ID = true ? "0.12.1-mt08bpdy" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1903,14 +1903,18 @@ var SCHEMA_SQL = `
     -- reminder's own marker \u2014 "since the last remember call, any verb", a
     -- session-scoped fact no existing column carries (create/close/assign
     -- never even attribute a caller session on their own write paths, so
-    -- there is nothing to derive this from). NULL means "never called" \u2014
-    -- the reminder then counts from created_at_epoch instead (see
-    -- touchSessionRememberActivity in db/sessions.ts). Deliberately excluded
+    -- there is nothing to derive this from). Stores the session's MAX turn
+    -- ROW ID at the moment of the call (0 when no turn exists yet) \u2014 a turn
+    -- id, not an epoch, because second-granularity timestamps cannot order
+    -- turns against the call (peer round 2: same-second turns escaped the
+    -- strict greater-than comparison; the id boundary also retires the old
+    -- createdAtEpoch-minus-one fallback dance). NULL means "never called" \u2014 the
+    -- reminder then counts every turn (anchor 0). Deliberately excluded
     -- from upsertSession's UPDATE SET list, the same "own dedicated setter,
     -- never the general upsert" treatment parent_session_id/lineage_status
     -- already get, so a routine SessionStart/UserPromptSubmit upsert cannot
     -- clobber it back to NULL.
-    last_remember_epoch INTEGER,
+    last_remember_turn_id INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -3025,7 +3029,7 @@ function initializeSchema(db) {
   ensureSessionTranscriptPathColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
-  ensureSessionLastRememberEpochColumn(db);
+  ensureSessionLastRememberTurnIdColumn(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
@@ -3361,8 +3365,8 @@ function ensureSessionTranscriptPathColumn(db) {
 function ensureSessionSummaryUpdatedAtEpochColumn(db) {
   addColumnIfMissing(db, "sessions", "summary_updated_at_epoch", "INTEGER");
 }
-function ensureSessionLastRememberEpochColumn(db) {
-  addColumnIfMissing(db, "sessions", "last_remember_epoch", "INTEGER");
+function ensureSessionLastRememberTurnIdColumn(db) {
+  addColumnIfMissing(db, "sessions", "last_remember_turn_id", "INTEGER");
 }
 function ensureSessionSummaryFieldColumns(db) {
   for (const column of ["decision", "done", "current", "reference"]) {
@@ -3541,9 +3545,12 @@ function foldTopicNamesIntoSegmentTags(db) {
     if (!topicName) {
       continue;
     }
-    const bareTag = normalizeTopicNameToTag(topicName);
+    let bareTag = normalizeTopicNameToTag(topicName);
     if (bareTag === "") {
-      continue;
+      bareTag = `topic-${segment.topicId}`;
+      console.error(
+        `[claude-mnemo] topic registry retirement: topic ${segment.topicId} (${JSON.stringify(topicName)}) normalizes to an empty tag \u2014 folded as "${bareTag}"`
+      );
     }
     const memberTurnIds = db.query(
       "SELECT turn_id AS turnId FROM segment_members WHERE segment_id = ?"
@@ -5434,7 +5441,7 @@ var SESSION_SELECT = `
     scan_cursor_line AS scanCursorLine,
     parent_session_id AS parentSessionId,
     lineage_status AS lineageStatus,
-    last_remember_epoch AS lastRememberEpoch,
+    last_remember_turn_id AS lastRememberTurnId,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -5490,7 +5497,7 @@ function upsertSession(db, input) {
         scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
-        last_remember_epoch AS lastRememberEpoch,
+        last_remember_turn_id AS lastRememberTurnId,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -5534,6 +5541,14 @@ function touchSessionCompletion(db, sessionId, updatedAtEpoch, completedAtEpoch)
   db.query(
     `UPDATE sessions SET updated_at_epoch = ?, completed_at_epoch = ? WHERE id = ?`
   ).run(updatedAtEpoch, completedAtEpoch, sessionId);
+}
+function countTurnsAfterTurnId(db, sessionId, anchorTurnId) {
+  return db.query(
+    `SELECT COUNT(*) AS count FROM turns
+         WHERE session_id = ?
+           AND status != 'undone'
+           AND id > ?`
+  ).get(sessionId, anchorTurnId)?.count ?? 0;
 }
 function compareAndSetScanCursor(db, sessionId, byteOffset, lineNumber, observedByteOffset) {
   const result = db.query(
@@ -9297,6 +9312,7 @@ function renderSegmentRosterFeed(db, options = {}) {
   const segmentEraCutoffEpoch = options.segmentEraCutoffEpoch === void 0 ? SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH : options.segmentEraCutoffEpoch;
   const overflow = options.overflowAttachedSegmentIds ?? /* @__PURE__ */ new Set();
   const now = options.now ?? (() => Math.floor(Date.now() / 1e3));
+  const renderStartSequence = snapshotWriteGateSequence(db);
   const totalLive = countLiveSegments(db, segmentEraCutoffEpoch);
   const candidates = listLiveSegmentsByActivity(db, ROSTER_CANDIDATE_CAP, segmentEraCutoffEpoch);
   const header = `## Segment roster (${totalLive} live)`;
@@ -9328,13 +9344,12 @@ function renderSegmentRosterFeed(db, options = {}) {
   const clampedPage = Math.min(Math.max(1, page), pageCount);
   const pageItems = pages[clampedPage - 1] ?? [];
   if (options.readerId && pageItems.length > 0) {
-    const sequence = snapshotWriteGateSequence(db);
     recordReadGrants(
       db,
       options.readerId,
       pageItems.map((item) => ({ entityType: "segment", entityId: item.segmentId })),
       now(),
-      sequence
+      renderStartSequence
     );
   }
   return joinPage(
@@ -28671,11 +28686,10 @@ function createSessionInitHandler(dependencies) {
         if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
           reliefText = renderNoteBacklogRelief(owed);
         }
-        const rememberSinceEpoch = session.lastRememberEpoch ?? session.createdAtEpoch - 1;
-        const turnsSinceRemember = countTurnsSince(
+        const turnsSinceRemember = countTurnsAfterTurnId(
           dependencies.db,
           session.id,
-          rememberSinceEpoch
+          session.lastRememberTurnId ?? 0
         );
         if (isRememberReminderDue(turnsSinceRemember)) {
           rememberReminderText = renderRememberReminder(turnsSinceRemember);
