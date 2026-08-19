@@ -12,7 +12,11 @@ decoupling from window size is still pending the anchoring-eval verdict.
 
 **Blocked by:** 01 (landed, d397746).
 
-**Status:** ready-for-agent
+**Status:** done — subagent implementation landed as 70363b7 (2026-08-20);
+verified with a maxTurns-wiring mutation (configured-cap endpoint test red
+under mutation). Incident on record: the main session's own `git restore`
+during the mutation run wiped the subagent's uncommitted server.ts edits;
+reconstructed from the subagent's report, all other files untouched.
 
 ## Pinned decisions
 
