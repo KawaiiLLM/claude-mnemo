@@ -1027,4 +1027,51 @@ describe("ticket 08 — edge correction through the shared phase validator (requ
     expect(edges).toHaveLength(1);
     expect(edges[0]!.relation).toBeNull();
   });
+
+  test("a relation whose same-call type correction YIELDS to a late note is judged by the persisted type, not the never-landed proposal", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["design"] }); // decision-phase target: fine
+    // t2's PERSISTED type stays [] — no decision phase on the citing side.
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
+      NOW - 500,
+      { eligibleForRelation: "unrestricted" },
+    );
+    // The agent's own note lands AFTER this dispatch's context read: the
+    // review's note-derived half (type/tags) stands down. The proposed
+    // ["design"] below never reaches the database — so the refines edge may
+    // not ride on it either.
+    upsertShadowNote(db, {
+      turnId: t2,
+      title: "agent's own live account",
+      content: "written during the async gap between claim and this call",
+      nowEpoch: NOW + 5,
+    });
+    const job = claimWindow(db, sessionDbId, 1, 2);
+    const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
+    const context = baseContext(job, {
+      eligibleRelationPairKeys: snapshot,
+      reviewableTurnIds: new Set([t2]),
+      contextBuiltAtEpoch: NOW,
+    });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW + 6 });
+
+    const receipt = engine.stageNoteWrite({
+      turn: `S${sessionDbId}/T2`,
+      type: ["design"],
+      refines: [`S${sessionDbId}/T1`],
+    });
+
+    // Judged by the persisted [] type: refines lacks its decision half.
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    expect(receipt.content[0]!.text).toContain("decision-phase");
+    expect(engine.pendingCount()).toBe(0);
+    const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.relation).toBeNull();
+    expect(getTurnById(db, t2)!.type).toEqual([]);
+  });
 });

@@ -645,7 +645,16 @@ export function evaluateSettlementTurnWrite(
     // turn corrected to `["design"]` in the same call that also attaches
     // `refines` must be judged as a decision-phase turn, not by whatever it
     // carried before this write.
-    const citingPhases = phasesForTypes(normalizedType ?? turn.type);
+    //
+    // UNLESS the review just yielded: then the proposed type never reaches
+    // the database, and an edge judged by it would be a validator-endorsed
+    // illegal edge (citing type in the DB may carry no legal phase half at
+    // all). Post-write state IS the persisted `turn.type` in that branch —
+    // the same rule, followed to where the write actually landed.
+    const typeCorrectionLands = review === null || review.kind === "written";
+    const citingPhases = phasesForTypes(
+      typeCorrectionLands ? (normalizedType ?? turn.type) : turn.type,
+    );
     const candidates: Array<{ key: string; relation: TurnEdgeRelation; node: EdgeNode }> = [];
     const rejections: string[] = [];
     for (const [key, relation] of relationFields) {
