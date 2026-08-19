@@ -4,7 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
-import { createContextHandler } from "../../src/hooks/handlers/context";
+import { createContextHandler, createReadOnlyContextHandler } from "../../src/hooks/handlers/context";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import { listPendingQueueItems } from "../../src/db/pending-queue";
 
@@ -262,5 +262,31 @@ describe("handleContextHook", () => {
     expect(result.hookSpecificOutput).toContain("## Segment roster");
     const items = listPendingQueueItems(db, currentSessionId);
     expect(items.filter((item) => item.kind === "turn-stop").length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The rubric's OWN hook slot ([S1730/T931]: Claude Code collapses a single
+// hook output past ~10K chars to a 2KB persisted preview — two blocks
+// sharing one slot would collapse together exactly when the roster fills).
+// ---------------------------------------------------------------------------
+
+describe("SessionStart:rubric — the rubric ships through its own slot", () => {
+  test("the rubric section renders the full block with no db and no gating", async () => {
+    const handler = createReadOnlyContextHandler({}, "rubric");
+    const result = await handler(createInput({ sessionId: "any" }));
+    expect(result.continue).toBe(true);
+    expect(result.hookSpecificOutput).toContain("<mnemo-memory-rubric");
+    expect(result.hookSpecificOutput).toContain("## 建段");
+  });
+
+  test("the bare context body no longer carries the rubric (split, not concatenated)", async () => {
+    const freshDb = createDatabase(":memory:");
+    initializeSchema(freshDb);
+    const handler = createContextHandler({ db: freshDb });
+    const result = await handler(createInput({ sessionId: "split-check" }));
+    expect(result.hookSpecificOutput).toContain("## Segment roster");
+    expect(result.hookSpecificOutput).not.toContain("mnemo-memory-rubric");
+    freshDb.close();
   });
 });

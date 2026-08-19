@@ -113,6 +113,7 @@ export function createDefaultHookHandlers({
     ...createDefaultReadOnlyContextHandlers({ dataRoot }),
     ...segmentBlockHandlers,
     "SessionStart:digest": createReadOnlyContextHandler({ db }, "digest"),
+    "SessionStart:rubric": createReadOnlyContextHandler({}, "rubric"),
     "SessionStart:proposals": createProposalsContextHandler({ db }),
     "SessionStart:notes": createNoteTakingContextHandler(),
     SessionStart: createContextHandler(contextDependencies),
@@ -267,6 +268,11 @@ function getDefaultHandler(handlerKey: string): HookHandler | undefined {
   if (handlerKey === "SessionStart:digest") {
     return getDefaultDigestContextHandler();
   }
+  if (handlerKey === "SessionStart:rubric") {
+    // Pure prose, no db — construct directly rather than booting the full
+    // default-handler map for a block that never reads anything.
+    return createReadOnlyContextHandler({}, "rubric");
+  }
   if (handlerKey === "SessionStart:proposals") {
     return getDefaultProposalsContextHandler();
   }
@@ -329,13 +335,14 @@ type SegmentBlockSection = `segment${number}-fields` | `segment${number}-milesto
 function contextSectionFromCommandArguments(
   command?: string,
   section?: string,
-): "sessions" | "persona" | "digest" | "proposals" | "notes" | SegmentBlockSection {
+): "sessions" | "persona" | "digest" | "rubric" | "proposals" | "notes" | SegmentBlockSection {
   if (command !== "context") {
     return "sessions";
   }
   if (
     section === "persona" ||
     section === "digest" ||
+    section === "rubric" ||
     section === "proposals" ||
     section === "notes"
   ) {

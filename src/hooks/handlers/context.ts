@@ -50,7 +50,7 @@ export interface ContextHandlerDependencies
   eraCutoffEpoch?: number | null;
 }
 
-export type ContextSection = "sessions" | "persona" | "digest";
+export type ContextSection = "sessions" | "persona" | "digest" | "rubric";
 export type ReadOnlyContextSection = Exclude<ContextSection, "sessions">;
 
 function hasDocumentBody(document: string): boolean {
@@ -159,15 +159,18 @@ function buildContextOutput(
       )
     : undefined;
 
-  // Ticket 14 (roster rebuild): the rubric and the roster are now two
-  // SEPARATE blocks (no shared budget) — the rubric is fixed-length prose
-  // with no elision, the roster is a unified-renderer segment listing that
-  // records its own read grants under the current session's writer identity.
-  const rosterBlock = renderSegmentRosterBlock(db, {
+  // Ticket 14 (roster rebuild): the roster is a unified-renderer segment
+  // listing that records its own read grants under the current session's
+  // writer identity. The rubric ships through its OWN hook slot
+  // (`SessionStart:rubric`) rather than concatenated here: Claude Code
+  // persists a single hook output past ~10K chars to a file with a 2KB
+  // preview ([S1730/T931] measured 25KB → 2KB; MAX_INJECTED_BLOCK_CHARS'
+  // own doc comment), so two blocks sharing one slot would collapse
+  // TOGETHER exactly when the roster grows to its full page budget.
+  return renderSegmentRosterBlock(db, {
     overflowAttachedSegmentIds,
     readerId: currentSession ? sessionWriterId(currentSession.id) : null,
   });
-  return [renderRubricBlock(), "", rosterBlock].join("\n");
 }
 
 export function createReadOnlyContextHandler(
@@ -177,6 +180,13 @@ export function createReadOnlyContextHandler(
   return async function handleReadOnlyContextHook(
     _input: NormalizedHookInput,
   ): Promise<HookResult> {
+    // The Memory Rubric's own slot — pure prose, no db, no gating; its own
+    // ~10K hook budget so the roster's growth can never collapse it (or be
+    // collapsed by it) into Claude Code's 2KB persisted preview.
+    if (section === "rubric") {
+      return { continue: true, hookSpecificOutput: renderRubricBlock() };
+    }
+
     if (section === "persona") {
       if (!dependencies.memoryStore) {
         return { continue: true };
