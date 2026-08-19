@@ -4,57 +4,49 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
-import {
-  addSegmentMembers,
-  applySegmentWrites,
-  createSegment,
-  getSegment,
-} from "../../src/db/segments";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
-import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
+import { buildTimelineView, renderTimeline, timelineQuery } from "../../src/mcp/timeline";
 
 /**
  * Milestone rows nest under each segment line on the era side of an `S<n>`
- * view (ticket 03's own mechanism), rendered with the SAME admission rule
- * and the SAME minimal row a standalone `E<n>` view uses
- * (tests/mcp/timeline.segment-views.test.ts): state-cited admits
- * unconditionally, overflow demotes rather than paginating. This replaces
- * the pre-ticket-05 effGrade/day-budget nested renderer entirely — see that
- * file's own module comment for why a minimal row has nothing left for the
- * old two-phase degradation ladder to do.
- *
- * TICKET 06 (ownership-and-note-cadence spec, "选举机器拆除"): the election
- * A/B-tier half of the admission rule this fixture used to exercise
- * (`election_tier`, `src/election.ts`) is GONE — dead code cleanup, not a
- * rendering redesign, since tier never carried real production data. What
- * used to be "A-tier, not cited" and "two B-tier members" fixture turns are
- * now state-cited instead, which is the only admission mechanism left; the
- * budget-demote sweep (E4) still exercises the SAME shrink loop
- * (`selectSegmentMilestoneRows`'s `keptAlways`), just over cited rows
- * instead of B-tier ones.
+ * view (ticket 03's own mechanism). Ticket 12 (`会话视图里程碑并轨`) unified
+ * this admission rule onto the SAME lexicographic edge-signal selector the
+ * standalone `E<n>` route uses (`selectSegmentMilestonesByEdgeSignals`,
+ * ticket 09) — replacing the old state-citation/token-budget rule this file
+ * used to exercise (`selectSegmentMilestoneRows`, retired along with its own
+ * dedicated unit tests in tests/mcp/timeline.segment-views.test.ts). Key
+ * order and edge-free degradation are proven directly against the pure
+ * function in that file; this file proves the WIRING — that the `S<n>`
+ * nested route reaches the identical selection a standalone `E<n>` call
+ * would for the same segment, `pageSize` and era boundary.
  *
  * This fixture builds ONE session, following `seedEraFixture`'s construction
  * pattern (tests/mcp/segment-spine.test.ts): raw turn inserts, segments via
- * `createSegment`/`addSegmentMembers`, a structured `supersedes` edge via
- * `writeMemoryEdges`. It is a SEPARATE fixture rather than an edit to
- * `seedEraFixture`, so as not to disturb that file's own passing assertions.
+ * `createSegment`/`addSegmentMembers`, structured `encodes`/`override`/
+ * `supersedes` edges via `writeMemoryEdges`. It is a SEPARATE fixture rather
+ * than an edit to `seedEraFixture`, so as not to disturb that file's own
+ * passing assertions.
  *
- * Four era segments, each isolating one acceptance criterion:
+ * Three era segments, each isolating one acceptance criterion:
  *
- *   E1 "cited segment"    — T5  : state-cited (named in E1's own `content`).
- *   E2 "quiet segment"    — T10, T11 : neither turn is cited — admits
- *                                NOTHING. The byte-identical regression
- *                                segment.
- *   E3 "corrector segment" — T20 : state-cited.
- *                          — T21 : state-cited AND a corrector (supersedes
- *                                T19), so its ⚑ flag is directly visible.
- *                          — T19 : the superseded victim, deliberately NOT
- *                                cited — proves no ↳ pull-through: a turn
- *                                merely cited BY a corrector never surfaces
- *                                on its own.
- *   E4 "budget segment"   — T30, T31 : two state-cited members, used to
- *                                exercise the demote-under-budget-pressure
- *                                sweep.
+ *   E1 "encoded segment"   — T5 : admitted via a live `encodes` edge from an
+ *                                external turn (T6, not a segment member).
+ *   E2 "quiet segment"     — T10, T11 : neither turn carries any edge —
+ *                                BOTH admit, in event order (edge-free
+ *                                degrades to flat chronology, spec's own
+ *                                phrase — the opposite of the old
+ *                                state-citation rule's "nothing admits by
+ *                                default").
+ *   E3 "corrector segment" — T19 : overridden by an external turn (T22) —
+ *                                excluded outright, even though it is also
+ *                                a `supersedes` VICTIM (correction alone is
+ *                                not an exclusion signal any more than it is
+ *                                an admission one).
+ *                          — T20 : plain member, admits by flat chronology.
+ *                          — T21 : a corrector (supersedes T19) — admits the
+ *                                same way T20 does; the ⚑ flag is a display
+ *                                marker, independent of admission.
  */
 const CUTOFF = 1_950_000_000;
 
@@ -110,26 +102,33 @@ function seedSegmentMilestoneFixture(db: Database): {
     title: "legacy anchor",
   });
 
-  // An era compact marker: never a segment member, and — since the
-  // admission rule never reads `type` at all — it has no bearing on whether
-  // anything renders either way. Kept to prove it stays absent regardless.
-  ids.compactMarker = makeTurn(3, { type: "compact", title: null });
-
-  ids.cited = makeTurn(5, { type: "research", title: "bootstrap the arc" });
+  ids.encoded = makeTurn(5, { type: "research", title: "bootstrap the arc" });
+  ids.encoder = makeTurn(6, { type: "review", title: "encoder of E1" });
   ids.quietOne = makeTurn(10, { type: "design", title: "quiet middle step" });
   ids.quietTwo = makeTurn(11, { type: "design", title: "a second quiet step" });
+  ids.overridden = makeTurn(19, { type: "implement", title: "the overridden attempt" });
   ids.correctorCited = makeTurn(20, { type: "implement", title: "ship the corrected change" });
   ids.corrector = makeTurn(21, { type: "implement", title: "correct the approach" });
-  ids.victim = makeTurn(19, { type: "implement", title: "the superseded attempt" });
-  ids.budgetEarly = makeTurn(30, { type: "review", title: "budget row one" });
-  ids.budgetLate = makeTurn(31, { type: "review", title: "budget row two" });
+  ids.overrider = makeTurn(22, { type: "review", title: "overrides the attempt" });
 
   writeMemoryEdges(
     db,
     [
       {
+        citing: { kind: "turn" as const, id: ids.encoder! },
+        cited: { kind: "turn" as const, id: ids.encoded! },
+        relation: "encodes" as const,
+        provenance: "judged" as const,
+      },
+      {
+        citing: { kind: "turn" as const, id: ids.overrider! },
+        cited: { kind: "turn" as const, id: ids.overridden! },
+        relation: "override" as const,
+        provenance: "judged" as const,
+      },
+      {
         citing: { kind: "turn" as const, id: ids.corrector! },
-        cited: { kind: "turn" as const, id: ids.victim! },
+        cited: { kind: "turn" as const, id: ids.overridden! },
         relation: "supersedes" as const,
         provenance: "judged" as const,
       },
@@ -138,24 +137,13 @@ function seedSegmentMilestoneFixture(db: Database): {
     { eligibleForRelation: "unrestricted" },
   );
 
-  const citedSeg = createSegment(db, {
-    title: "cited segment",
+  const encodedSeg = createSegment(db, {
+    title: "encoded segment",
     type: ["research"],
     nowEpoch: CUTOFF,
   });
-  ids.segCited = citedSeg.id;
-  addSegmentMembers(db, citedSeg.id, [ids.cited!], CUTOFF);
-  applySegmentWrites(
-    db,
-    [
-      {
-        segmentId: citedSeg.id,
-        expectedRevision: getSegment(db, citedSeg.id)!.revision,
-        content: `Load-bearing: [S${sessionId}/T5].`,
-      },
-    ],
-    { nowEpoch: CUTOFF },
-  );
+  ids.segEncoded = encodedSeg.id;
+  addSegmentMembers(db, encodedSeg.id, [ids.encoded!], CUTOFF);
 
   const quietSeg = createSegment(db, {
     title: "quiet segment",
@@ -174,44 +162,14 @@ function seedSegmentMilestoneFixture(db: Database): {
   addSegmentMembers(
     db,
     correctorSeg.id,
-    [ids.correctorCited!, ids.corrector!, ids.victim!],
+    [ids.overridden!, ids.correctorCited!, ids.corrector!],
     CUTOFF,
-  );
-  applySegmentWrites(
-    db,
-    [
-      {
-        segmentId: correctorSeg.id,
-        expectedRevision: getSegment(db, correctorSeg.id)!.revision,
-        content: `Load-bearing: [S${sessionId}/T20], [S${sessionId}/T21].`,
-      },
-    ],
-    { nowEpoch: CUTOFF },
-  );
-
-  const budgetSeg = createSegment(db, {
-    title: "budget segment",
-    type: ["review"],
-    nowEpoch: CUTOFF,
-  });
-  ids.segBudget = budgetSeg.id;
-  addSegmentMembers(db, budgetSeg.id, [ids.budgetEarly!, ids.budgetLate!], CUTOFF);
-  applySegmentWrites(
-    db,
-    [
-      {
-        segmentId: budgetSeg.id,
-        expectedRevision: getSegment(db, budgetSeg.id)!.revision,
-        content: `Load-bearing: [S${sessionId}/T30], [S${sessionId}/T31].`,
-      },
-    ],
-    { nowEpoch: CUTOFF },
   );
 
   return { sessionId, ids };
 }
 
-describe("milestone rows nest under segment lines, minimal-row admission", () => {
+describe("milestone rows nest under segment lines, lexicographic edge-signal admission", () => {
   let db: Database;
   let sessionId: number;
   let ids: Record<string, number>;
@@ -244,33 +202,40 @@ describe("milestone rows nest under segment lines, minimal-row admission", () =>
   test("milestone rows appear under their own segment line, in event order", () => {
     const output = renderArc();
     const lines = output.split("\n");
-    const eCited = lines.findIndex((line) => line.includes(`[E${ids.segCited}]`));
+    const eEncoded = lines.findIndex((line) => line.includes(`[E${ids.segEncoded}]`));
     const eCorrector = lines.findIndex((line) => line.includes(`[E${ids.segCorrector}]`));
     const t5 = lines.findIndex((line) => line.includes("bootstrap the arc"));
     const t20 = lines.findIndex((line) => line.includes("ship the corrected change"));
     const t21 = lines.findIndex((line) => line.includes("correct the approach"));
 
-    expect(t5).toBeGreaterThan(eCited);
+    expect(t5).toBeGreaterThan(eEncoded);
     expect(t5).toBeLessThan(eCorrector);
     expect(t20).toBeGreaterThan(eCorrector);
     expect(t21).toBeGreaterThan(t20);
   });
 
-  test("admission: state-cited members appear; uncited members — including a corrector's own victim — never do", () => {
+  test("admission: edge-signal-ranked members appear; an overridden member is excluded outright", () => {
     const output = renderArc();
 
-    expect(output).toContain("bootstrap the arc"); // state-cited
-    expect(output).toContain("ship the corrected change"); // state-cited
-    expect(output).toContain("correct the approach"); // state-cited AND a corrector
-    expect(output).not.toContain("quiet middle step"); // uncited
-    expect(output).not.toContain("a second quiet step"); // uncited
-    // No ↳ pull-through — a turn that is merely cited BY a corrector (not
-    // itself state-cited) never surfaces, unlike the old effGrade-based
-    // antecedent mechanism.
-    expect(output).not.toContain("the superseded attempt");
+    expect(output).toContain("bootstrap the arc"); // encoded
+    expect(output).toContain("quiet middle step"); // edge-free, flat chronology
+    expect(output).toContain("a second quiet step"); // edge-free, flat chronology
+    expect(output).toContain("ship the corrected change"); // edge-free, flat chronology
+    expect(output).toContain("correct the approach"); // edge-free, flat chronology
+    // Overridden outright — even though it is also a `supersedes` VICTIM, the
+    // exclusion comes from key 0 (`overridden`), not from victimhood.
+    expect(output).not.toContain("the overridden attempt");
   });
 
-  test("minimal row: no grade label, no prompt excerpt, no antecedent counters; ⚑ marks a corrector, and only a corrector", () => {
+  test("correction (`supersedes`) is not itself an admission signal — the ⚑ flag is a display marker only", () => {
+    const output = renderArc();
+    const correctorRow = output.split("\n").find((line) => line.includes("correct the approach"))!;
+    expect(correctorRow).toContain("⚑");
+    const citedRow = output.split("\n").find((line) => line.includes("ship the corrected change"))!;
+    expect(citedRow).not.toContain("⚑");
+  });
+
+  test("minimal row: no grade label, no prompt excerpt, no antecedent counters", () => {
     const output = renderArc();
     // Scoped to the era spine block (before the legacy divider): the LEGACY
     // block still prints its own pre-existing `G<n>` grade column — this
@@ -279,22 +244,16 @@ describe("milestone rows nest under segment lines, minimal-row admission", () =>
     expect(spineBlock).not.toMatch(/G[0-4]/);
     expect(spineBlock).not.toContain("the user asked something"); // the shared prompt text — never on a milestone row
     expect(spineBlock).not.toContain("↳");
-
-    const correctorRow = output.split("\n").find((line) => line.includes("correct the approach"))!;
-    expect(correctorRow).toContain("⚑");
-    const citedRow = output.split("\n").find((line) => line.includes("ship the corrected change"))!;
-    expect(citedRow).not.toContain("⚑");
   });
 
-  test("a segment whose members are never cited renders byte-identically: the segment row alone, nothing nested", () => {
+  test("an edge-free segment admits all its members, in event order — edge-free degrades to flat chronology", () => {
     const output = renderArc();
-    const lines = output.split("\n");
-    const quietIndex = lines.findIndex((line) => line.includes(`[E${ids.segQuiet}]`));
-    const nextSegmentIndex = lines.findIndex(
-      (line, index) => index > quietIndex && line.startsWith("   [E"),
+    const quietBlock = output.split(`[E${ids.segQuiet}]`)[1]!.split("[E")[0]!;
+    expect(quietBlock).toContain("quiet middle step");
+    expect(quietBlock).toContain("a second quiet step");
+    expect(quietBlock.indexOf("quiet middle step")).toBeLessThan(
+      quietBlock.indexOf("a second quiet step"),
     );
-    expect(quietIndex).toBeGreaterThan(-1);
-    expect(nextSegmentIndex).toBe(quietIndex + 1);
   });
 
   test("the legacy selection still runs over legacy turns alone, unaffected by the era-side redesign", () => {
@@ -306,50 +265,64 @@ describe("milestone rows nest under segment lines, minimal-row admission", () =>
       "ship the corrected change",
       "correct the approach",
       "quiet middle step",
+      "the overridden attempt",
     ]) {
       expect(legacyBlock).not.toContain(eraTitle);
     }
   });
 
-  test("state-cited rows demote under a tight pageBudget — overflow demotes, never paginates", () => {
+  test("RenderTimelineOptions.pageBudget no longer affects the nested rows (ticket 12: pageSize governs selection, not this render-time budget)", () => {
+    const tight = renderArc({ pageBudget: 1 });
     const roomy = renderArc({ pageBudget: 100_000 });
-    expect(roomy).toContain("budget row one");
-    expect(roomy).toContain("budget row two");
-
-    const oneRowLine = roomy.split("\n").find((line) => line.includes("budget row one"))!;
-    // `estimateDiaryTokens` is exercised indirectly here through the same
-    // renderer; a budget of roughly one row's worth should admit at most one
-    // of the two cited candidates and demote the other.
-    const tight = renderArc({ pageBudget: Math.ceil(oneRowLine.length * 0.9) });
-    const budgetSegmentBlock = tight.split(`[E${ids.segBudget}]`)[1]?.split("[E")[0] ?? "";
-    const bothPresent =
-      budgetSegmentBlock.includes("budget row one") &&
-      budgetSegmentBlock.includes("budget row two");
-    expect(bothPresent).toBe(false);
-    expect(budgetSegmentBlock).toMatch(/… \+\d+ more/);
-  });
-
-  test("segment/orphan LINES survive a small pageBudget on their own — pageBudget only governs each segment's NESTED content", () => {
-    // No `tokenBudget` is set, so `shedSpineToBudget` never runs at all: every
-    // `[E<n>]` line in the spine is present regardless of how tight
-    // `pageBudget` (the per-segment nested-row governor) gets.
-    const output = renderArc({ pageBudget: 1 });
-    for (const segId of [ids.segCited, ids.segQuiet, ids.segCorrector, ids.segBudget]) {
-      expect(output).toContain(`[E${segId}]`);
-    }
+    expect(tight).toBe(roomy);
   });
 
   test("an outer tokenBudget still sheds whole segment/orphan lines (shedSpineToBudget, unchanged) once nested content cannot shrink further", () => {
     const generous = renderArc({ tokenBudget: 100_000 });
-    const segmentCount = ["segCited", "segQuiet", "segCorrector", "segBudget"].filter((key) =>
+    const segmentCount = ["segEncoded", "segQuiet", "segCorrector"].filter((key) =>
       generous.includes(`[E${ids[key]!}]`),
     ).length;
-    expect(segmentCount).toBe(4);
+    expect(segmentCount).toBe(3);
 
     const tiny = renderArc({ tokenBudget: 10 });
-    const tinySegmentCount = ["segCited", "segQuiet", "segCorrector", "segBudget"].filter((key) =>
+    const tinySegmentCount = ["segEncoded", "segQuiet", "segCorrector"].filter((key) =>
       tiny.includes(`[E${ids[key]!}]`),
     ).length;
-    expect(tinySegmentCount).toBeLessThan(4);
+    expect(tinySegmentCount).toBeLessThan(3);
+  });
+
+  test("dual assertion: the S<n> nested rows for a segment select IDENTICALLY to the standalone E<n> route, given the same pageSize and era boundary", () => {
+    const sOutput = renderArc();
+    const eOutput = timelineQuery(db, {
+      id: `E${ids.segCorrector}`,
+      view: "milestones",
+    });
+
+    // Same admitted titles, same exclusion (the overridden victim absent from
+    // both), same corrector flag.
+    for (const title of ["ship the corrected change", "correct the approach"]) {
+      expect(sOutput).toContain(title);
+      expect(eOutput).toContain(title);
+    }
+    expect(sOutput).not.toContain("the overridden attempt");
+    expect(eOutput).not.toContain("the overridden attempt");
+
+    // Row-for-row: the nested block under `[E<segCorrector>]` in the S<n>
+    // view and the standalone E<n> view's own row list are the SAME lines
+    // (`renderSegmentMilestoneRow` with the same titleCap default in both —
+    // DEFAULT_TITLE_CAP), proving the two routes share not just the
+    // admission decision but its exact rendering. Filtered to actual `T<n>`
+    // rows so the spine header line, the legacy block and the shape-signals
+    // footer — everything else the two full renders otherwise disagree on —
+    // never enter the comparison.
+    const rowPattern = /^\s*(⚑ )?T\d+ /;
+    const nestedLines = sOutput
+      .split(`[E${ids.segCorrector}]`)[1]!
+      .split("── legacy era")[0]!
+      .split("\n")
+      .filter((line) => rowPattern.test(line));
+    const standaloneLines = eOutput.split("\n").filter((line) => rowPattern.test(line));
+    expect(nestedLines.length).toBeGreaterThan(0);
+    expect(nestedLines).toEqual(standaloneLines);
   });
 });

@@ -5,7 +5,6 @@ import {
   type EffectiveCitations,
 } from "../db/citations";
 import {
-  getSegmentCitedTurnIds,
   getSegmentMembershipForTurns,
   listOrphanAnchorTurns,
   listSegmentSpineForSession,
@@ -81,17 +80,16 @@ export interface TimelineInput {
    */
   filter?: MemoryFilterInput;
   /**
-   * Ticket 05 (spec "Budgets"): the milestone view's size governor (state-cited
-   * ∪ A-tier admits unconditionally, B-tier fills whatever budget is left) and
-   * the turn view's per-page token ceiling — one number, both roles, default
+   * Ticket 05 (spec "Budgets"): the `E<n>` route's turn view's per-page token
+   * ceiling (`SegmentTimelineInput.pageBudget`), default
    * `DEFAULT_MILESTONE_PAGE_BUDGET` (1000, ADR-0006's per-segment share).
-   * Governs the era-side segment-nested milestone rows AND a standalone
-   * `E<n>` view alike; the legacy (pre-era) milestone body is unaffected — it
+   * Ticket 09/12: no longer either route's MILESTONES-view admission rule —
+   * `pageSize` drives that now, on both the standalone `E<n>` route and the
+   * `S<n>` era spine's own nested per-segment rows
+   * (`selectSegmentMilestonesByEdgeSignals`, shared by both — see
+   * `TimelineView.segmentMilestoneSelection`). The `S<n>` turn view paginates
+   * by item count, not this budget, and the legacy (pre-era) milestone body
    * keeps its own `RenderTimelineOptions.tokenBudget` ladder.
-   *
-   * NOT yet on the public MCP schema (`timelineInputShape`, definitions.ts) —
-   * that file was frozen for a parallel ticket while this one shipped; see
-   * this ticket's report for the schema addition still owed.
    */
   pageBudget?: number;
   /**
@@ -103,7 +101,15 @@ export interface TimelineInput {
   readerId?: string | null;
   /** Test seam for the read-grant timestamp; defaults to the real clock. */
   now?: () => number;
-  /** Ticket 09: forwarded to `SegmentTimelineInput.taskCausalityEraCutoffEpoch` on the `E<n>` route only — the turn-view/legacy `S<n>` path is unaffected. */
+  /**
+   * Ticket 09: forwarded to `SegmentTimelineInput.taskCausalityEraCutoffEpoch`
+   * on the standalone `E<n>` route. Ticket 12: ALSO threaded into the `S<n>`
+   * era spine's own nested per-segment milestone rows
+   * (`selectSegmentMilestonesByEdgeSignals`, shared with the `E<n>` route) —
+   * the two routes' admission must agree on the same fixture, so they now
+   * share this era-boundary input too. The turns-view/legacy-milestone-body
+   * path (`selectMilestoneTurns`) still ignores it, unchanged.
+   */
   taskCausalityEraCutoffEpoch?: number;
 }
 
@@ -165,15 +171,15 @@ export interface TimelineView {
   /** Era turns with hard mechanical signals that no segment claimed. */
   orphanAnchors: OrphanAnchorRow[];
   /**
-   * Ticket 05 (spec "Tools"/ADR-0006): raw material for each era segment's
-   * NESTED milestone rows — chronological members plus the segment's own
-   * state-cited turn ids — read once here (`buildTimelineView` has `db`) so
-   * the render-time admission decision (state-cited ∪ A-tier always, B-tier
-   * fills `pageBudget`) stays a pure function of `TimelineView` the way every
-   * other render step is. Keyed by segment id; only entries for segments in
-   * `segmentSpine`. Empty with no era cutoff.
+   * Ticket 05/12: the era spine's NESTED per-segment milestone selection —
+   * computed EAGERLY here (`buildTimelineView` has `db`), via the same
+   * lexicographic edge-signal rule (`selectSegmentMilestonesByEdgeSignals`)
+   * the standalone `E<n>` route uses, so the render-time step
+   * (`renderEraMilestoneLines`) stays a pure function of `TimelineView` the
+   * way every other render step is. Keyed by segment id; only entries for
+   * segments in `segmentSpine`. Empty with no era cutoff.
    */
-  segmentMilestoneMaterial: ReadonlyMap<number, SegmentMilestoneMaterial>;
+  segmentMilestoneSelection: ReadonlyMap<number, SegmentMilestoneEdgeSelection>;
   /**
    * Turn DB id → owning segment id, scoped to `eraWindowTurns` (spec D8:
    * membership is exclusive in practice, so this is a plain map, not a
@@ -182,13 +188,6 @@ export interface TimelineView {
    * anchor, which is a separate, pre-existing mechanism.
    */
   eraSegmentIdByTurnId: ReadonlyMap<number, number>;
-}
-
-/** See `TimelineView.segmentMilestoneMaterial`. */
-export interface SegmentMilestoneMaterial {
-  /** Chronological (event order), era-scoped — index+1 is the member's ordinal. */
-  members: RankedSegmentMember[];
-  citedTurnIds: ReadonlySet<number>;
 }
 
 export interface RenderTimelineOptions {
@@ -210,7 +209,13 @@ export interface RenderTimelineOptions {
    * rendered in full with one overflow note appended.
    */
   tokenBudget?: number;
-  /** See `TimelineInput.pageBudget`. Default `DEFAULT_MILESTONE_PAGE_BUDGET`. */
+  /**
+   * See `TimelineInput.pageBudget`. Ticket 12: no longer consumed by
+   * `renderTimeline` for the `S<n>` era spine's nested rows (selection now
+   * happens eagerly in `buildTimelineView`, keyed on `pageSize` — see
+   * `TimelineView.segmentMilestoneSelection`); kept on this type for schema
+   * stability with callers that still set it.
+   */
   pageBudget?: number;
 }
 
@@ -2073,18 +2078,29 @@ export function buildTimelineView(
   const orphanAnchors = renderSegments
     ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds)
     : [];
-  // Ticket 05: raw material for each spine segment's NESTED milestone rows —
-  // fetched once here (this function has `db`), so the render-time admission
-  // decision stays pure. One extra read per segment in the spine; the spine
-  // itself is "a few dozen" rows (segment-spine.ts), so this is not a
+  // Ticket 05/12: each spine segment's NESTED milestone rows — selected
+  // eagerly here (this function has `db`) via the SAME lexicographic
+  // edge-signal rule (`selectSegmentMilestonesByEdgeSignals`) the standalone
+  // `E<n>` route uses (ticket 09), so a given fixture selects identically
+  // through either route (this ticket's own acceptance criterion) and
+  // render-time stays pure. One extra read per segment in the spine; the
+  // spine itself is "a few dozen" rows (segment-spine.ts), so this is not a
   // meaningfully larger query load than the spine fetch it rides beside.
-  const segmentMilestoneMaterial = new Map<number, SegmentMilestoneMaterial>();
+  // Per-segment admission uses `DEFAULT_TIMELINE_PAGE_SIZE` — the same
+  // default the standalone route falls back to with no explicit `pageSize`
+  // — since `TimelineInput` carries no separate per-segment knob.
+  const segmentMilestoneSelection = new Map<number, SegmentMilestoneEdgeSelection>();
   if (renderSegments) {
     for (const row of segmentSpine) {
-      segmentMilestoneMaterial.set(row.segment.id, {
-        members: chronologicalSegmentMembers(db, row.segment, eraCutoffEpoch),
-        citedTurnIds: getSegmentCitedTurnIds(db, row.segment.id),
-      });
+      segmentMilestoneSelection.set(
+        row.segment.id,
+        selectSegmentMilestonesByEdgeSignals(
+          db,
+          chronologicalSegmentMembers(db, row.segment, eraCutoffEpoch),
+          DEFAULT_TIMELINE_PAGE_SIZE,
+          input.taskCausalityEraCutoffEpoch,
+        ),
+      );
     }
   }
   const eraSegmentIdByTurnId = renderSegments
@@ -2132,7 +2148,7 @@ export function buildTimelineView(
     eraWindowTurns,
     segmentSpine,
     orphanAnchors,
-    segmentMilestoneMaterial,
+    segmentMilestoneSelection,
     eraSegmentIdByTurnId,
   };
 }
@@ -3752,84 +3768,18 @@ export interface SegmentMilestoneRow {
   ordinal: number;
 }
 
-export interface SegmentMilestoneSelection {
-  /** Admitted rows, in event order. */
-  kept: SegmentMilestoneRow[];
-  /** Eligible rows (state-cited ∪ A ∪ B) the budget could not admit. */
-  demotedCount: number;
-}
-
-function sumRowTokens(
-  rows: readonly SegmentMilestoneRow[],
-  measureRow: (row: SegmentMilestoneRow) => number,
-): number {
-  return rows.reduce((sum, row) => sum + measureRow(row), 0);
-}
-
-/**
- * The segment milestone view's admission rule — the lossy skeleton, where
- * "every row matters, overflow demotes, never paginates" (as opposed to the
- * turn view's lossless ledger, which paginates and never filters).
- *
- * State-cited (a turn the segment's own Working State/summary fields cite —
- * `citedTurnIds`, from `getSegmentCitedTurnIds`) rows are admitted
- * UNCONDITIONALLY, in event order. Overflow demotes rather than paginates:
- * once the budget is exceeded, rows give way oldest first ("lowest-value...
- * by recency" — the newest cited row is the one most likely to still
- * matter).
- *
- * TICKET 06 (ownership-and-note-cadence spec, "选举机器拆除"): the election
- * A/B tier admission this function used to layer on top of state-citation
- * (A always-admitted, B fills remaining budget) is DEAD CODE CLEANUP, not a
- * rendering redesign — `election_tier` never carried real production data
- * (the era cutoff was never pinned), so the tier-filtered sets were always
- * empty and this function's OUTPUT for every real row is unchanged. What
- * remains is state-citation alone.
- *
- * Pure and rendering-agnostic: `measureRow` is the caller's own token cost for
- * one rendered row (title-cap-dependent, a render-time concern — see
- * `renderTimeline`'s callers), so this function knows nothing about row text.
- */
-export function selectSegmentMilestoneRows(
-  members: readonly RankedSegmentMember[],
-  citedTurnIds: ReadonlySet<number>,
-  budgetTokens: number,
-  measureRow: (row: SegmentMilestoneRow) => number,
-): SegmentMilestoneSelection {
-  const rows: SegmentMilestoneRow[] = members.map((member, index) => ({
-    member,
-    ordinal: index + 1,
-  }));
-  const always = rows.filter((row) => citedTurnIds.has(row.member.turnId));
-
-  let demoted = 0;
-  const keptAlways = [...always];
-  while (
-    keptAlways.length > 0 &&
-    sumRowTokens(keptAlways, measureRow) > budgetTokens
-  ) {
-    // Oldest first: `keptAlways` is still in event order (a filtered pass over
-    // `rows`, itself built in event order), so its head is the earliest row.
-    keptAlways.shift();
-    demoted += 1;
-  }
-
-  const keptOrdinals = new Set(keptAlways.map((row) => row.ordinal));
-  const kept = rows.filter((row) => keptOrdinals.has(row.ordinal));
-  return { kept, demotedCount: demoted };
-}
-
 // ---------------------------------------------------------------------------
 // Ticket 09 (read-write-contract spec, "里程碑"): the segment timeline's
 // (`timeline(id="E<n>")`) own milestone admission rule — LEXICOGRAPHIC over
-// `getTurnEdgeSignals`, filling `pageSize`, replacing the state-citation/
-// token-budget rule above for this ONE route. `selectSegmentMilestoneRows`
-// stays exactly as it was and stays the mechanism the `S<n>` session view's
-// OWN nested per-segment rows use (`renderEraMilestoneLines` below,
-// unchanged by this ticket) — a deliberate scoping call, not an oversight:
-// replacing that second, deeply-tested consumer's admission rule too is a
-// separate blast radius this ticket does not take on. See this ticket's
-// report for the full reasoning.
+// `getTurnEdgeSignals`, filling `pageSize`. Ticket 12 (`会话视图里程碑并轨`)
+// unified the `S<n>` session view's own nested per-segment rows onto this
+// SAME function (`renderEraMilestoneLines` below now calls it too, via
+// `TimelineView.segmentMilestoneSelection`, computed eagerly in
+// `buildTimelineView`) — the old state-citation/token-budget rule
+// (`selectSegmentMilestoneRows`) that used to serve that second consumer had
+// no remaining functional reference once this happened, and was removed
+// along with its dedicated unit tests, closing the scoping ticket 09 itself
+// flagged as owed.
 //
 // Key order (spec, pinned): (0) `overridden` — EXCLUDED outright, not merely
 // deprioritized; (1) `encodesCount` desc; (2) `refinesExcess.decision` desc,
@@ -3844,9 +3794,19 @@ export function selectSegmentMilestoneRows(
 // case coded here: with every signal at zero, only the recency key
 // discriminates, and the KEPT set always renders in event order regardless
 // of ranking order (same "selection ranks, display stays chronological"
-// split `selectMilestoneTurns` already uses) — so an edge-free segment's
-// top-`pageSize` selection IS its `pageSize` most recent members, in event
-// order, which is flat chronological by construction.
+// split `selectMilestoneTurns`'s own SEPARATE, still-live legacy-body
+// selection uses) — so an edge-free segment's top-`pageSize` selection IS
+// its `pageSize` most recent members, in event order, which is flat
+// chronological by construction.
+//
+// `selectMilestoneTurns` (the effGrade/correction-graph, session-WIDE
+// selection feeding the LEGACY pre-era milestone body — a different render
+// region from the era spine this module governs) is UNCHANGED by ticket 12:
+// its retirement was scoped OUT of this ticket — it also feeds the turns
+// view's `G` column (`TimelineView.turnEffGrades`) and its own large
+// integration-test surface across `timeline.test.ts`, both surfaces beyond
+// "the session view's milestone ROWS" this ticket unifies. Flagged in ticket
+// 12's own report as the STOP-clause call, matching ticket 09's precedent.
 // ---------------------------------------------------------------------------
 
 export interface SegmentMilestoneEdgeSelection {
@@ -3943,35 +3903,31 @@ function renderMilestoneDemotedPointer(demotedCount: number): string | null {
 /**
  * Milestone rows nested beneath each segment line in the S<n> era spine (spec
  * "Session (S) views: same minimal milestone row, same per-view overflow") —
- * one call per segment, from its own pre-fetched
- * `TimelineView.segmentMilestoneMaterial`. Each segment is self-bounded to
- * `pageBudget` (ADR-0006's per-segment share, default
- * `DEFAULT_MILESTONE_PAGE_BUDGET`): the SAME admission rule and the SAME
- * minimal row a standalone `E<n>` milestone view renders (`renderSegmentTimeline`
- * below) — a segment's nested content is byte-identical to what addressing it
- * directly would show.
+ * one call per segment, from its own pre-computed
+ * `TimelineView.segmentMilestoneSelection` (ticket 12: selected EAGERLY in
+ * `buildTimelineView` via `selectSegmentMilestonesByEdgeSignals`, the SAME
+ * lexicographic edge-signal rule and the SAME minimal row a standalone
+ * `E<n>` milestone view renders — a segment's nested content is
+ * byte-identical to what addressing it directly with the same `pageSize`
+ * and `taskCausalityEraCutoffEpoch` would show). This function is now purely
+ * a renderer: no admission decision happens here any more, matching every
+ * other render step's "pure function of `TimelineView`" discipline.
  *
- * Replaces the pre-ticket-05 effGrade/day-budget nested renderer entirely: a
- * minimal row carries no desc block and no ↳ antecedents to fold, so the old
- * two-phase degradation ladder (fold desc, then drop whole units) has nothing
- * left to do — each segment already self-bounds to `pageBudget`, and the
- * surviving outer-budget mechanism (`shedSpineToBudget`, unchanged) sheds
- * whole segment/orphan LINES when even that is not enough.
+ * Replaces the pre-ticket-05 effGrade/day-budget nested renderer, and then
+ * ticket-05's own state-citation/token-budget rule in turn: a minimal row
+ * carries no desc block and no ↳ antecedents to fold, so the old two-phase
+ * degradation ladder (fold desc, then drop whole units) has nothing left to
+ * do — each segment is already bounded at selection time, and the surviving
+ * outer-budget mechanism (`shedSpineToBudget`, unchanged) sheds whole
+ * segment/orphan LINES when even that is not enough.
  */
 function renderEraMilestoneLines(
   view: TimelineView,
   titleCap: number,
-  pageBudget: number,
   signal?: TruncationSignal,
 ): Map<number, readonly string[]> {
   const bySegment = new Map<number, string[]>();
-  for (const [segmentId, material] of view.segmentMilestoneMaterial) {
-    const selection = selectSegmentMilestoneRows(
-      material.members,
-      material.citedTurnIds,
-      pageBudget,
-      (row) => estimateDiaryTokens(renderSegmentMilestoneRow(row, titleCap, signal)),
-    );
+  for (const [segmentId, selection] of view.segmentMilestoneSelection) {
     const lines = selection.kept.map((row) =>
       renderSegmentMilestoneRow(row, titleCap, signal),
     );
@@ -3997,22 +3953,21 @@ export function renderTimeline(
 ): string {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
-  const pageBudget = options.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET;
   // One flag for the whole response (spec D1): every `truncateText` call this
   // render makes — turn table, phase list, or milestone body — reports into
   // it, so the day-fold `hiddenTurns` signal is no longer the only thing that
   // can trigger the navigation legend.
   const signal = createTruncationSignal();
-  // Segment-nested milestone rows (ticket 05): each segment self-bounds to
-  // `pageBudget` (state-cited ∪ A-tier admits unconditionally, B-tier fills
-  // what is left; overflow demotes), so this is already the fully-fitted
-  // render — no further degradation pass needed. Empty whenever there is no
-  // era cutoff or no admitted era row, which is what keeps a session with no
-  // segmented era turns byte-identical to the pre-nesting renderer (spec
-  // D6/D9).
+  // Segment-nested milestone rows (ticket 05/12): already selected and
+  // bounded (edge-signal ranking, `pageSize`-capped) in `buildTimelineView`,
+  // so this is already the fully-fitted render — no further degradation pass
+  // needed here, and `options.pageBudget` plays no role any more (see its
+  // doc comment). Empty whenever there is no era cutoff or no admitted era
+  // row, which is what keeps a session with no segmented era turns
+  // byte-identical to the pre-nesting renderer (spec D6/D9).
   const eraMilestoneLines: ReadonlyMap<number, readonly string[]> =
     view.view === "milestones"
-      ? renderEraMilestoneLines(view, titleCap, pageBudget, signal)
+      ? renderEraMilestoneLines(view, titleCap, signal)
       : new Map();
   // Spine lines are recomputed whenever the outer token budget sheds a whole
   // segment/orphan line; everything else in `assemble` is fixed.

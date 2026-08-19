@@ -4,7 +4,6 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
-import type { RankedSegmentMember } from "../../src/db/segment-rank";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { estimateDiaryTokens } from "../../src/diary/domain";
@@ -12,125 +11,26 @@ import {
   buildSegmentTimelineView,
   parseSegmentTimelineId,
   renderSegmentTimeline,
-  selectSegmentMilestoneRows,
   timelineQuery,
-  type SegmentMilestoneRow,
 } from "../../src/mcp/timeline";
 
 /**
  * `timeline(id="E<n>")` addressing a segment directly, in both views, plus
- * the pure admission function (`selectSegmentMilestoneRows`) both views
- * share with the S<n> era spine's nested rows
- * (see tests/mcp/timeline.era-milestones.test.ts).
+ * the pure admission function (`selectSegmentMilestonesByEdgeSignals`) both
+ * views share with the S<n> era spine's nested rows (ticket 12 — see
+ * tests/mcp/timeline.era-milestones.test.ts, which covers that function's
+ * lexicographic key order directly; this file exercises it through the
+ * `E<n>` route).
  *
  * TICKET 06 (ownership-and-note-cadence spec, "选举机器拆除"): the election
- * A/B-tier half of the admission rule (`election_tier`, `src/election.ts`)
- * is GONE — dead code cleanup, not a rendering redesign, since tier never
- * carried real production data. State-citation is the only admission
- * mechanism left; the tier-specific unit tests below (A-tier admission, the
- * B-tier budget filler) are removed along with the mechanism, not merely
- * adjusted — there is nothing left to assert about them. The budget-demote
- * sweep survives unchanged: it always ran over the SAME `keptAlways` list
- * this ticket leaves in place, just without a second B-tier list feeding
- * into it any more.
+ * A/B-tier half of the OLD state-citation admission rule (`election_tier`,
+ * `src/election.ts`) was already dead code before ticket 09 replaced the
+ * whole rule with the lexicographic edge-signal one below. The old
+ * state-citation/token-budget mechanism itself (`selectSegmentMilestoneRows`)
+ * and its own dedicated unit tests retired in ticket 12, once its last
+ * production caller (the S<n> era spine's nested rows) moved onto this same
+ * function.
  */
-
-// ---------------------------------------------------------------------------
-// selectSegmentMilestoneRows — the pure admission mechanism, mutation-tested
-// directly (no DB): state-cited admits unconditionally; overflow demotes
-// (drops outright) rather than paginating.
-// ---------------------------------------------------------------------------
-
-function fakeMember(
-  overrides: Partial<RankedSegmentMember> & { turnId: number },
-): RankedSegmentMember {
-  return {
-    turnId: overrides.turnId,
-    sessionId: overrides.sessionId ?? 1,
-    promptNumber: overrides.promptNumber ?? overrides.turnId,
-    title: overrides.title ?? `title ${overrides.turnId}`,
-    type: overrides.type ?? [],
-    status: overrides.status ?? "extracted",
-    createdAtEpoch: overrides.createdAtEpoch ?? 1_000_000 + overrides.turnId,
-    isCorrector: overrides.isCorrector ?? 0,
-    isRolledBack: overrides.isRolledBack ?? 0,
-    citedBy: overrides.citedBy ?? 0,
-    isDeliveryMember: overrides.isDeliveryMember ?? 0,
-    filesModifiedCount: overrides.filesModifiedCount ?? 0,
-  };
-}
-
-const FLAT_COST = (): number => 10;
-
-describe("selectSegmentMilestoneRows", () => {
-  test("admits a state-cited member", () => {
-    const m1 = fakeMember({ turnId: 1 });
-    const selection = selectSegmentMilestoneRows([m1], new Set([1]), 1000, FLAT_COST);
-    expect(selection.kept.map((row) => row.member.turnId)).toEqual([1]);
-    expect(selection.demotedCount).toBe(0);
-  });
-
-  test("a member with no citation is excluded", () => {
-    const uncited = fakeMember({ turnId: 1 });
-    const selection = selectSegmentMilestoneRows([uncited], new Set(), 1000, FLAT_COST);
-    expect(selection.kept).toHaveLength(0);
-    expect(selection.demotedCount).toBe(0); // never eligible, so not "demoted" either
-  });
-
-  test("a corrector with no citation is still excluded — correction alone is not an admission signal here", () => {
-    const corrector = fakeMember({ turnId: 1, isCorrector: 1 });
-    const selection = selectSegmentMilestoneRows([corrector], new Set(), 1000, FLAT_COST);
-    expect(selection.kept).toHaveLength(0);
-  });
-
-  test("mutation: disabling the cited branch drops a cited-only row (red without it)", () => {
-    const m1 = fakeMember({ turnId: 1 });
-    const withCited = selectSegmentMilestoneRows([m1], new Set([1]), 1000, FLAT_COST);
-    expect(withCited.kept).toHaveLength(1);
-    const withoutCited = selectSegmentMilestoneRows([m1], new Set(), 1000, FLAT_COST);
-    expect(withoutCited.kept).toHaveLength(0);
-  });
-
-  test("an over-budget always-admitted set demotes the OLDEST row first — overflow demotes, never paginates", () => {
-    const m1 = fakeMember({ turnId: 1 }); // event order 1, oldest
-    const m2 = fakeMember({ turnId: 2 });
-    const m3 = fakeMember({ turnId: 3 });
-    const cited = new Set([1, 2, 3]);
-    // budget 20: only 2 of 3 rows (10 each) fit.
-    const selection = selectSegmentMilestoneRows([m1, m2, m3], cited, 20, FLAT_COST);
-    expect(selection.kept.map((row) => row.member.turnId)).toEqual([2, 3]);
-    expect(selection.demotedCount).toBe(1);
-    // The function's signature carries no page/offset parameter at all: the
-    // demoted row is gone from `kept`, not moved to a later call's result —
-    // structurally the opposite of the turn view's `paginateByTokenBudget`,
-    // which is built precisely so every item DOES turn up on some page.
-  });
-
-  test("mutation: a larger budget admits strictly more of an over-budget cited set", () => {
-    const m1 = fakeMember({ turnId: 1 });
-    const m2 = fakeMember({ turnId: 2 });
-    const m3 = fakeMember({ turnId: 3 });
-    const cited = new Set([1, 2, 3]);
-    const tight = selectSegmentMilestoneRows([m1, m2, m3], cited, 20, FLAT_COST);
-    const loose = selectSegmentMilestoneRows([m1, m2, m3], cited, 30, FLAT_COST);
-    expect(tight.kept.length).toBeLessThan(loose.kept.length);
-    expect(loose.kept).toHaveLength(3);
-  });
-
-  test("kept rows render in event order, not citation-check order", () => {
-    const uncited = fakeMember({ turnId: 1 });
-    const citedA = fakeMember({ turnId: 2 });
-    const citedB = fakeMember({ turnId: 3 });
-    const selection = selectSegmentMilestoneRows(
-      [uncited, citedA, citedB],
-      new Set([2, 3]),
-      1000,
-      FLAT_COST,
-    );
-    expect(selection.kept.map((row) => row.member.turnId)).toEqual([2, 3]);
-    expect(selection.kept.map((row) => row.ordinal)).toEqual([2, 3]);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // `timeline(id="E<n>")` at the MCP seam.
@@ -231,13 +131,14 @@ describe("timeline(id=\"E<n>\") segment views", () => {
   });
 
   // Ticket 09 (read-write-contract spec, "里程碑"): the standalone `E<n>`
-  // milestones view's admission rule is now LEXICOGRAPHIC over
+  // milestones view's admission rule is LEXICOGRAPHIC over
   // `getTurnEdgeSignals` (`selectSegmentMilestonesByEdgeSignals`), filling
-  // `pageSize` — replacing the state-citation/token-budget rule these tests
-  // used to assert. Deliberately scoped to THIS route only: the `S<n>`
-  // session view's own nested per-segment rows keep using
-  // `selectSegmentMilestoneRows` unchanged (see that function's own updated
-  // doc comment) — its pure-function unit tests above are untouched.
+  // `pageSize` — replacing the old state-citation/token-budget rule these
+  // tests used to assert. Ticket 12 unified the `S<n>` session view's own
+  // nested per-segment rows onto this SAME function (see
+  // tests/mcp/timeline.era-milestones.test.ts's dual-assertion test), so
+  // what this describe block proves through the `E<n>` route now holds for
+  // both routes.
   describe("milestones view (lexicographic edge-signal selection)", () => {
     test("minimal row: no grade label, no prompt excerpt, no antecedent counters; the corrector flag survives", () => {
       const t1 = makeTurn(1, { title: "first member" });
