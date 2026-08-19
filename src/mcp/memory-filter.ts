@@ -45,10 +45,12 @@ export interface MemoryFilterInput {
   /** Substring match against files_read + files_modified. */
   file?: string;
   /**
-   * Ticket 07: which turn fields to render, any combination, replacing the
-   * collapsed/expanded field-set switch. Unset falls back to the caller's own
-   * depth-driven default. Not a scoping criterion (see `hasFilterCriteria`) —
-   * `filter: { fields: [...] }` alone does not force the search/listing path.
+   * Ticket 07/11: which turn fields to render, any combination — the SOLE
+   * field-selection mechanism (the collapsed/expanded depth switch it
+   * replaced has fully retired, ticket 11). Unset falls back to
+   * `format.ts`'s `DEFAULT_TURN_RENDER_FIELDS` (title + content). Not a
+   * scoping criterion (see `hasFilterCriteria`) — `filter: { fields: [...] }`
+   * alone does not force the search/listing path.
    */
   fields?: RecallTurnField[];
 }

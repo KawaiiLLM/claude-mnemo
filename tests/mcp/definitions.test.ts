@@ -17,17 +17,17 @@ import { estimateTokens } from "../../src/utils/token-estimate";
 import { z } from "zod";
 
 describe("recallInputSchema", () => {
-  it("accepts page + pageSize and rejects limit + the retired `depth` key (ticket 14 #9: the public key is `view`)", () => {
+  it("accepts page + pageSize and rejects limit + both retired depth-switch spellings (`depth` and `view`, ticket 11)", () => {
     const ok = recallInputSchema.parse({
       id: "S1",
-      view: "expanded",
+      filter: { fields: ["title", "content"] },
       page: 2,
       pageSize: 10,
     });
 
     expect(ok).toEqual({
       id: "S1",
-      view: "expanded",
+      filter: { fields: ["title", "content"] },
       page: 2,
       pageSize: 10,
     });
@@ -41,6 +41,11 @@ describe("recallInputSchema", () => {
     // The implementer's old name is gone, not aliased — `.strict()` rejects it.
     expect(() =>
       recallInputSchema.parse({ id: "S1", depth: "expanded" }),
+    ).toThrow();
+    // Ticket 11: `view` (the collapsed/expanded depth switch) retires too —
+    // rejected with a message naming its replacement (`filter.fields`).
+    expect(() =>
+      recallInputSchema.parse({ id: "S1", view: "expanded" }),
     ).toThrow();
   });
 
@@ -84,7 +89,14 @@ describe("recallInputSchema", () => {
 });
 
 describe("workerRecallInputShape", () => {
-  it("accepts truncate above the main-session cap", () => {
+  // Ticket 11: the worker-only `truncate` exemption retired along with the
+  // char-cap mechanism it fed — `workerRecallInputShape` is now IDENTICAL to
+  // the public shape (see its own comment in definitions.ts). This raw
+  // `z.object(...)` (built directly, bypassing `recallInputSchema`'s own
+  // rejecting `superRefine`) still parses a stray `truncate` as an ordinary,
+  // now-INERT optional number — `recallMemory` no longer reads it — rather
+  // than a still-meaningful above-cap exemption.
+  it("still parses a stray `truncate` key, now inert (RecallInput no longer reads it)", () => {
     expect(z.object(workerRecallInputShape).strict().parse({ truncate: 5000 })).toEqual({ truncate: 5000 });
   });
 });

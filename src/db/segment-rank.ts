@@ -1,6 +1,5 @@
 import type { Database } from "bun:sqlite";
 
-import { getOutgoingEdges } from "./memory-edges";
 import { parseQualifiedReferences } from "./references";
 import { getSegment, type SegmentRecord } from "./segments";
 import { isSegmentEra } from "../segment-era";
@@ -533,29 +532,6 @@ export function hasEraTurns(
   eraCutoffEpoch: number | null,
 ): boolean {
   return turns.some((turn) => isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch));
-}
-
-/**
- * A segment's "state-cited" turns (ticket 05, spec "Tools"/ADR-0006): every
- * turn its Working State and summary fields currently cite, over
- * `memory_edges` — the same graph `reconcileSegmentCitedPairs` (db/segments.ts)
- * keeps in sync with the segment's nine text fields on every write. This is
- * the live, authoritative membership test for "state-cited" milestone
- * admission: a turn a decisions/done/reference row names is exactly a turn the
- * graph already records as cited, so no second scan of the segment's prose is
- * needed here.
- */
-export function getSegmentCitedTurnIds(
-  db: Database,
-  segmentId: number,
-): ReadonlySet<number> {
-  const cited = new Set<number>();
-  for (const edge of getOutgoingEdges(db, { kind: "segment", id: segmentId })) {
-    if (edge.cited.kind === "turn") {
-      cited.add(edge.cited.id);
-    }
-  }
-  return cited;
 }
 
 /**

@@ -12,7 +12,7 @@ import {
   getSegment,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
-import { capTurnRenderToTokenBudget, DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED } from "../../src/mcp/format";
+import { capRenderToTokenBudget, DEFAULT_TURN_TOKEN_BUDGET, NAVIGATION_LEGEND } from "../../src/mcp/format";
 import { recallMemory } from "../../src/mcp/recall";
 import {
   elideSegmentCardFields,
@@ -125,22 +125,22 @@ describe("elideSegmentCardFields", () => {
 // "keep the label, trim the tail" direction).
 // ---------------------------------------------------------------------------
 
-describe("capTurnRenderToTokenBudget", () => {
+describe("capRenderToTokenBudget", () => {
   test("keeps the label line even when the budget is too small for anything else", () => {
     const rendered = ["  - [S1][T1] a title", "    - desc: filler text here"].join("\n");
-    const capped = capTurnRenderToTokenBudget(rendered, 1);
+    const capped = capRenderToTokenBudget(rendered, 1);
     expect(capped.split("\n")[0]).toBe("  - [S1][T1] a title");
-    expect(capped).toContain("turn truncated to fit");
+    expect(capped).toContain("truncated to fit");
   });
 
   test("leaves a render under budget untouched", () => {
     const rendered = "  - [S1][T1] short";
-    expect(capTurnRenderToTokenBudget(rendered, 1000)).toBe(rendered);
+    expect(capRenderToTokenBudget(rendered, 1000)).toBe(rendered);
   });
 
   test("undefined budget means uncapped", () => {
     const rendered = "x".repeat(5000);
-    expect(capTurnRenderToTokenBudget(rendered, undefined)).toBe(rendered);
+    expect(capRenderToTokenBudget(rendered, undefined)).toBe(rendered);
   });
 });
 
@@ -409,7 +409,7 @@ describe("recall(id=\"E<n>\") segment card", () => {
     expect(output).toContain("ship the fix");
   });
 
-  test("expanded never elides — all rows render regardless of the page budget", () => {
+  test("page 2 never elides — all rows render regardless of the page budget", () => {
     for (let index = 0; index < 5; index += 1) {
       appendSegmentWorkingStateRows(
         db,
@@ -420,15 +420,15 @@ describe("recall(id=\"E<n>\") segment card", () => {
       );
     }
 
-    const output = recallMemory(db, { id: `E${segmentId}`, depth: "expanded", pageBudget: 5 });
+    const output = recallMemory(db, { id: `E${segmentId}`, page: 2, pageBudget: 5 });
     for (let index = 0; index < 5; index += 1) {
       expect(output).toContain(`decision number ${index}`);
     }
     expect(output).not.toContain("… +");
   });
 
-  test("expanded carries a member index in event order with each member's S/T home address", () => {
-    const output = recallMemory(db, { id: `E${segmentId}`, depth: "expanded" });
+  test("page 2 carries a member index in event order with each member's S/T home address", () => {
+    const output = recallMemory(db, { id: `E${segmentId}`, page: 2 });
     expect(output).toContain("member index");
     expect(output).toContain(`1. S${sessionId}/T1 "research the card"`);
     expect(output).toContain(`2. S${sessionId}/T2 "implement the card"`);
@@ -487,9 +487,9 @@ describe("recall(id=\"E<n>\") segment card", () => {
 
   // ---- election/tier absence ----
 
-  test("election/tier data appears nowhere in the card, at either depth", () => {
+  test("election/tier data appears nowhere in the card, at either page", () => {
     const collapsed = recallMemory(db, { id: `E${segmentId}` });
-    const expanded = recallMemory(db, { id: `E${segmentId}`, depth: "expanded" });
+    const expanded = recallMemory(db, { id: `E${segmentId}`, page: 2 });
     for (const output of [collapsed, expanded]) {
       expect(output.toLowerCase()).not.toContain("election");
       expect(output.toLowerCase()).not.toContain("tier");
@@ -545,8 +545,11 @@ describe("turn field-set switch (collapsed = prompt/title/content; expanded adds
     expect(output).not.toContain("a lesson learned");
   });
 
-  test("expanded adds insight and response on top of the collapsed field set", () => {
-    const output = recallMemory(db, { id: `S${sessionId}/T1`, depth: "expanded" });
+  test("filter.fields adds insight and response on top of the default field set", () => {
+    const output = recallMemory(db, {
+      id: `S${sessionId}/T1`,
+      filter: { fields: ["title", "content", "prompt", "response", "insight"] },
+    });
     expect(output).toContain("the note title");
     expect(output).toContain("the note content");
     expect(output).toContain("the raw user prompt");
@@ -603,31 +606,43 @@ describe("per-turn token budget (`turn` param)", () => {
 
     expect(estimateTokens(uncapped)).toBeGreaterThan(5);
     expect(capped).toContain("long turn"); // the label always survives
-    expect(capped).toContain("turn truncated to fit");
+    expect(capped).toContain("truncated to fit");
     expect(capped.length).toBeLessThan(uncapped.length);
   });
 
-  test("collapsed defaults to a card-scale cap without an explicit `turn`", () => {
-    // `truncate: 2000` lifts the CHARACTER-level cap out of the way (the
-    // stored content is ~1840 chars, under the 2000 cap) so what remains to
-    // explain any cut is the NEW per-turn TOKEN budget's own default.
-    const output = recallMemory(db, { id: `S${sessionId}/T1`, truncate: 2000 });
-    expect(output).toContain("turn truncated to fit");
-    expect(estimateTokens(output)).toBeLessThan(DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED + 20);
+  test("defaults to a card-scale cap without an explicit `turn` — no char knob left to lift it", () => {
+    const output = recallMemory(db, { id: `S${sessionId}/T1` });
+    expect(output).toContain("truncated to fit");
+    // Measure the capped BLOCK alone — `recallMemory` appends the one
+    // response-wide navigation legend on top, which is not part of the
+    // per-item budget this test is pinning.
+    const withoutLegend = output.replace(`\n\n${NAVIGATION_LEGEND}`, "");
+    expect(estimateTokens(withoutLegend)).toBeLessThan(DEFAULT_TURN_TOKEN_BUDGET + 20);
   });
 
-  test("expanded defaults to uncapped — the same long content survives at truncate: 2000", () => {
-    const longContent = "a very long note body ".repeat(80);
-    const output = recallMemory(db, {
+  // Ticket 11: `expanded`'s "default uncapped" retired along with `depth` —
+  // there is no more uncapped state (spec: every node kind always has a
+  // finite per-item budget). Widening `filter.fields` alone does NOT widen
+  // the budget; a caller after more content raises `turn` too.
+  test("widening filter.fields alone does not lift the cap — turn must be raised explicitly", () => {
+    const widerFields = recallMemory(db, {
       id: `S${sessionId}/T1`,
-      depth: "expanded",
-      truncate: 2000,
+      filter: { fields: ["title", "content", "prompt", "response", "insight"] },
     });
-    // Well past DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED (150) worth of content
-    // survives — proof nothing capped it — because expanded's default is
-    // uncapped, per spec "Budgets".
-    expect(output).toContain(longContent.trim().slice(0, 1000));
-    expect(estimateTokens(output)).toBeGreaterThan(DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED * 2);
+    const widerFieldsWithoutLegend = widerFields.replace(`\n\n${NAVIGATION_LEGEND}`, "");
+    expect(estimateTokens(widerFieldsWithoutLegend)).toBeLessThan(DEFAULT_TURN_TOKEN_BUDGET + 20);
+
+    const longContent = "a very long note body ".repeat(80);
+    const raisedBudget = recallMemory(db, {
+      id: `S${sessionId}/T1`,
+      filter: { fields: ["title", "content", "prompt", "response", "insight"] },
+      turn: 2000,
+    });
+    // Well past DEFAULT_TURN_TOKEN_BUDGET (150) worth of content survives —
+    // proof it was the raised `turn` budget, not `filter.fields`, that let
+    // it through.
+    expect(raisedBudget).toContain(longContent.trim().slice(0, 1000));
+    expect(estimateTokens(raisedBudget)).toBeGreaterThan(DEFAULT_TURN_TOKEN_BUDGET * 2);
   });
 });
 

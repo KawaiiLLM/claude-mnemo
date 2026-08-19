@@ -27,15 +27,17 @@ import { typeListsEqual } from "../shared/type-vocabulary";
 import {
   appendNavigationLegend,
   createTruncationSignal,
-  DEFAULT_TRUNCATE,
-  DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED,
+  DEFAULT_TURN_RENDER_FIELDS,
+  DEFAULT_TURN_TOKEN_BUDGET,
   REWIND_MARKER,
   renderNode,
+  resolveTurnFields,
   truncateText,
   type FormattedObservation,
   type FormattedSession,
   type FormattedTurn,
   type TruncationSignal,
+  type TurnRenderFields,
 } from "./format";
 import {
   hasFilterCriteria,
@@ -71,15 +73,8 @@ export interface RecallInput {
    * kept as a deprecated alias.
    */
   filter?: MemoryFilterInput;
-  depth?: "collapsed" | "expanded";
   page?: number;
   pageSize?: number;
-  // Ticket 04: retired from the PUBLIC schema (`recallInputSchema` rejects a
-  // supplied `truncate` with a message naming its replacements) — this
-  // internal field survives because the worker surface
-  // (`workerRecallInputShape`) and every test calling `recallMemory`
-  // directly still use it.
-  truncate?: number;
   /**
    * Ticket 03 (spec "Budgets"): the segment card's own token budget (default
    * `SEGMENT_CARD_DEFAULT_PAGE_BUDGET` = 1000). Named distinctly from `page`
@@ -93,9 +88,10 @@ export interface RecallInput {
    */
   pageBudget?: number;
   /**
-   * Ticket 03: per-turn token cap (spec "Budgets": "a per-turn budget...
-   * recall card-scale [default for collapsed], expanded default uncapped").
-   * Applies wherever a turn renders through `renderNode` (format.ts).
+   * Ticket 03/11: per-item token cap (spec "Budgets") — the SOLE size knob
+   * left on every rendered session/turn/observation block, default
+   * `DEFAULT_TURN_TOKEN_BUDGET` (150). Applies wherever a node renders
+   * through `renderNode` (format.ts); word-boundary cut, never a char count.
    */
   turn?: number;
   // Internal worker-only flag. When set, rendered turns append a `dbid:T<dbid>`
@@ -103,8 +99,6 @@ export interface RecallInput {
   // on the public `recallInputShape` (definitions.ts) — wired through the
   // handler-construction `audience` option (handlers.ts) instead.
   includeDbTurnIds?: boolean;
-  // Internal audience rendering policy. Public/main callers leave this unset.
-  truncateCap?: number;
   /**
    * P2 era boundary (spec D11). Observations created at or after it render
    * their mechanical fields (tool name + input/result prefixes) because nothing
@@ -527,42 +521,36 @@ function deriveBreadcrumb(
   return `continues from ${parentRef}`;
 }
 
+/**
+ * `recall(id="S<n>")` — the one full session-DETAIL route. Ticket 11 retired
+ * the collapsed/expanded depth switch that used to decide whether this
+ * showed a turn preview at all: with no toggle left, it always does (bounded
+ * by `CHILD_PREVIEW_SIZE` as before), and always includes the raw transcript
+ * pointer — a caller after JUST the session's own summary line, with no
+ * turns, uses `filter.fields` to render each previewed turn minimally rather
+ * than suppressing the preview outright.
+ */
 function renderSession(
   db: Database,
   session: NonNullable<ReturnType<typeof getSession>>,
-  depth: "collapsed" | "expanded",
-  truncate?: number,
-  turnSelector?: Set<number>,
-  includeDbTurnIds?: boolean,
-  truncateCap?: number,
+  fields: TurnRenderFields,
+  turnSelector: Set<number> | undefined,
+  includeDbTurnIds: boolean | undefined,
   eraCutoffEpoch: number | null = null,
-  signal?: TruncationSignal,
+  signal: TruncationSignal | undefined,
+  turnBudget: number | undefined,
 ): string {
-  const view = depth === "expanded"
-    ? buildSessionView(db, session, eraCutoffEpoch)
-    : buildSessionSummary(db, session.id, eraCutoffEpoch) ??
-      buildSessionView(db, session, eraCutoffEpoch);
+  const view = buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
     renderNode(
       { type: "session", value: view },
-      {
-        depth: depth === "collapsed" ? "collapsed" : "expanded",
-        mode: "unified",
-        truncate,
-        includeDbTurnIds,
-        truncateCap,
-        signal,
-      },
+      { includeRawPointer: true, turnBudget, signal },
     ),
   ];
 
   if (breadcrumb !== null) {
     lines.push(`  ${breadcrumb}`);
-  }
-
-  if (depth === "collapsed") {
-    return lines.join("\n");
   }
 
   const turns = getTurnsForSession(db, session.id).filter((turn) =>
@@ -575,12 +563,10 @@ function renderSession(
     const turnLines = renderNode(
       { type: "turn", value: turnView },
       {
-        depth: "collapsed",
-        mode: "unified",
+        fields,
         sessionId: session.id,
-        truncate,
         includeDbTurnIds,
-        truncateCap,
+        turnBudget,
         signal,
       },
     );
@@ -597,10 +583,8 @@ function renderSession(
 function renderTurnScope(
   db: Database,
   turns: TurnRecord[],
-  depth: "collapsed" | "expanded",
-  truncate?: number,
+  fields: TurnRenderFields,
   includeDbTurnIds?: boolean,
-  truncateCap?: number,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   turnBudget?: number,
@@ -626,10 +610,7 @@ function renderTurnScope(
       continue;
     }
     lines.push(
-      renderNode(
-        { type: "session", value: view },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal },
-      ),
+      renderNode({ type: "session", value: view }, { turnBudget, signal }),
     );
 
     const sessionTurns = grouped.get(session.id) ?? [];
@@ -639,12 +620,9 @@ function renderTurnScope(
         renderNode(
           { type: "turn", value: turnView },
           {
-            depth,
-            mode: "unified",
+            fields,
             sessionId: session.id,
-            truncate,
             includeDbTurnIds,
-            truncateCap,
             signal,
             turnBudget,
           },
@@ -659,13 +637,11 @@ function renderTurnScope(
 function renderObservationScope(
   db: Database,
   observations: Array<{ sessionId: number; turnId: number; observationId: number }>,
-  depth: "collapsed" | "expanded",
   includeParents: boolean,
-  truncate?: number,
   includeDbTurnIds?: boolean,
-  truncateCap?: number,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
+  turnBudget?: number,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, Map<number, number[]>>();
@@ -695,13 +671,7 @@ function renderObservationScope(
       lines.push(
         renderNode(
           { type: "observation", value: observationView },
-          {
-            depth: depth === "collapsed" ? "collapsed" : "expanded",
-            mode: "unified",
-            truncate,
-            truncateCap,
-            signal,
-          },
+          { turnBudget, signal },
         ),
       );
     }
@@ -722,10 +692,7 @@ function renderObservationScope(
       continue;
     }
     lines.push(
-      renderNode(
-        { type: "session", value: sessionView },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal },
-      ),
+      renderNode({ type: "session", value: sessionView }, { turnBudget, signal }),
     );
     const turnMap = grouped.get(session.id) ?? new Map<number, number[]>();
     const turns = getTurnsForSession(db, session.id).filter((turn) =>
@@ -738,12 +705,9 @@ function renderObservationScope(
         renderNode(
           { type: "turn", value: turnView },
           {
-            depth: "collapsed",
-            mode: "unified",
             sessionId: session.id,
-            truncate,
             includeDbTurnIds,
-            truncateCap,
+            turnBudget,
             signal,
           },
         ),
@@ -767,13 +731,10 @@ function renderObservationScope(
           renderNode(
             { type: "observation", value: observationView },
             {
-              depth: depth === "collapsed" ? "collapsed" : "expanded",
-              mode: "unified",
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate,
-              truncateCap,
+              turnBudget,
               signal,
             },
           ),
@@ -844,25 +805,23 @@ function buildOwnedObservationView(
 function renderSessionDetail(
   db: Database,
   sessionId: number,
-  depth: "collapsed" | "expanded",
-  truncate?: number,
-  includeDbTurnIds?: boolean,
-  truncateCap?: number,
+  fields: TurnRenderFields,
+  includeDbTurnIds: boolean | undefined,
   eraCutoffEpoch: number | null = null,
-  signal?: TruncationSignal,
+  signal: TruncationSignal | undefined,
+  turnBudget: number | undefined,
 ): string {
   const session = getSession(db, sessionId);
   return session
     ? renderSession(
         db,
         session,
-        depth,
-        truncate,
+        fields,
         undefined,
         includeDbTurnIds,
-        truncateCap,
         eraCutoffEpoch,
         signal,
+        turnBudget,
       )
     : "Session not found.";
 }
@@ -870,11 +829,9 @@ function renderSessionDetail(
 function renderObservationDetail(
   db: Database,
   observationId: number,
-  depth: "collapsed" | "expanded",
-  truncate?: number,
-  truncateCap?: number,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
+  turnBudget?: number,
 ): string {
   const observation = getObservation(db, observationId);
   // Every listing route already drops excluded rows, so direct addressing must
@@ -885,16 +842,7 @@ function renderObservationDetail(
   }
 
   const view = buildOwnedObservationView(db, observation, eraCutoffEpoch);
-  return renderNode(
-    { type: "observation", value: view },
-    {
-      depth: depth === "collapsed" ? "collapsed" : "expanded",
-      mode: "unified",
-      truncate,
-      truncateCap,
-      signal,
-    },
-  );
+  return renderNode({ type: "observation", value: view }, { turnBudget, signal });
 }
 
 /**
@@ -959,11 +907,11 @@ function buildSegmentFacts(
   };
 }
 
-/** One collapsed `[E<n>]` line, as a search hit renders it. */
+/** One collapsed `[E<n>]` line, as a search hit renders it — `turnBudget` (tokens) converts to a char limit the same way the browse feed's own field cuts do. */
 function renderSegmentSummary(
   db: Database,
   segmentId: number,
-  truncate?: number,
+  turnBudget: number | undefined,
   eraCutoffEpoch: number | null = null,
 ): string | null {
   const segment = getSegment(db, segmentId);
@@ -977,7 +925,7 @@ function renderSegmentSummary(
     dominantType: facts.dominantType,
     phaseTrace: facts.phaseTrace,
     anchorRefs: facts.anchorRefs,
-    truncate: truncate ?? DEFAULT_TRUNCATE,
+    charLimit: Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN),
   }).join("\n");
 }
 
@@ -1209,10 +1157,9 @@ function withSearchSnippet<T extends { content?: string | null }>(
 function renderGroupedSearchResults(
   db: Database,
   results: SearchMemoryResult[],
-  depth: "collapsed" | "expanded",
-  truncate?: number,
+  fields: TurnRenderFields,
+  turnBudget: number | undefined,
   includeDbTurnIds?: boolean,
-  truncateCap?: number,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   queryText?: string,
@@ -1220,7 +1167,10 @@ function renderGroupedSearchResults(
   now: () => number = () => Math.floor(Date.now() / 1000),
 ): string {
   const terms = queryText ? extractQueryTerms(queryText) : [];
-  const snippetWindow = truncate ?? DEFAULT_TRUNCATE;
+  // Ticket 11: the snippet window used to be the retired `truncate` char
+  // param directly; it is now derived from the `turn` TOKEN budget, same
+  // 4-chars-per-token conversion the browse feed's own field cuts use.
+  const snippetWindow = Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN);
   // Score order (spec: "分数序替代时序"): `results` already arrived in
   // relevance order (`searchQueryResults`) — this map lets turns within a
   // session group render in THAT order (best rank first) instead of
@@ -1238,7 +1188,7 @@ function renderGroupedSearchResults(
   const segmentLines = results
     .filter((result) => result.layer === "segment")
     .map((result) => {
-      const line = renderSegmentSummary(db, result.sourceId, truncate, eraCutoffEpoch);
+      const line = renderSegmentSummary(db, result.sourceId, turnBudget, eraCutoffEpoch);
       if (line !== null) {
         grants.push({ entityType: "segment", entityId: result.sourceId });
       }
@@ -1310,7 +1260,7 @@ function renderGroupedSearchResults(
       );
       return renderNode(
         { type: "session", value: sessionView },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal },
+        { turnBudget, signal },
       );
     }
 
@@ -1324,7 +1274,7 @@ function renderGroupedSearchResults(
     const lines = [
       renderNode(
         { type: "session", value: sessionView },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal },
+        { turnBudget, signal },
       ),
     ];
     // Score order (spec: "分数序替代时序"): turns within this session group
@@ -1353,21 +1303,24 @@ function renderGroupedSearchResults(
         snippetWindow,
         signal,
       );
-      const turnDepth =
+      // A turn pulled in only via an observation hit (never itself a direct
+      // turn-layer hit) renders at the DEFAULT field set regardless of what
+      // the caller asked for — same "collapsed" floor the pre-ticket-11
+      // depth switch gave it; a turn that WAS itself a direct hit gets the
+      // caller's own field selection.
+      const turnFields =
         group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id)
-          ? "collapsed"
-          : depth;
+          ? DEFAULT_TURN_RENDER_FIELDS
+          : fields;
 
       lines.push(
         renderNode(
           { type: "turn", value: turnView },
           {
-            depth: turnDepth,
-            mode: "unified",
+            fields: turnFields,
             sessionId: session.id,
-            truncate,
             includeDbTurnIds,
-            truncateCap,
+            turnBudget,
             signal,
           },
         ),
@@ -1390,13 +1343,10 @@ function renderGroupedSearchResults(
           renderNode(
             { type: "observation", value: observationView },
             {
-              depth: depth === "collapsed" ? "collapsed" : "expanded",
-              mode: "unified",
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate,
-              truncateCap,
+              turnBudget,
               signal,
             },
           ),
@@ -1420,14 +1370,12 @@ function renderGroupedSearchResults(
 function renderRoutedId(
   db: Database,
   routed: RoutedRecallId,
-  depth: "collapsed" | "expanded",
+  fields: TurnRenderFields,
   page: number,
   pageSize: number,
-  truncate?: number,
   after?: number,
   before?: number,
   includeDbTurnIds?: boolean,
-  truncateCap?: number,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   pageBudget?: number,
@@ -1467,12 +1415,11 @@ function renderRoutedId(
           renderSessionDetail(
             db,
             sessionId,
-            depth,
-            truncate,
+            fields,
             includeDbTurnIds,
-            truncateCap,
             eraCutoffEpoch,
             signal,
+            turnBudget,
           ),
         )
         .join("\n"),
@@ -1489,12 +1436,9 @@ function renderRoutedId(
     if (routed.segmentIds && routed.segmentIds.length === 1) {
       recordGrants([{ entityType: "segment", entityId: routed.segmentIds[0]! }]);
       return renderSegmentCard(db, routed.segmentIds[0]!, {
-        depth,
         pageBudget,
         page,
         turnBudget,
-        truncate,
-        truncateCap,
         includeDbTurnIds,
         eraCutoffEpoch,
         signal,
@@ -1516,12 +1460,9 @@ function renderRoutedId(
       paged.items
         .map((segmentId) =>
           renderSegmentCard(db, segmentId, {
-            depth,
             pageBudget,
             page: 1,
             turnBudget,
-            truncate,
-            truncateCap,
             includeDbTurnIds,
             eraCutoffEpoch,
             signal,
@@ -1562,9 +1503,7 @@ function renderRoutedId(
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderSegmentMembersByOrdinal(db, routed.segmentId, paged.items, {
-        depth,
-        truncate,
-        truncateCap,
+        fields,
         includeDbTurnIds,
         turnBudget,
         eraCutoffEpoch,
@@ -1591,10 +1530,8 @@ function renderRoutedId(
       renderTurnScope(
         db,
         paged.items,
-        depth,
-        truncate,
+        fields,
         includeDbTurnIds,
-        truncateCap,
         eraCutoffEpoch,
         signal,
         turnBudget,
@@ -1612,10 +1549,8 @@ function renderRoutedId(
     return renderTurnScope(
       db,
       [turn],
-      depth,
-      truncate,
+      fields,
       includeDbTurnIds,
-      truncateCap,
       eraCutoffEpoch,
       signal,
       turnBudget,
@@ -1650,13 +1585,11 @@ function renderRoutedId(
       renderObservationScope(
         db,
         paged.items,
-        depth,
         true,
-        truncate,
         includeDbTurnIds,
-        truncateCap,
         eraCutoffEpoch,
         signal,
+        turnBudget,
       ),
       paged.pageCount,
     );
@@ -1688,13 +1621,11 @@ function renderRoutedId(
       renderObservationScope(
         db,
         paged.items,
-        depth,
         true,
-        truncate,
         includeDbTurnIds,
-        truncateCap,
         eraCutoffEpoch,
         signal,
+        turnBudget,
       ),
       paged.pageCount,
     );
@@ -1704,11 +1635,9 @@ function renderRoutedId(
     return renderObservationDetail(
       db,
       routed.observationId,
-      depth,
-      truncate,
-      truncateCap,
       eraCutoffEpoch,
       signal,
+      turnBudget,
     );
   }
 
@@ -2020,12 +1949,9 @@ function buildBrowseFeed(
  */
 function renderBareOverview(
   db: Database,
-  depth: "collapsed" | "expanded",
   page: number,
   pageSize: number,
-  truncate?: number,
   includeDbTurnIds?: boolean,
-  truncateCap?: number,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   pageBudget?: number,
@@ -2051,12 +1977,9 @@ function renderBareOverview(
         }
         parts.push(
           renderSegmentCard(db, segment.id, {
-            depth,
             pageBudget,
             page: 1,
             turnBudget,
-            truncate,
-            truncateCap,
             includeDbTurnIds,
             eraCutoffEpoch,
             signal,
@@ -2125,18 +2048,18 @@ function recallMemoryBody(
   input: RecallInput,
   signal: TruncationSignal,
 ): string {
-  const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
   const includeDbTurnIds = input.includeDbTurnIds ?? false;
-  const truncate = input.truncate ?? DEFAULT_TRUNCATE;
-  const truncateCap = input.truncateCap;
   const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
   const pageBudget = input.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
-  // "default card-scale for collapsed, uncapped for expanded" (spec
-  // "Budgets") — a caller's explicit `turn` always wins; only the DEFAULT
-  // (nothing supplied) depends on depth.
-  const turnBudget = input.turn ?? (depth === "collapsed" ? DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED : undefined);
+  // Ticket 11: no more depth-dependent default — every render always has a
+  // finite per-item token budget (spec: "obs 恒截断，由 turn 预算驱动",
+  // generalized to every node kind). A caller's explicit `turn` always wins.
+  const turnBudget = input.turn ?? DEFAULT_TURN_TOKEN_BUDGET;
+  // Ticket 11: `filter.fields` is the SOLE field-selection mechanism — no
+  // more depth-driven default field set.
+  const fields = resolveTurnFields(input.filter?.fields);
   // Ticket 04: the ONE structured filter, AND-composed with `id`, and (below)
   // with `query`. Replaces the retired top-level `time` param and the
   // in-query prefix dialect alike.
@@ -2155,14 +2078,12 @@ function recallMemoryBody(
     return renderRoutedId(
       db,
       routed,
-      depth,
+      fields,
       page,
       pageSize,
-      truncate,
       filter.after,
       filter.before,
       includeDbTurnIds,
-      truncateCap,
       eraCutoffEpoch,
       signal,
       pageBudget,
@@ -2209,10 +2130,9 @@ function recallMemoryBody(
       renderGroupedSearchResults(
         db,
         paged.items,
-        depth,
-        truncate,
+        fields,
+        turnBudget,
         includeDbTurnIds,
-        truncateCap,
         eraCutoffEpoch,
         signal,
         text || undefined,
@@ -2225,12 +2145,9 @@ function recallMemoryBody(
 
   return renderBareOverview(
     db,
-    depth,
     page,
     pageSize,
-    truncate,
     includeDbTurnIds,
-    truncateCap,
     eraCutoffEpoch,
     signal,
     pageBudget,

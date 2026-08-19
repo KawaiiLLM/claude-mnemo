@@ -631,7 +631,7 @@ export function parseTimelineId(id: string): ParsedId {
 
   if (/^\d+$/.test(rangeValue)) {
     throw new Error(
-      `timeline does not accept single turn forms; use recall(id='S${sessionId}/T${rangeValue}', depth='expanded') instead`,
+      `timeline does not accept single turn forms; use recall(id='S${sessionId}/T${rangeValue}') instead`,
     );
   }
 

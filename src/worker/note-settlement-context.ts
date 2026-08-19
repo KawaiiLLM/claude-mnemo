@@ -9,13 +9,13 @@ import { claimWriterId, recordReadGrants, type ReadGrantEntry } from "../db/writ
 import { renderSessionMilestoneInjection } from "../hooks/milestone-injection";
 import { formatTurnAddress } from "../hooks/note-reminder";
 import { buildCollapsedTurnsForSession, recallMemory } from "../mcp/recall";
-import { formatTurnCollapsed, type FormattedTurn } from "../mcp/format";
+import { formatTurnCompact, type FormattedTurn } from "../mcp/format";
 
 /**
  * Settlement context assembly (ownership-and-note-cadence spec, ticket 05).
  *
  * Everything the settlement call reads is rendered by the SAME builders the
- * live surfaces use — `buildCollapsedTurnsForSession` + `formatTurnCollapsed`
+ * live surfaces use — `buildCollapsedTurnsForSession` + `formatTurnCompact`
  * for the preceding turns AND the window turns,
  * `renderSessionMilestoneInjection` for the arc, and `recallMemory` itself —
  * the unified renderer — for the session summary (read-write-contract spec,
@@ -237,7 +237,7 @@ export function buildNoteSettlementContext(
       ref: formatTurnAddress(turn),
       note,
       collapsedRendering: collapsedView
-        ? formatTurnCollapsed(
+        ? formatTurnCompact(
             note
               ? { ...collapsedView, title: note.title, content: note.content }
               : collapsedView,
@@ -288,18 +288,18 @@ export function buildNoteSettlementContext(
     // (read-write-contract spec: "结算消费方传大 turn 预算(全文可见)").
     // Settlement is the session narrative's only writer, so its prompt must
     // carry the FULL current title/content — a truncated prefix plus a
-    // whole-overwrite is the tail-loss path the peer review named. All three
-    // knobs raised together (C's finding: `turn` alone still leaves the
-    // per-field char cut underneath); ticket 11 retires the two char knobs,
-    // leaving `turn` as the only knife here. `readerId` doubles as the
-    // read-grant recording seam: this render is what licenses the facade's
-    // gated session write below.
+    // whole-overwrite is the tail-loss path the peer review named. Ticket 11
+    // retired the two char knobs (`truncate`/`truncateCap`) that used to
+    // need raising alongside `turn` (C's finding: `turn` alone left the
+    // per-field char cut underneath) — every field-level char cap is gone
+    // now, so `turn` (the one surviving token budget, applied uniformly to
+    // every rendered node kind — see `format.ts`'s `renderNode`) is the only
+    // knife left to raise. `readerId` doubles as the read-grant recording
+    // seam: this render is what licenses the facade's gated session write
+    // below.
     sessionStateRendering: recallMemory(db, {
       id: `S${job.sessionId}`,
-      depth: "expanded",
       turn: SETTLEMENT_FULL_RENDER_BUDGET,
-      truncate: SETTLEMENT_FULL_RENDER_BUDGET,
-      truncateCap: SETTLEMENT_FULL_RENDER_BUDGET,
       readerId: claimWriterId(job.id, job.claimGeneration),
       now: () => options.nowEpoch,
     }),

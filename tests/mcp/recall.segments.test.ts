@@ -162,7 +162,7 @@ describe("recall segment selector and cross-granularity filters", () => {
   // MEMBER INDEX in EVENT order instead (spec D9 user story 21), and members
   // are read individually through `E<n>/T<m>` ordinal addressing.
   test("the expanded card's member index lists members in event order, not anchor/rank order", () => {
-    const lines = recallMemory(db, { id: `E${segmentId}`, depth: "expanded" }).split("\n");
+    const lines = recallMemory(db, { id: `E${segmentId}`, page: 2 }).split("\n");
     const indexLines = lines.filter((line) => /^\s*-\s+\d+\.\s+S\d+\/T\d+/.test(line));
 
     // research(T1) design(T2) implement(T3) were created in that prompt-number
@@ -189,13 +189,13 @@ describe("recall segment selector and cross-granularity filters", () => {
     });
     addSegmentMembers(db, segmentId, [legacy], CUTOFF);
 
-    const era = recallMemory(db, { id: `E${segmentId}`, eraCutoffEpoch: CUTOFF, depth: "expanded" });
+    const era = recallMemory(db, { id: `E${segmentId}`, eraCutoffEpoch: CUTOFF, page: 2 });
     expect(era).toContain("3 turns");
     expect(era).not.toContain("legacy fix before the switch");
 
     // No cutoff means no partition — the whole membership is still readable,
     // which is what keeps `E<n>` usable before ticket 09 sets a cutoff.
-    const unpartitioned = recallMemory(db, { id: `E${segmentId}`, depth: "expanded" });
+    const unpartitioned = recallMemory(db, { id: `E${segmentId}`, page: 2 });
     expect(unpartitioned).toContain("4 turns");
     expect(unpartitioned).toContain("legacy fix before the switch");
   });
@@ -379,7 +379,7 @@ describe("acceptance: recalling one task does not drag another task's memory alo
   });
 
   test("drilling into the card segment never surfaces the harness line", () => {
-    const output = recallMemory(db, { id: `E${cardSegmentId}`, depth: "expanded" });
+    const output = recallMemory(db, { id: `E${cardSegmentId}`, page: 2 });
 
     expect(output).toContain("CARD_MARKER_9f2a");
     expect(output).toContain("extract card ruleset from bundle");
@@ -394,7 +394,7 @@ describe("acceptance: recalling one task does not drag another task's memory alo
   });
 
   test("drilling into the harness segment never surfaces the card line", () => {
-    const output = recallMemory(db, { id: `E${harnessSegmentId}`, depth: "expanded" });
+    const output = recallMemory(db, { id: `E${harnessSegmentId}`, page: 2 });
 
     expect(output).toContain("HARNESS_MARKER_7c31");
     expect(output).toContain("retry queue backoff timer");
@@ -561,19 +561,34 @@ describe("observation rows render the call they were, on the era side", () => {
     expect(output).not.toContain("rg --files-with-matches");
   });
 
-  test("the projected call respects the truncate budget", () => {
-    const output = recallMemory(db, {
+  // Ticket 11: the char `truncate` budget (and the header/line char caps it
+  // fed) retired outright — an observation is now capped ONLY by the `turn`
+  // token budget (spec: "obs 恒截断，由 turn 预算驱动"), applied to the
+  // WHOLE rendered block (label + tool line + body), word-boundary, exactly
+  // like every other node kind.
+  test("the projected call respects the turn token budget", () => {
+    const fullOutput = recallMemory(db, {
       id: `O${observationId}`,
       eraCutoffEpoch: CUTOFF,
-      truncate: 10,
+      turn: 1000,
+    });
+    const tightOutput = recallMemory(db, {
+      id: `O${observationId}`,
+      eraCutoffEpoch: CUTOFF,
+      turn: 12,
     });
 
-    // The header spends its budget on the argument and keeps the tool name
-    // whole, so the whole call line fits the ten characters it was given; the
-    // body is cut by whole lines, and the one line it keeps by its own cap.
-    expect(output).toContain(`[O${observationId}] Bash(rg …)`);
-    expect(output).toContain("    src/worker…");
-    expect(output).toContain("    … +1 lines");
+    // The label — the only thing identifying which observation this is —
+    // survives even a budget too small for it, WHOLE (never itself cut).
+    expect(tightOutput).toContain(
+      `[O${observationId}] Bash(rg --files-with-matches watchdog src/)`,
+    );
+    // A bigger budget shows strictly more of the same content — the second
+    // stdout line only survives when there is room for it.
+    expect(fullOutput).toContain("src/worker/server.ts");
+    expect(fullOutput).toContain("src/worker/diary-runtime.ts");
+    expect(tightOutput).not.toContain("diary-runtime.ts");
+    expect(tightOutput).toContain("… truncated to fit the per-item token budget");
   });
 });
 
@@ -643,7 +658,7 @@ describe("an observation's era is its owning turn's era", () => {
     expect(
       recallMemory(db, {
         id: `S${sessionId}/T1`,
-        depth: "expanded",
+        filter: { fields: ["title", "content", "observations"] },
         eraCutoffEpoch: CUTOFF,
       }),
     ).not.toContain("Bash(");
@@ -659,7 +674,7 @@ describe("an observation's era is its owning turn's era", () => {
     expect(
       recallMemory(db, {
         id: `S${sessionId}/T2`,
-        depth: "expanded",
+        filter: { fields: ["title", "content", "observations"] },
         eraCutoffEpoch: CUTOFF,
       }),
     ).toContain("Bash(rg --files-with-matches watchdog src/)");

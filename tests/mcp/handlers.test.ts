@@ -30,13 +30,13 @@ describe("database-backed MCP handlers", () => {
     expect(
       recallInputSchema.parse({
         id: "S1/T2",
-        view: "expanded",
+        filter: { fields: ["title", "content"] },
         page: 2,
         pageSize: 10,
       }),
     ).toEqual({
       id: "S1/T2",
-      view: "expanded",
+      filter: { fields: ["title", "content"] },
       page: 2,
       pageSize: 10,
     });
@@ -53,11 +53,18 @@ describe("database-backed MCP handlers", () => {
         view: "full",
       }),
     ).toThrow();
-    // Ticket 04: `truncate` retires from the public surface.
+    // Ticket 04/11: `truncate` and `view` (the depth switch) both retire
+    // from the public surface.
     expect(() =>
       recallInputSchema.parse({
         id: "S1",
         truncate: 500,
+      }),
+    ).toThrow();
+    expect(() =>
+      recallInputSchema.parse({
+        id: "S1",
+        view: "expanded",
       }),
     ).toThrow();
   });
@@ -183,8 +190,7 @@ describe("database-backed MCP handlers", () => {
     const worker = createDatabaseBackedHandlers(db, { audience: "worker" });
     const longResult = await worker.recall?.({
       id: `S${session.id}`,
-      view: "expanded",
-      truncate: 5_000,
+      turn: 5_000,
     });
     expect(longResult?.content[0]?.text).toContain(visible);
     expect(longResult?.content[0]?.text).not.toContain("hidden");
@@ -195,8 +201,11 @@ describe("database-backed MCP handlers", () => {
     );
     const capped = await worker.recall?.({
       id: `S${session.id}`,
-      view: "expanded",
-      truncate: WORKER_TOOL_RESULT_MAX_CHARS + 10_000,
+      // Ticket 11: `turn` (tokens) is what lifts recall's OWN per-item cap
+      // out of the way now — `WORKER_TOOL_RESULT_MAX_CHARS` chars is well
+      // under that many tokens, so the outer char cap below is what
+      // actually gates this result, same as before.
+      turn: WORKER_TOOL_RESULT_MAX_CHARS + 10_000,
     });
     expect(capped?.content[0]?.text.length).toBe(WORKER_TOOL_RESULT_MAX_CHARS);
     expect(capped?.content[0]?.text).toEndWith(WORKER_TOOL_RESULT_TRUNCATION_HINT);

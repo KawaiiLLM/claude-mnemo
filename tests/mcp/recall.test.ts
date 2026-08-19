@@ -206,8 +206,9 @@ describe("recallMemory", () => {
         id: "S1/T1",
         // ticket 04: `query` is pure FTS text now — no in-string dialect.
         query: "auth",
-        filter: { type: "bugfix", time: "1970-01-01" },
-        view: "expanded",
+        // ticket 11: `filter.fields` is the field-selection surface now —
+        // `view` (the depth switch) has retired, see below.
+        filter: { type: "bugfix", time: "1970-01-01", fields: ["title", "content"] },
         page: 1,
         pageSize: 5,
       }),
@@ -216,8 +217,10 @@ describe("recallMemory", () => {
     expect(recallInputSchema.safeParse({ session: authSessionId }).success).toBe(false);
     expect(recallInputSchema.safeParse({ view: "sessions" }).success).toBe(false);
     expect(recallInputSchema.safeParse({ project: "claude-mnemo" }).success).toBe(false);
-    // ticket 04: `truncate` retired from the public surface.
+    // ticket 04/11: `truncate` and `view` (the collapsed/expanded depth
+    // switch) both retired from the public surface.
     expect(recallInputSchema.safeParse({ id: "S1", truncate: 200 }).success).toBe(false);
+    expect(recallInputSchema.safeParse({ id: "S1", view: "expanded" }).success).toBe(false);
   });
 
   // Ticket 07 (read-write-contract spec, "视图(读面)"): bare recall() now
@@ -263,17 +266,19 @@ describe("recallMemory", () => {
   });
 
   test("routes simplified ids for session, turn, and observation detail", () => {
+    // Ticket 11: `depth` retired — a session-DETAIL route always shows its
+    // raw pointer and a turn preview now (no more collapsed/expanded toggle
+    // to suppress it); `filter.fields` is what widens a turn's own field set
+    // beyond the default (title/content/prompt).
     const sessionOutput = recallMemory(db, {
       id: `S${authSessionId}`,
-      depth: "expanded",
     });
     const turnOutput = recallMemory(db, {
       id: `S${authSessionId}/T1`,
-      depth: "expanded",
+      filter: { fields: ["title", "content", "prompt", "observations"] },
     });
     const observationOutput = recallMemory(db, {
       id: `O${authObservationId}`,
-      depth: "expanded",
     });
 
     expect(sessionOutput).toContain(`[S${authSessionId}] Auth race fix`);
@@ -281,9 +286,9 @@ describe("recallMemory", () => {
       `raw: ${resolveTranscriptPath("claude-mnemo", "session-2")}`,
     );
     expect(sessionOutput).toContain("[T1:L4] Diagnose auth race");
-    // ticket 03: the turn field-set switch makes collapsed = prompt/title/
-    // content, so the session view's own collapsed turn preview now carries
-    // the prompt line too — this used to be expanded-only.
+    // The default field set (title/content/prompt) already carries the
+    // prompt line on the session's own turn preview — no `filter.fields`
+    // needed to see it there.
     expect(sessionOutput).toContain('prompt: "Why am I getting 401 errors?"');
     expect(sessionOutput).not.toContain("[O1] Auth mutex");
 
@@ -334,7 +339,12 @@ describe("recallMemory", () => {
     expect(output).toContain(`[S${authSessionId}][T2] Follow-up`);
   });
 
-  test("honors truncate when expanding a turn", () => {
+  // Ticket 11 (read-write-contract spec, "视图(读面)"): the char `truncate`/
+  // `truncateCap` knobs retired outright — field cutting is driven ONLY by
+  // the `turn` token budget now, word-boundary. Same content at two
+  // different `turn` budgets must render different cuts, with no char-count
+  // parameter involved anywhere in the call.
+  test("same content at two different turn budgets renders different word-boundary cuts, with no char-count knob", () => {
     saveTurn(db, {
       sessionId: authSessionId,
       promptNumber: 99,
@@ -351,31 +361,32 @@ describe("recallMemory", () => {
       observations: [],
     });
 
-    const shortOutput = recallMemory(db, {
+    const smallBudgetOutput = recallMemory(db, {
       id: `S${authSessionId}/T99`,
-      depth: "expanded",
-      truncate: 40,
+      filter: { fields: ["title", "content", "prompt", "response"] },
+      turn: 20,
     });
-    const longOutput = recallMemory(db, {
+    const bigBudgetOutput = recallMemory(db, {
       id: `S${authSessionId}/T99`,
-      depth: "expanded",
-      truncate: 2000,
+      filter: { fields: ["title", "content", "prompt", "response"] },
+      turn: 400,
     });
 
-    expect(shortOutput).toContain("p".repeat(40));
-    expect(shortOutput).not.toContain("p".repeat(120));
-    expect(longOutput).toContain("p".repeat(120));
-    expect(longOutput).toContain("r".repeat(120));
+    // The bigger budget shows strictly more of the SAME field — a longer
+    // run of "p" — never a different mechanism, never a char-count knob (no
+    // `truncate`/`truncateCap` appears in either call above).
+    expect(bigBudgetOutput).toContain("p".repeat(120));
+    expect(smallBudgetOutput).not.toContain("p".repeat(120));
+    expect(smallBudgetOutput).toContain("…");
   });
 
-  test("omits jsonlPath from collapsed session output", () => {
+  test("a session-DETAIL route always includes the raw jsonlPath pointer (ticket 11: no more depth toggle to suppress it)", () => {
     const output = recallMemory(db, {
       id: `S${authSessionId}`,
-      depth: "collapsed",
     });
 
-    expect(output).not.toContain(".jsonl");
-    expect(output).not.toContain("raw:");
+    expect(output).toContain(".jsonl");
+    expect(output).toContain("raw:");
   });
 
   test("supports wildcard and range ids with stable observation identity", () => {
@@ -493,7 +504,7 @@ describe("recallMemory", () => {
     });
     const turnOutput = recallMemory(db, {
       id: `S${floodSessionId}/T1`,
-      depth: "expanded",
+      filter: { fields: ["title", "content", "observations"] },
     });
 
     expect(sessionOutput).toContain("[T1] Turn 1");
@@ -1136,19 +1147,25 @@ describe("recall navigation legend (spec D1)", () => {
       })),
     });
 
+    // Ticket 11: the old per-field 200-char cap (uniform across every field)
+    // retired along with `depth`/`truncate` — cutting is now a per-NODE
+    // token budget (`turn`), applied independently to the session header
+    // AND the turn block this route renders. A small explicit budget still
+    // cuts BOTH nodes (proving the legend's "response-scoped, not
+    // per-field" property survives the mechanism change) without needing to
+    // pin an exact per-field character count that no longer exists.
     const output = recallMemory(db, {
       id: `S${session.id}/T1`,
-      depth: "expanded",
+      filter: { fields: ["title", "content", "prompt", "response", "observations"] },
+      turn: 40,
       eraCutoffEpoch: ERA,
     });
 
-    // Several distinct fields actually got cut — session desc, turn prompt/
-    // response/content — each carrying the one ellipsis every read surface
-    // now ends a cut with.
-    expect(output).toContain(`${"s".repeat(200)}…`);
-    expect(output).toContain(`${"p".repeat(200)}…`);
-    expect(output).toContain(`${"r".repeat(200)}…`);
-    expect(output).toContain(`${"c".repeat(200)}…`);
+    // Both nodes actually got cut — the session header's own desc line AND
+    // the turn block — each carrying the one ellipsis every read surface
+    // ends a cut with.
+    const ellipsisOccurrences = output.split("…").length - 1;
+    expect(ellipsisOccurrences).toBeGreaterThanOrEqual(2);
 
     // One navigation sentence for the WHOLE response, not one per field — the
     // old scheme repeated it once per truncated field (75 times on a real

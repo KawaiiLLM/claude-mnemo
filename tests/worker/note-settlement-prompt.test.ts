@@ -11,7 +11,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { attachSegmentToSession, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { claimWriterId } from "../../src/db/write-gate";
-import { formatTurnCollapsed } from "../../src/mcp/format";
+import { formatTurnCompact } from "../../src/mcp/format";
 import { buildCollapsedTurnsForSession } from "../../src/mcp/recall";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { renderRubricAndRosterBlock } from "../../src/hooks/session-composition";
@@ -189,7 +189,7 @@ describe("the segment roster (ticket 05) — id/title/topic only, never a segmen
 /**
  * Ticket 11 (spec A5): a window turn is rendered by RECALL's collapsed view,
  * not by a renderer only this prompt has. The assertion is deliberately an
- * equality against what `buildCollapsedTurnsForSession` + `formatTurnCollapsed`
+ * equality against what `buildCollapsedTurnsForSession` + `formatTurnCompact`
  * produce for the same row — a private renderer that happened to print similar
  * text would still fail it, which is the whole point.
  */
@@ -209,7 +209,7 @@ describe("ticket 11 — window turns go through recall's collapsed view (spec A5
     const recallView = buildCollapsedTurnsForSession(db, sessionDbId).find(
       (turn) => turn.promptNumber === 1,
     )!;
-    const recallRendering = formatTurnCollapsed(recallView, { sessionId: sessionDbId });
+    const recallRendering = formatTurnCompact(recallView, { sessionId: sessionDbId });
     expect(recallRendering).toContain("implement+lease: fence the claim");
     expect(window).toContain(recallRendering);
     expect(context.windowTurns[0]!.collapsedRendering).toBe(recallRendering);

@@ -67,7 +67,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall:
-    "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id=\"E<n>\"` (also `E*`, `E1..9`) recalls the segment card — the accumulated impression of one arc of work, not a session or a turn — so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. `id=\"E<n>/T<m>\"` (also `E<n>/T*`, `E<n>/T3..7`) addresses the segment's own members by their 1-based EVENT-ORDER position — a navigation handle only, never a citation (cite the rendered `[S<session>][T<prompt>]` address instead, since a late-settling member shifts the ordinal). `depth` is a field-set switch: turns collapsed show prompt/title/content, expanded adds insight/response/observations; a segment collapsed shows its metadata header and counts with the newest field rows, expanded shows every row plus a member index. `query` is pure full-text search — it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.",
+    "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id=\"E<n>\"` (also `E*`, `E1..9`) recalls the segment card — the accumulated impression of one arc of work, not a session or a turn — so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. `id=\"E<n>/T<m>\"` (also `E<n>/T*`, `E<n>/T3..7`) addresses the segment's own members by their 1-based EVENT-ORDER position — a navigation handle only, never a citation (cite the rendered `[S<session>][T<prompt>]` address instead, since a late-settling member shifts the ordinal). `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, content); a segment card (`id=\"E<n>\"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets — `pageBudget` (page overflow → another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). `query` is pure full-text search — it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.",
   timeline:
     "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` (key chronological digest) — `phases` has retired. `filter` — the same structured grammar `recall` uses — AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
@@ -144,22 +144,29 @@ export const recallInputShape = {
   filter: memoryFilterSchema.optional().describe(
     "Structured scoping — {type, tag, session, time, file} — AND-composed with each other, with `id`, and with `query`.",
   ),
-  // Ticket 14 #9: the ruling and spec both name this `view`; `depth` was the
-  // implementer's word and, with `.strict()` on this shape, calling by the
-  // ruled name was a hard parse error. Internal option objects keep `depth`.
-  view: z.enum(["collapsed", "expanded"]).optional(),
+  // Ticket 11 (read-write-contract spec, "视图(读面)"): the collapsed/expanded
+  // depth switch retires — the field stays DEFINED only so
+  // `recallInputSchema`'s superRefine below can reject a supplied value with
+  // a message naming its replacement, the same precedent `truncate` already
+  // set. Detail is expressed entirely through `filter.fields` now.
+  view: z
+    .enum(["collapsed", "expanded"])
+    .optional()
+    .describe("Retired — select which turn fields to show via `filter.fields` instead."),
   page: z.number().int().positive().optional(),
   pageSize: z.number().int().positive().optional(),
-  // Ticket 04: `truncate` retires from the public surface. The field stays
-  // DEFINED (rather than simply omitted) so `recallInputSchema`'s superRefine
-  // below can reject it with a message naming its replacements — an omitted
-  // key would only ever produce zod's generic "unrecognized key" text, which
-  // names nothing to point the caller at.
+  // Ticket 04/11: `truncate` retires from the public surface (ticket 11 also
+  // drops the worker-only exemption that used to keep it working there — see
+  // `workerRecallInputShape`'s own comment). The field stays DEFINED (rather
+  // than simply omitted) so `recallInputSchema`'s superRefine below can
+  // reject it with a message naming its replacements — an omitted key would
+  // only ever produce zod's generic "unrecognized key" text, which names
+  // nothing to point the caller at.
   truncate: z
     .number()
     .optional()
     .describe(
-      "Retired — use `pageBudget` (segment cards) or `turn` (per-turn token cap) instead.",
+      "Retired — use `pageBudget` (page overflow) or `turn` (per-item token cap) instead.",
     ),
   // ticket 03 (spec "Budgets"): the segment card's own token budget, default
   // 1000. Distinct from `page` above (still the 1-indexed page NUMBER) —
@@ -171,18 +178,23 @@ export const recallInputShape = {
   pageBudget: z.number().int().positive().optional().describe(
     'Token budget for a segment card (id="E<n>") — default 1000. Over budget, the collapsed card elides the largest Working State field\'s oldest rows first (newest rows always visible), marked "… +N earlier"; ask for page 2 of the same id to see every row, uncapped.',
   ),
+  // Ticket 11: the ONE per-item size knob left, alongside `pageBudget` — no
+  // more depth-dependent default. Applies to every rendered session, turn,
+  // and observation block; a caller widening `filter.fields` beyond the
+  // default (title, content) should usually raise this too, or the extra
+  // fields mostly get cut by the unchanged default budget.
   turn: z.number().int().positive().optional().describe(
-    "Per-turn token cap on every rendered turn (default: card-scale when depth is collapsed, uncapped when expanded).",
+    "Per-item token cap on every rendered session/turn/observation block (default 150, word-boundary cut). Raise it when `filter.fields` selects more turn fields than the default.",
   ),
 };
 
-// SDK workers share recall's public selector grammar, but may request long
-// fields — worker callers (diary, settlement) never go through
-// `recallInputSchema`'s superRefine below, so `truncate` keeps working here
-// exactly as before ticket 04.
+// Ticket 11: workers share recall's public selector grammar UNCHANGED — the
+// prior worker-only exemption keeping `truncate` alive here (`min(1)`,
+// unrejected) retired along with the character-cap mechanism it fed. A
+// worker caller wanting a bigger render now raises `turn`/`pageBudget`, the
+// same two knobs every other caller has.
 export const workerRecallInputShape = {
   ...recallInputShape,
-  truncate: z.number().int().min(1).optional(),
 };
 
 // D5/D5a: one mode vocabulary, shared by every field of both addressing
@@ -557,12 +569,14 @@ export const settlementNoteInputShape = {
   dependsOn: noteInputShape.dependsOn,
 };
 
-// Ticket 04: `truncate` is defined on `recallInputShape` (above) purely so
-// this refine can name its replacements — a `.strict()`-rejected unknown key
-// would only ever carry zod's generic message. `workerRecallInputShape`
-// never routes through THIS schema (worker call sites build their own
-// `z.object(workerRecallInputShape)`), so the worker's long-field `truncate`
-// is untouched by this rejection.
+// Ticket 04/11: `truncate` and `view` are defined on `recallInputShape`
+// (above) purely so this refine can name their replacements — a
+// `.strict()`-rejected unknown key would only ever carry zod's generic
+// message. `workerRecallInputShape` reuses this same pair unchanged (ticket
+// 11 dropped the worker-only `truncate` exemption), but never routes
+// through THIS schema (worker call sites build their own
+// `z.object(workerRecallInputShape)`), so this rejection is public-surface
+// only, same as before.
 export const recallInputSchema = z
   .object(recallInputShape)
   .strict()
@@ -571,8 +585,16 @@ export const recallInputSchema = z
       ctx.addIssue({
         code: "custom",
         message:
-          "`truncate` has retired — use `pageBudget` (segment cards) or `turn` (per-turn token cap) instead.",
+          "`truncate` has retired — use `pageBudget` (page overflow) or `turn` (per-item token cap) instead.",
         path: ["truncate"],
+      });
+    }
+    if (data.view !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "`view` (the collapsed/expanded depth switch) has retired — select fields via `filter.fields` instead.",
+        path: ["view"],
       });
     }
   });

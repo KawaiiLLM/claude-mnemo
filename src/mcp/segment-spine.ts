@@ -211,7 +211,15 @@ export interface SegmentHeaderInput {
   phaseTrace: readonly (readonly string[])[];
   /** Qualified `S<n>/T<m>` addresses of the body's anchors, in body order. */
   anchorRefs: readonly string[];
-  truncate: number;
+  /**
+   * Character cut for `desc`/`insight` — a plain char count, NOT the retired
+   * `truncate`/`truncateCap` public knobs (ticket 11): this is a private
+   * rendering parameter of this one helper, and its only caller
+   * (`recall.ts`'s `renderSegmentSummary`) derives it from the `turn` token
+   * budget, the same 4-chars-per-token conversion the browse feed already
+   * uses for its own word-boundary field cuts.
+   */
+  charLimit: number;
 }
 
 /**
@@ -239,7 +247,7 @@ export function renderSegmentHeaderLines(input: SegmentHeaderInput): string[] {
 
   if (segment.content) {
     lines.push(
-      `  - desc: ${truncateText(segment.content, { limit: input.truncate })}`,
+      `  - desc: ${truncateText(segment.content, { limit: input.charLimit })}`,
     );
   }
   // Ticket 14 (spec K5): a segment's `insight` is the most reusable thing it
@@ -249,7 +257,7 @@ export function renderSegmentHeaderLines(input: SegmentHeaderInput): string[] {
   // arriving here for the third time.
   if (segment.insight) {
     lines.push(
-      `  - insight: ${truncateText(segment.insight, { limit: input.truncate })}`,
+      `  - insight: ${truncateText(segment.insight, { limit: input.charLimit })}`,
     );
   }
   const trace = formatPhaseTrace(input.phaseTrace);

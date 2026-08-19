@@ -6,20 +6,21 @@ import {
   type FormattedTurn,
   type TruncationSignal,
   createTruncationSignal,
-  formatObservationCollapsed,
-  formatObservationExpanded,
-  formatSessionCollapsed,
-  formatSessionExpanded,
+  DEFAULT_TURN_RENDER_FIELDS,
   renderNode,
-  formatTree,
-  formatTurnCollapsed,
-  formatTurnExpanded,
+  truncateText,
 } from "../../src/mcp/format";
+import { RECALL_TURN_FIELD_NAMES, type RecallTurnField } from "../../src/mcp/memory-filter";
 
 const createdAtEpoch = Math.floor(Date.UTC(2026, 3, 5, 14, 30) / 1000);
 
+// Every `filter.fields` value at once — the ticket 11 replacement for the
+// retired "expanded" depth, used wherever a test wants to see everything a
+// turn can show.
+const ALL_FIELDS: ReadonlySet<RecallTurnField> = new Set(RECALL_TURN_FIELD_NAMES);
+
 describe("MCP format renderer", () => {
-  test("formats collapsed lines with list structure, stats, and status", () => {
+  test("formats default-field lines with list structure, stats, and status", () => {
     const session: FormattedSession = {
       id: 142,
       title: "Auth refactor",
@@ -47,39 +48,37 @@ describe("MCP format renderer", () => {
       content: "Guards refresh",
     };
 
-    expect(formatSessionCollapsed(session)).toBe(
+    expect(renderNode({ type: "session", value: session })).toBe(
       [
         "- [S142] Auth refactor | 💬3 💡8 | 2026-04-05 | claude-mnemo",
         "  - desc: Fix race + add tests",
       ].join("\n"),
     );
 
-    expect(formatTurnCollapsed(turn)).toBe(
+    expect(renderNode({ type: "turn", value: turn })).toBe(
       [
         "  - [T1:L17] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
         "    - desc: Refresh overlap diagnosed",
       ].join("\n"),
     );
 
-    expect(formatTurnCollapsed(turn, { indent: "", sessionId: 142 })).toBe(
+    expect(
+      renderNode({ type: "turn", value: turn }, { indent: "", sessionId: 142 }),
+    ).toBe(
       [
         "- [S142][T1:L17] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
         "  - desc: Refresh overlap diagnosed",
       ].join("\n"),
     );
 
-    expect(formatObservationCollapsed(observation)).toBe(
-      [
-        "- [O7] Added mutex",
-        "  - desc: Guards refresh",
-      ].join("\n"),
+    expect(renderNode({ type: "observation", value: observation })).toBe(
+      ["- [O7] Added mutex", "  - desc: Guards refresh"].join("\n"),
     );
 
-    expect(formatObservationCollapsed(observation, { indent: "    " })).toBe(
-      [
-        "    - [O7] Added mutex",
-        "      - desc: Guards refresh",
-      ].join("\n"),
+    expect(
+      renderNode({ type: "observation", value: observation }, { indent: "    " }),
+    ).toBe(
+      ["    - [O7] Added mutex", "      - desc: Guards refresh"].join("\n"),
     );
   });
 
@@ -106,14 +105,14 @@ describe("MCP format renderer", () => {
       status: "pending",
     };
 
-    expect(formatSessionCollapsed(session)).toBe(
+    expect(renderNode({ type: "session", value: session })).toBe(
       [
         "- [S9] Empty stats | 2026-04-05 | claude-mnemo",
         "  - desc: Collapsed description stays visible",
       ].join("\n"),
     );
 
-    expect(formatTurnCollapsed(turn)).toBe(
+    expect(renderNode({ type: "turn", value: turn })).toBe(
       [
         "  - [T2] No stats [pending]",
         "    - desc: Collapsed description stays visible",
@@ -121,7 +120,7 @@ describe("MCP format renderer", () => {
     );
   });
 
-  test("renders current turn statuses directly", () => {
+  test("renders current turn statuses directly, at either field selection", () => {
     const activeTurn: FormattedTurn = {
       id: 3,
       promptNumber: 3,
@@ -137,13 +136,17 @@ describe("MCP format renderer", () => {
       status: "undone",
     };
 
-    expect(formatTurnCollapsed(activeTurn)).toContain("[active]");
-    expect(formatTurnExpanded(activeTurn)).toContain("[active]");
-    expect(formatTurnCollapsed(undoneTurn)).toContain("[undone]");
-    expect(formatTurnExpanded(undoneTurn)).toContain("[undone]");
+    expect(renderNode({ type: "turn", value: activeTurn })).toContain("[active]");
+    expect(
+      renderNode({ type: "turn", value: activeTurn }, { fields: ALL_FIELDS }),
+    ).toContain("[active]");
+    expect(renderNode({ type: "turn", value: undoneTurn })).toContain("[undone]");
+    expect(
+      renderNode({ type: "turn", value: undoneTurn }, { fields: ALL_FIELDS }),
+    ).toContain("[undone]");
   });
 
-  test("renders expanded lines with detail blocks and truncation", () => {
+  test("filter.fields adds detail blocks on top of the default field set", () => {
     const session: FormattedSession = {
       id: 142,
       title: "Auth refactor",
@@ -175,28 +178,21 @@ describe("MCP format renderer", () => {
       title: "Added mutex",
       content: "Guards refresh",
     };
-    const longTurn: FormattedTurn = {
-      id: 9,
-      promptNumber: 9,
-      transcriptLineStart: null,
-      title: "Verbose turn",
-      status: "extracted",
-      promptPreview: "p".repeat(260),
-      responsePreview: "r".repeat(260),
-    };
 
     // ownership-and-note-cadence spec ([S15069/T910]-[T913]): the session's
-    // expanded view is now the collapsed line plus (when present) the raw
+    // own render is the collapsed line plus (when present) the raw
     // transcript pointer — insight/decision/done/next/reference retired
-    // unconditionally, legacy row or not.
-    expect(formatSessionExpanded(session)).toBe(
+    // unconditionally, legacy row or not. `includeRawPointer` is recall.ts's
+    // own concern (the S<n> DETAIL route sets it); this module's default is
+    // off, matching every session HEADER embed.
+    expect(renderNode({ type: "session", value: session })).toBe(
       [
         "- [S142] Auth refactor | 💬3 💡8 | 2026-04-05 | claude-mnemo",
         "  - desc: Fix race + add tests",
       ].join("\n"),
     );
 
-    expect(formatTurnExpanded(turn)).toBe(
+    expect(renderNode({ type: "turn", value: turn }, { fields: ALL_FIELDS })).toBe(
       [
         "  - [T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
         "    - desc: Refresh overlap diagnosed",
@@ -204,38 +200,21 @@ describe("MCP format renderer", () => {
         '    - response: "I found a race condition in refresh logic."',
         "    - insight:",
         "      - concurrent refreshes collide",
+        "    - files_read:",
+        "      - src/auth.ts",
+        "    - files_modified:",
+        "      - .",
+        "      - src/auth.ts",
+        "      - tests/auth.test.ts",
       ].join("\n"),
     );
 
-    expect(formatObservationExpanded(observation)).toBe(
-      [
-        "- [O7] Added mutex",
-        "  - desc: Guards refresh",
-      ].join("\n"),
-    );
-
-    expect(formatTurnExpanded(longTurn, { sessionId: 142 })).not.toContain(
-      "[use mnemo-replay skill",
-    );
-    expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
-      "p".repeat(200),
-    );
-    expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
-      "r".repeat(200),
+    expect(renderNode({ type: "observation", value: observation })).toBe(
+      ["- [O7] Added mutex", "  - desc: Guards refresh"].join("\n"),
     );
   });
 
-  // ownership-and-note-cadence spec, "session 字段" ([S15069/T910]-[T913]):
-  // decision/insight/done/next/reference retire from the expanded view
-  // unconditionally (superseding ticket 04/D2's rendering of them) — the
-  // `FormattedSession` type no longer carries these fields at all, so there
-  // is nothing left to construct a "still renders X" fixture with. The
-  // shared per-bullet truncate-budget mechanism (`pushBullets` +
-  // `truncateText`) stays covered via `turn.insight` above and in
-  // recall-segment-card.test.ts (segment Working State bullets), which is
-  // where the session's old cap-whole-field-then-split behaviour's only
-  // surviving analogue lives.
-  test("renders only the collapsed line and the raw pointer in expanded view — no session state block", () => {
+  test("a session detail render includes the raw pointer only when includeRawPointer is set", () => {
     const session: FormattedSession = {
       id: 200,
       title: "Session redesign",
@@ -247,7 +226,10 @@ describe("MCP format renderer", () => {
       observationCount: 12,
     };
 
-    expect(formatSessionExpanded(session)).toBe(
+    expect(renderNode({ type: "session", value: session })).not.toContain("raw:");
+    expect(
+      renderNode({ type: "session", value: session }, { includeRawPointer: true }),
+    ).toBe(
       [
         "- [S200] Session redesign | 💬5 💡12 | 2026-04-05 | claude-mnemo",
         "  - desc: Reworking the session summary schema",
@@ -256,78 +238,32 @@ describe("MCP format renderer", () => {
     );
   });
 
-  test("formats a mixed expansion tree without extra blank lines", () => {
-    const tree: FormattedSession[] = [
-      {
-        id: 142,
-        title: "Auth refactor",
-        project: "claude-mnemo",
-        createdAtEpoch,
-        content: "Fix race + add tests",
-        turns: [
-          {
-            id: 1,
-            promptNumber: 1,
-            transcriptLineStart: null,
-            title: "Diagnose auth",
-            observationCount: 1,
-            status: "extracted",
-            observations: [
-              {
-                id: 7,
-                title: "Mutex added",
-              },
-            ],
-          },
-        ],
-      },
-    ];
-
-    expect(formatTree(tree)).toBe(
-      [
-        "- [S142] Auth refactor | 💬1 💡1 | 2026-04-05 | claude-mnemo",
-        "  - desc: Fix race + add tests",
-        "  - [S142][T1] Diagnose auth | 💡1 [extracted]",
-        "    - [O7] Mutex added",
-      ].join("\n"),
-    );
-  });
-
-  test("uses the global truncate option at all depths", () => {
+  // Ticket 11 (read-write-contract spec, "视图(读面)"): the char `truncate`/
+  // `truncateCap` knobs retired outright — every field renders IN FULL now;
+  // the ONLY thing that ever cuts a rendered block is the `turn` TOKEN
+  // budget, applied once to the whole block (see the "per-item token
+  // budget" describe block below and `capRenderToTokenBudget`'s own tests
+  // in recall-segment-card.test.ts).
+  test("fields render in full — no per-field character cap survives", () => {
     const turn: FormattedTurn = {
       id: 10,
       promptNumber: 10,
       transcriptLineStart: null,
       title: "fix auth",
       content: "x".repeat(500),
-      promptPreview: null,
-      responsePreview: null,
-      insight: [],
-      filesRead: [],
-      filesModified: [],
-      observationCount: 0,
-      toolCallCount: 0,
-      filesReadCount: 0,
-      filesModifiedCount: 0,
       status: "extracted",
     };
 
-    const shortLimit = renderNode(
+    const rendered = renderNode(
       { type: "turn", value: turn },
-      { depth: "expanded", truncate: 50 },
-    );
-    const longLimit = renderNode(
-      { type: "turn", value: turn },
-      { depth: "expanded", truncate: 500 },
+      { fields: DEFAULT_TURN_RENDER_FIELDS, turnBudget: 100_000 },
     );
 
-    expect(shortLimit).toContain("x".repeat(50));
-    expect(shortLimit).toContain("…");
-    expect(longLimit).toContain("x".repeat(500));
-    expect(longLimit).not.toContain("x".repeat(500) + "…");
+    expect(rendered).toContain("x".repeat(500));
+    expect(rendered).not.toContain("…");
   });
 
-  test("renders expanded turn files as a tree in unified mode", () => {
+  test("renders turn files as a full tree, no per-field line cap", () => {
     const turn: FormattedTurn = {
       id: 14,
       promptNumber: 14,
@@ -344,7 +280,12 @@ describe("MCP format renderer", () => {
       ],
     };
 
-    expect(renderNode({ type: "turn", value: turn }, { depth: "expanded" })).toBe(
+    expect(
+      renderNode(
+        { type: "turn", value: turn },
+        { fields: new Set<RecallTurnField>(["title", "files"]), turnBudget: 100_000 },
+      ),
+    ).toBe(
       [
         "  - [T14] tree render | 📖3 ✏️1 [extracted]",
         "    - files_read:",
@@ -359,32 +300,7 @@ describe("MCP format renderer", () => {
     );
   });
 
-  test("tree rendering respects truncate with line-aware omission", () => {
-    const turn: FormattedTurn = {
-      id: 15,
-      promptNumber: 15,
-      transcriptLineStart: null,
-      title: "tree truncation",
-      status: "extracted",
-      filesRead: [
-        "/Users/zhaoqixuan/Projects/claude-mnemo/src",
-        "/Users/zhaoqixuan/Projects/claude-mnemo/src/db/pending-queue.ts",
-        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
-        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
-      ],
-    };
-
-    const rendered = renderNode(
-      { type: "turn", value: turn },
-      { depth: "expanded", truncate: 40 },
-    );
-
-    expect(rendered).toContain("    - files_read:");
-    expect(rendered).toContain("      - /Users/zhaoqixuan/Projects/claude-mnemo/src");
-    expect(rendered).toContain("… +4 lines");
-  });
-
-  test("renders expanded turn with relative-path filesRead as correct tree", () => {
+  test("renders turn with relative-path filesRead as correct tree", () => {
     const turn: FormattedTurn = {
       id: 17,
       promptNumber: 17,
@@ -395,7 +311,12 @@ describe("MCP format renderer", () => {
       filesModified: [],
     };
 
-    expect(renderNode({ type: "turn", value: turn }, { depth: "expanded" })).toBe(
+    expect(
+      renderNode(
+        { type: "turn", value: turn },
+        { fields: new Set<RecallTurnField>(["title", "files"]), turnBudget: 100_000 },
+      ),
+    ).toBe(
       [
         "  - [T17] relative tree | 📖2 [extracted]",
         "    - files_read:",
@@ -406,173 +327,23 @@ describe("MCP format renderer", () => {
     );
   });
 
-  test("tree truncation sets the signal without a per-line hint, in either mode", () => {
-    const turn: FormattedTurn = {
-      id: 16,
-      promptNumber: 16,
-      transcriptLineStart: null,
-      title: "tree hint",
-      status: "extracted",
-      filesRead: [
-        "/Users/zhaoqixuan/Projects/claude-mnemo/src",
-        "/Users/zhaoqixuan/Projects/claude-mnemo/src/db/pending-queue.ts",
-        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
-        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
-      ],
-    };
-
-    const signal = createTruncationSignal();
-    const unified = renderNode(
-      { type: "turn", value: turn },
-      { depth: "expanded", truncate: 40, sessionId: 142, signal },
-    );
-    // Legacy mode never renders files_read at all (unified-only field), so it
-    // has nothing to truncate here — unrelated to the hint removal itself.
-    const legacy = formatTurnExpanded(turn, { truncate: 40 });
-
-    expect(unified).toContain("… +4 lines");
-    expect(unified).not.toContain("mnemo-replay skill");
-    expect(legacy).not.toContain("mnemo-replay skill");
-    expect(signal.truncated).toBe(true);
-  });
-
-  test("defaults truncate to 200 when unspecified", () => {
-    const rendered = renderNode(
-        {
-          type: "turn",
-          value: {
-            id: 11,
-            promptNumber: 11,
-            transcriptLineStart: null,
-            title: "truncate default",
-            content: "x".repeat(500),
-          },
-      },
-      { depth: "expanded" },
-    );
-
-    expect(rendered).toContain("x".repeat(200));
-    expect(rendered).not.toContain("x".repeat(201));
-  });
-
-  test("sets the truncation signal only when a field actually got cut", () => {
-    const turn: FormattedTurn = {
-      id: 12,
-      promptNumber: 12,
-      transcriptLineStart: null,
-      title: null,
-      content: "short text",
-      promptPreview: "y".repeat(500),
-      responsePreview: null,
-    };
-
-    const anchoredTurn: FormattedTurn = {
-      id: 13,
-      promptNumber: 13,
-      transcriptLineStart: 42,
-      title: "Anchored turn",
-      status: "extracted",
-    };
-
-    const shortSignal = createTruncationSignal();
-    const short = renderNode(
-      { type: "turn", value: { ...turn, promptPreview: "short text" } },
-      { depth: "expanded", truncate: 200, sessionId: 142, signal: shortSignal },
-    );
-    const longSignal = createTruncationSignal();
-    const long = renderNode(
-      { type: "turn", value: turn },
-      { depth: "expanded", truncate: 200, sessionId: 142, signal: longSignal },
-    );
-
-    expect(short).not.toContain("…");
-    expect(shortSignal.truncated).toBe(false);
-    expect(long).toContain(`${"y".repeat(200)}…`);
-    expect(long).not.toContain("mnemo-replay skill");
-    expect(longSignal.truncated).toBe(true);
-    expect(
-      formatTurnCollapsed(anchoredTurn, { sessionId: 17 }),
-    ).toContain("[S17][T13:L42] Anchored turn");
-  });
-});
-
-describe("truncation lands on a boundary a reader can see", () => {
-  const baseTurn: FormattedTurn = {
-    id: 21,
-    promptNumber: 21,
-    transcriptLineStart: null,
-    title: null,
-    content: null,
-  };
-
-  test("a cut inside a word retreats to the word boundary", () => {
-    // The production shape: a note's content is prose, and a raw slice ended
-    // mid-identifier ("identity sup…", "messaging-s…"), which reads as
-    // corruption rather than as truncation.
-    const content = `${"alpha beta gamma ".repeat(20)}supplementary`;
-    const rendered = renderNode(
-      { type: "turn", value: { ...baseTurn, title: "boundary", content } },
-      { depth: "expanded" },
-    );
-
-    const shown = rendered.split("- desc: ")[1]?.split("\n")[0] ?? "";
-    // One character, not three: the mark a cut field ends with is the same on
-    // every read surface now, and it is the one the timeline already used.
-    expect(shown).toEndWith("…");
-    expect(shown.slice(0, -1)).not.toEndWith(" ");
-    // Whatever survived is whole words: the visible text is a prefix of the
-    // source that ends where the source has a space.
-    expect(content.startsWith(shown.slice(0, -1))).toBe(true);
-    expect(content[shown.length - 1]).toBe(" ");
-  });
-
-  test("a window that already ends on whitespace keeps its last word", () => {
-    // "…too" where the source reads "…too long " is a word thrown away for
-    // nothing: the slice stopped before a space, so its last word was whole.
-    const content = `${"ab ".repeat(66)}tail`;
-    const rendered = renderNode(
-      { type: "turn", value: { ...baseTurn, title: "aligned", content } },
-      { depth: "expanded" },
-    );
-
-    expect(rendered).toContain(`${"ab ".repeat(66).trimEnd()}…`);
-  });
-
-  test("a sentence end is never honoured — the window keeps its evidence", () => {
-    // A note written conclusion-first ends its first sentence well before the
-    // window does. Retreating there would show the claim and drop every piece
-    // of support the rest of the window exists to carry, so the cut is decided
-    // by word boundaries alone.
-    const content = `Short conclusion. ${"evidence ".repeat(40)}`;
-    const rendered = renderNode(
-      { type: "turn", value: { ...baseTurn, title: "early", content } },
-      { depth: "expanded" },
-    );
-
-    expect(rendered).not.toContain("Short conclusion.…");
-    expect(rendered).toContain("evidence evidence");
-  });
-
-  test("an unbroken run still hard-cuts", () => {
+  test("a multi-line prompt standing in for a missing note is collapsed to one line", () => {
+    // A turn with no note falls back to its user prompt for the title slot,
+    // and a machine-generated prompt carries newlines. They reached the
+    // layout intact and spilled one turn's label across four lines.
+    const promptPreview =
+      "<task-notification>\n<task-id>a1758e6c</task-id>\n<output-file>/tmp/x.txt</output-file>\n</task-notification>";
     const rendered = renderNode(
       {
         type: "turn",
-        value: { ...baseTurn, title: "unbroken", content: "x".repeat(500) },
+        value: {
+          id: 21,
+          promptNumber: 21,
+          transcriptLineStart: null,
+          title: null,
+          promptPreview,
+        },
       },
-      { depth: "expanded" },
-    );
-
-    expect(rendered).toContain(`${"x".repeat(200)}…`);
-  });
-
-  test("a multi-line prompt standing in for a missing note is collapsed to one line", () => {
-    // A turn with no note falls back to its user prompt for the title slot,
-    // and a machine-generated prompt carries newlines. They reached the layout
-    // intact and spilled one turn's label across four lines.
-    const promptPreview =
-      "<task-notification>\n<task-id>a1758e6c</task-id>\n<output-file>/tmp/x.txt</output-file>\n</task-notification>";
-    const rendered = formatTurnCollapsed(
-      { ...baseTurn, promptPreview },
       { sessionId: 15069 },
     );
 
@@ -580,19 +351,23 @@ describe("truncation lands on a boundary a reader can see", () => {
     expect(rendered).toContain("<task-notification> <task-id>a1758e6c</task-id>");
   });
 
-  test("the expanded prompt and response lines are one line each", () => {
-    // The collapsed title slot was collapsed and the expanded detail was not,
-    // so one multi-line prompt read as one line under depth="collapsed" and as
-    // four under depth="expanded" — the same turn, two shapes.
+  test("the prompt and response detail lines are one line each, newlines collapsed", () => {
     const promptPreview =
       "<task-notification>\n<task-id>a1758e6c</task-id>\n</task-notification>";
     const responsePreview = "the answer\n\nwith a blank line in it";
     const rendered = renderNode(
       {
         type: "turn",
-        value: { ...baseTurn, title: "expanded", promptPreview, responsePreview },
+        value: {
+          id: 21,
+          promptNumber: 21,
+          transcriptLineStart: null,
+          title: "expanded",
+          promptPreview,
+          responsePreview,
+        },
       },
-      { depth: "expanded" },
+      { fields: ALL_FIELDS },
     );
 
     expect(rendered).toContain(
@@ -608,12 +383,149 @@ describe("truncation lands on a boundary a reader can see", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// `truncateText` — the one word-boundary primitive left (ticket 11: the
+// fixed 200-char DEFAULT_TRUNCATE default it used to be invoked with by
+// every field is gone; the function's own boundary rule is unchanged and is
+// what `capRenderToTokenBudget` reuses for the token-budget cut).
+// ---------------------------------------------------------------------------
+
+describe("truncateText lands its cut on a boundary a reader can see", () => {
+  test("a cut inside a word retreats to the word boundary", () => {
+    // A raw slice ends mid-identifier ("identity sup…", "messaging-s…"),
+    // which reads as corruption rather than as truncation.
+    const content = `${"alpha beta gamma ".repeat(20)}supplementary`;
+    const shown = truncateText(content, { limit: 200 });
+
+    expect(shown).toEndWith("…");
+    expect(shown.slice(0, -1)).not.toEndWith(" ");
+    expect(content.startsWith(shown.slice(0, -1))).toBe(true);
+    expect(content[shown.length - 1]).toBe(" ");
+  });
+
+  test("a window that already ends on whitespace keeps its last word", () => {
+    // "…too" where the source reads "…too long " is a word thrown away for
+    // nothing: the slice stopped before a space, so its last word was whole.
+    const content = `${"ab ".repeat(66)}tail`;
+    const shown = truncateText(content, { limit: 200 });
+
+    expect(shown).toBe(`${"ab ".repeat(66).trimEnd()}…`);
+  });
+
+  test("a sentence end is never honoured — the window keeps its evidence", () => {
+    // A note written conclusion-first ends its first sentence well before
+    // the window does. Retreating there would show the claim and drop every
+    // piece of support the rest of the window exists to carry.
+    const content = `Short conclusion. ${"evidence ".repeat(40)}`;
+    const shown = truncateText(content, { limit: 200 });
+
+    expect(shown).not.toContain("Short conclusion.…");
+    expect(shown).toContain("evidence evidence");
+  });
+
+  test("an unbroken run still hard-cuts", () => {
+    const shown = truncateText("x".repeat(500), { limit: 200 });
+    expect(shown).toBe(`${"x".repeat(200)}…`);
+  });
+
+  test("marks the signal only when a cut actually happened", () => {
+    const untouched = createTruncationSignal();
+    expect(truncateText("short text", { limit: 200, signal: untouched })).toBe(
+      "short text",
+    );
+    expect(untouched.truncated).toBe(false);
+
+    const touched = createTruncationSignal();
+    truncateText("y".repeat(500), { limit: 200, signal: touched });
+    expect(touched.truncated).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-item token budget (ticket 11): the SOLE size mechanism left, applied
+// to the whole rendered block (session, turn, or observation) — never a
+// per-field character cap. `capRenderToTokenBudget`'s own unit tests live in
+// recall-segment-card.test.ts; these exercise it through `renderNode`.
+// ---------------------------------------------------------------------------
+
+describe("per-item token budget (`turnBudget` — the `turn` param at the MCP seam)", () => {
+  test("defaults to DEFAULT_TURN_TOKEN_BUDGET when unspecified", () => {
+    const rendered = renderNode({
+      type: "turn",
+      value: {
+        id: 11,
+        promptNumber: 11,
+        transcriptLineStart: null,
+        title: "turn budget default",
+        content: "x".repeat(2000),
+      },
+    });
+
+    expect(rendered).toContain("truncated to fit");
+  });
+
+  test("a bigger budget shows strictly more of the same content — no char-count knob involved", () => {
+    const turn: FormattedTurn = {
+      id: 12,
+      promptNumber: 12,
+      transcriptLineStart: null,
+      title: null,
+      content: "short text",
+      promptPreview: "y".repeat(500),
+      responsePreview: null,
+    };
+
+    const shortSignal = createTruncationSignal();
+    const short = renderNode(
+      { type: "turn", value: { ...turn, promptPreview: "short text" } },
+      { fields: ALL_FIELDS, sessionId: 142, signal: shortSignal, turnBudget: 30 },
+    );
+    const longSignal = createTruncationSignal();
+    const long = renderNode(
+      { type: "turn", value: turn },
+      { fields: ALL_FIELDS, sessionId: 142, signal: longSignal, turnBudget: 30 },
+    );
+
+    expect(short).not.toContain("…");
+    expect(shortSignal.truncated).toBe(false);
+    expect(long).toContain("…");
+    expect(long).not.toContain("mnemo-replay skill");
+    expect(longSignal.truncated).toBe(true);
+  });
+
+  test("the label survives even a budget too small for anything else, and the anchor address stays intact", () => {
+    const anchoredTurn: FormattedTurn = {
+      id: 13,
+      promptNumber: 13,
+      transcriptLineStart: 42,
+      title: "Anchored turn",
+      status: "extracted",
+    };
+
+    expect(
+      renderNode(
+        { type: "turn", value: anchoredTurn },
+        { sessionId: 17, turnBudget: 1 },
+      ),
+    ).toContain("[S17][T13:L42] Anchored turn");
+  });
+});
+
 /**
- * An observation renders as the call it was, not as the JSON it was stored in.
- * The `- in:` / `- out:` labels named where a value was kept rather than what
- * it is, and the two sides do not correspond to what a reader wants: an
- * `Edit`'s meaning is entirely in its input, a `Read`'s entirely in its result,
- * and a `Bash` draws its header from one side and its body from the other.
+ * An observation renders as the call it was, not as the JSON it was stored
+ * in. The `- in:` / `- out:` labels named where a value was kept rather than
+ * what it is, and the two sides do not correspond to what a reader wants: an
+ * `Edit`'s meaning is entirely in its input, a `Read`'s entirely in its
+ * result, and a `Bash` draws its header from one side and its body from the
+ * other.
+ *
+ * Ticket 11: an observation always renders every field it has — there is no
+ * more collapsed/expanded split (there never was a real one: both depths
+ * produced identical output before this ticket too). What DID retire is the
+ * per-field character `truncate` budget (header-argument cutting, whole-line
+ * "+N lines" dropping) — an observation's own size is bounded ONLY by the
+ * outer per-item `turn` token budget now, tested in the section above and in
+ * recall-segment-card.test.ts / recall.segments.test.ts.
  */
 describe("an observation renders as the call it was", () => {
   function observation(
@@ -624,8 +536,8 @@ describe("an observation renders as the call it was", () => {
     return {
       id: 7,
       // What an era row's label really holds: no pipeline summarizes an
-      // observation any more, so the title has already fallen back to the tool
-      // name by the time the renderer sees it.
+      // observation any more, so the title has already fallen back to the
+      // tool name by the time the renderer sees it.
       title: toolName,
       toolName,
       toolInput: JSON.stringify(toolInput),
@@ -636,12 +548,9 @@ describe("an observation renders as the call it was", () => {
 
   function render(
     value: FormattedObservation,
-    options: { truncate?: number; signal?: TruncationSignal } = {},
+    options: { turnBudget?: number; signal?: TruncationSignal } = {},
   ): string {
-    return renderNode({ type: "observation", value }, {
-      depth: "expanded",
-      ...options,
-    });
+    return renderNode({ type: "observation", value }, { turnBudget: 100_000, ...options });
   }
 
   test("a Bash call renders as its command with its output beneath", () => {
@@ -681,88 +590,17 @@ describe("an observation renders as the call it was", () => {
 
   test("neither observation form carries the in/out labels any more", () => {
     const value = observation("Bash", { command: "ls" }, { stdout: "a.ts" });
+    const rendered = render(value);
 
-    for (const depth of ["collapsed", "expanded"] as const) {
-      const rendered = renderNode({ type: "observation", value }, { depth });
-      expect(rendered).not.toContain("- in:");
-      expect(rendered).not.toContain("- out:");
-      expect(rendered).toContain("Bash(ls)");
-    }
-  });
-
-  test("a body is cut by whole lines and says how many it dropped", () => {
-    const stdout = Array.from({ length: 30 }, (_, index) => `line ${index}`)
-      // Blank lines cost vertical space and carry nothing, so they are dropped
-      // before anything is counted — otherwise the "+N lines" a reader is asked
-      // to judge by counts emptiness.
-      .join("\n\n");
-    const rendered = render(
-      observation("Bash", { command: "ls" }, { stdout }),
-      { truncate: 40 },
-    );
-
-    const bodyLines = rendered.split("\n").slice(1);
-    const marker = bodyLines[bodyLines.length - 1] ?? "";
-    const droppedMatch = /^ {4}… \+(\d+) lines$/.exec(marker);
-    expect(droppedMatch).not.toBeNull();
-    // Every surviving line is a whole line of the source — the cut lands
-    // between lines, never inside one.
-    for (const line of bodyLines.slice(0, -1)) {
-      expect(line).toMatch(/^ {4}line \d+$/);
-    }
-    expect(bodyLines.length - 1 + Number(droppedMatch?.[1])).toBe(30);
-  });
-
-  test("the budget does not charge a separator after the final line", () => {
-    // A limit of 3 buys `a\nb`, which is three characters. Charging a separator
-    // after the last line as well made the budget one character short of what
-    // it was asked for, so a body that fitted was cut and reported `+1 lines`.
-    const rendered = render(
-      observation("Bash", { command: "ls" }, { stdout: "a\nb" }),
-      { truncate: 3 },
-    );
-
-    expect(rendered.split("\n").slice(1)).toEqual(["    a", "    b"]);
-    expect(rendered).not.toContain("lines");
-  });
-
-  test("the truncation signal is set only when something was dropped", () => {
-    // Three seven-character lines and the two separators between them are
-    // exactly twenty-three characters, and the header fits too — so nothing in
-    // this render was cut, and the response must not offer to show more.
-    const stdout = "aaaaaaa\nbbbbbbb\nccccccc";
-    const intact = createTruncationSignal();
-    render(observation("Bash", { command: "ls" }, { stdout }), {
-      truncate: 23,
-      signal: intact,
-    });
-    expect(intact.truncated).toBe(false);
-
-    const cut = createTruncationSignal();
-    const rendered = render(observation("Bash", { command: "ls" }, { stdout }), {
-      truncate: 22,
-      signal: cut,
-    });
-    expect(rendered).toContain("… +1 lines");
-    expect(cut.truncated).toBe(true);
-  });
-
-  test("a header cut down to the tool name still identifies the call", () => {
-    // At a budget this small the cut reached into the name and `Bash(ls)`
-    // became `B…)`, which identifies neither a tool nor an argument. The
-    // argument is what a header spends its budget on; the name is what is left
-    // when there is nothing to spend.
-    const rendered = render(
-      observation("Bash", { command: "ls" }, { stdout: "" }),
-      { truncate: 1 },
-    );
-
-    expect(rendered).toBe("- [O7] Bash");
+    expect(rendered).not.toContain("- in:");
+    expect(rendered).not.toContain("- out:");
+    expect(rendered).toContain("Bash(ls)");
   });
 
   test("a body's lines are indented under their header", () => {
-    // A multi-line value that reaches column zero produces lines no reader and
-    // no downstream parser can attribute to the observation they came from.
+    // A multi-line value that reaches column zero produces lines no reader
+    // and no downstream parser can attribute to the observation they came
+    // from.
     const rendered = render(
       observation("Bash", { command: "cat notes" }, {
         stdout: "first\nsecond\nthird",
@@ -816,8 +654,8 @@ describe("an observation renders as the call it was", () => {
           type: "create",
           filePath: "/Users/me/project/docs/plan.md",
           content: "# Plan\n\n- step one\n- step two\n",
-          // The majority case: there is no pre-edit file to diff against, so a
-          // projection that reached for one would render empty here.
+          // The majority case: there is no pre-edit file to diff against, so
+          // a projection that reached for one would render empty here.
           originalFile: null,
           structuredPatch: [],
         },
@@ -879,9 +717,9 @@ describe("an observation renders as the call it was", () => {
   });
 
   test("a dispatched agent says its report is not stored with the call", () => {
-    // Rendering an empty body would assert that it returned nothing, which is
-    // false: the completion report arrives later as a turn-level notification
-    // and never becomes a second observation.
+    // Rendering an empty body would assert that it returned nothing, which
+    // is false: the completion report arrives later as a turn-level
+    // notification and never becomes a second observation.
     const rendered = render(
       observation(
         "Agent",
@@ -920,111 +758,51 @@ describe("an observation renders as the call it was", () => {
     expect(rendered).toContain("matches:");
   });
 
-  test("a header cut inside its argument still closes its parenthesis", () => {
-    const rendered = render(
-      observation("Bash", { command: `echo ${"long ".repeat(80)}` }, { stdout: "" }),
-      { truncate: 60 },
-    );
-
-    expect(rendered).toMatch(/^- \[O7\] Bash\(echo (long ?)+…\)$/);
-  });
-
   test("a legacy observation renders exactly as it did before", () => {
-    // A row recorded before the era cutoff carries no raw tool fields at all —
-    // its record is its extractor's summary — so this change is about what a
-    // NEW row looks like, not about what the archive says.
+    // A row recorded before the era cutoff carries no raw tool fields at
+    // all — its record is its extractor's summary — so this change is about
+    // what a NEW row looks like, not about what the archive says.
     const legacy: FormattedObservation = {
       id: 7,
       title: "Added mutex",
       content: "Guards refresh",
     };
 
-    expect(formatObservationCollapsed(legacy)).toBe(
-      ["- [O7] Added mutex", "  - desc: Guards refresh"].join("\n"),
-    );
-    expect(formatObservationExpanded(legacy)).toBe(
+    expect(render(legacy)).toBe(
       ["- [O7] Added mutex", "  - desc: Guards refresh"].join("\n"),
     );
   });
-});
 
-describe("a projected call keeps the row's own record", () => {
   test("a row that has both a title and a call shows both", () => {
-    // Not reachable from recall today — an era row has no extractor title — but
-    // the two are independent fields, and a title that exists is the row's own
-    // record, not something the header may overwrite.
-    const rendered = renderNode(
-      {
-        type: "observation",
-        value: {
-          id: 7,
-          title: "Added mutex",
-          toolName: "Bash",
-          toolInput: JSON.stringify({ command: "bun test" }),
-          toolResult: JSON.stringify({ stdout: "3 pass" }),
-        },
-      },
-      { depth: "expanded" },
-    );
+    // Not reachable from recall today — an era row has no extractor title —
+    // but the two are independent fields, and a title that exists is the
+    // row's own record, not something the header may overwrite.
+    const rendered = render({
+      id: 7,
+      title: "Added mutex",
+      toolName: "Bash",
+      toolInput: JSON.stringify({ command: "bun test" }),
+      toolResult: JSON.stringify({ stdout: "3 pass" }),
+    });
 
     expect(rendered).toBe(
-      [
-        "- [O7] Added mutex",
-        "  - tool: 🔧 Bash(bun test)",
-        "    3 pass",
-      ].join("\n"),
+      ["- [O7] Added mutex", "  - tool: 🔧 Bash(bun test)", "    3 pass"].join("\n"),
     );
   });
 
-  test("a line longer than the whole budget is cut inside itself, not dropped", () => {
-    // The rule, stated rather than implied: the budget is spent by whole lines,
-    // and a line that alone exceeds it is cut inside itself and ends in the
-    // truncation mark. Dropping it instead would render a call that produced
-    // thousands of characters as `… +1 lines` and nothing else — the same
-    // untruth an empty body tells, and not a rare one: 22 of the 304 era Bash
-    // rows carrying output have a line longer than the default budget.
-    const rendered = renderNode(
-      {
-        type: "observation",
-        value: {
-          id: 7,
-          title: "Bash",
-          toolName: "Bash",
-          toolInput: JSON.stringify({ command: "cat blob" }),
-          toolResult: JSON.stringify({ stdout: "x".repeat(20_000) }),
-        },
-      },
-      { depth: "expanded", truncate: 200 },
+  // Ticket 11: the per-item `turn` budget replaces the retired per-field
+  // `truncate` cap even for a single giant observation body — a huge line
+  // is now cut WORD-BOUNDARY at the point the budget runs out, never
+  // dropped outright (same "the cut is visible, not silent" guarantee the
+  // old line-aware truncator gave, driven by the one surviving budget).
+  test("a body far larger than the budget is cut at a word boundary, not silently dropped", () => {
+    const big = render(
+      observation("Bash", { command: "cat blob" }, { stdout: "x".repeat(20_000) }),
+      { turnBudget: 30 },
     );
 
-    expect(rendered).toBe(
-      ["- [O7] Bash(cat blob)", `    ${"x".repeat(200)}…`].join("\n"),
-    );
-    // Cut, not dropped: the line is shown, so it is not also counted as one the
-    // reader never saw.
-    expect(rendered).not.toContain("+1 lines");
-  });
-
-  test("a cut inside a line still lands on a word boundary", () => {
-    // The two cuts stay apart in the output — a line cut inside ends in the
-    // mark, dropped lines are counted by `… +N lines` — and neither ends the
-    // reader's last line in the middle of a word.
-    const rendered = renderNode(
-      {
-        type: "observation",
-        value: {
-          id: 7,
-          title: "Bash",
-          toolName: "Bash",
-          toolInput: JSON.stringify({ command: "cat prose" }),
-          toolResult: JSON.stringify({ stdout: "word ".repeat(100).trim() }),
-        },
-      },
-      { depth: "expanded", truncate: 200 },
-    );
-
-    const body = rendered.split("\n")[1] ?? "";
-    expect(body).toEndWith("word…");
-    expect(rendered).not.toContain("lines");
+    expect(big).toContain("[O7] Bash(cat blob)"); // the label survives whole
+    expect(big).toContain("…");
+    expect(big).toContain("truncated to fit");
   });
 });

@@ -83,7 +83,6 @@ function readerOutputAtBudget(
   if (kind === "fields") {
     return recallMemory(db, {
       id: `E${segmentId}`,
-      depth: "collapsed",
       pageBudget,
       eraCutoffEpoch,
       readerId,

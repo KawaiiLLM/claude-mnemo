@@ -25,6 +25,7 @@ import {
   splitBulletField,
   type FormattedTurn,
   type TruncationSignal,
+  type TurnRenderFields,
 } from "./format";
 
 /**
@@ -45,11 +46,11 @@ export const SEGMENT_CARD_DEFAULT_PAGE_BUDGET = 1000;
 /**
  * "card-scale" (spec "Budgets"): the same order of magnitude the segment
  * card's own per-field rows are budgeted at (a fraction of the 1000-token
- * page budget), not the much larger uncapped expanded default. Re-exported
- * here so the one constant recall.ts resolves the `turn` default against and
- * the one this module's own member-index rows use cannot drift apart.
+ * page budget). Re-exported here so the one constant recall.ts resolves the
+ * `turn` default against and the one this module's own member-index rows
+ * use cannot drift apart.
  */
-export { DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED } from "./format";
+export { DEFAULT_TURN_TOKEN_BUDGET } from "./format";
 
 // ---------------------------------------------------------------------------
 // Event-order membership — the addressing axis (spec D8/D9): `E<n>/T<m>`'s
@@ -300,21 +301,20 @@ function maintenanceTurnsAgo(
 // ---------------------------------------------------------------------------
 
 export interface RenderSegmentCardOptions {
-  depth: "collapsed" | "expanded";
-  /** Token budget for the whole card (default `SEGMENT_CARD_DEFAULT_PAGE_BUDGET`). Collapsed only — expanded never elides. */
+  /** Token budget for the whole card (default `SEGMENT_CARD_DEFAULT_PAGE_BUDGET`). Page 1 only — page ≥ 2 never elides. */
   pageBudget?: number;
   /**
    * 1-indexed. `page >= 2` is the "stable page 2" overflow escape (spec
    * "Overflow ALWAYS paginates... never drop items silently"): elision is
-   * skipped and every Working State row renders regardless of budget, so a
-   * caller that hit the ellipsis on page 1 gets the full text, deterministically,
-   * by asking for page 2 — not by switching depth.
+   * skipped and every Working State row renders regardless of budget, AND
+   * the member index appears — ticket 11 retired the separate `depth` switch
+   * that used to gate the member index on its own, so `page` alone now
+   * decides both: a caller that hit the ellipsis on page 1 gets the full
+   * card, deterministically, by asking for page 2.
    */
   page?: number;
   /** Per-member-turn token cap, forwarded to the member index's turn rows. */
   turnBudget?: number;
-  truncate?: number;
-  truncateCap?: number;
   includeDbTurnIds?: boolean;
   eraCutoffEpoch?: number | null;
   signal?: TruncationSignal;
@@ -351,11 +351,10 @@ export function renderSegmentCardRecord(
   segment: SegmentRecord,
   options: RenderSegmentCardOptions,
 ): string {
-  const depth = options.depth;
   const eraCutoffEpoch = options.eraCutoffEpoch ?? null;
   const pageBudget = options.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
   const page = Math.max(1, options.page ?? 1);
-  const elides = depth === "collapsed" && page <= 1;
+  const elides = page <= 1;
 
   const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   const facetCounts = computeSegmentMemberFacetCounts(db, segment.id, eraCutoffEpoch);
@@ -492,7 +491,7 @@ export function renderSegmentCardRecord(
     lines.push(...renderElidedField(fieldByKey.get(field)!));
   }
 
-  if (depth === "expanded") {
+  if (!elides) {
     lines.push(`  - member index (event order):`);
     if (members.length === 0) {
       lines.push(`    - (no members)`);
@@ -514,9 +513,7 @@ export function renderSegmentCardRecord(
 // ---------------------------------------------------------------------------
 
 export interface RenderSegmentMembersOptions {
-  depth: "collapsed" | "expanded";
-  truncate?: number;
-  truncateCap?: number;
+  fields?: TurnRenderFields;
   includeDbTurnIds?: boolean;
   turnBudget?: number;
   eraCutoffEpoch?: number | null;
@@ -580,11 +577,8 @@ export function renderSegmentMembersByOrdinal(
     const rendered = renderNode(
       { type: "turn", value: view },
       {
-        depth: options.depth,
-        mode: "unified",
+        fields: options.fields,
         sessionId: member.sessionId,
-        truncate: options.truncate,
-        truncateCap: options.truncateCap,
         includeDbTurnIds: options.includeDbTurnIds,
         turnBudget: options.turnBudget,
         signal: options.signal,

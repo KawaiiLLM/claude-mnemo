@@ -413,7 +413,6 @@ function handleAttach(
   // `recall(id="E<n>")` collapsed produces — swapping ticket 02's provisional
   // plain render for it, per this module's own note above `handleAttach`.
   const card = renderSegmentCard(db, resolution.segment.id, {
-    depth: "collapsed",
     eraCutoffEpoch: null,
   });
   return textResult(`${header}\n${card}`);

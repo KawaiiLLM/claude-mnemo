@@ -73,7 +73,10 @@ describe("recall withholds excluded observations", () => {
   });
 
   test("an expanded turn shows neither the note observation nor its count", () => {
-    const output = recallMemory(db, { id: `S${sessionId}/T1`, depth: "expanded" });
+    const output = recallMemory(db, {
+      id: `S${sessionId}/T1`,
+      filter: { fields: ["title", "content", "observations", "files"] },
+    });
 
     expect(output).not.toContain("mcp__mnemo__note");
     expect(output).not.toContain("secretnotetitle");

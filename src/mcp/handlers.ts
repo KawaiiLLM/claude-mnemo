@@ -167,20 +167,17 @@ export function createDatabaseBackedHandlers(
           id: args.id as string | undefined,
           query: args.query as string | undefined,
           // Ticket 04: `time` moved into the structured `filter` object
-          // (public schema no longer offers a top-level `time`); `truncate`
-          // still forwards for the worker audience, whose own schema
-          // (`workerRecallInputShape`) keeps accepting it.
+          // (public schema no longer offers a top-level `time`). Ticket 11:
+          // `filter.fields` is the sole field-selection mechanism — the
+          // worker gets no special exemption any more (the retired `view`/
+          // `depth` mapping and the `truncate`/`truncateCap` forwarding
+          // below it are both gone).
           filter: args.filter as RecallInput["filter"],
-          // Ticket 14 #9: the public key is `view` (the ruled name); `depth`
-          // survives only as the internal option the renderers already use.
-          depth: args.view as "collapsed" | "expanded" | undefined,
           page: args.page as number | undefined,
           pageSize: args.pageSize as number | undefined,
-          truncate: args.truncate as number | undefined,
           pageBudget: args.pageBudget as number | undefined,
           turn: args.turn as number | undefined,
           includeDbTurnIds,
-          truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : undefined,
           eraCutoffEpoch: eraCutoff(),
           readerId: readerId(),
         }),

@@ -1,6 +1,7 @@
 import { renderFileTree } from "../shared/file-tree";
 import { estimateTokens } from "../utils/token-estimate";
 import { projectToolCall, type ProjectedCall } from "./tool-projection";
+import type { RecallTurnField } from "./memory-filter";
 
 /**
  * One mark for a cut field, on every read surface. This renderer ended a cut
@@ -16,25 +17,23 @@ import { projectToolCall, type ProjectedCall } from "./tool-projection";
  * measures hard per-unit token caps on the rendered line.
  */
 const FIELD_TRUNCATION_SUFFIX = "…";
-export const DEFAULT_TRUNCATE = 200;
-export const MAX_TRUNCATE = 2000;
 export const DEFAULT_PREVIEW_COUNT = 5;
 
 /**
- * The default per-turn token cap for a COLLAPSED turn render (ticket 03, spec
- * "Budgets": "a per-turn budget with... recall card-scale" default). Sized to
- * the note contract's own field budgets (`NOTE_TOKEN_BUDGET`: title ~20 +
- * content ~100 = ~120) plus headroom for the raw prompt line the collapsed
- * field-set switch now always carries alongside them — "card-scale" because
- * this is the same order of magnitude a segment card's own per-field rows
- * are budgeted at, not the much larger expanded/uncapped default. A caller's
- * explicit `turn` input always overrides this; EXPANDED stays uncapped
- * (`undefined`) by default, per the same spec line.
+ * Ticket 11 (read-write-contract spec, "视图(读面)"): the ONE remaining
+ * item-level size knob — every rendered session/turn/observation block is
+ * capped to this many tokens unless a caller's explicit `turn` input
+ * overrides it. Replaces the retired `truncate`/`truncateCap` character
+ * parameters AND the retired `depth`-gated "expanded is uncapped" default —
+ * there is no more uncapped state; a budget always applies (spec: "obs 恒截
+ * 断，由 turn 预算驱动" generalizes to every node kind, not observations
+ * alone). Sized to the pre-ticket-11 "collapsed" card-scale default so a
+ * caller who never touches `turn` sees byte-similar output to before.
  */
-export const DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED = 150;
+export const DEFAULT_TURN_TOKEN_BUDGET = 150;
 
-/** The marker a token-budget-capped turn ends with, distinct from the character-level `…`. */
-const TURN_BUDGET_TRUNCATION_MARKER = "  … turn truncated to fit the per-turn budget";
+/** The marker a token-budget-capped block ends with. */
+const TURN_BUDGET_TRUNCATION_MARKER = "  … truncated to fit the per-item token budget";
 
 /**
  * Ticket 07 (read-write-contract spec): the rewind marker on a `was_rolled_back`
@@ -44,65 +43,6 @@ const TURN_BUDGET_TRUNCATION_MARKER = "  … turn truncated to fit the per-turn 
  * next to the bracketed ids, same convention `formatStatus` already uses.
  */
 export const REWIND_MARKER = " ⤺ rewound (transcript pointer stale — do not trust replay)";
-
-/**
- * Cap an already-rendered turn block to a TOKEN budget (ticket 03: "use the
- * repo's token estimation, not characters" — `truncate`/`truncateCap` above
- * measure characters, which is the wrong unit for a budget stated in tokens,
- * per this project's own measured CJK under-count).
- *
- * The label line (line 0 — `[S<n>][T<n>] title | stats`) is never dropped: it
- * is the only thing that identifies WHICH turn this is, so a budget too small
- * even for it still keeps it whole and drops everything else. Trailing detail
- * lines are dropped whole, oldest-rendered-first (i.e. from the end, since
- * the renderer already emits fields in a fixed, front-loaded order), which is
- * the same "cut from the back, mark that something was cut" shape
- * `truncateLines` already applies to a file tree — reused here at the
- * turn-block granularity instead of the field granularity.
- */
-export function capTurnRenderToTokenBudget(
-  rendered: string,
-  budgetTokens: number | undefined,
-  signal?: TruncationSignal,
-): string {
-  if (budgetTokens === undefined || !Number.isFinite(budgetTokens)) {
-    return rendered;
-  }
-
-  if (estimateTokens(rendered) <= budgetTokens) {
-    return rendered;
-  }
-
-  const lines = rendered.split("\n");
-  const markerTokens = estimateTokens(TURN_BUDGET_TRUNCATION_MARKER);
-  // Always keep the label line, however small the budget.
-  const kept = [lines[0] ?? ""];
-  let used = estimateTokens(kept[0]!);
-
-  for (let index = 1; index < lines.length; index += 1) {
-    const line = lines[index]!;
-    const lineTokens = estimateTokens(line);
-    if (used + lineTokens + markerTokens > budgetTokens) {
-      break;
-    }
-    kept.push(line);
-    used += lineTokens;
-  }
-
-  if (kept.length === lines.length) {
-    // Every line fit once the marker's own cost was accounted for — nothing
-    // was actually cut, so no marker is owed.
-    return rendered;
-  }
-
-  markTruncated(signal);
-  kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-  return kept.join("\n");
-}
-
-export type RenderDepth = "collapsed" | "expanded";
-
-type RenderMode = "legacy" | "unified";
 
 /**
  * Render-scoped "did anything get cut" flag (spec D1). Discoverability — "you
@@ -186,15 +126,6 @@ export interface FormattedToolCall {
   result?: string | null;
 }
 
-interface ObservationFormatOptions {
-  indent?: string;
-  sessionId?: number;
-  turnPromptNumber?: number;
-  truncate?: number;
-  truncateCap?: number;
-  signal?: TruncationSignal;
-}
-
 export interface FormattedTurn {
   id: number;
   promptNumber: number;
@@ -234,48 +165,49 @@ export interface FormattedSession {
   turns?: FormattedTurn[];
 }
 
-interface TurnFormatOptions {
-  indent?: string;
-  sessionId?: number;
-  truncate?: number;
-  truncateCap?: number;
-  // Worker-only: append a `dbid:T<dbid>` token to the turn label so the memory
-  // worker can cite a turn it found via recall. Public/main rendering leaves
-  // this unset and the output is byte-identical to before.
-  includeDbTurnIds?: boolean;
-  signal?: TruncationSignal;
-}
-
-interface ToolCallFormatOptions {
+/**
+ * Ticket 11: the ONE options bag shared by every render function in this
+ * module. Before this ticket, four near-identical `*FormatOptions`
+ * interfaces existed (session/turn/observation/toolCall) whose only real
+ * differences were which of `truncate`/`truncateCap`/`depth` a given node
+ * kind happened to read — with both retired, nothing remains to
+ * differentiate them, so they collapse into one shape rather than four
+ * shapes that agree on every surviving field.
+ */
+export interface RenderNodeOptions {
   indent?: string;
   sessionId?: number;
   turnPromptNumber?: number;
-  truncate?: number;
-  truncateCap?: number;
-  signal?: TruncationSignal;
-}
-
-interface RenderNodeOptions {
-  depth: RenderDepth;
-  indent?: string;
-  sessionId?: number;
-  turnPromptNumber?: number;
-  truncate?: number;
-  truncateCap?: number;
-  mode?: RenderMode;
-  includeChildren?: boolean;
+  /** Worker-only: append a `dbid:T<dbid>` token to a turn label. */
   includeDbTurnIds?: boolean;
   signal?: TruncationSignal;
   /**
-   * Ticket 03: a per-TURN token cap, applied only to `type: "turn"` nodes
-   * (see `capTurnRenderToTokenBudget`) — `undefined` (the default at every
-   * pre-ticket-03 call site) leaves rendering byte-identical to before.
-   * Deliberately not applied to session/observation nodes: the spec's
-   * "per-turn budget" is stated per-tool, not per-node-kind, and `recall`'s
-   * one caller-facing knob for it (`RecallInput.turn`) is resolved once and
-   * threaded down to exactly the turn nodes it names.
+   * Ticket 11: the per-item token cap, applied to every node kind (session,
+   * turn, observation) — the SOLE size-limiting mechanism (`turnBudget` is
+   * the field's pre-existing name; it is not renamed to avoid re-touching
+   * every call site for a cosmetic reason). `undefined` at this layer still
+   * means "use `DEFAULT_TURN_TOKEN_BUDGET`", not "uncapped" — see that
+   * constant's own doc comment.
    */
   turnBudget?: number;
+  /**
+   * Ticket 11: which turn fields to render — the SOLE field-selection
+   * mechanism, replacing the retired collapsed/expanded depth switch. Turn
+   * nodes only; ignored by session/observation/toolCall nodes (an
+   * observation already renders every field it has, unconditionally — see
+   * `formatObservationBlock`'s own comment). `undefined` resolves to
+   * `DEFAULT_TURN_RENDER_FIELDS`.
+   */
+  fields?: TurnRenderFields;
+  /**
+   * Session nodes only: append the `raw: <jsonlPath>` transcript-pointer
+   * line. Replaces the retired depth switch's session-level behaviour
+   * (`expanded` used to add this line) — callers rendering a session as a
+   * bare listing HEADER (search hits, a turn-scope's owning session) leave
+   * this unset; the one full session-DETAIL route (`recall(id="S<n>")`) sets
+   * it, alongside always including its turn preview (see recall.ts).
+   */
+  includeRawPointer?: boolean;
 }
 
 type RenderNode =
@@ -383,9 +315,14 @@ function collapseToSingleLine(text: string): string {
 }
 
 /**
- * The one truncator. Exported because the timeline renders the same fields and
- * used to carry its own same-named copy, which hard-cut and marked the cut
- * differently — a duplicate that only half-received every fix this one got.
+ * The one character-level truncator left in this module (spec: "词边界" —
+ * word boundary). Ticket 11 removed every FIXED character budget that used
+ * to feed it (`DEFAULT_TRUNCATE`/`MAX_TRUNCATE`/`truncate`/`truncateCap`);
+ * its surviving callers are `capRenderToTokenBudget` below (budget derived
+ * from the `turn` token cap, not a char constant) and a handful of
+ * genuinely unrelated internal char ceilings elsewhere in this codebase
+ * (timeline title caps, the roster's per-row cap) that were never part of
+ * the retiring mechanism.
  */
 export function truncateText(
   text: string,
@@ -429,127 +366,141 @@ export function truncateText(
 }
 
 /**
- * The one line-aware cut: fit a multi-line value to the same character budget a
- * one-line field gets, dropping whole lines and saying how many went.
- *
- * It was written for the file tree and now also carries an observation's body,
- * because those are the same problem and the alternative is two budgeting
- * concepts that drift apart — this renderer has already had to delete a
- * duplicate truncator that grew that way.
- *
- * `lineLimit` caps each individual line and is opt-in. A file tree does not
- * want it: its lines are paths, a cut one is a path that does not exist, and
- * the two callers that pass a tree here rendered whole paths before this
- * existed. A tool's output does want it, and that is where the rule needs
- * stating rather than implying:
- *
- * **The budget is spent by whole lines, and a line that alone exceeds
- * `lineLimit` is cut inside itself.** The two cuts stay apart in the output: a
- * line cut inside ends in the truncation mark, whole lines that were dropped
- * are counted by the trailing `… +N lines`. The alternative — never cutting
- * inside a line — has to either print an over-long line whole, blowing the
- * budget by a hundredfold (this project's own database holds a 30,000-character
- * stdout line), or drop it, which for a body whose first line is the long one
- * renders as `… +N lines` and nothing else: a call reported as having produced
- * output, with none of it shown. That is the same untruth an empty body tells,
- * and it is not rare — 22 of the 304 era Bash rows carrying output have a line
- * longer than the default 200-character budget. `truncateText` retreats to a
- * word boundary where one is near, so the cut still does not end mid-word.
+ * `truncateText`, but the limit is a TOKEN budget rather than a character
+ * one (ticket 11: the turn budget is the only knife left, and it is stated
+ * in tokens). Binary-searches the character limit `truncateText` needs to
+ * land at-or-under `maxTokens` once `estimateTokens` measures the result —
+ * cheap here (turn-scale text, not corpus-scale) and keeps the word-boundary
+ * rule itself in exactly one place rather than a second token-aware copy of
+ * it. Returns `""` when not even one character (plus the mark) fits.
  */
-function truncateLines(
-  lines: string[],
-  {
-    limit,
-    signal,
-    lineLimit,
-  }: {
-    limit: number;
-    signal?: TruncationSignal;
-    lineLimit?: number;
-  },
-): string[] {
-  const boundedLimit = Math.max(limit, 1);
-  // Blank lines are dropped before anything is counted, so the "+N lines" a
-  // reader judges by counts content rather than emptiness. A rendered file tree
-  // has none, so this is inert on that path.
-  const content = lines.filter((line) => line.trim() !== "");
-  const kept: string[] = [];
-  let used = 0;
+function truncateTextToTokenBudget(text: string, maxTokens: number): string {
+  if (maxTokens <= 0) {
+    return "";
+  }
+  if (estimateTokens(text) <= maxTokens) {
+    return text;
+  }
 
-  for (const line of content) {
-    const capped =
-      lineLimit === undefined
-        ? line
-        : truncateText(line, { limit: lineLimit, signal });
-    // The separator is charged between lines and never after the last one, so
-    // a budget of 3 buys `["a", "b"]` — which is three characters — instead of
-    // paying for a newline that will not be rendered and reporting `+1 lines`.
-    const nextUsed = used + capped.length + (kept.length > 0 ? 1 : 0);
-    if (kept.length > 0 && nextUsed > boundedLimit) {
-      break;
+  let low = 0;
+  let high = text.length;
+  let best = "";
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = truncateText(text, { limit: Math.max(mid, 1) });
+    if (estimateTokens(candidate) <= maxTokens) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
     }
-    kept.push(capped);
-    used = nextUsed;
   }
-
-  const omitted = content.length - kept.length;
-  if (omitted <= 0) {
-    return kept;
-  }
-
-  markTruncated(signal);
-  // Same mark as a cut field and as the timeline's `… +N more`: a response that
-  // hides things should say so one way, not two.
-  return [...kept, `${FIELD_TRUNCATION_SUFFIX} +${omitted} lines`];
+  return best;
 }
 
 /**
- * Cut a projected header by its argument, never by its tool name.
+ * Cap an already-rendered block (session, turn, or observation) to a TOKEN
+ * budget — the SOLE size mechanism now that per-field character caps have
+ * retired (ticket 11, spec: "字段截断只由 turn token 预算驱动，词边界").
  *
- * `Bash(git diff --stat &&…` reads as a renderer that lost its footing;
- * `Bash(git diff --stat &&…)` reads as an argument that was too long, which is
- * what happened. Cutting the whole header as one string did the second only by
- * luck: at a small budget the cut reached the name itself and `Bash(ls)` became
- * `B…)`, which identifies no call at all. So the argument is what the budget is
- * spent on, and when there is not enough left for even one character of it the
- * header degrades to the bare tool name — the part a reader still needs to know
- * what was run. That the name can then exceed the budget is deliberate: it is
- * bounded (a tool name is a few dozen characters and repeats across rows) and a
- * header that identifies nothing costs more than the characters it saves.
+ * The label line (line 0 — `[S<n>][T<n>] title | stats`) is never dropped:
+ * it is the only thing that identifies WHICH row this is, so a budget too
+ * small even for it still keeps it whole. Every subsequent line is kept
+ * whole while it fits; the first line that does NOT fit whole is cut at a
+ * WORD BOUNDARY to whatever budget remains (`truncateTextToTokenBudget`,
+ * reusing `truncateText`'s own cut rule) instead of being dropped outright —
+ * this is what makes "same content, bigger `turn` budget" show strictly
+ * more of it rather than jumping between two fixed states. Lines after the
+ * cut are dropped, and the drop is marked.
  */
-function truncateCallHeader(
-  header: string,
-  { limit, signal }: { limit: number; signal?: TruncationSignal },
+export function capRenderToTokenBudget(
+  rendered: string,
+  budgetTokens: number | undefined,
+  signal?: TruncationSignal,
 ): string {
-  if (header.length <= limit) {
-    return header;
+  if (budgetTokens === undefined || !Number.isFinite(budgetTokens)) {
+    return rendered;
   }
 
-  const open = header.indexOf("(");
-  if (open <= 0 || !header.endsWith(")")) {
-    // No argument to sacrifice — the header is a bare name, or a row that
-    // stored no tool name left the argument standing alone.
-    return truncateText(header, { limit, signal });
+  if (estimateTokens(rendered) <= budgetTokens) {
+    return rendered;
   }
 
-  const toolName = header.slice(0, open);
-  const argument = header.slice(open + 1, -1);
-  // What a cut argument costs beyond its own characters: the two parentheses
-  // and the mark that says it was cut.
-  const argumentBudget = limit - toolName.length - 3;
-  if (argumentBudget < 1) {
+  const lines = rendered.split("\n");
+  const markerTokens = estimateTokens(TURN_BUDGET_TRUNCATION_MARKER);
+  // Always keep the label line, however small the budget.
+  const kept = [lines[0] ?? ""];
+  let used = estimateTokens(kept[0]!);
+
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    const lineTokens = estimateTokens(line);
+    const remaining = budgetTokens - used - markerTokens;
+
+    if (remaining <= 0) {
+      markTruncated(signal);
+      kept.push(TURN_BUDGET_TRUNCATION_MARKER);
+      return kept.join("\n");
+    }
+
+    if (lineTokens <= remaining) {
+      kept.push(line);
+      used += lineTokens;
+      continue;
+    }
+
+    // This line does not fit whole — cut it at a word boundary to what is
+    // left, then stop: nothing after it can fit either.
+    const partial = truncateTextToTokenBudget(line, remaining);
+    if (partial) {
+      kept.push(partial);
+    }
     markTruncated(signal);
-    return toolName;
+    kept.push(TURN_BUDGET_TRUNCATION_MARKER);
+    return kept.join("\n");
   }
 
-  return `${toolName}(${truncateText(argument, { limit: argumentBudget, signal })})`;
+  if (kept.length === lines.length) {
+    // Every line fit once the marker's own cost was accounted for — nothing
+    // was actually cut, so no marker is owed.
+    return rendered;
+  }
+
+  markTruncated(signal);
+  kept.push(TURN_BUDGET_TRUNCATION_MARKER);
+  return kept.join("\n");
 }
 
-function resolveExplicitTruncate(
-  truncate?: number,
-  truncateCap = MAX_TRUNCATE,
-): number {
-  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
+/**
+ * Ticket 11: `filter.fields`' render-side counterpart — a resolved SET a
+ * render function can `.has()` against, instead of re-deriving one from the
+ * raw array on every call.
+ */
+export type TurnRenderFields = ReadonlySet<RecallTurnField>;
+
+/**
+ * Default when `filter.fields` is unset — mirrors the retired collapsed
+ * default EXACTLY (ticket 03's own field-set switch: "collapsed carries
+ * exactly prompt/title/content" — the prompt bullet rendered in collapsed
+ * mode too, whenever a real title already occupied the label). A caller
+ * after what `expanded` used to ADD beyond this (response/insight/
+ * observations/files) asks for those fields explicitly. `filter.fields` is
+ * the SOLE field-selection mechanism (spec: "07 的 filter.fields 从加法机制
+ * 升为唯一机制") — there is no longer a second, depth-driven default field
+ * set for a caller to fall back on. (The browse feed's own default,
+ * `DEFAULT_BROWSE_FIELDS` in recall.ts, is a separate, narrower set
+ * purpose-built for that one-line-per-turn listing — unaffected.)
+ */
+export const DEFAULT_TURN_RENDER_FIELDS: TurnRenderFields = new Set<RecallTurnField>([
+  "title",
+  "content",
+  "prompt",
+]);
+
+export function resolveTurnFields(
+  fields?: readonly RecallTurnField[],
+): TurnRenderFields {
+  return fields && fields.length > 0 ? new Set(fields) : DEFAULT_TURN_RENDER_FIELDS;
 }
 
 function formatStatus(status?: string | null): string {
@@ -601,28 +552,10 @@ export function extractKeyParam(name: string, input: unknown): string | null {
   }
 }
 
-function isObservationExpanded(observation: FormattedObservation): boolean {
-  return false;
-}
-
-function isTurnExpanded(turn: FormattedTurn): boolean {
-  return Boolean(
-    turn.promptPreview ||
-      turn.responsePreview ||
-      (turn.insight && turn.insight.length > 0) ||
-      (turn.observations && turn.observations.length > 0) ||
-      (turn.toolCalls && turn.toolCalls.length > 0),
-  );
-}
-
-function formatSessionCollapsedWithMode(
+function formatSessionBlock(
   session: FormattedSession,
-  mode: RenderMode,
-  truncate?: number,
-  truncateCap?: number,
-  signal?: TruncationSignal,
+  options: RenderNodeOptions,
 ): string {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -630,32 +563,10 @@ function formatSessionCollapsedWithMode(
   ];
 
   if (session.content) {
-    lines.push(
-      `  - desc: ${truncateText(session.content, { limit, signal })}`,
-    );
+    lines.push(`  - desc: ${session.content}`);
   }
 
-  return lines.join("\n");
-}
-
-// ownership-and-note-cadence spec, "session 字段" ([S15069/T910]-[T913]): the
-// session's expanded view used to add decision/insight/done/next/reference
-// bullets on top of the collapsed [title + desc] line. Those six fields
-// retire from every render surface unconditionally (recall's session header
-// is title + content only), so the expanded view now differs from the
-// collapsed one only by the `raw:` transcript pointer.
-function formatSessionExpandedWithMode(
-  session: FormattedSession,
-  mode: RenderMode,
-  truncate?: number,
-  truncateCap?: number,
-  signal?: TruncationSignal,
-): string {
-  const lines = [
-    formatSessionCollapsedWithMode(session, mode, truncate, truncateCap, signal),
-  ];
-
-  if (session.jsonlPath) {
+  if (options.includeRawPointer && session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
   }
 
@@ -664,15 +575,8 @@ function formatSessionExpandedWithMode(
 
 function formatTurnLabel(
   turn: FormattedTurn,
-  {
-    indent = "  ",
-    sessionId,
-    depth = "collapsed",
-    truncate,
-    truncateCap,
-    includeDbTurnIds = false,
-    signal,
-  }: TurnFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
+  fields: TurnRenderFields,
+  { indent = "  ", sessionId, includeDbTurnIds = false }: RenderNodeOptions,
 ): string {
   const turnId = turn.transcriptLineStart === null
     ? `T${turn.promptNumber}`
@@ -683,274 +587,30 @@ function formatTurnLabel(
       : `${indent}- [S${sessionId}][${turnId}]`;
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
-  const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const title =
-    turn.title === null && turn.promptPreview
-      ? // The title slot is one line by construction. A prompt standing in for
-        // a missing note need not be: a task notification or a pasted payload
-        // carries newlines, and they reached the layout intact, spilling one
-        // turn's label across four lines. Collapse before measuring, so the
-        // truncation budget is spent on content rather than on line breaks.
-        `"${truncateText(collapseToSingleLine(turn.promptPreview), {
-          limit,
-          signal,
-        })}"`
-      : truncateText(rawTitle, { limit, signal });
 
-  // Worker-only DB-id surface: recall labels turns by prompt number, but a
-  // citation needs the DB turn id (the same id remember() / `<turn id="T...">`
-  // use). Appending `dbid:T<dbid>` lets the worker cite a turn it found via
-  // recall(query=...). Unset → output is byte-identical to the public form.
+  // The label always needs SOME identifying text: the stored title when
+  // `fields` selects it and one exists, else the raw prompt (collapsed to
+  // one line — a task notification or pasted payload carries newlines that
+  // would otherwise split one turn's label across several), else a bare
+  // placeholder. This fallback is structural, not a `fields` selection in
+  // its own right — it is what keeps a turn's label non-empty regardless of
+  // what the caller asked to see.
+  const titleSelected = fields.has("title") && turn.title !== null;
+  const title = titleSelected
+    ? turn.title!
+    : turn.promptPreview
+      ? `"${collapseToSingleLine(turn.promptPreview)}"`
+      : "Untitled";
+
   const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
 
   return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}${rewindSegment}`;
 }
 
-function formatTurnCollapsedWithMode(
-  turn: FormattedTurn,
-  options: TurnFormatOptions & { mode?: RenderMode } = {},
-): string {
-  const { indent = "  ", mode = "legacy", signal } = options;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const lines = [
-    formatTurnLabel(turn, {
-      ...options,
-      mode,
-      depth: "collapsed",
-    }),
-  ];
-
-  if (turn.content) {
-    lines.push(
-      `${indent}  - desc: ${truncateText(turn.content, { limit, signal })}`,
-    );
-  }
-
-  // Ticket 03 (spec "Tools"): the turn field-set switch — collapsed carries
-  // exactly prompt/title/content. Suppressed when `title` is null: the label
-  // above has ALREADY fallen back to this same prompt text (see
-  // `formatTurnLabel`'s own fallback), so a second line here would repeat it
-  // rather than add a field. Expanded's own prompt line (below) covers that
-  // case instead, unconditionally on title, which is what keeps the full
-  // field-set contract true at that depth without duplicating it here.
-  if (turn.title !== null && turn.promptPreview) {
-    lines.push(
-      `${indent}  - prompt: "${truncateText(collapseToSingleLine(turn.promptPreview), {
-        limit,
-        signal,
-      })}"`,
-    );
-  }
-
-  return lines.join("\n");
-}
-
-function formatToolCallLabel(
-  toolCall: FormattedToolCall,
-  { indent = "    ", truncate, truncateCap, signal }: ToolCallFormatOptions & {
-    mode?: RenderMode;
-    depth?: RenderDepth;
-  } = {},
-): string {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
-  const suffix = keyParam
-    ? ` ${truncateText(keyParam, { limit, signal })}`
-    : "";
-
-  return `${indent}- 🔧 ${toolCall.name}${suffix}`;
-}
-
-function formatToolCallCollapsedWithMode(
-  toolCall: FormattedToolCall,
-  options: ToolCallFormatOptions & { mode?: RenderMode } = {},
-): string {
-  return formatToolCallLabel(toolCall, {
-    ...options,
-    mode: options.mode,
-    depth: "collapsed",
-  });
-}
-
-function formatToolCallExpandedWithMode(
-  toolCall: FormattedToolCall,
-  options: ToolCallFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
-): string {
-  const { indent = "    ", truncate, signal } = options;
-  const limit = resolveExplicitTruncate(truncate, options.truncateCap);
-  const detailIndent = `${indent}  `;
-  const lines = [
-    formatToolCallLabel(toolCall, {
-      ...options,
-      depth: "expanded",
-      truncate,
-    }),
-  ];
-
-  if (toolCall.input !== undefined) {
-    lines.push(
-      `${detailIndent}- in: ${truncateText(JSON.stringify(toolCall.input), {
-        limit,
-        signal,
-      })}`,
-    );
-  }
-
-  if (toolCall.result) {
-    lines.push(
-      `${detailIndent}- out: ${truncateText(toolCall.result, { limit, signal })}`,
-    );
-  }
-
-  return lines.join("\n");
-}
-
-function renderTurnChildren(
-  turn: FormattedTurn,
-  depth: RenderDepth,
-  options: TurnFormatOptions & { mode?: RenderMode } = {},
-): string {
-  if (depth === "collapsed") {
-    return "";
-  }
-
-  const { indent = "  ", sessionId, mode = "legacy", truncate, signal } = options;
-  const childIndent = `${indent}  `;
-  const childLines: string[] = [];
-
-  if (turn.observations && turn.observations.length > 0) {
-    for (const observation of turn.observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
-      childLines.push(
-        formatObservationExpandedWithMode(observation, {
-          indent: childIndent,
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-          mode,
-          depth: "expanded",
-          truncate,
-          signal,
-        }),
-      );
-    }
-
-    if (turn.observations.length > DEFAULT_PREVIEW_COUNT) {
-      childLines.push(`${childIndent}+${turn.observations.length - DEFAULT_PREVIEW_COUNT} more`);
-    }
-
-    return childLines.join("\n");
-  }
-
-  if (turn.toolCalls && turn.toolCalls.length > 0) {
-    for (const toolCall of turn.toolCalls.slice(0, DEFAULT_PREVIEW_COUNT)) {
-      childLines.push(
-        formatToolCallExpandedWithMode(toolCall, {
-          indent: childIndent,
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-          mode,
-          depth: "expanded",
-          truncate,
-          signal,
-        }),
-      );
-    }
-
-    if (turn.toolCalls.length > DEFAULT_PREVIEW_COUNT) {
-      childLines.push(`${childIndent}+${turn.toolCalls.length - DEFAULT_PREVIEW_COUNT} more`);
-    }
-  }
-
-  return childLines.join("\n");
-}
-
-function formatTurnExpandedWithMode(
-  turn: FormattedTurn,
-  options: TurnFormatOptions & {
-    mode?: RenderMode;
-    depth?: RenderDepth;
-    includeChildren?: boolean;
-  } = {},
-): string {
-  const {
-    indent = "  ",
-    mode = "legacy",
-    depth = "expanded",
-    includeChildren = mode === "unified",
-    signal,
-  } = options;
-  const detailIndent = `${indent}  `;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
-
-  // Collapsed for the reason the title slot is (see `formatTurnLabel`): these
-  // are one-line field slots, and a task notification or a pasted payload
-  // arrives with its newlines, which reached the layout intact and split one
-  // field across four lines that no reader can attribute to it. Fixing only the
-  // title slot is what left the same prompt reading differently at the two
-  // depths. Collapse before measuring, so the budget buys content, not breaks.
-  //
-  // Ticket 03: the embedded collapsed block above already added this exact
-  // line whenever `title !== null` (its own field-set switch). Only the
-  // complementary case — no title, so the label fell back to this same text —
-  // still owes the line here; the two conditions never both fire, so this can
-  // never duplicate the collapsed block's own.
-  if (turn.title === null && turn.promptPreview) {
-    lines.push(
-      `${detailIndent}- prompt: "${truncateText(collapseToSingleLine(turn.promptPreview), { limit, signal })}"`,
-    );
-  }
-
-  if (turn.responsePreview) {
-    lines.push(
-      `${detailIndent}- response: "${truncateText(collapseToSingleLine(turn.responsePreview), { limit, signal })}"`,
-    );
-  }
-
-  if (turn.insight && turn.insight.length > 0) {
-    lines.push(`${detailIndent}- insight:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      turn.insight.map((line) => truncateText(line, { limit, signal })),
-    );
-  }
-
-  if (mode === "unified" && turn.filesRead && turn.filesRead.length > 0) {
-    lines.push(`${detailIndent}- files_read:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      truncateLines(renderFileTree(turn.filesRead).split("\n"), { limit, signal }),
-    );
-  }
-
-  if (mode === "unified" && turn.filesModified && turn.filesModified.length > 0) {
-    lines.push(`${detailIndent}- files_modified:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      truncateLines(renderFileTree(turn.filesModified).split("\n"), {
-        limit,
-        signal,
-      }),
-    );
-  }
-
-  const childBlock = includeChildren
-    ? renderTurnChildren(turn, depth, { ...options, mode })
-    : "";
-  if (childBlock) {
-    lines.push(childBlock);
-  }
-
-  return lines.join("\n");
-}
-
 function formatObservationLabel(
   observation: FormattedObservation,
-  { indent = "" }: ObservationFormatOptions = {},
+  indent: string,
   header?: string,
 ): string {
   return `${indent}- [O${observation.id}] ${header ?? observation.title}`;
@@ -985,12 +645,19 @@ function projectObservation(
   );
 }
 
-function formatObservationCollapsedWithMode(
+/**
+ * One observation, in full — ticket 11 drops the collapsed/expanded split
+ * this used to carry: an observation already rendered IDENTICALLY at both
+ * depths (its own fields are not individually selectable), so the split was
+ * dead weight even before this ticket. `capRenderToTokenBudget` (applied by
+ * `renderNode`) is what keeps a heavy tool-call observation from blowing out
+ * its owner's page, same guarantee the old per-field character cap gave,
+ * driven by the same `turn` budget every other node kind now shares.
+ */
+function formatObservationBlock(
   observation: FormattedObservation,
-  options: ObservationFormatOptions & { mode?: RenderMode } = {},
+  { indent = "" }: RenderNodeOptions,
 ): string {
-  const { indent = "", signal } = options;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const projection = projectObservation(observation);
   // An era row has no extractor title — 0 of the 517 measured — so its label is
   // already just the tool name, and the projected header replaces it in place.
@@ -1002,17 +669,13 @@ function formatObservationCollapsedWithMode(
   const lines = [
     formatObservationLabel(
       observation,
-      options,
-      headerIsLabel
-        ? truncateCallHeader(projection.header, { limit, signal })
-        : undefined,
+      indent,
+      headerIsLabel ? projection.header : undefined,
     ),
   ];
 
   if (observation.content) {
-    lines.push(
-      `${indent}  - desc: ${truncateText(observation.content, { limit, signal })}`,
-    );
+    lines.push(`${indent}  - desc: ${observation.content}`);
   }
 
   // D3: the label above already fell back to the tool name when there was no
@@ -1027,17 +690,14 @@ function formatObservationCollapsedWithMode(
       ? observation.toolName
       : null;
   if (toolLine) {
-    lines.push(
-      `${indent}  - tool: 🔧 ${truncateCallHeader(toolLine, { limit, signal })}`,
-    );
+    lines.push(`${indent}  - tool: 🔧 ${toolLine}`);
   }
 
   if (projection) {
-    for (const line of truncateLines(projection.body, {
-      limit,
-      signal,
-      lineLimit: limit,
-    })) {
+    for (const line of projection.body) {
+      if (line.trim() === "") {
+        continue;
+      }
       lines.push(`${indent}${OBSERVATION_BODY_INDENT}${line}`);
     }
   }
@@ -1045,134 +705,188 @@ function formatObservationCollapsedWithMode(
   return lines.join("\n");
 }
 
-function formatObservationExpandedWithMode(
-  observation: FormattedObservation,
-  options: ObservationFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
+function formatToolCallBlock(
+  toolCall: FormattedToolCall,
+  { indent = "    " }: RenderNodeOptions,
 ): string {
-  const mode = options.mode ?? "legacy";
-  const lines = [formatObservationCollapsedWithMode(observation, { ...options, mode })];
+  const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
+  const suffix = keyParam ? ` ${keyParam}` : "";
+  const detailIndent = `${indent}  `;
+  const lines = [`${indent}- 🔧 ${toolCall.name}${suffix}`];
+
+  if (toolCall.input !== undefined) {
+    lines.push(`${detailIndent}- in: ${JSON.stringify(toolCall.input)}`);
+  }
+
+  if (toolCall.result) {
+    lines.push(`${detailIndent}- out: ${toolCall.result}`);
+  }
 
   return lines.join("\n");
 }
 
-export function renderNode(node: RenderNode, options: RenderNodeOptions): string {
-  const mode = options.mode ?? "unified";
-  const effectiveOptions = options;
+function renderTurnChildren(
+  turn: FormattedTurn,
+  options: RenderNodeOptions,
+): string {
+  const { indent = "  ", sessionId } = options;
+  const childIndent = `${indent}  `;
+  const childLines: string[] = [];
+
+  if (turn.observations && turn.observations.length > 0) {
+    for (const observation of turn.observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
+      childLines.push(
+        formatObservationBlock(observation, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber,
+        }),
+      );
+    }
+
+    if (turn.observations.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.observations.length - DEFAULT_PREVIEW_COUNT} more`);
+    }
+
+    return childLines.join("\n");
+  }
+
+  if (turn.toolCalls && turn.toolCalls.length > 0) {
+    for (const toolCall of turn.toolCalls.slice(0, DEFAULT_PREVIEW_COUNT)) {
+      childLines.push(
+        formatToolCallBlock(toolCall, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber,
+        }),
+      );
+    }
+
+    if (turn.toolCalls.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.toolCalls.length - DEFAULT_PREVIEW_COUNT} more`);
+    }
+  }
+
+  return childLines.join("\n");
+}
+
+/**
+ * One turn, at exactly the fields `fields` selects (ticket 11: `filter.fields`
+ * is the sole field-selection mechanism — see that type's own doc comment).
+ * Every field renders in FULL; `capRenderToTokenBudget` (applied by
+ * `renderNode`) is the only thing that ever cuts it, driven by the `turn`
+ * token budget.
+ */
+function formatTurnBody(
+  turn: FormattedTurn,
+  fields: TurnRenderFields,
+  options: RenderNodeOptions,
+): string {
+  const { indent = "  " } = options;
+  const lines = [formatTurnLabel(turn, fields, options)];
+
+  if (fields.has("content") && turn.content) {
+    lines.push(`${indent}  - desc: ${turn.content}`);
+  }
+
+  // The prompt bullet only ADDS information when the label is showing the
+  // polished TITLE, not the raw prompt (see `formatTurnLabel`'s own
+  // fallback) — if the label already fell back to the prompt text itself
+  // (no title selected/stored), a second copy here would just repeat it.
+  const titleSelected = fields.has("title") && turn.title !== null;
+  if (fields.has("prompt") && titleSelected && turn.promptPreview) {
+    lines.push(
+      `${indent}  - prompt: "${collapseToSingleLine(turn.promptPreview)}"`,
+    );
+  }
+
+  if (fields.has("response") && turn.responsePreview) {
+    lines.push(
+      `${indent}  - response: "${collapseToSingleLine(turn.responsePreview)}"`,
+    );
+  }
+
+  if (fields.has("insight") && turn.insight && turn.insight.length > 0) {
+    lines.push(`${indent}  - insight:`);
+    pushBullets(lines, `${indent}    `, turn.insight);
+  }
+
+  if (fields.has("files") && turn.filesRead && turn.filesRead.length > 0) {
+    lines.push(`${indent}  - files_read:`);
+    pushBullets(lines, `${indent}    `, renderFileTree(turn.filesRead).split("\n"));
+  }
+
+  if (fields.has("files") && turn.filesModified && turn.filesModified.length > 0) {
+    lines.push(`${indent}  - files_modified:`);
+    pushBullets(
+      lines,
+      `${indent}    `,
+      renderFileTree(turn.filesModified).split("\n"),
+    );
+  }
+
+  if (fields.has("observations")) {
+    const childBlock = renderTurnChildren(turn, options);
+    if (childBlock) {
+      lines.push(childBlock);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * The one entry point every render path in this codebase calls (ticket 11:
+ * "统一渲染器" — the unified renderer). A session/turn/observation node is
+ * always capped to a per-item token budget (`RenderNodeOptions.turnBudget`,
+ * default `DEFAULT_TURN_TOKEN_BUDGET`); a turn node additionally selects
+ * which fields to show via `RenderNodeOptions.fields`
+ * (default `DEFAULT_TURN_RENDER_FIELDS`). `toolCall` nodes render only as a
+ * turn's own child (`renderTurnChildren`) and carry no budget of their own —
+ * they are already inside their owning turn's capped block.
+ */
+export function renderNode(node: RenderNode, options: RenderNodeOptions = {}): string {
+  const budget = options.turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET;
 
   switch (node.type) {
     case "session":
-      return effectiveOptions.depth === "collapsed"
-        ? formatSessionCollapsedWithMode(
-            node.value,
-            mode,
-            effectiveOptions.truncate,
-            effectiveOptions.truncateCap,
-            effectiveOptions.signal,
-          )
-        : formatSessionExpandedWithMode(
-            node.value,
-            mode,
-            effectiveOptions.truncate,
-            effectiveOptions.truncateCap,
-            effectiveOptions.signal,
-          );
+      return capRenderToTokenBudget(
+        formatSessionBlock(node.value, options),
+        budget,
+        options.signal,
+      );
     case "turn": {
-      const rendered =
-        effectiveOptions.depth === "collapsed"
-          ? formatTurnCollapsedWithMode(node.value, { ...effectiveOptions, mode })
-          : formatTurnExpandedWithMode(node.value, { ...effectiveOptions, mode });
-      return capTurnRenderToTokenBudget(
-        rendered,
-        effectiveOptions.turnBudget,
-        effectiveOptions.signal,
+      const fields = options.fields ?? DEFAULT_TURN_RENDER_FIELDS;
+      return capRenderToTokenBudget(
+        formatTurnBody(node.value, fields, options),
+        budget,
+        options.signal,
       );
     }
     case "observation":
-      return effectiveOptions.depth === "collapsed"
-        ? formatObservationCollapsedWithMode(node.value, { ...effectiveOptions, mode })
-        : formatObservationExpandedWithMode(node.value, { ...effectiveOptions, mode });
+      return capRenderToTokenBudget(
+        formatObservationBlock(node.value, options),
+        budget,
+        options.signal,
+      );
     case "toolCall":
-      return effectiveOptions.depth === "collapsed"
-        ? formatToolCallCollapsedWithMode(node.value, { ...effectiveOptions, mode })
-        : formatToolCallExpandedWithMode(node.value, { ...effectiveOptions, mode });
+      return formatToolCallBlock(node.value, options);
   }
 }
 
-export function formatSessionCollapsed(session: FormattedSession): string {
-  return renderNode({ type: "session", value: session }, { depth: "collapsed", mode: "legacy" });
-}
-
-export function formatSessionExpanded(session: FormattedSession): string {
-  return renderNode({ type: "session", value: session }, { depth: "expanded", mode: "legacy" });
-}
-
-export function formatTurnCollapsed(
+/**
+ * A turn rendered at the default field set (title + content) — settlement's
+ * own per-turn compact rendering (`worker/note-settlement-context.ts`)
+ * reuses this so its prior/window turns render through the SAME builder
+ * recall's own default view uses, rather than a second, hand-rolled compact
+ * shape. Replaces the retired `formatTurnCollapsed` convenience wrapper.
+ */
+export function formatTurnCompact(
   turn: FormattedTurn,
-  options: TurnFormatOptions = {},
+  options: RenderNodeOptions = {},
 ): string {
-  return renderNode({ type: "turn", value: turn }, { depth: "collapsed", mode: "legacy", ...options });
-}
-
-export function formatTurnExpanded(
-  turn: FormattedTurn,
-  options: TurnFormatOptions = {},
-): string {
-  return renderNode({ type: "turn", value: turn }, { depth: "expanded", mode: "legacy", ...options });
-}
-
-export function formatObservationCollapsed(
-  observation: FormattedObservation,
-  options: ObservationFormatOptions = {},
-): string {
-  return renderNode({ type: "observation", value: observation }, { depth: "collapsed", mode: "legacy", ...options });
-}
-
-export function formatObservationExpanded(
-  observation: FormattedObservation,
-  options: ObservationFormatOptions = {},
-): string {
-  return renderNode({ type: "observation", value: observation }, { depth: "expanded", mode: "legacy", ...options });
-}
-
-export function formatTree(sessions: FormattedSession[]): string {
-  const lines: string[] = [];
-
-  for (const session of sessions) {
-    lines.push(formatSessionExpanded(session));
-
-    const turns = session.turns ?? [];
-    for (const entry of turns.slice(0, DEFAULT_PREVIEW_COUNT)) {
-      const turnLine = isTurnExpanded(entry)
-        ? formatTurnExpanded(entry, { sessionId: session.id })
-        : formatTurnCollapsed(entry, { sessionId: session.id });
-      lines.push(turnLine);
-
-      const observations = entry.observations ?? [];
-      for (const observationEntry of observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
-        lines.push(
-          isObservationExpanded(observationEntry)
-            ? formatObservationExpanded(observationEntry, {
-                indent: "    ",
-                sessionId: session.id,
-                turnPromptNumber: entry.promptNumber,
-              })
-            : formatObservationCollapsed(observationEntry, {
-                indent: "    ",
-                sessionId: session.id,
-                turnPromptNumber: entry.promptNumber,
-              }),
-        );
-      }
-
-      if (observations.length > DEFAULT_PREVIEW_COUNT) {
-        lines.push(`    - ... ${observations.length - DEFAULT_PREVIEW_COUNT} omitted ...`);
-      }
-    }
-
-    if (turns.length > DEFAULT_PREVIEW_COUNT) {
-      lines.push(`  - ... ${turns.length - DEFAULT_PREVIEW_COUNT} omitted ...`);
-    }
-  }
-
-  return lines.join("\n");
+  return renderNode(
+    { type: "turn", value: turn },
+    { ...options, fields: DEFAULT_TURN_RENDER_FIELDS },
+  );
 }
