@@ -466,12 +466,16 @@ describe("tool surface", () => {
     expect(remember).toContain("Tool-call markup");
     expect(remember).toContain("Every field is written in English.");
     expect(remember).toContain("under 10 turns draws a too-soon reminder");
-    // Ticket 12's nudge half: the 20-turn nudge left the write receipt for
-    // the segment card's header; the description must say where it lives
-    // now, not promise it on the next write.
-    expect(remember).not.toContain("draws a nudge on the next write");
-    expect(remember).toContain("rides the segment card's own header");
     expect(remember).toContain("`decisions` append is exempt");
+    // Ticket 13 (spec "节奏与建段指导"): the 20-turn nudge retired off the
+    // segment card's header outright — the description must not promise it
+    // lives there any more, and must instead carry its own one-line timing
+    // fact, pointed at the Memory Rubric for the judgment rather than
+    // restating it (the single-home grep guard in memory-rubric.test.ts
+    // covers the restatement half).
+    expect(remember).not.toContain("rides the segment card's own header");
+    expect(remember).toContain("20-turn reminder");
+    expect(remember).toContain("Memory Rubric");
     // Ticket 02: `assign`'s own clause, trimmed to fit — single ownership
     // and the clear-ownership form are both load-bearing on sight.
     expect(remember).toContain("single ownership");

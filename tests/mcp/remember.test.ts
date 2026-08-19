@@ -9,7 +9,7 @@ import {
   getSegment,
   getSegmentMemberTurnIds,
 } from "../../src/db/segments";
-import { upsertSession } from "../../src/db/sessions";
+import { getSession, upsertSession } from "../../src/db/sessions";
 import { sessionWriterId } from "../../src/db/write-gate";
 import { rememberInputSchema } from "../../src/mcp/definitions";
 import { recallMemory } from "../../src/mcp/recall";
@@ -1002,5 +1002,83 @@ describe("remember write gate (ticket 02)", () => {
       )
       .get(segmentId);
     expect(stampRow?.count).toBe(0);
+  });
+});
+
+// Ticket 13 (spec "节奏与建段指导"): every successful `remember` call, any of
+// the six verbs, stamps `sessions.last_remember_epoch` — the fact
+// `hooks/note-reminder.ts`'s universal 20-turn check counts turns since. A
+// parameter-error call must not reset that clock: nothing was checked or
+// written, so it is not a "call" for this purpose.
+describe("last_remember_epoch stamp (ticket 13)", () => {
+  let db: Database;
+  let sessionId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "remember-cadence-session",
+      project: "/tmp/project-remember-cadence",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("a successful create stamps the caller session's last_remember_epoch", () => {
+    expect(getSession(db, sessionId)?.lastRememberEpoch).toBeNull();
+
+    rememberTool(
+      db,
+      { verb: "create", title: "stamps the clock", topic: "cadence" },
+      { callerSessionId: sessionId, now: () => 5000 },
+    );
+
+    expect(getSession(db, sessionId)?.lastRememberEpoch).toBe(5000);
+  });
+
+  test("a rejected call (Parameter error) does not stamp anything", () => {
+    const result = rememberTool(
+      db,
+      { verb: "create", topic: "cadence" }, // missing required `title`
+      { callerSessionId: sessionId, now: () => 5000 },
+    );
+
+    expect(resultText(result)).toContain("Parameter error:");
+    expect(getSession(db, sessionId)?.lastRememberEpoch).toBeNull();
+  });
+
+  test("append also stamps it — every verb counts, not just create/attach", () => {
+    const created = rememberTool(db, {
+      verb: "create",
+      title: "target segment",
+      topic: "cadence-append",
+    });
+    const segmentId = /Created E(\d+)/.exec(resultText(created))![1];
+
+    rememberTool(
+      db,
+      { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["a goal row"] },
+      { callerSessionId: sessionId, now: () => 6000 },
+    );
+
+    expect(getSession(db, sessionId)?.lastRememberEpoch).toBe(6000);
+  });
+
+  test("without a caller session, nothing is stamped (there is nothing to attribute it to)", () => {
+    rememberTool(
+      db,
+      { verb: "create", title: "no caller session", topic: "cadence-anon" },
+      { now: () => 5000 },
+    );
+
+    expect(getSession(db, sessionId)?.lastRememberEpoch).toBeNull();
   });
 });

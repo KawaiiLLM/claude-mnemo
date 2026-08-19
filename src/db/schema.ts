@@ -163,6 +163,18 @@ const SCHEMA_SQL = `
     summary_updated_at_epoch INTEGER,
     scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0,
     scan_cursor_line INTEGER NOT NULL DEFAULT 0,
+    -- Ticket 13 (spec "节奏与建段指导"): the universal 20-turn remember
+    -- reminder's own marker — "since the last remember call, any verb", a
+    -- session-scoped fact no existing column carries (create/close/assign
+    -- never even attribute a caller session on their own write paths, so
+    -- there is nothing to derive this from). NULL means "never called" —
+    -- the reminder then counts from created_at_epoch instead (see
+    -- touchSessionRememberActivity in db/sessions.ts). Deliberately excluded
+    -- from upsertSession's UPDATE SET list, the same "own dedicated setter,
+    -- never the general upsert" treatment parent_session_id/lineage_status
+    -- already get, so a routine SessionStart/UserPromptSubmit upsert cannot
+    -- clobber it back to NULL.
+    last_remember_epoch INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -1603,6 +1615,7 @@ export function initializeSchema(db: Database): void {
   ensureSessionTranscriptPathColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
+  ensureSessionLastRememberEpochColumn(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
@@ -2262,6 +2275,14 @@ function ensureSessionTranscriptPathColumn(db: Database): void {
 
 function ensureSessionSummaryUpdatedAtEpochColumn(db: Database): void {
   addColumnIfMissing(db, "sessions", "summary_updated_at_epoch", "INTEGER");
+}
+
+// Ticket 13: forward-only, same shape as the column's own comment on the base
+// CREATE TABLE above — an existing session lands on NULL and the reminder
+// falls back to `created_at_epoch`, exactly the same reading a session that
+// truly never called remember gets.
+function ensureSessionLastRememberEpochColumn(db: Database): void {
+  addColumnIfMissing(db, "sessions", "last_remember_epoch", "INTEGER");
 }
 
 // D7: the redesigned session summary splits into a time-axis (done/current/

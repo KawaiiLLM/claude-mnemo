@@ -11,11 +11,12 @@ import type { HookHandler, HookResult, NormalizedHookInput } from "../types";
  *
  * UserPromptSubmit keeps exactly two registrations: `session-init` owns the
  * turn row and, in the same transaction, renders the current-turn address
- * line and the backlog-relief block (spec D1/D3/D4/D9; ticket 03 retired the
- * line's own owed SUFFIX, see hooks/note-reminder.ts's doc comment) — it is
- * the only process that knows the new turn's number without racing, so it is
- * also the only process allowed to render anything that depends on it. This
- * entry carries everything else, which today is only the rule digest.
+ * line, the backlog-relief block, and (ticket 13) the universal 20-turn
+ * `remember` check (spec D1/D3/D4/D9; ticket 03 retired the line's own owed
+ * SUFFIX, see hooks/note-reminder.ts's doc comment) — it is the only process
+ * that knows the new turn's number without racing, so it is also the only
+ * process allowed to render anything that depends on it. This entry carries
+ * everything else, which today is only the rule digest.
  *
  * Before note-prompt-clock this file also rendered the backlog relief, with
  * its own claim and its own reading of a ride turn that could disagree with

@@ -2,12 +2,16 @@ import type { OwedNoteTurn } from "../db/note-debt";
 
 /**
  * Rendering for the prompt-clock ledger's owed set (spec D3/D4; ticket 03
- * note-cadence-backlog).
+ * note-cadence-backlog), plus (ticket 13, spec "节奏与建段指导") the
+ * universal `remember` cadence reminder — a different fact (segment
+ * maintenance, not note debt) that rides the identical channel for the
+ * identical structural reason: `session-init` is the one UserPromptSubmit
+ * process that knows the new turn's number without racing, so it is the only
+ * process allowed to render anything that depends on turn counts.
  *
- * Everything here is a pure function over `listOwedNoteTurns`'s result — no
+ * Everything here is a pure function over already-computed counts — no
  * database access, no state of its own. `session-init` calls these inside the
- * same write transaction that creates the current turn (spec D9: it is the
- * one process that knows the new turn's number without racing) and is the
+ * same write transaction that creates the current turn (spec D9) and is the
  * ONLY caller; `prompt-dispatch` renders none of this any more.
  *
  * Ticket 03 retired the per-prompt owed SUFFIX this file used to render onto
@@ -80,6 +84,46 @@ export function formatPromptPrefix(userPrompt: string | null): string {
   return characters.length > PROMPT_PREFIX_CHARACTERS
     ? `"${characters.slice(0, PROMPT_PREFIX_CHARACTERS).join("")}…"`
     : `"${collapsed}"`;
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 13 (spec "节奏与建段指导"): the universal `remember` check. Every
+// session — attached to a segment or not — gets a one-line reminder once
+// every REMEMBER_REMINDER_INTERVAL_TURNS turns, counted since its last
+// successful `remember` call (any verb; `mcp/remember.ts`'s own
+// `touchSessionRememberActivity` stamps `sessions.last_remember_epoch`) or,
+// absent one, since the session began. This retires the segment card's own
+// header nudge (`MAINTENANCE_CADENCE.nudgeAtOrAbove`, `mcp/segment-card.ts`):
+// that nudge only ever reached a session with the card already in view
+// (SessionStart, or `recall` on an ATTACHED segment) — silent for exactly the
+// session that most needs it, the one that has never attached or created
+// anything.
+//
+// Periodic, not sticky-until-resolved (unlike the backlog relief above): "每
+// 20 turn 一次" fires once per 20-turn window (turn 20, 40, 60, ...) rather
+// than on every single turn once the threshold is crossed — there is no
+// standing debt here the way an unwritten note is one, only a periodic
+// nudge to check.
+// ---------------------------------------------------------------------------
+
+export const REMEMBER_REMINDER_INTERVAL_TURNS = 20;
+
+/** Whether this prompt lands on a `REMEMBER_REMINDER_INTERVAL_TURNS` boundary since the last `remember` call. */
+export function isRememberReminderDue(turnsSinceRemember: number): boolean {
+  return (
+    turnsSinceRemember > 0 &&
+    turnsSinceRemember % REMEMBER_REMINDER_INTERVAL_TURNS === 0
+  );
+}
+
+/**
+ * The reminder line itself — terse, pointing at the tool description rather
+ * than restating what to check (the Memory Rubric / `remember`'s own
+ * `.describe()` carry that judgment; a second copy here would be a second
+ * home for it).
+ */
+export function renderRememberReminder(turnsSinceRemember: number): string {
+  return `mnemo remember check: ${turnsSinceRemember} turns since your last remember call — see the remember tool description for what to check.`;
 }
 
 function pendingSuffix(pendingTurns: number): string {

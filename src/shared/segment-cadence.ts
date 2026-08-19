@@ -1,18 +1,22 @@
 /**
- * The maintenance cadence's two thresholds (ADR-0002; ticket 12's nudge
- * half): under `tooSoonUnder` turns since the segment's last touch, a fresh
- * write draws the too-soon reminder on `remember`'s receipt; at or beyond
- * `nudgeAtOrAbove`, the segment card's HEADER carries the nudge — session
- * side (T825: "每 20 轮还没更新，提醒一次"), so a session that never calls
- * `remember` at all still sees it at SessionStart and in `recall`. One pair,
- * not a caller-tunable knob — same reasoning as `NOTE_TOKEN_BUDGET` being
- * one shared constant rather than a value each call site restates.
+ * The maintenance cadence's "too soon" threshold (ADR-0002): under this many
+ * turns since the segment's last touch, a fresh write draws the too-soon
+ * reminder on `remember`'s own receipt (`mcp/remember.ts`).
  *
- * Lives here rather than in `mcp/remember.ts` because `mcp/segment-card.ts`
- * reads it too, and `remember` already imports the card renderer — the
- * reverse import would cycle.
+ * Ticket 13 (spec "节奏与建段指导") retired this module's other half — the
+ * `nudgeAtOrAbove` threshold that used to draw a "consider a maintenance
+ * pass" suffix on the segment card's header (`mcp/segment-card.ts`) once a
+ * segment went 20+ turns unmaintained. That nudge only ever reached a
+ * session that already had the card in view (SessionStart or `recall` on an
+ * ATTACHED segment); the ticket's whole point was that judgment about
+ * whether to create or attach in the first place needs a reminder that
+ * reaches every session, attached or not — the universal 20-turn `remember`
+ * check on the UserPromptSubmit channel (`hooks/note-reminder.ts`'s
+ * `renderRememberReminder`) now carries that function instead, and the card
+ * header goes back to stating the bare "maintenance N turns ago" fact with
+ * no suffix.
+ *
+ * `tooSoonUnder` survives as its own scalar (not part of a pair any more) —
+ * `remember.ts` is its one remaining consumer.
  */
-export const MAINTENANCE_CADENCE = {
-  tooSoonUnder: 10,
-  nudgeAtOrAbove: 20,
-} as const;
+export const TOO_SOON_UNDER_TURNS = 10;

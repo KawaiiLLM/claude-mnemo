@@ -11,10 +11,12 @@ import {
   getMnemoSessionIdForProcessSession,
 } from "../../src/db/process-session-map";
 import { initializeSchema } from "../../src/db/schema";
-import { getSessionByContentId } from "../../src/db/sessions";
+import { attachSegmentToSession, createSegment } from "../../src/db/segments";
+import { getSessionByContentId, touchSessionRememberActivity } from "../../src/db/sessions";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurn } from "../../src/db/turns";
 import { upsertSession } from "../../src/db/sessions";
+import { REMEMBER_REMINDER_INTERVAL_TURNS } from "../../src/hooks/note-reminder";
 import { createPromptDispatchHandler } from "../../src/hooks/handlers/prompt-dispatch";
 import { createSessionInitHandler } from "../../src/hooks/handlers/session-init";
 import type { NormalizedHookInput } from "../../src/hooks/types";
@@ -937,5 +939,106 @@ describe("process-session identity map (spec D1)", () => {
     const session = getSessionByContentId(db, "session-1");
     expect(mappedSessions(before)).toEqual([session!.id]);
     expect(mappedSessions(after)).toEqual([session!.id]);
+  });
+});
+
+// Ticket 13 (spec "节奏与建段指导"): the universal `remember` check — every
+// session, attached to a segment or not, gets a one-line reminder at its
+// REMEMBER_REMINDER_INTERVAL_TURNS-th turn since its last successful
+// `remember` call (or, absent one, since the session began). Both acceptance
+// variants (零挂靠/挂靠) share one mechanism: the reminder is computed purely
+// from `sessions.last_remember_epoch` and the turn count, never from whether
+// a segment is attached — so a session that attaches a segment through a
+// path OTHER than `remember` (a raw DB write here, matching how a pre-existing
+// attachment would look) proves the attach itself carries no exemption.
+describe("universal remember cadence reminder (ticket 13)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  /**
+   * Runs the handler `count` times. The strictly-increasing epoch itself
+   * lives in the `now` closure the caller passed to `createSessionInitHandler`
+   * — this helper only drives the call count.
+   */
+  async function runTurns(
+    handler: ReturnType<typeof createSessionInitHandler>,
+    count: number,
+  ) {
+    let result;
+    for (let index = 0; index < count; index += 1) {
+      result = await handler(createInput({ prompt: `turn ${index + 1}` }));
+    }
+    return result!;
+  }
+
+  test("a session with zero attachments, never calling remember, gets the reminder exactly at its 20th turn", async () => {
+    let epoch = 1000;
+    const handler = createSessionInitHandler({ db, now: () => epoch++ });
+
+    const nineteenth = await runTurns(handler, REMEMBER_REMINDER_INTERVAL_TURNS - 1);
+    expect(nineteenth.hookSpecificOutput ?? "").not.toContain("remember check");
+
+    const twentieth = await handler(createInput({ prompt: "turn 20" }));
+    expect(twentieth.hookSpecificOutput).toContain(
+      `mnemo remember check: ${REMEMBER_REMINDER_INTERVAL_TURNS} turns since your last remember call`,
+    );
+  });
+
+  test("an attached session, never calling remember itself, gets the reminder just the same — attachment carries no exemption", async () => {
+    let epoch = 1000;
+    const handler = createSessionInitHandler({ db, now: () => epoch++ });
+
+    // Turn 1 creates the session; attach a segment to it directly (not
+    // through `remember`, so `last_remember_epoch` stays untouched) before
+    // running the remaining 19 turns.
+    await handler(createInput({ prompt: "turn 1" }));
+    const session = getSessionByContentId(db, "session-1")!;
+    const segment = createSegment(db, { title: "an attached segment", nowEpoch: epoch });
+    attachSegmentToSession(db, session.id, segment.id, epoch);
+
+    let result;
+    for (let index = 1; index < REMEMBER_REMINDER_INTERVAL_TURNS; index += 1) {
+      result = await handler(createInput({ prompt: `turn ${index + 1}` }));
+    }
+
+    expect(result!.hookSpecificOutput).toContain(
+      `mnemo remember check: ${REMEMBER_REMINDER_INTERVAL_TURNS} turns since your last remember call`,
+    );
+  });
+
+  test("a remember call resets the clock — the next 20-turn boundary counts from there, not from session start", async () => {
+    let epoch = 1000;
+    const handler = createSessionInitHandler({ db, now: () => epoch++ });
+
+    await runTurns(handler, 15);
+    const session = getSessionByContentId(db, "session-1")!;
+    touchSessionRememberActivity(db, session.id, epoch);
+    // Bump past the marker so the next turn's own epoch is strictly greater
+    // than it — countTurnsSince's boundary is `>`, and `now`'s shared counter
+    // would otherwise hand the very next turn the SAME epoch just stamped.
+    epoch += 1;
+
+    // 15 more turns after the remember call: total turns since session start
+    // is 30, well past 20, but only 15 have passed since the reset — no
+    // reminder yet.
+    let result;
+    for (let index = 0; index < 15; index += 1) {
+      result = await handler(createInput({ prompt: `after-remember ${index + 1}` }));
+    }
+    expect(result!.hookSpecificOutput ?? "").not.toContain("remember check");
+
+    // 5 more (20 since the remember call) fires it.
+    for (let index = 0; index < 5; index += 1) {
+      result = await handler(createInput({ prompt: `boundary ${index + 1}` }));
+    }
+    expect(result!.hookSpecificOutput).toContain("mnemo remember check: 20 turns");
   });
 });

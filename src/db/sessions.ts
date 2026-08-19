@@ -36,6 +36,8 @@ export interface SessionRecord {
   scanCursorLine: number;
   parentSessionId: number | null;
   lineageStatus: string;
+  /** Ticket 13: epoch of this session's last successful `remember` call (any verb) — `null` if never. See touchSessionRememberActivity. */
+  lastRememberEpoch: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
@@ -82,6 +84,7 @@ const SESSION_SELECT = `
     scan_cursor_line AS scanCursorLine,
     parent_session_id AS parentSessionId,
     lineage_status AS lineageStatus,
+    last_remember_epoch AS lastRememberEpoch,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -143,6 +146,7 @@ export function upsertSession(
         scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
+        last_remember_epoch AS lastRememberEpoch,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -250,6 +254,7 @@ export function updateSessionSummaryRewrite(
         scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
+        last_remember_epoch AS lastRememberEpoch,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -412,6 +417,7 @@ export function updateSessionFields(
         scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
+        last_remember_epoch AS lastRememberEpoch,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -559,6 +565,26 @@ export function touchSessionCompletion(
   db.query<unknown, [number, number, number]>(
     `UPDATE sessions SET updated_at_epoch = ?, completed_at_epoch = ? WHERE id = ?`,
   ).run(updatedAtEpoch, completedAtEpoch, sessionId);
+}
+
+/**
+ * `remember`'s own end-of-call stamp (ticket 13, spec "节奏与建段指导"): the
+ * ONE column this touches, same "dedicated setter, never the general upsert"
+ * shape `touchSessionCompletion` above already uses for
+ * `updated_at_epoch`/`completed_at_epoch` — a session-arc field a routine
+ * SessionStart/UserPromptSubmit upsert must never stomp back to an earlier
+ * value. `mcp/remember.ts` calls this once per successful verb (any of the
+ * six, not just the field-writing ones) — a parameter-error call never
+ * reaches here, so a rejected attempt does not reset the clock.
+ */
+export function touchSessionRememberActivity(
+  db: Database,
+  sessionId: number,
+  epoch: number,
+): void {
+  db.query<unknown, [number, number]>(
+    `UPDATE sessions SET last_remember_epoch = ? WHERE id = ?`,
+  ).run(epoch, sessionId);
 }
 
 export function updateCompactAnchor(db: Database, sessionId: number): void {

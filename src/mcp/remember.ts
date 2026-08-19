@@ -20,7 +20,7 @@ import {
   type ReplaceSegmentWorkingStateFieldResult,
   type SegmentRecord,
 } from "../db/segments";
-import { countTurnsSince } from "../db/sessions";
+import { countTurnsSince, touchSessionRememberActivity } from "../db/sessions";
 import { checkFieldGate, sessionWriterId, stampField } from "../db/write-gate";
 import { decodeHtmlEntities } from "./note";
 import { renderSegmentCard } from "./segment-card";
@@ -57,7 +57,7 @@ const REMEMBER_VERBS: readonly RememberVerb[] = [
   "assign",
 ];
 
-import { MAINTENANCE_CADENCE } from "../shared/segment-cadence";
+import { TOO_SOON_UNDER_TURNS } from "../shared/segment-cadence";
 
 export interface RememberToolInput {
   verb?: unknown;
@@ -208,14 +208,15 @@ function formatMaintenanceCadence(
   }
   const turnsSince = countTurnsSince(db, callerSessionId, priorUpdatedAtEpoch);
   const label = `${turnsSince} turn${turnsSince === 1 ? "" : "s"}`;
-  if (turnsSince < MAINTENANCE_CADENCE.tooSoonUnder && !exemptFromTooSoon) {
+  if (turnsSince < TOO_SOON_UNDER_TURNS && !exemptFromTooSoon) {
     return `${label} since this segment's last maintenance — you may be over-maintaining; consider batching small edits.`;
   }
-  // Ticket 12's nudge half: the 20-turn nudge left this receipt. A receipt
-  // only reaches whoever is ALREADY maintaining the segment — the session
-  // that has gone 20 turns without touching it never sees a receipt at all.
-  // The nudge rides the segment card's header instead (segment-card.ts),
-  // which renders at SessionStart and in recall without any write.
+  // Ticket 12's nudge half retired (ticket 13): the segment card's header no
+  // longer carries a 20-turn suffix, and this receipt never did either — a
+  // receipt only reaches whoever is ALREADY maintaining the segment. The
+  // universal 20-turn `remember` check (hooks/note-reminder.ts) now carries
+  // that function, reaching every session on the UserPromptSubmit channel
+  // whether or not it has ever touched this or any segment.
   return `${label} since this segment's last maintenance.`;
 }
 
@@ -923,6 +924,11 @@ function handleAssign(
  * (or back onto) the roster; `assign` (ticket 02) places or clears turn
  * ownership.
  */
+/** The one shape every handler's rejection takes — see `parameterError` above. */
+function isParameterError(result: ToolTextResult): boolean {
+  return result.content[0]?.text.startsWith("Parameter error:") ?? false;
+}
+
 export function rememberTool(
   db: Database,
   rawInput: RememberToolInput,
@@ -932,18 +938,38 @@ export function rememberTool(
     return parameterError(`verb must be one of ${REMEMBER_VERBS.join(", ")}.`);
   }
 
-  switch (rawInput.verb as RememberVerb) {
-    case "create":
-      return handleCreate(db, rawInput, options);
-    case "attach":
-      return handleAttach(db, rawInput, options);
-    case "append":
-      return handleAppend(db, rawInput, options);
-    case "replace":
-      return handleReplace(db, rawInput, options);
-    case "close":
-      return handleClose(db, rawInput, options);
-    case "assign":
-      return handleAssign(db, rawInput, options);
+  const result = ((): ToolTextResult => {
+    switch (rawInput.verb as RememberVerb) {
+      case "create":
+        return handleCreate(db, rawInput, options);
+      case "attach":
+        return handleAttach(db, rawInput, options);
+      case "append":
+        return handleAppend(db, rawInput, options);
+      case "replace":
+        return handleReplace(db, rawInput, options);
+      case "close":
+        return handleClose(db, rawInput, options);
+      case "assign":
+        return handleAssign(db, rawInput, options);
+    }
+  })();
+
+  // Ticket 13 (spec "节奏与建段指导"): every successful call, any of the six
+  // verbs, resets the universal 20-turn `remember` check
+  // (hooks/note-reminder.ts renders it off `sessions.last_remember_epoch`).
+  // "Since last remember call" is a session-scoped fact no existing column
+  // carries — create/close/assign do not attribute a caller session on their
+  // own write paths at all — so this is the one new column ticket 13 adds. A
+  // parameter-error call is not a "call" for this purpose: nothing was
+  // checked or written, so a rejected attempt must not reset the clock.
+  if (typeof options.callerSessionId === "number" && !isParameterError(result)) {
+    touchSessionRememberActivity(
+      db,
+      options.callerSessionId,
+      options.now?.() ?? Math.floor(Date.now() / 1000),
+    );
   }
+
+  return result;
 }

@@ -13,7 +13,6 @@ import {
 } from "../db/segments";
 import { countTurnsSince, getSession } from "../db/sessions";
 import { getTurnById } from "../db/turns";
-import { MAINTENANCE_CADENCE } from "../shared/segment-cadence";
 import { SEGMENT_WORKING_STATE_FIELDS, type SegmentWorkingStateField } from "../shared/segment-fields";
 import { typeWordGlyph } from "../shared/type-vocabulary";
 import { estimateTokens } from "../utils/token-estimate";
@@ -378,15 +377,15 @@ export function renderSegmentCardRecord(
     `${members.length} ${members.length === 1 ? "turn" : "turns"}`,
     `created ${formatEpoch(segment.createdAtEpoch)}`,
     `last edit ${formatEpoch(segment.updatedAtEpoch)}`,
-    // Ticket 12's nudge half (T825 "每 20 轮还没更新，提醒一次"): the 20-turn
-    // nudge lives HERE, session-side — this header renders at SessionStart
-    // and in recall, so it reaches a session that never calls `remember`;
-    // the write receipt only ever reached whoever was already maintaining.
-    `maintenance ${maintenance} ${maintenance === 1 ? "turn" : "turns"} ago${
-      maintenance >= MAINTENANCE_CADENCE.nudgeAtOrAbove
-        ? " — consider a maintenance pass"
-        : ""
-    }`,
+    // Ticket 12's nudge half (T825 "每 20 轮还没更新，提醒一次") retired
+    // (ticket 13, spec "节奏与建段指导"): this header only ever reached a
+    // session with the card already in view (SessionStart, or `recall` on an
+    // ATTACHED segment) — silent for exactly the session that most needs the
+    // reminder, the one that has never attached anything. The universal
+    // 20-turn `remember` check (hooks/note-reminder.ts's
+    // `renderRememberReminder`, rendered on every UserPromptSubmit) carries
+    // that function now; this line states only the bare fact.
+    `maintenance ${maintenance} ${maintenance === 1 ? "turn" : "turns"} ago`,
   ];
   headerLines.push(`  ${metaParts.join(" · ")}`);
 

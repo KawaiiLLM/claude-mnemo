@@ -6,12 +6,14 @@ import {
   deriveProcessIdentityKeys,
   upsertProcessSessionMap,
 } from "../../db/process-session-map";
-import { getSessionByContentId, upsertSession } from "../../db/sessions";
+import { countTurnsSince, getSessionByContentId, upsertSession } from "../../db/sessions";
 import { reindexTurnFromDb } from "../../db/search";
 import { getMaxPromptNumber } from "../../db/turns";
 import {
+  isRememberReminderDue,
   NOTE_RELIEF_PENDING_THRESHOLD,
   renderNoteBacklogRelief,
+  renderRememberReminder,
 } from "../note-reminder";
 import {
   countUserPromptsInEntries,
@@ -241,15 +243,42 @@ export function createSessionInitHandler(
       // for the CURRENT turn's own ownership/edge bookkeeping, not a debt
       // ledger.
       let reliefText: string | null = null;
+      // Ticket 13 (spec "节奏与建段指导"): the universal `remember` check —
+      // every session, attached to a segment or not, every 20 turns since its
+      // last successful `remember` call (any verb). Computed in the SAME
+      // transaction as the relief block above, for the identical reason: this
+      // is the one process that knows the turn count without racing.
+      let rememberReminderText: string | null = null;
       if (!isSubagent && turnId !== null) {
         const owed = listOwedNoteTurns(dependencies.db, session.id, promptNumber);
 
         if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
           reliefText = renderNoteBacklogRelief(owed);
         }
+
+        // `session.lastRememberEpoch` is untouched by `upsertSession` (never
+        // in its SET list — see sessions.ts) so it reads back the value
+        // `mcp/remember.ts`'s `touchSessionRememberActivity` last stamped, or
+        // NULL if this session has never called `remember` at all, in which
+        // case counting falls back to the session's own start. The `- 1` on
+        // that fallback matters: `createdAtEpoch` is set from this SAME
+        // `epoch` local on the session's first-ever prompt (both derived from
+        // one `now()` call, see above), so `createdAtEpoch` alone would put
+        // turn 1 on the wrong side of `countTurnsSince`'s strict `>` and
+        // undercount every session that has never called `remember` by
+        // exactly one turn.
+        const rememberSinceEpoch = session.lastRememberEpoch ?? session.createdAtEpoch - 1;
+        const turnsSinceRemember = countTurnsSince(
+          dependencies.db,
+          session.id,
+          rememberSinceEpoch,
+        );
+        if (isRememberReminderDue(turnsSinceRemember)) {
+          rememberReminderText = renderRememberReminder(turnsSinceRemember);
+        }
       }
 
-      return { sessionDbId: session.id, promptNumber, reliefText };
+      return { sessionDbId: session.id, promptNumber, reliefText, rememberReminderText };
     });
 
     if (isSubagent) {
@@ -276,6 +305,9 @@ export function createSessionInitHandler(
     ];
     if (created.reliefText) {
       sections.push(created.reliefText);
+    }
+    if (created.rememberReminderText) {
+      sections.push(created.rememberReminderText);
     }
 
     return {

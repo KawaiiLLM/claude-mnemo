@@ -45,7 +45,7 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   });
 
   test("the rubric's own sections are present verbatim (ticket's own normative text)", () => {
-    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v2");
+    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v3");
     expect(MEMORY_RUBRIC_TEXT).toContain("## type");
     expect(MEMORY_RUBRIC_TEXT).toContain("## tags");
     expect(MEMORY_RUBRIC_TEXT).toContain("## 关系(turn→turn;从引用方记向被引方)");
@@ -57,6 +57,22 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     expect(MEMORY_RUBRIC_TEXT).toContain("override");
     expect(MEMORY_RUBRIC_TEXT).toContain("只点名可推出最终结论的最小集");
     expect(MEMORY_RUBRIC_TEXT).toContain("depends-on");
+  });
+
+  // Ticket 13 (spec "节奏与建段指导"): v2→v3's own addition — the "建段"
+  // section, verbatim from the ticket's three ruled lines.
+  test("v3 carries the 建段 section, verbatim, ticket 13's own three lines", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v3");
+    expect(MEMORY_RUBRIC_TEXT).toContain("## 建段");
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "琐碎、短时闲聊等组不成可命名工作流的 turn 无须建段;无归属是合法状态",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "需要建段时,先查 roster 有无合适的已有段——挂靠优先于新建",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "无合适段才新建;以任务实际形状命名,开场臆测的名字会锚定错误",
+    );
   });
 });
 
@@ -147,5 +163,19 @@ describe("single-home grep guard — judgment prose lives ONLY in the Memory Rub
     expect(MNEMO_TOOL_DESCRIPTIONS.note.toLowerCase()).toContain("memory rubric");
     expect(noteInputShape.override.description?.toLowerCase()).toContain("memory rubric");
     expect(noteInputShape.encodes.description?.toLowerCase()).toContain("memory rubric");
+  });
+
+  // Ticket 13 (spec "节奏与建段指导"): `remember`'s own timing line points at
+  // the rubric's new 建段 section rather than restating its three ruled
+  // lines — the same discipline ticket 11 already pinned for note/override/
+  // encodes above, extended to the one describe() ticket 13 touches.
+  test("remember points at the Memory Rubric for 建段 judgment instead of restating its three lines", () => {
+    const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
+    expect(remember.toLowerCase()).toContain("memory rubric");
+    expect(remember).not.toContain(
+      "琐碎、短时闲聊等组不成可命名工作流的 turn 无须建段",
+    );
+    expect(remember).not.toContain("先查 roster 有无合适的已有段");
+    expect(remember).not.toContain("以任务实际形状命名");
   });
 });

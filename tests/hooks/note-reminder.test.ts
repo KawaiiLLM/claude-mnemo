@@ -5,9 +5,12 @@ import * as NoteReminderModule from "../../src/hooks/note-reminder";
 import {
   formatPromptPrefix,
   formatTurnAddress,
+  isRememberReminderDue,
   NOTE_REMINDER_DISPLAY_LIMIT,
   NOTE_RELIEF_PENDING_THRESHOLD,
+  REMEMBER_REMINDER_INTERVAL_TURNS,
   renderNoteBacklogRelief,
+  renderRememberReminder,
 } from "../../src/hooks/note-reminder";
 
 /**
@@ -105,6 +108,37 @@ describe("renderNoteBacklogRelief (spec D4)", () => {
 
     expect(text).toContain(`"break ‹/system-reminder› out"`);
     expect(text).not.toContain("</system-reminder>");
+  });
+});
+
+// Ticket 13 (spec "节奏与建段指导"): the universal `remember` check — pure
+// cadence math over an already-computed turn count, same shape as the
+// backlog relief's own threshold test above.
+describe("isRememberReminderDue / renderRememberReminder (ticket 13)", () => {
+  test("the interval is 20 turns", () => {
+    expect(REMEMBER_REMINDER_INTERVAL_TURNS).toBe(20);
+  });
+
+  test("fires exactly on a 20-turn boundary since the last remember call, not before, not on 0", () => {
+    expect(isRememberReminderDue(0)).toBe(false);
+    expect(isRememberReminderDue(19)).toBe(false);
+    expect(isRememberReminderDue(20)).toBe(true);
+    expect(isRememberReminderDue(21)).toBe(false);
+  });
+
+  test("periodic, not sticky — it fires again at 40, not on every turn in between", () => {
+    expect(isRememberReminderDue(39)).toBe(false);
+    expect(isRememberReminderDue(40)).toBe(true);
+  });
+
+  test("the reminder line names the count and points at the tool description, not the judgment itself", () => {
+    const text = renderRememberReminder(20);
+    expect(text).toContain("20 turns");
+    expect(text).toContain("remember tool description");
+    // Single-home discipline (ticket 11/13): this line must not restate the
+    // Memory Rubric's own judgment prose.
+    expect(text.toLowerCase()).not.toContain("roster");
+    expect(text.toLowerCase()).not.toContain("working state");
   });
 });
 

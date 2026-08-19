@@ -346,14 +346,19 @@ describe("recall(id=\"E<n>\") segment card", () => {
     expect(output).not.toContain("Overflow session 2");
   });
 
-  test("ticket 12 nudge half: 20+ turns since the last edit draw the nudge on the card header, with no remember call anywhere", () => {
+  test("ticket 12 nudge half retired (ticket 13): the header states the bare maintenance distance, no suffix, even 20+ turns since the last edit", () => {
     // The fixture already carries 2 member turns after the segment's last
-    // edit; 20 more takes the attached session's distance to 22.
+    // edit; 20 more takes the attached session's distance to 22. The card
+    // header used to draw a "consider a maintenance pass" suffix here — that
+    // function moved to the universal 20-turn `remember` check on the
+    // UserPromptSubmit channel (hooks/note-reminder.ts), which reaches every
+    // session, not just one with this card already in view.
     for (let prompt = 3; prompt <= 22; prompt += 1) {
       makeTurn(prompt);
     }
     const output = recallMemory(db, { id: `E${segmentId}` });
-    expect(output).toMatch(/maintenance 22 turns ago — consider a maintenance pass/);
+    expect(output).toContain("maintenance 22 turns ago");
+    expect(output).not.toContain("consider a maintenance pass");
   });
 
   test("maintenance distance is the busiest attached session's distance, not the sum (ticket 14 #10)", () => {

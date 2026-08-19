@@ -28,10 +28,17 @@ import { createHash } from "node:crypto";
  * (tests/shared/memory-rubric.test.ts) asserts both renderings hash to
  * `MEMORY_RUBRIC_HASH`, computed from this same constant, so the two can
  * never quietly diverge into two different rubrics.
+ *
+ * v2→v3 (ticket 13, spec "节奏与建段指导"): appended the `## 建段` section,
+ * verbatim from that ticket's own three ruled lines — when a turn need not
+ * belong to any segment, the roster-first discipline before minting one, and
+ * naming by the task's actual shape. TIMING for when to consult this section
+ * stays off this file, on `remember`'s own tool description (ticket 13's own
+ * split, same three-way division ticket 11 already established).
  */
-export const MEMORY_RUBRIC_VERSION = "v2";
+export const MEMORY_RUBRIC_VERSION = "v3";
 
-export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v2
+export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v3
 
 ## type
 - 词表,每词一义:
@@ -73,6 +80,11 @@ export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v2
 - (结算侧)值域 = 该会话已挂靠段 ∪ 无归属;只纠显性失配,存疑不动
   - 正例:turn 通篇修改 A 段的模块,却挂在 B 段 → 改派 A
   - 反例:标题与 A 段相关,但内容看不出服务它 → 不动
+
+## 建段
+- 琐碎、短时闲聊等组不成可命名工作流的 turn 无须建段;无归属是合法状态
+- 需要建段时,先查 roster 有无合适的已有段——挂靠优先于新建
+- 无合适段才新建;以任务实际形状命名,开场臆测的名字会锚定错误
 `;
 
 function computeHash(text: string): string {
