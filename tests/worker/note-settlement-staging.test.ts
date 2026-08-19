@@ -44,7 +44,8 @@ import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
  * retired from `note`, and the completion gate is now an empty shell — fence
  * plus CAS, no segmentation/note/coverage/election-ceiling checks (see
  * `db/note-settlement-completion.ts`'s module doc comment). TICKET 06
- * ("选举机器拆除"): `tier` is also gone — `grade`/`type`/`tags` review,
+ * ("选举机器拆除"): `tier` is also gone. TICKET 02 (view-render-repair spec,
+ * "grading retires whole"): `grade` is gone too — `type`/`tags` review,
  * relations, and text-only proposals are what remains, none of them a
  * completion condition.
  */
@@ -155,7 +156,6 @@ describe("acceptance criterion 1 — a staged write reaches no live table before
 
     const noteReceipt = engine.stageNoteWrite({
       turn: `S${sessionDbId}/T1`,
-      grade: 3,
       type: ["design"],
       tags: ["lease"],
     });
@@ -176,7 +176,7 @@ describe("acceptance criterion 1 — a staged write reaches no live table before
     const commitReceipt = engine.commit();
 
     expect(commitReceipt.content[0]!.text).toContain("Committed");
-    expect(getTurnById(db, t1)!.significanceGrade).toBe(3);
+    expect(getTurnById(db, t1)!.type).toEqual(["design"]);
     const after = tableCounts(db);
     expect(after.proposals).toBe(before.proposals + 1);
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
@@ -195,7 +195,7 @@ describe("acceptance criterion 2 — a staged write validates fully and returns 
     const context = baseContext(job, { reviewableTurnIds: new Set() });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    const receipt = engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 3 });
+    const receipt = engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["design"] });
 
     expect(receipt.content[0]!.text).toContain("Parameter error");
     expect(receipt.content[0]!.text).toContain("reviewable window");
@@ -230,12 +230,10 @@ describe("acceptance criterion 2 — a staged write validates fully and returns 
 
     const receipt = engine.stageNoteWrite({
       turn: `S${sessionDbId}/T1`,
-      grade: 2,
       type: ["fix"],
       tags: ["widgets"],
     });
 
-    expect(receipt.content[0]!.text).toContain("grade 2");
     expect(receipt.content[0]!.text).toContain("fix");
     expect(receipt.content[0]!.text).toContain("widgets");
   });
@@ -352,7 +350,6 @@ describe("acceptance criterion 5 — commit re-validates inside its own transact
 
     const receipt = engine.stageNoteWrite({
       turn: `S${sessionDbId}/T1`,
-      grade: 3,
       type: ["fix"],
       tags: ["settlement"],
     });
@@ -361,8 +358,8 @@ describe("acceptance criterion 5 — commit re-validates inside its own transact
     expect(receipt.content[0]!.text).not.toContain("Yielded");
 
     // The world moves: the main agent's own note lands, strictly after the
-    // read grant context build took — the exact race the note-derived half
-    // of a review must yield to. `note.ts`'s real subsumption stamps type
+    // read grant context build took — the exact race the note-derived
+    // review must yield to. `note.ts`'s real subsumption stamps type
     // and tags together; reproduced directly here.
     const agentWriter = sessionWriterId(sessionDbId);
     stampField(db, "turn", t1, "type", agentWriter, NOW + 5);
@@ -373,12 +370,12 @@ describe("acceptance criterion 5 — commit re-validates inside its own transact
     expect(commitReceipt.content[0]!.text).toContain("Committed");
 
     const turn = getTurnById(db, t1)!;
-    // Grade still lands (judged from raw material, not the note); type/tags
-    // do not — the agent's own type (["research"]) survives untouched by the
-    // stale review, the exact divergence between the stage-time preview
-    // (which reported it would overwrite to ["fix"]) and the commit-time
-    // truth.
-    expect(turn.significanceGrade).toBe(3);
+    // Ticket 02 (view-render-repair spec, "grading retires whole"): every
+    // reviewable field is note-derived now (grade, the one field that
+    // was not, is gone) — type/tags both yield, the agent's own type
+    // (["research"]) surviving untouched by the stale review, the exact
+    // divergence between the stage-time preview (which reported it would
+    // overwrite to ["fix"]) and the commit-time truth.
     expect(turn.type).toEqual(["research"]);
     expect(turn.tags).toEqual([]);
   });
@@ -442,7 +439,7 @@ describe("acceptance criterion 6 — the gate runs inside commit's transaction, 
     const job = claimWindow(db, sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 2, type: ["discuss"], tags: [] });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["discuss"], tags: [] });
 
     let competingBumpLanded = false;
     fireAfterNextJobsRead(db, () => {
@@ -486,7 +483,7 @@ describe("acceptance criterion 7 — a refused commit reports what is missing an
     const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 1, type: ["discuss"], tags: [] });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["discuss"], tags: [] });
     engine.stageMembershipWrite({
       action: "propose",
       addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
@@ -501,7 +498,7 @@ describe("acceptance criterion 7 — a refused commit reports what is missing an
     const refusal = engine.commit();
     expect(refusal.content[0]!.text).toContain("Commit refused");
     expect(refusal.content[0]!.text).toContain("Staging kept");
-    expect(getTurnById(db, t1)!.significanceGrade).toBeNull();
+    expect(getTurnById(db, t1)!.type).toEqual([]);
     expect(listRecentSettlementProposals(db, 3)).toEqual([]);
     expect(engine.pendingCount()).toBe(2);
   });
@@ -531,32 +528,29 @@ describe("acceptance criterion 8 — the staging engine exposes no check", () =>
 
 // ---------------------------------------------------------------------------
 // `commit`'s own replay is the source of the operator job-log metrics
-// (worker/note-settlement-dispatch.ts), and the per-grade histogram inside
-// it must never reach the agent (spec G9).
+// (worker/note-settlement-dispatch.ts), and none of the counts inside it
+// must ever reach the agent (spec G9).
 // ---------------------------------------------------------------------------
 
 describe("commit's own result feeds the job log, never the agent", () => {
-  test("commit's agent-visible receipt is the fixed 'Committed' sentence — no count or grade data rides along (spec G9)", () => {
+  test("commit's agent-visible receipt is the fixed 'Committed' sentence — no count data rides along (spec G9)", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(db, sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 4, type: ["design"], tags: ["lease"] });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["lease"] });
 
     const commitReceipt = engine.commit();
     // Exact-string, not "does not contain" — a substring check could miss a
-    // count folded into different wording. Grade 4 is chosen deliberately:
-    // if the histogram (or the grade itself) leaked into this text at all,
-    // the literal "4" would be the easiest thing to spot and the easiest to
-    // miss with a looser assertion.
+    // count folded into different wording.
     expect(commitReceipt.content[0]!.text).toBe(
       `Committed. S${sessionDbId} window settled — job complete.`,
     );
   });
 
-  test("getLastCommitMetrics reflects exactly what commit's replay landed, including the grade histogram and proposalsCreated", () => {
+  test("getLastCommitMetrics reflects exactly what commit's replay landed, including turnsReviewed and proposalsCreated", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
@@ -567,11 +561,9 @@ describe("commit's own result feeds the job log, never the agent", () => {
 
     expect(engine.getLastCommitMetrics()).toBeNull();
 
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 2, type: ["discuss"], tags: [] });
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T2`, grade: 1, type: ["research"], tags: [] });
-    // Same grade as T1, to prove the histogram ACCUMULATES rather than
-    // overwriting per turn.
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T3`, grade: 2, type: ["discuss"], tags: [] });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["discuss"], tags: [] });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T2`, type: ["research"], tags: [] });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T3`, type: ["discuss"], tags: [] });
     engine.stageMembershipWrite({
       action: "propose",
       addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T3`],
@@ -584,7 +576,6 @@ describe("commit's own result feeds the job log, never the agent", () => {
     expect(engine.getLastCommitMetrics()).toEqual({
       turnsReviewed: 3,
       reviewsYieldedToLateNote: 0,
-      gradeHistogram: [0, 1, 2, 0, 0],
       relationsWritten: 0,
       proposalsCreated: 1,
       sessionNarrativeWritten: 0,
@@ -630,10 +621,9 @@ describe("commit-time relation eligibility is frozen ∩ current, never frozen a
     // that also sets it is not yet applied when T2's dry-run phase check
     // runs against T1.
     updateTurnById(db, t1, { type: ["implement"] });
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 1, type: ["implement"], tags: [] });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["implement"], tags: [] });
     const staged = engine.stageNoteWrite({
       turn: `S${sessionDbId}/T2`,
-      grade: 2,
       type: ["implement"],
       tags: [],
       dependsOn: [`S${sessionDbId}/T1`],
@@ -664,25 +654,25 @@ describe("spec A7a — re-staging a key replaces its entry rather than appending
   // The merge is field-LEVEL: a second call overwrites only the fields it
   // states. Whole-entry replacement would also satisfy every other test in
   // this block, which is why this one exists — it is the only case that
-  // tells the two apart, and under whole-entry replacement the grade staged
+  // tells the two apart, and under whole-entry replacement the type staged
   // first would be silently destroyed by a later call that only names tags.
-  test("a second call naming only tags keeps the grade the first call staged", () => {
+  test("a second call naming only tags keeps the type the first call staged", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(db, sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 3 });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["design"] });
     engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, tags: ["lease"] });
     expect(engine.pendingCount()).toBe(1);
 
     expect(engine.commit().content[0]!.text).toContain("Committed");
 
     const turn = getTurnById(db, t1)!;
-    // The load-bearing assertion: the first call's grade survived a second
+    // The load-bearing assertion: the first call's type survived a second
     // call that never mentioned it.
-    expect(turn.significanceGrade).toBe(3);
+    expect(turn.type).toEqual(["design"]);
     expect(turn.tags).toEqual(["lease"]);
   });
 
@@ -693,14 +683,13 @@ describe("spec A7a — re-staging a key replaces its entry rather than appending
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 2, type: ["discuss"], tags: [] });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["discuss"], tags: [] });
     expect(engine.pendingCount()).toBe(1);
 
-    // A same-run correction — the model noticed a better grade — restates
+    // A same-run correction — the model noticed a better type — restates
     // the SAME turn address.
     const secondReceipt = engine.stageNoteWrite({
       turn: `S${sessionDbId}/T1`,
-      grade: 4,
       type: ["design"],
       tags: [],
     });
@@ -709,7 +698,6 @@ describe("spec A7a — re-staging a key replaces its entry rather than appending
 
     const commitReceipt = engine.commit();
     expect(commitReceipt.content[0]!.text).toContain("Committed");
-    expect(getTurnById(db, t1)!.significanceGrade).toBe(4);
     expect(getTurnById(db, t1)!.type).toEqual(["design"]);
   });
 
@@ -744,7 +732,7 @@ describe("spec A7a — re-staging a key replaces its entry rather than appending
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 1, type: ["discuss"], tags: [] });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["discuss"], tags: [] });
     // Floor is 1 (ticket 05), so a lone turn's own proposal is legal too.
     engine.stageMembershipWrite({
       action: "propose",
@@ -808,12 +796,12 @@ describe("session-addressed narrative writes stage through the same commit chann
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, grade: 2, type: ["fix"], tags: [] });
+    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["fix"], tags: [] });
     engine.stageNoteWrite({ session: `S${sessionDbId}`, title: "session title" });
     expect(engine.pendingCount()).toBe(2);
 
     engine.commit();
-    expect(getTurnById(db, t1)!.significanceGrade).toBe(2);
+    expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
     expect(getSession(db, sessionDbId)?.title).toBe("session title");
   });
 

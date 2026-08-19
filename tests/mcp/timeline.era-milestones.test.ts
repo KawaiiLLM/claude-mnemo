@@ -326,4 +326,40 @@ describe("milestone rows nest under segment lines, lexicographic edge-signal adm
     expect(nestedLines.length).toBeGreaterThan(0);
     expect(nestedLines).toEqual(standaloneLines);
   });
+
+  test("election is provably grade-free (view-render-repair ticket 02, [S15069/T1035]): under OPPOSED significance_grade assignments the E<n> selection stays byte-identical", () => {
+    // `pageSize: 1` is what makes this test able to fail. The corrector
+    // segment has two live candidates (the third is override-excluded), so at
+    // the default page size BOTH are admitted and no ranking key — grade
+    // included — can change the output. Capping the page to one seat forces
+    // the rank comparator to pick a winner, so any grade term in it becomes
+    // observable as a different row.
+    const query = () =>
+      timelineQuery(db, { id: `E${ids.segCorrector}`, view: "milestones", pageSize: 1 });
+    const setGrades = (grade: (index: number) => number) => {
+      db.query<{ id: number }, []>("SELECT id FROM turns")
+        .all()
+        .forEach((row, index) => {
+          db.query<unknown, [number, number]>(
+            "UPDATE turns SET significance_grade = ? WHERE id = ?",
+          ).run(grade(index), row.id);
+        });
+    };
+
+    // Ungraded baseline, then two assignments that INVERT each other's order
+    // on every turn. One scramble alone proves nothing: it can hand the real
+    // winner the top grade by luck and leave a grade-ranked election looking
+    // stable. Two opposed assignments cannot both agree with a grade term —
+    // whichever way it sorted, reversing every grade must move some pair.
+    const ungraded = query();
+    setGrades((index) => index % 5);
+    const ascending = query();
+    setGrades((index) => 4 - (index % 5));
+    const descending = query();
+
+    expect(ascending).toBe(ungraded);
+    expect(descending).toBe(ungraded);
+    // The seat really is contested — otherwise the equalities above are vacuous.
+    expect(ungraded.match(/\[T\d+\]/g) ?? []).toHaveLength(1);
+  });
 });

@@ -60,12 +60,10 @@ import {
  */
 
 export interface NoteSettlementCommitCounts {
-  /** Turns a `note` call actually carried a review (grade/type/tags) for, landed or with at least one field yielded. */
+  /** Turns a `note` call actually carried a review (type/tags) for, landed or with at least one field yielded. */
   turnsReviewed: number;
-  /** Of `turnsReviewed`, how many had at least one field (grade/type/tags) rejected by the write gate as stale/never-read. */
+  /** Of `turnsReviewed`, how many had at least one field (type/tags) rejected by the write gate as stale/never-read. */
   reviewsYieldedToLateNote: number;
-  /** Indexed 0-4 (the task-causality scale). Counted only for a LANDED grade — a grade the gate itself rejected never reached a stored row. Operator-only (spec G9): read by note-settlement-dispatch.ts ONLY after the model's run has fully ended. */
-  gradeHistogram: number[];
   relationsWritten: number;
   /** A `propose` call that landed a NEW stored proposal — a duplicate that matched an earlier one (spec "propose 携幂等键") is not counted again. */
   proposalsCreated: number;
@@ -79,7 +77,6 @@ function emptyCommitCounts(): NoteSettlementCommitCounts {
   return {
     turnsReviewed: 0,
     reviewsYieldedToLateNote: 0,
-    gradeHistogram: [0, 0, 0, 0, 0],
     relationsWritten: 0,
     proposalsCreated: 0,
     sessionNarrativeWritten: 0,
@@ -94,15 +91,10 @@ function accumulateTurnWriteCounts(
   if (outcome.review) {
     counts.turnsReviewed += 1;
     const anyYielded =
-      (outcome.review.grade !== undefined && !outcome.review.grade.landed) ||
       (outcome.review.type !== undefined && !outcome.review.type.landed) ||
       (outcome.review.tags !== undefined && !outcome.review.tags.landed);
     if (anyYielded) {
       counts.reviewsYieldedToLateNote += 1;
-    }
-    if (outcome.review.grade?.landed) {
-      const grade = outcome.review.grade.value;
-      counts.gradeHistogram[grade] = (counts.gradeHistogram[grade] ?? 0) + 1;
     }
   }
   if (outcome.relations) {

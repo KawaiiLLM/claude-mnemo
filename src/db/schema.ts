@@ -227,6 +227,16 @@ const SCHEMA_SQL = `
     -- code from here on; a fresh database never gets it. ADR-0003 is marked
     -- superseded; significance_grade above is UNRELATED and stays exactly as
     -- it was, old grade reads intact.
+    --
+    -- Ticket 02 (view-render-repair spec, "grading retires whole", ruled at
+    -- [S15069/T1035]) closes the write surface ticket 05 left open above:
+    -- the settlement turn-write facade
+    -- (worker/note-settlement-turn-facade.ts) no longer ACCEPTS grade on
+    -- any call either, so this column has no live writer left at all, not
+    -- merely an unused prompt instruction. This CHECK, the column and the
+    -- legacy read path (db/turns.ts, the pre-era milestone body in
+    -- mcp/timeline.ts) are frozen-readable and physically UNTOUCHED — same
+    -- "no physical drop" precedent supersedes already set.
     tags TEXT,
     files_read TEXT,
     files_modified TEXT,

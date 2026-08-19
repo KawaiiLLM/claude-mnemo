@@ -38,10 +38,11 @@ import type {
  * 写为纠错语义的空位") — a window this run finds nothing to propose or relate
  * completes exactly as cleanly as one where it does. A later ticket
  * (settlement-four-field-correction) refills this with rubric-driven
- * type/tags/membership/edge correction duties; until then the underlying
- * write facade still ACCEPTS grade/tier/type/tags (ADR-0003 handles grade/
- * tier's own separate retirement), this prompt just does not instruct any of
- * it.
+ * type/tags/membership/edge correction duties. Ticket 02 (view-render-repair
+ * spec, "grading retires whole", [S15069/T1035]) closed the gap this
+ * paragraph used to flag: the underlying write facade no longer accepts
+ * `grade` (or `tier` — ADR-0003's earlier retirement) at all, so there is
+ * nothing left for this prompt to under-instruct.
  *
  * TICKET 11'S ADDITION (edge-ownership-impl, "统一 Memory Rubric"): the
  * `## Memory Rubric` section below renders `renderMemoryRubricBlock()` —

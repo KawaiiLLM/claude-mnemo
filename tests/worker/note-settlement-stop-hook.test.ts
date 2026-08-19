@@ -211,7 +211,6 @@ describe("the hook is registered on the run's own job identity", () => {
           // staging — then tries to stop without ever calling commit.
           await toolHandlers.get("note")!({
             turn: `S${sessionDbId}/T1`,
-            grade: 2,
             type: ["discuss"],
             tags: [],
           } as never);
@@ -253,7 +252,7 @@ describe("the hook is registered on the run's own job identity", () => {
     expect(stopReason).toContain("already landed");
     expect(stopReason).toContain("Call `commit` now");
     // The write already landed for real — direct write, not staged.
-    expect(getTurnById(db, turnId)!.significanceGrade).toBe(2);
+    expect(getTurnById(db, turnId)!.type).toEqual(["discuss"]);
     // ...but the job itself stays open: only `commit` marks it done.
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
   });

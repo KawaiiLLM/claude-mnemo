@@ -84,10 +84,16 @@ import {
  * THIS module's own replay loop landed, counted as it happens rather than
  * inferred from what the model claimed. It is deliberately NOT an MCP tool —
  * `note-settlement-sdk-query.ts` never registers it with the SDK's `tool()`,
- * so the model can never call it, and the per-grade histogram inside it
- * never appears in any `ToolTextResult` this module returns. The query
- * wrapper reads it exactly once, after the model's run has already ended,
- * for a sink the model never sees (spec G9).
+ * so the model can never call it, and none of the counts inside it ever
+ * appear in any `ToolTextResult` this module returns. The query wrapper
+ * reads it exactly once, after the model's run has already ended, for a
+ * sink the model never sees (spec G9).
+ *
+ * TICKET 02'S REMOVAL (view-render-repair spec, "grading retires whole",
+ * [S15069/T1035]): this used to carry a per-grade histogram too — settlement
+ * no longer assigns a grade at all (the facade this module wraps refuses the
+ * field outright now), so there is nothing left to count, and
+ * `NoteSettlementCommitCounts` below drops the field.
  *
  * TICKET 11'S ADDITION: `previewCommit` — `attemptCommit(preview: true)`,
  * which is the SAME replay and the SAME gate in a transaction whose last
@@ -161,18 +167,10 @@ import {
  * guess about what the model said it would do.
  */
 export interface NoteSettlementCommitCounts {
-  /** Turns a `note` call actually carried a review (grade/type/tags) for, landed or yielded. */
+  /** Turns a `note` call actually carried a review (type/tags) for, landed or yielded. */
   turnsReviewed: number;
-  /** Of `turnsReviewed`, how many had their type/tags step aside because an agent note landed after this dispatch's context was read — grade still lands either way. */
+  /** Of `turnsReviewed`, how many had their type/tags step aside because an agent note landed after this dispatch's context was read. */
   reviewsYieldedToLateNote: number;
-  /**
-   * Indexed 0-4 (the task-causality scale). Counted whenever a landed review
-   * carried a grade, written OR yielded — grade always lands regardless
-   * (`evaluateSettlementTurnWrite`: only the note-derived half stands down).
-   * Operator-only (spec G9) — see the module doc comment above for how that
-   * is enforced, not merely intended.
-   */
-  gradeHistogram: number[];
   relationsWritten: number;
   /** A `propose` call that landed a stored proposal. */
   proposalsCreated: number;
@@ -189,7 +187,6 @@ function emptyCommitCounts(): NoteSettlementCommitCounts {
   return {
     turnsReviewed: 0,
     reviewsYieldedToLateNote: 0,
-    gradeHistogram: [0, 0, 0, 0, 0],
     relationsWritten: 0,
     proposalsCreated: 0,
     sessionNarrativeWritten: 0,
@@ -426,7 +423,7 @@ export function createSettlementStagingEngine(
     // and after a merge that is the combination, not this call's own fields.
     // And a combination neither call would have passed alone — prose for a
     // turn this dispatch may not write prose for, arriving in a second call
-    // that only names a grade — has to be refused here rather than at commit,
+    // that only names a tag — has to be refused here rather than at commit,
     // which is A7's whole "the agent learns while it can still act" rule.
     // Ticket 09: `rawInput.turn` is optional now (a `session`-addressed call
     // carries `rawInput.session` instead) — the staging key falls back to
@@ -555,24 +552,17 @@ export function createSettlementStagingEngine(
             const outcome = evaluation.outcome;
             if (outcome.review) {
               counts.turnsReviewed += 1;
-              // Ticket 05: the write gate checks grade/type/tags
-              // INDEPENDENTLY now — "yielded" is per-field, not a single
-              // verdict for the whole review. Grade still lands regardless
-              // of whether type/tags on the SAME call yielded (it is not
-              // note-derived) — the histogram counts it only when IT
-              // ITSELF landed, since a rejected grade never reached a
-              // stored row (see note-settlement-direct-write.ts, the
-              // module that actually wires this now).
+              // Ticket 05: the write gate checks type/tags INDEPENDENTLY —
+              // "yielded" is per-field, not a single verdict for the whole
+              // review. Ticket 02 (view-render-repair spec, "grading
+              // retires whole"): `grade` used to be a third, non-note-
+              // derived field counted here separately (a histogram); it is
+              // gone, so this is now a plain two-field check.
               const anyYielded =
-                (outcome.review.grade !== undefined && !outcome.review.grade.landed) ||
                 (outcome.review.type !== undefined && !outcome.review.type.landed) ||
                 (outcome.review.tags !== undefined && !outcome.review.tags.landed);
               if (anyYielded) {
                 counts.reviewsYieldedToLateNote += 1;
-              }
-              if (outcome.review.grade?.landed) {
-                const grade = outcome.review.grade.value;
-                counts.gradeHistogram[grade] = (counts.gradeHistogram[grade] ?? 0) + 1;
               }
             }
             if (outcome.relations) {

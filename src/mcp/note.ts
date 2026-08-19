@@ -849,7 +849,7 @@ function handleTurnWrite(
   // syntax (spec E2): a write whose result cannot be read is a failure, and a
   // failure must be legible at the call.
   //
-  // Grade, type and tags are NOT refused. They write `turns` directly for
+  // Type and tags are NOT refused. They write `turns` directly for
   // every era and every one of them renders, so settlement can still judge a
   // pre-cutoff turn in its fifty-turn lookback. The rule is about the
   // destination, not about the turn's age.
@@ -876,7 +876,7 @@ function handleTurnWrite(
     return parameterError(
       `S${address.sessionId}/T${address.promptNumber} is a pre-cutoff turn, whose prose has no reader —` +
         " title, content and insight cannot be written to it." +
-        " Its grade, type and tags are still writable.",
+        " Its type and tags are still writable.",
     );
   }
 

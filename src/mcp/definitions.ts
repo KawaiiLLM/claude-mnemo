@@ -536,19 +536,28 @@ export const timelineInputShape = {
 // reconstruction is a whole-rewrite with no append mode and no null-clear
 // (see that module's own doc comment), so `noteInputShape`'s nullable,
 // append-aware pair does not describe the same operation and must not be
-// shared. `turn`/`grade` have no main-agent analogue at all (grade is
-// settlement's alone to assign) and are declared fresh.
+// shared. `turn` has no main-agent analogue at all and is declared fresh.
 //
 // Ticket 06 (ownership-and-note-cadence spec, "选举机器拆除"): `tier`
 // (ADR-0003's election A/B/C) is RETIRED — settlement no longer assigns a
-// tier to any turn. `grade` stays; ADR-0003 is marked superseded.
+// tier to any turn.
+//
+// Ticket 02 (view-render-repair spec, "grading retires whole", ruled at
+// [S15069/T1035]): `grade` is RETIRED from this shape too — settlement no
+// longer assigns a G0-4 grade either, the same "writer records facts,
+// nobody left assigns value" retirement the main `note` tool's own `grade`
+// already got (ADR-0003, `noteInputShape` above). A call still sending
+// `grade` is `.strict()`'s ordinary unrecognised-key parse error, same
+// treatment as that earlier retirement — see `settlementTurnWriteInputSchema`
+// (worker/note-settlement-turn-facade.ts). ADR-0003 is now superseded on
+// its grading half too, not only its tier half.
 //
 // Ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): `turn`
 // becomes OPTIONAL and `session` joins it — exactly one of the two
 // addresses a call, the same shape `noteInputShape` used to give the main
 // tool before ticket 09 retired `session` from THAT surface. `title`/
 // `content` are what a `session`-addressed call writes (settlement's own
-// whole-rewrite semantics, unchanged) — grade/type/tags/relations stay
+// whole-rewrite semantics, unchanged) — type/tags/relations stay
 // turn-only, refused by `evaluateSettlementTurnWrite`'s session branch.
 //
 // Ticket 08 (edge-ownership-impl, "settlement four-field check-and-
@@ -567,7 +576,6 @@ export const settlementNoteInputShape = {
   title: z.string().optional(),
   content: z.string().optional(),
   insight: noteInputShape.insight,
-  grade: z.number().int().min(0).max(4).optional(),
   type: noteInputShape.type,
   tags: noteInputShape.tags,
   evidenceFor: noteInputShape.evidenceFor,

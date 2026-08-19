@@ -114,10 +114,10 @@ describe("note/remember land immediately, before commit is ever called (ticket 0
       now: () => NOW,
     });
 
-    const receipt = engine.writeNote({ turn: `S${sessionDbId}/T1`, grade: 3, type: ["design"] });
+    const receipt = engine.writeNote({ turn: `S${sessionDbId}/T1`, type: ["design"] });
 
     expect(receipt.content[0]!.text).toContain("Landed");
-    expect(getTurnById(db, t1)!.significanceGrade).toBe(3);
+    expect(getTurnById(db, t1)!.type).toEqual(["design"]);
     // The job is not yet marked done — only commit does that.
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
   });
@@ -154,8 +154,8 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
       now: () => NOW,
     });
 
-    engine.writeNote({ turn: `S${sessionDbId}/T1`, grade: 2, type: ["design"] });
-    engine.writeNote({ turn: `S${sessionDbId}/T2`, grade: 3 });
+    engine.writeNote({ turn: `S${sessionDbId}/T1`, type: ["design"] });
+    engine.writeNote({ turn: `S${sessionDbId}/T2`, type: ["research"] });
     engine.writeMembership({
       action: "propose",
       addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
@@ -168,7 +168,6 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
     expect(metrics).not.toBeNull();
     expect(metrics!.turnsReviewed).toBe(2);
     expect(metrics!.reviewsYieldedToLateNote).toBe(0);
-    expect(metrics!.gradeHistogram).toEqual([0, 0, 1, 1, 0]);
     expect(metrics!.proposalsCreated).toBe(1);
   });
 
@@ -181,7 +180,7 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
       context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       now: () => NOW,
     });
-    engine.writeNote({ turn: `S${sessionDbId}/T1`, grade: 1 });
+    engine.writeNote({ turn: `S${sessionDbId}/T1`, type: ["design"] });
 
     const receipt = engine.commit();
 
@@ -204,7 +203,6 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
     expect(engine.getLastCommitMetrics()).toEqual({
       turnsReviewed: 0,
       reviewsYieldedToLateNote: 0,
-      gradeHistogram: [0, 0, 0, 0, 0],
       relationsWritten: 0,
       proposalsCreated: 0,
       sessionNarrativeWritten: 0,

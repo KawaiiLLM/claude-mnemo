@@ -51,17 +51,29 @@ import {
  * alongside `grade`, era-gated by `src/election-era.ts` — is GONE. Settlement
  * assigns neither grade nor tier as of ticket 05's duty 1 removal; ticket 06
  * is the storage half, deleting the write surface a model could still
- * technically reach. `grade` stays reachable (ADR-0003's "significance_grade
- * 与旧读法保留" — old grade data and its read path are UNRELATED to tier and
- * are untouched), but era-gating and the tier field itself are gone.
+ * technically reach. `grade` stayed reachable a while longer (ADR-0003's
+ * "significance_grade 与旧读法保留" carve-out is the STORED column and its
+ * read path, not this facade's own acceptance of it) — see TICKET 02 below,
+ * which retires that acceptance too. Era-gating and the tier field itself
+ * are gone regardless.
  *
- * What is granted here, post-ticket-06:
+ * TICKET 02 (view-render-repair spec, "grading retires whole", ruled at
+ * [S15069/T1035]): `grade` leaves this facade outright. `ReviewOutcome`
+ * drops its `grade` field, the write-gate check below runs for `type`/`tags`
+ * only, and a call still naming `grade` is `.strict()`'s ordinary
+ * unrecognised-key parse error at the schema layer
+ * (`mcp/definitions.ts`'s `settlementNoteInputShape` no longer declares it)
+ * — the same treatment the main `note` tool's own `grade` already got from
+ * ADR-0003. The stored `significance_grade` column and its legacy read path
+ * (`db/turns.ts`, the pre-era milestone body in `mcp/timeline.ts`) are
+ * UNRELATED and untouched — this ticket retires the WRITE surface only,
+ * same split ADR-0003 already drew for the tier half.
  *
- *   - grade/type/tags ONLY for a turn `context.reviewableTurnIds`
- *     names — the window plus its rendered lookback — and yields the
- *     note-derived half (type/tags) to an agent note that landed after this
- *     dispatch's context was read (grade always lands: judged from raw
- *     material, not from the note);
+ * What is granted here, post-ticket-02:
+ *
+ *   - type/tags ONLY for a turn `context.reviewableTurnIds`
+ *     names — the window plus its rendered lookback — and yields to an
+ *     agent note that landed after this dispatch's context was read;
  *   - a relation ONLY on a pair already present in
  *     `context.eligibleRelationPairKeys` — a snapshot the caller takes ONCE
  *     before the model run starts (spec C7/C14: "a reply cannot create its
@@ -191,9 +203,9 @@ export function parameterError(message: string): ToolTextResult {
 // tags and the four relation fields are the SAME zod objects `noteInputShape`
 // declares, so a contract change to one of those reaches both surfaces from
 // a single edit in `mcp/definitions.ts` — see that shape's own doc comment
-// for which fields are shared and which (title/content, turn, grade) are
-// declared fresh because they describe an operation the main `note` tool
-// does not have.
+// for which fields are shared and which (title/content, turn) are declared
+// fresh because they describe an operation the main `note` tool does not
+// have.
 export const settlementTurnWriteInputShape = settlementNoteInputShape;
 
 export const settlementTurnWriteInputSchema = z
@@ -217,17 +229,18 @@ const RELATION_FIELD_ENTRIES: ReadonlyArray<
  * "结算(直写改造)"): `landed` is what the write gate's per-field
  * three-judgment check (`checkFieldGate`, writer = this dispatch's claim
  * identity) actually decided, checked and applied independently for
- * grade/type/tags — never a single all-or-nothing verdict for the whole
- * review. `yieldedReason` is the gate's own rejection text (never-read or
- * stale) when `landed` is false; this IS the new yield semantics (spec:
- * "门的'stale'拒绝就是新的yield 语义") — an agent note landing after this
+ * type/tags — never a single all-or-nothing verdict for the whole review.
+ * `yieldedReason` is the gate's own rejection text (never-read or stale)
+ * when `landed` is false; this IS the new yield semantics (spec: "门的
+ * 'stale'拒绝就是新的yield 语义") — an agent note landing after this
  * dispatch's context was read re-stamps `type`/`tags` (the note->turn field
  * mapping, ticket 01), so this dispatch's own stale grant on those fields is
  * what rejects the correction, with no separate `noteSupersedesReview` check
- * left to duplicate that logic. `grade` is checked by the SAME gate, on its
- * own field — it is not note-derived (nothing stamps `grade` from a note
- * write), so in the ordinary case its grant simply never goes stale and it
- * lands regardless of whether `type`/`tags` on the SAME call yield.
+ * left to duplicate that logic. Ticket 02 (view-render-repair spec, "grading
+ * retires whole"): `grade` — the one field of this trio that was NOT
+ * note-derived, and so used to land regardless of whether `type`/`tags` on
+ * the same call yielded — is gone; every field left here now goes through
+ * the identical note-derived path.
  */
 export interface ReviewFieldOutcome<T> {
   value: T;
@@ -236,7 +249,6 @@ export interface ReviewFieldOutcome<T> {
 }
 
 export interface ReviewOutcome {
-  grade?: ReviewFieldOutcome<number>;
   type?: ReviewFieldOutcome<string[]>;
   tags?: ReviewFieldOutcome<string[]>;
 }
@@ -387,7 +399,6 @@ function evaluateRelationCandidates(
 
 const SESSION_ONLY_FORBIDDEN_FIELDS = [
   "insight",
-  "grade",
   "type",
   "tags",
   "evidenceFor",
@@ -570,13 +581,12 @@ export function evaluateSettlementTurnWrite(
       message:
         "title/content/insight are no longer settlement's to write — turn " +
         "prose reconstruction retired with duty 2; the main agent is the " +
-        "note's sole writer. This call may only carry grade/type/tags " +
+        "note's sole writer. This call may only carry type/tags " +
         "and/or a relation field.",
     };
   }
 
   const touchesReview =
-    rawInput.grade !== undefined ||
     rawInput.type !== undefined ||
     rawInput.tags !== undefined;
   const relationFields = RELATION_FIELD_ENTRIES.filter(
@@ -587,7 +597,7 @@ export function evaluateSettlementTurnWrite(
   if (!touchesReview && relationFields.length === 0) {
     return {
       ok: false,
-      message: "at least one of grade/type/tags, or a relation field is required.",
+      message: "at least one of type/tags, or a relation field is required.",
     };
   }
 
@@ -635,7 +645,7 @@ export function evaluateSettlementTurnWrite(
         ok: false,
         message:
           `${ref} is outside this dispatch's reviewable window (the window ` +
-          "plus its rendered lookback) — grade/type/tags may only be " +
+          "plus its rendered lookback) — type/tags may only be " +
           "written for a turn this prompt actually showed.",
       };
     }
@@ -643,7 +653,7 @@ export function evaluateSettlementTurnWrite(
     // Ticket 05 (read-write-contract spec "结算(直写改造)"): the write
     // gate's per-field three-judgment check, writer = this dispatch's claim
     // identity (`claimWriterId`, ticket 01's pinned encoding) — checked
-    // independently for each of grade/type/tags this call actually
+    // independently for each of type/tags this call actually
     // provided, replacing the old single `noteSupersedesReview` fence. The
     // context build recorded a read grant on THIS turn for this same claim
     // identity (worker/note-settlement-context.ts); a field the gate now
@@ -653,20 +663,10 @@ export function evaluateSettlementTurnWrite(
     const writer = claimWriterId(context.jobId, context.claimGeneration);
     const outcome: ReviewOutcome = {};
     const landedUpdate: {
-      significanceGrade?: number;
       type?: string[];
       tags?: string[];
     } = {};
 
-    if (rawInput.grade !== undefined) {
-      const verdict = checkFieldGate(db, writer, "turn", turn.id, "grade", ref);
-      outcome.grade = verdict.ok
-        ? { value: rawInput.grade, landed: true }
-        : { value: rawInput.grade, landed: false, yieldedReason: verdict.message };
-      if (verdict.ok) {
-        landedUpdate.significanceGrade = rawInput.grade;
-      }
-    }
     if (normalizedType !== undefined) {
       const verdict = checkFieldGate(db, writer, "turn", turn.id, "type", ref);
       outcome.type = verdict.ok
@@ -688,18 +688,13 @@ export function evaluateSettlementTurnWrite(
 
     if (
       options.apply &&
-      (landedUpdate.significanceGrade !== undefined ||
-        landedUpdate.type !== undefined ||
-        landedUpdate.tags !== undefined)
+      (landedUpdate.type !== undefined || landedUpdate.tags !== undefined)
     ) {
       updateTurnById(db, turn.id, { ...landedUpdate, updatedAtEpoch: nowEpoch });
       // Stamp gate (spec "检查-写入原子"): only the fields that actually
       // landed, same writer identity the check above used — a yielded
       // field must NOT be re-stamped, or a second correction attempt in
       // this same run would find its own prior (rejected) call admitted.
-      if (landedUpdate.significanceGrade !== undefined) {
-        stampField(db, "turn", turn.id, "grade", writer, nowEpoch);
-      }
       if (landedUpdate.type !== undefined) {
         stampField(db, "turn", turn.id, "type", writer, nowEpoch);
       }
@@ -828,13 +823,6 @@ export function renderSettlementTurnWriteReceipt(
     const yieldedBits: string[] = [];
     const describeArray = (value: string[]): string =>
       value.length > 0 ? value.join(",") : "(none)";
-    if (outcome.review.grade) {
-      if (outcome.review.grade.landed) {
-        landedBits.push(`grade ${outcome.review.grade.value}`);
-      } else {
-        yieldedBits.push(`grade — ${outcome.review.grade.yieldedReason}`);
-      }
-    }
     if (outcome.review.type) {
       if (outcome.review.type.landed) {
         landedBits.push(`type ${describeArray(outcome.review.type.value)}`);

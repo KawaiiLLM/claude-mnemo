@@ -139,7 +139,7 @@ export interface NoteSettlementContext {
    * The session-lifetime exposure ledger is deliberately not the gate here.
    * That ledger answers "was this id ever legal to cite", which is right for a
    * citation: naming an old turn in a segment body is additive. A review
-   * verdict is destructive — it overwrites grade, type and tags — so an
+   * verdict is destructive — it overwrites type and tags — so an
    * address the model could only have produced from its own imagination must
    * not resolve onto a real row from some earlier window.
    */

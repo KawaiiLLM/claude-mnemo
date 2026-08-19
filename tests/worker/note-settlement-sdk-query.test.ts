@@ -190,7 +190,6 @@ describe("direct write holds through the real registered handlers (ticket 05: st
         (async function* () {
           const noteReceipt = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T1`,
-            grade: 2,
             type: ["design"],
             tags: ["lease"],
           })) as { content: Array<{ text: string }> };
@@ -200,8 +199,8 @@ describe("direct write holds through the real registered handlers (ticket 05: st
 
           // The load-bearing assertion: the write landed ALREADY, through the
           // ACTUAL registered handler, before `commit` was ever called.
-          expect(getTurnById(capturedDb, t1)!.significanceGrade).toBe(2);
           expect(getTurnById(capturedDb, t1)!.type).toEqual(["design"]);
+          expect(getTurnById(capturedDb, t1)!.tags).toEqual(["lease"]);
 
           // The job itself is still open — only `commit` marks it done.
           expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
@@ -238,8 +237,8 @@ describe("direct write holds through the real registered handlers (ticket 05: st
       });
 
       // After commit: the job itself is durably complete.
-      expect(getTurnById(db, t1)!.significanceGrade).toBe(2);
       expect(getTurnById(db, t1)!.type).toEqual(["design"]);
+      expect(getTurnById(db, t1)!.tags).toEqual(["lease"]);
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     } finally {
       db?.close();

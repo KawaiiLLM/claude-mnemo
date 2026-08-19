@@ -17,6 +17,20 @@
 > 策". Importance, where it is judged at all going forward, comes from the
 > turn-edge mechanism (`.scratch/turn-edge-mechanism/spec.md`) — edges, not
 > an election.
+>
+> **Ticket 02 addendum** (view-render-repair spec, "grading retires whole",
+> ruled at [S15069/T1035], 2026-08-20): the paragraph above already claimed
+> settlement "no longer assigns... a grade to any turn" as of ticket 05, but
+> that was the PROMPT's own instruction retiring, not the write surface —
+> the settlement turn-write facade (`worker/note-settlement-turn-facade.ts`)
+> kept ACCEPTING a model-supplied `grade` and landing it onto
+> `turns.significance_grade` right up to this ticket, which is what actually
+> closes it: `grade` leaves `settlementNoteInputShape` (`mcp/definitions.ts`)
+> outright, the same `.strict()`-rejected retirement its main-`note`-tool
+> sibling already got. `significance_grade` itself and its legacy read path
+> (`db/turns.ts`, the pre-era milestone body in `mcp/timeline.ts`) are
+> UNCHANGED by this ticket too — frozen-readable, no physical drop, same
+> split this ADR already drew for the tier column above.
 
 ## Context
 

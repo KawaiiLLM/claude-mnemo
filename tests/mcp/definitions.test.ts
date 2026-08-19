@@ -598,6 +598,16 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
     }
   });
 
+  // Ticket 02 (view-render-repair spec, "grading retires whole", ruled at
+  // [S15069/T1035]): `grade` leaves this shape outright — settlement no
+  // longer assigns a grade any more than it still assigns a tier.
+  it("grade is not part of this shape any more (ticket 02) — settlement no longer grades anything", () => {
+    expect(Object.keys(settlementNoteInputShape)).not.toContain("grade");
+    expect(() =>
+      z.object(settlementNoteInputShape).strict().parse({ turn: "S1/T1", grade: 2 }),
+    ).toThrow();
+  });
+
   it("title/content stay non-nullable — settlement's reconstruction never clears a field", () => {
     expect(() => z.object(settlementNoteInputShape).strict().parse({
       turn: "S1/T1",
@@ -613,7 +623,7 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
   // retired that surface's own `session`).
   it("turn is optional and session joins it (ticket 09) — both are legal on the wire schema", () => {
     const schema = z.object(settlementNoteInputShape).strict();
-    expect(() => schema.parse({ turn: "S1/T1", grade: 2 })).not.toThrow();
+    expect(() => schema.parse({ turn: "S1/T1", type: ["design"] })).not.toThrow();
     expect(() => schema.parse({ session: "S1", title: "t", content: "c" })).not.toThrow();
     expect(() => schema.parse({})).not.toThrow();
   });

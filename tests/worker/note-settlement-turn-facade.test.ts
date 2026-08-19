@@ -204,14 +204,14 @@ describe("the retired topic: tag namespace is refused, not silently revived (tic
 
     const result = write(
       context,
-      { turn: `S${sessionDbId}/T1`, grade: 2, tags: ["topic:lease"] },
+      { turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["topic:lease"] },
       NOW,
     );
 
     expect(resultText(result)).toContain("Parameter error");
     expect(resultText(result)).toContain("retired topic:");
     expect(getTurnById(db, t1)!.tags).toEqual([]);
-    expect(getTurnById(db, t1)!.significanceGrade).toBeNull();
+    expect(getTurnById(db, t1)!.type).toEqual([]);
   });
 
   test("a bare tag alongside an existing bare tag is unaffected", () => {
@@ -242,20 +242,18 @@ describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A
     const evaluation = evaluateSettlementTurnWrite(
       db,
       context,
-      { turn: `S${sessionDbId}/T1`, grade: 3, type: ["design"], tags: ["widgets"] },
+      { turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["widgets"] },
       NOW,
       { apply: false },
     );
 
     expect(evaluation.ok).toBe(true);
     expect(evaluation.ok && evaluation.outcome.review).toEqual({
-      grade: { value: 3, landed: true },
       type: { value: ["design"], landed: true },
       tags: { value: ["widgets"], landed: true },
     });
     // The load-bearing assertion: nothing landed.
     const turn = getTurnById(db, t1)!;
-    expect(turn.significanceGrade).toBeNull();
     expect(turn.type).toEqual([]);
     expect(turn.tags).toEqual([]);
   });
@@ -313,7 +311,7 @@ describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A
     const evaluation = evaluateSettlementTurnWrite(
       db,
       context,
-      { turn: `S${sessionDbId}/T1`, grade: 4 },
+      { turn: `S${sessionDbId}/T1`, type: ["design"] },
       NOW,
       { apply: false },
     );
@@ -358,12 +356,12 @@ describe("title/content/insight are refused outright (duty 2 retired, ticket 05)
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { turn: `S${sessionDbId}/T1`, title: "a lone title", grade: 2 },
+      { turn: `S${sessionDbId}/T1`, title: "a lone title", type: ["design"] },
       NOW,
     );
 
     expect(resultText(result)).toContain("Parameter error");
-    expect(getTurnById(db, t1)!.significanceGrade).toBeNull();
+    expect(getTurnById(db, t1)!.type).toEqual([]);
   });
 
   test("an existing agent note is left untouched by a refused prose call", () => {
@@ -390,11 +388,10 @@ describe("title/content/insight are refused outright (duty 2 retired, ticket 05)
 });
 
 // ---------------------------------------------------------------------------
-// Requirement 5: grade/type/tags only for reviewable turns, yield on the
-// note-derived half
+// Requirement 5: type/tags only for reviewable turns, yield when stale
 // ---------------------------------------------------------------------------
 
-describe("grade/type/tags are writable only for the window's reviewable turns (requirement 5)", () => {
+describe("type/tags are writable only for the window's reviewable turns (requirement 5)", () => {
   test("refuses a review write for a turn outside reviewableTurnIds", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
@@ -402,41 +399,39 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set() }),
-      { turn: `S${sessionDbId}/T1`, grade: 4, type: ["design"], tags: ["x"] },
+      { turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["x"] },
       NOW,
     );
 
     expect(resultText(result)).toContain("Parameter error");
     expect(resultText(result)).toContain("reviewable window");
-    expect(getTurnById(db, t1)!.significanceGrade).toBeNull();
+    expect(getTurnById(db, t1)!.type).toEqual([]);
   });
 
-  test("writes grade/type/tags whole for a reviewable turn", () => {
+  test("writes type/tags whole for a reviewable turn", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { turn: `S${sessionDbId}/T1`, grade: 2, type: ["design"], tags: ["widgets"] },
+      { turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["widgets"] },
       NOW,
     );
 
     expect(resultText(result)).not.toContain("Parameter error");
     const turn = getTurnById(db, t1)!;
-    expect(turn.significanceGrade).toBe(2);
     expect(turn.type).toEqual(["design"]);
     expect(turn.tags).toEqual(["widgets"]);
   });
 
   // Ticket 05 (read-write-contract spec): yield retired as a special check —
   // the write gate's own per-field staleness IS the new yield semantics.
-  // `note.ts`'s real subsumption rule re-stamps BOTH `type` and `tags`
-  // (never `grade`) whenever the main agent writes ANY note on a turn —
-  // reproduced directly here via `stampField`/`recordReadGrant`
-  // (db/write-gate.ts) rather than through `note.ts` itself, since this file
-  // tests the facade in isolation.
-  test("yields type/tags (but not grade) when an agent note's subsumption stamp lands after this claim's own read grant", () => {
+  // `note.ts`'s real subsumption rule re-stamps `type` and `tags` together
+  // whenever the main agent writes ANY note on a turn — reproduced directly
+  // here via `stampField`/`recordReadGrant` (db/write-gate.ts) rather than
+  // through `note.ts` itself, since this file tests the facade in isolation.
+  test("yields type/tags when an agent note's subsumption stamp lands after this claim's own read grant", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
@@ -447,14 +442,14 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
     recordReadGrant(db, claimWriter, "turn", t1, NOW, snapshotWriteGateSequence(db));
 
     // The main agent's note lands AFTER that grant — its subsumption stamp
-    // (note.ts) touches type/tags together, never grade.
+    // (note.ts) touches type/tags together.
     const agentWriter = sessionWriterId(sessionDbId);
     stampField(db, "turn", t1, "type", agentWriter, NOW + 5);
     stampField(db, "turn", t1, "tags", agentWriter, NOW + 5);
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW }),
-      { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tags: ["settlement"] },
+      { turn: `S${sessionDbId}/T1`, type: ["fix"], tags: ["settlement"] },
       NOW + 6,
     );
 
@@ -463,10 +458,9 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
     expect(resultText(result)).toContain("Yielded for");
     expect(resultText(result)).toContain(`recall(id="S${sessionDbId}/T1")`);
     const turn = getTurnById(db, t1)!;
-    // Grade is checked by the SAME gate on its OWN field — nothing stamps
-    // "grade" from a note write, so its grant never goes stale here, and it
-    // lands regardless of type/tags yielding on the same call.
-    expect(turn.significanceGrade).toBe(3);
+    // Ticket 02 (view-render-repair spec, "grading retires whole"): every
+    // reviewable field is note-derived now — type and tags both yield
+    // together here, with no field left that would land regardless.
     expect(turn.type).toEqual([]);
     expect(turn.tags).toEqual([]);
   });
@@ -488,7 +482,7 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW }),
-      { turn: `S${sessionDbId}/T1`, grade: 3, type: ["fix"], tags: ["settlement"] },
+      { turn: `S${sessionDbId}/T1`, type: ["fix"], tags: ["settlement"] },
       NOW + 1,
     );
 
@@ -747,7 +741,7 @@ describe("call shape", () => {
     const sessionDbId = seedSession();
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = write(baseContext(job), { turn: `S${sessionDbId}/T999`, grade: 1 }, NOW);
+    const result = write(baseContext(job), { turn: `S${sessionDbId}/T999`, type: ["design"] }, NOW);
 
     expect(resultText(result)).toContain("Parameter error");
   });
@@ -756,10 +750,12 @@ describe("call shape", () => {
 // ---------------------------------------------------------------------------
 // Ticket 06 (ownership-and-note-cadence spec, "选举机器拆除"): the election
 // tier (ADR-0003) is retired outright — `tier` is no longer a field this
-// facade accepts, there is no more era-gating, and `grade` alone survives.
-// The describe block that used to live here (era-gated tier election,
-// grade/tier mutual exclusivity) tested a mechanism that no longer exists;
-// ordinary grade writing is already covered by "writes grade/type/tags whole
+// facade accepts, and there is no more era-gating. The describe block that
+// used to live here (era-gated tier election, grade/tier mutual exclusivity)
+// tested a mechanism that no longer exists — `grade` itself is ALSO gone
+// now (ticket 02, view-render-repair spec, "grading retires whole"), so
+// there is no longer an "ordinary grade writing" case left to point at
+// either; ordinary type/tags writing is covered by "writes type/tags whole
 // for a reviewable turn" above.
 // ---------------------------------------------------------------------------
 
@@ -833,12 +829,11 @@ describe("session-addressed narrative writes (ticket 09)", () => {
     expect(!result.ok && result.message).toContain("at least one of title, content");
   });
 
-  test("rejects grade/type/tags/relations on a session address, naming them turn fields", () => {
+  test("rejects type/tags/relations on a session address, naming them turn fields", () => {
     const sessionDbId = seedSession();
     const job = claimWindow(sessionDbId, 1, 1);
 
     for (const extra of [
-      { grade: 2 },
       { type: ["design"] },
       { tags: ["auth"] },
       { evidenceFor: ["S1/T1"] },
@@ -896,7 +891,7 @@ describe("session-addressed narrative writes (ticket 09)", () => {
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { turn: `S${sessionDbId}/T1`, session: `S${sessionDbId}`, title: "x", grade: 1 },
+      { turn: `S${sessionDbId}/T1`, session: `S${sessionDbId}`, title: "x", type: ["design"] },
       NOW,
     );
 
@@ -908,7 +903,7 @@ describe("session-addressed narrative writes (ticket 09)", () => {
     const sessionDbId = seedSession();
     const job = claimWindow(sessionDbId, 1, 1);
 
-    const result = write(baseContext(job), { grade: 1 } as unknown as SettlementTurnWriteInput, NOW);
+    const result = write(baseContext(job), {} as unknown as SettlementTurnWriteInput, NOW);
 
     expect(result.ok).toBe(false);
     expect(!result.ok && result.message).toContain("exactly one of turn or session");

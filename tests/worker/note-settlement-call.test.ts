@@ -400,15 +400,14 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const metricsSeen: NoteSettlementWindowMetrics[] = [];
     const outcome = await dispatchWith(
       queryThatStages((engine) => {
-        engine.stageNoteWrite({ turn: "S1/T1", grade: 2, type: ["design"], tags: ["lease"] });
+        engine.stageNoteWrite({ turn: "S1/T1", type: ["design"], tags: ["lease"] });
         engine.stageNoteWrite({
           turn: "S1/T3",
-          grade: 3,
           type: ["implement", "correction"],
           tags: ["lease"],
           encodes: ["S1/T1"],
         });
-        engine.stageNoteWrite({ turn: "S1/T2", grade: 1, type: ["research"], tags: ["lease"] });
+        engine.stageNoteWrite({ turn: "S1/T2", type: ["research"], tags: ["lease"] });
         engine.stageMembershipWrite({
           action: "propose",
           addresses: ["S1/T2", "S1/T4"],
@@ -447,7 +446,6 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     expect(metricsSeen[0]!.commit).toEqual({
       turnsReviewed: 3,
       reviewsYieldedToLateNote: 0,
-      gradeHistogram: [0, 1, 1, 1, 0],
       relationsWritten: 1,
       proposalsCreated: 1,
       sessionNarrativeWritten: 0,
@@ -478,7 +476,6 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     expect(metricsSeen[0]!.commit).toEqual({
       turnsReviewed: 0,
       reviewsYieldedToLateNote: 0,
-      gradeHistogram: [0, 0, 0, 0, 0],
       relationsWritten: 0,
       proposalsCreated: 0,
       sessionNarrativeWritten: 0,
@@ -491,7 +488,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
 
     const outcome = await dispatchWith(
       queryThatStages((engine) => {
-        engine.stageNoteWrite({ turn: "S1/T2", grade: 1, type: ["research"], tags: [] });
+        engine.stageNoteWrite({ turn: "S1/T2", type: ["research"], tags: ["lease"] });
         // Deliberately no engine.commit() call.
       }),
     )({ job: fixture.job });
@@ -499,7 +496,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     expect(outcome.ok).toBe(false);
     // Nothing landed — staging without commit is exactly as durable as never
     // having called a tool at all.
-    expect(getTurnById(db, fixture.turnIds[1]!)!.significanceGrade).toBeNull();
+    expect(getTurnById(db, fixture.turnIds[1]!)!.tags).toEqual([]);
     expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
     expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
   });
@@ -519,7 +516,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const metricsSeen: NoteSettlementWindowMetrics[] = [];
     const outcome = await dispatchWith(
       queryThatStages((engine) => {
-        engine.stageNoteWrite({ turn: "S1/T2", grade: 1, type: ["research"], tags: [] });
+        engine.stageNoteWrite({ turn: "S1/T2", type: ["research"], tags: [] });
         // Deliberately no commit — this attempt fails, and it is the job's
         // last one.
       }),
@@ -655,22 +652,21 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
 
   /**
    * Spec D4/D6: the subagent may revise a turn from an earlier window that is
-   * still in its context — not a loophole, the mechanism the rubric's own
-   * Grade-4 "provisional, confirmed or demoted later" language assumes. T1's
-   * Grade 4 from window one is demoted in window two, once T1 is a PRECEDING
-   * turn rather than a window turn.
+   * still in its context — not a loophole, ordinary review-window mechanics.
+   * T1's tags from window one are corrected in window two, once T1 is a
+   * PRECEDING turn rather than a window turn.
    */
   test("a note call revises a turn settled by an earlier window once it is only in the preceding-turns context", async () => {
     const fixture = seedFourTurnWindow();
     const firstOutcome = await dispatchWith(
       queryThatStages((engine) => {
-        engine.stageNoteWrite({ turn: "S1/T1", grade: 4, type: ["design"], tags: ["settlement"] });
-        engine.stageNoteWrite({ turn: "S1/T3", grade: 2, type: ["implement"], tags: ["settlement"] });
+        engine.stageNoteWrite({ turn: "S1/T1", type: ["design"], tags: ["settlement"] });
+        engine.stageNoteWrite({ turn: "S1/T3", type: ["implement"], tags: ["settlement"] });
         engine.commit();
       }),
     )({ job: fixture.job });
     expect(firstOutcome).toEqual({ ok: true });
-    expect(getTurnById(db, fixture.turnIds[0]!)!.significanceGrade).toBe(4);
+    expect(getTurnById(db, fixture.turnIds[0]!)!.tags).toEqual(["settlement"]);
 
     // A second window, T5-T8: T1-T4 are now PRECEDING turns in its context,
     // not window turns — buildNoteSettlementContext still exposes them (ticket
@@ -688,13 +684,12 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
 
     const secondOutcome = await dispatchWith(
       queryThatStages((engine) => {
-        // T1's arc turned out short-lived — demoted now that its real scale
-        // is visible, exactly what the rubric's own Grade-4 language expects.
-        engine.stageNoteWrite({ turn: "S1/T1", grade: 0, type: ["design"], tags: ["settlement"] });
+        // T1's tag turned out wrong — corrected now that its real scale is
+        // visible.
+        engine.stageNoteWrite({ turn: "S1/T1", type: ["design"], tags: ["revised"] });
         for (let promptNumber = 5; promptNumber <= 8; promptNumber += 1) {
           engine.stageNoteWrite({
             turn: `S1/T${promptNumber}`,
-            grade: 1,
             type: ["implement"],
             tags: ["seam"],
           });
@@ -704,7 +699,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     )({ job: secondJob });
 
     expect(secondOutcome).toEqual({ ok: true });
-    expect(getTurnById(db, fixture.turnIds[0]!)!.significanceGrade).toBe(0);
+    expect(getTurnById(db, fixture.turnIds[0]!)!.tags).toEqual(["revised"]);
     expect(getNoteSettlementJob(db, secondJob.id)!.status).toBe("done");
   });
 });
@@ -737,7 +732,6 @@ describe("settlement payload at the scheduler seam", () => {
           for (let promptNumber = 1; promptNumber <= 4; promptNumber += 1) {
             engine.stageNoteWrite({
               turn: `S1/T${promptNumber}`,
-              grade: 1,
               type: ["implement"],
               tags: ["scheduler seam"],
             });
@@ -810,7 +804,6 @@ describe("settlement payload at the scheduler seam", () => {
     expect(metricsSeen[0]!.commit).toEqual({
       turnsReviewed: 0,
       reviewsYieldedToLateNote: 0,
-      gradeHistogram: [0, 0, 0, 0, 0],
       relationsWritten: 0,
       proposalsCreated: 0,
       sessionNarrativeWritten: 0,

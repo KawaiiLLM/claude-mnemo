@@ -131,8 +131,7 @@ export interface NoteSettlementQueryRequest {
  * committed), read by the query implementation ONLY after the model's run
  * has ended and never exposed to the model as a tool result — see
  * `note-settlement-staging.ts`'s `getLastCommitMetrics` doc comment for why
- * that ordering is what makes the per-grade histogram inside it safe under
- * spec G9.
+ * that ordering is what makes the counts inside it safe under spec G9.
  */
 export interface NoteSettlementQueryResult {
   text: string;
@@ -172,9 +171,9 @@ export interface NoteSettlementWindowMetrics {
    * What `commit` itself landed, sourced from its own replay
    * (`note-settlement-staging.ts`'s `getLastCommitMetrics`) rather than from
    * a payload nobody sends any more (ticket 10c). Null when `committed` is
-   * false — nothing landed, so there is nothing to count. The per-grade
-   * histogram inside is for THIS log line only (spec G9): it is never
-   * returned to the agent at any point before this line runs.
+   * false — nothing landed, so there is nothing to count. The counts inside
+   * are for THIS log line only (spec G9): never returned to the agent at
+   * any point before this line runs.
    */
   commit: NoteSettlementCommitCounts | null;
 }

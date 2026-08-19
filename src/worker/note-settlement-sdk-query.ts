@@ -67,7 +67,7 @@ const SETTLEMENT_ALLOWED_TOOLS = [
  * description below).
  */
 const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
-  "WRITE a CORRECTION to a turn's grade/type/tags/relations, OR this " +
+  "WRITE a CORRECTION to a turn's type/tags/relations, OR this " +
   "session's narrative — lands immediately, in this same call. This is a " +
   "RE-CHECK, not a first write: the main agent already wrote every field " +
   "below for this window's turns; call this only when the Memory Rubric " +
@@ -76,14 +76,13 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "preceding-turns section) or `session` (\"S<session>\", this session). " +
   "On `turn`: does NOT accept title/content/insight — turn prose is the " +
   "main agent's alone to write. " +
-  "grade (0-4)/type/tags: only for a turn shown in this prompt (window or " +
+  "type/tags: only for a turn shown in this prompt (window or " +
   "preceding turns); each overwrites whole when present, omit to leave " +
   "alone — there is no append. Each field is checked and applied " +
   "INDEPENDENTLY: if another writer (the main agent's own later note, or a " +
   "prior settlement attempt) touched a field since this dispatch's context " +
   "was read, that ONE field yields (reported in the receipt, not written) " +
-  "while the others still land — grade in particular is not derived from " +
-  "any note, so it lands even when type/tags on the same call yield. " +
+  "while the other still lands. " +
   "evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/" +
   "dependsOn: address lists — the SAME seven relations and phase-legality " +
   "validator the main agent's own `note` tool uses; a target must already " +
@@ -94,7 +93,7 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "above — this call only enforces address/eligibility/phase shape. " +
   "On `session`: `title`/`content` only, each overwritten whole when " +
   "present (no append — compose the incremented text yourself from what " +
-  "you can already see) — grade/type/tags/relations are refused.";
+  "you can already see) — type/tags/relations are refused.";
 
 /**
  * The `remember` tool's settlement-side call contract — `propose` and
