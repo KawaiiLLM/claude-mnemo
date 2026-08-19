@@ -14,7 +14,25 @@ import type { TurnRecord } from "../db/turns";
  * interface field-for-field; kept as a hand-written type rather than a
  * `z.infer` (same precedent as `RecallInput` itself) so this module has no
  * runtime dependency on zod.
+ *
+ * Ticket 07 (read-write-contract spec, "视图(读面)") adds `fields` — the
+ * field-selection vocabulary that replaces the collapsed/expanded two-state
+ * field-set switch for a turn render. "Arbitrary combination": any subset,
+ * any order, no implied pairing (unlike the old depth switch, which always
+ * bundled prompt+title+content together and response+insight+files together).
  */
+export const RECALL_TURN_FIELD_NAMES = [
+  "title",
+  "content",
+  "prompt",
+  "response",
+  "insight",
+  "observations",
+  "files",
+] as const;
+
+export type RecallTurnField = (typeof RECALL_TURN_FIELD_NAMES)[number];
+
 export interface MemoryFilterInput {
   /** Exact match against one stored `type` value (a turn's type array, or a segment's). */
   type?: string;
@@ -26,6 +44,13 @@ export interface MemoryFilterInput {
   time?: string;
   /** Substring match against files_read + files_modified. */
   file?: string;
+  /**
+   * Ticket 07: which turn fields to render, any combination, replacing the
+   * collapsed/expanded field-set switch. Unset falls back to the caller's own
+   * depth-driven default. Not a scoping criterion (see `hasFilterCriteria`) —
+   * `filter: { fields: [...] }` alone does not force the search/listing path.
+   */
+  fields?: RecallTurnField[];
 }
 
 /** `MemoryFilterInput`, parsed and normalized — every member independently optional. */
@@ -36,6 +61,16 @@ export interface ParsedMemoryFilter {
   sessionId?: number;
   after?: number;
   before?: number;
+  fields?: RecallTurnField[];
+}
+
+function isRecallTurnField(value: string): value is RecallTurnField {
+  return (RECALL_TURN_FIELD_NAMES as readonly string[]).includes(value);
+}
+
+/** The grammar an invalid `filter.fields` entry echoes back (spec: "报错回显语法"). */
+export function describeRecallTurnFieldGrammar(): string {
+  return `expected one of: ${RECALL_TURN_FIELD_NAMES.join(", ")}`;
 }
 
 interface ParsedTimeRange {
@@ -179,10 +214,29 @@ export function parseMemoryFilter(
     parsed.before = range?.before;
   }
 
+  if (filter.fields !== undefined) {
+    if (filter.fields.length === 0) {
+      return { parsed, error: `filter.fields must not be empty — ${describeRecallTurnFieldGrammar()}` };
+    }
+    const invalid = filter.fields.filter((field) => !isRecallTurnField(field));
+    if (invalid.length > 0) {
+      return {
+        parsed,
+        error: `invalid filter.fields entry "${invalid[0]}" — ${describeRecallTurnFieldGrammar()}`,
+      };
+    }
+    parsed.fields = filter.fields as RecallTurnField[];
+  }
+
   return { parsed };
 }
 
-/** True when at least one filter member is set — an all-empty filter AND-composes to a no-op. */
+/**
+ * True when at least one SCOPING filter member is set — an all-empty filter
+ * AND-composes to a no-op. `fields` is deliberately excluded (spec: it is a
+ * rendering directive, not a scope-narrowing one) — `filter: { fields: [...] }`
+ * alone must not force bare `recall()` into the search/listing path.
+ */
 export function hasFilterCriteria(filter: ParsedMemoryFilter): boolean {
   return (
     filter.type !== undefined ||

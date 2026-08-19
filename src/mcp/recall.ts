@@ -29,7 +29,9 @@ import {
   createTruncationSignal,
   DEFAULT_TRUNCATE,
   DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED,
+  REWIND_MARKER,
   renderNode,
+  truncateText,
   type FormattedObservation,
   type FormattedSession,
   type FormattedTurn,
@@ -41,7 +43,9 @@ import {
   turnMatchesFilter,
   type MemoryFilterInput,
   type ParsedMemoryFilter,
+  type RecallTurnField,
 } from "./memory-filter";
+import { estimateTokens } from "../utils/token-estimate";
 import { renderSegmentHeaderLines } from "./segment-spine";
 import {
   chronologicalSegmentMembers,
@@ -382,6 +386,7 @@ export function buildCollapsedTurnsForSession(
     filesReadCount: turn.filesRead.length,
     filesModifiedCount: turn.filesModified.length,
     status: turn.status,
+    wasRolledBack: turn.wasRolledBack,
   }));
 }
 
@@ -455,6 +460,7 @@ export function buildTurnView(
     observations: observations.map((observation) =>
       buildObservationView(observation, turn.createdAtEpoch, eraCutoffEpoch),
     ),
+    wasRolledBack: turn.wasRolledBack,
   };
 }
 
@@ -1084,6 +1090,122 @@ function applyTurnSelector(
   return turns.filter((turn) => selected.has(turn.promptNumber));
 }
 
+// ---------------------------------------------------------------------------
+// Ticket 08 (read-write-contract spec, "一工具两形态" 搜索半边): matched-term
+// bold + neighborhood, replacing the default even-split truncation for a
+// search hit's content field. Score order (already `results`' own order —
+// `searchQueryResults`/`searchMemory` sort by relevance) is what this
+// section preserves through rendering, rather than re-sorting turns back to
+// session-chronological order.
+// ---------------------------------------------------------------------------
+
+function extractQueryTerms(query: string): string[] {
+  return query
+    .trim()
+    .split(/\s+/)
+    .map((term) => term.replace(/["*]/g, ""))
+    .filter(Boolean);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Bolds every occurrence of any term inside `text` — a reader scanning a hit sees every matched word, not only the one the window centered on. */
+function boldAllTermOccurrences(text: string, terms: readonly string[]): string {
+  const escaped = terms.map(escapeRegExp).filter(Boolean);
+  if (escaped.length === 0) {
+    return text;
+  }
+  const pattern = new RegExp(`(${escaped.join("|")})`, "gi");
+  return text.replace(pattern, "**$1**");
+}
+
+/**
+ * Matched-term bold + neighborhood (spec: "匹配词加粗+邻域优先展示,替代默认
+ * 字段均摊截断;尾部词边界切、两侧均分"). Finds the EARLIEST case-insensitive
+ * occurrence of any term; the window is centered there, `windowChars` split
+ * evenly across both sides, each side's tail cut at a WORD BOUNDARY (mirrors
+ * `truncateText`'s own boundary rule, applied independently left and right).
+ * No term found in `text` at all (the FTS hit came from a different field)
+ * falls back to the ordinary word-boundary truncate from the start.
+ */
+export function boldSearchSnippet(
+  text: string,
+  terms: readonly string[],
+  windowChars: number,
+  signal?: TruncationSignal,
+): string {
+  if (terms.length === 0) {
+    return truncateText(text, { limit: windowChars, signal });
+  }
+
+  const lower = text.toLowerCase();
+  let matchStart = -1;
+  let matchLength = 0;
+  for (const term of terms) {
+    if (!term) continue;
+    const idx = lower.indexOf(term.toLowerCase());
+    if (idx !== -1 && (matchStart === -1 || idx < matchStart)) {
+      matchStart = idx;
+      matchLength = term.length;
+    }
+  }
+
+  if (matchStart === -1) {
+    return truncateText(text, { limit: windowChars, signal });
+  }
+
+  const halfWindow = Math.max(10, Math.floor(windowChars / 2));
+  const leftStart = Math.max(0, matchStart - halfWindow);
+  const rightEnd = Math.min(text.length, matchStart + matchLength + halfWindow);
+
+  let left = text.slice(leftStart, matchStart);
+  let right = text.slice(matchStart + matchLength, rightEnd);
+  const matched = text.slice(matchStart, matchStart + matchLength);
+  const leftTruncated = leftStart > 0;
+  const rightTruncated = rightEnd < text.length;
+
+  // Word-boundary cut on each side independently — keep the END of the left
+  // window (adjacent to the match) and the START of the right window.
+  if (leftTruncated) {
+    const spaceIdx = left.indexOf(" ");
+    if (spaceIdx !== -1 && spaceIdx <= left.length * 0.2) {
+      left = left.slice(spaceIdx + 1);
+    }
+  }
+  if (rightTruncated) {
+    const spaceIdx = right.lastIndexOf(" ");
+    if (spaceIdx !== -1 && spaceIdx >= right.length * 0.8) {
+      right = right.slice(0, spaceIdx);
+    }
+  }
+
+  if ((leftTruncated || rightTruncated) && signal) {
+    signal.truncated = true;
+  }
+
+  const windowText = `${left}${matched}${right}`;
+  const bolded = boldAllTermOccurrences(windowText, terms);
+  return `${leftTruncated ? "…" : ""}${bolded}${rightTruncated ? "…" : ""}`;
+}
+
+/** Shallow-clones a formatted view with its `content` replaced by a bold+neighborhood snippet — the search-shape's own field, never mutating the source view. */
+function withSearchSnippet<T extends { content?: string | null }>(
+  view: T,
+  terms: readonly string[],
+  windowChars: number,
+  signal?: TruncationSignal,
+): T {
+  if (!view.content || terms.length === 0) {
+    return view;
+  }
+  // `T` is generic — TS cannot prove a spread-and-override object literal is
+  // still exactly `T`, so the cast makes explicit what is structurally true
+  // (every property of `view` survives the spread; only `content` narrows).
+  return { ...view, content: boldSearchSnippet(view.content, terms, windowChars, signal) } as T;
+}
+
 function renderGroupedSearchResults(
   db: Database,
   results: SearchMemoryResult[],
@@ -1093,14 +1215,35 @@ function renderGroupedSearchResults(
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
+  queryText?: string,
+  readerId?: string | null,
+  now: () => number = () => Math.floor(Date.now() / 1000),
 ): string {
+  const terms = queryText ? extractQueryTerms(queryText) : [];
+  const snippetWindow = truncate ?? DEFAULT_TRUNCATE;
+  // Score order (spec: "分数序替代时序"): `results` already arrived in
+  // relevance order (`searchQueryResults`) — this map lets turns within a
+  // session group render in THAT order (best rank first) instead of
+  // `getTurnsForSession`'s chronological one. Ties keep the first (best)
+  // rank a turn was seen at, across its possible turn+observation hits.
+  const relevanceRank = new Map<number, number>();
+  results.forEach((result, index) => {
+    if (result.turnId !== null && !relevanceRank.has(result.turnId)) {
+      relevanceRank.set(result.turnId, index);
+    }
+  });
+  const grants: ReadGrantEntry[] = [];
   // Segment hits lead: a `tag:` query returns the chapter AND its member turns
   // (spec user story 16), and the chapter is the index into the rest.
   const segmentLines = results
     .filter((result) => result.layer === "segment")
-    .map((result) =>
-      renderSegmentSummary(db, result.sourceId, truncate, eraCutoffEpoch),
-    )
+    .map((result) => {
+      const line = renderSegmentSummary(db, result.sourceId, truncate, eraCutoffEpoch);
+      if (line !== null) {
+        grants.push({ entityType: "segment", entityId: result.sourceId });
+      }
+      return line;
+    })
     .filter((line): line is string => line !== null);
 
   const sessionGroups = new Map<
@@ -1151,39 +1294,65 @@ function renderGroupedSearchResults(
     if (!session || !group) {
       return "";
     }
+    grants.push({ entityType: "session", entityId: session.id });
 
     if (group.sessionHit && group.turnIds.size === 0) {
-      return renderSession(
-        db,
-        session,
-        depth,
-        truncate,
-        undefined,
-        includeDbTurnIds,
-        truncateCap,
-        eraCutoffEpoch,
+      // The session itself matched (its own title/content) with no specific
+      // turn/observation hit — spec's "命中后的深入=用户用选择器自取,不做±N":
+      // this renders the session's own snippet-bolded line, not every turn
+      // dragged along underneath it (the old full nested render did).
+      const sessionView = withSearchSnippet(
+        buildSessionSummary(db, session.id, eraCutoffEpoch) ??
+          buildSessionView(db, session, eraCutoffEpoch),
+        terms,
+        snippetWindow,
         signal,
+      );
+      return renderNode(
+        { type: "session", value: sessionView },
+        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal },
       );
     }
 
+    const sessionView = withSearchSnippet(
+      buildSessionSummary(db, session.id, eraCutoffEpoch) ??
+        buildSessionView(db, session, eraCutoffEpoch),
+      terms,
+      snippetWindow,
+      signal,
+    );
     const lines = [
       renderNode(
-        {
-          type: "session",
-          value:
-            buildSessionSummary(db, session.id, eraCutoffEpoch) ??
-            buildSessionView(db, session, eraCutoffEpoch),
-        },
+        { type: "session", value: sessionView },
         { depth: "collapsed", mode: "unified", truncate, truncateCap, signal },
       ),
     ];
-    const turns = getTurnsForSession(db, session.id).filter(
-      (turn) =>
-        group.turnIds.has(turn.id) || group.observationIdsByTurnId.has(turn.id),
-    );
+    // Score order (spec: "分数序替代时序"): turns within this session group
+    // render in RELEVANCE order (best rank first), not `getTurnsForSession`'s
+    // chronological one — ties (a turn with no direct relevance entry, e.g.
+    // pulled in only via an observation hit) fall back to prompt order.
+    const turns = getTurnsForSession(db, session.id)
+      .filter(
+        (turn) =>
+          group.turnIds.has(turn.id) || group.observationIdsByTurnId.has(turn.id),
+      )
+      .sort((left, right) => {
+        const leftRank = relevanceRank.get(left.id) ?? Number.POSITIVE_INFINITY;
+        const rightRank = relevanceRank.get(right.id) ?? Number.POSITIVE_INFINITY;
+        if (leftRank !== rightRank) {
+          return leftRank - rightRank;
+        }
+        return left.promptNumber - right.promptNumber;
+      });
 
     for (const turn of turns) {
-      const turnView = buildTurnView(db, turn, eraCutoffEpoch);
+      grants.push({ entityType: "turn", entityId: turn.id });
+      const turnView = withSearchSnippet(
+        buildTurnView(db, turn, eraCutoffEpoch),
+        terms,
+        snippetWindow,
+        signal,
+      );
       const turnDepth =
         group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id)
           ? "collapsed"
@@ -1211,10 +1380,11 @@ function renderGroupedSearchResults(
           continue;
         }
 
-        const observationView = buildObservationView(
-          observation,
-          turn.createdAtEpoch,
-          eraCutoffEpoch,
+        const observationView = withSearchSnippet(
+          buildObservationView(observation, turn.createdAtEpoch, eraCutoffEpoch),
+          terms,
+          snippetWindow,
+          signal,
         );
         lines.push(
           renderNode(
@@ -1236,6 +1406,13 @@ function renderGroupedSearchResults(
 
     return lines.join("\n");
   });
+
+  // Ticket 08 (read-write-contract spec): the flagged gap — a `query=` render
+  // used to record no read grants at all. Every segment/session/turn shown
+  // above earns the reader a grant, same as the routed-id paths.
+  if (readerId && grants.length > 0) {
+    recordReadGrants(db, readerId, grants, now());
+  }
 
   return [...segmentLines, ...sessionLines].filter(Boolean).join("\n");
 }
@@ -1539,14 +1716,307 @@ function renderRoutedId(
   return formatParameterError(`unrecognized id kind`);
 }
 
+// ---------------------------------------------------------------------------
+// Ticket 07 (read-write-contract spec, "视图(读面)"): the browse shape — bare
+// `recall()` (no `id`, no `query`, no SCOPING filter — see `hasFilterCriteria`)
+// renders a GLOBAL chronological turn feed instead of session-grouped
+// listing. A session's title shows only on its FIRST appearance ON THE PAGE
+// (spec user story 16); an alternation back to an already-shown session does
+// not repeat it. `pageBudget` bounds a page by TOKENS — overflow rolls to
+// another page, never truncating a shown block (spec: "溢出→分页,绝不截断整
+// 块"). `turn` is the one per-field knife: word-boundary cut, its budget
+// split evenly across whichever fields `filter.fields` selected (default
+// title+content, mirroring the retired collapsed field-set).
+// ---------------------------------------------------------------------------
+
+const DEFAULT_BROWSE_FIELDS: readonly RecallTurnField[] = ["title", "content"];
+
+/**
+ * Bounded working set fetched before packing into pages. Not a full-corpus
+ * scan: this project's own comments elsewhere size a session/segment at "a
+ * few dozen or a few hundred" turns, so 500 of the MOST RECENT turns is
+ * generous headroom for the browse feed's own default page. A corpus beyond
+ * this cap loses turns older than the 500th most recent to the browse feed
+ * specifically — they stay fully reachable by `id=`/`query=` addressing.
+ */
+const BROWSE_CANDIDATE_CAP = 500;
+
+/** Approximate chars-per-token used only to size the per-field WORD-BOUNDARY cut — a guidance ratio, not the hard pageBudget ceiling that actually governs overflow. */
+const BROWSE_CHARS_PER_TOKEN = 4;
+
+function browseFieldText(
+  db: Database,
+  turn: TurnRecord,
+  field: RecallTurnField,
+): string | null {
+  switch (field) {
+    case "title":
+      return turn.title;
+    case "content":
+      return turn.content;
+    case "prompt":
+      return turn.userPrompt;
+    case "response":
+      return turn.assistantResponse;
+    case "insight": {
+      const lines = splitInsight(turn.insight);
+      return lines.length > 0 ? lines.join("; ") : null;
+    }
+    case "files": {
+      const files = [...turn.filesRead, ...turn.filesModified];
+      return files.length > 0 ? files.join(", ") : null;
+    }
+    case "observations": {
+      const count = getExtractableObservationsForTurn(db, turn.id).length;
+      return count > 0 ? `${count} observation${count === 1 ? "" : "s"}` : null;
+    }
+    default:
+      return null;
+  }
+}
+
+function formatBrowseTurnLabel(
+  turn: TurnRecord,
+  sessionId: number,
+  includeDbTurnIds: boolean,
+): string {
+  const turnId =
+    turn.transcriptLineStart === null
+      ? `T${turn.promptNumber}`
+      : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
+  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
+  const statusSegment = turn.status ? ` [${turn.status}]` : "";
+  const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
+  return `  - [S${sessionId}][${turnId}]${statusSegment}${dbIdSegment}${rewindSegment}`;
+}
+
+/**
+ * One turn's field-selected render (spec: "turn = 唯一刀,词边界截断,均摊 across
+ * 选中字段"). `turnBudget` (tokens) is split evenly across however many of
+ * the selected fields actually produced text; each field's own cut is
+ * word-boundary (`truncateText`, reused — its own limit is characters, so
+ * the token budget is converted via `BROWSE_CHARS_PER_TOKEN`).
+ */
+function renderBrowseTurnBlock(
+  db: Database,
+  turn: TurnRecord,
+  sessionId: number,
+  fields: readonly RecallTurnField[],
+  includeDbTurnIds: boolean,
+  turnBudget: number | undefined,
+  signal: TruncationSignal | undefined,
+): string {
+  const label = formatBrowseTurnLabel(turn, sessionId, includeDbTurnIds);
+  const values = fields
+    .map((field) => ({ field, text: browseFieldText(db, turn, field) }))
+    .filter((entry): entry is { field: RecallTurnField; text: string } => Boolean(entry.text));
+
+  if (values.length === 0) {
+    return label;
+  }
+
+  const perFieldCharLimit =
+    turnBudget !== undefined
+      ? Math.max(20, Math.floor((turnBudget * BROWSE_CHARS_PER_TOKEN) / values.length))
+      : undefined;
+
+  const fieldLines = values.map(({ field, text }) => {
+    const rendered =
+      perFieldCharLimit !== undefined
+        ? truncateText(text, { limit: perFieldCharLimit, signal })
+        : text;
+    return `    - ${field}: ${rendered}`;
+  });
+
+  return [label, ...fieldLines].join("\n");
+}
+
+function renderBrowseSessionHeader(session: NonNullable<ReturnType<typeof getSession>>): string {
+  return `- [S${session.id}] ${session.title ?? "Untitled"}`;
+}
+
+/**
+ * One browsable unit: a turn (the common case) or a SESSION WITH NO TURNS AT
+ * ALL YET (a freshly created session that has not produced a turn). Without
+ * this second kind, a turn-only feed would silently drop such a session from
+ * discoverability entirely — the pre-ticket-07 session-grouped listing
+ * always showed every session's own line regardless of turn count, and bare
+ * `recall()` must keep that guarantee.
+ */
+type BrowseUnit =
+  | { kind: "turn"; epoch: number; turn: TurnRecord }
+  | { kind: "session"; epoch: number; session: NonNullable<ReturnType<typeof getSession>> };
+
+interface BrowsePackedUnit {
+  unit: BrowseUnit;
+  rendered: string;
+}
+
+function browseUnitSessionId(unit: BrowseUnit): number {
+  return unit.kind === "turn" ? unit.turn.sessionId : unit.session.id;
+}
+
+/**
+ * Builds and paginates the global chronological feed. Greedy token-budget
+ * packing (same shape as `timeline.ts`'s `paginateByTokenBudget`):
+ * consecutive units (most-recent first) fill a page until either `pageSize`
+ * items or `pageBudget` tokens is reached, whichever comes first — a page
+ * always holds at least one item, so a single oversized turn cannot stall
+ * pagination. Every packed page independently tracks its own
+ * first-appearance set, which is what makes "session title on first
+ * appearance, not repeated on alternation" a per-PAGE fact.
+ */
+function buildBrowseFeed(
+  db: Database,
+  page: number,
+  pageSize: number,
+  pageBudget: number,
+  turnBudget: number | undefined,
+  fields: readonly RecallTurnField[] | undefined,
+  includeDbTurnIds: boolean,
+  signal: TruncationSignal | undefined,
+  readerId: string | null | undefined,
+  now: () => number,
+): string {
+  const turnIdRows = db
+    .query<{ id: number }, [number]>(
+      `SELECT id FROM turns ORDER BY created_at_epoch DESC, id DESC LIMIT ?`,
+    )
+    .all(BROWSE_CANDIDATE_CAP);
+  const turnUnits: BrowseUnit[] = turnIdRows
+    .map((row) => getTurnById(db, row.id))
+    .filter((turn): turn is TurnRecord => turn !== null)
+    .map((turn) => ({ kind: "turn", epoch: turn.createdAtEpoch, turn }));
+
+  // Sessions with no turn at all yet — kept as their own browse unit so
+  // discoverability matches the pre-ticket-07 listing exactly.
+  const emptySessionRows = db
+    .query<{ id: number; createdAtEpoch: number }, [number]>(
+      `SELECT id, created_at_epoch AS createdAtEpoch FROM sessions
+       WHERE id NOT IN (SELECT DISTINCT session_id FROM turns)
+       ORDER BY created_at_epoch DESC LIMIT ?`,
+    )
+    .all(BROWSE_CANDIDATE_CAP);
+  const sessionCache = new Map<number, ReturnType<typeof getSession>>();
+  const sessionFor = (sessionId: number) => {
+    if (!sessionCache.has(sessionId)) {
+      sessionCache.set(sessionId, getSession(db, sessionId));
+    }
+    return sessionCache.get(sessionId) ?? null;
+  };
+  const emptySessionUnits: BrowseUnit[] = emptySessionRows.flatMap((row) => {
+    const session = sessionFor(row.id);
+    return session ? [{ kind: "session" as const, epoch: row.createdAtEpoch, session }] : [];
+  });
+
+  const units = [...turnUnits, ...emptySessionUnits].sort((left, right) => {
+    if (left.epoch !== right.epoch) {
+      return right.epoch - left.epoch;
+    }
+    return browseUnitSessionId(right) - browseUnitSessionId(left);
+  });
+
+  if (units.length === 0) {
+    return joinPage(formatPageHeader(1, 1, 0), "", 1);
+  }
+
+  const resolvedFields = fields && fields.length > 0 ? fields : DEFAULT_BROWSE_FIELDS;
+
+  const renderForPage = (unit: BrowseUnit, seenSessions: ReadonlySet<number>): string => {
+    const sessionId = browseUnitSessionId(unit);
+    const isFirst = !seenSessions.has(sessionId);
+    if (unit.kind === "session") {
+      // A first-appearance-only header IS the whole render for a turnless
+      // session — there is no turn body to show.
+      return isFirst ? renderBrowseSessionHeader(unit.session) : "";
+    }
+    const session = sessionFor(unit.turn.sessionId);
+    if (!session) {
+      return "";
+    }
+    const block = renderBrowseTurnBlock(
+      db,
+      unit.turn,
+      session.id,
+      resolvedFields,
+      includeDbTurnIds,
+      turnBudget,
+      signal,
+    );
+    return isFirst ? `${renderBrowseSessionHeader(session)}\n${block}` : block;
+  };
+
+  const pages: BrowsePackedUnit[][] = [];
+  let current: BrowsePackedUnit[] = [];
+  let seenInPage = new Set<number>();
+  let used = 0;
+
+  for (const unit of units) {
+    if (unit.kind === "turn" && !sessionFor(unit.turn.sessionId)) {
+      continue;
+    }
+
+    let rendered = renderForPage(unit, seenInPage);
+    let cost = estimateTokens(rendered);
+    const overflowsCount = current.length >= pageSize;
+    const overflowsBudget = current.length > 0 && used + cost > pageBudget;
+
+    if (current.length > 0 && (overflowsCount || overflowsBudget)) {
+      pages.push(current);
+      current = [];
+      seenInPage = new Set();
+      used = 0;
+      rendered = renderForPage(unit, seenInPage);
+      cost = estimateTokens(rendered);
+    }
+
+    current.push({ unit, rendered });
+    seenInPage.add(browseUnitSessionId(unit));
+    used += cost;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+
+  const pageCount = pages.length;
+  const clampedPage = Math.min(Math.max(1, page), pageCount);
+  const pageItems = pages[clampedPage - 1] ?? [];
+
+  if (readerId && pageItems.length > 0) {
+    const grants: ReadGrantEntry[] = [];
+    const grantedSessions = new Set<number>();
+    for (const item of pageItems) {
+      const sessionId = browseUnitSessionId(item.unit);
+      if (item.unit.kind === "turn") {
+        grants.push({ entityType: "turn", entityId: item.unit.turn.id });
+      }
+      if (!grantedSessions.has(sessionId)) {
+        grantedSessions.add(sessionId);
+        grants.push({ entityType: "session", entityId: sessionId });
+      }
+    }
+    recordReadGrants(db, readerId, grants, now());
+  }
+
+  return joinPage(
+    formatPageHeader(clampedPage, pageCount, units.length),
+    pageItems.map((item) => item.rendered).filter(Boolean).join("\n"),
+    pageCount,
+  );
+}
+
 /**
  * Bare `recall()` — no `id`, no `query` (ticket 03, spec user story 18):
- * segments lead, sessions follow. Segments are recency-ordered by last
- * member-or-state edit (`listSegmentsByActivity`, ADR-0005's roster rule)
- * and bounded by `pageSize`, same as the roster is budget-truncated; the
- * section only appears on page 1 — later pages are pure session-listing
- * pagination, unchanged from before this ticket, so a caller paging through
- * sessions never sees the segments header repeat.
+ * segments lead, the browse turn feed follows. Segments are recency-ordered
+ * by last member-or-state edit (`listSegmentsByActivity`, ADR-0005's roster
+ * rule) and bounded by `pageSize`, same as the roster is budget-truncated;
+ * the section only appears on page 1 — later pages are pure browse-feed
+ * pagination, so a caller paging through turns never sees the segments
+ * header repeat.
+ *
+ * Ticket 07 (read-write-contract spec): the sessions section retired in
+ * favour of `buildBrowseFeed`'s global chronological turn feed — see that
+ * function's own doc comment.
  */
 function renderBareOverview(
   db: Database,
@@ -1554,19 +2024,20 @@ function renderBareOverview(
   page: number,
   pageSize: number,
   truncate?: number,
-  after?: number,
-  before?: number,
   includeDbTurnIds?: boolean,
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   pageBudget?: number,
   turnBudget?: number,
-  // Ticket 04: narrows the sessions section the same way the `S*` listing
-  // kind does (`listSessionIds`, shared). The segments section above is
-  // ticket 02/03/05 territory and stays unfiltered — bare `recall()`'s
-  // roster-first behavior is unchanged.
+  // Ticket 04: the segments section above is ticket 02/03/05 territory and
+  // stays unfiltered — bare `recall()`'s roster-first behavior is unchanged.
+  // Reached here only with no SCOPING criterion set (`hasFilterCriteria`
+  // gates the caller before this function runs) — `filter.fields` is the
+  // only member that can legitimately be set.
   filter: ParsedMemoryFilter = {},
+  readerId?: string | null,
+  now: () => number = () => Math.floor(Date.now() / 1000),
 ): string {
   const parts: string[] = [];
 
@@ -1575,6 +2046,9 @@ function renderBareOverview(
     if (segments.length > 0) {
       parts.push(`── segments (${segments.length}) ──`);
       for (const segment of segments) {
+        if (readerId) {
+          recordReadGrants(db, readerId, [{ entityType: "segment", entityId: segment.id }], now());
+        }
         parts.push(
           renderSegmentCard(db, segment.id, {
             depth,
@@ -1592,32 +2066,19 @@ function renderBareOverview(
     }
   }
 
-  const paged = paginateItems(
-    listSessionIds(db, undefined, after, before, filter),
-    page,
-    pageSize,
-  );
-  if (paged.total > 0) {
-    parts.push(`── sessions ──`);
-  }
+  parts.push(`── turns ──`);
   parts.push(
-    joinPage(
-      formatPageHeader(page, paged.pageCount, paged.total),
-      paged.items
-        .map((sessionId) =>
-          renderSessionDetail(
-            db,
-            sessionId,
-            depth,
-            truncate,
-            includeDbTurnIds,
-            truncateCap,
-            eraCutoffEpoch,
-            signal,
-          ),
-        )
-        .join("\n"),
-      paged.pageCount,
+    buildBrowseFeed(
+      db,
+      page,
+      pageSize,
+      pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+      turnBudget,
+      filter.fields,
+      includeDbTurnIds ?? false,
+      signal,
+      readerId,
+      now,
     ),
   );
 
@@ -1754,6 +2215,9 @@ function recallMemoryBody(
         truncateCap,
         eraCutoffEpoch,
         signal,
+        text || undefined,
+        input.readerId,
+        input.now ?? (() => Math.floor(Date.now() / 1000)),
       ),
       paged.pageCount,
     );
@@ -1765,8 +2229,6 @@ function recallMemoryBody(
     page,
     pageSize,
     truncate,
-    filter.after,
-    filter.before,
     includeDbTurnIds,
     truncateCap,
     eraCutoffEpoch,
@@ -1774,5 +2236,7 @@ function recallMemoryBody(
     pageBudget,
     turnBudget,
     filter,
+    input.readerId,
+    input.now ?? (() => Math.floor(Date.now() / 1000)),
   );
 }

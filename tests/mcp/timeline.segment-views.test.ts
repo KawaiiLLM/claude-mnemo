@@ -5,7 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import type { RankedSegmentMember } from "../../src/db/segment-rank";
-import { addSegmentMembers, applySegmentWrites, createSegment, getSegment } from "../../src/db/segments";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import {
@@ -201,13 +201,28 @@ describe("timeline(id=\"E<n>\") segment views", () => {
     process.env.TZ = originalTz;
   });
 
-  test("parseSegmentTimelineId matches E<n> case-insensitively and rejects any range/wildcard", () => {
+  test("parseSegmentTimelineId matches E<n> case-insensitively, treats E<n>/T... as equivalent, and rejects any range/wildcard on the segment id itself", () => {
     expect(parseSegmentTimelineId("E47")).toEqual({ segmentId: 47 });
     expect(parseSegmentTimelineId("e47")).toEqual({ segmentId: 47 });
     expect(parseSegmentTimelineId("S47")).toBeNull();
-    expect(parseSegmentTimelineId("E47/T3")).toBeNull();
+    // Ticket 09 (read-write-contract spec): `E<n>/T...` — any trailing
+    // selector — is EQUIVALENT to bare `E<n>` (timeline(id="E31/T1...") ≡
+    // timeline(id="E31")), a deliberate change from the pre-ticket-09
+    // rejection this test used to assert.
+    expect(parseSegmentTimelineId("E47/T3")).toEqual({ segmentId: 47 });
+    expect(parseSegmentTimelineId("E47/T3..7")).toEqual({ segmentId: 47 });
+    expect(parseSegmentTimelineId("E47/T*")).toEqual({ segmentId: 47 });
     expect(parseSegmentTimelineId("E*")).toBeNull();
     expect(parseSegmentTimelineId("E1..9")).toBeNull();
+  });
+
+  test("timeline(id=\"E<n>/T1...\") renders identically to timeline(id=\"E<n>\")", () => {
+    const t1 = makeTurn(1, { title: "equivalence member" });
+    addSegmentMembers(db, segmentId, [t1], CUTOFF);
+
+    const bare = timelineQuery(db, { id: `E${segmentId}`, view: "turns" });
+    const suffixed = timelineQuery(db, { id: `E${segmentId}/T1..9`, view: "turns" });
+    expect(suffixed).toBe(bare);
   });
 
   test("timelineQuery reports an error for a segment that does not exist", () => {
@@ -215,19 +230,25 @@ describe("timeline(id=\"E<n>\") segment views", () => {
     expect(output).toContain("timeline error");
   });
 
-  describe("milestones view", () => {
-    test("minimal row: no grade label, no prompt excerpt, no antecedent counters; the corrector flag and overflow pointer survive", () => {
-      const cited = makeTurn(1, { title: "cited state row" });
-      const secondCited = makeTurn(2, { title: "a second cited row" });
-      const corrector = makeTurn(3, { title: "corrects an earlier approach" });
-      const victim = makeTurn(4, { title: "the superseded attempt" }); // never cited
-      addSegmentMembers(db, segmentId, [cited, secondCited, corrector, victim], CUTOFF);
+  // Ticket 09 (read-write-contract spec, "里程碑"): the standalone `E<n>`
+  // milestones view's admission rule is now LEXICOGRAPHIC over
+  // `getTurnEdgeSignals` (`selectSegmentMilestonesByEdgeSignals`), filling
+  // `pageSize` — replacing the state-citation/token-budget rule these tests
+  // used to assert. Deliberately scoped to THIS route only: the `S<n>`
+  // session view's own nested per-segment rows keep using
+  // `selectSegmentMilestoneRows` unchanged (see that function's own updated
+  // doc comment) — its pure-function unit tests above are untouched.
+  describe("milestones view (lexicographic edge-signal selection)", () => {
+    test("minimal row: no grade label, no prompt excerpt, no antecedent counters; the corrector flag survives", () => {
+      const t1 = makeTurn(1, { title: "first member" });
+      const t2 = makeTurn(2, { title: "corrects an earlier approach" });
+      addSegmentMembers(db, segmentId, [t1, t2], CUTOFF);
       writeMemoryEdges(
         db,
         [
           {
-            citing: { kind: "turn", id: corrector },
-            cited: { kind: "turn", id: victim },
+            citing: { kind: "turn", id: t2 },
+            cited: { kind: "turn", id: t1 },
             relation: "supersedes",
             provenance: "judged",
           },
@@ -235,26 +256,11 @@ describe("timeline(id=\"E<n>\") segment views", () => {
         CUTOFF,
         { eligibleForRelation: "unrestricted" },
       );
-      applySegmentWrites(
-        db,
-        [
-          {
-            segmentId,
-            expectedRevision: getSegment(db, segmentId)!.revision,
-            content: `Load-bearing: [S${sessionId}/T1], [S${sessionId}/T2], [S${sessionId}/T3].`,
-          },
-        ],
-        { nowEpoch: CUTOFF },
-      );
 
       const output = timelineQuery(db, { id: `E${segmentId}`, view: "milestones" });
 
-      expect(output).toContain("cited state row");
-      expect(output).toContain("a second cited row");
+      expect(output).toContain("first member");
       expect(output).toContain("corrects an earlier approach");
-      // Never admitted (no state citation) — and there is no ↳ pull-through
-      // mechanism any more to surface it as an antecedent.
-      expect(output).not.toContain("the superseded attempt");
       // No tier/grade label anywhere on a milestone row.
       expect(output).not.toMatch(/G[0-4]/);
       // No prompt excerpt.
@@ -266,26 +272,11 @@ describe("timeline(id=\"E<n>\") segment views", () => {
         .split("\n")
         .find((line) => line.includes("corrects an earlier approach"))!;
       expect(correctorLine).toContain("⚑");
-      const nonCorrectorLine = output
-        .split("\n")
-        .find((line) => line.includes("a second cited row"))!;
-      expect(nonCorrectorLine).not.toContain("⚑");
     });
 
     test("every kept row exposes its segment ordinal, date and time", () => {
       const t1 = makeTurn(1, { title: "first member" });
       addSegmentMembers(db, segmentId, [t1], CUTOFF);
-      applySegmentWrites(
-        db,
-        [
-          {
-            segmentId,
-            expectedRevision: getSegment(db, segmentId)!.revision,
-            content: `[S${sessionId}/T1].`,
-          },
-        ],
-        { nowEpoch: CUTOFF },
-      );
 
       const output = timelineQuery(db, { id: `E${segmentId}`, view: "milestones" });
       const row = output.split("\n").find((line) => line.includes("first member"))!;
@@ -294,49 +285,134 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(row).toMatch(/\d{2}:\d{2}/);
     });
 
-    test("overflow demotes cited rows under a tight budget, oldest first — never paginates", () => {
-      const citedOne = makeTurn(1, { title: "cited row one" }); // oldest, demoted first
-      const citedTwo = makeTurn(2, { title: "cited row two" });
-      const citedThree = makeTurn(3, { title: "cited row three" }); // newest, survives a one-row budget
-      addSegmentMembers(db, segmentId, [citedOne, citedTwo, citedThree], CUTOFF);
-      applySegmentWrites(
+    test("key 0: an overridden turn is excluded outright, even with a strong encodes signal", () => {
+      const overridden = makeTurn(1, { title: "overridden turn" });
+      const overrider = makeTurn(2, { title: "overrides it" });
+      const encoder = makeTurn(3, { title: "encoder" });
+      const plain = makeTurn(4, { title: "plain survivor" });
+      addSegmentMembers(db, segmentId, [overridden, overrider, plain], CUTOFF);
+      writeMemoryEdges(
         db,
         [
           {
-            segmentId,
-            expectedRevision: getSegment(db, segmentId)!.revision,
-            content: `[S${sessionId}/T1], [S${sessionId}/T2], [S${sessionId}/T3].`,
+            citing: { kind: "turn", id: overrider },
+            cited: { kind: "turn", id: overridden },
+            relation: "override",
+            provenance: "judged",
+          },
+          {
+            citing: { kind: "turn", id: encoder },
+            cited: { kind: "turn", id: overridden },
+            relation: "encodes",
+            provenance: "judged",
           },
         ],
-        { nowEpoch: CUTOFF },
+        CUTOFF,
+        { eligibleForRelation: "unrestricted" },
       );
 
-      const roomyView = buildSegmentTimelineView(db, {
+      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 10 });
+      const keptIds = view.keptMilestones.map((row) => row.member.turnId);
+      expect(keptIds).not.toContain(overridden);
+      expect(keptIds).toContain(plain);
+    });
+
+    test("key 1: encodesCount ranks desc, filling pageSize with the strongest-encoded turns first", () => {
+      const strong = makeTurn(1, { title: "strongly encoded" });
+      const weak = makeTurn(2, { title: "weakly encoded" });
+      const none = makeTurn(3, { title: "no encodes" });
+      addSegmentMembers(db, segmentId, [strong, weak, none], CUTOFF);
+      const e1 = makeTurn(4, { title: "e1" });
+      const e2 = makeTurn(5, { title: "e2" });
+      const e3 = makeTurn(6, { title: "e3" });
+      const w1 = makeTurn(7, { title: "w1" });
+      writeMemoryEdges(
+        db,
+        [
+          { citing: { kind: "turn", id: e1 }, cited: { kind: "turn", id: strong }, relation: "encodes", provenance: "judged" },
+          { citing: { kind: "turn", id: e2 }, cited: { kind: "turn", id: strong }, relation: "encodes", provenance: "judged" },
+          { citing: { kind: "turn", id: e3 }, cited: { kind: "turn", id: strong }, relation: "encodes", provenance: "judged" },
+          { citing: { kind: "turn", id: w1 }, cited: { kind: "turn", id: weak }, relation: "encodes", provenance: "judged" },
+        ],
+        CUTOFF,
+        { eligibleForRelation: "unrestricted" },
+      );
+
+      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 2 });
+      // Ranking admits [strong, weak]; DISPLAY stays event order (strong's
+      // member ordinal precedes weak's).
+      expect(view.keptMilestones.map((row) => row.member.turnId)).toEqual([strong, weak]);
+      expect(view.keptMilestones.map((row) => row.member.turnId)).not.toContain(none);
+      expect(view.demotedCount).toBe(1);
+    });
+
+    test("key 2: refinesExcess — the decision bucket outranks the delivery bucket at equal encodes", () => {
+      const decisionHeavy = makeTurn(1, { title: "decision-refined" });
+      const deliveryHeavy = makeTurn(2, { title: "delivery-refined" });
+      addSegmentMembers(db, segmentId, [decisionHeavy, deliveryHeavy], CUTOFF);
+
+      // Baseline (1st) refines edge contributes nothing — only EXCESS
+      // (2nd+) counts, per the excess-in-degree rule.
+      const baselineA = makeTurn(3, { title: "baseline a" });
+      const baselineB = makeTurn(4, { title: "baseline b" });
+      const decisionRefiner = makeTurn(5, { title: "decision refiner", type: "design" });
+      const deliveryRefiner = makeTurn(6, { title: "delivery refiner", type: "implement" });
+
+      writeMemoryEdges(
+        db,
+        [
+          { citing: { kind: "turn", id: baselineA }, cited: { kind: "turn", id: decisionHeavy }, relation: "refines", provenance: "judged" },
+          { citing: { kind: "turn", id: decisionRefiner }, cited: { kind: "turn", id: decisionHeavy }, relation: "refines", provenance: "judged" },
+          { citing: { kind: "turn", id: baselineB }, cited: { kind: "turn", id: deliveryHeavy }, relation: "refines", provenance: "judged" },
+          { citing: { kind: "turn", id: deliveryRefiner }, cited: { kind: "turn", id: deliveryHeavy }, relation: "refines", provenance: "judged" },
+        ],
+        CUTOFF,
+        { eligibleForRelation: "unrestricted" },
+      );
+
+      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 1 });
+      expect(view.keptMilestones.map((row) => row.member.turnId)).toEqual([decisionHeavy]);
+    });
+
+    test("edge-free graph degrades to flat chronological — every member fits within pageSize", () => {
+      const t1 = makeTurn(1, { title: "no edges 1" });
+      const t2 = makeTurn(2, { title: "no edges 2" });
+      const t3 = makeTurn(3, { title: "no edges 3" });
+      addSegmentMembers(db, segmentId, [t1, t2, t3], CUTOFF);
+
+      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 10 });
+      expect(view.keptMilestones.map((row) => row.member.turnId)).toEqual([t1, t2, t3]);
+      expect(view.demotedCount).toBe(0);
+    });
+
+    test("a legacy-era turn (before the task-causality cutoff) exits milestone rendering entirely", () => {
+      const legacy = makeTurn(1, { title: "legacy member" });
+      db.query("UPDATE turns SET created_at_epoch = ? WHERE id = ?").run(CUTOFF - 100, legacy);
+      const modern = makeTurn(2, { title: "modern member" });
+      addSegmentMembers(db, segmentId, [legacy, modern], CUTOFF);
+
+      const view = buildSegmentTimelineView(db, {
         segmentId,
         view: "milestones",
-        pageBudget: 100_000,
+        pageSize: 10,
+        taskCausalityEraCutoffEpoch: CUTOFF,
       });
-      expect(roomyView.keptMilestones.length).toBe(3);
+      const keptIds = view.keptMilestones.map((row) => row.member.turnId);
+      expect(keptIds).not.toContain(legacy);
+      expect(keptIds).toContain(modern);
+    });
 
-      const oneRowLine = renderSegmentTimeline(roomyView)
-        .split("\n")
-        .find((line) => line.includes("cited row three"))!;
-      const oneRowCost = estimateDiaryTokens(oneRowLine);
+    test("pageSize (not pageBudget) drives admission — overflow demotes, still no pagination parameter reaches it", () => {
+      const t1 = makeTurn(1, { title: "member one" });
+      const t2 = makeTurn(2, { title: "member two" });
+      const t3 = makeTurn(3, { title: "member three" });
+      addSegmentMembers(db, segmentId, [t1, t2, t3], CUTOFF);
 
-      const tightView = buildSegmentTimelineView(db, {
-        segmentId,
-        view: "milestones",
-        pageBudget: oneRowCost + 2,
-      });
-      expect(tightView.keptMilestones.map((row) => row.member.turnId)).toEqual([citedThree]);
-      expect(tightView.demotedCount).toBe(2);
-
-      const rendered = renderSegmentTimeline(tightView);
+      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 1 });
+      expect(view.keptMilestones).toHaveLength(1);
+      expect(view.demotedCount).toBe(2);
+      const rendered = renderSegmentTimeline(view);
       expect(rendered).toMatch(/… \+2 more/);
-      expect(rendered).not.toContain("cited row one");
-      expect(rendered).not.toContain("cited row two");
-      // No `page` field on `SegmentTimelineInput` changes this outcome — the
-      // milestones view has no pagination parameter to reach the demoted rows.
     });
   });
 

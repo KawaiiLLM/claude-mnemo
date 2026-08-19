@@ -20,6 +20,8 @@ import {
 } from "../../src/db/note-settlement";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 import type { NormalizedHookInput } from "../../src/hooks/types";
+import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { TASK_CAUSALITY_ERA_CUTOFF_EPOCH } from "../../src/task-causality-era";
 
 function input(overrides: Partial<NormalizedHookInput> = {}): NormalizedHookInput {
   return {
@@ -117,6 +119,66 @@ describe("createSegmentBlockContextHandler", () => {
 
     const result = await createSegmentBlockContextHandler({ db }, 1, "milestones")(input());
     expect(result.hookSpecificOutput).toContain(`[E${segment.id}] #claude-mnemo · milestones`);
+    db.close();
+  });
+
+  // Ticket 09 (read-write-contract spec): SessionStart's existing
+  // per-attached-segment `milestones` slot (wired in hook-command.ts /
+  // plugin/hooks/hooks.json before this ticket) automatically picks up the
+  // new lexicographic edge-signal selection once `buildSegmentTimelineView`
+  // switches to it — no new hook plumbing needed, only the algorithm swap
+  // this test proves reaches the injected block end to end.
+  test("ticket 09: the injected milestones block reflects edge-signal selection — an overridden member is excluded", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const session = upsertSession(db, {
+      contentSessionId: "segment-slot-session",
+      project: "/projects/segment-slots",
+      title: "Slots",
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: 1_000 });
+    const segment = createSegment(db, {
+      title: "Edge-signal lane",
+      topicId: topic.id,
+      nowEpoch: 1_000,
+    });
+
+    const modernEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH + 100;
+    const makeMemberTurn = (promptNumber: number, title: string): number =>
+      db
+        .query<{ id: number }, [number, number, string, number]>(
+          `INSERT INTO turns (session_id, prompt_number, status, user_prompt, assistant_response, title, type, created_at_epoch)
+           VALUES (?, ?, 'extracted', 'p', 'r', ?, '[]', ?)
+           RETURNING id`,
+        )
+        .get(session.id, promptNumber, title, modernEpoch + promptNumber)!.id;
+
+    const admitted = makeMemberTurn(1, "admitted member");
+    const overridden = makeMemberTurn(2, "overridden member");
+    const overrider = makeMemberTurn(3, "overrider");
+    addSegmentMembers(db, segment.id, [admitted, overridden], modernEpoch);
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: overrider },
+          cited: { kind: "turn", id: overridden },
+          relation: "override",
+          provenance: "judged",
+        },
+      ],
+      modernEpoch,
+      { eligibleForRelation: "unrestricted" },
+    );
+    attachSegmentToSession(db, session.id, segment.id, modernEpoch);
+
+    const result = await createSegmentBlockContextHandler({ db }, 1, "milestones")(input());
+    expect(result.hookSpecificOutput).toContain("admitted member");
+    expect(result.hookSpecificOutput).not.toContain("overridden member");
     db.close();
   });
 });

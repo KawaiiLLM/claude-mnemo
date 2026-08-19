@@ -37,6 +37,15 @@ export const DEFAULT_TURN_TOKEN_BUDGET_COLLAPSED = 150;
 const TURN_BUDGET_TRUNCATION_MARKER = "  … turn truncated to fit the per-turn budget";
 
 /**
+ * Ticket 07 (read-write-contract spec): the rewind marker on a `was_rolled_back`
+ * turn — its transcript pointer (`transcriptLineStart`/`jsonlPath` line anchor)
+ * is a stale coordinate the replay skill must not trust (spec: "rewind 撤销后
+ * transcript 指针视为失效坐标"). No period at the end — it rides mid-line,
+ * next to the bracketed ids, same convention `formatStatus` already uses.
+ */
+export const REWIND_MARKER = " ⤺ rewound (transcript pointer stale — do not trust replay)";
+
+/**
  * Cap an already-rendered turn block to a TOKEN budget (ticket 03: "use the
  * repo's token estimation, not characters" — `truncate`/`truncateCap` above
  * measure characters, which is the wrong unit for a budget stated in tokens,
@@ -205,6 +214,12 @@ export interface FormattedTurn {
   filesModified?: string[];
   observations?: FormattedObservation[];
   toolCalls?: FormattedToolCall[];
+  /**
+   * Ticket 07 (read-write-contract spec: "rewind turn 渲染带标记; transcript
+   * 指针失效"). Undefined/false renders nothing — every pre-existing caller
+   * that never populates this field is byte-identical to before this ticket.
+   */
+  wasRolledBack?: boolean;
 }
 
 export interface FormattedSession {
@@ -688,8 +703,9 @@ function formatTurnLabel(
   // use). Appending `dbid:T<dbid>` lets the worker cite a turn it found via
   // recall(query=...). Unset → output is byte-identical to the public form.
   const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
+  const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
 
-  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}`;
+  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}${rewindSegment}`;
 }
 
 function formatTurnCollapsedWithMode(

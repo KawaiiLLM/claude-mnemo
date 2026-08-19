@@ -13,6 +13,7 @@ import {
   type RankedSegmentMember,
   type SegmentSpineRow,
 } from "../db/segment-rank";
+import { getTurnEdgeSignals, type TurnEdgeSignals } from "../db/edge-signals";
 import { getSegment, type SegmentRecord } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
@@ -102,6 +103,8 @@ export interface TimelineInput {
   readerId?: string | null;
   /** Test seam for the read-grant timestamp; defaults to the real clock. */
   now?: () => number;
+  /** Ticket 09: forwarded to `SegmentTimelineInput.taskCausalityEraCutoffEpoch` on the `E<n>` route only — the turn-view/legacy `S<n>` path is unaffected. */
+  taskCausalityEraCutoffEpoch?: number;
 }
 
 // Ticket 04 (spec "Tools"): `phases` retired — a parse error at the schema
@@ -3816,6 +3819,94 @@ export function selectSegmentMilestoneRows(
   return { kept, demotedCount: demoted };
 }
 
+// ---------------------------------------------------------------------------
+// Ticket 09 (read-write-contract spec, "里程碑"): the segment timeline's
+// (`timeline(id="E<n>")`) own milestone admission rule — LEXICOGRAPHIC over
+// `getTurnEdgeSignals`, filling `pageSize`, replacing the state-citation/
+// token-budget rule above for this ONE route. `selectSegmentMilestoneRows`
+// stays exactly as it was and stays the mechanism the `S<n>` session view's
+// OWN nested per-segment rows use (`renderEraMilestoneLines` below,
+// unchanged by this ticket) — a deliberate scoping call, not an oversight:
+// replacing that second, deeply-tested consumer's admission rule too is a
+// separate blast radius this ticket does not take on. See this ticket's
+// report for the full reasoning.
+//
+// Key order (spec, pinned): (0) `overridden` — EXCLUDED outright, not merely
+// deprioritized; (1) `encodesCount` desc; (2) `refinesExcess.decision` desc,
+// THEN `refinesExcess.delivery` desc (decision bucket compared first); (3)
+// recency desc. Ties beyond that break by turn id, descending, for a total
+// order. A LEGACY-ERA turn (before `taskCausalityEraCutoffEpoch`) never
+// becomes a candidate at all (spec: "旧纪元 turn 整体退出里程碑渲染") — it
+// carries no edge signals under this era's semantics regardless of what
+// `getTurnEdgeSignals` would compute for it.
+//
+// "Edge-free graphs degrade to flat chronological" (spec) is not a special
+// case coded here: with every signal at zero, only the recency key
+// discriminates, and the KEPT set always renders in event order regardless
+// of ranking order (same "selection ranks, display stays chronological"
+// split `selectMilestoneTurns` already uses) — so an edge-free segment's
+// top-`pageSize` selection IS its `pageSize` most recent members, in event
+// order, which is flat chronological by construction.
+// ---------------------------------------------------------------------------
+
+export interface SegmentMilestoneEdgeSelection {
+  /** Admitted rows, in EVENT order (chronological) — ranking decides membership, never display order. */
+  kept: SegmentMilestoneRow[];
+  /** Era-eligible, non-overridden candidates the pageSize cap could not admit. */
+  demotedCount: number;
+}
+
+function compareEdgeSignalRank(
+  left: { turnId: number; createdAtEpoch: number },
+  right: { turnId: number; createdAtEpoch: number },
+  signals: ReadonlyMap<number, TurnEdgeSignals>,
+): number {
+  const leftSignal = signals.get(left.turnId)!;
+  const rightSignal = signals.get(right.turnId)!;
+  if (leftSignal.encodesCount !== rightSignal.encodesCount) {
+    return rightSignal.encodesCount - leftSignal.encodesCount;
+  }
+  if (leftSignal.refinesExcess.decision !== rightSignal.refinesExcess.decision) {
+    return rightSignal.refinesExcess.decision - leftSignal.refinesExcess.decision;
+  }
+  if (leftSignal.refinesExcess.delivery !== rightSignal.refinesExcess.delivery) {
+    return rightSignal.refinesExcess.delivery - leftSignal.refinesExcess.delivery;
+  }
+  if (left.createdAtEpoch !== right.createdAtEpoch) {
+    return right.createdAtEpoch - left.createdAtEpoch;
+  }
+  return right.turnId - left.turnId;
+}
+
+export function selectSegmentMilestonesByEdgeSignals(
+  db: Database,
+  members: readonly RankedSegmentMember[],
+  pageSize: number,
+  taskCausalityEraCutoffEpoch?: number,
+): SegmentMilestoneEdgeSelection {
+  const eraEligible = members.filter((member) =>
+    isTaskCausalityEra(member.createdAtEpoch, taskCausalityEraCutoffEpoch),
+  );
+  if (eraEligible.length === 0) {
+    return { kept: [], demotedCount: 0 };
+  }
+
+  const signals = getTurnEdgeSignals(db, eraEligible.map((member) => member.turnId));
+  const candidates = eraEligible.filter((member) => !signals.get(member.turnId)!.overridden);
+
+  const ranked = [...candidates].sort((left, right) =>
+    compareEdgeSignalRank(left, right, signals),
+  );
+  const admitted = new Set(ranked.slice(0, Math.max(0, pageSize)).map((member) => member.turnId));
+
+  const chronologicalOrdinals = new Map(members.map((member, index) => [member.turnId, index + 1]));
+  const kept: SegmentMilestoneRow[] = members
+    .filter((member) => admitted.has(member.turnId))
+    .map((member) => ({ member, ordinal: chronologicalOrdinals.get(member.turnId)! }));
+
+  return { kept, demotedCount: candidates.length - kept.length };
+}
+
 /**
  * The minimal milestone row (spec's own template, S15069 T838-T839):
  * `T<ordinal> <date> <time> <type-glyphs> <title>` — no prompt excerpt (the
@@ -4071,8 +4162,18 @@ export interface ParsedSegmentTimelineId {
   segmentId: number;
 }
 
+/**
+ * Ticket 09 (read-write-contract spec): `E<n>/T...` — any trailing selector
+ * — is EQUIVALENT to bare `E<n>` (spec: "`timeline(id="E31/T1...")` ≡
+ * `timeline(id="E31")`"). The segment id is the scope; a trailing ordinal
+ * selector has no separate meaning on this route (unlike `recall`'s own
+ * `E<n>/T<m>` member-address grammar, a different tool's own route), so it
+ * is accepted and ignored rather than rejected. `E*`/`E1..9` still reject —
+ * those are range/wildcard forms on the segment id ITSELF, not a trailing
+ * selector.
+ */
 export function parseSegmentTimelineId(id: string): ParsedSegmentTimelineId | null {
-  const match = id.trim().match(/^E(\d+)$/i);
+  const match = id.trim().match(/^E(\d+)(?:\/T.*)?$/i);
   if (!match) {
     return null;
   }
@@ -4084,9 +4185,11 @@ export interface SegmentTimelineInput {
   view?: TimelineViewKind;
   page?: number;
   pageSize?: number;
-  /** See `TimelineInput.pageBudget`. Governs both the milestone view's admission and the turn view's per-page token ceiling. */
+  /** See `TimelineInput.pageBudget`. Governs the turn view's per-page token ceiling. Ticket 09: no longer the milestones view's admission rule — see `pageSize` above and `selectSegmentMilestonesByEdgeSignals`. */
   pageBudget?: number;
   eraCutoffEpoch?: number | null;
+  /** Ticket 09: the task-causality era boundary the milestones view's edge-signal selection gates candidacy on. Omitted uses `TASK_CAUSALITY_ERA_CUTOFF_EPOCH` (the same default `isTaskCausalityEra` itself falls back to). */
+  taskCausalityEraCutoffEpoch?: number;
 }
 
 export interface SegmentTurnPageRow {
@@ -4239,12 +4342,17 @@ export function buildSegmentTimelineView(
     page = paged.page;
     pageCount = paged.pageCount;
   } else {
-    const citedTurnIds = getSegmentCitedTurnIds(db, segment.id);
-    const selection = selectSegmentMilestoneRows(
+    // Ticket 09: `pageSize` (item count), not `pageBudget` (tokens), drives
+    // this view's importance selection — the property the spec states as
+    // "turn 视图与里程碑视图仅差 pageSize 驱动的重要性选择": both views are
+    // governed by the SAME parameter, differing only in whether it merely
+    // paginates (turns view above) or ALSO ranks (milestones view here).
+    const milestonePageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
+    const selection = selectSegmentMilestonesByEdgeSignals(
+      db,
       members,
-      citedTurnIds,
-      pageBudget,
-      (row) => estimateDiaryTokens(renderSegmentMilestoneRow(row, SEGMENT_TIMELINE_TITLE_CAP)),
+      milestonePageSize,
+      input.taskCausalityEraCutoffEpoch,
     );
     keptMilestones = selection.kept;
     demotedCount = selection.demotedCount;
@@ -4333,6 +4441,7 @@ export function timelineQuery(db: Database, input: TimelineInput): string {
         pageSize: input.pageSize,
         pageBudget: input.pageBudget,
         eraCutoffEpoch: input.eraCutoffEpoch,
+        taskCausalityEraCutoffEpoch: input.taskCausalityEraCutoffEpoch,
       });
       // Write gate (ticket 01): the segment itself, plus whichever member
       // turns this page actually rendered — the turns view's `pageMembers`

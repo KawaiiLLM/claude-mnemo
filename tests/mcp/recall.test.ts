@@ -220,15 +220,29 @@ describe("recallMemory", () => {
     expect(recallInputSchema.safeParse({ id: "S1", truncate: 200 }).success).toBe(false);
   });
 
-  test("defaults to session listing and intersects time filters", () => {
+  // Ticket 07 (read-write-contract spec, "视图(读面)"): bare recall() now
+  // browses a GLOBAL chronological turn feed (spec user story 16) rather
+  // than listing every session in full — see tests/mcp/recall.browse.test.ts
+  // for the shape's own dedicated coverage (session-title-on-first-
+  // appearance, pageBudget overflow → pagination, field selection).
+  test("bare recall() leads with the most recent turns; time filter still narrows via the search path", () => {
     const defaultOutput = recallMemory(db, {});
     const filteredOutput = recallMemory(db, {
       filter: { time: "1970-01-02" },
     });
 
-    expect(defaultOutput).not.toContain("page 1 / 1 (total 4)");
+    // bigSession's turns were created after authSession's — the browse
+    // shape's default page leads with them.
     expect(defaultOutput).toContain(`[S${bigSessionId}] Large timeline`);
-    expect(defaultOutput).toContain(`[S${authSessionId}] Auth race fix`);
+
+    // Nothing is dropped, only paginated (spec: "溢出→分页,绝不截断整块") — a
+    // generous pageBudget/pageSize reaches every turn, including the older one.
+    const wideOutput = recallMemory(db, { pageBudget: 1_000_000, pageSize: 200 });
+    expect(wideOutput).toContain(`[S${authSessionId}] Auth race fix`);
+    expect(wideOutput).toContain(`[S${bigSessionId}] Large timeline`);
+
+    // `filter.time` still forces the (unchanged) search path — its own
+    // recency/session-grouped rendering is untouched by the browse redesign.
     expect(filteredOutput).toContain(`[S${authSessionId}] Auth race fix`);
     expect(filteredOutput).not.toContain(`[S${bigSessionId}] Large timeline`);
     expect(filteredOutput).not.toContain(`[S${baselineSessionId}] Auth baseline`);
