@@ -777,11 +777,14 @@ describe("recallMemory", () => {
     expect(pageCount).toBe(total); // pageSize:1 => pageCount === total
   });
 
+  // Ticket 14 (P2-5 fix, spec "搜索加粗覆盖全部被索引字段"): a search hit's
+  // TITLE now bolds a matched query term too, not just `content` — these
+  // session titles both contain "auth", so they render `**Auth** ...`.
   test("filter.session scopes a full-text search to one session", () => {
     // 'auth' matches BOTH the baseline session and the auth-race session.
     const unscoped = recallMemory(db, { query: "auth", pageSize: 50 });
-    expect(unscoped).toContain(`[S${baselineSessionId}] Auth baseline`);
-    expect(unscoped).toContain(`[S${authSessionId}] Auth race fix`);
+    expect(unscoped).toContain(`[S${baselineSessionId}] **Auth** baseline`);
+    expect(unscoped).toContain(`[S${authSessionId}] **Auth** race fix`);
 
     // filter.session narrows the same query to a single session — "S<id>" form.
     const scoped = recallMemory(db, {
@@ -789,8 +792,8 @@ describe("recallMemory", () => {
       filter: { session: `S${authSessionId}` },
       pageSize: 50,
     });
-    expect(scoped).toContain(`[S${authSessionId}] Auth race fix`);
-    expect(scoped).not.toContain(`[S${baselineSessionId}] Auth baseline`);
+    expect(scoped).toContain(`[S${authSessionId}] **Auth** race fix`);
+    expect(scoped).not.toContain(`[S${baselineSessionId}] **Auth** baseline`);
   });
 
   test("filter.session accepts a bare numeric id, string or number, without the S prefix", () => {
@@ -805,8 +808,8 @@ describe("recallMemory", () => {
       pageSize: 50,
     });
     for (const scoped of [scopedByString, scopedByNumber]) {
-      expect(scoped).toContain(`[S${authSessionId}] Auth race fix`);
-      expect(scoped).not.toContain(`[S${baselineSessionId}] Auth baseline`);
+      expect(scoped).toContain(`[S${authSessionId}] **Auth** race fix`);
+      expect(scoped).not.toContain(`[S${baselineSessionId}] **Auth** baseline`);
     }
   });
 
@@ -825,8 +828,8 @@ describe("recallMemory", () => {
     // it does not narrow to one session (proving `session:` is no longer
     // parsed out of `query`).
     const output = recallMemory(db, { query: "auth session:abc", pageSize: 50 });
-    expect(output).toContain(`[S${authSessionId}] Auth race fix`);
-    expect(output).toContain(`[S${baselineSessionId}] Auth baseline`);
+    expect(output).toContain(`[S${authSessionId}] **Auth** race fix`);
+    expect(output).toContain(`[S${baselineSessionId}] **Auth** baseline`);
   });
 });
 
@@ -1340,7 +1343,8 @@ describe("session semantic fields retire ([S15069/T910]-[T913]); content keeps i
       eraCutoffEpoch: ERA,
     });
 
-    expect(output).toContain("Ticket 09 fixture");
+    // Ticket 14 (P2-5 fix): the title now bolds matched query terms too.
+    expect(output).toContain("**Ticket** **09** fixture");
     expect(output).not.toContain("desc:");
   });
 

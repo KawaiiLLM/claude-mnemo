@@ -14,7 +14,7 @@ import { claimWriterId } from "../../src/db/write-gate";
 import { formatTurnCompact } from "../../src/mcp/format";
 import { buildCollapsedTurnsForSession } from "../../src/mcp/recall";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
-import { renderRubricAndRosterBlock } from "../../src/hooks/session-composition";
+import { renderRubricBlock } from "../../src/hooks/session-composition";
 import { MEMORY_RUBRIC_TEXT, renderMemoryRubricBlock } from "../../src/shared/memory-rubric";
 import { buildNoteSettlementContext } from "../../src/worker/note-settlement-context";
 import { renderNoteSettlementPrompt } from "../../src/worker/note-settlement-prompt";
@@ -257,7 +257,8 @@ describe("ticket 11 — window turns go through recall's collapsed view (spec A5
  * Ticket 11 (edge-ownership-impl, "统一 Memory Rubric") — the hash guard
  * this ticket's own checklist names: the settlement prompt and the
  * SessionStart injection (`hooks/session-composition.ts`'s
- * `renderRubricAndRosterBlock`) must render the rubric byte-identical.
+ * `renderRubricBlock`, ticket 14: its own block, no longer shared with the
+ * roster) must render the rubric byte-identical.
  * Exercised HERE, against a real settlement prompt (this file's own
  * fixture), rather than only comparing each side to the shared constant in
  * isolation — a future edit that wrapped one side differently would still
@@ -294,14 +295,14 @@ describe("ticket 11 — the Memory Rubric renders byte-identical in both consume
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
     const prompt = renderNoteSettlementPrompt(context);
 
-    const sessionStartBlock = renderRubricAndRosterBlock(db, {});
+    const sessionStartBlock = renderRubricBlock();
     const rubricOnly = renderMemoryRubricBlock();
 
     // The settlement prompt carries the SAME rendered rubric block…
     expect(prompt).toContain(rubricOnly);
-    // …and so does the SessionStart injection (the roster follows it there
-    // instead of the settlement duties, but the rubric substring itself is
-    // identical).
+    // …and so does the SessionStart injection's OWN rubric block (ticket 14:
+    // no longer cohabiting with the roster, but the rubric substring itself
+    // is identical).
     expect(sessionStartBlock).toContain(rubricOnly);
     // Byte-for-byte: extract each consumer's own copy and compare.
     const promptRubric = prompt.slice(

@@ -28,7 +28,7 @@ import {
   enforceHardCharLimit,
   renderAttachedSegmentBlock,
   renderProposalsBlock,
-  renderSegmentRoster,
+  renderSegmentRosterBlock,
   segmentBlockHeader,
 } from "../../src/hooks/session-composition";
 import { recordNoteSettlementProposal } from "../../src/db/note-settlement-proposals";
@@ -282,11 +282,14 @@ describe("renderAttachedSegmentBlock", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Roster: every live segment, legacy exclusion, topic grouping, budget
-// truncation with a recall() pointer.
+// Roster (ticket 14 rebuild, spec "roster 重建"): a unified-renderer segment
+// listing — activity-recency order, title+tags fields only, 100-tok item /
+// 2000-tok page budgets, token pagination, grant recording. Retired by this
+// rebuild and NOT retested here: topic grouping headers, the type facet, the
+// 40-segment count cap, and character-only title truncation.
 // ---------------------------------------------------------------------------
 
-describe("renderSegmentRoster", () => {
+describe("renderSegmentRosterBlock", () => {
   test("excludes frozen (non-open) segments — the only source of a non-open status under this redesign is the pre-redesign legacy rows", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
@@ -309,7 +312,7 @@ describe("renderSegmentRoster", () => {
       nowEpoch: ERA + 800,
     });
 
-    const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
+    const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null });
 
     expect(roster).toContain(`E${open.id} Live open segment`);
     expect(roster).not.toContain("Legacy arc-segment");
@@ -335,7 +338,7 @@ describe("renderSegmentRoster", () => {
       nowEpoch: 1_000,
     });
 
-    const roster = renderSegmentRoster(db);
+    const roster = renderSegmentRosterBlock(db);
 
     expect(roster).toContain(`E${live.id} Container-era lane`);
     expect(roster).not.toContain("Legacy open arc-segment");
@@ -343,7 +346,7 @@ describe("renderSegmentRoster", () => {
     db.close();
   });
 
-  test("groups segments under their topic as a coarse project header", () => {
+  test("no more topic grouping — segments render flat, in activity-recency order, with no ### header", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const mnemo = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
@@ -352,14 +355,16 @@ describe("renderSegmentRoster", () => {
     createSegment(db, { title: "Mnemo lane two", topicId: mnemo.id, nowEpoch: ERA + 1_002 });
     createSegment(db, { title: "Side lane", topicId: other.id, nowEpoch: ERA + 1_003 });
 
-    const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
+    const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null });
 
-    expect(roster).toContain("### claude-mnemo (2)");
-    expect(roster).toContain("### side-project (1)");
+    expect(roster).not.toContain("###");
+    expect(roster).toContain("Mnemo lane one");
+    expect(roster).toContain("Mnemo lane two");
+    expect(roster).toContain("Side lane");
     db.close();
   });
 
-  test("truncates on budget with a recall() pointer for the remainder", () => {
+  test("paginates by TOKEN page budget (not a segment count cap) — a tiny page budget spreads five segments across pages, with the standard page header", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
@@ -371,11 +376,33 @@ describe("renderSegmentRoster", () => {
       });
     }
 
-    const roster = renderSegmentRoster(db, { eraCutoffEpoch: null, limit: 2 });
+    // Small enough that one segment row alone exceeds it, so every page holds
+    // exactly one item (a page always holds at least one, never zero).
+    const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null, pageBudget: 5 });
 
-    const rows = roster.split("\n").filter((line) => /^- E\d+/.test(line));
-    expect(rows.length).toBe(2);
-    expect(roster).toContain("3 more: recall()");
+    expect(roster).toMatch(/page 1 \/ 5 \(total 5\)/);
+    db.close();
+  });
+
+  test("page defaults to 1 when omitted", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
+    for (let index = 1; index <= 5; index += 1) {
+      createSegment(db, {
+        title: `Lane ${index}`,
+        topicId: topic.id,
+        nowEpoch: ERA + 1_000 + index,
+      });
+    }
+
+    const withoutPage = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null, pageBudget: 5 });
+    const explicitPage1 = renderSegmentRosterBlock(db, {
+      segmentEraCutoffEpoch: null,
+      pageBudget: 5,
+      page: 1,
+    });
+    expect(withoutPage).toBe(explicitPage1);
     db.close();
   });
 
@@ -389,8 +416,8 @@ describe("renderSegmentRoster", () => {
       nowEpoch: ERA + 1_000,
     });
 
-    const roster = renderSegmentRoster(db, {
-      eraCutoffEpoch: null,
+    const roster = renderSegmentRosterBlock(db, {
+      segmentEraCutoffEpoch: null,
       overflowAttachedSegmentIds: new Set([overflowSegment.id]),
     });
 
@@ -407,7 +434,7 @@ describe("renderSegmentRoster", () => {
     createSegment(db, { title: "One", topicId: topic.id, nowEpoch: ERA + 1_000 });
     createSegment(db, { title: "Two", topicId: topic.id, nowEpoch: ERA + 1_001 });
 
-    const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
+    const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null });
     expect(roster.startsWith("## Segment roster (2 live)")).toBe(true);
     db.close();
   });
@@ -415,46 +442,69 @@ describe("renderSegmentRoster", () => {
   test("renders a graceful message when no live segments exist", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
+    const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null });
     expect(roster).toContain("no live segments yet");
+    db.close();
+  });
+
+  test("records a read grant for every segment the shown page actually renders (ticket 14, spec 与 01 的表断言)", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
+    const segment = createSegment(db, { title: "Granted lane", topicId: topic.id, nowEpoch: ERA + 1_000 });
+
+    renderSegmentRosterBlock(db, {
+      segmentEraCutoffEpoch: null,
+      readerId: "session:1",
+      now: () => 500,
+    });
+
+    const grant = db
+      .query<{ readAtEpoch: number }, [string, number]>(
+        `SELECT read_at_epoch AS readAtEpoch FROM write_gate_reads
+         WHERE writer = ? AND entity_type = 'segment' AND entity_id = ?`,
+      )
+      .get("session:1", segment.id);
+    expect(grant).not.toBeNull();
+    expect(grant?.readAtEpoch).toBe(500);
     db.close();
   });
 });
 
 // ---------------------------------------------------------------------------
-// Roster type/tags facets (ticket 12's roster half — T819: "注入时给出所有段
-// 的 title 和 type/tags，方便挂靠"). `type` was computed and discarded;
-// `tags` was hard-sliced to a fixed count of 3 regardless of length.
+// Roster tags (ticket 12 introduced the facet; ticket 14 switched the source
+// from a live per-render facet computation to the segment's own persisted
+// `tags` field, uncapped by count, budget-truncated only by the item's own
+// 100-tok line budget — no per-tag frequency suffix any more).
 // ---------------------------------------------------------------------------
 
-describe("renderSegmentRoster: type/tag facets (ticket 12)", () => {
-  /** A minimal turn carrying a stated type + tags, member-added to a segment — the roster's own facet aggregation source (`computeSegmentMemberFacetCounts`). */
-  function makeTurnWithFacets(
+describe("renderSegmentRosterBlock: tags (ticket 14)", () => {
+  /** A minimal turn carrying stated tags, member-added to a segment — `recomputeSegmentFacets`' own aggregation source, which is what populates `segment.tags`. */
+  function makeTurnWithTags(
     db: Database,
     sessionId: number,
     promptNumber: number,
-    type: string,
     tags: string[],
     epoch: number,
   ): number {
     return db
-      .query<{ id: number }, [number, number, string, string, number]>(
+      .query<{ id: number }, [number, number, string, number]>(
         `INSERT INTO turns (
-           session_id, prompt_number, status, type, tags, created_at_epoch,
+           session_id, prompt_number, status, tags, created_at_epoch,
            user_prompt, assistant_response
-         ) VALUES (?, ?, 'extracted', ?, ?, ?, 'p', 'r')
+         ) VALUES (?, ?, 'extracted', ?, ?, 'p', 'r')
          RETURNING id`,
       )
-      .get(sessionId, promptNumber, JSON.stringify([type]), JSON.stringify(tags), epoch)!.id;
+      .get(sessionId, promptNumber, JSON.stringify(tags), epoch)!.id;
   }
 
-  test("each roster row now carries a type frequency string — previously computed and discarded", () => {
+  test("a roster row carries its segment's own derived tags, bare (no frequency suffix, no type facet at all)", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
-    const segment = createSegment(db, { title: "Typed lane", topicId: topic.id, nowEpoch: ERA + 1_000 });
+    const segment = createSegment(db, { title: "Tagged lane", topicId: topic.id, nowEpoch: ERA + 1_000 });
     const session = upsertSession(db, {
-      contentSessionId: "roster-type-session",
+      contentSessionId: "roster-tag-session",
       project: "/tmp/project",
       title: "session",
       insight: null,
@@ -462,15 +512,16 @@ describe("renderSegmentRoster: type/tag facets (ticket 12)", () => {
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
-    const t1 = makeTurnWithFacets(db, session.id, 1, "implement", ["card"], 1_000);
+    const t1 = makeTurnWithTags(db, session.id, 1, ["card"], 1_000);
     addSegmentMembers(db, segment.id, [t1], 1_000);
 
-    const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
-    expect(roster).toMatch(/implement×1/);
+    const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null });
+    expect(roster).toContain("#card");
+    expect(roster).not.toContain("×1");
     db.close();
   });
 
-  test("tags are no longer hard-capped at a fixed count of 3 — many short tags render more than 3", () => {
+  test("an oversized row (many tags) is word-boundary cut to the item token budget, not silently unbounded", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
@@ -484,50 +535,17 @@ describe("renderSegmentRoster: type/tag facets (ticket 12)", () => {
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
-    // 8 distinct one-letter tags, one turn each — every tag's own count is 1,
-    // so the pre-ticket-12 `.slice(0, 3)` would show exactly three no matter
-    // how short each tag is.
-    const tags = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    const tags = Array.from({ length: 30 }, (_, index) => `tagverylong${index}padding${"x".repeat(15)}`);
     tags.forEach((tag, index) => {
-      const turn = makeTurnWithFacets(db, session.id, index + 1, "implement", [tag], 1_000 + index);
+      const turn = makeTurnWithTags(db, session.id, index + 1, [tag], 1_000 + index);
       addSegmentMembers(db, segment.id, [turn], 1_000 + index);
     });
 
-    const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
-    const shownTags = tags.filter((tag) => roster.includes(`#${tag}×1`));
-    expect(shownTags.length).toBeGreaterThan(3);
-    db.close();
-  });
-
-  test("a handful of long tags is still bounded — by BUDGET, not by a raw count", () => {
-    const db = createDatabase(":memory:");
-    initializeSchema(db);
-    const topic = upsertTopic(db, { name: "claude-mnemo", nowEpoch: ERA + 1_000 });
-    const segment = createSegment(db, { title: "Long-tag lane", topicId: topic.id, nowEpoch: ERA + 1_000 });
-    const session = upsertSession(db, {
-      contentSessionId: "roster-longtag-session",
-      project: "/tmp/project",
-      title: "session",
-      insight: null,
-      createdAtEpoch: 1_000,
-      updatedAtEpoch: null,
-      completedAtEpoch: null,
-    });
-    const longTags = Array.from(
-      { length: 10 },
-      (_, index) => `verylongtagname${index}withpadding${"x".repeat(20)}`,
-    );
-    longTags.forEach((tag, index) => {
-      const turn = makeTurnWithFacets(db, session.id, index + 1, "implement", [tag], 1_000 + index);
-      addSegmentMembers(db, segment.id, [turn], 1_000 + index);
-    });
-
-    const roster = renderSegmentRoster(db, { eraCutoffEpoch: null });
-    const shownTags = longTags.filter((tag) => roster.includes(`#${tag}×1`));
-    // Some survive (budget, not an outright ban on long tags)...
+    const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null, itemBudget: 30 });
+    const shownTags = tags.filter((tag) => roster.includes(`#${tag}`));
+    // Some survive, but not all thirty — the item's own token budget bites.
     expect(shownTags.length).toBeGreaterThan(0);
-    // ...but not all ten — the budget bites well before a raw count of 3 would.
-    expect(shownTags.length).toBeLessThan(longTags.length);
+    expect(shownTags.length).toBeLessThan(tags.length);
     db.close();
   });
 });

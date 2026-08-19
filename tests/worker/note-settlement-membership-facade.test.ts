@@ -362,7 +362,9 @@ describe("propose — never creates a segment row, and is no longer a completion
 
     const proposals = listRecentSettlementProposals(db, 5);
     expect(proposals).toHaveLength(1);
-    expect(proposals[0]!.title).toBe("first attempt's title");
+    // Ticket 14 (spec "propose 撞键刷新 title"): the retry's title refreshes
+    // the stored row — a later pass has seen more of the window.
+    expect(proposals[0]!.title).toBe("retry's own (different) title");
   });
 
   test("apply:false stores nothing and creates no segment", () => {

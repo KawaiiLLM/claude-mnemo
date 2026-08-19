@@ -47,7 +47,11 @@ import {
   legacyEraHeader,
   renderSegmentSpineBlock,
 } from "./segment-spine";
-import { recordReadGrants, type ReadGrantEntry } from "../db/write-gate";
+import {
+  recordReadGrants,
+  snapshotWriteGateSequence,
+  type ReadGrantEntry,
+} from "../db/write-gate";
 
 export interface TimelineInput {
   id: string;
@@ -4378,14 +4382,21 @@ function recordTimelineReadGrants(
   readerId: string | null | undefined,
   now: (() => number) | undefined,
   entries: readonly ReadGrantEntry[],
+  // Ticket 14 (P1-3 fix): the render pass's own pre-render sequence snapshot
+  // — captured once by `timelineQuery` before either branch reads a row,
+  // never looked up fresh here at record time.
+  sequence: number,
 ): void {
   if (!readerId || entries.length === 0) {
     return;
   }
-  recordReadGrants(db, readerId, entries, (now ?? (() => Math.floor(Date.now() / 1000)))());
+  recordReadGrants(db, readerId, entries, (now ?? (() => Math.floor(Date.now() / 1000)))(), sequence);
 }
 
 export function timelineQuery(db: Database, input: TimelineInput): string {
+  // Ticket 14 (P1-3 fix, spec "授权序列渲染前快照"): captured before EITHER
+  // branch below reads a single row.
+  const sequence = snapshotWriteGateSequence(db);
   try {
     const segmentRoute = parseSegmentTimelineId(input.id);
     if (segmentRoute !== null) {
@@ -4402,23 +4413,37 @@ export function timelineQuery(db: Database, input: TimelineInput): string {
       // turns this page actually rendered — the turns view's `pageMembers`
       // or the milestones view's `keptMilestones`, never both (one is always
       // empty depending on `view.view`).
-      recordTimelineReadGrants(db, input.readerId, input.now, [
-        { entityType: "segment", entityId: view.segment.id },
-        ...view.pageMembers.map((row) => ({ entityType: "turn" as const, entityId: row.turn.id })),
-        ...view.keptMilestones.map((row) => ({
-          entityType: "turn" as const,
-          entityId: row.member.turnId,
-        })),
-      ]);
+      recordTimelineReadGrants(
+        db,
+        input.readerId,
+        input.now,
+        [
+          { entityType: "segment", entityId: view.segment.id },
+          ...view.pageMembers.map((row) => ({ entityType: "turn" as const, entityId: row.turn.id })),
+          ...view.keptMilestones.map((row) => ({
+            entityType: "turn" as const,
+            entityId: row.member.turnId,
+          })),
+        ],
+        sequence,
+      );
       return renderSegmentTimeline(view);
     }
     const view = buildTimelineView(db, input);
-    // Write gate (ticket 01): the turns view's own page, or the milestones
-    // view's kept selection — whichever `view.view` actually rendered.
-    recordTimelineReadGrants(db, input.readerId, input.now, [
-      ...view.pageTurns.map((turn) => ({ entityType: "turn" as const, entityId: turn.id })),
-      ...view.pagedMilestones.map((row) => ({ entityType: "turn" as const, entityId: row.turn.id })),
-    ]);
+    // Write gate (ticket 01; ticket 14 P1-2 fix adds the SESSION entity —
+    // the prior state recorded only the turns this route showed, never the
+    // session detail it renders alongside them).
+    recordTimelineReadGrants(
+      db,
+      input.readerId,
+      input.now,
+      [
+        { entityType: "session", entityId: view.session.id },
+        ...view.pageTurns.map((turn) => ({ entityType: "turn" as const, entityId: turn.id })),
+        ...view.pagedMilestones.map((row) => ({ entityType: "turn" as const, entityId: row.turn.id })),
+      ],
+      sequence,
+    );
     return renderTimeline(view, { pageBudget: input.pageBudget });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

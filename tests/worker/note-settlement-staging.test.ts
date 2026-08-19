@@ -24,7 +24,13 @@ import {
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
-import { claimWriterId, recordReadGrant, sessionWriterId, stampField } from "../../src/db/write-gate";
+import {
+  claimWriterId,
+  recordReadGrant,
+  sessionWriterId,
+  snapshotWriteGateSequence,
+  stampField,
+} from "../../src/db/write-gate";
 import { createSettlementStagingEngine } from "../../src/worker/note-settlement-staging";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
@@ -341,7 +347,7 @@ describe("acceptance criterion 5 — commit re-validates inside its own transact
     const claimWriter = claimWriterId(job.id, job.claimGeneration);
     // Context build's own read grant (worker/note-settlement-context.ts) —
     // taken before either the stage call or the note that lands later.
-    recordReadGrant(db, claimWriter, "turn", t1, NOW);
+    recordReadGrant(db, claimWriter, "turn", t1, NOW, snapshotWriteGateSequence(db));
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
     const receipt = engine.stageNoteWrite({
@@ -1061,7 +1067,7 @@ describe("ticket 08 — edge correction through the shared phase validator (requ
     // below never reaches the database — so the refines edge may not ride
     // on it either.
     const claimWriter = claimWriterId(job.id, job.claimGeneration);
-    recordReadGrant(db, claimWriter, "turn", t2, NOW);
+    recordReadGrant(db, claimWriter, "turn", t2, NOW, snapshotWriteGateSequence(db));
     const agentWriter = sessionWriterId(sessionDbId);
     stampField(db, "turn", t2, "type", agentWriter, NOW + 5);
     stampField(db, "turn", t2, "tags", agentWriter, NOW + 5);

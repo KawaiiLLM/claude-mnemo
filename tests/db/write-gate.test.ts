@@ -13,6 +13,7 @@ import {
   nextWriteGateSequence,
   recordReadGrant,
   recordReadGrants,
+  snapshotWriteGateSequence,
   sessionWriterId,
   stampField,
   sweepReadGrantsForCompletedSessions,
@@ -90,7 +91,7 @@ describe("read grants", () => {
     // Someone else wrote the field long ago; a grant recorded AFTER that
     // write covers it (rule 1).
     stampField(db, "segment", 1, "goal", "session:9", 100);
-    recordReadGrant(db, "session:1", "segment", 1, 200);
+    recordReadGrant(db, "session:1", "segment", 1, 200, snapshotWriteGateSequence(db));
 
     const verdict = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1");
     expect(verdict.ok).toBe(true);
@@ -105,14 +106,15 @@ describe("read grants", () => {
         { entityType: "turn", entityId: 5 },
       ],
       100,
+      snapshotWriteGateSequence(db),
     );
     expect(checkFieldGate(db, "session:1", "segment", 1, "goal", "E1").ok).toBe(true);
     expect(checkFieldGate(db, "session:1", "turn", 5, "title", "S1/T5").ok).toBe(true);
   });
 
   test("re-reading refreshes the same row rather than accumulating rows", () => {
-    recordReadGrant(db, "session:1", "segment", 1, 100);
-    recordReadGrant(db, "session:1", "segment", 1, 200);
+    recordReadGrant(db, "session:1", "segment", 1, 100, snapshotWriteGateSequence(db));
+    recordReadGrant(db, "session:1", "segment", 1, 200, snapshotWriteGateSequence(db));
     const rows = db
       .query<{ count: number }, []>(
         "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = 'session:1' AND entity_id = 1",
@@ -122,13 +124,65 @@ describe("read grants", () => {
   });
 
   test("clearReadGrantsForWriter drops every grant that writer holds, and only that writer's", () => {
-    recordReadGrant(db, "session:1", "segment", 1, 100);
-    recordReadGrant(db, "session:1", "turn", 2, 100);
-    recordReadGrant(db, "session:2", "segment", 1, 100);
+    recordReadGrant(db, "session:1", "segment", 1, 100, snapshotWriteGateSequence(db));
+    recordReadGrant(db, "session:1", "turn", 2, 100, snapshotWriteGateSequence(db));
+    recordReadGrant(db, "session:2", "segment", 1, 100, snapshotWriteGateSequence(db));
 
     const cleared = clearReadGrantsForWriter(db, "session:1");
     expect(cleared).toBe(2);
     expect(checkFieldGate(db, "session:2", "segment", 1, "goal", "E1").ok).toBe(true);
+  });
+
+  // Ticket 14 (P1-3 fix, spec "授权序列渲染前快照"): a render pass must
+  // snapshot the sequence at its own START, not have `recordReadGrant` look
+  // it up lazily at record time — otherwise a foreign write landing in the
+  // gap between "the render actually read this row" and "the render pass
+  // finally calls recordReadGrant" would bump the sequence the grant gets
+  // stamped with, making a render that in truth predates the foreign write
+  // look like it postdates it.
+  test("a sequence snapshotted at render-START, not at record-time, is correctly judged stale by a write that lands in between", () => {
+    // The render pass begins: it snapshots the sequence BEFORE reading
+    // anything else.
+    const renderStartSequence = snapshotWriteGateSequence(db);
+
+    // A foreign write lands in the gap between render-start and this render
+    // pass's own (deferred) record call.
+    stampField(db, "segment", 1, "goal", "session:9", 150);
+
+    // Only now does the render pass finish and record its grant — using the
+    // sequence it captured at its own start, not a fresh lookup.
+    recordReadGrant(db, "session:1", "segment", 1, 200, renderStartSequence);
+
+    const verdict = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1");
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("stale");
+    }
+
+    // The contrast: recording with a sequence taken AFTER the foreign write
+    // (the bug this fix closes) would have made the same render look fresh.
+    recordReadGrant(db, "session:2", "segment", 1, 200, snapshotWriteGateSequence(db));
+    expect(checkFieldGate(db, "session:2", "segment", 1, "goal", "E1").ok).toBe(true);
+  });
+
+  test("the BATCH form honors the caller's render-start snapshot the same way (a record-time re-lookup would survive the singular test alone)", () => {
+    const renderStartSequence = snapshotWriteGateSequence(db);
+
+    stampField(db, "segment", 2, "goal", "session:9", 150);
+
+    recordReadGrants(
+      db,
+      "session:1",
+      [{ entityType: "segment", entityId: 2 }],
+      200,
+      renderStartSequence,
+    );
+
+    const verdict = checkFieldGate(db, "session:1", "segment", 2, "goal", "E2");
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("stale");
+    }
   });
 });
 
@@ -148,8 +202,8 @@ describe("janitor backstop", () => {
   test("sweeps grants belonging to already-completed sessions", () => {
     const completed = seedSession("done", 500);
     const live = seedSession("live", null);
-    recordReadGrant(db, sessionWriterId(completed), "segment", 1, 100);
-    recordReadGrant(db, sessionWriterId(live), "segment", 2, 100);
+    recordReadGrant(db, sessionWriterId(completed), "segment", 1, 100, snapshotWriteGateSequence(db));
+    recordReadGrant(db, sessionWriterId(live), "segment", 2, 100, snapshotWriteGateSequence(db));
 
     const swept = sweepReadGrantsForCompletedSessions(db, 100);
 
@@ -157,13 +211,13 @@ describe("janitor backstop", () => {
     expect(checkFieldGate(db, sessionWriterId(live), "segment", 2, "goal", "E2").ok).toBe(true);
     // The live session's OWN grant on segment 2 is untouched.
     stampField(db, "segment", 2, "goal", "session:999", 50);
-    recordReadGrant(db, sessionWriterId(live), "segment", 2, 60);
+    recordReadGrant(db, sessionWriterId(live), "segment", 2, 60, snapshotWriteGateSequence(db));
     expect(checkFieldGate(db, sessionWriterId(live), "segment", 2, "goal", "E2").ok).toBe(true);
   });
 
   test("is idempotent and self-heals a session whose own cleanup call was missed", () => {
     const completed = seedSession("crashed", 500);
-    recordReadGrant(db, sessionWriterId(completed), "segment", 1, 100);
+    recordReadGrant(db, sessionWriterId(completed), "segment", 1, 100, snapshotWriteGateSequence(db));
 
     expect(sweepReadGrantsForCompletedSessions(db, 100)).toBe(1);
     expect(sweepReadGrantsForCompletedSessions(db, 100)).toBe(0);
@@ -172,7 +226,7 @@ describe("janitor backstop", () => {
   test("bounds its own work with limit", () => {
     for (let i = 0; i < 5; i += 1) {
       const id = seedSession(`s${i}`, 500);
-      recordReadGrant(db, sessionWriterId(id), "segment", i + 1, 100);
+      recordReadGrant(db, sessionWriterId(id), "segment", i + 1, 100, snapshotWriteGateSequence(db));
     }
     const swept = sweepReadGrantsForCompletedSessions(db, 2);
     expect(swept).toBeLessThanOrEqual(2);
@@ -203,7 +257,7 @@ describe("checkFieldGate — the three-judgment order", () => {
   });
 
   test("rule 4 (stale): grant predates a later write by someone else", () => {
-    recordReadGrant(db, "session:1", "segment", 1, 100);
+    recordReadGrant(db, "session:1", "segment", 1, 100, snapshotWriteGateSequence(db));
     stampField(db, "segment", 1, "goal", "session:9", 200);
 
     const verdict = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1");
@@ -222,12 +276,12 @@ describe("checkFieldGate — the three-judgment order", () => {
 
   test("rule 1: grant recorded AFTER the last write on the field admits", () => {
     stampField(db, "segment", 1, "goal", "session:9", 100);
-    recordReadGrant(db, "session:1", "segment", 1, 200);
+    recordReadGrant(db, "session:1", "segment", 1, 200, snapshotWriteGateSequence(db));
     expect(checkFieldGate(db, "session:1", "segment", 1, "goal", "E1").ok).toBe(true);
   });
 
   test("self-writes never go stale relative to a grant, however old the grant is", () => {
-    recordReadGrant(db, "session:1", "segment", 1, 100);
+    recordReadGrant(db, "session:1", "segment", 1, 100, snapshotWriteGateSequence(db));
     stampField(db, "segment", 1, "goal", "session:1", 500);
     expect(checkFieldGate(db, "session:1", "segment", 1, "goal", "E1").ok).toBe(true);
   });
@@ -236,7 +290,7 @@ describe("checkFieldGate — the three-judgment order", () => {
     stampField(db, "segment", 1, "goal", "session:9", 100);
     const neverRead = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1");
 
-    recordReadGrant(db, "session:2", "segment", 2, 50);
+    recordReadGrant(db, "session:2", "segment", 2, 50, snapshotWriteGateSequence(db));
     stampField(db, "segment", 2, "goal", "session:9", 100);
     const stale = checkFieldGate(db, "session:2", "segment", 2, "goal", "E2");
 

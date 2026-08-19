@@ -5,7 +5,12 @@ import { getTopic, listAttachedSegments } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getShadowNote, type ShadowNoteRecord } from "../db/shadow-notes";
 import { getTurnsForSession } from "../db/turns";
-import { claimWriterId, recordReadGrants, type ReadGrantEntry } from "../db/write-gate";
+import {
+  claimWriterId,
+  recordReadGrants,
+  snapshotWriteGateSequence,
+  type ReadGrantEntry,
+} from "../db/write-gate";
 import { renderSessionMilestoneInjection } from "../hooks/milestone-injection";
 import { formatTurnAddress } from "../hooks/note-reminder";
 import { buildCollapsedTurnsForSession, recallMemory } from "../mcp/recall";
@@ -175,6 +180,13 @@ export function buildNoteSettlementContext(
   job: NoteSettlementJob,
   options: BuildNoteSettlementContextOptions,
 ): NoteSettlementContext | null {
+  // Ticket 14 (P1-3 fix, spec "授权序列渲染前快照"): captured before this
+  // context build reads a single turn — the explicit grant block at the
+  // bottom of this function uses THIS value, never a fresh lookup at record
+  // time (this build does substantial work — turn/note reads, the session
+  // narrative render — between here and that call).
+  const sequence = snapshotWriteGateSequence(db);
+
   const session = getSession(db, job.sessionId);
   if (!session) {
     return null;
@@ -330,7 +342,7 @@ export function buildNoteSettlementContext(
     // entities (ticket 01's scoping: no main-agent session writer exists;
     // settlement is the one writer, and this is its render pass).
     entries.push({ entityType: "session", entityId: job.sessionId });
-    recordReadGrants(db, writer, entries, options.nowEpoch);
+    recordReadGrants(db, writer, entries, options.nowEpoch, sequence);
   }
 
   return context;

@@ -21,6 +21,7 @@ import {
   claimWriterId,
   recordReadGrant,
   sessionWriterId,
+  snapshotWriteGateSequence,
   stampField,
 } from "../../src/db/write-gate";
 import {
@@ -443,7 +444,7 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
 
     // Context build recorded this claim's read grant (ticket 05's own seam,
     // worker/note-settlement-context.ts) at contextBuiltAtEpoch (NOW).
-    recordReadGrant(db, claimWriter, "turn", t1, NOW);
+    recordReadGrant(db, claimWriter, "turn", t1, NOW, snapshotWriteGateSequence(db));
 
     // The main agent's note lands AFTER that grant — its subsumption stamp
     // (note.ts) touches type/tags together, never grade.
@@ -483,7 +484,7 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
     stampField(db, "turn", t1, "tags", agentWriter, NOW - 60);
     // Context build's read grant postdates it (rule 1: granted after the
     // last write admits).
-    recordReadGrant(db, claimWriter, "turn", t1, NOW);
+    recordReadGrant(db, claimWriter, "turn", t1, NOW, snapshotWriteGateSequence(db));
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW }),
@@ -503,12 +504,12 @@ describe("grade/type/tags are writable only for the window's reviewable turns (r
     const staleJob = claimWindow(sessionDbId, 1, 1);
     const staleWriter = claimWriterId(staleJob.id, staleJob.claimGeneration);
     // A displaced claimant still holds a grant from ITS OWN context build.
-    recordReadGrant(db, staleWriter, "turn", t1, NOW);
+    recordReadGrant(db, staleWriter, "turn", t1, NOW, snapshotWriteGateSequence(db));
 
     // The NEW claimant (same job id, later generation — a real reclaim bumps
     // claim_generation; simulated directly here) writes the SAME field first.
     const freshWriter = claimWriterId(staleJob.id, staleJob.claimGeneration + 1);
-    recordReadGrant(db, freshWriter, "turn", t1, NOW + 1);
+    recordReadGrant(db, freshWriter, "turn", t1, NOW + 1, snapshotWriteGateSequence(db));
     write(
       baseContext(
         { ...staleJob, claimGeneration: staleJob.claimGeneration + 1 },
@@ -942,7 +943,7 @@ describe("stitch — the session narrative write is gated under the claim identi
     seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
     const writerA = claimWriterId(job.id, job.claimGeneration);
-    recordReadGrant(db, writerA, "session", sessionDbId, NOW);
+    recordReadGrant(db, writerA, "session", sessionDbId, NOW, snapshotWriteGateSequence(db));
 
     const landed = write(
       baseContext(job),

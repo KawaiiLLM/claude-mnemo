@@ -8,7 +8,8 @@ import {
 } from "../../db/sessions";
 import {
   ATTACHED_SEGMENT_BLOCK_SLOTS,
-  renderRubricAndRosterBlock,
+  renderRubricBlock,
+  renderSegmentRosterBlock,
 } from "../session-composition";
 import { listAttachedSegmentsByActivity } from "../../db/segments";
 import { resolveEraCutoff } from "../../db/era";
@@ -20,6 +21,7 @@ import { renderSessionStartPersonaInjection } from "../../diary/persona-render";
 import { markSessionRunStart } from "../../db/session-run";
 import { createRuleStore } from "../../db/rules";
 import { renderRuleDigest } from "../../rules/digest";
+import { sessionWriterId } from "../../db/write-gate";
 import {
   notifyWorkerTrigger,
   type WorkerClientDeps,
@@ -157,11 +159,15 @@ function buildContextOutput(
       )
     : undefined;
 
-  // Ticket 11 (edge-ownership-impl): the roster now shares its block with
-  // the Memory Rubric — the rubric renders first, fixed-length; the roster
-  // spends whatever budget is left over (see the function's own doc
-  // comment for the "never silently truncate the rubric" discipline).
-  return renderRubricAndRosterBlock(db, { eraCutoffEpoch, overflowAttachedSegmentIds });
+  // Ticket 14 (roster rebuild): the rubric and the roster are now two
+  // SEPARATE blocks (no shared budget) — the rubric is fixed-length prose
+  // with no elision, the roster is a unified-renderer segment listing that
+  // records its own read grants under the current session's writer identity.
+  const rosterBlock = renderSegmentRosterBlock(db, {
+    overflowAttachedSegmentIds,
+    readerId: currentSession ? sessionWriterId(currentSession.id) : null,
+  });
+  return [renderRubricBlock(), "", rosterBlock].join("\n");
 }
 
 export function createReadOnlyContextHandler(

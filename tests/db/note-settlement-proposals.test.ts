@@ -159,8 +159,10 @@ describe("recordNoteSettlementProposal / listRecentSettlementProposals", () => {
 
     expect(retry.alreadyExisted).toBe(true);
     expect(retry.record.id).toBe(first.record.id);
-    // The EARLIER title survives — a retry's own title never overwrites it.
-    expect(retry.record.title).toBe("first attempt's title");
+    // Ticket 14 (spec "propose 撞键刷新 title"): the NEWER attempt's title
+    // wins — a later pass has seen more of the window, so its title
+    // refreshes the stored row rather than being discarded.
+    expect(retry.record.title).toBe("retry's own (different) title");
 
     expect(
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM note_settlement_proposals").get()!

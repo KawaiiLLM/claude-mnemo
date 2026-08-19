@@ -62,8 +62,21 @@ export function nextWriteGateSequence(db: Database): number {
     .get()!.value;
 }
 
-/** The counter's current value, without consuming one — what a read grant snapshots. */
-function currentWriteGateSequence(db: Database): number {
+/**
+ * The counter's current value, without consuming one — what a read grant
+ * snapshots. Ticket 14 (P1-3 fix, spec "授权序列渲染前快照"): every render
+ * pass must call this ONCE at the moment it STARTS (before it reads any
+ * row), then carry the returned number through to whatever
+ * `recordReadGrant(s)` call eventually records what it rendered. Calling
+ * this again at record time — the bug this fix closes — lets a foreign
+ * write that lands between render and record make the grant look fresher
+ * than what the render pass actually showed: a reader who fetched a field's
+ * value BEFORE a concurrent writer changed it would still get a grant
+ * stamped with the sequence AFTER that write, and a subsequent
+ * `checkFieldGate` call would then wrongly treat the stale render as
+ * current.
+ */
+export function snapshotWriteGateSequence(db: Database): number {
   const row = db
     .query<{ value: number }, []>(`SELECT value FROM write_gate_sequence WHERE id = 1`)
     .get();
@@ -85,6 +98,12 @@ export interface ReadGrantEntry {
  * for whatever it just rendered. Idempotent and non-destructive: re-reading
  * an entity just bumps the grant's own snapshot forward; it never touches
  * another writer's grant or any field stamp.
+ *
+ * `sequence` (ticket 14, P1-3 fix): the caller's OWN `snapshotWriteGateSequence(db)`
+ * value, captured at the START of the render pass that produced this entity —
+ * never looked up here, at record time, which is what let a foreign write
+ * landing between render and record masquerade as already-seen. See
+ * `snapshotWriteGateSequence`'s own doc comment for the failure this closes.
  */
 export function recordReadGrant(
   db: Database,
@@ -92,8 +111,8 @@ export function recordReadGrant(
   entityType: WriteGateEntityType,
   entityId: number,
   nowEpoch: number,
+  sequence: number,
 ): void {
-  const sequence = currentWriteGateSequence(db);
   db.query<unknown, [string, string, number, number, number]>(
     `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence)
      VALUES (?, ?, ?, ?, ?)
@@ -103,19 +122,22 @@ export function recordReadGrant(
   ).run(writer, entityType, entityId, nowEpoch, sequence);
 }
 
-/** Batch form of `recordReadGrant` — one render pass, several entities shown (e.g. a listing page). */
+/**
+ * Batch form of `recordReadGrant` — one render pass, several entities shown
+ * (e.g. a listing page). `sequence`: same pre-render snapshot contract as
+ * `recordReadGrant` — ONE value for the whole batch, since every entity this
+ * single render pass showed was current as of the same render-start instant.
+ */
 export function recordReadGrants(
   db: Database,
   writer: string,
   entries: readonly ReadGrantEntry[],
   nowEpoch: number,
+  sequence: number,
 ): void {
   if (entries.length === 0) {
     return;
   }
-  // One sequence snapshot for the whole batch — every entity this single
-  // render pass showed was current as of the same instant.
-  const sequence = currentWriteGateSequence(db);
   const stmt = db.query<unknown, [string, string, number, number, number]>(
     `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence)
      VALUES (?, ?, ?, ?, ?)

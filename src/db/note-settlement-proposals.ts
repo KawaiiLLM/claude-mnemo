@@ -92,11 +92,13 @@ export interface RecordNoteSettlementProposalResult {
    * True when this call matched an EARLIER proposal (same session, same
    * canonical address set) instead of inserting a new row — the re-claimed-
    * job retry case the idempotency key exists for (spec: "重试回执'已存
-   * 在'"). The returned `record` is the ORIGINAL row in that case, not a
-   * second one; its `title` may differ from what this call asked for if an
-   * earlier attempt proposed the same turns under a different name — title
-   * is deliberately excluded from the key (spec: "key on session + canonical
-   * addresses payload"), so it is never what a retry re-lands.
+   * 在'"). The returned `record`'s `title` is THIS call's own title in that
+   * case too (ticket 14, spec "propose 撞键刷新 title", 2026-08-19 revision):
+   * title is excluded from the key itself (still session + canonical
+   * addresses), but a conflicting call's title now REFRESHES the stored row
+   * rather than being discarded — a later settlement pass has seen more of
+   * the window and its title is hindsight-informed, so the newest proposal's
+   * wording wins.
    */
   alreadyExisted: boolean;
 }
@@ -111,10 +113,13 @@ export interface RecordNoteSettlementProposalResult {
  * "storage mechanics only" discipline `db/segments.ts` keeps for segment
  * writes.
  *
- * `INSERT ... ON CONFLICT DO NOTHING` cannot itself report which row it left
- * alone (SQLite's `RETURNING` produces no row on a no-op conflict), so a
- * miss falls through to an ordinary `SELECT` under the same key — two
- * statements, not a race: both run inside the caller's own write transaction
+ * UPDATE-then-INSERT, not `INSERT ... ON CONFLICT`: an `ON CONFLICT DO
+ * UPDATE ... RETURNING` cannot itself tell the caller whether it inserted or
+ * updated (SQLite's `RETURNING` returns a row either way), and that
+ * distinction is exactly `alreadyExisted`. Trying the UPDATE first and
+ * falling through to INSERT only on a miss gets the flag for free from which
+ * statement actually produced a row — two statements, not a race: both run
+ * inside the caller's own write transaction
  * (`evaluateSettlementMembershipWrite`'s `apply: true` path, itself inside
  * `runWriteTransaction`), so nothing else can insert between them.
  */
@@ -123,11 +128,22 @@ export function recordNoteSettlementProposal(
   input: RecordNoteSettlementProposalInput,
 ): RecordNoteSettlementProposalResult {
   const addressesKey = canonicalizeSettlementProposalAddresses(input.addresses);
+
+  const updated = db
+    .query<ProposalRow, [string, number, string]>(
+      `UPDATE note_settlement_proposals SET title = ?
+       WHERE session_id = ? AND addresses_key = ?
+       RETURNING ${PROPOSAL_COLUMNS}`,
+    )
+    .get(input.title, input.sessionId, addressesKey);
+  if (updated) {
+    return { record: mapProposalRow(updated), alreadyExisted: true };
+  }
+
   const inserted = db
     .query<ProposalRow, [number, number, string, string, string, number]>(
       `INSERT INTO note_settlement_proposals (job_id, session_id, title, addresses, addresses_key, created_at_epoch)
        VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(session_id, addresses_key) DO NOTHING
        RETURNING ${PROPOSAL_COLUMNS}`,
     )
     .get(
@@ -138,23 +154,12 @@ export function recordNoteSettlementProposal(
       addressesKey,
       input.nowEpoch,
     );
-  if (inserted) {
-    return { record: mapProposalRow(inserted), alreadyExisted: false };
-  }
-
-  const existing = db
-    .query<ProposalRow, [number, string]>(
-      `SELECT ${PROPOSAL_COLUMNS} FROM note_settlement_proposals
-       WHERE session_id = ? AND addresses_key = ?`,
-    )
-    .get(input.sessionId, addressesKey);
-  if (!existing) {
-    // The conflict target matched nothing on re-select — a genuine storage
-    // bug (the row this call's own INSERT just conflicted against must
-    // exist), not a case the caller can meaningfully retry differently.
+  if (!inserted) {
+    // Neither the UPDATE nor the INSERT produced a row — a genuine storage
+    // bug, not a case the caller can meaningfully retry differently.
     throw new Error("Failed to record settlement proposal.");
   }
-  return { record: mapProposalRow(existing), alreadyExisted: true };
+  return { record: mapProposalRow(inserted), alreadyExisted: false };
 }
 
 /**

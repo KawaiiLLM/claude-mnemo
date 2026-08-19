@@ -11,7 +11,14 @@ import {
   resolveSegmentAnchorTurnIds,
   type RankedSegmentMember,
 } from "../db/segment-rank";
-import { getSegment, listSegmentsByActivity, type SegmentRecord } from "../db/segments";
+import {
+  countLiveSegments,
+  getSegment,
+  listLiveSegmentsByActivity,
+  listSegmentsByActivity,
+  SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
+  type SegmentRecord,
+} from "../db/segments";
 import { getSession } from "../db/sessions";
 import {
   getFirstTurn,
@@ -56,7 +63,11 @@ import {
   SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
 } from "./segment-card";
 import { expandNumericSelector } from "./selectors";
-import { recordReadGrants, type ReadGrantEntry } from "../db/write-gate";
+import {
+  recordReadGrants,
+  snapshotWriteGateSequence,
+  type ReadGrantEntry,
+} from "../db/write-gate";
 
 export interface RecallInput {
   id?: string;
@@ -170,6 +181,14 @@ function buildSessionSummaryFields(
 function formatParameterError(message: string): string {
   return `Parameter error: ${message}`;
 }
+
+/**
+ * Ticket 14 (spec "选择器多选"): echoed on a rejected comma-separated `id`
+ * list — either an item that does not parse at all, or a list whose items
+ * do not all share the same address kind.
+ */
+const ID_SELECTOR_GRAMMAR_HINT =
+  'each item must be one address: "S<n>", "S<n>/T<m>" (also T*, Ta..b), "E<n>" (also E*, Ea..b), "E<n>/T<m>" (also T*, Ta..b), "T<n>" (global), "O<n>", "S<n>/T<m>/O*", or "S<n>/T*/O*" — every item in the list must be the SAME kind.';
 
 function parseRoutedId(value: string): RoutedRecallId | null {
   const trimmed = value.trim();
@@ -530,6 +549,17 @@ function deriveBreadcrumb(
  * turns, uses `filter.fields` to render each previewed turn minimally rather
  * than suppressing the preview outright.
  */
+interface RenderedSession {
+  text: string;
+  /**
+   * Write gate (ticket 14, P1-2 fix): the turn ids this render pass actually
+   * showed in its own preview — what `recall(id="S<n>")`'s "sessions" branch
+   * needs to record grants for alongside the session itself (spec: "S<n>
+   * 详情路由(含 turn 预览)... 记录其实际渲染实体的授权").
+   */
+  turnIds: number[];
+}
+
 function renderSession(
   db: Database,
   session: NonNullable<ReturnType<typeof getSession>>,
@@ -539,7 +569,7 @@ function renderSession(
   eraCutoffEpoch: number | null = null,
   signal: TruncationSignal | undefined,
   turnBudget: number | undefined,
-): string {
+): RenderedSession {
   const view = buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
@@ -558,6 +588,7 @@ function renderSession(
   );
 
   const preview = previewItems(turns, CHILD_PREVIEW_SIZE);
+  const turnIds: number[] = [];
   for (const item of preview.items) {
     const turnView = buildTurnView(db, item, eraCutoffEpoch);
     const turnLines = renderNode(
@@ -571,13 +602,14 @@ function renderSession(
       },
     );
     lines.push(turnLines);
+    turnIds.push(item.id);
   }
 
   if (preview.omittedCount > 0) {
     lines.push(`  +${preview.omittedCount} more`);
   }
 
-  return lines.join("\n");
+  return { text: lines.join("\n"), turnIds };
 }
 
 function renderTurnScope(
@@ -810,7 +842,7 @@ function renderSessionDetail(
   eraCutoffEpoch: number | null = null,
   signal: TruncationSignal | undefined,
   turnBudget: number | undefined,
-): string {
+): RenderedSession {
   const session = getSession(db, sessionId);
   return session
     ? renderSession(
@@ -823,7 +855,7 @@ function renderSessionDetail(
         signal,
         turnBudget,
       )
-    : "Session not found.";
+    : { text: "Session not found.", turnIds: [] };
 }
 
 function renderObservationDetail(
@@ -1138,20 +1170,65 @@ export function boldSearchSnippet(
   return `${leftTruncated ? "…" : ""}${bolded}${rightTruncated ? "…" : ""}`;
 }
 
-/** Shallow-clones a formatted view with its `content` replaced by a bold+neighborhood snippet — the search-shape's own field, never mutating the source view. */
-function withSearchSnippet<T extends { content?: string | null }>(
+/**
+ * Shallow-clones a formatted view with its `title`/`content` replaced by a
+ * bold+neighborhood snippet — the search-shape's own fields, never mutating
+ * the source view. Shared by `FormattedSession` and `FormattedObservation`,
+ * whose only indexed text fields are these two (ticket 14, P2-5 fix, spec
+ * "搜索加粗覆盖全部被索引字段" — see `withTurnSearchSnippet` for the wider
+ * turn shape).
+ */
+function withBasicSearchSnippet<T extends { title?: string | null; content?: string | null }>(
   view: T,
   terms: readonly string[],
   windowChars: number,
   signal?: TruncationSignal,
 ): T {
-  if (!view.content || terms.length === 0) {
+  if (terms.length === 0) {
     return view;
   }
   // `T` is generic — TS cannot prove a spread-and-override object literal is
   // still exactly `T`, so the cast makes explicit what is structurally true
-  // (every property of `view` survives the spread; only `content` narrows).
-  return { ...view, content: boldSearchSnippet(view.content, terms, windowChars, signal) } as T;
+  // (every property of `view` survives the spread; only the two named fields
+  // narrow).
+  return {
+    ...view,
+    title: view.title ? boldSearchSnippet(view.title, terms, windowChars, signal) : view.title,
+    content: view.content ? boldSearchSnippet(view.content, terms, windowChars, signal) : view.content,
+  } as T;
+}
+
+/**
+ * `withBasicSearchSnippet`'s turn-shaped sibling (ticket 14, P2-5 fix): a
+ * turn indexes more than title/content for FTS (`db/search.ts` also matches
+ * `user_prompt`/`assistant_response`), and a hit whose matched term lives
+ * ONLY in one of those fields used to render with no bold and no
+ * neighborhood at all — the matched evidence was invisible. `insight` is a
+ * list; each row gets its own independent snippet rather than one window
+ * over the joined text, since a match in row 3 should not need rows 1-2's
+ * text to eat into its window.
+ */
+function withTurnSearchSnippet(
+  view: FormattedTurn,
+  terms: readonly string[],
+  windowChars: number,
+  signal?: TruncationSignal,
+): FormattedTurn {
+  if (terms.length === 0) {
+    return view;
+  }
+  return {
+    ...view,
+    title: view.title ? boldSearchSnippet(view.title, terms, windowChars, signal) : view.title,
+    content: view.content ? boldSearchSnippet(view.content, terms, windowChars, signal) : view.content,
+    promptPreview: view.promptPreview
+      ? boldSearchSnippet(view.promptPreview, terms, windowChars, signal)
+      : view.promptPreview,
+    responsePreview: view.responsePreview
+      ? boldSearchSnippet(view.responsePreview, terms, windowChars, signal)
+      : view.responsePreview,
+    insight: view.insight?.map((row) => boldSearchSnippet(row, terms, windowChars, signal)),
+  };
 }
 
 function renderGroupedSearchResults(
@@ -1165,6 +1242,9 @@ function renderGroupedSearchResults(
   queryText?: string,
   readerId?: string | null,
   now: () => number = () => Math.floor(Date.now() / 1000),
+  // Ticket 14 (P1-3 fix): pre-render sequence snapshot, see `renderRoutedId`'s
+  // own parameter of the same name.
+  sequence: number = 0,
 ): string {
   const terms = queryText ? extractQueryTerms(queryText) : [];
   // Ticket 11: the snippet window used to be the retired `truncate` char
@@ -1251,7 +1331,7 @@ function renderGroupedSearchResults(
       // turn/observation hit — spec's "命中后的深入=用户用选择器自取,不做±N":
       // this renders the session's own snippet-bolded line, not every turn
       // dragged along underneath it (the old full nested render did).
-      const sessionView = withSearchSnippet(
+      const sessionView = withBasicSearchSnippet(
         buildSessionSummary(db, session.id, eraCutoffEpoch) ??
           buildSessionView(db, session, eraCutoffEpoch),
         terms,
@@ -1264,7 +1344,7 @@ function renderGroupedSearchResults(
       );
     }
 
-    const sessionView = withSearchSnippet(
+    const sessionView = withBasicSearchSnippet(
       buildSessionSummary(db, session.id, eraCutoffEpoch) ??
         buildSessionView(db, session, eraCutoffEpoch),
       terms,
@@ -1297,7 +1377,7 @@ function renderGroupedSearchResults(
 
     for (const turn of turns) {
       grants.push({ entityType: "turn", entityId: turn.id });
-      const turnView = withSearchSnippet(
+      const turnView = withTurnSearchSnippet(
         buildTurnView(db, turn, eraCutoffEpoch),
         terms,
         snippetWindow,
@@ -1333,7 +1413,7 @@ function renderGroupedSearchResults(
           continue;
         }
 
-        const observationView = withSearchSnippet(
+        const observationView = withBasicSearchSnippet(
           buildObservationView(observation, turn.createdAtEpoch, eraCutoffEpoch),
           terms,
           snippetWindow,
@@ -1361,7 +1441,7 @@ function renderGroupedSearchResults(
   // used to record no read grants at all. Every segment/session/turn shown
   // above earns the reader a grant, same as the routed-id paths.
   if (readerId && grants.length > 0) {
-    recordReadGrants(db, readerId, grants, now());
+    recordReadGrants(db, readerId, grants, now(), sequence);
   }
 
   return [...segmentLines, ...sessionLines].filter(Boolean).join("\n");
@@ -1394,10 +1474,15 @@ function renderRoutedId(
   // `RecallInput.readerId`.
   readerId?: string | null,
   now: () => number = () => Math.floor(Date.now() / 1000),
+  // Ticket 14 (P1-3 fix): the render pass's OWN pre-render sequence snapshot
+  // (`snapshotWriteGateSequence`, captured by `recallMemoryBody` before any
+  // row is read) — every grant this call records uses THIS value, never a
+  // fresh lookup at record time.
+  sequence: number = 0,
 ): string {
   const recordGrants = (entries: readonly ReadGrantEntry[]): void => {
     if (readerId && entries.length > 0) {
-      recordReadGrants(db, readerId, entries, now());
+      recordReadGrants(db, readerId, entries, now(), sequence);
     }
   };
 
@@ -1408,21 +1493,33 @@ function renderRoutedId(
       pageSize,
     );
 
+    const rendered = paged.items.map((sessionId) => ({
+      sessionId,
+      ...renderSessionDetail(
+        db,
+        sessionId,
+        fields,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        turnBudget,
+      ),
+    }));
+
+    // Write gate (ticket 14, P1-2 fix): the session itself, plus whichever
+    // turns its own preview actually rendered (spec: "S<n> 详情路由(含 turn
+    // 预览)... 记录其实际渲染实体的授权" — the prior state recorded nothing
+    // at all for this route).
+    recordGrants(
+      rendered.flatMap((entry) => [
+        { entityType: "session" as const, entityId: entry.sessionId },
+        ...entry.turnIds.map((turnId) => ({ entityType: "turn" as const, entityId: turnId })),
+      ]),
+    );
+
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      paged.items
-        .map((sessionId) =>
-          renderSessionDetail(
-            db,
-            sessionId,
-            fields,
-            includeDbTurnIds,
-            eraCutoffEpoch,
-            signal,
-            turnBudget,
-          ),
-        )
-        .join("\n"),
+      rendered.map((entry) => entry.text).join("\n"),
       paged.pageCount,
     );
   }
@@ -1563,6 +1660,14 @@ function renderRoutedId(
       return "Turn not found.";
     }
 
+    // Write gate (ticket 14, P1-2 fix): the O* route's own turn/session
+    // context — not the observations themselves, which carry no gated entity
+    // type (spec: "O* 观察路由(其 turn/session context)").
+    recordGrants([
+      { entityType: "turn", entityId: turn.id },
+      { entityType: "session", entityId: routed.sessionId },
+    ]);
+
     const observations = getExtractableObservationsForTurn(db, turn.id)
       .filter((observation) => {
         if (after !== undefined && observation.createdAtEpoch < after) {
@@ -1616,6 +1721,16 @@ function renderRoutedId(
       );
 
     const paged = paginateItems(observations, page, pageSize);
+    // Write gate (ticket 14, P1-2 fix): the session, plus exactly the turns
+    // THIS page's own observation rows belong to — never every turn the
+    // session has, since pagination may show only a slice of them.
+    recordGrants([
+      { entityType: "session", entityId: routed.sessionId },
+      ...[...new Set(paged.items.map((entry) => entry.turnId))].map((turnId) => ({
+        entityType: "turn" as const,
+        entityId: turnId,
+      })),
+    ]);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderObservationScope(
@@ -1632,6 +1747,21 @@ function renderRoutedId(
   }
 
   if (routed.kind === "observation") {
+    // Write gate (ticket 14, P1-2 fix): the observation's own owning turn/
+    // session context — the observation itself has no gated entity type
+    // (only segment/turn/session are managed write surfaces). Mirrors
+    // `renderObservationDetail`'s own "excluded reads as not found" rule so a
+    // grant is never recorded for a row the render did not actually show.
+    const observation = getObservation(db, routed.observationId);
+    if (observation && observation.excludedFromExtraction === 0) {
+      const owningTurn = getTurnById(db, observation.turnId);
+      if (owningTurn) {
+        recordGrants([
+          { entityType: "turn", entityId: owningTurn.id },
+          { entityType: "session", entityId: owningTurn.sessionId },
+        ]);
+      }
+    }
     return renderObservationDetail(
       db,
       routed.observationId,
@@ -1806,6 +1936,8 @@ function buildBrowseFeed(
   signal: TruncationSignal | undefined,
   readerId: string | null | undefined,
   now: () => number,
+  // Ticket 14 (P1-3 fix): pre-render sequence snapshot.
+  sequence: number,
 ): string {
   const turnIdRows = db
     .query<{ id: number }, [number]>(
@@ -1924,7 +2056,7 @@ function buildBrowseFeed(
         grants.push({ entityType: "session", entityId: sessionId });
       }
     }
-    recordReadGrants(db, readerId, grants, now());
+    recordReadGrants(db, readerId, grants, now(), sequence);
   }
 
   return joinPage(
@@ -1964,6 +2096,8 @@ function renderBareOverview(
   filter: ParsedMemoryFilter = {},
   readerId?: string | null,
   now: () => number = () => Math.floor(Date.now() / 1000),
+  // Ticket 14 (P1-3 fix): pre-render sequence snapshot.
+  sequence: number = 0,
 ): string {
   const parts: string[] = [];
 
@@ -1973,7 +2107,13 @@ function renderBareOverview(
       parts.push(`── segments (${segments.length}) ──`);
       for (const segment of segments) {
         if (readerId) {
-          recordReadGrants(db, readerId, [{ entityType: "segment", entityId: segment.id }], now());
+          recordReadGrants(
+            db,
+            readerId,
+            [{ entityType: "segment", entityId: segment.id }],
+            now(),
+            sequence,
+          );
         }
         parts.push(
           renderSegmentCard(db, segment.id, {
@@ -2002,6 +2142,7 @@ function renderBareOverview(
       signal,
       readerId,
       now,
+      sequence,
     ),
   );
 
@@ -2069,29 +2210,90 @@ function recallMemoryBody(
     return formatParameterError(filterError);
   }
 
+  // Ticket 14 (P1-3 fix, spec "授权序列渲染前快照"): captured HERE, before
+  // this render pass reads a single row — every grant this call ends up
+  // recording (however many nested render functions it fans out through)
+  // uses this one value, never a fresh lookup at record time.
+  const sequence = snapshotWriteGateSequence(db);
+  const now = input.now ?? (() => Math.floor(Date.now() / 1000));
+
   if (input.id) {
-    const routed = parseRoutedId(input.id);
-    if (!routed) {
-      return formatParameterError(`invalid id selector "${input.id}"`);
+    // Ticket 14 (spec "选择器多选"): `id="E31, E32"` — a comma-separated
+    // list, each item parsed by the EXISTING grammar above, rendered in
+    // order, sharing this call's own page/turn budgets. A single item (the
+    // overwhelmingly common case, and every pre-ticket-14 caller) takes the
+    // untouched single-item path below unchanged.
+    const idItems = input.id
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+
+    if (idItems.length <= 1) {
+      const routed = parseRoutedId(input.id.trim());
+      if (!routed) {
+        return formatParameterError(`invalid id selector "${input.id}"`);
+      }
+
+      return renderRoutedId(
+        db,
+        routed,
+        fields,
+        page,
+        pageSize,
+        filter.after,
+        filter.before,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        pageBudget,
+        turnBudget,
+        filter,
+        input.readerId,
+        now,
+        sequence,
+      );
     }
 
-    return renderRoutedId(
-      db,
-      routed,
-      fields,
-      page,
-      pageSize,
-      filter.after,
-      filter.before,
-      includeDbTurnIds,
-      eraCutoffEpoch,
-      signal,
-      pageBudget,
-      turnBudget,
-      filter,
-      input.readerId,
-      input.now ?? (() => Math.floor(Date.now() / 1000)),
-    );
+    const routedItems: RoutedRecallId[] = [];
+    for (const item of idItems) {
+      const routed = parseRoutedId(item);
+      if (!routed) {
+        return formatParameterError(
+          `invalid id selector "${item}" in comma list "${input.id}" — ${ID_SELECTOR_GRAMMAR_HINT}`,
+        );
+      }
+      routedItems.push(routed);
+    }
+
+    const firstKind = routedItems[0]!.kind;
+    if (routedItems.some((routed) => routed.kind !== firstKind)) {
+      return formatParameterError(
+        `mixed id kinds in comma list "${input.id}" — ${ID_SELECTOR_GRAMMAR_HINT}`,
+      );
+    }
+
+    return routedItems
+      .map((routed) =>
+        renderRoutedId(
+          db,
+          routed,
+          fields,
+          page,
+          pageSize,
+          filter.after,
+          filter.before,
+          includeDbTurnIds,
+          eraCutoffEpoch,
+          signal,
+          pageBudget,
+          turnBudget,
+          filter,
+          input.readerId,
+          now,
+          sequence,
+        ),
+      )
+      .join("\n\n");
   }
 
   // Ticket 04: a `filter` alone (no `query`) also runs the search/listing
@@ -2137,7 +2339,8 @@ function recallMemoryBody(
         signal,
         text || undefined,
         input.readerId,
-        input.now ?? (() => Math.floor(Date.now() / 1000)),
+        now,
+        sequence,
       ),
       paged.pageCount,
     );
@@ -2154,6 +2357,138 @@ function recallMemoryBody(
     turnBudget,
     filter,
     input.readerId,
-    input.now ?? (() => Math.floor(Date.now() / 1000)),
+    now,
+    sequence,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 14 (read-write-contract spec, "roster 重建"): the SessionStart
+// roster as a unified-renderer segment listing in its own right — the
+// bespoke topic-grouped composer this replaces lived in
+// hooks/session-composition.ts; this lives HERE because its own render pass
+// now goes through the identical recordReadGrants/snapshotWriteGateSequence
+// seam every other route in this file uses, rather than a second,
+// independently-hand-kept grant recording site. Retires: topic grouping
+// headers, the type facet glyph, the 40-segment cap (pagination replaces
+// it), and character-cap title truncation (the item TOKEN budget's own
+// word-boundary cut replaces it).
+// ---------------------------------------------------------------------------
+
+/** Item budget (spec: "item 100 tok"). */
+export const DEFAULT_ROSTER_ITEM_BUDGET_TOKENS = 100;
+/** Page budget (spec: "page 2000 tok"). */
+export const DEFAULT_ROSTER_PAGE_BUDGET_TOKENS = 2_000;
+/** Pagination here is TOKEN-driven, not count-driven — every live segment has to be fetched up front to pack pages correctly, so this is a generous headroom cap, not a display limit (mirrors `BROWSE_CANDIDATE_CAP`'s own role). */
+const ROSTER_CANDIDATE_CAP = 500;
+
+export interface SegmentRosterFeedOptions {
+  /** 1-indexed; default 1 (spec: "分页默认展示第一页" — SessionStart always injects page 1). */
+  page?: number;
+  pageBudget?: number;
+  itemBudget?: number;
+  /**
+   * Ticket 02's segment-era freeze. `undefined` (every production caller)
+   * applies `SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH` — a pre-redesign legacy
+   * arc-segment never reaches the roster; an explicit `null` is era-blind
+   * (status-only), for tests probing other roster properties.
+   */
+  segmentEraCutoffEpoch?: number | null;
+  /** Segments attached to the CURRENT session but past the SessionStart block-slot pool — annotated with a recall pointer instead of a full block (spec: "挂靠溢出指路行为保留", equivalent wording). */
+  overflowAttachedSegmentIds?: ReadonlySet<number>;
+  readerId?: string | null;
+  now?: () => number;
+}
+
+/** One roster row: `E<id> <title> — #tag #tag` (spec: "字段仅 title、tags"), word-boundary cut to the item's own token budget — the full line, not title alone (ticket 14 retires the old character-only title cap). */
+function renderRosterLine(
+  segment: Pick<SegmentRecord, "id" | "title" | "tags">,
+  itemBudgetTokens: number,
+  overflow: ReadonlySet<number>,
+): string {
+  const tagsText = segment.tags.length > 0 ? ` — ${segment.tags.map((tag) => `#${tag}`).join(" ")}` : "";
+  const attachedNote = overflow.has(segment.id)
+    ? ` (attached, not rendered here — recall(id="E${segment.id}"))`
+    : "";
+  const full = `- E${segment.id} ${segment.title}${tagsText}${attachedNote}`;
+  const charLimit = Math.max(20, itemBudgetTokens * BROWSE_CHARS_PER_TOKEN);
+  return truncateText(full, { limit: charLimit });
+}
+
+/**
+ * The SessionStart roster block (ticket 14): live segments, activity-recency
+ * ordered (`listLiveSegmentsByActivity`, unchanged ordering rule), each row
+ * title+tags only, packed into pages by a TOKEN page budget (never a
+ * segment-count cap) — a page always holds at least one item, so a single
+ * oversized row cannot stall pagination. Records a read grant for every
+ * segment the returned page actually shows, under its OWN pre-render
+ * sequence snapshot (ticket 14, P1-3 fix) — this is its own independent
+ * render pass, not nested inside another one.
+ */
+export function renderSegmentRosterFeed(
+  db: Database,
+  options: SegmentRosterFeedOptions = {},
+): string {
+  const page = Math.max(1, options.page ?? 1);
+  const pageBudget = options.pageBudget ?? DEFAULT_ROSTER_PAGE_BUDGET_TOKENS;
+  const itemBudget = options.itemBudget ?? DEFAULT_ROSTER_ITEM_BUDGET_TOKENS;
+  const segmentEraCutoffEpoch =
+    options.segmentEraCutoffEpoch === undefined
+      ? SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH
+      : options.segmentEraCutoffEpoch;
+  const overflow = options.overflowAttachedSegmentIds ?? new Set<number>();
+  const now = options.now ?? (() => Math.floor(Date.now() / 1000));
+
+  const totalLive = countLiveSegments(db, segmentEraCutoffEpoch);
+  const candidates = listLiveSegmentsByActivity(db, ROSTER_CANDIDATE_CAP, segmentEraCutoffEpoch);
+  const header = `## Segment roster (${totalLive} live)`;
+
+  if (candidates.length === 0) {
+    return `${header}\n(no live segments yet — remember(create) mints one from a topic)`;
+  }
+
+  const rendered = candidates.map((entry) => ({
+    segmentId: entry.segment.id,
+    text: renderRosterLine(entry.segment, itemBudget, overflow),
+  }));
+
+  // Greedy token-budget packing into pages — same shape as `buildBrowseFeed`'s
+  // own packer above.
+  const pages: (typeof rendered)[] = [];
+  let current: typeof rendered = [];
+  let used = 0;
+  for (const item of rendered) {
+    const cost = estimateTokens(item.text) + 1;
+    if (current.length > 0 && used + cost > pageBudget) {
+      pages.push(current);
+      current = [];
+      used = 0;
+    }
+    current.push(item);
+    used += cost;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+
+  const pageCount = pages.length;
+  const clampedPage = Math.min(Math.max(1, page), pageCount);
+  const pageItems = pages[clampedPage - 1] ?? [];
+
+  if (options.readerId && pageItems.length > 0) {
+    const sequence = snapshotWriteGateSequence(db);
+    recordReadGrants(
+      db,
+      options.readerId,
+      pageItems.map((item) => ({ entityType: "segment" as const, entityId: item.segmentId })),
+      now(),
+      sequence,
+    );
+  }
+
+  return joinPage(
+    formatPageHeader(clampedPage, pageCount, totalLive),
+    [header, ...pageItems.map((item) => item.text)].join("\n"),
+    pageCount,
   );
 }

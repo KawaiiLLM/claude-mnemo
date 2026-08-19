@@ -17,6 +17,7 @@ import {
   checkFieldGate,
   recordReadGrant,
   sessionWriterId,
+  snapshotWriteGateSequence,
   stampField,
 } from "../../src/db/write-gate";
 
@@ -583,7 +584,7 @@ describe("handleSessionEndHook — write gate cleanup", () => {
     // Someone else wrote the field, THEN this session read it — the grant
     // covers the current state, so it may write the field ungranted-free.
     stampField(db, "segment", 1, "goal", "session:9999", 100);
-    recordReadGrant(db, sessionWriterId(sessionId), "segment", 1, 150);
+    recordReadGrant(db, sessionWriterId(sessionId), "segment", 1, 150, snapshotWriteGateSequence(db));
     expect(checkFieldGate(db, sessionWriterId(sessionId), "segment", 1, "goal", "E1").ok).toBe(
       true,
     );
@@ -609,7 +610,7 @@ describe("handleSessionEndHook — write gate cleanup", () => {
       updatedAtEpoch: 60,
       completedAtEpoch: 60,
     }).id;
-    recordReadGrant(db, sessionWriterId(staleSessionId), "segment", 2, 55);
+    recordReadGrant(db, sessionWriterId(staleSessionId), "segment", 2, 55, snapshotWriteGateSequence(db));
 
     const handler = createSessionEndHandler({ db });
     await handler(createInput({ sessionId: "write-gate-end-1" }));
@@ -633,7 +634,7 @@ describe("handleSessionEndHook — write gate cleanup", () => {
       updatedAtEpoch: 60,
       completedAtEpoch: null,
     }).id;
-    recordReadGrant(db, sessionWriterId(liveSessionId), "segment", 3, 55);
+    recordReadGrant(db, sessionWriterId(liveSessionId), "segment", 3, 55, snapshotWriteGateSequence(db));
 
     const handler = createSessionEndHandler({ db });
     await handler(createInput({ sessionId: "write-gate-end-1" }));

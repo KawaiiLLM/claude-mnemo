@@ -1,13 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
-import type { Database } from "bun:sqlite";
 
-import { createDatabase } from "../../src/db/database";
-import { initializeSchema } from "../../src/db/schema";
-import {
-  RUBRIC_AND_ROSTER_BUDGET_TOKENS,
-  renderRubricAndRosterBlock,
-} from "../../src/hooks/session-composition";
+import { renderRubricBlock } from "../../src/hooks/session-composition";
 import { MNEMO_TOOL_DESCRIPTIONS, noteInputShape } from "../../src/mcp/definitions";
 import {
   MEMORY_RUBRIC_HASH,
@@ -76,52 +70,18 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   });
 });
 
-describe("renderRubricAndRosterBlock — shared budget discipline (ticket 11)", () => {
-  let db: Database;
-
-  function freshDb(): Database {
-    const database = createDatabase(":memory:");
-    initializeSchema(database);
-    return database;
-  }
-
-  test("at the production budget, the rubric renders whole and the roster follows it", () => {
-    db = freshDb();
-    const block = renderRubricAndRosterBlock(db, {});
+describe("renderRubricBlock — its own block, no shared budget (ticket 14 roster rebuild)", () => {
+  // Ticket 14: the rubric no longer cohabits an injection block with the
+  // segment roster — ticket 11's shared-budget/INCOMPLETE-marker discipline
+  // retires along with that cohabitation (`hooks/session-composition.ts`'s
+  // `renderRubricBlock` and `renderSegmentRosterBlock` are now two
+  // independent renders; see `tests/hooks/session-composition.test.ts` for
+  // the roster's own coverage).
+  test("renders the rubric whole, with no roster text and no budget/INCOMPLETE mechanism at all", () => {
+    const block = renderRubricBlock();
     expect(block).toContain(MEMORY_RUBRIC_TEXT);
-    expect(block).toContain("## Segment roster");
-    // The rubric comes FIRST — the roster's own header appears strictly
-    // after the rubric's closing tag.
-    expect(block.indexOf("</mnemo-memory-rubric>")).toBeLessThan(
-      block.indexOf("## Segment roster"),
-    );
-    expect(block).not.toContain("INCOMPLETE");
-    db.close();
-  });
-
-  // Ticket 11's own explicit-failure requirement: over budget must never
-  // silently truncate the rubric (which would cut its own trailing 关系/归属
-  // sections first) — it must render whole, with a visible marker, and the
-  // roster omitted rather than partially shown.
-  test("when the rubric alone exceeds the shared budget, the block renders INCOMPLETE — the rubric still whole, the roster omitted, never silently truncated", () => {
-    db = freshDb();
-    const tinyBudget = 10; // far under the rubric's own ~1460 tok
-    const block = renderRubricAndRosterBlock(db, {}, tinyBudget);
-
-    // The rubric itself is NOT cut short — every one of its sections still
-    // appears, including the trailing ones a silent tail-truncation would
-    // have lost first.
-    expect(block).toContain(MEMORY_RUBRIC_TEXT);
-    expect(block).toContain("## 归属");
-    expect(block).toContain("INCOMPLETE");
-    expect(block).toContain(`${tinyBudget} tok`);
-    // The roster is omitted outright, not partially rendered.
     expect(block).not.toContain("## Segment roster");
-    db.close();
-  });
-
-  test("the production budget constant is 2000 tokens, with real headroom over the rubric's own measured size", () => {
-    expect(RUBRIC_AND_ROSTER_BUDGET_TOKENS).toBe(2_000);
+    expect(block).not.toContain("INCOMPLETE");
   });
 });
 
