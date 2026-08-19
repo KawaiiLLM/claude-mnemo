@@ -18,9 +18,11 @@ import { estimateTokens } from "../utils/token-estimate";
 
 import {
   DEFAULT_PREVIEW_COUNT,
+  DEFAULT_TURN_TOKEN_BUDGET,
   formatEpoch,
   renderNode,
   splitBulletField,
+  truncateTextToTokenBudget,
   type FormattedTurn,
   type TruncationSignal,
   type TurnRenderFields,
@@ -354,11 +356,13 @@ export function renderSegmentCardRecord(
   const maintenance = maintenanceTurnsAgo(db, segment, attachedSessionIds);
 
   // -----------------------------------------------------------------------
-  // The fixed header: meta line, tag/type facets, attached sessions (row
-  // count capped — see MAX_ATTACHED_SESSION_ROWS). Never elided — what's
-  // left of `pageBudget` after this is what the field ladder below competes
-  // for. The `[E<n>]` id marker itself is added when `lines` opens, after
-  // the title survives (or doesn't) elision.
+  // The fixed header: meta line, tag/type facets (each capped at the item
+  // knife on page 1 — see pushFacetLine below), attached sessions (row
+  // count capped — see MAX_ATTACHED_SESSION_ROWS). Header lines are never
+  // dropped — what's left of `pageBudget` after this is what the field
+  // ladder below competes for, which is exactly why no single header line
+  // may grow without bound. The `[E<n>]` id marker itself is added when
+  // `lines` opens, after the title survives (or doesn't) elision.
   // -----------------------------------------------------------------------
   const headerLines: string[] = [];
 
@@ -379,13 +383,32 @@ export function renderSegmentCardRecord(
   ];
   headerLines.push(`  ${metaParts.join(" · ")}`);
 
+  // Facet lines take the SAME item knife every other rendered unit takes
+  // (spec "Budgets": the card must fit the page budget; roster precedent:
+  // facets are "budget-truncated"). Counts sort descending, so a word-boundary
+  // cut keeps the high-signal words and sheds the long tail — a project-wide
+  // segment folds hundreds of tags into one line that would otherwise eat the
+  // whole page and starve the field ladder below to zero visible rows
+  // ([S15069/T1022], the E60 card regression). Page ≥ 2 renders facets whole,
+  // same as every other never-elided page-2 surface.
+  const facetCap = options.turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET;
+  const pushFacetLine = (line: string): void => {
+    if (!elides || estimateTokens(line) <= facetCap) {
+      headerLines.push(line);
+      return;
+    }
+    if (options.signal) {
+      options.signal.truncated = true;
+    }
+    headerLines.push(truncateTextToTokenBudget(line, facetCap));
+  };
   if (facetCounts.tags.length > 0) {
-    headerLines.push(
+    pushFacetLine(
       `  - tags: ${facetCounts.tags.map((entry) => `#${entry.word}×${entry.count}`).join(" ")}`,
     );
   }
   if (facetCounts.type.length > 0) {
-    headerLines.push(
+    pushFacetLine(
       `  - type: ${facetCounts.type
         .map((entry) => `${typeWordGlyph(entry.word)}${entry.word}×${entry.count}`)
         .join(" ")}`,

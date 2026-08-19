@@ -475,6 +475,25 @@ describe("remember tool (ticket 02)", () => {
       expect(getSegment(db, segmentId)?.reference).toBeNull();
     });
 
+    // [S15069/T1022] — the phantom-bullet regression: `append` normalizes a
+    // bare row INTO `- ` form, so callers naturally delete by the same bare
+    // text — which used to leave a contentless `- ` line the trim()-only
+    // cleaner kept (two shipped live on E60's next_steps).
+    test("deleting by BARE row text (no dash) leaves no phantom empty bullet", () => {
+      const segmentId = createWithRow("replace-delete-bare", "next_steps", "run the campaign");
+      const text = resultText(
+        rememberTool(db, {
+          verb: "replace",
+          id: `E${segmentId}`,
+          field: "next_steps",
+          oldString: "run the campaign",
+          newString: "",
+        }),
+      );
+      expect(text).toContain("Removed a row from next_steps");
+      expect(getSegment(db, segmentId)?.nextSteps).toBeNull();
+    });
+
     test("a missing oldString rejects loudly and leaves the field untouched", () => {
       const segmentId = createWithRow("replace-missing", "goal", "ship it");
       const text = resultText(

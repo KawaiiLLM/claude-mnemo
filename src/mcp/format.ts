@@ -375,7 +375,7 @@ export function truncateText(
  * rule itself in exactly one place rather than a second token-aware copy of
  * it. Returns `""` when not even one character (plus the mark) fits.
  */
-function truncateTextToTokenBudget(text: string, maxTokens: number): string {
+export function truncateTextToTokenBudget(text: string, maxTokens: number): string {
   if (maxTokens <= 0) {
     return "";
   }

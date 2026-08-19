@@ -208,6 +208,36 @@ describe("recall(id=\"E<n>\") segment card", () => {
     attachSegmentToSession(db, sessionId, segmentId, CUTOFF);
   });
 
+  // [S15069/T1022] — the E60 regression: a whole-project segment folds
+  // hundreds of tags into one facet line that, unbudgeted, ate the entire
+  // page and starved the field ladder to zero visible rows. The facet line
+  // takes the same item knife as every other rendered unit; counts sort
+  // descending, so the cut keeps the high-signal words. Page 2 stays whole.
+  test("a tag-flooded facet line takes the item knife and Working State rows stay visible", () => {
+    const turnIds: number[] = [];
+    for (let promptNumber = 3; promptNumber < 120; promptNumber += 1) {
+      turnIds.push(
+        makeTurn(promptNumber, {
+          tags: [`flood-${promptNumber}-${"x".repeat(12)}`, `also-${promptNumber}`],
+        }),
+      );
+    }
+    addSegmentMembers(db, segmentId, turnIds, CUTOFF);
+    appendSegmentWorkingStateRows(db, segmentId, "goal", ["the goal survives the flood"], CUTOFF);
+
+    const pageOne = recallMemory(db, { id: `E${segmentId}` });
+    const tagsLine = pageOne.split("\n").find((line) => line.includes("- tags:"))!;
+    expect(estimateTokens(tagsLine)).toBeLessThanOrEqual(DEFAULT_TURN_TOKEN_BUDGET + 5);
+    // Highest-count words render; the flood's long tail is what got cut.
+    expect(tagsLine).toContain("#card×");
+    // The ladder still had a page to spend: the newest goal row is visible.
+    expect(pageOne).toContain("the goal survives the flood");
+
+    const pageTwo = recallMemory(db, { id: `E${segmentId}`, page: 2 });
+    const fullTagsLine = pageTwo.split("\n").find((line) => line.includes("- tags:"))!;
+    expect(estimateTokens(fullTagsLine)).toBeGreaterThan(DEFAULT_TURN_TOKEN_BUDGET);
+  });
+
   afterEach(() => {
     db.close();
   });

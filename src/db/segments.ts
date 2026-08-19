@@ -1054,9 +1054,13 @@ export function replaceInSegmentWorkingStateField(
   }
 
   const replaced = current.split(oldString).join(newString);
+  // A line is gone when nothing but bullet furniture remains: `append`
+  // normalizes a bare row INTO `- ` form, so a caller deleting by the same
+  // bare text leaves `- ` behind — furniture the trim()-only filter kept as
+  // a phantom empty bullet ([S15069/T1022], two of them live on E60).
   const cleaned = replaced
     .split("\n")
-    .filter((line) => line.trim() !== "")
+    .filter((line) => line.replace(/^\s*-\s*/, "").trim() !== "")
     .join("\n");
 
   const updated = mapSegmentRow(
