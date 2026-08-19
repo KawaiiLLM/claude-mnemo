@@ -3,7 +3,7 @@
 Persistent memory for Claude Code sessions: an episodic layer of recorded turns and
 a semantic layer of task containers, maintained by the agents that do the work.
 Vocabulary pinned by the 2026-08-17 segment redesign and the 2026-08-19
-edge-ownership redesign (ADR-0001…0007).
+edge-ownership redesign (ADR-0001…0008).
 
 ## Language
 

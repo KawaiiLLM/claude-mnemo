@@ -1,6 +1,6 @@
 # 读写契约:一个门、一个渲染器
 
-**Status:** ready-for-agent(2026-08-19,grill 两轮收敛 [S15069/T953]–[T958];吸收此前待写的视图 spec)
+**Status:** implemented(read-write-contract 票 01–09/11–15,2026-08-19)——门(三判+读授权+印章)、统一渲染器、结算直写、视图重设计(pageBudget/turn 双预算、里程碑字典序选择、段选择器、id 多选)均已落地;新 ADR-0008。turn-edge-mechanism spec 留给「视图 spec」的消费侧验收缺口(里程碑准入与计分渲染)由此收口,其自身的 caveat 措辞未回改,读者遇到时以本行为准。
 
 ## Problem Statement
 

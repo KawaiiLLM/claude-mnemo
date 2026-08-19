@@ -5,14 +5,20 @@ description: Search past sessions for the *why* behind this project's code — d
 
 # Mnemo Recall
 
-`recall` is the structured read index over past sessions. It returns paginated, truncated summaries from SQLite: session headers, turn titles, and observation summaries. For exact prompts, full responses, full tool output, or raw transcript reconstruction, switch to the `mnemo-replay` skill.
+`recall` is the structured read index over past sessions. It returns a paginated
+render from SQLite — session headers, turn titles, observation summaries, segment
+cards — bounded by two token budgets rather than a fixed character truncation. For
+exact prompts, full responses, full tool output, or raw transcript reconstruction,
+switch to the `mnemo-replay` skill.
 
 **Three axes of read access**:
 - `recall` — content index: what happened, where, and what to inspect next
 - `timeline` — temporal narrative: how a single session unfolded
 - `mnemo-replay` skill — raw truth: direct SQLite and JSONL reads
 
-**Rule of thumb**: start broad, then narrow. `collapsed` is the cheap browsing mode. Use `expanded` only once you have a target. If a `recall` result is good enough, stop there.
+**Rule of thumb**: start broad, then narrow. The default field set (`title` +
+`content`) is the cheap browsing mode. Widen `filter.fields` and raise `turn` only
+once you have a target. If a `recall` result is good enough, stop there.
 
 ## When to Use
 
@@ -51,30 +57,69 @@ Output IDs map directly to selectors:
 - `[O87]` → `recall(id="O87")`
 - `[E47]` → `recall(id="E47")`
 
+A segment's own members can also be addressed by their in-segment chronological
+position — `E47/T3` — but that ordinal is a **navigation handle only, never a
+citation**: a member that settles into the segment later shifts every ordinal
+after it. Cite the rendered `S<session>/T<prompt>` address instead; `E<n>/T<m>`
+is only for picking a member out while you are looking at the card.
+
+A turn marked **rewound** (`⤺ rewound (transcript pointer stale — do not trust
+replay)`) had its branch undone — treat its content as an abandoned path, and do
+not hand its transcript pointer to `mnemo-replay`: the pointer is a stale
+coordinate once a turn has been rewound.
+
+## Browse vs Search
+
+`recall` has exactly two output shapes, selected by whether `query` is set:
+
+- **Browse** (`id` and `query` both omitted): a global, chronological feed
+  across every session — not one session's worth. A session's title renders
+  only the first time its turns appear in the feed; later turns from the same
+  session in the same page omit the repeated header. Segments list before
+  sessions.
+- **Search** (`query` set): results rank by relevance (bm25). Every matched
+  term is **bolded**, with a word-boundary neighborhood shown around the hit
+  instead of a fixed truncation window — you see the evidence, not an
+  arbitrary slice.
+
+`filter` narrows either shape the same way; it is not what selects between them.
+
 ## Progressive Workflow
 
 ### Step 1 — Browse or search
 
 ```text
-recall()                                        # recent sessions
-recall(query="auth race")                       # FTS across all layers
-recall(query="type:bugfix file:src/auth.ts")    # typed filters
-recall(query="cookie session:S12")              # full-text search within one session
-recall(time="-7d")                              # last 7 days
+recall()                                            # global chronological feed
+recall(query="auth race")                           # full-text search, relevance-ranked
+recall(query="cookie", filter={session: "S12"})      # full-text search within one session
+recall(filter={type: "fix", file: "src/auth.ts"})    # structured scoping, no query
+recall(filter={time: "-7d"})                         # last 7 days
 ```
 
-These return paginated, collapsed results by default. Use `page` to move through large result sets.
+**`query` is pure full-text search — it has no in-string dialect.** There is no
+`type:`/`tag:`/`project:`/`session:` prefix inside the query string any more; a
+query containing the literal text `tag:foo` searches those characters, it does
+not scope by tag. This retirement fails **silently** — a stale `type:bugfix`
+habit inside `query` will not error, it will just search for the substring
+`"type:bugfix"` and likely match nothing. Use the structured `filter` object
+below for every scoping need query prefixes used to cover.
+
+These return a paginated feed by default. Use `page` to move through large result sets.
 
 ### Step 2 — Drill into a session
 
 ```text
-recall(id="S12")                                # session summary + collapsed turn preview
-recall(id="S12/T*")                             # all turns in a session
-recall(id="S12/T3..7")                          # turn range
-recall(id="S12", view="expanded")              # session content + raw transcript path
+recall(id="S12")                                          # session summary + turn preview + raw: pointer
+recall(id="S12/T*")                                        # all turns in a session
+recall(id="S12/T3..7")                                     # turn range
+recall(id="S12", filter={fields: ["content", "insight"]})  # widen which turn fields render
 ```
 
-At expanded session view, the output includes a `raw:` path pointing at the source JSONL. `mnemo-replay` reads a turn's full text and tool I/O straight from the database; that `raw:` path is the handoff only when you need exact bytes the database does not mirror.
+`recall(id="S12")` always includes its turn preview and a `raw:` path pointing
+at the source JSONL — there is no separate detail mode to opt into. `mnemo-replay`
+reads a turn's full text and tool I/O straight from the database; that `raw:`
+path is the hand-off only when you need exact bytes the database does not
+mirror.
 
 ### Step 3 — Read the arc, not the session
 
@@ -82,29 +127,41 @@ At expanded session view, the output includes a `raw:` path pointing at the sour
 recall(id="E47")                                # one segment: body, insight, members
 recall(id="E*")                                 # every segment
 recall(id="E5..9")                              # segment range
+recall(id="E31, E32")                           # multiple segments, one call
 ```
 
 A segment row leads with its title, `[open]`/`[delivered]` status and member
 count, then its conclusion and the member turns that carry it. Drill into a
-member with the ordinary `S12/T3` form. Segments also come back from `query=`
-search alongside sessions and turns, and answer `tag:` and `type:` there.
+member with the ordinary `S12/T3` form (not the segment's own `E47/T3`
+ordinal — see Data Model above). Segments also come back from `query=`
+search alongside sessions and turns, and `filter.tag`/`filter.type` apply to
+them too.
 
 ### Step 4 — Turn detail and observations
 
 ```text
-recall(id="S12/T3", view="expanded")           # one turn with prompt + response + file lists
+recall(id="S12/T3", filter={fields: ["prompt", "response", "files"]})   # widen the field set
 recall(id="S12/T3/O*")                          # observations for one turn
 recall(id="S12/T*/O*")                          # observations across the session
-recall(id="O87", view="expanded")              # one observation with full stored fields
+recall(id="O87")                                # one observation, every stored field
 ```
+
+Observation content is always capped by the `turn` token budget — there is no
+field-selection knob for observations the way there is for turns; raise `turn`
+to see more of a tool call's input/output.
 
 ### Step 5 — Escalate only when needed
 
-If a field is truncated, raise `truncate` first:
+If a rendered field looks cut off, raise `turn` (the per-item token budget)
+first:
 
 ```text
-recall(id="S12/T3", view="expanded", truncate=2000)
+recall(id="S12/T3", filter={fields: ["prompt", "response"]}, turn=400)
 ```
+
+If a whole page is cut short rather than one field, that is `pageBudget`
+overflow — ask for the next `page` of the same call; overflow always produces
+another page, it never silently drops content mid-block.
 
 If the result still is not enough, or you need exact wording, the full response, or full tool output, switch to the `mnemo-replay` skill. There is no unlimited `recall` mode.
 
@@ -112,15 +169,15 @@ If the result still is not enough, or you need exact wording, the full response,
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `id` | string | Selector. Supports wildcards (`*`), ranges (`5..10`), and nested paths (`S12/T3/O*`). |
-| `query` | string | Free text + optional prefixes `type:` / `file:` / `tag:` / `project:` / `session:`. Free-text terms are OR'd and ranked by relevance (bm25); the typed filters are AND'd with the text and each other. |
-| `time` | string | `-7d` / `-2w` (relative), `YYYY-MM-DD` (single UTC day), `YYYY-MM-DD..YYYY-MM-DD` (inclusive UTC range). |
-| `view` | string | `collapsed` (default) or `expanded`. |
+| `id` | string | Selector. Supports wildcards (`*`), ranges (`5..10`), nested paths (`S12/T3/O*`), and a comma-separated list of same-kind addresses (`"E31, E32"`, `"S12, S15"`). |
+| `query` | string | Pure full-text search — no in-string dialect. A literal `tag:foo` inside `query` searches those characters; it does not scope. Use `filter` instead. |
+| `filter` | object | Structured scoping: `{type, tag, session, time, file, fields}`, AND-composed with each other, with `id`, and with `query`. See below. |
 | `page` | number | 1-indexed page number for the target level. Default `1`. |
 | `pageSize` | number | Item count for the target level page. Default `10`. |
-| `truncate` | number | Character cap per rendered field. Default `200`, max `2000`. |
+| `pageBudget` | number | Token budget for a segment card (default `1000`). Overflow paginates — ask for the next `page`, never truncated silently. |
+| `turn` | number | Per-item token cap on every rendered session/turn/observation block (default `150`, word-boundary cut). Raise it when `filter.fields` selects more fields than the default. |
 
-Omit both `id` and `query` to get recent sessions.
+Omit both `id` and `query` to get the global browse feed.
 
 Child collections are always shown as a fixed preview with a `+N more` hint. To inspect more children, narrow the selector to that child level.
 
@@ -135,29 +192,33 @@ Child collections are always shown as a fixed preview with a `+N more` hint. To 
 | `O87` | Single observation (global DB id) |
 | `T418` | Single turn (global DB id) |
 | `E*` / `E47` / `E5..9` | Segments — one arc of work, not a session |
+| `E47/T3` | One segment member, by in-segment ordinal (selection only — see Data Model) |
 
 In the `S12/T3` form the turn id is a session-scoped prompt number. Bare `T418` is the global DB id; prefer the `S/T` form unless you already hold a DB id.
 
-### Query Filters
+**Comma lists**: `id` accepts a comma-separated list of addresses, e.g.
+`id="E31, E32"` or `id="S12, S15"` — every item must parse and every item must
+be the **same address kind**; a mixed-kind list or any one invalid item rejects
+the whole call rather than silently skipping the bad one. Items render in
+order and share this call's `page`/`pageBudget`/`turn` budgets.
 
-| Prefix | Applies to | Notes |
+### `filter` — Structured Scoping
+
+`filter` replaces the retired in-query prefix dialect. All five scoping members are AND-composed with each other, with `id`, and with `query`:
+
+| Field | Applies to | Notes |
 |---|---|---|
-| `type:fix` | turns, observations, segments | Matches a stored activity word. A turn's type is a list, so this matches a turn that carries the word among others. A segment's is the union of its members'. |
-| `file:src/auth.ts` | turns, observations | Substring match against `files_read` + `files_modified`. |
-| `tag:svg-filter` | sessions, turns, segments | Exact-match a stored tag; a segment's tags are its members', most frequent first. A **bare** tag is what the turn was about; a **prefixed** one (`compact:`, `invalidated:`, `delivery:`) is bookkeeping. The match is anchored to a whole tag, so `tag:svg` does NOT match `svg-filter`. |
-| `project:/abs/path` | sessions, turns, observations | Exact match against `session.project`. |
-| `session:S12` | sessions, turns, observations | Restrict a full-text search to one session. Accepts `S12` or bare `12`; a malformed id is ignored. |
+| `type` | turns, segments | Exact match against one stored `type` value. A turn's type is a list, so this matches a turn that carries the word among others. A segment's is the union of its members'. |
+| `tag` | sessions, turns, segments | Exact match against one whole `tags` array element, either namespace (bare, or a legacy `topic:`-prefixed one) — a prefix does not partial-match, so `tag: "svg"` does NOT match `svg-filter`. |
+| `session` | turns, observations | Scope to one session: `"S12"` or bare `"12"`/`12`. |
+| `time` | turns | `-7d`/`-2w` (relative), `YYYY-MM-DD` (one UTC day), or `YYYY-MM-DD..YYYY-MM-DD` (inclusive UTC range). |
+| `file` | turns, observations | Substring match against `files_read` + `files_modified`. |
 
-Free words become an FTS query (terms OR'd, bm25-ranked) over indexed text. Use `session:` to scope that search to a single session — the one thing the `id` selector cannot combine with free text.
+`filter.fields` is a **display-only** sixth member — not a scoping criterion, so setting it alone does not switch bare `recall()` off the browse path:
 
-## View Guidance
-
-| View | Use when |
+| Field | Meaning |
 |---|---|
-| `collapsed` | Browsing and list navigation. |
-| `expanded` | You have a specific target and need stored fields inline. |
-
-There is no `full` view anymore.
+| `fields` | Any combination of `title`, `content`, `prompt`, `response`, `insight`, `observations`, `files` — which turn fields to render. Default `title` + `content`. |
 
 ## Common Patterns
 
@@ -165,7 +226,7 @@ There is no `full` view anymore.
 ```text
 recall(query="auth race")
 # → sees [S12/T3] "Fixed auth mutex"
-recall(id="S12/T3", view="expanded")
+recall(id="S12/T3", filter={fields: ["prompt", "response"]})
 ```
 
 **"Did we already try X, and why did it not work?"**
@@ -178,9 +239,9 @@ recall(id="E47")
 
 **"Show me the exact edit to login.ts last Thursday"**
 ```text
-recall(query="file:src/login.ts", time="2026-04-03")
+recall(filter={file: "src/login.ts", time: "2026-04-03"})
 # → picks out [S8/T2]
-recall(id="S8", view="expanded")
+recall(id="S8")
 # → session shows raw: /Users/...jsonl
 # → switch to mnemo-replay for exact transcript bytes
 ```
@@ -189,6 +250,7 @@ recall(id="S8", view="expanded")
 
 - Prefer `recall` for search, browsing, and structured answers.
 - Before starting a task that may already have been done, look for its segment: `[delivered]` says it was finished, `[open]` says it is in flight and gives you its working state.
-- Narrow with `id`, `query`, or `time` before raising `view`, `pageSize`, or `truncate`.
-- Use `project:<path>` when the question is project-local.
-- When `recall` shows a `raw:` path or a truncation hint, that is your signal to switch to `mnemo-replay`.
+- Narrow with `id`, `query`, or `filter` before raising `pageSize`, `pageBudget`, or `turn`.
+- Never rely on prefixes inside `query` — they do not scope, and the failure is silent. Reach for `filter` instead.
+- When `recall` shows a `raw:` path, or a page-overflow hint, that `raw:` path is your signal to switch to `mnemo-replay`; the overflow hint is your signal to ask for the next `page`.
+- A `⤺ rewound` turn's transcript pointer is stale — do not hand it to `mnemo-replay`.

@@ -67,6 +67,7 @@ ORDER BY id;
 - Field semantics: `NULL` = never captured; `''` = captured empty (e.g. an interrupted turn).
 - `observations.tool_input` / `tool_result` are stored **uncapped**, even for `skipped` rows.
 - **Locate turns by DB keys only** — `(session_id, prompt_number)` for turns, `turn_id` for observations. `turns.transcript_line_start` is a best-effort JSONL line hint and is known to duplicate/go stale (notably on notification-driven turns); never use it for content lookup.
+- **A rewound turn's transcript pointer is stale, not just imprecise.** `recall`/`timeline` mark a rolled-back turn `⤺ rewound (transcript pointer stale — do not trust replay)`. Do not reconstruct that turn's content from its `transcript_line_start` hint or from the `raw:` JSONL path — the branch it pointed at was undone; read only the DB row's own stored fields (which reflect the corrected state), never the transcript coordinate.
 
 ### Other useful queries
 
@@ -108,7 +109,7 @@ Go here only for what the database does not store: exact verbatim bytes, the pre
 ~/.claude/projects/<encoded-project-path>/<content-session-id>.jsonl
 ```
 
-The encoded project path replaces `/` with `-` (e.g. `/Users/alice/code/my-app` → `~/.claude/projects/-Users-alice-code-my-app/<uuid>.jsonl`); mnemo worker sessions use the project path `~/.claude-mnemo`. The exact absolute path is the `raw:` line in `recall(id="S12", view="expanded")` output — copy-paste it.
+The encoded project path replaces `/` with `-` (e.g. `/Users/alice/code/my-app` → `~/.claude/projects/-Users-alice-code-my-app/<uuid>.jsonl`); mnemo worker sessions use the project path `~/.claude-mnemo`. The exact absolute path is the `raw:` line in `recall(id="S12")` output (always rendered, no separate detail mode to request) — copy-paste it.
 
 ### Parse it with the bundled script
 
