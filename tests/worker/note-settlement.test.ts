@@ -16,6 +16,7 @@ import {
   claimNextNoteSettlementJob,
   completeNoteSettlementJob,
   countNoteSettlementJobs,
+  enqueueBackfillNoteSettlementJob,
   enqueueNoteSettlementWindows,
   failNoteSettlementJob,
   getDecidedPrefixEnd,
@@ -33,6 +34,7 @@ import {
 import { DEFAULT_CONFIG, type MnemoConfig } from "../../src/shared/config";
 import {
   SETTLEMENT_ENABLED_CONFIG,
+  SETTLEMENT_ERA_CUTOFF_EPOCH,
   SETTLEMENT_KILLED_CONFIG,
 } from "../support/settlement-config";
 
@@ -219,6 +221,45 @@ describe("note settlement triggers", () => {
     expect(getNoteSettlementCursor(db, sessionDbId)).toBe(
       NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS,
     );
+  });
+
+  test("drainSession dispatches a manual backfill no event of the session's own can reach ([S15069/T1014])", async () => {
+    const sessionDbId = seedSession(db, "manual-drain");
+    const clock = createClock();
+    const { dispatch, calls } = recordingDispatch();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+    });
+
+    // An ACTIVE session far below the 25-turn threshold: its own turn-stop is
+    // a pure read (plans empty → inert before any drain), and the leak that
+    // rides it excludes the caller — the scheduling blind spot the manual
+    // surface exists for.
+    seedTurns(db, sessionDbId, 1, 10);
+    const enqueued = enqueueBackfillNoteSettlementJob(
+      db,
+      sessionDbId,
+      1,
+      5,
+      clock.now(),
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+    expect(enqueued.ok).toBe(true);
+    const jobId = (enqueued as { ok: true; job: NoteSettlementJob }).job.id;
+
+    const ownEvent = await scheduler.onTurnStop(sessionDbId);
+    expect(ownEvent.triggered).toBe(false);
+    expect(calls).toHaveLength(0);
+    expect(getNoteSettlementJob(db, jobId)?.status).toBe("pending");
+
+    const drained = await scheduler.drainSession(sessionDbId);
+    expect(drained.map((job) => job.id)).toEqual([jobId]);
+    expect(calls.map((job) => job.id)).toEqual([jobId]);
+    expect(getNoteSettlementJob(db, jobId)?.status).toBe("done");
   });
 
   test("60 accumulated decided turns cut one 50-turn window and leave 10 pending (ticket 04)", async () => {

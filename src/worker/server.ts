@@ -150,6 +150,11 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   ) => Promise<void>;
   handleDreamImpl?: (date: unknown) => ManualDreamResult;
   handleSettleImpl?: (request: ManualSettleRequest) => ManualSettleResult;
+  /**
+   * Dispatches the target session's due settlement jobs right after a manual
+   * `/settle` enqueue succeeds — the operator's call is the content event.
+   */
+  drainSettleSessionImpl?: (sessionDbId: number) => Promise<unknown>;
   registerSessionEnvImpl?: (
     contentSessionId: string,
     sessionDbId: number | undefined,
@@ -235,6 +240,12 @@ export interface ManualSettleRequest {
   sessionId: unknown;
   windowStart: unknown;
   windowEnd: unknown;
+  /**
+   * Exactly `true` crosses the era floor; anything else leaves it standing.
+   * The operator's explicit word, never a default — see `below_era_floor`'s
+   * rationale in db/note-settlement.ts.
+   */
+  allowPreEra?: unknown;
 }
 
 const MANUAL_SETTLE_REFUSAL_STATUS: Record<
@@ -265,7 +276,8 @@ const MANUAL_SETTLE_REFUSAL_MESSAGE: Record<
   inverted_range: "window_end is before window_start",
   backfill_too_large: `window spans more than ${NOTE_SETTLEMENT_BACKFILL_MAX_TURNS} turns; narrow the range and re-run`,
   below_era_floor:
-    "window_start is at or below the session's last pre-era prompt number",
+    "window_start is at or below the session's last pre-era prompt number; " +
+    "pass allow_pre_era: true to re-settle pre-era turns deliberately",
   below_window_floor:
     "window_start is below the monotonic settlement floor, which a backfill should be exempt from",
   duplicate_window:
@@ -291,9 +303,12 @@ export interface WorkerCore {
    * operator surface and not an MCP tool: an MCP tool would hand the main agent
    * a lever over the grading of its own record.
    *
-   * It enqueues and stops there — no planning, no range guessing, no dispatch of
-   * its own. The row is picked up by the existing leak/claim path at the next
-   * content event, exactly like a `sessionend` job.
+   * It enqueues and stops there — no planning, no range guessing. Dispatch is
+   * kicked by the fetch layer via `noteSettlement.drainSession` in the same
+   * request: the original "the next content event's leak picks it up" design
+   * was falsified for ACTIVE sessions ([S15069/T1014] — their own turn-stops
+   * are threshold-gated and the leak excludes the caller), so a manual call is
+   * itself the event, or the row strands.
    */
   settleBackfillWindow(request: ManualSettleRequest): ManualSettleResult;
   /**
@@ -975,6 +990,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         windowEnd as number,
         now(),
         eraCutoffEpoch,
+        { allowPreEra: request.allowPreEra === true },
       );
       if (result.ok) {
         return { ok: true, job: result.job };
@@ -1196,6 +1212,7 @@ export function createWorkerFetchHandler(
     deps.registerSessionEnvImpl ?? runtime?.registerSessionEnv;
   const clearSessionEnvImpl =
     deps.clearSessionEnvImpl ?? runtime?.clearSessionEnv;
+  const drainSettleSessionImpl = deps.drainSettleSessionImpl;
   let wakeScanInFlight: Promise<void> | null = null;
   let activeGlobalWork = 0;
   let resolveGlobalWork: (() => void) | null = null;
@@ -1421,19 +1438,63 @@ export function createWorkerFetchHandler(
           session_id?: unknown;
           window_start?: unknown;
           window_end?: unknown;
+          allow_pre_era?: unknown;
         };
         const result = handleSettleImpl({
           sessionId: payload.session_id,
           windowStart: payload.window_start,
           windowEnd: payload.window_end,
+          allowPreEra: payload.allow_pre_era,
         });
+        // Manual means dispatched: without this kick an ACTIVE session's
+        // backfill strands in the scheduling blind spot (its own turn-stops
+        // are threshold-gated, the leak excludes the caller). Background —
+        // a settle runs minutes; the operator polls the job row for the
+        // verdict, and the response says only that dispatch began.
+        const kickDrain = (sessionDbId: number): "started" | "unavailable" => {
+          const drain = drainSettleSessionImpl?.(sessionDbId);
+          if (!drain) {
+            return "unavailable";
+          }
+          trackGlobalWork(
+            drain.then(
+              () => undefined,
+              (error) => {
+                deps.logger?.error?.("manual settle dispatch failed", {
+                  sessionId: sessionDbId,
+                  error,
+                });
+              },
+            ),
+          );
+          return "started";
+        };
         if (!result.ok) {
+          // `duplicate_window` names a job that already EXISTS and is due —
+          // the operator's intent ("run this window") is servable even though
+          // the enqueue is refused; without this kick a stranded row would
+          // need a fresh window enqueued beside it just to hitch a ride on
+          // its drain. Every other refusal has nothing to dispatch.
+          const dispatch =
+            result.reason === "duplicate_window" &&
+            Number.isInteger(payload.session_id)
+              ? kickDrain(payload.session_id as number)
+              : undefined;
           return Response.json(
-            { ok: false, reason: result.reason, message: result.message },
+            {
+              ok: false,
+              reason: result.reason,
+              message: result.message,
+              ...(dispatch === undefined ? {} : { dispatch }),
+            },
             { status: result.status },
           );
         }
-        return Response.json({ ok: true, job: result.job });
+        return Response.json({
+          ok: true,
+          job: result.job,
+          dispatch: kickDrain(result.job.sessionId),
+        });
       }
 
       if (req.method === "POST" && url.pathname === "/dream") {
@@ -1813,6 +1874,9 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
       // 503s.
       handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream,
       handleSettleImpl: deps.handleSettleImpl ?? core.settleBackfillWindow,
+      drainSettleSessionImpl:
+        deps.drainSettleSessionImpl ??
+        ((sessionDbId) => core.noteSettlement.drainSession(sessionDbId)),
     },
     serverState,
   );

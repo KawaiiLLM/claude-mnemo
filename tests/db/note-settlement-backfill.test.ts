@@ -183,6 +183,37 @@ describe("note settlement backfill windows", () => {
     expect(accepted.ok).toBe(true);
   });
 
+  test("allow_pre_era — the exact literal true, nothing weaker — crosses the era floor", () => {
+    const sessionDbId = seedSession(db, "backfill-era-override");
+    seedTurns(db, sessionDbId, 1, 10, ERA_CUTOFF_EPOCH - 500);
+    seedTurns(db, sessionDbId, 11, 20, ERA_CUTOFF_EPOCH + 500);
+
+    // An empty options object changes nothing: the floor still stands.
+    expect(
+      enqueueBackfillNoteSettlementJob(
+        db, sessionDbId, 1, 30, NOW, ERA_CUTOFF_EPOCH, {},
+      ),
+    ).toEqual({ ok: false, reason: "below_era_floor" });
+
+    const crossed = enqueueBackfillNoteSettlementJob(
+      db, sessionDbId, 1, 30, NOW, ERA_CUTOFF_EPOCH, { allowPreEra: true },
+    );
+    expect(crossed.ok).toBe(true);
+    expect((crossed as { ok: true; job: NoteSettlementJob }).job).toMatchObject({
+      windowStart: 1,
+      windowEnd: 30,
+      triggerType: "backfill",
+      status: "pending",
+    });
+
+    // The override lifts ONLY the era floor: the range guards still hold.
+    expect(
+      enqueueBackfillNoteSettlementJob(
+        db, sessionDbId, 40, 39, NOW, ERA_CUTOFF_EPOCH, { allowPreEra: true },
+      ),
+    ).toEqual({ ok: false, reason: "inverted_range" });
+  });
+
   test("an inverted range is refused for a backfill too", () => {
     const sessionDbId = seedSession(db, "backfill-inverted");
     seedTurns(db, sessionDbId, 1, 30, 2_000);

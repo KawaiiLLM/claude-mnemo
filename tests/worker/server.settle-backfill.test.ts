@@ -250,4 +250,85 @@ describe("POST /settle", () => {
 
     expect(listNoteSettlementJobs(db, sessionDbId)).toEqual([]);
   });
+
+  test("a successful enqueue starts dispatch in the same request; refusals never do", async () => {
+    const sessionDbId = seedSession(db, "settle-dispatch");
+    seedTurns(db, sessionDbId, 1, 60, ERA_CUTOFF_EPOCH + 500);
+    const drained: number[] = [];
+    const handler = createWorkerFetchHandler({
+      db,
+      config: settleConfig(),
+      drainSettleSessionImpl: async (sessionId) => {
+        drained.push(sessionId);
+      },
+    });
+
+    const refused = await settle(handler, {
+      session_id: sessionDbId,
+      window_start: 40,
+      window_end: 39,
+    });
+    expect(refused.status).toBe(400);
+    expect(drained).toEqual([]);
+
+    const ok = await settle(handler, {
+      session_id: sessionDbId,
+      window_start: 10,
+      window_end: 40,
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ ok: true, dispatch: "started" });
+    expect(drained).toEqual([sessionDbId]);
+
+    // duplicate_window is the one refusal that still dispatches: the job it
+    // names exists and is due, and "run this window" is exactly what the
+    // operator asked for — a stranded row must not need a sibling window
+    // enqueued beside it just to hitch a ride.
+    const duplicate = await settle(handler, {
+      session_id: sessionDbId,
+      window_start: 10,
+      window_end: 40,
+    });
+    expect(duplicate.status).toBe(409);
+    expect(await duplicate.json()).toMatchObject({
+      ok: false,
+      reason: "duplicate_window",
+      dispatch: "started",
+    });
+    expect(drained).toEqual([sessionDbId, sessionDbId]);
+  });
+
+  test("allow_pre_era crosses the era floor through the endpoint — the exact literal true only", async () => {
+    const sessionDbId = seedSession(db, "settle-pre-era");
+    // 1-10 legacy, 11-60 in the era.
+    seedTurns(db, sessionDbId, 1, 10, ERA_CUTOFF_EPOCH - 500);
+    seedTurns(db, sessionDbId, 11, 50, ERA_CUTOFF_EPOCH + 500);
+    const handler = createWorkerFetchHandler({ db, config: settleConfig() });
+
+    const truthyButNotTrue = await settle(handler, {
+      session_id: sessionDbId,
+      window_start: 1,
+      window_end: 30,
+      allow_pre_era: "yes",
+    });
+    expect(truthyButNotTrue.status).toBe(409);
+    expect(await truthyButNotTrue.json()).toMatchObject({
+      ok: false,
+      reason: "below_era_floor",
+    });
+    expect(listNoteSettlementJobs(db, sessionDbId)).toEqual([]);
+
+    const crossed = await settle(handler, {
+      session_id: sessionDbId,
+      window_start: 1,
+      window_end: 30,
+      allow_pre_era: true,
+    });
+    expect(crossed.status).toBe(200);
+    expect(await crossed.json()).toMatchObject({
+      ok: true,
+      job: { windowStart: 1, windowEnd: 30, triggerType: "backfill" },
+    });
+    expect(listNoteSettlementJobs(db, sessionDbId)).toHaveLength(1);
+  });
 });

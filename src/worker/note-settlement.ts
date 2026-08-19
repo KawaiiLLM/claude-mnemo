@@ -143,6 +143,21 @@ export interface NoteSettlementScheduler {
    * cross-session scan at all.
    */
   leakDueSessions(excludeSessionDbId?: number): Promise<NoteSettlementJob[]>;
+  /**
+   * The manual-dispatch surface (`POST /settle`): claim and run this session's
+   * due jobs right now, without any event's help. It exists because a manually
+   * enqueued backfill for an ACTIVE session is otherwise unreachable — the
+   * session's own turn-stops are threshold-gated (`plans.length === 0` returns
+   * before the drain), and the leak excludes the triggering session by
+   * contract — so the row would sit pending until 25 consecutive turns or
+   * session end ([S15069/T1014]'s scheduling-blind-spot finding). Claim
+   * serialization (one in-flight settle per session) still holds: a call that
+   * lands while another drain is mid-job claims nothing and returns.
+   */
+  drainSession(
+    sessionDbId: number,
+    maxJobs?: number,
+  ): Promise<NoteSettlementJob[]>;
 }
 
 /**
@@ -615,5 +630,7 @@ export function createNoteSettlementScheduler(
   return {
     onTurnStop: (sessionDbId) => runTrigger(sessionDbId),
     leakDueSessions,
+    drainSession: (sessionDbId, maxJobs = Number.MAX_SAFE_INTEGER) =>
+      drainSession(sessionDbId, maxJobs),
   };
 }

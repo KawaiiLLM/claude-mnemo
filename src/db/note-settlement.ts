@@ -190,7 +190,13 @@ export type NoteSettlementInsertRefusal =
   | "inverted_range"
   /** A `backfill` wider than `NOTE_SETTLEMENT_BACKFILL_MAX_TURNS`. */
   | "backfill_too_large"
-  /** At or below the session's last pre-era prompt number. Never exempt. */
+  /**
+   * At or below the session's last pre-era prompt number. Never exempt on any
+   * automatic path; the ONE crossing is a manual backfill whose operator said
+   * `allow_pre_era` explicitly — a pre-era window re-settled whole is regraded
+   * into current semantics, so the mixing this floor guards against cannot
+   * occur inside it.
+   */
   | "below_era_floor"
   /** Below max(cursor, highest enqueued window_end). `backfill` is exempt. */
   | "below_window_floor"
@@ -533,6 +539,7 @@ function insertJob(
   triggerType: NoteSettlementTrigger,
   nowEpoch: number,
   eraCutoffEpoch: number,
+  options: { allowPreEra?: boolean } = {},
 ): InsertNoteSettlementJobResult {
   if (windowEnd < windowStart) {
     return { ok: false, reason: "inverted_range" };
@@ -549,7 +556,15 @@ function insertJob(
   ) {
     return { ok: false, reason: "backfill_too_large" };
   }
-  if (windowStart <= getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch)) {
+  // `allowPreEra` reaches here only from the manual backfill wrapper — no
+  // automatic caller passes options at all. The floor's rationale (legacy
+  // grades must not mix into a post-era window) does not survive an explicit
+  // re-settlement: the whole window is regraded into current semantics, so
+  // what the operator asked for is precisely "stop treating these as legacy".
+  if (
+    options.allowPreEra !== true &&
+    windowStart <= getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch)
+  ) {
     return { ok: false, reason: "below_era_floor" };
   }
   // The monotonic floor, and the ONE thing a backfill is exempt from. The era
@@ -833,6 +848,7 @@ export function enqueueBackfillNoteSettlementJob(
   windowEnd: number,
   nowEpoch: number,
   eraCutoffEpoch: number,
+  options: { allowPreEra?: boolean } = {},
 ): InsertNoteSettlementJobResult {
   return runWriteTransaction(db, () =>
     insertJob(
@@ -843,6 +859,7 @@ export function enqueueBackfillNoteSettlementJob(
       "backfill",
       nowEpoch,
       eraCutoffEpoch,
+      options,
     ),
   );
 }
