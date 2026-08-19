@@ -117,7 +117,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
   remember:
-    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Six verbs: \`create\` mints a new segment from the roster you have in view — never a near-duplicate of an existing one; \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`append\` adds rows to one named field; \`replace\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched row; \`close\` toggles the segment off the roster (still \`recall\`-able), or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership — or clears ownership if \`id\` is omitted. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. A closed segment refuses append/replace, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
+    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Six verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`append\` adds rows to one named field; \`replace\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched row; \`close\` toggles the segment off the roster (still \`recall\`-able), or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership — or clears ownership if \`id\` is omitted. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. A closed segment refuses append/replace, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
     "Maintenance is advisory, never a gate: every append/replace reports turns since this segment was last touched — under 10 turns draws a too-soon reminder (a `decisions` append is exempt — a lost ruling is the costliest loss).\n" +
     "20-turn reminder: check membership, Working State, whether to create or attach — judgment lives in the Memory Rubric, not here.",
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -174,15 +174,14 @@ export const recallInputShape = {
     .describe(
       "Retired — use `pageBudget` (page overflow) or `turn` (per-item token cap) instead.",
     ),
-  // ticket 03 (spec "Budgets"): the segment card's own token budget, default
-  // 1000. Distinct from `page` above (still the 1-indexed page NUMBER) —
-  // `page` doubles as this render's own overflow escape: page 1 is the
-  // elided collapsed card, page ≥ 2 is the same card with every Working
-  // State row shown, uncapped — "stable page 2" (never dropping content
-  // silently), reached by asking for the next page rather than a different
-  // parameter.
+  // Spec "预算" ([S15069/T919] ruling, describe migrated per the peer's
+  // budget-contract-drift finding): pageBudget is the PAGE-level token
+  // budget on every listing surface, not a segment-card-only knob — the old
+  // card-scoped wording taught callers the wrong contract for bare
+  // recall()/search, and its "newest rows always visible" claim contradicted
+  // the ticket-08 eviction ruling.
   pageBudget: z.number().int().positive().optional().describe(
-    'Token budget for a segment card (id="E<n>") — default 1000. Over budget, the collapsed card elides the largest Working State field\'s oldest rows first (newest rows always visible), marked "… +N earlier"; ask for page 2 of the same id to see every row, uncapped.',
+    'Page-level token budget, default 1000: every listing surface packs items into a page against it, and overflow starts the NEXT page — never a truncated block mid-page. On a segment card (id="E<n>") page 1 additionally elides field rows oldest-first against it, marked "… +N earlier"; page 2 renders every row uncapped.',
   ),
   // Ticket 11: the ONE per-item size knob left, alongside `pageBudget` — no
   // more depth-dependent default. Applies to every rendered session, turn,

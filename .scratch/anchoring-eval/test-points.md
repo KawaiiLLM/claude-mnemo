@@ -57,6 +57,11 @@
 - 决策点等价物:改结算 session 写面时问「title 的首窗语义靠什么守」。
 - 期望:三通道召回 T913 与 [T1040] 的裁决链;已裁 A([S15069/T1040]):**prompt-only 即设计**——「极少改」由 prompt 承载判断,不设机械门;评测只验召回,不期望机械测试。
 
+### P12 · pageBudget 契约漂移:describe 旧语义 + 搜索/routed 列表不消费预算(peer 发现,2026-08-20)
+- 事实链:[T919] 裁 pageBudget=页级预算、溢出分页绝不截断;HEAD 曾双重漂移——describe 仍是 segment-card 专用旧文(连被 ticket-08 否定的「newest rows always visible」都在),运行时 query 分支与 routed turn/obs 列表纯 pageSize 计数分页、零 token packing(recall.ts:1246 签名无 pageBudget;浏览 feed :1979-2112 有正例)。
+- 决策点等价物:改任何列表渲染时问「pageBudget 在此面由谁执行」。
+- 期望:三通道召回 T919 与 [T972](字符截断退役);describe 已修,运行时缺口=票 03。
+
 ### P11 · 建段判断在 remember 工具描述残留英文复述(peer 发现,2026-08-20)
 - 事实链:[T978] 裁决「工具描述=时机+作用,判断入 rubric」;HEAD definitions.ts:120 仍带 "never a near-duplicate" 判断句;single-home 守卫只筛中文三句,漏英文复述。
 - 决策点等价物:改 remember 工具描述时问「哪些句子属判断层」。

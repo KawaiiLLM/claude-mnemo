@@ -137,6 +137,10 @@ describe("single-home grep guard — judgment prose lives ONLY in the Memory Rub
     "name only the minimal set that can derive the final conclusion",
     "Did it test the claim, for or against?",
     "Overturns the cited decision whole?",
+    // The peer's P11 ([S15069/T1039]): the segment-creation judgment survived
+    // in ENGLISH restatement on the remember description while this guard
+    // screened only the rubric's Chinese sentences — screen the restatement.
+    "never a near-duplicate",
   ];
 
   test("none of the retired judgment phrases survive on MNEMO_TOOL_DESCRIPTIONS.note", () => {
@@ -163,6 +167,21 @@ describe("single-home grep guard — judgment prose lives ONLY in the Memory Rub
     expect(MNEMO_TOOL_DESCRIPTIONS.note.toLowerCase()).toContain("memory rubric");
     expect(noteInputShape.override.description?.toLowerCase()).toContain("memory rubric");
     expect(noteInputShape.encodes.description?.toLowerCase()).toContain("memory rubric");
+  });
+
+  // The peer's P11: the remember description carried its own English judgment
+  // contract ("never a near-duplicate…") beside the rubric's Chinese one —
+  // T978's split (tool description = timing + function; judgment = rubric)
+  // binds this surface identically.
+  test("none of the retired judgment phrases survive on MNEMO_TOOL_DESCRIPTIONS.remember, which points at the rubric", () => {
+    const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
+    for (const phrase of JUDGMENT_SIGNATURE_PHRASES) {
+      expect(
+        remember,
+        `remember description must not restate: ${phrase}`,
+      ).not.toContain(phrase);
+    }
+    expect(remember.toLowerCase()).toContain("memory rubric");
   });
 
   // Ticket 13 (spec "节奏与建段指导"): `remember`'s own timing line points at
