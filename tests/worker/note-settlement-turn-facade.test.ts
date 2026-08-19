@@ -929,3 +929,52 @@ describe("session-addressed narrative writes (ticket 09)", () => {
     expect(getSession(db, sessionDbId)?.title).toBe("settlement turn facade fixture");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The stitch (read-write-contract, ticket 07's deferred half): the session
+// narrative is a MANAGED surface — granted by the context render, gated and
+// stamped under the claim identity.
+// ---------------------------------------------------------------------------
+
+describe("stitch — the session narrative write is gated under the claim identity", () => {
+  test("granted by the render it lands and stamps; a successor's stamp turns the next write stale", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const writerA = claimWriterId(job.id, job.claimGeneration);
+    recordReadGrant(db, writerA, "session", sessionDbId, NOW);
+
+    const landed = write(
+      baseContext(job),
+      { session: `S${sessionDbId}`, content: "window one increment" },
+      NOW + 1,
+    );
+    expect(resultText(landed)).not.toContain("Parameter error");
+    expect(getSession(db, sessionDbId)?.content).toBe("window one increment");
+    const stamp = db
+      .query<{ writer: string }, [number]>(
+        "SELECT writer FROM write_gate_stamps WHERE entity_type = 'session' AND entity_id = ? AND field = 'content'",
+      )
+      .get(sessionDbId);
+    expect(stamp?.writer).toBe(writerA);
+
+    // A successor claim re-narrates; the lapsed claimant's next write is
+    // refused as stale instead of whole-overwriting the newer narrative.
+    stampField(
+      db,
+      "session",
+      sessionDbId,
+      "content",
+      claimWriterId(job.id, job.claimGeneration + 1),
+      NOW + 2,
+    );
+    const stale = write(
+      baseContext(job),
+      { session: `S${sessionDbId}`, content: "late overwrite from the lapsed claimant" },
+      NOW + 3,
+    );
+    expect(resultText(stale)).toContain("was changed by");
+    expect(resultText(stale)).toContain("recall(id=");
+    expect(getSession(db, sessionDbId)?.content).toBe("window one increment");
+  });
+});

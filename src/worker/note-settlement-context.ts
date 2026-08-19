@@ -8,8 +8,7 @@ import { getTurnsForSession } from "../db/turns";
 import { claimWriterId, recordReadGrants, type ReadGrantEntry } from "../db/write-gate";
 import { renderSessionMilestoneInjection } from "../hooks/milestone-injection";
 import { formatTurnAddress } from "../hooks/note-reminder";
-import { renderMainAgentSessionInjection } from "../hooks/session-injection";
-import { buildCollapsedTurnsForSession } from "../mcp/recall";
+import { buildCollapsedTurnsForSession, recallMemory } from "../mcp/recall";
 import { formatTurnCollapsed, type FormattedTurn } from "../mcp/format";
 
 /**
@@ -18,11 +17,12 @@ import { formatTurnCollapsed, type FormattedTurn } from "../mcp/format";
  * Everything the settlement call reads is rendered by the SAME builders the
  * live surfaces use — `buildCollapsedTurnsForSession` + `formatTurnCollapsed`
  * for the preceding turns AND the window turns,
- * `renderSessionMilestoneInjection` for the arc,
- * `renderMainAgentSessionInjection` for the session summary the main agent is
- * shown at SessionStart. The alternative, a settlement-only renderer, is the
- * dual-source rot the spec names: two descriptions of the same rows drift, and
- * the one the model reads is the one nobody looks at.
+ * `renderSessionMilestoneInjection` for the arc, and `recallMemory` itself —
+ * the unified renderer — for the session summary (read-write-contract spec,
+ * the stitch closing ticket 07's deferred half). The alternative, a
+ * settlement-only renderer, is the dual-source rot the spec names: two
+ * descriptions of the same rows drift, and the one the model reads is the
+ * one nobody looks at.
  *
  * TICKET 05'S CHANGE (spec "结算不读段的字段" [S15069/T906]): settlement no
  * longer reads a segment's FIELDS at all — no content/insight, no Working
@@ -161,6 +161,15 @@ export interface BuildNoteSettlementContextOptions {
 /**
  * Assemble one window's settlement context.
  */
+/**
+ * Sole-writer full-document budget for the session-summary render: far above
+ * any legal narrative size (content guidance ~200 tokens; this is 1000×), so
+ * neither the page/turn token caps nor the per-field char cuts ever bite in
+ * practice — "practically whole", with the receipt's post-write totals as the
+ * drift alarm, per the spec's own residual-risk note.
+ */
+export const SETTLEMENT_FULL_RENDER_BUDGET = 200_000;
+
 export function buildNoteSettlementContext(
   db: Database,
   job: NoteSettlementJob,
@@ -275,14 +284,24 @@ export function buildNoteSettlementContext(
     segmentRoster,
     attachedSegmentIds: new Set(segmentRoster.map((segment) => segment.id)),
     milestoneRendering: renderSessionMilestoneInjection(db, job.sessionId),
-    // The SAME entry point the SessionStart hook calls, minus the corpus
-    // header — the settlement agent has recall and timeline and no skills,
-    // so the header's replay pointer would name a capability it does not
-    // have. The global-view group only (user ruling, S15069/T759).
-    // Settlement needs the arc, not the resuming session's event stream.
-    sessionStateRendering: renderMainAgentSessionInjection(db, {
-      session,
-      fields: "global-view",
+    // The UNIFIED renderer, sole-writer-sees-the-whole-document budgets
+    // (read-write-contract spec: "结算消费方传大 turn 预算(全文可见)").
+    // Settlement is the session narrative's only writer, so its prompt must
+    // carry the FULL current title/content — a truncated prefix plus a
+    // whole-overwrite is the tail-loss path the peer review named. All three
+    // knobs raised together (C's finding: `turn` alone still leaves the
+    // per-field char cut underneath); ticket 11 retires the two char knobs,
+    // leaving `turn` as the only knife here. `readerId` doubles as the
+    // read-grant recording seam: this render is what licenses the facade's
+    // gated session write below.
+    sessionStateRendering: recallMemory(db, {
+      id: `S${job.sessionId}`,
+      depth: "expanded",
+      turn: SETTLEMENT_FULL_RENDER_BUDGET,
+      truncate: SETTLEMENT_FULL_RENDER_BUDGET,
+      truncateCap: SETTLEMENT_FULL_RENDER_BUDGET,
+      readerId: claimWriterId(job.id, job.claimGeneration),
+      now: () => options.nowEpoch,
     }),
     reviewableTurnIds: new Set(renderedTurns.map((turn) => turn.turnId)),
     builtAtEpoch: options.nowEpoch,
@@ -299,12 +318,18 @@ export function buildNoteSettlementContext(
   // ticket 04's unified rendering), one batch, one sequence snapshot — the
   // write gate's own `checkFieldGate` is what a settlement write later
   // consumes this grant against (worker/note-settlement-turn-facade.ts).
-  if (renderedTurns.length > 0) {
+  {
     const writer = claimWriterId(job.id, job.claimGeneration);
     const entries: ReadGrantEntry[] = renderedTurns.map((turn) => ({
       entityType: "turn",
       entityId: turn.turnId,
     }));
+    // The SESSION entity too (the stitch): the full-document summary render
+    // above is what licenses the gated narrative write — recorded here
+    // explicitly because recall's own seam deliberately skips session
+    // entities (ticket 01's scoping: no main-agent session writer exists;
+    // settlement is the one writer, and this is its render pass).
+    entries.push({ entityType: "session", entityId: job.sessionId });
     recordReadGrants(db, writer, entries, options.nowEpoch);
   }
 

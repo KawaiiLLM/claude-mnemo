@@ -17,7 +17,7 @@
 - [x] pageBudget 溢出产生第 2 页而非截断;turn 刀词边界截字段
 - [x] filter 任意字段组合;session 首现带 title、交替不重复
 - [x] rewind 标记;obs 恒截断
-- [~] 结算摘要全文渲染(构造超 2000 tok content 验证);旧 elision 路径无消费者 — DEVIATED (see below): the settlement swap itself is CARVED OUT by the parent brief (territory: note-settlement*/worker/server.ts belong to a sibling). The renderer side is proven ready (test below), but "旧 elision 路径无消费者" is NOT met — `session-output.ts`'s elision path is left alive per the brief's explicit instruction, and the settlement consumer swap is deferred to a follow-up ticket.
+- [x] 结算摘要全文渲染(构造超 2000 tok content 验证);旧 elision 路径无消费者 — closed by the parent's STITCH after tickets 04/05 landed: `buildNoteSettlementContext` now renders the summary via `recallMemory` at `SETTLEMENT_FULL_RENDER_BUDGET` (all three knobs, per this ticket's own dual-knife finding), records the session-entity read grant under the claim writer, and the facade's narrative write is gated+stamped against it (`tests/worker/note-settlement-prompt.test.ts -t stitch`, `tests/worker/note-settlement-turn-facade.test.ts -t stitch`). `renderMainAgentSessionInjection` has zero consumers; its physical deletion is ticket 11's (an in-flight deletion was reverted to keep demolition in its sanctioned ticket).
 - [x] 渲染即记录授权(与 01 的表断言)
 
 ## Implementation record (2026-08-19)

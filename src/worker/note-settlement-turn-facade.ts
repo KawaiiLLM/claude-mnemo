@@ -455,6 +455,24 @@ function evaluateSettlementSessionWrite(
     return { ok: false, message: `no session at ${ref}.` };
   }
 
+  // The narrative is a MANAGED write surface too (read-write-contract spec:
+  // "受管面…session 字段写(含结算叙事)"), gated field-by-field under this
+  // dispatch's claim identity — the grant comes from the context build's own
+  // full-document render (note-settlement-context.ts). What this fences in
+  // practice is the OTHER settlement writer: a lapsed claimant whose
+  // successor already re-narrated this session sees its grant stale and is
+  // told to re-read, instead of whole-overwriting the newer narrative.
+  const sessionWriter = claimWriterId(context.jobId, context.claimGeneration);
+  const sessionFields = (["title", "content"] as const).filter(
+    (field) => rawInput[field] !== undefined,
+  );
+  for (const field of sessionFields) {
+    const verdict = checkFieldGate(db, sessionWriter, "session", sessionId, field, ref);
+    if (!verdict.ok) {
+      return { ok: false, message: verdict.message };
+    }
+  }
+
   if (options.apply) {
     updateSessionFields(
       db,
@@ -465,6 +483,9 @@ function evaluateSettlementSessionWrite(
       },
       nowEpoch,
     );
+    for (const field of sessionFields) {
+      stampField(db, "session", sessionId, field, sessionWriter, nowEpoch);
+    }
   }
 
   const usage: string[] = [];

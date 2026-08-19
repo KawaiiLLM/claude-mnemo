@@ -7,7 +7,7 @@
 - CONTEXT.md:Write gate 三词条核对;Settlement 词条随直写更新。
 - spec 与十票状态一致。
 
-**Blocked by:** 03、06、08、09。
+**Blocked by:** 03、06、08、09、11、12。
 
 **Status:** ready-for-agent
 

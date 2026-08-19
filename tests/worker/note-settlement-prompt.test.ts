@@ -10,6 +10,7 @@ import {
 import { initializeSchema } from "../../src/db/schema";
 import { attachSegmentToSession, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { claimWriterId } from "../../src/db/write-gate";
 import { formatTurnCollapsed } from "../../src/mcp/format";
 import { buildCollapsedTurnsForSession } from "../../src/mcp/recall";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
@@ -394,5 +395,43 @@ describe("ticket 04 — lookback scales with the window, one unified turn sectio
       expect(turnsSection).toContain(`[S${sessionDbId}/T${promptNumber}]`);
     }
     expect(turnsSection).not.toContain(`[S${sessionDbId}/T25]`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The stitch (read-write-contract, ticket 07's deferred half): the session
+// summary renders through the UNIFIED renderer at sole-writer budgets, and
+// that render is itself the read grant the narrative write consumes.
+// ---------------------------------------------------------------------------
+
+describe("stitch — the session summary is the unified renderer's full-document view", () => {
+  test("a >2000-token narrative renders whole, and the render grants the session to the claim writer", () => {
+    const longContent = Array.from({ length: 2_500 }, (_, i) => `sentence${i}`).join(" ");
+    const sessionDbId = upsertSession(db, {
+      contentSessionId: "settlement-stitch-session",
+      project: "/tmp/project-settlement-stitch",
+      title: "stitch fixture",
+      content: longContent,
+      insight: null,
+      createdAtEpoch: NOW - 10_000,
+      updatedAtEpoch: NOW - 10_000,
+      completedAtEpoch: null,
+    }).id;
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+
+    // Whole document, no elision marker, no recall pointer the settlement
+    // agent could not follow anyway.
+    expect(context.sessionStateRendering).toContain("sentence2499");
+    expect(context.sessionStateRendering).not.toContain("state truncated");
+
+    const grant = db
+      .query<{ count: number }, [string, number]>(
+        "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ? AND entity_type = 'session' AND entity_id = ?",
+      )
+      .get(claimWriterId(job.id, job.claimGeneration), sessionDbId);
+    expect(grant?.count).toBe(1);
   });
 });

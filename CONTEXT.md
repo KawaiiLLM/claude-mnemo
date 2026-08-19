@@ -77,6 +77,23 @@ The rule that a summary-layer claim exists only with a turn citation.
 **Era**:
 A semantics boundary in stored data; reads never mix the two sides.
 
+### Write gate
+
+**Read grant (读授权)**:
+A writer's license to write an entity, earned by that entity appearing in its
+injected context or a recall/timeline render. Entity-level: one appearance
+licenses every field.
+_Avoid_: lock (nothing is held; it's a license check at write time)
+
+**Stale (失效)**:
+A field another writer touched after the grant; writing it again requires a fresh
+read. Error messages distinguish stale from never-granted.
+
+**Writer (写者)**:
+The identity a write is attributed to — the caller session for agents, its own
+identity for settlement. A field whose last writer is the caller is always
+writable (writing is reading).
+
 ### Addressing
 
 **Turn address (`S<n>/T<m>`)**:
