@@ -201,4 +201,62 @@ describe("recall(query=...) search shape", () => {
       .get(readerId);
     expect(grant?.n).toBeGreaterThan(0);
   });
+
+  // Ticket 03 (view-render-repair): pageBudget is a PAGE-level token budget
+  // on the search shape — overflow starts the next page instead of packing
+  // every hit into page 1.
+  function seedSplitHits(term: string, baseEpoch: number): number {
+    const sessionId = makeSession(`session-${term}`, `Session ${term}`, baseEpoch);
+    for (let promptNumber = 1; promptNumber <= 6; promptNumber += 1) {
+      saveTurn(db, {
+        sessionId,
+        promptNumber,
+        userPrompt: "p",
+        assistantResponse: "r",
+        title: `Hit ${promptNumber} for ${term}`,
+        content: `${term} result number ${promptNumber} padded with enough surrounding words to carry real token weight in a rendered row`,
+        insight: null,
+        filesRead: [],
+        filesModified: [],
+        createdAtEpoch: baseEpoch + promptNumber,
+        updatedAtEpoch: null,
+        observations: [],
+      });
+    }
+    return sessionId;
+  }
+
+  test("a small pageBudget splits search hits across pages; a generous one does not", () => {
+    seedSplitHits("splitterm", 9_000);
+    // A single page renders no page header at all; the split announces itself.
+    const generous = recallMemory(db, { query: "splitterm", pageBudget: 4_000 });
+    expect(generous).not.toContain("page 1 /");
+    const tight = recallMemory(db, { query: "splitterm", pageBudget: 60 });
+    expect(tight).toContain("page 1 /");
+    expect(tight).not.toContain("page 1 / 1");
+  });
+
+  // The hazard the grant-COUNT tests cannot see: `write_gate_reads` upserts
+  // on its (writer, entity, id) key, so a probe that re-records a delivered
+  // entity is invisible. What a probe CAN corrupt is scope — trial renders
+  // touch candidate hits that land on LATER pages, and with a readerId they
+  // would grant entities the caller never received: write permission without
+  // a read. Granted turns must therefore be exactly the delivered rows.
+  test("budget probing grants nothing beyond the delivered page", () => {
+    seedSplitHits("probeterm", 9_500);
+    const readerId = sessionWriterId(77);
+    const out = recallMemory(db, { query: "probeterm", pageBudget: 60, readerId });
+    expect(out).not.toContain("page 1 / 1");
+
+    const deliveredRows = (out.match(/\[T\d+\]/g) ?? []).length;
+    expect(deliveredRows).toBeGreaterThan(0);
+    expect(deliveredRows).toBeLessThan(6);
+
+    const grantedTurns = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM write_gate_reads WHERE writer = ? AND entity_type = 'turn'",
+      )
+      .get(readerId)!.n;
+    expect(grantedTurns).toBe(deliveredRows);
+  });
 });

@@ -509,6 +509,78 @@ function paginateItems<T>(
   };
 }
 
+/**
+ * Packs `items` into pages by measuring a CANDIDATE page's actual rendered
+ * cost via `renderPage`, rather than summing a per-item cost (ticket 03,
+ * "pageBudget governs every listing surface at runtime"): several listing
+ * surfaces in this file (`renderTurnScope`, `renderObservationScope`,
+ * `renderGroupedSearchResults`) rebuild their own session/turn header fresh
+ * from whatever items land on a given page, so one item's true marginal
+ * cost depends on which page it joins and cannot be priced alone the way
+ * `buildBrowseFeed`'s own per-unit packer prices a `BrowseUnit`. Same
+ * "items or `pageBudget` tokens, whichever comes first" rule as that packer
+ * (a page always holds at least one item, so a single oversized item can
+ * never stall pagination) — ticket 03's pinned "one packing rule" applied
+ * here with a measurement strategy suited to renderers that regroup a page
+ * from scratch instead of rendering each item independently.
+ *
+ * `renderPage` MUST be side-effect-free: it runs multiple times per item
+ * while probing for the boundary, so a caller whose real render records
+ * read grants or mutates a `TruncationSignal` passes `readerId: null` /
+ * `signal: undefined` here and performs the real, once-only render (with
+ * the real values) against the chosen page's items afterward.
+ */
+function packItemsByRenderedPageCost<T>(
+  items: readonly T[],
+  pageSize: number,
+  pageBudget: number,
+  renderPage: (pageItems: T[]) => string,
+): T[][] {
+  const pages: T[][] = [];
+  let current: T[] = [];
+
+  for (const item of items) {
+    const candidate = [...current, item];
+    const overflowsCount = current.length >= pageSize;
+    const overflowsBudget =
+      current.length > 0 && estimateTokens(renderPage(candidate)) > pageBudget;
+
+    if (current.length > 0 && (overflowsCount || overflowsBudget)) {
+      pages.push(current);
+      current = [item];
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  return pages;
+}
+
+/**
+ * `paginateItems`'s pageBudget-aware sibling (ticket 03). Same offset
+ * semantics as `paginateItems` — an out-of-range `page` yields an empty
+ * slice, `pageCount` still the true page count, no clamping — but the page
+ * boundary itself comes from `packItemsByRenderedPageCost` instead of a
+ * pure `pageSize` cut.
+ */
+function paginateByRenderedPageCost<T>(
+  items: readonly T[],
+  page: number,
+  pageSize: number,
+  pageBudget: number,
+  renderPage: (pageItems: T[]) => string,
+): { items: T[]; total: number; pageCount: number } {
+  const pages = packItemsByRenderedPageCost(items, pageSize, pageBudget, renderPage);
+  const index = page - 1;
+  return {
+    items: index >= 0 && index < pages.length ? pages[index]! : [],
+    total: items.length,
+    pageCount: pages.length,
+  };
+}
+
 function formatPageHeader(page: number, pageCount: number, total: number): string {
   return `page ${page} / ${pageCount} (total ${total})`;
 }
@@ -1642,7 +1714,19 @@ function renderRoutedId(
       }
       return turnMatchesFilter(turn, filter);
     });
-    const paged = paginateItems(turns, page, pageSize);
+    // Ticket 03: pageBudget can now force an earlier split than `pageSize`
+    // alone — measured by trial-rendering candidate pages with `signal`
+    // suppressed (`renderTurnScope` has no other side effect), then the
+    // real render below (with the real `signal`) runs once against the
+    // chosen page's items.
+    const paged = paginateByRenderedPageCost(
+      turns,
+      page,
+      pageSize,
+      pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+      (pageItems) =>
+        renderTurnScope(db, pageItems, fields, includeDbTurnIds, eraCutoffEpoch, undefined, turnBudget),
+    );
     recordGrants(paged.items.map((turn) => ({ entityType: "turn" as const, entityId: turn.id })));
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
@@ -1706,7 +1790,17 @@ function renderRoutedId(
         observationId: observation.id,
       }));
 
-    const paged = paginateItems(observations, page, pageSize);
+    // Ticket 03: same trial-render / real-render split as the `turns` route
+    // above — `renderObservationScope` has no side effect of its own to
+    // suppress besides `signal`.
+    const paged = paginateByRenderedPageCost(
+      observations,
+      page,
+      pageSize,
+      pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+      (pageItems) =>
+        renderObservationScope(db, pageItems, true, includeDbTurnIds, eraCutoffEpoch, undefined, turnBudget),
+    );
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderObservationScope(
@@ -1742,7 +1836,16 @@ function renderRoutedId(
           })),
       );
 
-    const paged = paginateItems(observations, page, pageSize);
+    // Ticket 03: same trial-render / real-render split as the other two
+    // routes above.
+    const paged = paginateByRenderedPageCost(
+      observations,
+      page,
+      pageSize,
+      pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+      (pageItems) =>
+        renderObservationScope(db, pageItems, true, includeDbTurnIds, eraCutoffEpoch, undefined, turnBudget),
+    );
     // Write gate (ticket 14, P1-2 fix): the session, plus exactly the turns
     // THIS page's own observation rows belong to — never every turn the
     // session has, since pagination may show only a slice of them.
@@ -1972,6 +2075,67 @@ function browseUnitSessionId(unit: BrowseUnit): number {
   return unit.kind === "turn" ? unit.turn.sessionId : unit.session.id;
 }
 
+interface PagePackEntry<T> {
+  item: T;
+  rendered: string;
+}
+
+/**
+ * Greedy token-budget page packer (ticket 03): consecutive items fill a
+ * page until either `pageSize` items or `budgetTokens` tokens is reached,
+ * whichever comes first — a page always holds at least one item, so a
+ * single oversized item cannot stall pagination. `render(item, atPageTop)`
+ * renders an item KNOWING whether it opens a fresh page, which is what lets
+ * a caller give the opening row of a page its self-contained form (spec 补充
+ * 裁决 "跨页引用自足") instead of a form that assumes the previous item is
+ * still on screen. `onPageStart` resets any page-scoped render state (e.g.
+ * "have we shown this session's title yet in THIS page") between pages;
+ * `onItemPacked` runs exactly once per item, after it lands on a page
+ * (never twice, even though `render` itself may run twice for an item that
+ * turns out to open a new page).
+ *
+ * Extracted from `buildBrowseFeed`'s own inline loop — the ONE packing
+ * mechanism this file has (ticket 03 pinned decision: "no second packing
+ * algorithm"); `buildBrowseFeed` below is this function's first caller, not
+ * a parallel implementation of the same rule.
+ */
+function packPagesByTokenBudget<T>(
+  items: readonly T[],
+  pageSize: number,
+  budgetTokens: number,
+  render: (item: T, atPageTop: boolean) => string,
+  onPageStart: () => void,
+  onItemPacked: (item: T) => void,
+): PagePackEntry<T>[][] {
+  const pages: PagePackEntry<T>[][] = [];
+  let current: PagePackEntry<T>[] = [];
+  let used = 0;
+
+  for (const item of items) {
+    let rendered = render(item, current.length === 0);
+    let cost = estimateTokens(rendered);
+    const overflowsCount = current.length >= pageSize;
+    const overflowsBudget = current.length > 0 && used + cost > budgetTokens;
+
+    if (current.length > 0 && (overflowsCount || overflowsBudget)) {
+      pages.push(current);
+      current = [];
+      used = 0;
+      onPageStart();
+      rendered = render(item, true);
+      cost = estimateTokens(rendered);
+    }
+
+    current.push({ item, rendered });
+    used += cost;
+    onItemPacked(item);
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  return pages;
+}
+
 /**
  * Builds and paginates the global chronological feed. Greedy token-budget
  * packing (same shape as `timeline.ts`'s `paginateByTokenBudget`):
@@ -2095,39 +2259,35 @@ function buildBrowseFeed(
     return header === null ? block : `${header}\n${block}`;
   };
 
-  const pages: BrowsePackedUnit[][] = [];
-  let current: BrowsePackedUnit[] = [];
+  const validUnits = units.filter(
+    (unit) => !(unit.kind === "turn" && !sessionFor(unit.turn.sessionId)),
+  );
+
   let seenInPage = new Set<number>();
   let runSessionId: number | null = null;
-  let used = 0;
 
-  for (const unit of units) {
-    if (unit.kind === "turn" && !sessionFor(unit.turn.sessionId)) {
-      continue;
-    }
-
-    let rendered = renderForPage(unit, seenInPage, runSessionId, current.length === 0);
-    let cost = estimateTokens(rendered);
-    const overflowsCount = current.length >= pageSize;
-    const overflowsBudget = current.length > 0 && used + cost > pageBudget;
-
-    if (current.length > 0 && (overflowsCount || overflowsBudget)) {
-      pages.push(current);
-      current = [];
+  // Ticket 03: the packing LOOP itself now lives in `packPagesByTokenBudget`
+  // (extracted, byte-identical behavior) — this closure supplies only the
+  // browse-specific per-page render state (`seenInPage`, `runSessionId`)
+  // that decides title-on-first-appearance and the cross-page citation
+  // escape.
+  const packed = packPagesByTokenBudget(
+    validUnits,
+    pageSize,
+    pageBudget,
+    (unit, atPageTop) => renderForPage(unit, seenInPage, runSessionId, atPageTop),
+    () => {
       seenInPage = new Set();
-      used = 0;
-      rendered = renderForPage(unit, seenInPage, runSessionId, true);
-      cost = estimateTokens(rendered);
-    }
+    },
+    (unit) => {
+      seenInPage.add(browseUnitSessionId(unit));
+      runSessionId = browseUnitSessionId(unit);
+    },
+  );
 
-    current.push({ unit, rendered });
-    seenInPage.add(browseUnitSessionId(unit));
-    runSessionId = browseUnitSessionId(unit);
-    used += cost;
-  }
-  if (current.length > 0 || pages.length === 0) {
-    pages.push(current);
-  }
+  const pages: BrowsePackedUnit[][] = packed.map((pageEntries) =>
+    pageEntries.map(({ item, rendered }) => ({ unit: item, rendered })),
+  );
 
   const pageCount = pages.length;
   const clampedPage = Math.min(Math.max(1, page), pageCount);
@@ -2415,7 +2575,28 @@ function recallMemoryBody(
       filter,
       input.eraCutoffEpoch ?? null,
     );
-    const paged = paginateItems(results, page, pageSize);
+    // Ticket 03: pageBudget can now force an earlier split than `pageSize`
+    // alone — measured by trial-rendering candidate slices of `results`
+    // with grant recording AND `signal` suppressed (`readerId: null`,
+    // `signal: undefined`), since `renderGroupedSearchResults` records a
+    // read grant for everything it renders and must never do so twice for
+    // the same entity across trial passes. The real render below (with the
+    // real `readerId`/`signal`) runs once against the chosen page's items.
+    const paged = paginateByRenderedPageCost(results, page, pageSize, pageBudget, (pageItems) =>
+      renderGroupedSearchResults(
+        db,
+        pageItems,
+        fields,
+        turnBudget,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        undefined,
+        text || undefined,
+        null,
+        now,
+        sequence,
+      ),
+    );
 
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
