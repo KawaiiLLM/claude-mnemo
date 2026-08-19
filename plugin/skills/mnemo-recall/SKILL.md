@@ -124,7 +124,10 @@ that skill for why).
 - **Search** (`query` set): results rank by relevance (bm25). Every matched
   term is **bolded**, with a word-boundary neighborhood shown around the hit
   instead of a fixed truncation window — you see the evidence, not an
-  arbitrary slice.
+  arbitrary slice. A hit landing in a turn's own PROMPT text (not its
+  title/content) additionally renders that row's `- prompt:` field line, same
+  bolding — `prompt` stays out of the default field set otherwise, and a
+  sibling row whose match landed elsewhere renders none.
 
 **The two shapes differ in ORDERING ONLY** — same rows, same transition lines,
 same field lines. Bolding and the neighborhood excerpt are behaviour *inside*

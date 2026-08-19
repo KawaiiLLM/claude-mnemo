@@ -228,6 +228,16 @@ export interface RenderNodeOptions {
    */
   fields?: TurnRenderFields;
   /**
+   * Ticket 04 (view-render-repair, spec "命中即展示" — matched-field probe):
+   * per-row fields whose text contains one of the search's own query terms,
+   * computed by the caller (`recall.ts`'s search path only — the browse path
+   * never sets this). A field in `MATCH_CONDITIONAL_TURN_FIELDS` renders when
+   * EITHER `fields` selects it (unconditional, caller override wins) OR it
+   * appears here (conditional, evidence-driven) — see `isTurnFieldActive`.
+   * Turn nodes only, like `fields` itself.
+   */
+  matchedFields?: TurnRenderFields;
+  /**
    * Session nodes only: append the `raw: <jsonlPath>` transcript-pointer
    * line. Replaces the retired depth switch's session-level behaviour
    * (`expanded` used to add this line) — callers rendering a session as a
@@ -465,6 +475,35 @@ export const DEFAULT_TURN_RENDER_FIELDS: TurnRenderFields = new Set<RecallTurnFi
   "title",
   "content",
 ]);
+
+/**
+ * Ticket 04 (view-render-repair, spec "命中即展示"): fields that render
+ * without being in `fields` when the search path's own probe found a query
+ * term inside that field's text (`RenderNodeOptions.matchedFields`) — "命中
+ * 即展示,不命中不渲染". Written as a set so a future field can opt in the
+ * same way; ruled ON for `prompt` only today. A field NOT in this set is
+ * unaffected by `matchedFields` regardless of what a caller puts there.
+ */
+const MATCH_CONDITIONAL_TURN_FIELDS: TurnRenderFields = new Set<RecallTurnField>(["prompt"]);
+
+/**
+ * Whether a turn field should render: the caller asked for it explicitly
+ * (`fields`, unconditional — caller override wins), OR the field is
+ * match-conditional and the search path's probe found the query in it
+ * (`matchedFields`, evidence-driven). Every other field (not in
+ * `MATCH_CONDITIONAL_TURN_FIELDS`) is decided by `fields` alone, same as
+ * before this ticket.
+ */
+function isTurnFieldActive(
+  field: RecallTurnField,
+  fields: TurnRenderFields,
+  matchedFields?: TurnRenderFields,
+): boolean {
+  return (
+    fields.has(field) ||
+    (MATCH_CONDITIONAL_TURN_FIELDS.has(field) && (matchedFields?.has(field) ?? false))
+  );
+}
 
 export function resolveTurnFields(
   fields?: readonly RecallTurnField[],
@@ -804,8 +843,15 @@ function formatTurnBody(
   // polished TITLE, not the raw prompt (see `formatTurnLabel`'s own
   // fallback) — if the label already fell back to the prompt text itself
   // (no title selected/stored), a second copy here would just repeat it.
+  // This gate applies whether `prompt` renders because the caller asked for
+  // it or because it matched the search (`isTurnFieldActive`) — the
+  // redundancy it guards against is the same either way.
   const titleSelected = fields.has("title") && turn.title !== null;
-  if (fields.has("prompt") && titleSelected && turn.promptPreview) {
+  if (
+    isTurnFieldActive("prompt", fields, options.matchedFields) &&
+    titleSelected &&
+    turn.promptPreview
+  ) {
     lines.push(
       `${fieldIndent}- prompt: "${collapseToSingleLine(turn.promptPreview)}"`,
     );

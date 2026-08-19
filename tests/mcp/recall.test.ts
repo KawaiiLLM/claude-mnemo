@@ -736,7 +736,7 @@ describe("recallMemory", () => {
     ).toContain("Resumed adopted turn");
   });
 
-  test("surfaces a Chinese prompt-only match, and the collapsed turn now shows the matched prompt", () => {
+  test("surfaces a Chinese prompt-only match, and now shows the matched prompt without a fields override (ticket 04, closes the flagged gap)", () => {
     const session = upsertSession(db, {
       contentSessionId: "session-prompt-only",
       project: "claude-mnemo",
@@ -767,10 +767,12 @@ describe("recallMemory", () => {
     // Findability is met: the turn's session surfaces.
     expect(output).toContain(`[S${session.id}`);
     expect(output).toContain("Cookie sync setup");
-    // The DEFAULT field set is title+content (spec 金样例 补充), so a
-    // prompt-only match surfaces the row but not the matched words; asking
-    // for the `prompt` field is what shows the evidence, bolded.
-    expect(output).not.toContain("浏览器插件");
+    // Ticket 04 (view-render-repair, spec "命中即展示" — closes ticket 01's
+    // flagged gap): `prompt` is still out of the DEFAULT field set
+    // (title+content), but a search hit landing in the prompt text now
+    // renders that row's own `- prompt:` line — bolded evidence — without
+    // needing an explicit `filter.fields` override.
+    expect(output).toContain("**浏览器插件**");
     expect(
       recallMemory(db, { query: "浏览器插件", filter: { fields: ["title", "prompt"] } }),
     ).toContain("**浏览器插件**");

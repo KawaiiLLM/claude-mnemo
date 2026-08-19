@@ -260,3 +260,156 @@ describe("recall(query=...) search shape", () => {
     expect(grantedTurns).toBe(deliveredRows);
   });
 });
+
+/**
+ * Ticket 04 (view-render-repair spec, "命中即展示"): a search hit landing in
+ * a turn's PROMPT text renders that row's `- prompt: ` field line (bolded +
+ * neighborhood, same machinery as `content`); a sibling row whose match
+ * landed elsewhere renders none. `prompt` stays out of the default field set
+ * — it surfaces per row as the evidence that ranked the row, not as a
+ * standing field. An explicit `filter.fields` including `prompt` still wins
+ * unconditionally (caller override).
+ */
+describe("recall(query=...) search shape — matched-field prompt line (ticket 04)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function makeSession(contentId: string, title: string, createdAtEpoch: number): number {
+    return upsertSession(db, {
+      contentSessionId: contentId,
+      project: "/tmp/project",
+      title,
+      content: null,
+      insight: null,
+      createdAtEpoch,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+  }
+
+  // Score order means the two turns can render in either sequence — this
+  // isolates the substring between one turn's own bracketed address and the
+  // next, order-independent, rather than assuming a fixed [T1] then [T2].
+  function turnBlock(output: string, address: string): string {
+    const start = output.indexOf(address);
+    expect(start).toBeGreaterThan(-1);
+    const after = output.slice(start + address.length);
+    const nextTurn = after.search(/\[T\d+\]/);
+    return nextTurn === -1 ? after : after.slice(0, nextTurn);
+  }
+
+  test("a prompt-text hit renders that row's prompt line; a sibling row without a prompt match renders none", () => {
+    const sessionId = makeSession("session-prompt-match", "Prompt match session", 10_000);
+    saveTurn(db, {
+      sessionId,
+      promptNumber: 1,
+      userPrompt: "how do I fix the flumox timeout error",
+      assistantResponse: "r",
+      title: "Investigate the failure",
+      content: "Looked at the stack trace and the logs",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 10_001,
+      updatedAtEpoch: null,
+      observations: [],
+    });
+    saveTurn(db, {
+      sessionId,
+      promptNumber: 2,
+      userPrompt: "totally unrelated question",
+      assistantResponse: "r",
+      title: "Flumox handling notes",
+      content: "Added flumox handling to the pipeline",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 10_002,
+      updatedAtEpoch: null,
+      observations: [],
+    });
+
+    const output = recallMemory(db, { query: "flumox" });
+
+    const promptLineCount = (output.match(/- prompt:/g) ?? []).length;
+    expect(promptLineCount).toBe(1);
+
+    const t1Block = turnBlock(output, "[T1]");
+    const t2Block = turnBlock(output, "[T2]");
+    expect(t1Block).toContain("- prompt:");
+    expect(t1Block).toContain("**flumox**");
+    expect(t2Block).not.toContain("- prompt:");
+  });
+
+  test("a content-only hit renders no prompt line anywhere", () => {
+    const sessionId = makeSession("session-content-only", "Content only session", 11_000);
+    saveTurn(db, {
+      sessionId,
+      promptNumber: 1,
+      userPrompt: "please look into this for me",
+      assistantResponse: "r",
+      title: "Zanther investigation",
+      content: "The zanther subsystem is misbehaving under load",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 11_001,
+      updatedAtEpoch: null,
+      observations: [],
+    });
+
+    const output = recallMemory(db, { query: "zanther" });
+    expect(output).toContain("**zanther**");
+    expect(output).not.toContain("- prompt:");
+  });
+
+  test("filter.fields including prompt still renders it on every row, matched or not (caller override)", () => {
+    const sessionId = makeSession("session-explicit-fields", "Explicit fields session", 12_000);
+    saveTurn(db, {
+      sessionId,
+      promptNumber: 1,
+      userPrompt: "the grombus prompt itself",
+      assistantResponse: "r",
+      title: "Grombus turn one",
+      content: "content mentions grombus too",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 12_001,
+      updatedAtEpoch: null,
+      observations: [],
+    });
+    saveTurn(db, {
+      sessionId,
+      promptNumber: 2,
+      userPrompt: "an unrelated line with no hit text",
+      assistantResponse: "r",
+      title: "Grombus turn two",
+      content: "also mentions grombus",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 12_002,
+      updatedAtEpoch: null,
+      observations: [],
+    });
+
+    const output = recallMemory(db, {
+      query: "grombus",
+      filter: { session: sessionId, fields: ["title", "content", "prompt"] },
+    });
+
+    // Both rows render the field, even though only T1's own prompt text
+    // contains the query term — explicit `filter.fields` is unconditional.
+    const promptLineCount = (output.match(/- prompt:/g) ?? []).length;
+    expect(promptLineCount).toBe(2);
+  });
+});

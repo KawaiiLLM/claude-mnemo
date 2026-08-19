@@ -1315,6 +1315,57 @@ function withTurnSearchSnippet(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Ticket 04 (view-render-repair spec, "命中即展示"): the matched-field probe
+// — a per-row check of whether the search's own terms landed inside a turn's
+// PROMPT text, reusing the exact term set the bolding above computes. No FTS
+// column-attribution machinery: this never asks which indexed column
+// produced the FTS hit, only whether the term is present in the field's own
+// text.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether any of `terms` occurs in `text` at a WORD boundary — the match is
+ * not glued to another alphanumeric character on either side. A CJK term has
+ * no alphanumeric neighbours to begin with, so the check degrades to a plain
+ * substring test there.
+ */
+function hasWordBoundaryMatch(text: string, terms: readonly string[]): boolean {
+  const lower = text.toLowerCase();
+  const isWordChar = (ch: string) => /[a-z0-9_]/i.test(ch);
+  return terms.some((term) => {
+    const needle = term.toLowerCase();
+    if (!needle) return false;
+    let from = 0;
+    for (;;) {
+      const idx = lower.indexOf(needle, from);
+      if (idx === -1) return false;
+      const before = idx > 0 ? lower[idx - 1]! : "";
+      const after = idx + needle.length < lower.length ? lower[idx + needle.length]! : "";
+      if (!isWordChar(before) && !isWordChar(after)) {
+        return true;
+      }
+      from = idx + 1;
+    }
+  });
+}
+
+/**
+ * Which of a turn's match-conditional fields (`format.ts`'s
+ * `MATCH_CONDITIONAL_TURN_FIELDS`, currently just `prompt`) contain one of
+ * the search's own terms — `turn.userPrompt` is the same raw text
+ * `withTurnSearchSnippet` bolds into `promptPreview`. format.ts's own set is
+ * the switch that decides which of these actually render; this probe simply
+ * reports what matched, so it stays correct even if that set grows.
+ */
+function matchedTurnFields(turn: TurnRecord, terms: readonly string[]): TurnRenderFields {
+  const matched = new Set<RecallTurnField>();
+  if (turn.userPrompt && hasWordBoundaryMatch(turn.userPrompt, terms)) {
+    matched.add("prompt");
+  }
+  return matched;
+}
+
 function renderGroupedSearchResults(
   db: Database,
   results: SearchMemoryResult[],
@@ -1483,6 +1534,7 @@ function renderGroupedSearchResults(
           {
             indent: RENDER_INDENT_STEP,
             fields: turnFields,
+            matchedFields: matchedTurnFields(turn, terms),
             sessionId: session.id,
             includeDbTurnIds,
             turnBudget,
