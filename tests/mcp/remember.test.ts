@@ -8,7 +8,7 @@ import {
   getSegment,
   getSegmentMemberTurnIds,
 } from "../../src/db/segments";
-import { getSession, upsertSession } from "../../src/db/sessions";
+import { getSession, upsertSession, countTurnsAfterTurnId } from "../../src/db/sessions";
 import { sessionWriterId } from "../../src/db/write-gate";
 import { rememberInputSchema } from "../../src/mcp/definitions";
 import { recallMemory } from "../../src/mcp/recall";
@@ -984,11 +984,14 @@ describe("remember write gate (ticket 02)", () => {
 });
 
 // Ticket 13 (spec "节奏与建段指导"): every successful `remember` call, any of
-// the six verbs, stamps `sessions.last_remember_epoch` — the fact
-// `hooks/note-reminder.ts`'s universal 20-turn check counts turns since. A
-// parameter-error call must not reset that clock: nothing was checked or
-// written, so it is not a "call" for this purpose.
-describe("last_remember_epoch stamp (ticket 13)", () => {
+// the six verbs, stamps `sessions.last_remember_turn_id` — the session's MAX
+// turn row id at that moment (0 when no turn exists yet), the anchor
+// `hooks/note-reminder.ts`'s universal 20-turn check counts turns after. A
+// turn ID, not an epoch (0.12.1): second-granularity timestamps cannot order
+// same-second turns against the call. A parameter-error call must not reset
+// that clock: nothing was checked or written, so it is not a "call" for this
+// purpose.
+describe("last_remember_turn_id stamp (ticket 13, id anchor 0.12.1)", () => {
   let db: Database;
   let sessionId: number;
 
@@ -1010,8 +1013,15 @@ describe("last_remember_epoch stamp (ticket 13)", () => {
     db.close();
   });
 
-  test("a successful create stamps the caller session's last_remember_epoch", () => {
-    expect(getSession(db, sessionId)?.lastRememberEpoch).toBeNull();
+  test("a successful create stamps the caller session's MAX turn id — same-second turns still count as after it", () => {
+    expect(getSession(db, sessionId)?.lastRememberTurnId).toBeNull();
+
+    const anchorTurn = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+         VALUES (?, 1, 'active', 5000) RETURNING id`,
+      )
+      .get(sessionId)!.id;
 
     rememberTool(
       db,
@@ -1019,7 +1029,26 @@ describe("last_remember_epoch stamp (ticket 13)", () => {
       { callerSessionId: sessionId, now: () => 5000 },
     );
 
-    expect(getSession(db, sessionId)?.lastRememberEpoch).toBe(5000);
+    expect(getSession(db, sessionId)?.lastRememberTurnId).toBe(anchorTurn);
+
+    // The peer-round-2 regression shape: a turn created in the SAME second as
+    // the remember call, but with a newer row, must count as "after" it.
+    db.query<unknown, [number]>(
+      `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+       VALUES (?, 2, 'active', 5000)`,
+    ).run(sessionId);
+    expect(
+      countTurnsAfterTurnId(db, sessionId, getSession(db, sessionId)!.lastRememberTurnId!),
+    ).toBe(1);
+  });
+
+  test("a call before any turn exists anchors at 0, so every future turn counts", () => {
+    rememberTool(
+      db,
+      { verb: "create", title: "pre-turn call" },
+      { callerSessionId: sessionId, now: () => 5000 },
+    );
+    expect(getSession(db, sessionId)?.lastRememberTurnId).toBe(0);
   });
 
   test("a rejected call (Parameter error) does not stamp anything", () => {
@@ -1030,7 +1059,7 @@ describe("last_remember_epoch stamp (ticket 13)", () => {
     );
 
     expect(resultText(result)).toContain("Parameter error:");
-    expect(getSession(db, sessionId)?.lastRememberEpoch).toBeNull();
+    expect(getSession(db, sessionId)?.lastRememberTurnId).toBeNull();
   });
 
   test("append also stamps it — every verb counts, not just create/attach", () => {
@@ -1046,7 +1075,7 @@ describe("last_remember_epoch stamp (ticket 13)", () => {
       { callerSessionId: sessionId, now: () => 6000 },
     );
 
-    expect(getSession(db, sessionId)?.lastRememberEpoch).toBe(6000);
+    expect(getSession(db, sessionId)?.lastRememberTurnId).toBe(0);
   });
 
   test("without a caller session, nothing is stamped (there is nothing to attribute it to)", () => {
@@ -1056,6 +1085,6 @@ describe("last_remember_epoch stamp (ticket 13)", () => {
       { now: () => 5000 },
     );
 
-    expect(getSession(db, sessionId)?.lastRememberEpoch).toBeNull();
+    expect(getSession(db, sessionId)?.lastRememberTurnId).toBeNull();
   });
 });

@@ -2439,6 +2439,12 @@ export function renderSegmentRosterFeed(
   const overflow = options.overflowAttachedSegmentIds ?? new Set<number>();
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
 
+  // P1-3 discipline (peer round 2): the grant sequence is snapshotted at
+  // render START, before ANY segment row is read — a foreign stamp landing
+  // between these reads and the record call below must leave the grant
+  // looking older than it, never fresher.
+  const renderStartSequence = snapshotWriteGateSequence(db);
+
   const totalLive = countLiveSegments(db, segmentEraCutoffEpoch);
   const candidates = listLiveSegmentsByActivity(db, ROSTER_CANDIDATE_CAP, segmentEraCutoffEpoch);
   const header = `## Segment roster (${totalLive} live)`;
@@ -2476,13 +2482,12 @@ export function renderSegmentRosterFeed(
   const pageItems = pages[clampedPage - 1] ?? [];
 
   if (options.readerId && pageItems.length > 0) {
-    const sequence = snapshotWriteGateSequence(db);
     recordReadGrants(
       db,
       options.readerId,
       pageItems.map((item) => ({ entityType: "segment" as const, entityId: item.segmentId })),
       now(),
-      sequence,
+      renderStartSequence,
     );
   }
 

@@ -243,3 +243,22 @@ describe("topic registry retirement migration (ticket 15)", () => {
     expect(output).toContain(`E${segment.id}`);
   });
 });
+
+describe("peer round 2 — an empty-normalizing topic name folds as a fallback tag, never silently", () => {
+  test("a whitespace-only topic name survives as topic-<id>", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    downgradeToLegacyTopicRegistry(db);
+    const topicId = insertLegacyTopic(db, "  -  ");
+    const segment = createSegment(db, { title: "orphan-named segment", nowEpoch: 100 });
+    setSegmentTopic(db, segment.id, topicId);
+
+    initializeSchema(db);
+
+    const tags = JSON.parse(
+      db.query<{ tags: string }, [number]>("SELECT tags FROM segments WHERE id = ?").get(segment.id)!.tags,
+    ) as string[];
+    expect(tags).toContain(`topic-${topicId}`);
+    db.close();
+  });
+});

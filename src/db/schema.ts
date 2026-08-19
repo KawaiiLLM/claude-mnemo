@@ -167,14 +167,18 @@ const SCHEMA_SQL = `
     -- reminder's own marker — "since the last remember call, any verb", a
     -- session-scoped fact no existing column carries (create/close/assign
     -- never even attribute a caller session on their own write paths, so
-    -- there is nothing to derive this from). NULL means "never called" —
-    -- the reminder then counts from created_at_epoch instead (see
-    -- touchSessionRememberActivity in db/sessions.ts). Deliberately excluded
+    -- there is nothing to derive this from). Stores the session's MAX turn
+    -- ROW ID at the moment of the call (0 when no turn exists yet) — a turn
+    -- id, not an epoch, because second-granularity timestamps cannot order
+    -- turns against the call (peer round 2: same-second turns escaped the
+    -- strict greater-than comparison; the id boundary also retires the old
+    -- createdAtEpoch-minus-one fallback dance). NULL means "never called" — the
+    -- reminder then counts every turn (anchor 0). Deliberately excluded
     -- from upsertSession's UPDATE SET list, the same "own dedicated setter,
     -- never the general upsert" treatment parent_session_id/lineage_status
     -- already get, so a routine SessionStart/UserPromptSubmit upsert cannot
     -- clobber it back to NULL.
-    last_remember_epoch INTEGER,
+    last_remember_turn_id INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -1596,7 +1600,7 @@ export function initializeSchema(db: Database): void {
   ensureSessionTranscriptPathColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
-  ensureSessionLastRememberEpochColumn(db);
+  ensureSessionLastRememberTurnIdColumn(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
@@ -2267,8 +2271,8 @@ function ensureSessionSummaryUpdatedAtEpochColumn(db: Database): void {
 // CREATE TABLE above — an existing session lands on NULL and the reminder
 // falls back to `created_at_epoch`, exactly the same reading a session that
 // truly never called remember gets.
-function ensureSessionLastRememberEpochColumn(db: Database): void {
-  addColumnIfMissing(db, "sessions", "last_remember_epoch", "INTEGER");
+function ensureSessionLastRememberTurnIdColumn(db: Database): void {
+  addColumnIfMissing(db, "sessions", "last_remember_turn_id", "INTEGER");
 }
 
 // D7: the redesigned session summary splits into a time-axis (done/current/
@@ -2643,9 +2647,18 @@ function foldTopicNamesIntoSegmentTags(db: Database): void {
     if (!topicName) {
       continue;
     }
-    const bareTag = normalizeTopicNameToTag(topicName);
+    // Peer round 2: a topic name that normalizes to NOTHING (whitespace or
+    // punctuation only — legal under the old registry's bare NOT NULL UNIQUE)
+    // must not vanish silently, because the registry it lives in is dropped
+    // right after this fold. The fallback tag keeps the fact that a grouping
+    // existed recoverable, and the log line names what it was.
+    let bareTag = normalizeTopicNameToTag(topicName);
     if (bareTag === "") {
-      continue;
+      bareTag = `topic-${segment.topicId}`;
+      console.error(
+        `[claude-mnemo] topic registry retirement: topic ${segment.topicId} ` +
+          `(${JSON.stringify(topicName)}) normalizes to an empty tag — folded as "${bareTag}"`,
+      );
     }
 
     const memberTurnIds = db

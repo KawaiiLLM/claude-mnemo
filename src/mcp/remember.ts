@@ -920,18 +920,15 @@ export function rememberTool(
 
   // Ticket 13 (spec "节奏与建段指导"): every successful call, any of the six
   // verbs, resets the universal 20-turn `remember` check
-  // (hooks/note-reminder.ts renders it off `sessions.last_remember_epoch`).
+  // (hooks/note-reminder.ts renders it off `sessions.last_remember_turn_id` —
+  // a turn ROW ID anchor, 0.12.1: epochs cannot order same-second turns).
   // "Since last remember call" is a session-scoped fact no existing column
   // carries — create/close/assign do not attribute a caller session on their
   // own write paths at all — so this is the one new column ticket 13 adds. A
   // parameter-error call is not a "call" for this purpose: nothing was
   // checked or written, so a rejected attempt must not reset the clock.
   if (typeof options.callerSessionId === "number" && !isParameterError(result)) {
-    touchSessionRememberActivity(
-      db,
-      options.callerSessionId,
-      options.now?.() ?? Math.floor(Date.now() / 1000),
-    );
+    touchSessionRememberActivity(db, options.callerSessionId);
   }
 
   return result;

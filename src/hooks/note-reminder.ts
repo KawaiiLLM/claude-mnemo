@@ -91,7 +91,7 @@ export function formatPromptPrefix(userPrompt: string | null): string {
 // session — attached to a segment or not — gets a one-line reminder once
 // every REMEMBER_REMINDER_INTERVAL_TURNS turns, counted since its last
 // successful `remember` call (any verb; `mcp/remember.ts`'s own
-// `touchSessionRememberActivity` stamps `sessions.last_remember_epoch`) or,
+// `touchSessionRememberActivity` stamps `sessions.last_remember_turn_id`) or,
 // absent one, since the session began. This retires the segment card's own
 // header nudge (`MAINTENANCE_CADENCE.nudgeAtOrAbove`, `mcp/segment-card.ts`):
 // that nudge only ever reached a session with the card already in view

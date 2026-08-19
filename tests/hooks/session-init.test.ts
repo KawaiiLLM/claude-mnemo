@@ -947,7 +947,7 @@ describe("process-session identity map (spec D1)", () => {
 // REMEMBER_REMINDER_INTERVAL_TURNS-th turn since its last successful
 // `remember` call (or, absent one, since the session began). Both acceptance
 // variants (零挂靠/挂靠) share one mechanism: the reminder is computed purely
-// from `sessions.last_remember_epoch` and the turn count, never from whether
+// from `sessions.last_remember_turn_id` and the turn count, never from whether
 // a segment is attached — so a session that attaches a segment through a
 // path OTHER than `remember` (a raw DB write here, matching how a pre-existing
 // attachment would look) proves the attach itself carries no exemption.
@@ -997,7 +997,7 @@ describe("universal remember cadence reminder (ticket 13)", () => {
     const handler = createSessionInitHandler({ db, now: () => epoch++ });
 
     // Turn 1 creates the session; attach a segment to it directly (not
-    // through `remember`, so `last_remember_epoch` stays untouched) before
+    // through `remember`, so `last_remember_turn_id` stays untouched) before
     // running the remaining 19 turns.
     await handler(createInput({ prompt: "turn 1" }));
     const session = getSessionByContentId(db, "session-1")!;
@@ -1020,11 +1020,10 @@ describe("universal remember cadence reminder (ticket 13)", () => {
 
     await runTurns(handler, 15);
     const session = getSessionByContentId(db, "session-1")!;
-    touchSessionRememberActivity(db, session.id, epoch);
-    // Bump past the marker so the next turn's own epoch is strictly greater
-    // than it — countTurnsSince's boundary is `>`, and `now`'s shared counter
-    // would otherwise hand the very next turn the SAME epoch just stamped.
-    epoch += 1;
+    touchSessionRememberActivity(db, session.id);
+    // No epoch dance needed any more (0.12.1): the anchor is the session's
+    // MAX turn row id, and every later turn's id is strictly greater
+    // regardless of shared seconds.
 
     // 15 more turns after the remember call: total turns since session start
     // is 30, well past 20, but only 15 have passed since the reset — no

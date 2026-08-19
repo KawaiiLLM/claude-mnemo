@@ -36,8 +36,8 @@ export interface SessionRecord {
   scanCursorLine: number;
   parentSessionId: number | null;
   lineageStatus: string;
-  /** Ticket 13: epoch of this session's last successful `remember` call (any verb) — `null` if never. See touchSessionRememberActivity. */
-  lastRememberEpoch: number | null;
+  /** Ticket 13 (anchor revised 0.12.1): the session's MAX turn row id at its last successful `remember` call (any verb; 0 = called before any turn) — `null` if never. See touchSessionRememberActivity. */
+  lastRememberTurnId: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
@@ -84,7 +84,7 @@ const SESSION_SELECT = `
     scan_cursor_line AS scanCursorLine,
     parent_session_id AS parentSessionId,
     lineage_status AS lineageStatus,
-    last_remember_epoch AS lastRememberEpoch,
+    last_remember_turn_id AS lastRememberTurnId,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -146,7 +146,7 @@ export function upsertSession(
         scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
-        last_remember_epoch AS lastRememberEpoch,
+        last_remember_turn_id AS lastRememberTurnId,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -254,7 +254,7 @@ export function updateSessionSummaryRewrite(
         scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
-        last_remember_epoch AS lastRememberEpoch,
+        last_remember_turn_id AS lastRememberTurnId,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -417,7 +417,7 @@ export function updateSessionFields(
         scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
-        last_remember_epoch AS lastRememberEpoch,
+        last_remember_turn_id AS lastRememberTurnId,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -580,11 +580,43 @@ export function touchSessionCompletion(
 export function touchSessionRememberActivity(
   db: Database,
   sessionId: number,
-  epoch: number,
 ): void {
+  // The anchor is a turn ROW ID, not an epoch: ids order turns against this
+  // call exactly, where second-granularity timestamps cannot (a turn created
+  // in the same second as the call must still count as "after" it if its row
+  // is newer — and must not if it is older). COALESCE(…, 0): a call before
+  // any turn exists anchors at 0, so every future turn counts.
   db.query<unknown, [number, number]>(
-    `UPDATE sessions SET last_remember_epoch = ? WHERE id = ?`,
-  ).run(epoch, sessionId);
+    `UPDATE sessions
+     SET last_remember_turn_id = COALESCE(
+       (SELECT MAX(id) FROM turns WHERE session_id = ?1), 0)
+     WHERE id = ?2`,
+  ).run(sessionId, sessionId);
+}
+
+/**
+ * Turns of `sessionId` whose row id is strictly greater than `anchorTurnId`
+ * — the remember-reminder's own counter (`anchorTurnId` = the stamped
+ * `lastRememberTurnId`, or 0 for a session that never called `remember`,
+ * which counts every turn). Row-id order is the one ordering that cannot
+ * tie: `countTurnsSince`'s epoch comparison stays for the segment
+ * maintenance counters, whose anchors are genuinely epochs.
+ */
+export function countTurnsAfterTurnId(
+  db: Database,
+  sessionId: number,
+  anchorTurnId: number,
+): number {
+  return (
+    db
+      .query<{ count: number }, [number, number]>(
+        `SELECT COUNT(*) AS count FROM turns
+         WHERE session_id = ?
+           AND status != 'undone'
+           AND id > ?`,
+      )
+      .get(sessionId, anchorTurnId)?.count ?? 0
+  );
 }
 
 export function updateCompactAnchor(db: Database, sessionId: number): void {

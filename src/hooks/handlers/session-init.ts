@@ -6,7 +6,7 @@ import {
   deriveProcessIdentityKeys,
   upsertProcessSessionMap,
 } from "../../db/process-session-map";
-import { countTurnsSince, getSessionByContentId, upsertSession } from "../../db/sessions";
+import { countTurnsAfterTurnId, getSessionByContentId, upsertSession } from "../../db/sessions";
 import { reindexTurnFromDb } from "../../db/search";
 import { getMaxPromptNumber } from "../../db/turns";
 import {
@@ -256,22 +256,20 @@ export function createSessionInitHandler(
           reliefText = renderNoteBacklogRelief(owed);
         }
 
-        // `session.lastRememberEpoch` is untouched by `upsertSession` (never
-        // in its SET list — see sessions.ts) so it reads back the value
+        // `session.lastRememberTurnId` is untouched by `upsertSession` (never
+        // in its SET list — see sessions.ts) so it reads back the anchor
         // `mcp/remember.ts`'s `touchSessionRememberActivity` last stamped, or
-        // NULL if this session has never called `remember` at all, in which
-        // case counting falls back to the session's own start. The `- 1` on
-        // that fallback matters: `createdAtEpoch` is set from this SAME
-        // `epoch` local on the session's first-ever prompt (both derived from
-        // one `now()` call, see above), so `createdAtEpoch` alone would put
-        // turn 1 on the wrong side of `countTurnsSince`'s strict `>` and
-        // undercount every session that has never called `remember` by
-        // exactly one turn.
-        const rememberSinceEpoch = session.lastRememberEpoch ?? session.createdAtEpoch - 1;
-        const turnsSinceRemember = countTurnsSince(
+        // NULL if this session has never called `remember` at all — anchor 0
+        // then, which counts every turn. A turn ROW ID orders exactly against
+        // the call (0.12.1, peer round 2): the old epoch anchor let
+        // same-second turns escape its strict comparison, and its
+        // never-called fallback needed a createdAtEpoch-minus-one dance
+        // because session creation shares its second with turn 1. Both
+        // hazards die with id ordering.
+        const turnsSinceRemember = countTurnsAfterTurnId(
           dependencies.db,
           session.id,
-          rememberSinceEpoch,
+          session.lastRememberTurnId ?? 0,
         );
         if (isRememberReminderDue(turnsSinceRemember)) {
           rememberReminderText = renderRememberReminder(turnsSinceRemember);
