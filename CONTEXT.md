@@ -16,7 +16,13 @@ _Avoid_: extraction, summary
 
 **Segment**:
 The long-lived semantic container for one task lane, accumulating across sessions.
-_Avoid_: arc (for this concept), topic (the label is not the container)
+Addressed by `E<n>`.
+_Avoid_: arc (for this concept)
+
+**Topic** — _retired_:
+The segment-grouping registry. Two mechanisms were recording one kind of
+information — a mechanism-level synonym split — so its role collapsed into tags:
+the theme a topic named is just a tag on the segment.
 
 **Arc** (also **episode**):
 One bounded span of a task's activity inside a segment's history.
@@ -45,8 +51,8 @@ _Avoid_: attachment (sessions attach; turns are members)
 A turn belonging to no segment. Legal — noise stays out of the semantic layer.
 
 **Roster (花名册)**:
-The injected list of live segments that makes attachment and creation
-read-before-write.
+The injected, paginated list of live segments (title and tags, most recently
+active first) that makes attachment and creation read-before-write.
 
 **Proposal**:
 Settlement's text-only suggestion that homeless turns form a new segment. Never a
@@ -116,6 +122,7 @@ field maintenance.
 _Avoid_: the retired 0.x remember (merged into note)
 
 **Tag**:
-A noun naming a thing — the project first, then subsystems or artifacts. Activities
-belong to `type`, never to tags.
+A noun naming a thing — the project first, then subsystems or artifacts. Carries
+the theme the retired topic registry once held. Activities belong to `type`,
+never to tags.
 _Avoid_: activity-suffixed hybrids (`segment-design`)
