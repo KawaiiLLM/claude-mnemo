@@ -339,6 +339,22 @@ describe("recallMemory", () => {
     expect(output).toContain(`[S${authSessionId}][T2] Follow-up`);
   });
 
+  // [S15069/T1021]: `T1..T2` ≡ `T1..2` — remember's interval grammar writes the
+  // repeated letter, so one session working both surfaces writes both shapes.
+  // A repeated letter of the WRONG kind is still a parse error, not a range.
+  test("a range's second endpoint may repeat the kind letter; a foreign letter still rejects", () => {
+    const natural = recallMemory(db, {
+      id: `S${authSessionId}/T1..T2`,
+      depth: "collapsed",
+    });
+    expect(natural).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
+    expect(natural).toContain(`[S${authSessionId}][T2] Follow-up`);
+
+    expect(
+      recallMemory(db, { id: `S${authSessionId}/T1..O2`, depth: "collapsed" }),
+    ).toContain("invalid id selector");
+  });
+
   // Ticket 11 (read-write-contract spec, "视图(读面)"): the char `truncate`/
   // `truncateCap` knobs retired outright — field cutting is driven ONLY by
   // the `turn` token budget now, word-boundary. Same content at two

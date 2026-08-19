@@ -210,9 +210,9 @@ function parseRoutedId(value: string): RoutedRecallId | null {
     };
   }
 
-  const turnMatch = /^S(\d+)\/T(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  const turnMatch = /^S(\d+)\/T(\*|\d+|\d+\.\.[A-Za-z]?\d+)$/i.exec(trimmed);
   if (turnMatch) {
-    const promptNumbers = expandNumericSelector(turnMatch[2]!);
+    const promptNumbers = expandNumericSelector(turnMatch[2]!, "T");
     if (promptNumbers === null) {
       return null;
     }
@@ -238,9 +238,9 @@ function parseRoutedId(value: string): RoutedRecallId | null {
   // BEFORE the bare segment route below, since that route's own pattern would
   // otherwise stop at the digits and leave a trailing `/T5` unmatched instead
   // of falling through to this one.
-  const segmentMemberMatch = /^E(\d+)\/T(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  const segmentMemberMatch = /^E(\d+)\/T(\*|\d+|\d+\.\.[A-Za-z]?\d+)$/i.exec(trimmed);
   if (segmentMemberMatch) {
-    const ordinals = expandNumericSelector(segmentMemberMatch[2]!);
+    const ordinals = expandNumericSelector(segmentMemberMatch[2]!, "T");
     if (ordinals === null) {
       return null;
     }
@@ -255,9 +255,9 @@ function parseRoutedId(value: string): RoutedRecallId | null {
   // `E1..9`. `E` is the SAME token the write grammar uses (`[E47]`, see
   // db/references.ts), so a citation a settlement wrote is a working address a
   // reader can paste straight back into recall.
-  const segmentMatch = /^E(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  const segmentMatch = /^E(\*|\d+|\d+\.\.[A-Za-z]?\d+)$/i.exec(trimmed);
   if (segmentMatch) {
-    const segmentIds = expandNumericSelector(segmentMatch[1]!);
+    const segmentIds = expandNumericSelector(segmentMatch[1]!, "E");
     if (segmentIds === null) {
       return null;
     }
@@ -278,9 +278,9 @@ function parseRoutedId(value: string): RoutedRecallId | null {
     };
   }
 
-  const sessionMatch = /^S(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  const sessionMatch = /^S(\*|\d+|\d+\.\.[A-Za-z]?\d+)$/i.exec(trimmed);
   if (sessionMatch) {
-    const sessionIds = expandNumericSelector(sessionMatch[1]!);
+    const sessionIds = expandNumericSelector(sessionMatch[1]!, "S");
     if (sessionIds === null) {
       return null;
     }

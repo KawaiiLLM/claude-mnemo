@@ -606,7 +606,8 @@ export function parseTimelineId(id: string): ParsedId {
     return { sessionId, range: { kind: "all" } };
   }
 
-  const closed = rangeValue.match(/^(\d+)\.\.(\d+)$/);
+  // `T19..T21` is as legal as `T19..21` — see selectors.ts ([S15069/T1021]).
+  const closed = rangeValue.match(/^(\d+)\.\.T?(\d+)$/i);
   if (closed) {
     const start = parsePositiveBound(closed[1], id);
     const end = parsePositiveBound(closed[2], id);

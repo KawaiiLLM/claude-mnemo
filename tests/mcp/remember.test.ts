@@ -642,6 +642,27 @@ describe("remember tool (ticket 02)", () => {
       );
     });
 
+    // [S15069/T1021]: recall ranges write `T1..3`; this grammar wrote `T1..T3`.
+    // Both endpoint shapes are legal on both surfaces now.
+    test("interval form: the second endpoint's T is optional", () => {
+      const t1 = seedTurn(1, 100);
+      const t2 = seedTurn(2, 101);
+      const segmentId = createViaTool("assign-interval-bare");
+
+      const text = resultText(
+        rememberTool(db, {
+          verb: "assign",
+          id: `E${segmentId}`,
+          turns: [`${turnAddress(1)}..2`],
+        }),
+      );
+
+      expect(text).toContain(`Assigned 2 turn(s) to E${segmentId}`);
+      expect(getSegmentMemberTurnIds(db, segmentId).sort()).toEqual(
+        [t1, t2].sort(),
+      );
+    });
+
     test("list form: one call places exactly the named, non-contiguous turns", () => {
       const t1 = seedTurn(1, 100);
       seedTurn(2, 101); // not named

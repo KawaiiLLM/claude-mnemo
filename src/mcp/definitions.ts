@@ -129,7 +129,12 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
 } as const;
 
 export const recallInputShape = {
-  id: z.string().optional(),
+  id: z
+    .string()
+    .optional()
+    .describe(
+      'Selector: "S12" | "S12/T3" | "S12/T3..7" | "S12/T3/O*" | "E31" | "E31/T2..5" | "O87" | bare "T418" (global DB id). A range\'s second endpoint may repeat the kind letter ("T3..T7" ≡ "T3..7"); comma-separated lists of one kind allowed.',
+    ),
   query: z
     .string()
     .optional()
@@ -495,7 +500,7 @@ export const rememberInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      'assign only (required): turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>", inclusive) — as seen in context, never recalled or invented. An interval spanning even one missing turn rejects the whole call, naming which; nothing is assigned.',
+      'assign only (required): turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>", inclusive; the second T is optional) — as seen in context, never recalled or invented. An interval spanning even one missing turn rejects the whole call, naming which; nothing is assigned.',
     ),
 };
 

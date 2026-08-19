@@ -169,7 +169,7 @@ If the result still is not enough, or you need exact wording, the full response,
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `id` | string | Selector. Supports wildcards (`*`), ranges (`5..10`), nested paths (`S12/T3/O*`), and a comma-separated list of same-kind addresses (`"E31, E32"`, `"S12, S15"`). |
+| `id` | string | Selector. Supports wildcards (`*`), ranges (`5..10` — the second endpoint may repeat the kind letter, `T3..T7` ≡ `T3..7`), nested paths (`S12/T3/O*`), and a comma-separated list of same-kind addresses (`"E31, E32"`, `"S12, S15"`). |
 | `query` | string | Pure full-text search — no in-string dialect. A literal `tag:foo` inside `query` searches those characters; it does not scope. Use `filter` instead. |
 | `filter` | object | Structured scoping: `{type, tag, session, time, file, fields}`, AND-composed with each other, with `id`, and with `query`. See below. |
 | `page` | number | 1-indexed page number for the target level. Default `1`. |
@@ -186,7 +186,7 @@ Child collections are always shown as a fixed preview with a `+N more` hint. To 
 | Form | Meaning |
 |---|---|
 | `S*` / `S12` / `S5..10` | Sessions |
-| `S12/T*` / `S12/T3` / `S12/T3..7` | Turns in a session |
+| `S12/T*` / `S12/T3` / `S12/T3..7` (or `T3..T7`) | Turns in a session |
 | `S12/T3/O*` | Observations for one turn |
 | `S12/T*/O*` | Observations for an entire session |
 | `O87` | Single observation (global DB id) |

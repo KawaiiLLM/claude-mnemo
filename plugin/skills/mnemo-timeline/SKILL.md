@@ -60,7 +60,7 @@ Views:
 |---|---|
 | `S42` | All turns in the session |
 | `S42/T*` | Same as `S42` |
-| `S42/T10..30` | Closed range `T10-T30` |
+| `S42/T10..30` (or `T10..T30`) | Closed range `T10-T30` |
 | `S42/T..20` | Open-start range `T1-T20` |
 | `S42/T30..` | Open-end range starting at `T30` |
 | `E47` | All of the segment's member turns, in cross-session chronological order |

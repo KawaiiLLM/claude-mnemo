@@ -697,7 +697,10 @@ function handleClose(
  * in one array is not rejected, just unusual — each element is parsed on its
  * own.
  */
-const ASSIGN_RANGE_PATTERN = /^S(\d+)\/T(\d+)\.\.T(\d+)$/i;
+// The second endpoint's `T` is optional: recall ranges write `T3..7`, this
+// grammar wrote `T3..T7`, and one session mixing the surfaces writes both
+// ([S15069/T1021]).
+const ASSIGN_RANGE_PATTERN = /^S(\d+)\/T(\d+)\.\.T?(\d+)$/i;
 
 interface AssignTokenRejection {
   raw: string;

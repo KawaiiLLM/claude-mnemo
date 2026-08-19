@@ -379,6 +379,13 @@ describe("parseTimelineId", () => {
     });
   });
 
+  it("parses closed range with the repeated T ([S15069/T1021])", () => {
+    expect(parseTimelineId("S42/T10..T30")).toEqual({
+      sessionId: 42,
+      range: { kind: "closed", start: 10, end: 30 },
+    });
+  });
+
   it("parses open-start range", () => {
     expect(parseTimelineId("S42/T..20")).toEqual({
       sessionId: 42,
