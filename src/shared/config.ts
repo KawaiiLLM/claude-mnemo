@@ -51,6 +51,25 @@ export interface MnemoConfig {
    * days are demoted to terminal (manual-only). Default 1 = just the latest.
    */
   dreamAgentBacklogLimit: number;
+  /** Model for P2 note settlement's single stateless call (spec D9, 裁决 10). */
+  noteSettlementModel: DreamAgentModel;
+  /**
+   * Decided turns that must accumulate before turn-stop planning cuts a window
+   * (db/note-settlement.ts carries the "why 25" reasoning; this is the config
+   * seam over the same number, ticket 02).
+   */
+  noteSettlementThresholdTurns: number;
+  /**
+   * Per-run cap on one window's turn count. Coherence-checked against
+   * `noteSettlementThresholdTurns` after clamping: a cap below the threshold is
+   * incoherent (a window could never reach it), so it is raised to match.
+   */
+  noteSettlementCapTurns: number;
+  /**
+   * Hard ceiling on one manual `/settle` backfill window (db/note-settlement.ts).
+   * A wider request is refused outright, never silently clamped.
+   */
+  noteSettlementBackfillMaxTurns: number;
 }
 
 export const KNOWN_DREAM_AGENT_MODELS = [
@@ -88,6 +107,14 @@ export const DREAM_RETRY_BACKOFF_MS = 10_000;
 export const DEFAULT_DREAM_AGENT_HOUR = 4;
 export const DEFAULT_HARD_EXIT_TIMEOUT_MS = 70_000;
 
+// Settlement's own three thresholds (ticket 02, [S15069/T1017]): one home per
+// number, re-exported from db/note-settlement.ts and worker/note-settlement-
+// dispatch.ts so every existing import path stays valid.
+export const DEFAULT_NOTE_SETTLEMENT_MODEL: DreamAgentModel = "claude-sonnet-5";
+export const DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS = 25;
+export const DEFAULT_NOTE_SETTLEMENT_CAP_TURNS = 50;
+export const DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
+
 export const DEFAULT_CONFIG: MnemoConfig = {
   hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   // On by default because it is a kill switch, not the cutover switch: with no
@@ -101,6 +128,10 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
   dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
   dreamAgentBacklogLimit: 1,
+  noteSettlementModel: DEFAULT_NOTE_SETTLEMENT_MODEL,
+  noteSettlementThresholdTurns: DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS,
+  noteSettlementCapTurns: DEFAULT_NOTE_SETTLEMENT_CAP_TURNS,
+  noteSettlementBackfillMaxTurns: DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
 };
 
 export function resolveConfigPath(homePath = homedir()): string {
@@ -111,8 +142,17 @@ interface ConfigWarningLogger {
   warn(message: string): void;
 }
 
-function resolveDreamAgentModel(
+/**
+ * Shared by both model fields (ticket 02): `dreamAgentModel` and
+ * `noteSettlementModel` draw from the same `KNOWN_DREAM_AGENT_MODELS`
+ * vocabulary, so one resolver — named by the field it is resolving, for a
+ * warning that points at the right key — replaces the two that would
+ * otherwise drift apart.
+ */
+function resolveAgentModel(
+  fieldName: string,
   value: unknown,
+  fallback: DreamAgentModel,
   logger: ConfigWarningLogger,
 ): DreamAgentModel {
   if (
@@ -123,9 +163,9 @@ function resolveDreamAgentModel(
   }
 
   logger.warn(
-    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`,
+    `[claude-mnemo] Invalid ${fieldName} ${JSON.stringify(value)}; using ${fallback}.`,
   );
-  return DEFAULT_DREAM_AGENT_MODEL;
+  return fallback;
 }
 
 function resolveDreamAgentTimeZone(
@@ -169,8 +209,32 @@ function clampConfig(
   config: MnemoConfig,
   rawDreamAgentModel: unknown,
   rawDreamAgentTimeZone: unknown,
+  rawNoteSettlementModel: unknown,
   logger: ConfigWarningLogger,
 ): MnemoConfig {
+  // Clamped independently, then reconciled: a cap clamped below an
+  // independently-clamped threshold is incoherent (a window could never reach
+  // its own cap), so the cap is raised to match rather than left to silently
+  // under-cut the threshold it is supposed to bound.
+  const noteSettlementThresholdTurns = clampInteger(
+    config.noteSettlementThresholdTurns,
+    1,
+    500,
+    DEFAULT_CONFIG.noteSettlementThresholdTurns,
+  );
+  let noteSettlementCapTurns = clampInteger(
+    config.noteSettlementCapTurns,
+    1,
+    500,
+    DEFAULT_CONFIG.noteSettlementCapTurns,
+  );
+  if (noteSettlementCapTurns < noteSettlementThresholdTurns) {
+    logger.warn(
+      `[claude-mnemo] noteSettlementCapTurns (${noteSettlementCapTurns}) is below noteSettlementThresholdTurns (${noteSettlementThresholdTurns}); raising the cap to match.`,
+    );
+    noteSettlementCapTurns = noteSettlementThresholdTurns;
+  }
+
   return {
     hardExitTimeoutMs: clampInteger(
       config.hardExitTimeoutMs,
@@ -189,7 +253,12 @@ function clampConfig(
       config.dreamAgentEnabled,
       DEFAULT_CONFIG.dreamAgentEnabled,
     ),
-    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
+    dreamAgentModel: resolveAgentModel(
+      "dreamAgentModel",
+      rawDreamAgentModel,
+      DEFAULT_DREAM_AGENT_MODEL,
+      logger,
+    ),
     dreamAgentTimeoutMs: clampInteger(
       config.dreamAgentTimeoutMs,
       60_000,
@@ -217,6 +286,20 @@ function clampConfig(
       1,
       366,
       DEFAULT_CONFIG.dreamAgentBacklogLimit,
+    ),
+    noteSettlementModel: resolveAgentModel(
+      "noteSettlementModel",
+      rawNoteSettlementModel,
+      DEFAULT_NOTE_SETTLEMENT_MODEL,
+      logger,
+    ),
+    noteSettlementThresholdTurns,
+    noteSettlementCapTurns,
+    noteSettlementBackfillMaxTurns: clampInteger(
+      config.noteSettlementBackfillMaxTurns,
+      1,
+      10_000,
+      DEFAULT_CONFIG.noteSettlementBackfillMaxTurns,
     ),
   };
 }
@@ -261,10 +344,16 @@ export function loadConfig(
     )
       ? raw.dreamAgentTimeZone
       : DEFAULT_DREAM_AGENT_TIME_ZONE;
+    const configuredNoteSettlementModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "noteSettlementModel",
+    )
+      ? raw.noteSettlementModel
+      : DEFAULT_NOTE_SETTLEMENT_MODEL;
     return clampConfig({
       ...DEFAULT_CONFIG,
       ...raw,
-    }, configuredDreamModel, configuredDreamTimeZone, logger);
+    }, configuredDreamModel, configuredDreamTimeZone, configuredNoteSettlementModel, logger);
   } catch {
     return DEFAULT_CONFIG;
   }

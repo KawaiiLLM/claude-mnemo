@@ -213,6 +213,37 @@ describe("POST /settle", () => {
     expect(listNoteSettlementJobs(db, sessionDbId)).toHaveLength(1);
   });
 
+  test("a configured noteSettlementBackfillMaxTurns of 10 refuses an 11-turn window and accepts exactly 10 (ticket 02)", async () => {
+    const sessionDbId = seedSession(db, "settle-configured-cap");
+    seedTurns(db, sessionDbId, 1, 20, ERA_CUTOFF_EPOCH + 500);
+    const handler = createWorkerFetchHandler({
+      db,
+      config: settleConfig({ noteSettlementBackfillMaxTurns: 10 }),
+    });
+
+    // The compiled-in 100-turn default would accept this window; the
+    // configured 10-turn cap must be what actually governs the refusal.
+    const tooWide = await settle(handler, {
+      session_id: sessionDbId,
+      window_start: 1,
+      window_end: 11,
+    });
+    expect(tooWide.status).toBe(400);
+    expect(await tooWide.json()).toMatchObject({
+      ok: false,
+      reason: "backfill_too_large",
+    });
+    expect(listNoteSettlementJobs(db, sessionDbId)).toEqual([]);
+
+    const exactlyAtConfiguredCap = await settle(handler, {
+      session_id: sessionDbId,
+      window_start: 1,
+      window_end: 10,
+    });
+    expect(exactlyAtConfiguredCap.status).toBe(200);
+    expect(listNoteSettlementJobs(db, sessionDbId)).toHaveLength(1);
+  });
+
   test("refuses before writing when settlement is off or the era is unset", async () => {
     const sessionDbId = seedSession(db, "settle-gates");
     seedTurns(db, sessionDbId, 1, 60, ERA_CUTOFF_EPOCH + 500);

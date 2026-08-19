@@ -9,7 +9,7 @@ import {
   type NoteSettlementJob,
 } from "../db/note-settlement";
 import type { MnemoConfig } from "../shared/config";
-import { DEFAULT_CONFIG } from "../shared/config";
+import { DEFAULT_CONFIG, DEFAULT_NOTE_SETTLEMENT_MODEL } from "../shared/config";
 import { classifyWorkerError } from "./error-classifier";
 import {
   buildNoteSettlementContext,
@@ -85,8 +85,16 @@ export function classifySettlementFailure(error: unknown): NoteSettlementFailure
  * reads them any more.
  */
 
-/** Spec D9: settlement runs on Sonnet, by user decision (裁决 10). */
-export const NOTE_SETTLEMENT_MODEL = "claude-sonnet-5";
+/**
+ * Spec D9: settlement runs on Sonnet, by user decision (裁决 10).
+ *
+ * Re-exported from shared/config.ts's `DEFAULT_NOTE_SETTLEMENT_MODEL` (ticket
+ * 02, [S15069/T1017]): the model is config-tunable (`noteSettlementModel`) now
+ * — this stays the fallback `createNoteSettlementDispatch` uses when the
+ * assembly site (worker/server.ts) does not supply an override, and a valid
+ * import path for anything that still names this constant directly.
+ */
+export const NOTE_SETTLEMENT_MODEL = DEFAULT_NOTE_SETTLEMENT_MODEL;
 
 export interface NoteSettlementQueryRequest {
   prompt: string;

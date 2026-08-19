@@ -36,7 +36,6 @@ import { initializeDatabase, migrateTurnCitationsToEdges } from "../db/schema";
 import { runTranscriptPathBackfill } from "../db/transcript-path-backfill";
 import {
   enqueueBackfillNoteSettlementJob,
-  NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
   type NoteSettlementInsertRefusal,
   type NoteSettlementJob,
 } from "../db/note-settlement";
@@ -274,7 +273,9 @@ const MANUAL_SETTLE_REFUSAL_MESSAGE: Record<
   string
 > = {
   inverted_range: "window_end is before window_start",
-  backfill_too_large: `window spans more than ${NOTE_SETTLEMENT_BACKFILL_MAX_TURNS} turns; narrow the range and re-run`,
+  backfill_too_large:
+    "window spans more than the configured backfill cap " +
+    "(noteSettlementBackfillMaxTurns); narrow the range and re-run",
   below_era_floor:
     "window_start is at or below the session's last pre-era prompt number; " +
     "pass allow_pre_era: true to re-settle pre-era turns deliberately",
@@ -990,7 +991,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         windowEnd as number,
         now(),
         eraCutoffEpoch,
-        { allowPreEra: request.allowPreEra === true },
+        {
+          allowPreEra: request.allowPreEra === true,
+          maxTurns: config.noteSettlementBackfillMaxTurns,
+        },
       );
       if (result.ok) {
         return { ok: true, job: result.job };
@@ -1791,6 +1795,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
       ? createNoteSettlementDispatch({
           db,
           config,
+          model: config.noteSettlementModel,
           now: deps.now,
           logger,
           runQuery: createNoteSettlementSdkQuery({

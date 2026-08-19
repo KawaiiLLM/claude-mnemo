@@ -31,6 +31,7 @@ import {
   createNoteSettlementScheduler,
   type NoteSettlementDispatch,
 } from "../../src/worker/note-settlement";
+import { createNoteSettlementDispatch } from "../../src/worker/note-settlement-dispatch";
 import { DEFAULT_CONFIG, type MnemoConfig } from "../../src/shared/config";
 import {
   SETTLEMENT_ENABLED_CONFIG,
@@ -221,6 +222,66 @@ describe("note settlement triggers", () => {
     expect(getNoteSettlementCursor(db, sessionDbId)).toBe(
       NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS,
     );
+  });
+
+  test("a config-only threshold of 5 fires at 6 decided turns with windowEnd 5, and a deps override still beats config (ticket 02)", async () => {
+    const sessionDbId = seedSession(db, "content-config-threshold");
+    const clock = createClock();
+    const { dispatch, calls } = recordingDispatch();
+    const configOnly: MnemoConfig = {
+      ...SETTLEMENT_ENABLED_CONFIG,
+      noteSettlementThresholdTurns: 5,
+    };
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: configOnly,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+    });
+
+    // Turn 5 itself is not yet decided (spec D10) — turn 6 is what makes it so.
+    seedTurns(db, sessionDbId, 1, 5);
+    const short = await scheduler.onTurnStop(sessionDbId);
+    expect(short.triggered).toBe(false);
+    expect(calls).toHaveLength(0);
+
+    seedTurns(db, sessionDbId, 6, 1);
+    const full = await scheduler.onTurnStop(sessionDbId);
+    expect(full.triggered).toBe(true);
+    expect(full.created).toHaveLength(1);
+    expect(full.created[0]!.windowStart).toBe(1);
+    expect(full.created[0]!.windowEnd).toBe(5);
+    expect(calls).toHaveLength(1);
+
+    // deps override always wins over config (pinned decision 3): a separate
+    // session on the SAME config but with an explicit `thresholdTurns: 3` on
+    // deps fires at 3 decided turns, not config's 5.
+    const overrideSessionDbId = seedSession(
+      db,
+      "content-config-threshold-override",
+    );
+    const { dispatch: overrideDispatch, calls: overrideCalls } =
+      recordingDispatch();
+    const overrideScheduler = createNoteSettlementScheduler({
+      db,
+      config: configOnly,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch: overrideDispatch,
+      thresholdTurns: 3,
+    });
+
+    seedTurns(db, overrideSessionDbId, 1, 3);
+    const overrideShort = await overrideScheduler.onTurnStop(overrideSessionDbId);
+    expect(overrideShort.triggered).toBe(false);
+    expect(overrideCalls).toHaveLength(0);
+
+    seedTurns(db, overrideSessionDbId, 4, 1);
+    const overrideFull = await overrideScheduler.onTurnStop(overrideSessionDbId);
+    expect(overrideFull.triggered).toBe(true);
+    expect(overrideFull.created[0]!.windowEnd).toBe(3);
+    expect(overrideCalls).toHaveLength(1);
   });
 
   test("drainSession dispatches a manual backfill no event of the session's own can reach ([S15069/T1014])", async () => {
@@ -1658,5 +1719,57 @@ describe("residual settlement of closed sessions", () => {
     const next = await scheduler.onTurnStop(live);
     expect(next.residualSessionIds).toEqual([newest]);
     expect(calls.map((job) => job.sessionId)).toContain(newest);
+  });
+});
+
+describe("note settlement dispatch model wiring (ticket 02, [S15069/T1017])", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("an injected model reaches the query request's own model field, overriding the compiled-in default", async () => {
+    // Factory unit (the pinned decision explicitly allows this): the real
+    // assembly site (worker/server.ts's `createNoteSettlementDispatch` call)
+    // wires `config.noteSettlementModel` in, but is not itself a unit seam —
+    // this proves the factory forwards whatever `options.model` it is given.
+    const sessionDbId = seedSession(db, "content-dispatch-model");
+    seedTurns(db, sessionDbId, 1, 5);
+    const [job] = enqueueNoteSettlementWindows(
+      db,
+      [
+        {
+          sessionId: sessionDbId,
+          windowStart: 1,
+          windowEnd: 3,
+          triggerType: "consecutive",
+        },
+      ],
+      1_000,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+
+    let receivedModel: string | null = null;
+    const dispatch = createNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => 2_000,
+      model: "claude-haiku-4-5",
+      runQuery: async (request) => {
+        receivedModel = request.model;
+        return { text: "settlement run finished.", commitMetrics: null };
+      },
+      logger: { warn: () => {}, error: () => {} },
+    });
+
+    await dispatch({ job: job! });
+
+    expect(receivedModel).toBe("claude-haiku-4-5");
   });
 });

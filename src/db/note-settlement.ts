@@ -2,6 +2,11 @@ import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
 import { closePendingNoteDebtsAsClosed, realPromptPredicate } from "./note-debt";
+import {
+  DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
+  DEFAULT_NOTE_SETTLEMENT_CAP_TURNS,
+  DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS,
+} from "../shared/config";
 
 /**
  * P2 note settlement, persistence half (spec D9, ticket 05).
@@ -52,16 +57,24 @@ import { closePendingNoteDebtsAsClosed, realPromptPredicate } from "./note-debt"
 /**
  * Decided turns that must accumulate before turn-stop planning cuts a window
  * ([S15069/T963], ticket 04 — replaces the old fixed 50-turn block).
+ *
+ * Re-exported from shared/config.ts's `DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS`
+ * (ticket 02, [S15069/T1017]): the number now has one home, config-tunable,
+ * and this stays a valid import path so nothing else in the codebase moves.
  */
-export const NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS = 25;
+export const NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS =
+  DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS;
 
 /**
  * Per-run cap on a single window's turn count. A run that has accumulated more
  * than this cuts the cap and leaves the remainder pending for the next trigger
  * (60 accumulated → one 50-turn window, 10 left over) rather than growing the
  * window without bound.
+ *
+ * Re-exported from shared/config.ts's `DEFAULT_NOTE_SETTLEMENT_CAP_TURNS`
+ * (ticket 02) — see `NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS` above.
  */
-export const NOTE_SETTLEMENT_WINDOW_CAP_TURNS = 50;
+export const NOTE_SETTLEMENT_WINDOW_CAP_TURNS = DEFAULT_NOTE_SETTLEMENT_CAP_TURNS;
 
 /**
  * Floor on a residual window — a closed session's leftover, cut outside the
@@ -83,8 +96,12 @@ export const NOTE_SETTLEMENT_MIN_WINDOW_TURNS = 20;
  * rather than silently clamped — an operator re-settling history states the
  * range they mean, and a silently truncated window would settle less than the
  * receipt implies.
+ *
+ * Re-exported from shared/config.ts's `DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS`
+ * (ticket 02) — see `NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS` above.
  */
-export const NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
+export const NOTE_SETTLEMENT_BACKFILL_MAX_TURNS =
+  DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS;
 
 /** A `claimed` job older than this is presumed dead and returns to `pending`. */
 export const NOTE_SETTLEMENT_LEASE_MS = 10 * 60 * 1000;
@@ -539,7 +556,7 @@ function insertJob(
   triggerType: NoteSettlementTrigger,
   nowEpoch: number,
   eraCutoffEpoch: number,
-  options: { allowPreEra?: boolean } = {},
+  options: { allowPreEra?: boolean; maxTurns?: number } = {},
 ): InsertNoteSettlementJobResult {
   if (windowEnd < windowStart) {
     return { ok: false, reason: "inverted_range" };
@@ -550,9 +567,14 @@ function insertJob(
   // Checked alongside `inverted_range` because it is the same kind of guard —
   // a property of the RANGE ITSELF, true or false before any DB state enters
   // the picture — rather than a derived floor like the two below.
+  //
+  // `options.maxTurns` (ticket 02): the operator surface's own cap comes from
+  // config now, not the compiled-in default — but the fallback keeps every
+  // caller that never passed it (every automatic path, and every legacy test)
+  // exactly as it was.
   if (
     triggerType === "backfill" &&
-    windowEnd - windowStart + 1 > NOTE_SETTLEMENT_BACKFILL_MAX_TURNS
+    windowEnd - windowStart + 1 > (options.maxTurns ?? NOTE_SETTLEMENT_BACKFILL_MAX_TURNS)
   ) {
     return { ok: false, reason: "backfill_too_large" };
   }
@@ -848,7 +870,7 @@ export function enqueueBackfillNoteSettlementJob(
   windowEnd: number,
   nowEpoch: number,
   eraCutoffEpoch: number,
-  options: { allowPreEra?: boolean } = {},
+  options: { allowPreEra?: boolean; maxTurns?: number } = {},
 ): InsertNoteSettlementJobResult {
   return runWriteTransaction(db, () =>
     insertJob(

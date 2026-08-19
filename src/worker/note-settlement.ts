@@ -193,9 +193,12 @@ export function createNoteSettlementScheduler(
   const activeSessionIds = deps.activeSessionIds ?? (() => []);
   const isGracefulExit = deps.isGracefulExit ?? (() => false);
   const logger = deps.logger ?? console;
+  // Deps override always wins over config (ticket 02) — a test's explicit
+  // `thresholdTurns`/`capTurns` must not be shadowed by whatever config the
+  // scheduler was also handed.
   const windowOptions = {
-    thresholdTurns: deps.thresholdTurns,
-    capTurns: deps.capTurns,
+    thresholdTurns: deps.thresholdTurns ?? config.noteSettlementThresholdTurns,
+    capTurns: deps.capTurns ?? config.noteSettlementCapTurns,
   };
   const claimOptions = {
     leaseMs: deps.leaseMs,
