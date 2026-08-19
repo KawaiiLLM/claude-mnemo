@@ -522,12 +522,16 @@ export interface MilestoneDayGroup {
 }
 
 export const PENDING_EMOJI = "⏳";
-const MISSING_LINE_ANCHOR = "—";
 const MISSING_GRADE_CELL = "—";
 
-/** Turn-table column set. `G` is the grade column the arc view also renders. */
+/**
+ * Turn-table column set. `G` is the grade column the arc view also renders.
+ * No `line` column ([S15069/T1020]): the transcript line anchor was the
+ * JSONL-first replay coordinate, retired with SQLite-first replay — no ruled
+ * row format ever carried it, and the replay skill forbids locating by it.
+ */
 export const TURN_TABLE_HEADER =
-  "T# | line | time | gap | stats | G | prompt → title";
+  "T# | time | gap | stats | G | prompt → title";
 
 /**
  * The glyph for a turn's type list (ticket 02, spec B5): `[]` — no type
@@ -1277,10 +1281,6 @@ function formatCompactTokenCount(tokens: number): string {
   }
 
   return String(tokens);
-}
-
-function formatTranscriptLineAnchor(lineNumber: number | null): string {
-  return lineNumber === null ? MISSING_LINE_ANCHOR : `L${lineNumber}`;
 }
 
 export function segmentPhases(turns: TurnRecord[]): Phase[] {
@@ -3552,7 +3552,6 @@ function renderTurnRow(
 
   return [
     `${statusPrefix}T${turn.promptNumber}`,
-    formatTranscriptLineAnchor(turn.transcriptLineStart),
     formatLocalTime(turn.createdAtEpoch),
     `${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`,
     renderStats(turn),

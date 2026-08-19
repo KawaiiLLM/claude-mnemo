@@ -37,10 +37,12 @@ const TURN_BUDGET_TRUNCATION_MARKER = "  … truncated to fit the per-item token
 
 /**
  * Ticket 07 (read-write-contract spec): the rewind marker on a `was_rolled_back`
- * turn — its transcript pointer (`transcriptLineStart`/`jsonlPath` line anchor)
- * is a stale coordinate the replay skill must not trust (spec: "rewind 撤销后
- * transcript 指针视为失效坐标"). No period at the end — it rides mid-line,
- * next to the bracketed ids, same convention `formatStatus` already uses.
+ * turn — its raw-transcript coordinate (the DB's `transcript_line_start` /
+ * `jsonlPath`) is stale and the replay skill must not trust it (spec: "rewind
+ * 撤销后 transcript 指针视为失效坐标"). Renderers no longer carry that
+ * coordinate at all ([S15069/T1020]); this marker is the surviving read-side
+ * warning. No period at the end — it rides mid-line, next to the bracketed
+ * ids, same convention `formatStatus` already uses.
  */
 export const REWIND_MARKER = " ⤺ rewound (transcript pointer stale — do not trust replay)";
 
@@ -80,9 +82,9 @@ function markTruncated(signal?: TruncationSignal): void {
  *
  * It deliberately does NOT spell out an id format. An earlier wording promised
  * `[S<n>/T<n>]`, a form this renderer never emits — turn lines carry
- * `[S<n>][T<n>]`, optionally with a transcript-line suffix. A legend that names
- * a shape has to be re-checked against the renderer every time a label changes;
- * pointing at "the ids on that line" cannot go stale.
+ * `[S<n>][T<n>]`. A legend that names a shape has to be re-checked against the
+ * renderer every time a label changes; pointing at "the ids on that line"
+ * cannot go stale.
  * Appended only when `TruncationSignal.truncated` is set — a response with
  * nothing cut gets no legend.
  */
@@ -129,7 +131,6 @@ export interface FormattedToolCall {
 export interface FormattedTurn {
   id: number;
   promptNumber: number;
-  transcriptLineStart: number | null;
   title: string | null;
   createdAtEpoch?: number | null;
   content?: string | null;

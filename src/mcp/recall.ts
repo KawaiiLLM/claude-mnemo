@@ -391,7 +391,6 @@ export function buildCollapsedTurnsForSession(
   return turns.map((turn) => ({
     id: turn.id,
     promptNumber: turn.promptNumber,
-    transcriptLineStart: turn.transcriptLineStart,
     title: turn.title,
     content: turn.content,
     observationCount: observationCounts.get(turn.id) ?? 0,
@@ -457,7 +456,6 @@ export function buildTurnView(
   return {
     id: turn.id,
     promptNumber: turn.promptNumber,
-    transcriptLineStart: turn.transcriptLineStart,
     title: turn.title,
     content: turn.content,
     observationCount: observations.length,

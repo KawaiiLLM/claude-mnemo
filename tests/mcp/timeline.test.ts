@@ -2960,7 +2960,7 @@ describe("renderTimeline", () => {
     expect(turn21Line).not.toContain("⏳");
   });
 
-  it("renders transcript line anchors in the turn table", () => {
+  it("the turn table carries no transcript line anchor ([S15069/T1020])", () => {
     const db = createDatabase(":memory:");
 
     seedSession(db);
@@ -2972,7 +2972,9 @@ describe("renderTimeline", () => {
       .find((line) => line.startsWith("T1 |"));
 
     expect(turn1Line).toBeDefined();
-    expect(turn1Line).toContain("L10");
+    // The seeded turn's transcript_line_start is 10; no rendered coordinate.
+    expect(turn1Line).not.toContain("L10");
+    expect(output).not.toContain("| line |");
   });
 
   it("extracted turns render emoji plus title in the title column", () => {
@@ -3056,7 +3058,6 @@ describe("renderTimeline", () => {
       .find((line) => line.startsWith("T21 |"));
 
     expect(compactLine).toBeDefined();
-    expect(compactLine).toContain("L210");
     expect(compactLine).toContain("/compact");
     expect(compactLine).toContain("⏸ /compact 357k tokens, auto");
     expect(compactLine).not.toContain("ignored raw summary wrapper");
@@ -4016,7 +4017,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     expect(out).toContain(`T1 ⚖️ G4 ${MILESTONE_NOTIFICATION_MARKER} → origin`);
   });
 
-  it("renders the grade column in the turns view alongside line/time/gap/stats", () => {
+  it("renders the grade column in the turns view alongside time/gap/stats", () => {
     const db = createDatabase(":memory:");
     seedDesignArc(db);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
@@ -4024,7 +4025,6 @@ describe("unified row renderer — row formats (spec §D)", () => {
     expect(out).toContain(TURN_TABLE_HEADER);
     expect(TURN_TABLE_HEADER.split(" | ")).toEqual([
       "T#",
-      "line",
       "time",
       "gap",
       "stats",
@@ -4033,12 +4033,12 @@ describe("unified row renderer — row formats (spec §D)", () => {
     ]);
     const row = out.split("\n").find((line) => line.startsWith("T5 |"))!;
     const cells = row.split(" | ");
-    expect(cells).toHaveLength(7);
-    expect(cells[5]).toBe("G3");
+    expect(cells).toHaveLength(6);
+    expect(cells[4]).toBe("G3");
     // The turn table prints the SAME effGrade the arc view does — T3 was
     // superseded, but an edge no longer moves a grade (spec H1), so both
     // surfaces show it at its own stored 3, not demoted.
-    expect(out.split("\n").find((line) => line.startsWith("T3 |"))!.split(" | ")[5]).toBe(
+    expect(out.split("\n").find((line) => line.startsWith("T3 |"))!.split(" | ")[4]).toBe(
       "G3",
     );
   });
@@ -4053,7 +4053,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1/T19..21" }));
     const row = out.split("\n").find((line) => line.startsWith("T21 |"))!;
 
-    expect(row.split(" | ")[5]).toBe("—");
+    expect(row.split(" | ")[4]).toBe("—");
   });
 
   it("caps the prompt prefix by characters and the ✏️ tail by file count", () => {

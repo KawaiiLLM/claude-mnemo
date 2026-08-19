@@ -33,7 +33,6 @@ describe("MCP format renderer", () => {
     const turn: FormattedTurn = {
       id: 1,
       promptNumber: 1,
-      transcriptLineStart: 17,
       title: "Diagnose auth",
       content: "Refresh overlap diagnosed",
       observationCount: 2,
@@ -95,7 +94,6 @@ describe("MCP format renderer", () => {
     const turn: FormattedTurn = {
       id: 2,
       promptNumber: 2,
-      transcriptLineStart: null,
       title: "No stats",
       content: "Collapsed description stays visible",
       observationCount: 0,
@@ -124,14 +122,12 @@ describe("MCP format renderer", () => {
     const activeTurn: FormattedTurn = {
       id: 3,
       promptNumber: 3,
-      transcriptLineStart: null,
       title: "Active turn",
       status: "active",
     };
     const undoneTurn: FormattedTurn = {
       id: 4,
       promptNumber: 4,
-      transcriptLineStart: null,
       title: "Undone turn",
       status: "undone",
     };
@@ -159,7 +155,6 @@ describe("MCP format renderer", () => {
     const turn: FormattedTurn = {
       id: 1,
       promptNumber: 1,
-      transcriptLineStart: null,
       title: "Diagnose auth",
       observationCount: 2,
       toolCallCount: 4,
@@ -248,7 +243,6 @@ describe("MCP format renderer", () => {
     const turn: FormattedTurn = {
       id: 10,
       promptNumber: 10,
-      transcriptLineStart: null,
       title: "fix auth",
       content: "x".repeat(500),
       status: "extracted",
@@ -267,7 +261,6 @@ describe("MCP format renderer", () => {
     const turn: FormattedTurn = {
       id: 14,
       promptNumber: 14,
-      transcriptLineStart: null,
       title: "tree render",
       status: "extracted",
       filesRead: [
@@ -304,7 +297,6 @@ describe("MCP format renderer", () => {
     const turn: FormattedTurn = {
       id: 17,
       promptNumber: 17,
-      transcriptLineStart: null,
       title: "relative tree",
       status: "extracted",
       filesRead: ["src/auth.ts", "src/server.ts"],
@@ -339,7 +331,6 @@ describe("MCP format renderer", () => {
         value: {
           id: 21,
           promptNumber: 21,
-          transcriptLineStart: null,
           title: null,
           promptPreview,
         },
@@ -361,7 +352,6 @@ describe("MCP format renderer", () => {
         value: {
           id: 21,
           promptNumber: 21,
-          transcriptLineStart: null,
           title: "expanded",
           promptPreview,
           responsePreview,
@@ -455,7 +445,6 @@ describe("per-item token budget (`turnBudget` — the `turn` param at the MCP se
       value: {
         id: 11,
         promptNumber: 11,
-        transcriptLineStart: null,
         title: "turn budget default",
         content: "x".repeat(2000),
       },
@@ -468,7 +457,6 @@ describe("per-item token budget (`turnBudget` — the `turn` param at the MCP se
     const turn: FormattedTurn = {
       id: 12,
       promptNumber: 12,
-      transcriptLineStart: null,
       title: null,
       content: "short text",
       promptPreview: "y".repeat(500),
@@ -497,7 +485,6 @@ describe("per-item token budget (`turnBudget` — the `turn` param at the MCP se
     const anchoredTurn: FormattedTurn = {
       id: 13,
       promptNumber: 13,
-      transcriptLineStart: 42,
       title: "Anchored turn",
       status: "extracted",
     };

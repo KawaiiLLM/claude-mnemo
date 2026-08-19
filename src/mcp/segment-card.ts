@@ -545,7 +545,6 @@ export function renderSegmentMembersByOrdinal(
     const view: FormattedTurn = {
       id: turn.id,
       promptNumber: turn.promptNumber,
-      transcriptLineStart: turn.transcriptLineStart,
       title: turn.title,
       content: turn.content,
       status: turn.status,
