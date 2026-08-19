@@ -11,7 +11,8 @@ import {
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { getTurnById } from "../../src/db/turns";
+import { getTurnById, updateTurnById } from "../../src/db/turns";
+import { pairKey, writeMemoryEdges } from "../../src/db/memory-edges";
 import { createSettlementDirectWriteEngine } from "../../src/worker/note-settlement-direct-write";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
@@ -223,5 +224,53 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
     expect(second.content[0]!.text).toContain("Already committed");
     expect(second.content[0]!.text).not.toContain("refused");
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Peer finding P1-1 (2026-08-19 commit review): each direct write must be
+// check-write-stamp ATOMIC. A compound call whose relation half rejects
+// AFTER its type half already applied must leave no partial state behind.
+// ---------------------------------------------------------------------------
+
+describe("a rejected direct write leaves no partial state (one transaction per call)", () => {
+  test("type lands then the relation rejects: the whole call rolls back", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["design"] });
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
+      NOW - 500,
+      { eligibleForRelation: "unrestricted" },
+    );
+    const job = claimWindow(sessionDbId, 1, 2);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, {
+        reviewableTurnIds: new Set([t2]),
+        eligibleRelationPairKeys: new Set([
+          pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } }),
+        ]),
+      }),
+      now: () => NOW,
+    });
+
+    // implement = delivery-only: refines demands a decision-phase citing turn,
+    // so the relation half rejects — but only after the review half already
+    // ran its UPDATE under apply:true.
+    const receipt = engine.writeNote({
+      turn: "S" + sessionDbId + "/T2",
+      type: ["implement"],
+      refines: ["S" + sessionDbId + "/T1"],
+    });
+
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    expect(getTurnById(db, t2)!.type).toEqual([]);
+    const stamp = db
+      .query("SELECT writer FROM write_gate_stamps WHERE entity_type = 'turn' AND entity_id = ? AND field = 'type'")
+      .get(t2);
+    expect(stamp).toBeNull();
   });
 });

@@ -12,7 +12,18 @@
 
 **Status:** ready-for-agent
 
+本票同时吸收 2026-08-19 提交审查的三条渲染接缝修复(peer P1-2/P1-3/P2-5)与一条行为修订:
+
+- 授权序列**渲染开始时快照**并随记录接缝传递——渲染与记录之间他人的写入不得使授权显得比渲染新(现记录点在渲染后取计数器现值,读侧 TOCTOU)。
+- **渲染什么记什么**统一化:`S<n>` 详情路由(含 turn 预览)、`O*` 观察路由、timeline 的 session 路由全部记录其实际渲染实体的授权(现状:S 详情零记录)。
+- **搜索加粗覆盖全部被索引字段**:title/insight/user_prompt/assistant_response 命中时同样走 boldSearchSnippet,而非只有 content(命中证据不可见)。
+- **propose 撞键刷新 title**(spec 已修订:键=session+addresses,title 不入键、撞键取新)。
+
 - [ ] roster 块按新形态渲染:时近序、100/2000 双预算、title+tags、分页
 - [ ] rubric 块独立,合租逻辑退役
 - [ ] `id="E31, E32"` 与 `id="S12, S15"` 各一条端到端;非法项整拒回显语法
 - [ ] roster 渲染记录授权(与 01 的表断言)
+- [ ] 授权序列渲染前快照(构造性:渲染-记录间插入他人印章→写被正确判 stale)
+- [ ] S 详情/O* 路由/timeline session 路由的授权记录各一断言
+- [ ] 非 content 字段命中的搜索呈现加粗邻域
+- [ ] propose 同址异 title 撞键:不插新行、title 更新

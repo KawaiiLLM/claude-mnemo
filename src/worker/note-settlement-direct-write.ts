@@ -167,6 +167,11 @@ export interface SettlementDirectWriteEngine {
   getLastCommitMetrics(): NoteSettlementCommitCounts | null;
 }
 
+/** Rejection sentinel: thrown inside the per-call transaction so the whole
+ * check-write-stamp sequence rolls back, caught at the boundary and reported
+ * as an ordinary parameter error (never escapes this module). */
+class DirectWriteRefused extends Error {}
+
 export function createSettlementDirectWriteEngine(
   options: CreateSettlementDirectWriteEngineOptions,
 ): SettlementDirectWriteEngine {
@@ -178,11 +183,29 @@ export function createSettlementDirectWriteEngine(
 
   function writeNote(rawInput: SettlementTurnWriteInput): ToolTextResult {
     const nowEpoch = now();
-    const evaluation = evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch, {
-      apply: true,
-    });
-    if (!evaluation.ok) {
-      return parameterError(evaluation.message);
+    let evaluation: ReturnType<typeof evaluateSettlementTurnWrite>;
+    try {
+      // One transaction per call (peer finding P1-1): the evaluator's whole
+      // check→write→stamp sequence — including a compound call whose LATER
+      // half rejects after an EARLIER half already applied — commits or
+      // vanishes as a unit. A rejection throws the sentinel so SQLite rolls
+      // the transaction back whole (the staging engine's own
+      // refusal-inside-transaction pattern), then reports as an ordinary
+      // parameter error.
+      evaluation = runWriteTransaction(db, () => {
+        const result = evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch, {
+          apply: true,
+        });
+        if (!result.ok) {
+          throw new DirectWriteRefused(result.message);
+        }
+        return result;
+      });
+    } catch (error) {
+      if (error instanceof DirectWriteRefused) {
+        return parameterError(error.message);
+      }
+      throw error;
     }
     accumulateTurnWriteCounts(counts, evaluation.outcome);
     return textResult(
@@ -192,11 +215,25 @@ export function createSettlementDirectWriteEngine(
 
   function writeMembership(rawInput: SettlementMembershipWriteInput): ToolTextResult {
     const nowEpoch = now();
-    const evaluation = evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch, {
-      apply: true,
-    });
-    if (!evaluation.ok) {
-      return parameterError(evaluation.message);
+    let evaluation: ReturnType<typeof evaluateSettlementMembershipWrite>;
+    try {
+      // Same one-transaction-per-call discipline; this wrap is also what
+      // makes the reassign path's live attachment/open re-check share a
+      // transaction with the membership mutation it guards.
+      evaluation = runWriteTransaction(db, () => {
+        const result = evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch, {
+          apply: true,
+        });
+        if (!result.ok) {
+          throw new DirectWriteRefused(result.message);
+        }
+        return result;
+      });
+    } catch (error) {
+      if (error instanceof DirectWriteRefused) {
+        return parameterError(error.message);
+      }
+      throw error;
     }
     accumulateMembershipWriteCounts(counts, rawInput, evaluation.outcome);
     return textResult(
