@@ -38,10 +38,18 @@ import { formatTurnCollapsed, type FormattedTurn } from "../mcp/format";
  * note, and their raw prompt/response material — is gone too. A window turn
  * is just whatever recall would show for it; settlement has no more use for
  * a note-debt view of its own window.
+ *
+ * TICKET 04'S CHANGE ([S15069/T963]): the lookback/window split that used to
+ * exist at the RENDERING layer is gone — `priorTurns` and `windowTurns` are
+ * now the SAME shape (`NoteSettlementWindowTurn[]`), built by one shared pass
+ * over both ranges. For the model there is no difference between a prior
+ * turn and a window turn (unified rendering, unified correctability —
+ * rendering IS authorization, isomorphic with the write gate); the split
+ * that remains is job accounting only (`job.windowStart`/`windowEnd`, read by
+ * the caller and stated in the prompt's own header), not a prompt-side
+ * rendering boundary. Lookback size now SCALES with the window: it defaults
+ * to the window's own turn count rather than a fixed constant.
  */
-
-/** Turns of context BEFORE the window, rendered as recall renders them. */
-export const NOTE_SETTLEMENT_PRIOR_TURNS = 50;
 
 export interface NoteSettlementWindowTurn {
   turnId: number;
@@ -51,8 +59,9 @@ export interface NoteSettlementWindowTurn {
   ref: string;
   note: ShadowNoteRecord | null;
   /**
-   * The turn as RECALL renders it — same builder, same renderer, same
-   * one-line-plus-desc shape the preceding-turns section uses.
+   * The turn as RECALL renders it — same builder, same renderer, one
+   * one-line-plus-desc shape whether this turn is lookback or window
+   * (ticket 04: the two are rendered identically).
    *
    * When the turn has a note, the note's own title and content are what that
    * view renders: for an agent-written note on an era turn they are already
@@ -85,9 +94,16 @@ export interface NoteSettlementSegmentRosterEntry {
 export interface NoteSettlementContext {
   job: NoteSettlementJob;
   session: SessionRecord;
+  /** This job's OWN window (ticket 04: job accounting only, not a render boundary). */
   windowTurns: NoteSettlementWindowTurn[];
-  /** Collapsed rendering of the 50 turns preceding the window. */
-  priorTurnsRendering: string;
+  /**
+   * The lookback turns immediately preceding the window, same shape as
+   * `windowTurns` and rendered exactly the same way (ticket 04, [S15069/T963]:
+   * "统一渲染、统一可纠" — no difference for the model between a prior turn
+   * and a window turn). Count defaults to the window's own size; see
+   * `BuildNoteSettlementContextOptions.priorTurns`.
+   */
+  priorTurns: NoteSettlementWindowTurn[];
   /**
    * The session summary as the MAIN agent is shown it at SessionStart, from
    * the shared entry point both surfaces call (ticket 11, spec A4).
@@ -132,6 +148,12 @@ export interface NoteSettlementContext {
 
 export interface BuildNoteSettlementContextOptions {
   nowEpoch: number;
+  /**
+   * Lookback turn count. Defaults to the window's OWN size (ticket 04,
+   * [S15069/T963]: "前序注入数量=本窗口 turn 数") — a 25-turn window renders
+   * 25 preceding turns, a 50-turn window renders 50 — rather than the old
+   * fixed 50-turn constant.
+   */
   priorTurns?: number;
 }
 
@@ -149,20 +171,36 @@ export function buildNoteSettlementContext(
   }
 
   const allTurns = getTurnsForSession(db, job.sessionId);
+
+  // Lookback defaults to the window's OWN size (ticket 04: "前序注入数量=本
+  // 窗口 turn 数") — a 25-turn window renders 25 preceding turns, a 50-turn
+  // window renders 50.
+  const priorTurnsCount =
+    options.priorTurns ?? job.windowEnd - job.windowStart + 1;
+  const priorFloor = Math.max(1, job.windowStart - priorTurnsCount);
+
+  const priorRecords = allTurns.filter(
+    (turn) =>
+      turn.promptNumber >= priorFloor && turn.promptNumber < job.windowStart,
+  );
   const windowRecords = allTurns.filter(
     (turn) =>
       turn.promptNumber >= job.windowStart && turn.promptNumber <= job.windowEnd,
   );
+  // Ascending by construction: both filters walk `allTurns` (itself ascending
+  // by prompt number) and every prior record's prompt number is, by the
+  // filters above, strictly less than every window record's.
+  const combinedRecords = [...priorRecords, ...windowRecords];
+
   const notes = new Map<number, ShadowNoteRecord | null>();
-  for (const turn of windowRecords) {
+  for (const turn of combinedRecords) {
     notes.set(turn.id, getShadowNote(db, turn.id));
   }
 
   // ONE collapsed build for the whole session: recall's own builder, feeding
-  // both the window turns below and the preceding-turns rendering further
-  // down. Two calls would be two reads of the same rows at two instants —
-  // and, more to the point, the window's turns are rendered by the same
-  // function as everything else on this prompt.
+  // both groups below. Two calls would be two reads of the same rows at two
+  // instants — and, more to the point, ticket 04 unifies the two groups into
+  // one rendering, so there is only one function left to feed.
   const collapsedTurns = new Map<number, FormattedTurn>(
     buildCollapsedTurnsForSession(db, job.sessionId).map((turn) => [
       turn.promptNumber,
@@ -170,13 +208,19 @@ export function buildNoteSettlementContext(
     ]),
   );
 
-  const windowTurns: NoteSettlementWindowTurn[] = [];
+  // ONE pass over prior turns THEN window turns, so the gap signal carries
+  // across the boundary between them (ticket 04: no rendering distinction
+  // between the two groups, so the silence signal should not reset at the
+  // boundary either) — then split back into the two exposed fields, which
+  // remain separate ONLY because `windowTurns` still answers "does this job's
+  // own window have anything to settle" for the dispatch/facade layer.
+  const renderedTurns: NoteSettlementWindowTurn[] = [];
   let previousCreatedAt: number | null = null;
-  for (const turn of windowRecords) {
+  for (const turn of combinedRecords) {
     const note = notes.get(turn.id) ?? null;
     const collapsedView = collapsedTurns.get(turn.promptNumber);
 
-    windowTurns.push({
+    renderedTurns.push({
       turnId: turn.id,
       sessionId: turn.sessionId,
       promptNumber: turn.promptNumber,
@@ -202,25 +246,12 @@ export function buildNoteSettlementContext(
     previousCreatedAt = turn.createdAtEpoch;
   }
 
-  const priorTurns = options.priorTurns ?? NOTE_SETTLEMENT_PRIOR_TURNS;
-  const priorFloor = Math.max(1, job.windowStart - priorTurns);
-  const priorPromptNumbers = new Set(
-    allTurns
-      .filter(
-        (turn) =>
-          turn.promptNumber >= priorFloor &&
-          turn.promptNumber < job.windowStart,
-      )
-      .map((turn) => turn.promptNumber),
+  const priorTurns = renderedTurns.filter(
+    (turn) => turn.promptNumber < job.windowStart,
   );
-  const priorTurnsRendering = [...collapsedTurns.values()]
-    .filter((turn) => priorPromptNumbers.has(turn.promptNumber))
-    .map((turn) => formatTurnCollapsed(turn, { sessionId: job.sessionId }))
-    .join("\n");
-
-  const priorTurnIds = allTurns
-    .filter((turn) => priorPromptNumbers.has(turn.promptNumber))
-    .map((turn) => turn.id);
+  const windowTurns = renderedTurns.filter(
+    (turn) => turn.promptNumber >= job.windowStart,
+  );
 
   // The session's own attachment rows — never a global recency window —
   // projected down to the roster shape (id/title/topic, ticket 05: "结算不
@@ -239,7 +270,7 @@ export function buildNoteSettlementContext(
     job,
     session,
     windowTurns,
-    priorTurnsRendering,
+    priorTurns,
     segmentRoster,
     attachedSegmentIds: new Set(segmentRoster.map((segment) => segment.id)),
     milestoneRendering: renderSessionMilestoneInjection(db, job.sessionId),
@@ -252,10 +283,7 @@ export function buildNoteSettlementContext(
       session,
       fields: "global-view",
     }),
-    reviewableTurnIds: new Set([
-      ...windowTurns.map((turn) => turn.turnId),
-      ...priorTurnIds,
-    ]),
+    reviewableTurnIds: new Set(renderedTurns.map((turn) => turn.turnId)),
     builtAtEpoch: options.nowEpoch,
   };
 

@@ -4,7 +4,10 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { listNoteSettlementJobs } from "../../src/db/note-settlement";
+import {
+  listNoteSettlementJobs,
+  NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
+} from "../../src/db/note-settlement";
 import { createWorkerFetchHandler } from "../../src/worker/server";
 import { DEFAULT_CONFIG, type MnemoConfig } from "../../src/shared/config";
 import { SETTLEMENT_ENABLED_CONFIG } from "../support/settlement-config";
@@ -178,6 +181,35 @@ describe("POST /settle", () => {
       ok: false,
       reason: "duplicate_window",
     });
+    expect(listNoteSettlementJobs(db, sessionDbId)).toHaveLength(1);
+  });
+
+  test("rejects a window wider than the 100-turn backfill cap; the exact cap is accepted (ticket 04)", async () => {
+    const sessionDbId = seedSession(db, "settle-cap");
+    seedTurns(db, sessionDbId, 1, 300, ERA_CUTOFF_EPOCH + 500);
+    const handler = createWorkerFetchHandler({ db, config: settleConfig() });
+
+    // Reject-over-100 (ticket 04 judgment call): a window one turn past the
+    // cap is refused outright rather than silently clamped to 100, so the
+    // receipt never implies more was settled than the operator asked for.
+    const tooWide = await settle(handler, {
+      session_id: sessionDbId,
+      window_start: 1,
+      window_end: NOTE_SETTLEMENT_BACKFILL_MAX_TURNS + 1,
+    });
+    expect(tooWide.status).toBe(400);
+    expect(await tooWide.json()).toMatchObject({
+      ok: false,
+      reason: "backfill_too_large",
+    });
+    expect(listNoteSettlementJobs(db, sessionDbId)).toEqual([]);
+
+    const exactlyAtCap = await settle(handler, {
+      session_id: sessionDbId,
+      window_start: 1,
+      window_end: NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
+    });
+    expect(exactlyAtCap.status).toBe(200);
     expect(listNoteSettlementJobs(db, sessionDbId)).toHaveLength(1);
   });
 

@@ -272,7 +272,7 @@ describe("settlement context assembly", () => {
     expect(context).not.toHaveProperty("interiorHoles");
 
     const prompt = renderNoteSettlementPrompt(context);
-    const window = prompt.slice(prompt.indexOf("## Window turns"));
+    const window = prompt.slice(prompt.indexOf("## Turns"));
     // The old fact line's "kind=" and the raw-material annotation are gone.
     expect(window).not.toContain("kind=");
     expect(window).not.toContain("raw>");
@@ -291,7 +291,7 @@ describe("settlement context assembly", () => {
     expect(t1).not.toHaveProperty("tagDraft");
 
     const prompt = renderNoteSettlementPrompt(context);
-    const window = prompt.slice(prompt.indexOf("## Window turns"));
+    const window = prompt.slice(prompt.indexOf("## Turns"));
     expect(window).not.toContain("type_draft=");
     expect(window).not.toContain("tag_draft=");
   });
@@ -672,8 +672,10 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     expect(getTurnById(db, fixture.turnIds[0]!)!.significanceGrade).toBe(4);
 
     // A second window, T5-T8: T1-T4 are now PRECEDING turns in its context,
-    // not window turns — buildNoteSettlementContext still exposes them (the
-    // previous-50 lookback), which is what makes citing S1/T1 legal here.
+    // not window turns — buildNoteSettlementContext still exposes them (ticket
+    // 04: lookback defaults to the window's own size, here 4, which is
+    // exactly enough to reach back to T1), which is what makes citing S1/T1
+    // legal here.
     for (let promptNumber = 5; promptNumber <= 8; promptNumber += 1) {
       const turnId = seedTurn(fixture.sessionDbId, promptNumber, {
         note: { title: `implement+seam: turn ${promptNumber}`, content: "Noted." },
@@ -728,7 +730,7 @@ describe("settlement payload at the scheduler seam", () => {
       config: SETTLEMENT_ENABLED_CONFIG,
       now: () => NOW,
       nowMs: () => NOW * 1000,
-      consecutiveTurns: 4,
+      thresholdTurns: 4,
       dispatch: dispatchWith(
         queryThatStages((engine) => {
           for (let promptNumber = 1; promptNumber <= 4; promptNumber += 1) {
@@ -792,7 +794,7 @@ describe("settlement payload at the scheduler seam", () => {
       config: SETTLEMENT_ENABLED_CONFIG,
       now: () => NOW,
       nowMs: () => NOW * 1000,
-      consecutiveTurns: 2,
+      thresholdTurns: 2,
       dispatch,
       logger: { warn: () => {}, error: () => {} },
     });

@@ -9,11 +9,11 @@ import {
   enqueueBackfillNoteSettlementJob,
   enqueueNoteSettlementWindows,
   enqueueResidualNoteSettlementJob,
-  enqueueSessionEndNoteSettlementWindow,
   getNoteSettlementCursor,
   listNoteSettlementJobs,
   listResidualNoteSettlementCandidates,
-  NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+  NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
+  NOTE_SETTLEMENT_WINDOW_CAP_TURNS,
   planNoteSettlementWindows,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
@@ -316,34 +316,24 @@ describe("note settlement backfill windows", () => {
       db,
       sessionDbId,
       1,
-      NOTE_SETTLEMENT_CONSECUTIVE_TURNS * 2 + 10,
+      NOTE_SETTLEMENT_WINDOW_CAP_TURNS * 2 + 10,
       ERA_CUTOFF_EPOCH + 500,
     );
-    db.query<unknown, [number, number]>(
-      "UPDATE sessions SET last_compact_turn = ? WHERE id = ?",
-    ).run(NOTE_SETTLEMENT_CONSECUTIVE_TURNS * 2 + 5, sessionDbId);
 
-    const plannedTriggers = (["consecutive", "compact", "sessionend"] as const)
-      .flatMap((trigger) =>
-        planNoteSettlementWindows(db, sessionDbId, trigger, {
-          eraCutoffEpoch: ERA_CUTOFF_EPOCH,
-        }),
-      )
-      .map((plan) => plan.triggerType);
+    // Ticket 04 ([S15069/T963]): turn-stop planning is the ONLY automatic
+    // trigger, and `NoteSettlementWindowPlan.triggerType` is pinned to the
+    // literal `"consecutive"` — this assertion is now a redundant runtime
+    // check of a compile-time fact, kept as a regression guard.
+    const plannedTriggers = planNoteSettlementWindows(db, sessionDbId, {
+      eraCutoffEpoch: ERA_CUTOFF_EPOCH,
+    }).map((plan) => plan.triggerType);
     expect(plannedTriggers.length).toBeGreaterThan(0);
     expect(plannedTriggers).not.toContain("backfill");
+    expect(new Set(plannedTriggers)).toEqual(new Set(["consecutive"]));
 
-    // The two enqueue paths that do not go through `planNoteSettlementWindows`
-    // at all: the SessionEnd hook and the closed-session residual scan.
-    expect(
-      enqueueSessionEndNoteSettlementWindow(
-        db,
-        sessionDbId,
-        NOW,
-        ERA_CUTOFF_EPOCH,
-      ).map((job) => job.triggerType),
-    ).not.toContain("backfill");
-
+    // The one enqueue path that does not go through `planNoteSettlementWindows`
+    // at all: the closed-session residual scan. (SessionEnd's own synchronous
+    // enqueue is retired along with `compact`/`sessionend` planning — ticket 04.)
     const idleSessionDbId = seedSession(db, "backfill-never-planned-idle");
     seedTurns(db, idleSessionDbId, 1, 40, ERA_CUTOFF_EPOCH + 500);
     const residualNowEpoch = 2_000 + 10 * 24 * 60 * 60;
@@ -365,7 +355,7 @@ describe("note settlement backfill windows", () => {
     expect(residualJobs.length).toBeGreaterThan(0);
     expect(residualJobs.map((job) => job.triggerType)).not.toContain("backfill");
 
-    // And end to end through the scheduler's own two triggers.
+    // And end to end through the scheduler's own (sole) automatic trigger.
     const scheduler = createNoteSettlementScheduler({
       db,
       config: { ...SETTLEMENT_ENABLED_CONFIG, eraCutoffEpoch: ERA_CUTOFF_EPOCH },
@@ -373,10 +363,7 @@ describe("note settlement backfill windows", () => {
       nowMs: () => residualNowEpoch * 1_000,
       dispatch: async () => ({ ok: true }),
     });
-    const fromTriggers = [
-      ...(await scheduler.onTurnStop(sessionDbId)).created,
-      ...(await scheduler.onCompact(sessionDbId)).created,
-    ];
+    const fromTriggers = (await scheduler.onTurnStop(sessionDbId)).created;
     expect(fromTriggers.map((job) => job.triggerType)).not.toContain("backfill");
 
     const everyTriggerTypeWritten = db
@@ -386,5 +373,32 @@ describe("note settlement backfill windows", () => {
       .all()
       .map((row) => row.triggerType);
     expect(everyTriggerTypeWritten).not.toContain("backfill");
+  });
+
+  test("a backfill wider than the 100-turn cap is refused; exactly 100 is accepted (ticket 04)", () => {
+    const sessionDbId = seedSession(db, "backfill-cap");
+    seedTurns(db, sessionDbId, 1, 200, ERA_CUTOFF_EPOCH + 500);
+
+    const tooWide = enqueueBackfillNoteSettlementJob(
+      db,
+      sessionDbId,
+      1,
+      NOTE_SETTLEMENT_BACKFILL_MAX_TURNS + 1,
+      NOW,
+      ERA_CUTOFF_EPOCH,
+    );
+    expect(tooWide).toEqual({ ok: false, reason: "backfill_too_large" });
+    expect(listNoteSettlementJobs(db, sessionDbId)).toEqual([]);
+
+    const exactlyAtCap = enqueueBackfillNoteSettlementJob(
+      db,
+      sessionDbId,
+      1,
+      NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
+      NOW,
+      ERA_CUTOFF_EPOCH,
+    );
+    expect(exactlyAtCap.ok).toBe(true);
+    expect(listNoteSettlementJobs(db, sessionDbId)).toHaveLength(1);
   });
 });

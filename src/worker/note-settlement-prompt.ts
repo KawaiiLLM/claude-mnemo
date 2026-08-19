@@ -72,6 +72,14 @@ import type {
  * roster ∪ homeless. Every correction in this duty is RE-CHECK, never
  * first-write (spec: "纠错是复核不是首写") — a window with nothing to
  * correct completes exactly as emptily as one with nothing to propose.
+ *
+ * TICKET 04'S UNIFICATION ([S15069/T963]): the old "## Preceding turns
+ * (context only)" / "## Window turns (settle exactly these)" split is GONE —
+ * one "## Turns" section, one rendering, chronological. `renderWindowTurn`
+ * below is applied uniformly to `context.priorTurns` and
+ * `context.windowTurns` alike; the model reads which addresses belong to
+ * THIS window from the header line's own `S<session>/T<start>-T<end>` range,
+ * not from a visual split in the body.
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -139,6 +147,9 @@ export function renderNoteSettlementPrompt(
   context: NoteSettlementContext,
 ): string {
   const { job } = context;
+  // Chronological: `priorTurns` is entirely lower prompt numbers than
+  // `windowTurns` by construction (see `buildNoteSettlementContext`).
+  const allTurns = [...context.priorTurns, ...context.windowTurns];
 
   const sections: string[] = [
     `# Settlement window S${job.sessionId}/T${job.windowStart}-T${job.windowEnd} (trigger: ${job.triggerType})`,
@@ -227,13 +238,12 @@ export function renderNoteSettlementPrompt(
     "",
     context.milestoneRendering || "(no milestones)",
     "",
-    "## Preceding turns (context only — this window's own turns are listed below)",
+    "## Turns (chronological — lookback context and this window's own turns, " +
+      "rendered identically; this window's own bounds are the S/T range in " +
+      "the header above, everything shown here is equally citable and " +
+      "correctable)",
     "",
-    context.priorTurnsRendering || "(none)",
-    "",
-    "## Window turns (settle exactly these)",
-    "",
-    context.windowTurns.map(renderWindowTurn).join("\n"),
+    allTurns.length > 0 ? allTurns.map(renderWindowTurn).join("\n") : "(none)",
     "",
     "## Output",
     "",

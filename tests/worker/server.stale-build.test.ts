@@ -7,7 +7,7 @@ import { createDatabase } from "../../src/db/database";
 import {
   enqueueNoteSettlementWindows,
   listNoteSettlementJobs,
-  NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+  NOTE_SETTLEMENT_WINDOW_CAP_TURNS,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
@@ -101,7 +101,7 @@ describe("a stale build claims no settlement work", () => {
     const sessionDbId = seedDecidedSession(
       db,
       "content-stale-live-stamp",
-      NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1,
+      NOTE_SETTLEMENT_WINDOW_CAP_TURNS + 1,
     );
     const dispatched: NoteSettlementJob[] = [];
     // No seam: the core asks the database, exactly as the shipped wiring does.
@@ -132,21 +132,30 @@ describe("a stale build claims no settlement work", () => {
 
     // The control that makes the zeros above about STALENESS rather than about
     // an unsettleable fixture: the same parked job, the same core — with this
-    // database's initializer back to our own id. A compact is used rather than a
-    // second turn-stop because a turn-stop only triggers on a window it has not
-    // already cut, and this window is already on the books.
+    // database's initializer back to our own id. Compact is retired as a
+    // trigger outright now (ticket 04), so a SECOND, unrelated session's
+    // below-threshold turn-stop is used instead — its own leak (which excludes
+    // only ITS OWN session id) is what reaches the first session's parked job.
     recordInitializerBuild(db, BUILD_ID, Math.floor(Date.now() / 1000));
+    const otherSessionDbId = seedDecidedSession(
+      db,
+      "content-stale-resume-other",
+      3,
+    );
 
-    await core.handleCompact(sessionDbId);
+    await core.handleTurnStop(otherSessionDbId);
 
     expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]!.sessionId).toBe(sessionDbId);
     expect(listNoteSettlementJobs(db, sessionDbId)[0]!.status).toBe("done");
   });
 
   test("the stale latch also blocks the cross-session leak", async () => {
     // Below the threshold, so this session triggers no window of its own — the
     // only thing that could be claimed here is the OTHER session's recorded job,
-    // which is what the leak exists to pick up.
+    // which is what the leak exists to pick up. Compact and finish are not
+    // exercised here: neither carries any settlement wiring any more (ticket
+    // 04), so the leak's only remaining entry point is turn-stop.
     const busySessionDbId = seedDecidedSession(db, "content-stale-leak-busy", 3);
     const otherSessionDbId = upsertSession(db, {
       contentSessionId: "content-stale-leak-other",
@@ -184,8 +193,6 @@ describe("a stale build claims no settlement work", () => {
     });
 
     await core.handleTurnStop(busySessionDbId);
-    await core.finishSession(busySessionDbId);
-    await core.handleCompact(busySessionDbId);
 
     expect(dispatched).toHaveLength(0);
     const leaked = listNoteSettlementJobs(db, otherSessionDbId);

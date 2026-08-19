@@ -202,7 +202,7 @@ describe("ticket 11 — window turns go through recall's collapsed view (spec A5
 
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
     const prompt = renderNoteSettlementPrompt(context);
-    const window = prompt.slice(prompt.indexOf("## Window turns"));
+    const window = prompt.slice(prompt.indexOf("## Turns"));
 
     const recallView = buildCollapsedTurnsForSession(db, sessionDbId).find(
       (turn) => turn.promptNumber === 1,
@@ -239,7 +239,7 @@ describe("ticket 11 — window turns go through recall's collapsed view (spec A5
 
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
     const window = renderNoteSettlementPrompt(context).slice(
-      renderNoteSettlementPrompt(context).indexOf("## Window turns"),
+      renderNoteSettlementPrompt(context).indexOf("## Turns"),
     );
 
     expect(window).toContain("fix+lease: reconstructed in hindsight");
@@ -353,5 +353,45 @@ describe("ticket 11 — the Memory Rubric renders byte-identical in both consume
     expect(prompt.indexOf("SESSION NARRATIVE")).toBeLessThan(prompt.indexOf("4. COMMIT"));
 
     db.close();
+  });
+});
+
+/**
+ * Ticket 04 ([S15069/T963]): lookback = window size, and the prompt renders
+ * ONE unified "## Turns" section rather than the old two-section split.
+ */
+describe("ticket 04 — lookback scales with the window, one unified turn section", () => {
+  test("a 25-turn window renders 25 preceding turns plus its own 25, 50 in total, under one heading", () => {
+    const sessionDbId = seedSession();
+    // 75 turns total: 1-50 lookback material, 51-75 the window itself. A
+    // 25-turn window's default lookback is exactly its own size (25), so it
+    // should reach back to prompt 26, not further (turns 1-25 stay out of
+    // reach) and not less (turn 50 must be included).
+    for (let promptNumber = 1; promptNumber <= 75; promptNumber += 1) {
+      seedTurn(sessionDbId, promptNumber);
+    }
+    const job = claimWindow(sessionDbId, 51, 75);
+
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    expect(context.windowTurns).toHaveLength(25);
+    expect(context.priorTurns).toHaveLength(25);
+    expect(context.priorTurns[0]!.promptNumber).toBe(26);
+    expect(context.priorTurns.at(-1)!.promptNumber).toBe(50);
+    expect(context.windowTurns[0]!.promptNumber).toBe(51);
+    expect(context.windowTurns.at(-1)!.promptNumber).toBe(75);
+    // reviewableTurnIds is exactly the 50 rendered turns — no more, no less.
+    expect(context.reviewableTurnIds.size).toBe(50);
+
+    const prompt = renderNoteSettlementPrompt(context);
+    // One heading, not two: the old "Preceding turns"/"Window turns" split
+    // is gone.
+    expect(prompt).toContain("## Turns");
+    expect(prompt).not.toContain("Preceding turns");
+    expect(prompt).not.toContain("Window turns (settle exactly these)");
+    const turnsSection = prompt.slice(prompt.indexOf("## Turns"));
+    for (let promptNumber = 26; promptNumber <= 75; promptNumber += 1) {
+      expect(turnsSection).toContain(`[S${sessionDbId}/T${promptNumber}]`);
+    }
+    expect(turnsSection).not.toContain(`[S${sessionDbId}/T25]`);
   });
 });

@@ -40,19 +40,42 @@ import { closePendingNoteDebtsAsClosed, realPromptPredicate } from "./note-debt"
  * Deliberately NOT the same table as `settlement_jobs` — see the schema comment.
  */
 
-/** Decided turns that must accumulate before the in-session trigger fires. */
-export const NOTE_SETTLEMENT_CONSECUTIVE_TURNS = 50;
+/**
+ * Decided turns that must accumulate before turn-stop planning cuts a window
+ * ([S15069/T963], ticket 04 — replaces the old fixed 50-turn block).
+ */
+export const NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS = 25;
 
 /**
- * Floor on a window that is cut EARLY — by a compact, or off a closed session's
- * residual. Both are "settle what you have" events, and settling six turns costs
- * a whole inference to produce almost no arc. Below the floor nothing is written
- * at all and the window simply keeps accumulating to the next trigger.
+ * Per-run cap on a single window's turn count. A run that has accumulated more
+ * than this cuts the cap and leaves the remainder pending for the next trigger
+ * (60 accumulated → one 50-turn window, 10 left over) rather than growing the
+ * window without bound.
+ */
+export const NOTE_SETTLEMENT_WINDOW_CAP_TURNS = 50;
+
+/**
+ * Floor on a residual window — a closed session's leftover, cut outside the
+ * turn-stop tiling. Settling six turns costs a whole inference to produce
+ * almost no arc. Below the floor nothing is written at all and the session is
+ * left exactly as it was, to be picked up once more turns (or more idle time)
+ * change the picture.
  *
  * A suggested value, exported rather than configured: it is a payload-shape
  * judgement the offline eval can recalibrate, not a knob a user should turn.
  */
 export const NOTE_SETTLEMENT_MIN_WINDOW_TURNS = 20;
+
+/**
+ * Hard cap on a single manual backfill window (ticket 04, [S15069/T963]):
+ * `/settle` takes no lookback and reaches back past the monotonic floor on
+ * purpose, so nothing else bounds how much history one call could re-grade in
+ * one inference. Over the cap the call is refused outright (`backfill_too_large`)
+ * rather than silently clamped — an operator re-settling history states the
+ * range they mean, and a silently truncated window would settle less than the
+ * receipt implies.
+ */
+export const NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
 
 /** A `claimed` job older than this is presumed dead and returns to `pending`. */
 export const NOTE_SETTLEMENT_LEASE_MS = 10 * 60 * 1000;
@@ -73,10 +96,17 @@ export const NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER = 2;
  * Why a window exists — and, for `backfill`, the one thing that distinguishes
  * it from every other window.
  *
- * `consecutive`/`compact`/`sessionend`/`residual` are all AUTOMATIC: some event
- * derived the window from the session's own state, and the four of them tile a
- * session's post-era turns monotonically forward, each starting past the last
- * one enqueued.
+ * `consecutive` (turn-stop planning) and `residual` (the closed-session scan)
+ * are the two AUTOMATIC trigger types left (ticket 04, [S15069/T963]): some
+ * event derived the window from the session's own state, and the two of them
+ * tile a session's post-era turns monotonically forward, each starting past
+ * the last one enqueued.
+ *
+ * `compact` and `sessionend` are RETIRED as automatic triggers by the same
+ * ticket — nothing derives one any more — but both remain legal values here:
+ * historical rows from before the retarget carry them, and the vocabulary
+ * itself is schema, not planner behaviour. `planNoteSettlementWindows` no
+ * longer accepts either.
  *
  * `backfill` is the operator's explicit re-settlement of a range that has
  * ALREADY been covered — turns settled by a build whose payload never graded
@@ -85,8 +115,8 @@ export const NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER = 2;
  * disagree with it, so a window that says it is a backfill is exactly a window
  * exempt from the floor. Nothing derives one; only an explicit caller
  * (`enqueueBackfillNoteSettlementJob`, reached from the worker's `POST /settle`)
- * ever creates one, which is why the planner's own trigger parameter excludes it
- * at the type level rather than by convention.
+ * ever creates one, which is why `NoteSettlementWindowPlan`'s own `triggerType`
+ * excludes it at the type level rather than by convention.
  */
 export type NoteSettlementTrigger =
   | "consecutive"
@@ -127,6 +157,8 @@ export interface NoteSettlementJob {
 export type NoteSettlementInsertRefusal =
   /** `window_end < window_start` — not a window at all. */
   | "inverted_range"
+  /** A `backfill` wider than `NOTE_SETTLEMENT_BACKFILL_MAX_TURNS`. */
+  | "backfill_too_large"
   /** At or below the session's last pre-era prompt number. Never exempt. */
   | "below_era_floor"
   /** Below max(cursor, highest enqueued window_end). `backfill` is exempt. */
@@ -141,17 +173,20 @@ export type InsertNoteSettlementJobResult =
 /**
  * A window the planner would cut, before anything is written.
  *
- * `backfill` is excluded alongside `residual` because neither is ever DERIVED:
- * a residual is built by its own scan and a backfill only ever comes from an
- * explicit operator call, so a plan carrying either would be a plan nobody can
- * produce. Excluding it here is also what makes "no automatic planner emits a
- * backfill" a compile-time fact rather than a test's hope.
+ * `triggerType` is the literal `"consecutive"` (ticket 04, [S15069/T963]):
+ * turn-stop planning is the ONLY automatic trigger now — `compact` and
+ * `sessionend` no longer derive or narrow a window at all, and `residual`/
+ * `backfill` are excluded for the same reason they always were, neither is
+ * ever DERIVED (a residual is built by its own scan, a backfill only ever
+ * comes from an explicit operator call). Pinning the field to one literal is
+ * what makes "the automatic planner only ever emits `consecutive`" a
+ * compile-time fact rather than a test's hope.
  */
 export interface NoteSettlementWindowPlan {
   sessionId: number;
   windowStart: number;
   windowEnd: number;
-  triggerType: Exclude<NoteSettlementTrigger, "residual" | "backfill">;
+  triggerType: "consecutive";
 }
 
 const JOB_COLUMNS = `
@@ -314,12 +349,10 @@ export function ensureNoteSettlementCursor(
  * `realPromptPredicate`, spec D1/D10 — reused rather than re-derived here).
  *
  * A sidechain row is born `undone` with a HIGHER prompt number than the root
- * turn dispatching it, so an unfiltered MAX would inflate both readers of this
- * function: `getDecidedPrefixEnd` (whose `ended = MAX - 1` would then land on
+ * turn dispatching it, so an unfiltered MAX would inflate every reader of this
+ * function — `getDecidedPrefixEnd` (whose `ended = MAX - 1` would then land on
  * the still-running root turn itself, one short of covering the phantom
- * sidechain slot) and `planNoteSettlementWindows`'s `sessionend` branch (whose
- * `prefixEnd = MAX` would reach straight past the root turn into the
- * sidechain's own borrowed number). Either way a turn still actively running
+ * sidechain slot) chief among them. Either way a turn still actively running
  * its subagent would be pulled into a settlement window mid-flight (P1-1).
  */
 export function getMaxPromptNumber(db: Database, sessionId: number): number {
@@ -338,9 +371,9 @@ export function getMaxPromptNumber(db: Database, sessionId: number): number {
  * under the shared prompt-clock default (spec D10, ticket 05): a turn has ended
  * once a LATER prompt exists, full stop — the highest ended turn is always one
  * behind the session's current max, so the current (open) turn is excluded by
- * construction. This is the bound `consecutive` uses as-is; `compact` and
- * `sessionend` narrow it further with their own frozen boundary marker (see
- * `planNoteSettlementWindows`).
+ * construction. This is the ONLY bound `planNoteSettlementWindows` uses now
+ * (ticket 04, [S15069/T963]) — the `compact`/`sessionend` narrowing this
+ * function used to feed is retired along with those two triggers.
  *
  * The note-debt classification cursor and the first-still-`pending`-debt
  * truncation are BOTH gone: owed notes are a derived query now (03), `note_debt`
@@ -360,111 +393,60 @@ export function getDecidedPrefixEnd(
   return Math.max(windowStart - 1, ended);
 }
 
-/**
- * The compact boundary marker as `updateCompactAnchor` last repaired it: the
- * highest prompt_number that had reached a terminal status when the compact was
- * handled. Null when the session has never had one.
- */
-export function getCompactBoundaryPromptNumber(
-  db: Database,
-  sessionId: number,
-): number | null {
-  return (
-    db
-      .query<{ boundary: number | null }, [number]>(
-        "SELECT last_compact_turn AS boundary FROM sessions WHERE id = ?",
-      )
-      .get(sessionId)?.boundary ?? null
-  );
-}
-
 export interface NoteSettlementWindowOptions {
   /**
    * The era boundary, and required for that reason: there is no such thing as
    * planning a window without one, so the type says so rather than a comment.
    */
   eraCutoffEpoch: number;
-  consecutiveTurns?: number;
-  minWindowTurns?: number;
+  thresholdTurns?: number;
+  capTurns?: number;
 }
 
 /**
- * The windows this trigger would cut, computed with READS ONLY.
+ * The windows turn-stop planning would cut, computed with READS ONLY.
  *
- * Separating the plan from the write is what makes the below-threshold case cost
- * nothing: a turn-stop that has not reached the 50-turn mark returns an empty
- * plan and never opens a transaction, so the overwhelmingly common event leaves
- * no trace in the database at all.
+ * Ticket 04 ([S15069/T963]) retargets the trigger: turn-stop planning is the
+ * ONLY automatic trigger now. `compact` and `sessionend` no longer derive or
+ * enqueue a window at all — settlement reads the database, never live
+ * context, so a compact's repaired boundary and a session's live end carry no
+ * information this planner needs, and check-natured work does not need
+ * either event's immediacy. The accepted consequence: a session that ends
+ * with fewer than `thresholdTurns` undecided-tail turns leaves that tail
+ * unsettled until enough MORE turns (this session's own later turn-stop, or
+ * the residual scan once it reads as closed) push it over the threshold.
  *
- * Full 50-turn blocks are cut for EVERY trigger — a backfill that lands 130
- * decided turns at once produces two 50-turn windows plus (at a compact or a
- * sessionend) the 30-turn remainder, rather than one 130-turn payload. The
- * remainder is subject to the minimum-window floor with NO exception — see
- * `remainderFloor` below — and only `compact`/`sessionend` may take it —
- * `consecutive` never cuts a partial block.
+ * Separating the plan from the write is what makes the below-threshold case
+ * cost nothing: a turn-stop that has not reached the threshold returns an
+ * empty plan and never opens a transaction, so the overwhelmingly common
+ * event leaves no trace in the database at all.
  *
- * `compact` and `sessionend` each narrow the shared decided-prefix default with
- * their OWN frozen boundary (spec D10, ticket 05 — the three trigger types are
- * NOT interchangeable, each states its upper bound explicitly):
- *
- *   - `compact` is bounded by the repaired anchor marker
- *     (`getCompactBoundaryPromptNumber`), used AS-IS rather than intersected
- *     with the prompt-clock default: the anchor is itself already "the highest
- *     prompt_number that had reached a terminal status when the compact was
- *     handled", computed independently, and can legitimately equal the
- *     session's current max turn (a compact landing between that turn's Stop
- *     and the next prompt). Absent an anchor (never compacted) there is no
- *     boundary to narrow by, so the shared default stands unclamped — never a
- *     licence to settle everything, since the default is itself bounded;
- *   - `sessionend` is bounded by the LIVE max prompt number, read at the exact
- *     moment the hook calls this — that read IS the freeze (spec D7's "hook
- *     冻结的 end 边界"): a session actually ending is stronger evidence than
- *     "a later prompt exists", so unlike the shared default the current turn is
- *     NOT excluded. The frozen value survives only inside the enqueued job's
- *     `window_end`; nothing else persists it, and nothing needs to.
- *
- * `sessionend`'s remainder exemption from the minimum-window floor is DEAD
- * (ownership-and-note-cadence spec, ticket 05: "sessionend 豁免死"). A session
- * ending after fewer than `minWindowTurns` decided turns simply leaves that
- * tail unsettled — not lost, just left to accumulate: the NEXT trigger for
- * this session (a later `consecutive`/`compact`, or the residual scan once
- * the session reads as closed) starts from the same `getNoteSettlementWindowStart`
- * bound and picks the tail up as part of a larger window. This is the same
- * "不足者留待累积" acceptance the spec states for every other short tail —
- * settling six turns cost a whole inference for almost no arc regardless of
- * WHY the session stopped.
+ * Once the threshold is cleared, windows are cut greedily up to the cap: each
+ * iteration takes `min(capTurns, remaining)` turns, so 60 accumulated decided
+ * turns cut one 50-turn window and leave 10 — pending, not lost — for the
+ * next trigger, rather than growing an unbounded single window or holding the
+ * cap's own remainder back the way the old fixed-size block did.
  */
 export function planNoteSettlementWindows(
   db: Database,
   sessionId: number,
-  trigger: Exclude<NoteSettlementTrigger, "residual" | "backfill">,
   options: NoteSettlementWindowOptions,
 ): NoteSettlementWindowPlan[] {
-  const consecutiveTurns =
-    options.consecutiveTurns ?? NOTE_SETTLEMENT_CONSECUTIVE_TURNS;
-  const minWindowTurns =
-    options.minWindowTurns ?? NOTE_SETTLEMENT_MIN_WINDOW_TURNS;
+  const thresholdTurns =
+    options.thresholdTurns ?? NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS;
+  const capTurns = options.capTurns ?? NOTE_SETTLEMENT_WINDOW_CAP_TURNS;
 
   let windowStart = getNoteSettlementWindowStart(
     db,
     sessionId,
     options.eraCutoffEpoch,
   );
-  let prefixEnd = getDecidedPrefixEnd(db, sessionId, windowStart);
-  if (trigger === "compact") {
-    const boundary = getCompactBoundaryPromptNumber(db, sessionId);
-    // Null means no compact has ever been anchored on this session, so there is
-    // no boundary to be bounded by — the shared default stands unclamped.
-    if (boundary !== null) {
-      prefixEnd = boundary;
-    }
-  } else if (trigger === "sessionend") {
-    prefixEnd = getMaxPromptNumber(db, sessionId);
-  }
+  const prefixEnd = getDecidedPrefixEnd(db, sessionId, windowStart);
   const plans: NoteSettlementWindowPlan[] = [];
 
-  while (prefixEnd - windowStart + 1 >= consecutiveTurns) {
-    const windowEnd = windowStart + consecutiveTurns - 1;
+  while (prefixEnd - windowStart + 1 >= thresholdTurns) {
+    const windowSize = Math.min(capTurns, prefixEnd - windowStart + 1);
+    const windowEnd = windowStart + windowSize - 1;
     plans.push({
       sessionId,
       windowStart,
@@ -474,51 +456,7 @@ export function planNoteSettlementWindows(
     windowStart = windowEnd + 1;
   }
 
-  // Ticket 05: no more per-trigger exemption — every remainder, sessionend
-  // included, is subject to the SAME floor.
-  const remainderFloor = minWindowTurns;
-  if (
-    (trigger === "compact" || trigger === "sessionend") &&
-    prefixEnd - windowStart + 1 >= remainderFloor
-  ) {
-    plans.push({
-      sessionId,
-      windowStart,
-      windowEnd: prefixEnd,
-      triggerType: trigger,
-    });
-  }
-
   return plans;
-}
-
-/**
- * The hook's own half of spec D7: freeze this session's SessionEnd boundary and
- * enqueue whatever window it closes over, in one pass. "Freeze" is nothing more
- * than the plan/enqueue pair below reading `getMaxPromptNumber` and committing
- * it into a job's `window_end` — nothing else can create a turn for this
- * session between that read and the commit, so there is no separate boundary
- * column to keep in sync with the job table.
- *
- * Idempotent by construction, satisfying spec D7's "同一会话重复收到 end 事件
- * 只产生一条边界/一单作业": a repeat SessionEnd with no new activity re-derives
- * the identical, already-consumed window, `planNoteSettlementWindows` returns
- * nothing to plan, and `enqueueNoteSettlementWindows` opens no transaction at
- * all. A SessionEnd after a genuine resume with new turns derives a NEW window
- * starting past the previous one (`getNoteSettlementWindowStart` already reads
- * the highest enqueued `window_end`) — the boundary is only ever a boundary,
- * never a lock on the session (spec D7: "边界只是边界,其后新 turn 归下一窗口,
- * 已入队作业不失效").
- */
-export function enqueueSessionEndNoteSettlementWindow(
-  db: Database,
-  sessionId: number,
-  nowEpoch: number,
-  eraCutoffEpoch: number,
-): NoteSettlementJob[] {
-  return planAndEnqueueNoteSettlementWindows(db, sessionId, "sessionend", nowEpoch, {
-    eraCutoffEpoch,
-  });
 }
 
 /**
@@ -566,6 +504,18 @@ function insertJob(
 ): InsertNoteSettlementJobResult {
   if (windowEnd < windowStart) {
     return { ok: false, reason: "inverted_range" };
+  }
+  // Backfill's own size ceiling (ticket 04): no lookback and no monotonic
+  // floor to bound it, so this is the one guard standing between an operator
+  // and re-grading an unbounded stretch of history in a single inference.
+  // Checked alongside `inverted_range` because it is the same kind of guard —
+  // a property of the RANGE ITSELF, true or false before any DB state enters
+  // the picture — rather than a derived floor like the two below.
+  if (
+    triggerType === "backfill" &&
+    windowEnd - windowStart + 1 > NOTE_SETTLEMENT_BACKFILL_MAX_TURNS
+  ) {
+    return { ok: false, reason: "backfill_too_large" };
   }
   if (windowStart <= getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch)) {
     return { ok: false, reason: "below_era_floor" };
@@ -664,16 +614,16 @@ export function enqueueNoteSettlementWindows(
  *
  * `planNoteSettlementWindows` is a bare read and `enqueueNoteSettlementWindows`
  * opens its own separate write transaction — calling them back to back (as
- * `enqueueSessionEndNoteSettlementWindow` used to, and as `runTrigger` in
- * worker/note-settlement.ts still does for its FIRST, gate-only read) leaves a
- * window between the read and the write in which a concurrent writer — another
- * trigger for the SAME session, racing in from a different process — can land
- * its own job. `insertJob`'s freshness check then refuses the now-stale plan
- * WHOLE rather than shrinking it to the remainder: nothing recomputes a smaller
- * replacement, so the turns between the concurrent job's end and this plan's
- * original end are never covered by any job at all. A `sessionend` window has
- * no trigger of its own to come back and retry, so that remainder is lost for
- * good, not just delayed.
+ * `runTrigger` in worker/note-settlement.ts still does for its FIRST, gate-only
+ * read) leaves a window between the read and the write in which a concurrent
+ * writer — another turn-stop for the SAME session, racing in from a different
+ * process — can land its own job. `insertJob`'s freshness check then refuses
+ * the now-stale plan WHOLE rather than shrinking it to the remainder: nothing
+ * recomputes a smaller replacement, so the turns between the concurrent job's
+ * end and this plan's original end are not covered by THIS call — but unlike
+ * the retired `sessionend` race, turn-stop planning always gets a next chance:
+ * the very next turn-stop for this session re-derives from the new bound and
+ * picks the remainder up.
  *
  * `BEGIN IMMEDIATE` (via `runWriteTransaction`) is what closes this: once this
  * transaction starts, no other writer can commit anything about this session
@@ -684,12 +634,11 @@ export function enqueueNoteSettlementWindows(
 export function planAndEnqueueNoteSettlementWindows(
   db: Database,
   sessionId: number,
-  trigger: Exclude<NoteSettlementTrigger, "residual" | "backfill">,
   nowEpoch: number,
   options: NoteSettlementWindowOptions,
 ): NoteSettlementJob[] {
   return runWriteTransaction(db, () => {
-    const plans = planNoteSettlementWindows(db, sessionId, trigger, options);
+    const plans = planNoteSettlementWindows(db, sessionId, options);
     if (plans.length === 0) {
       return [];
     }

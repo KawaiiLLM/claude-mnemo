@@ -16,7 +16,6 @@ import {
   planNoteSettlementWindows,
   releaseNoteSettlementJobClaim,
   type NoteSettlementJob,
-  type NoteSettlementTrigger,
   type NoteSettlementWindowPlan,
 } from "../db/note-settlement";
 import { DEFAULT_CONFIG, type MnemoConfig } from "../shared/config";
@@ -30,17 +29,26 @@ import { DEFAULT_CONFIG, type MnemoConfig } from "../shared/config";
  * the machinery moves, which is the reason the seam is a single async function
  * taking a frozen job and returning a verdict.
  *
- * There are exactly two triggers, and both are content events:
+ * `onTurnStop` is the ONLY automatic trigger left (ticket 04, [S15069/T963]):
+ * it fires a window only once the threshold's worth of consecutive decided
+ * turns have accumulated (25-50 turns, capped per run — see
+ * `db/note-settlement.ts`'s window constants). Below the threshold it is a
+ * pure read and writes nothing.
  *
- *   - `onTurnStop` fires a window only once 50 consecutive decided turns have
- *     accumulated. Below that it is a pure read and writes nothing;
- *   - `onCompact` is a trigger event in its own right (post-repair boundary),
- *     but its own window is subject to the minimum-window floor: under the floor
- *     no job is created and the turns roll forward to the next trigger.
+ * Compact and SessionEnd/finish, resume, worker start and every timer are
+ * explicitly NOT triggers. Settlement reads the database, never live context
+ * — a compact's repaired boundary and a session's live end carry no
+ * information this scheduler needs, and check-natured work does not need
+ * either event's immediacy. They are not non-triggers by omission — the
+ * worker never calls this module from those paths, and the tests assert the
+ * absence. The accepted consequence: a session that ends with fewer than the
+ * threshold's worth of undecided-tail turns leaves that tail unsettled until
+ * a later trigger (this session's own next turn-stop, or the residual scan
+ * once it reads as closed) pushes it over.
  *
- * SessionEnd, resume, worker start and every timer are explicitly NOT triggers.
- * They are not non-triggers by omission — the worker never calls this module
- * from those paths, and the tests assert the absence.
+ * The residual piggyback (closed-session settlement) still rides ONLY on
+ * `onTurnStop` — never on compact or finish — same as before ticket 04, just
+ * with one fewer event to ride.
  *
  * Two config values guard the whole module, and they are not the same guard
  * (ticket 14). `eraCutoffEpoch` is the cutover switch: with none set every turn
@@ -91,7 +99,9 @@ export interface NoteSettlementSchedulerDeps {
    */
   isGracefulExit?: () => boolean;
   logger?: Pick<Console, "warn" | "error">;
-  consecutiveTurns?: number;
+  thresholdTurns?: number;
+  capTurns?: number;
+  /** Floor for the RESIDUAL scan only (ticket 04 leaves this untouched). */
   minWindowTurns?: number;
   leaseMs?: number;
   maxAttempts?: number;
@@ -111,16 +121,15 @@ export interface NoteSettlementPassResult {
 
 export interface NoteSettlementScheduler {
   onTurnStop(sessionDbId: number): Promise<NoteSettlementPassResult>;
-  onCompact(sessionDbId: number): Promise<NoteSettlementPassResult>;
   /**
    * The leak point spec D7 (ticket 05) requires explicit rather than assumed:
    * one attempt at whatever OTHER session's job is due right now, independent
-   * of whether the CALLING event triggered a window of its own. A sessionend
-   * job — frozen and enqueued synchronously by the SessionEnd hook, never by a
-   * trigger this scheduler runs — has no trigger of its own to come back for
-   * it; without this, a session that ends and then goes quiet strands its own
-   * tail window forever. Called after every settlement entry point (turn-stop,
-   * compact, and flush/finishSession), including the overwhelmingly common
+   * of whether the CALLING event triggered a window of its own. Any job whose
+   * own trigger will not come back for it — a backed-off retry, a job left
+   * `pending` by a graceful exit — relies on this. Ticket 04 (`[S15069/T963]`)
+   * narrows WHERE it is called from: only after `onTurnStop`, never after
+   * compact or flush/finishSession any more (see `worker/server.ts`) — but the
+   * mechanism itself is unchanged, including the overwhelmingly common
    * below-threshold turn-stop that used to return before reaching any
    * cross-session scan at all.
    */
@@ -161,8 +170,8 @@ export function createNoteSettlementScheduler(
   const isGracefulExit = deps.isGracefulExit ?? (() => false);
   const logger = deps.logger ?? console;
   const windowOptions = {
-    consecutiveTurns: deps.consecutiveTurns,
-    minWindowTurns: deps.minWindowTurns,
+    thresholdTurns: deps.thresholdTurns,
+    capTurns: deps.capTurns,
   };
   const claimOptions = {
     leaseMs: deps.leaseMs,
@@ -430,7 +439,6 @@ export function createNoteSettlementScheduler(
 
   async function runTrigger(
     sessionDbId: number,
-    trigger: Exclude<NoteSettlementTrigger, "residual" | "backfill">,
   ): Promise<NoteSettlementPassResult> {
     // The era is the switch: with no cutoff every turn is legacy, and a legacy
     // turn is settled by nothing. `settlementEnabled` only stops a live era.
@@ -445,7 +453,7 @@ export function createNoteSettlementScheduler(
 
     let plans: NoteSettlementWindowPlan[];
     try {
-      plans = planNoteSettlementWindows(db, sessionDbId, trigger, {
+      plans = planNoteSettlementWindows(db, sessionDbId, {
         ...windowOptions,
         eraCutoffEpoch,
       });
@@ -456,9 +464,10 @@ export function createNoteSettlementScheduler(
 
     // A turn-stop that has not filled a window is not a trigger: no job, no
     // residual scan, no claim — and, crucially, no write of any kind, so the
-    // overwhelmingly common event stays free. A compact is a trigger even when
-    // the floor suppresses its own window.
-    const triggered = trigger === "compact" || plans.length > 0;
+    // overwhelmingly common event stays free (ticket 04: this is now the ONLY
+    // gate — compact used to be an unconditional trigger even under its own
+    // floor, but compact is no longer a trigger at all).
+    const triggered = plans.length > 0;
     if (!triggered) {
       return inertPass();
     }
@@ -482,7 +491,7 @@ export function createNoteSettlementScheduler(
       // stale `plans` would either refuse the whole window or double-count a
       // range the concurrent writer already claimed.
       created.push(
-        ...planAndEnqueueNoteSettlementWindows(db, sessionDbId, trigger, now(), {
+        ...planAndEnqueueNoteSettlementWindows(db, sessionDbId, now(), {
           ...windowOptions,
           eraCutoffEpoch,
         }),
@@ -581,8 +590,7 @@ export function createNoteSettlementScheduler(
   }
 
   return {
-    onTurnStop: (sessionDbId) => runTrigger(sessionDbId, "consecutive"),
-    onCompact: (sessionDbId) => runTrigger(sessionDbId, "compact"),
+    onTurnStop: (sessionDbId) => runTrigger(sessionDbId),
     leakDueSessions,
   };
 }

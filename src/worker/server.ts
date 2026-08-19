@@ -36,6 +36,7 @@ import { initializeDatabase, migrateTurnCitationsToEdges } from "../db/schema";
 import { runTranscriptPathBackfill } from "../db/transcript-path-backfill";
 import {
   enqueueBackfillNoteSettlementJob,
+  NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
   type NoteSettlementInsertRefusal,
   type NoteSettlementJob,
 } from "../db/note-settlement";
@@ -79,7 +80,7 @@ const IDLE_WORKER_HTTP_MS = 30 * 60 * 1000;
  * The worker is a librarian, not a reader (spec D10, ticket 15).
  *
  * It owns the serialized write to the database, the mechanical retirement of
- * captured work, the two note-settlement triggers and the nightly dream claim —
+ * captured work, the note-settlement trigger and the nightly dream claim —
  * and it hosts NO language model of its own on any path. The resident extraction
  * agent that used to live here (its SDK session, compact management, resume
  * pointer, stall watchdog, obs summary pipeline, per-session summary pass and
@@ -243,6 +244,10 @@ const MANUAL_SETTLE_REFUSAL_STATUS: Record<
   // Not a range at all, and not a range any state of the database could make
   // legal — the payload itself is wrong.
   inverted_range: 400,
+  // Same kind of refusal as inverted_range — a payload-shape problem, not a
+  // database-state one — so it gets the same status (ticket 04: backfill has
+  // no lookback and no monotonic floor, so this is its one size ceiling).
+  backfill_too_large: 400,
   // The one bound a backfill may never cross: pre-cutoff turns were graded
   // under legacy semantics that must not be mixed into a post-era window.
   below_era_floor: 409,
@@ -258,6 +263,7 @@ const MANUAL_SETTLE_REFUSAL_MESSAGE: Record<
   string
 > = {
   inverted_range: "window_end is before window_start",
+  backfill_too_large: `window spans more than ${NOTE_SETTLEMENT_BACKFILL_MAX_TURNS} turns; narrow the range and re-run`,
   below_era_floor:
     "window_start is at or below the session's last pre-era prompt number",
   below_window_floor:
@@ -450,33 +456,33 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   });
 
   /**
-   * Run one settlement trigger. Wrapped so a settlement fault can never fail the
-   * content event that carried it — capture outranks settlement, and a settled
-   * window is recoverable from the durable job row anyway.
+   * Run the settlement trigger. Wrapped so a settlement fault can never fail
+   * the content event that carried it — capture outranks settlement, and a
+   * settled window is recoverable from the durable job row anyway.
+   *
+   * Turn-stop planning is the ONLY automatic trigger (ticket 04, [S15069/T963]):
+   * settlement reads the database, never live context, so compact's own
+   * repaired boundary and a session's live end carry nothing this needs, and
+   * check-natured work does not need either event's immediacy. `handleCompact`
+   * below no longer calls this at all — see its own comment.
    */
-  async function runNoteSettlementTrigger(
-    sessionDbId: number,
-    trigger: "turn-stop" | "compact",
-  ): Promise<void> {
+  async function runNoteSettlementTrigger(sessionDbId: number): Promise<void> {
     try {
-      if (trigger === "compact") {
-        await noteSettlement.onCompact(sessionDbId);
-      } else {
-        await noteSettlement.onTurnStop(sessionDbId);
-      }
+      await noteSettlement.onTurnStop(sessionDbId);
     } catch (error) {
       logger.error?.("note settlement trigger failed", {
         sessionDbId,
-        trigger,
         error,
       });
     }
   }
 
   /**
-   * The leak point (spec D7, ticket 05), run after EVERY settlement entry
-   * point's own logic — including the below-threshold turn-stop path that used
-   * to return before any cross-session scan ran at all. A settlement fault
+   * The leak point (spec D7, ticket 05), run after `handleTurnStop`'s own
+   * trigger — including the below-threshold case that used to return before
+   * any cross-session scan ran at all. Ticket 04 ([S15069/T963]) narrows WHERE
+   * this runs from: only turn-stop now, never compact or flush/finishSession
+   * (their own handlers no longer call it — see each). A settlement fault
    * here must never fail the content event that carried it, same tolerance as
    * `runNoteSettlementTrigger`.
    */
@@ -816,13 +822,15 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     // scans. A direct session drain can otherwise overtake rows already being
     // claimed by an in-flight global drain and terminalize their owner first.
     await scanAndDrainGlobalQueue(sessionDbId);
-    // One of the two settlement triggers (spec D9), and the only one that fires
-    // from ordinary work. It settles nothing until 50 consecutive decided turns
-    // have accumulated, so every other turn-stop costs one indexed read.
-    await runNoteSettlementTrigger(sessionDbId, "turn-stop");
+    // The ONLY automatic settlement trigger (spec D9, retargeted by ticket 04,
+    // [S15069/T963]). It settles nothing until the threshold's worth of
+    // consecutive decided turns have accumulated, so every other turn-stop
+    // costs one indexed read.
+    await runNoteSettlementTrigger(sessionDbId);
     // The leak (spec D7, ticket 05): unconditional, including the below-
     // threshold case above that just returned without triggering anything of
-    // its own.
+    // its own. Ticket 04 confines the leak to THIS entry point alone — compact
+    // and finish/flush no longer call it (see each).
     await runNoteSettlementLeak(sessionDbId);
   }
 
@@ -848,17 +856,17 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   async function finishSession(sessionDbId: number): Promise<void> {
-    // SessionEnd still opens no window of its OWN session here (spec D9, 裁決
-    // 7): closing this session triggers nothing about its own turns — the
-    // SessionEnd HOOK already froze and enqueued that window synchronously
-    // (spec D7, ticket 05), before this flush was ever notified. What flush
-    // adds is the leak: one attempt at whatever OTHER session's job — most
-    // often a sessionend job, which has no trigger of its own — is due right
-    // now. Without it, a session that enqueues its tail and then goes quiet
-    // strands that job until an unrelated session's trigger happens by.
+    // SessionEnd opens no settlement window at all any more (ticket 04,
+    // [S15069/T963]): the hook used to freeze and enqueue a `sessionend`
+    // window synchronously before this flush was ever notified, but that path
+    // is retired — settlement reads the database, not the live context a
+    // session's ending carries, so closing a session has no settlement work
+    // of its own left to do. Flush no longer runs the leak either: turn-stop
+    // is the only entry point the residual/leak piggyback rides now (ticket
+    // 04's "残余搭车通道保持、只挂 turn-stop") — an unrelated session's own
+    // turn-stop is what eventually picks up anything this session left due.
     await drainSessionCompletely(sessionDbId);
     await scanAndDrainGlobalQueue(sessionDbId);
-    await runNoteSettlementLeak(sessionDbId);
   }
 
   async function handleCompact(
@@ -889,14 +897,14 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     await scanAndDrainGlobalQueue(sessionDbId);
 
-    // The second settlement trigger (spec D9). Placed here on purpose: the
-    // boundary marker has already been repaired by updateCompactAnchor above
-    // and the queue is drained, so the note-debt ledger is as decided as it
-    // will get for the turns this compact closes over.
-    await runNoteSettlementTrigger(sessionDbId, "compact");
-    // The leak (spec D7, ticket 05) — see handleTurnStop's call for why this
-    // runs unconditionally after every settlement entry point.
-    await runNoteSettlementLeak(sessionDbId);
+    // Compact creates and triggers NO settlement work any more (ticket 04,
+    // [S15069/T963]): settlement reads the database, never live context, so a
+    // compact's repaired boundary carries nothing this needs, and
+    // check-natured work does not need a compact's immediacy either. The
+    // anchor repair above still matters for its OTHER reader (timeline's own
+    // boundary marker, `mcp/timeline.ts`) — only settlement's consumption of
+    // it is retired. The leak does not run here either: it rides turn-stop
+    // alone now (see `handleTurnStop`).
   }
 
   return {
