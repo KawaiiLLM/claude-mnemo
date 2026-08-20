@@ -330,8 +330,12 @@ describe("remember tool (ticket 02)", () => {
       expect(getSegment(db, segmentId)?.done).toBe("- row one\n- row two");
     });
 
-    test("under 10 turns since the last touch draws the too-soon reminder", () => {
-      const segmentId = createSegmentId("append-too-soon");
+    // Ticket 02 (cadence-simplification, [S15069/T1057]): the "too soon"
+    // reminder (dense writes under 10 turns apart) retired outright, and with
+    // it the `decisions` exemption that existed ONLY to exempt from that one
+    // line — there is nothing left to exempt once the line is gone.
+    test("dense writes under 10 turns apart no longer draw a too-soon reminder", () => {
+      const segmentId = createSegmentId("append-dense");
       // Zero turns have happened in this session since the segment's creation.
       const text = resultText(
         rememberTool(
@@ -340,11 +344,13 @@ describe("remember tool (ticket 02)", () => {
           { callerSessionId: sessionId, now: () => 100 },
         ),
       );
-      expect(text).toContain("over-maintaining");
+      expect(text).not.toContain("over-maintaining");
+      expect(text).not.toContain("too soon");
+      expect(text).toContain("0 turns since this segment's last maintenance.");
     });
 
-    test("a decisions append is exempt from the too-soon reminder", () => {
-      const segmentId = createSegmentId("append-decisions-exempt");
+    test("decisions writes get the identical receipt as any other field — no field-level exemption remains", () => {
+      const segmentId = createSegmentId("append-decisions-parity");
       const text = resultText(
         rememberTool(
           db,
@@ -353,12 +359,30 @@ describe("remember tool (ticket 02)", () => {
         ),
       );
       expect(text).not.toContain("over-maintaining");
-      // Still reports the figure — exempt from the REMINDER, not from the report.
-      expect(text).toContain("since this segment's last maintenance");
+      expect(text).toContain("0 turns since this segment's last maintenance.");
     });
 
-    test("20+ turns since the last touch no longer draws a receipt nudge — the nudge rides the segment card, session-side (ticket 12)", () => {
-      const segmentId = createSegmentId("append-nudge");
+    test("under 20 turns since this segment's last field update, the receipt states the bare count", () => {
+      const segmentId = createSegmentId("append-under-nudge");
+      seedTurnsSince(100, 19, 1);
+      const text = resultText(
+        rememberTool(
+          db,
+          { verb: "append", id: `E${segmentId}`, field: "next_steps", rows: ["still on track"] },
+          { callerSessionId: sessionId, now: () => 500 },
+        ),
+      );
+      expect(text).not.toContain("consider a maintenance pass");
+      expect(text).toContain("19 turns since this segment's last maintenance.");
+    });
+
+    // Ticket 09 (spec "write-mode-edit-semantics"): ticket 02's own `>= 20`
+    // suffix branch on this receipt is retired — the session-wide 20-turn
+    // check on the UserPromptSubmit channel (hooks/note-reminder.ts) is now
+    // the ONE surviving maintenance reminder, so the receipt states the bare
+    // turn count with no suffix regardless of how large the count gets.
+    test("20+ consecutive turns with no update to any of this segment's fields still gets the bare count, no suffix", () => {
+      const segmentId = createSegmentId("append-at-nudge");
       seedTurnsSince(100, 20, 1);
       const text = resultText(
         rememberTool(
@@ -367,11 +391,8 @@ describe("remember tool (ticket 02)", () => {
           { callerSessionId: sessionId, now: () => 500 },
         ),
       );
-      // A receipt only ever reached whoever was already maintaining; the
-      // 20-turn nudge moved to the segment card's header (segment-card.ts),
-      // which renders without any write. The receipt keeps the plain figure.
       expect(text).not.toContain("consider a maintenance pass");
-      expect(text).toContain("since this segment's last maintenance");
+      expect(text).toContain("20 turns since this segment's last maintenance.");
     });
 
     test("a row containing a newline is rejected — one row, one line", () => {
@@ -1023,14 +1044,16 @@ describe("remember write gate (ticket 02)", () => {
   });
 });
 
-// Ticket 13 (spec "节奏与建段指导"): every successful `remember` call, any of
-// the six verbs, stamps `sessions.last_remember_turn_id` — the session's MAX
-// turn row id at that moment (0 when no turn exists yet), the anchor
-// `hooks/note-reminder.ts`'s universal 20-turn check counts turns after. A
-// turn ID, not an epoch (0.12.1): second-granularity timestamps cannot order
-// same-second turns against the call. A parameter-error call must not reset
-// that clock: nothing was checked or written, so it is not a "call" for this
-// purpose.
+// Ticket 13 (spec "节奏与建段指导"), verb scope narrowed by ticket 09
+// (spec "write-mode-edit-semantics"): every successful FIELD-WRITING
+// `remember` call — `create`, `append`, `replace` — stamps
+// `sessions.last_remember_turn_id` — the session's MAX turn row id at that
+// moment (0 when no turn exists yet), the anchor `hooks/note-reminder.ts`'s
+// universal 20-turn check counts turns after. `attach`/`close`/`assign` do
+// NOT stamp it: none of them writes a segment field. A turn ID, not an epoch
+// (0.12.1): second-granularity timestamps cannot order same-second turns
+// against the call. A parameter-error call must not reset that clock either:
+// nothing was checked or written, so it is not a "call" for this purpose.
 describe("last_remember_turn_id stamp (ticket 13, id anchor 0.12.1)", () => {
   let db: Database;
   let sessionId: number;
@@ -1102,7 +1125,7 @@ describe("last_remember_turn_id stamp (ticket 13, id anchor 0.12.1)", () => {
     expect(getSession(db, sessionId)?.lastRememberTurnId).toBeNull();
   });
 
-  test("append also stamps it — every verb counts, not just create/attach", () => {
+  test("append also stamps it — a field-writing verb resets the clock same as create", () => {
     const created = rememberTool(db, {
       verb: "create",
       title: "target segment",
@@ -1116,6 +1139,77 @@ describe("last_remember_turn_id stamp (ticket 13, id anchor 0.12.1)", () => {
     );
 
     expect(getSession(db, sessionId)?.lastRememberTurnId).toBe(0);
+  });
+
+  test("replace also stamps it — the other field-writing verb resets the clock too", () => {
+    const created = rememberTool(db, {
+      verb: "create",
+      title: "target segment for replace",
+      goal: "seed row",
+    });
+    const segmentId = /Created E(\d+)/.exec(resultText(created))![1];
+
+    rememberTool(
+      db,
+      {
+        verb: "replace",
+        id: `E${segmentId}`,
+        field: "goal",
+        oldString: "- seed row",
+        newString: "- revised row",
+      },
+      { callerSessionId: sessionId, now: () => 6000 },
+    );
+
+    expect(getSession(db, sessionId)?.lastRememberTurnId).toBe(0);
+  });
+
+  test("attach/close/assign do NOT stamp the clock — none of them writes a segment field", () => {
+    const created = rememberTool(db, { verb: "create", title: "verb-scoped clock" });
+    const segmentId = /Created E(\d+)/.exec(resultText(created))![1];
+
+    // A field write anchors the clock at the turn existing at that moment.
+    const fieldWriteTurn = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+         VALUES (?, 1, 'active', 5000) RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    rememberTool(
+      db,
+      { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["field write"] },
+      { callerSessionId: sessionId, now: () => 5000 },
+    );
+    expect(getSession(db, sessionId)?.lastRememberTurnId).toBe(fieldWriteTurn);
+
+    // A newer turn lands, then attach/close/assign all succeed in a row — if
+    // any of them incorrectly touched the clock, it would move to this turn's
+    // (newer) id instead of staying pinned at the field write above.
+    db.query<unknown, [number]>(
+      `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+       VALUES (?, 2, 'active', 6000)`,
+    ).run(sessionId);
+
+    rememberTool(
+      db,
+      { verb: "attach", id: `E${segmentId}` },
+      { callerSessionId: sessionId, now: () => 7000 },
+    );
+    expect(getSession(db, sessionId)?.lastRememberTurnId).toBe(fieldWriteTurn);
+
+    rememberTool(
+      db,
+      { verb: "close", id: `E${segmentId}` },
+      { callerSessionId: sessionId, now: () => 7000 },
+    );
+    expect(getSession(db, sessionId)?.lastRememberTurnId).toBe(fieldWriteTurn);
+
+    rememberTool(
+      db,
+      { verb: "assign", id: `E${segmentId}`, turns: [`S${sessionId}/T2`] },
+      { callerSessionId: sessionId, now: () => 7000 },
+    );
+    expect(getSession(db, sessionId)?.lastRememberTurnId).toBe(fieldWriteTurn);
   });
 
   test("without a caller session, nothing is stamped (there is nothing to attribute it to)", () => {

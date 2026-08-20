@@ -36,7 +36,7 @@ export interface SessionRecord {
   scanCursorLine: number;
   parentSessionId: number | null;
   lineageStatus: string;
-  /** Ticket 13 (anchor revised 0.12.1): the session's MAX turn row id at its last successful `remember` call (any verb; 0 = called before any turn) — `null` if never. See touchSessionRememberActivity. */
+  /** Ticket 13 (anchor revised 0.12.1; verb scope narrowed to field-writing calls only by ticket 09): the session's MAX turn row id at its last successful field-writing `remember` call (`create`/`append`/`replace` — not `attach`/`close`/`assign`; 0 = called before any turn) — `null` if never. See touchSessionRememberActivity. */
   lastRememberTurnId: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
@@ -568,14 +568,16 @@ export function touchSessionCompletion(
 }
 
 /**
- * `remember`'s own end-of-call stamp (ticket 13, spec "节奏与建段指导"): the
- * ONE column this touches, same "dedicated setter, never the general upsert"
- * shape `touchSessionCompletion` above already uses for
- * `updated_at_epoch`/`completed_at_epoch` — a session-arc field a routine
- * SessionStart/UserPromptSubmit upsert must never stomp back to an earlier
- * value. `mcp/remember.ts` calls this once per successful verb (any of the
- * six, not just the field-writing ones) — a parameter-error call never
- * reaches here, so a rejected attempt does not reset the clock.
+ * `remember`'s own end-of-call stamp (ticket 13, spec "节奏与建段指导"; verb
+ * scope narrowed by ticket 09): the ONE column this touches, same "dedicated
+ * setter, never the general upsert" shape `touchSessionCompletion` above
+ * already uses for `updated_at_epoch`/`completed_at_epoch` — a session-arc
+ * field a routine SessionStart/UserPromptSubmit upsert must never stomp back
+ * to an earlier value. `mcp/remember.ts` calls this once per successful
+ * FIELD-WRITING verb only (`create`/`append`/`replace` — `attach`/`close`/
+ * `assign` move or toggle a segment without touching a field, so they leave
+ * the clock alone) — a parameter-error call never reaches here either, so a
+ * rejected attempt does not reset the clock.
  */
 export function touchSessionRememberActivity(
   db: Database,
