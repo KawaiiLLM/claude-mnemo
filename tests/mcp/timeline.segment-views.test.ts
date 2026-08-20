@@ -323,7 +323,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
   });
 
   describe("turns view", () => {
-    test("every member renders in the unified row form, in event order, under its session transition line", () => {
+    test("every member renders in the ONE milestone row form (ticket 05), in event order, under its session transition line — no metadata line, no `- content:`", () => {
       const t1 = makeTurn(1, { title: "first", promptText: "please build the first thing" });
       const t2 = makeTurn(2, { title: "second", promptText: "now the second thing" });
       addSegmentMembers(db, segmentId, [t1, t2], CUTOFF);
@@ -334,13 +334,18 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       // citation is split across a transition line and a bare `[T<m>]` row.
       expect(output).not.toContain(" | ");
       expect(lines).toContain(`    [S${sessionId}] E-view session`);
-      expect(output).toContain("        [T1] first");
-      expect(output).toContain("            - content: please build the first thing");
-      expect(output).toContain("        [T2] second");
-      expect(output).toContain("            - content: now the second thing");
+      // Ticket 05: the turns view row is now the milestone row (address, stamp,
+      // type glyph, title) — no metadata line, no `- content:`/`- prompt:`
+      // field row. `type` was never set on these members, so the glyph is the
+      // pending placeholder (`⏳`).
+      expect(output).toMatch(/^ {8}\[T1\] \d{2}-\d{2} \d{2}:\d{2} ⏳ first$/m);
+      expect(output).toMatch(/^ {8}\[T2\] \d{2}-\d{2} \d{2}:\d{2} ⏳ second$/m);
+      expect(output).not.toContain("- content:");
+      expect(output).not.toContain("- prompt:");
+      expect(output).not.toContain("please build the first thing");
 
-      const i1 = lines.findIndex((line) => line.includes("[T1] first"));
-      const i2 = lines.findIndex((line) => line.includes("[T2] second"));
+      const i1 = lines.findIndex((line) => line.includes("[T1]") && line.includes("first"));
+      const i2 = lines.findIndex((line) => line.includes("[T2]") && line.includes("second"));
       expect(i1).toBeGreaterThan(-1);
       expect(i2).toBeGreaterThan(i1);
     });
@@ -362,7 +367,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           pageSize: 2,
         });
         for (const entry of view.pageMembers) {
-          seen.add(entry.turn.promptNumber);
+          seen.add(entry.member.promptNumber);
         }
         if (page >= view.pageCount) {
           break;
@@ -419,7 +424,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           pageBudget: oneRowCost + 5,
         });
         for (const entry of view.pageMembers) {
-          seen.add(entry.turn.promptNumber);
+          seen.add(entry.member.promptNumber);
         }
         if (page >= view.pageCount) {
           break;
@@ -428,5 +433,116 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       }
       expect(seen).toEqual(new Set([1, 2, 3]));
     });
+  });
+});
+
+describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-row-form.md)", () => {
+  // The ticket's own verbatim fixture is `timeline(id="E31/T1...")`:
+  //
+  //   [E31] title
+  //       [S15069]
+  //           [T821] 08-17 18:19 ⚖️ title
+  //               ↳ T811, T812
+  //           [T822] 08-17 18:20 ⚖️ title
+  //       [S15088]
+  //           [T21] 08-18 18:19 ⚖️ title
+  //           [T22] 08-19 18:19 ⚖️ title
+  //       [S15069]
+  //           [T823] 08-20 10:19 ⚖️ title
+  //
+  // Same caveat as the S<n> golden sample (tests/mcp/timeline.test.ts): the
+  // specific ids are the ticket author's own illustrative session and are not
+  // reproducible here (auto-increment) — this fixture reconstructs the SAME
+  // shape (a titled segment spanning two untitled sessions, re-visiting the
+  // first, with one antecedent citation) and asserts the rendered block
+  // byte-for-byte against a literal expected string. `E<n>/T1...` defaults to
+  // `view: "turns"` (ticket 09), which is exactly what this sample exercises —
+  // it is never a `view: "milestones"` call.
+  test("byte-for-byte: [E<n>] title / [S<n>] (bare, re-emitted per run) / [T<n>] stamp glyph title / ↳ addresses", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionA = upsertSession(db, {
+      contentSessionId: "golden-e-session-a",
+      project: "/tmp/golden",
+      title: null,
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: Math.floor(Date.UTC(2026, 7, 16, 9, 0) / 1000),
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    const sessionB = upsertSession(db, {
+      contentSessionId: "golden-e-session-b",
+      project: "/tmp/golden",
+      title: null,
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: Math.floor(Date.UTC(2026, 7, 18, 18, 0) / 1000),
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    const insertTurn = (sid: number, promptNumber: number, epoch: number): number =>
+      db
+        .query<{ id: number }, [number, number, number]>(
+          `INSERT INTO turns (
+             session_id, prompt_number, status, type, title, created_at_epoch,
+             user_prompt, assistant_response, content, files_read, files_modified, tags
+           ) VALUES (?, ?, 'extracted', '["decision"]', 'title', ?, 'the user asked something',
+                     'assistant response text', 'turn body', '[]', '[]', '[]')
+           RETURNING id`,
+        )
+        .get(sid, promptNumber, epoch)!.id;
+
+    const t811Epoch = Math.floor(Date.UTC(2026, 7, 16, 9, 0) / 1000);
+    const t812Epoch = Math.floor(Date.UTC(2026, 7, 16, 9, 5) / 1000);
+    const t821Epoch = Math.floor(Date.UTC(2026, 7, 17, 18, 19) / 1000);
+    const t822Epoch = Math.floor(Date.UTC(2026, 7, 17, 18, 20) / 1000);
+    const t21Epoch = Math.floor(Date.UTC(2026, 7, 18, 18, 19) / 1000);
+    const t22Epoch = Math.floor(Date.UTC(2026, 7, 19, 18, 19) / 1000);
+    const t823Epoch = Math.floor(Date.UTC(2026, 7, 20, 10, 19) / 1000);
+
+    const t811 = insertTurn(sessionA, 811, t811Epoch);
+    const t812 = insertTurn(sessionA, 812, t812Epoch);
+    const t821 = insertTurn(sessionA, 821, t821Epoch);
+    const t822 = insertTurn(sessionA, 822, t822Epoch);
+    const t21 = insertTurn(sessionB, 21, t21Epoch);
+    const t22 = insertTurn(sessionB, 22, t22Epoch);
+    const t823 = insertTurn(sessionA, 823, t823Epoch);
+
+    writeMemoryEdges(
+      db,
+      [
+        { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t811 }, relation: "depends-on", provenance: "judged" },
+        { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t812 }, relation: "depends-on", provenance: "judged" },
+      ],
+      t821Epoch,
+      { eligibleForRelation: "unrestricted" },
+    );
+
+    const segment = createSegment(db, { title: "title", type: ["implement"], nowEpoch: t811Epoch });
+    // Event order, NOT insertion order: S15069(T821,T822), S15088(T21,T22),
+    // S15069(T823) again — the interleaving the sample's own repeated
+    // `[S15069]` line depends on.
+    addSegmentMembers(db, segment.id, [t821, t822, t21, t22, t823], t823Epoch);
+
+    const output = timelineQuery(db, { id: `E${segment.id}/T1...` });
+
+    expect(output).toContain(
+      [
+        `[E${segment.id}] title`,
+        `    [S${sessionA}]`,
+        "        [T821] 08-17 18:19 ⚖️ title",
+        "            ↳ T811, T812",
+        "        [T822] 08-17 18:20 ⚖️ title",
+        `    [S${sessionB}]`,
+        "        [T21] 08-18 18:19 ⚖️ title",
+        "        [T22] 08-19 18:19 ⚖️ title",
+        `    [S${sessionA}]`,
+        "        [T823] 08-20 10:19 ⚖️ title",
+      ].join("\n"),
+    );
   });
 });

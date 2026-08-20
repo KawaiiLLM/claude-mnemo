@@ -340,10 +340,19 @@ describe("金样例 — the rendered row contract", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 金样例 补充: turns 表溶解 — the unified row plus a `metadata` slot
+  // ticket 05 (.scratch/view-render-repair/05-timeline-one-row-form.md):
+  // turns 表溶解's SECOND act — the `metadata`/`- content:` shape these two
+  // tests used to pin (read-write-contract spec) was itself replaced: the
+  // turns view now adopts the SAME minimal milestone row this file's
+  // "milestone view" tests above already assert (`[T<n>] date time glyph
+  // title`), with no metadata line and no `- content:` anywhere on ANY
+  // timeline output. `[rewind]` does not carry over either — that marker is
+  // recall's own row (format.ts's `FormattedTurn.wasRolledBack`), asserted on
+  // recall separately in this same file ("session turn listing" above);
+  // timeline's row form is time/type/title only (ticket 05's own title).
   // -------------------------------------------------------------------------
 
-  test("turns view: no tabular surface, and a metadata line sits unprefixed directly under the row", () => {
+  test("turns view: no tabular surface, no metadata line, no `- content:` — the SAME minimal row the milestones view uses", () => {
     insertSession(15069, null);
     insertSegment(31, "title");
     const first = insertTurn({
@@ -359,19 +368,18 @@ describe("金样例 — the rendered row contract", () => {
 
     const output = timelineQuery(db, { id: "E31", view: "turns" });
 
+    // No `type` was stored, so the glyph is the pending placeholder (`⏳`) —
+    // the same fact `milestoneEffGrade`'s truth table and every other view
+    // read off an empty type list.
     expect(output).toBe(
-      [
-        "[E31] title",
-        "    [S15069]",
-        "        [T823] title [rewind]",
-        "            08-17 18:19 · 🔧20 ✏️3",
-        "            - content: user prompt",
-      ].join("\n"),
+      ["[E31] title", "    [S15069]", "        [T823] 08-17 18:19 ⏳ title"].join("\n"),
     );
     expect(output).not.toContain(" | ");
+    expect(output).not.toContain("- content:");
+    expect(output).not.toContain("[rewind]");
   });
 
-  test("turns view: the metadata line carries the gap from the previous member", () => {
+  test("turns view: every member states its OWN stamp inline (no shared gap line to carry it)", () => {
     insertSession(15069, null);
     insertSegment(31, "title");
     const first = insertTurn({ sessionId: 15069, promptNumber: 823, title: "title", epoch: T821_EPOCH });
@@ -384,7 +392,8 @@ describe("金样例 — the rendered row contract", () => {
     addSegmentMembers(db, 31, [first, second], CUTOFF, { eligibleForRelation: "unrestricted" });
 
     const lines = timelineQuery(db, { id: "E31", view: "turns" }).split("\n");
-    expect(lines).toContain("            08-17 18:25 · +6m");
+    expect(lines).toContain("        [T823] 08-17 18:19 ⏳ title");
+    expect(lines).toContain("        [T824] 08-17 18:25 ⏳ title");
   });
 
   test("metadata joins filter.fields: recall leaves it out by default and renders it on request", () => {

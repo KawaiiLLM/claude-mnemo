@@ -327,6 +327,31 @@ describe("milestone rows nest under segment lines, lexicographic edge-signal adm
     expect(nestedLines).toEqual(standaloneLines);
   });
 
+  test("the plain S<n> turns view flags a corrector too (view-render-repair ticket 05): row parity means the ⚑ is computed on that route, not just carried on the E<n> one", () => {
+    // Ticket 05 collapsed both turn views onto the milestone row. On the
+    // `E<n>` route the corrector flag rides `RankedSegmentMember`; the plain
+    // `S<n>` route has no such member and resolves the flag through its own
+    // edge query instead. Two code paths asserted to agree is exactly where a
+    // divergence hides silently, and nothing pinned this half — an independent
+    // mutation swapping the S-route's `supersedes` test for `override` left
+    // the whole suite green. This is that missing pin: T21 carries an outgoing
+    // `supersedes` edge, so its row must show ⚑ on the S<n> route, while a
+    // sibling turn without one must not.
+    const rendered = timelineQuery(db, { id: `S${sessionId}`, view: "turns", pageSize: 50 });
+
+    const correctorRow = rendered
+      .split("\n")
+      .find((line) => line.includes("correct the approach"));
+    expect(correctorRow).toBeDefined();
+    expect(correctorRow).toContain("⚑");
+
+    const plainRow = rendered
+      .split("\n")
+      .find((line) => line.includes("quiet middle step"));
+    expect(plainRow).toBeDefined();
+    expect(plainRow).not.toContain("⚑");
+  });
+
   test("election is provably grade-free (view-render-repair ticket 02, [S15069/T1035]): under OPPOSED significance_grade assignments the E<n> selection stays byte-identical", () => {
     // `pageSize: 1` is what makes this test able to fail. The corrector
     // segment has two live candidates (the third is override-excluded), so at

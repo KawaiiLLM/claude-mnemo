@@ -22,7 +22,6 @@ import { resolveSessionTranscriptPath } from "../shared/paths";
 import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
 import { isTaskCausalityEra } from "../task-causality-era";
 import {
-  COMPACT_TYPE_GLYPH,
   LEGACY_TYPE_GLYPH,
   MEMORY_TYPES,
   typeListGlyph,
@@ -36,7 +35,6 @@ import {
   RENDER_INDENT_STEP,
   renderSessionTransitionLine,
   renderTurnAddress,
-  REWIND_MARKER,
   truncateText,
   type TruncationSignal,
 } from "./format";
@@ -196,10 +194,19 @@ export interface TimelineView {
    * anchor, which is a separate, pre-existing mechanism.
    */
   eraSegmentIdByTurnId: ReadonlyMap<number, number>;
+  /**
+   * Ticket 05: `↳` antecedents and the self-corrector flag (⚑) for `pageTurns`
+   * — the plain `S<n>` turns view has no `RankedSegmentMember` to read
+   * `isCorrector` off (that concept exists only inside a segment), so this is
+   * resolved eagerly here off the same `memory_edges` predicate
+   * (`resolveTurnRowLinks`), keeping the render step a pure function of
+   * `TimelineView` like every other one. Keyed by turn DB id; empty outside
+   * the turns view.
+   */
+  turnRowLinks: ReadonlyMap<number, TurnRowLinks>;
 }
 
 export interface RenderTimelineOptions {
-  promptCap?: number;
   showEarlierHint?: boolean;
   /**
    * Character ceiling on any rendered title, in every view (spec §D). Replaces
@@ -237,7 +244,6 @@ export interface SystemTimezoneSource {
 }
 
 export const DEFAULT_TIMELINE_PAGE_SIZE = 30;
-export const PROMPT_COLUMN_CAP = 100;
 export const BROKEN_PROMPT_MIN_PREFIX = 20;
 export const BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1000;
 export const TOOL_BURST_TOP_N = 3;
@@ -2153,6 +2159,16 @@ export function buildTimelineView(
     viewKind === "turns"
       ? (pagedTurns.items[0]?.createdAtEpoch ?? null)
       : (pagedMilestones.items[0]?.turn.createdAtEpoch ?? null);
+  // Ticket 05: `↳`/`⚑` facts for the plain turns view's own rows — the same
+  // `memory_edges` predicate `RankedSegmentMember.isCorrector` uses, resolved
+  // directly since this view has no segment membership to read it off.
+  const turnRowLinks =
+    viewKind === "turns"
+      ? resolveTurnRowLinks(
+          db,
+          pagedTurns.items.map((turn) => ({ turnId: turn.id, sessionId: turn.sessionId })),
+        )
+      : new Map<number, TurnRowLinks>();
 
   return {
     view: viewKind,
@@ -2189,6 +2205,7 @@ export function buildTimelineView(
     orphanAnchors,
     segmentMilestoneSelection,
     eraSegmentIdByTurnId,
+    turnRowLinks,
   };
 }
 
@@ -2403,16 +2420,10 @@ function formatShowingLine(view: TimelineView): string | null {
 
 function renderTurnTable(
   view: TimelineView,
-  promptCap: number,
   titleCap: number,
   signal?: TruncationSignal,
 ): string[] {
-  const renderedTurns = view.pageTurns.map((turn) => ({
-    turn,
-    marker: null as string | null,
-  }));
-
-  return renderTurnRows(view, renderedTurns, promptCap, titleCap, signal);
+  return renderTurnRows(view, titleCap, signal);
 }
 
 const MILESTONE_MARKER_GLYPH: Record<Exclude<MilestoneMarker, null>, string> = {
@@ -2535,6 +2546,33 @@ function milestonePromptPrefix(turn: TurnRecord, signal?: TruncationSignal): str
     limit: MILESTONE_PROMPT_PREFIX_CAP,
     signal,
   });
+}
+
+/**
+ * The unified row's identifying text (ticket 05, spec 补充裁决 "行标签取
+ * title,无题时才回退 prompt"): the stored title when there is one, else a
+ * prompt-derived label, matching `milestonePromptPrefix`'s own injected-content
+ * handling (a `<task-notification>`/`<cross-session-message>` envelope collapses
+ * to `MILESTONE_NOTIFICATION_MARKER` rather than dumping raw harness XML; a
+ * slash-command envelope keeps its command name) — the empirical basis pinning
+ * this fallback (a 40-turn window where 15 prompts said nothing about what
+ * happened) is exactly the noise this collapsing already guards against
+ * elsewhere. Uncapped: the caller truncates against ITS OWN `titleCap`, which
+ * varies per render call (recall's SessionStart injection uses a smaller one).
+ */
+function titleOrPromptLabel(title: string | null, rawPrompt: string | null): string {
+  if (title !== null && title.trim() !== "") {
+    return title;
+  }
+  if (rawPrompt === null) {
+    return "(untitled)";
+  }
+  const commandName = extractCommandName(rawPrompt);
+  if (commandName === null && isKnownSystemInjectedContent(rawPrompt.trimStart())) {
+    return MILESTONE_NOTIFICATION_MARKER;
+  }
+  const prompt = cleanPromptForLabel(rawPrompt);
+  return prompt === "" ? "(untitled)" : prompt;
 }
 
 /** One spine row plus the `↳` antecedents homed under it — the budget unit (spec §D). */
@@ -3457,40 +3495,36 @@ function fitMilestoneBodyToBudget(
 
   return { lines: [...body.lines(), MILESTONE_OVER_BUDGET_NOTE], hiddenTurns: body.hasHiddenTurns() };
 }
+/**
+ * The `[S<n>]` → `[T<n>]` → `↳` hierarchy for the DIRECT `S<n>` route, one
+ * indent step shallower than the segment-nested one
+ * (`TIMELINE_SESSION_INDENT`/`TIMELINE_TURN_INDENT`/`TIMELINE_FIELD_INDENT`):
+ * addressed directly, a session has no `[E<n>]` ancestor above it, so its own
+ * transition line sits at column 0 (spec 金样例 `[S15069] title`, not
+ * `    [S15069] title`) and every rung below it shifts up by one step too.
+ * The `E<n>` route's rows (and the `S<n>` arc view's era-nested rows, still
+ * under a spine `[E<n>]`) keep the deeper constants — unchanged, sample 1's
+ * own nesting depth.
+ */
+const DIRECT_TURN_INDENT = RENDER_INDENT_STEP;
+const DIRECT_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
+
 function renderTurnRows(
   view: TimelineView,
-  renderedTurns: Array<{ turn: TurnRecord; marker: string | null }>,
-  promptCap: number,
   titleCap: number,
   signal?: TruncationSignal,
 ): string[] {
-  if (renderedTurns.length === 0) {
+  if (view.pageTurns.length === 0) {
     return [];
   }
 
-  const brokenPromptCandidates = new Set<number>();
-  for (const pair of view.windowSignals.brokenPromptPairs) {
-    brokenPromptCandidates.add(pair.first);
-    brokenPromptCandidates.add(pair.second);
-  }
-
-  const previousEpochByPrompt = computePreviousEpochByPrompt(view.windowTurns);
-
-  // The session transition line the whole page's rows hang under (spec 金样例):
-  // one session per `S<n>` view, so it is emitted once, with its title.
-  const lines = [
-    "",
-    renderSessionTransitionLine(
-      view.session.id,
-      view.session.title,
-      TIMELINE_SESSION_INDENT,
-    ),
-  ];
+  // The session transition line the whole page's rows hang under (spec 金样
+  // 例): one session per `S<n>` view, so it is emitted once, with its title,
+  // at column 0 (this route's own top-level bracket — see DIRECT_TURN_INDENT).
+  const lines = ["", renderSessionTransitionLine(view.session.id, view.session.title, "")];
 
   let previousRenderedEpoch: number | null = null;
-  for (let index = 0; index < renderedTurns.length; index += 1) {
-    const { turn, marker } = renderedTurns[index]!;
-
+  for (const turn of view.pageTurns) {
     if (
       previousRenderedEpoch !== null &&
       !sameLocalDate(previousRenderedEpoch, turn.createdAtEpoch)
@@ -3499,19 +3533,7 @@ function renderTurnRows(
     }
 
     lines.push(
-      ...renderTurnRow(
-        turn,
-        previousEpochByPrompt.get(turn.promptNumber) ?? null,
-        brokenPromptCandidates.has(turn.promptNumber),
-        promptCap,
-        titleCap,
-        // The page's FIRST row carries the full `[S<n>][T<m>]` address so the
-        // page is self-contained for a citation join (spec 补充裁决).
-        index === 0,
-        view.session.id,
-        marker,
-        signal,
-      ),
+      ...renderPlainTurnRowLines(turn, view.turnRowLinks.get(turn.id), titleCap, signal),
     );
     previousRenderedEpoch = turn.createdAtEpoch;
   }
@@ -3519,74 +3541,59 @@ function renderTurnRows(
   return lines;
 }
 
-function computePreviousEpochByPrompt(turns: TurnRecord[]): Map<number, number | null> {
-  const out = new Map<number, number | null>();
-  let previous: number | null = null;
-
-  for (const turn of sortTurnsForAnalysis(turns)) {
-    out.set(turn.promptNumber, previous);
-    previous = turn.createdAtEpoch;
-  }
-
-  return out;
-}
-
 function renderDayDivider(currentEpoch: number, previousRenderedEpoch: number): string {
   return `── ${formatLocalDateWithWeekday(currentEpoch)} · ${formatGap(currentEpoch, previousRenderedEpoch)} idle ──`;
 }
 
 /**
- * One turn in the unified row form plus its `metadata` slot (spec 补充裁决
- * "turns 表溶解"): the address row, then the unprefixed metadata line, then
- * `- content:`. Returns the whole unit's lines — a row is no longer one string
- * because it is no longer one table row.
- *
- * The signals the table used to spend columns on survive as row decoration:
- * `※` still marks a broken-prompt candidate (on the metadata line, next to the
- * gap it is a claim about), `~~`/`⨯` still mark an undone turn, and `[ext:…]`
- * still marks an externally-sourced prompt.
+ * The turn view's identifying label, INCLUDING the compact special case (spec
+ * 金样例): `titleOrPromptLabel`'s title-else-prompt-fallback for an ordinary
+ * turn, or the compact marker's own token-count/trigger summary — which no
+ * longer carries its own leading `⏸`, since the row's type glyph
+ * (`typeEmoji`, resolving `compact` to the same glyph) already supplies it;
+ * repeating it in the label would double it up.
  */
-function renderTurnRow(
+function resolveTurnRowLabel(turn: TurnRecord): string {
+  if (turn.type.includes("compact")) {
+    const compactMetadata = getCompactMetadata(turn.tags);
+    const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
+    const trigger = compactMetadata?.trigger ?? "manual";
+    return `/compact ${preTokens} tokens, ${trigger}`;
+  }
+  return titleOrPromptLabel(turn.title, turn.userPrompt);
+}
+
+/**
+ * One row in the plain `S<n>` turns view (spec 金样例 `[T821] 08-17 18:19 ⚖️
+ * title`, plus `↳ T811, T812`): the SAME row shape `renderSegmentMilestoneRow`
+ * renders, over a bare `TurnRecord` instead of a `RankedSegmentMember` — this
+ * view has no segment, so there is no rank-facts row to read `isCorrector` off
+ * (`links`, resolved eagerly in `buildTimelineView` via `resolveTurnRowLinks`,
+ * supplies it and the `↳` addresses instead). `⨯`/strikethrough still mark an
+ * undone turn (unrelated to this ticket's renderer merge, kept as-is).
+ */
+function renderPlainTurnRowLines(
   turn: TurnRecord,
-  prevEpoch: number | null,
-  isBrokenPromptCandidate: boolean,
-  promptCap: number,
+  links: TurnRowLinks | undefined,
   titleCap: number,
-  includeSessionPrefix: boolean,
-  sessionId: number,
-  marker: string | null = null,
   signal?: TruncationSignal,
 ): string[] {
   const isUndone = turn.status === "undone";
-  const isCompactMarker = turn.type.includes("compact");
-  const compactMetadata = isCompactMarker ? getCompactMetadata(turn.tags) : null;
-  const gapSuffix = isBrokenPromptCandidate ? " ※" : "";
-  const sourceBadges = extractSourceTags(turn.tags)
-    .map((source) => `[ext:${source}]`)
-    .join(" ");
-  const promptCore =
-    isCompactMarker ? "/compact" : cleanPromptForLabel(turn.userPrompt);
-  const promptWithBadges =
-    isCompactMarker
-      ? promptCore
-      : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
-  const promptText = sanitizeTimelineField(
-    truncateText(promptWithBadges, { limit: promptCap, signal }),
-  );
+  const flag = links?.isCorrector ? "⚑ " : "";
   const statusPrefix = isUndone ? "⨯ " : "";
-  const titleText = sanitizeTimelineField(
-    renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker, signal),
+  const glyph = typeEmoji(turn.type);
+  const label = sanitizeTimelineField(
+    truncateText(resolveTurnRowLabel(turn), { limit: titleCap, signal }),
   );
-
-  const address = renderTurnAddress(turn.promptNumber, sessionId, includeSessionPrefix);
+  const titleText = isUndone ? `~~${label}~~` : label;
+  const stamp = `${formatLocalMonthDay(turn.createdAtEpoch)} ${formatLocalTime(turn.createdAtEpoch)}`;
+  const address = renderTurnAddress(turn.promptNumber, turn.sessionId, false);
   const lines = [
-    `${TIMELINE_TURN_INDENT}${statusPrefix}${address} ${titleText}`.trimEnd(),
-    `${TIMELINE_FIELD_INDENT}${composeTurnMetadata(turn, prevEpoch)}${gapSuffix}`,
+    `${DIRECT_TURN_INDENT}${flag}${statusPrefix}${address} ${stamp} ${glyph} ${titleText}`.trimEnd(),
   ];
-  if (promptText !== "") {
-    lines.push(
-      `${TIMELINE_FIELD_INDENT}- prompt: ${isUndone ? `~~${promptText}~~` : promptText}`,
-    );
+  const antecedents = links?.antecedents ?? [];
+  if (antecedents.length > 0) {
+    lines.push(`${DIRECT_FIELD_INDENT}↳ ${antecedents.join(", ")}`);
   }
   return lines;
 }
@@ -3630,50 +3637,6 @@ export function composeTurnMetadata(
     ...(previousEpoch === null ? [] : [formatGap(turn.createdAtEpoch, previousEpoch)]),
     ...(stats === "—" ? [] : [stats]),
   ].join(" · ");
-}
-
-/**
- * The turn row's identifying text. No type glyph: the turn view's row is the
- * address plus the title and nothing else (spec 金样例 `[T823] title
- * [rewind]`) — the glyph is a MILESTONE-row element, where the whole point of
- * a row is to say what kind of decision it was. A compact marker keeps its own
- * glyph because that glyph IS the row's identity, not a facet of it.
- */
-function renderTitleCell(
-  turn: TurnRecord,
-  isUndone: boolean,
-  compactMetadata: { preTokens: number; trigger: string } | null,
-  titleCap: number,
-  marker: string | null = null,
-  signal?: TruncationSignal,
-): string {
-  const markerPrefix = marker ? `${marker} ` : "";
-
-  if (turn.type.includes("compact")) {
-    const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
-    const trigger = compactMetadata?.trigger ?? "manual";
-    return `${markerPrefix}${COMPACT_TYPE_GLYPH} /compact ${preTokens} tokens, ${trigger}`;
-  }
-
-  // A missing type no longer withholds the title. Gating on it conflated "is
-  // there anything to show" with "is every column populated", and since the
-  // extraction agent that used to write `type` was retired, that conflation
-  // hid every unreviewed turn's title behind ⏳ — 926 titles in one measured
-  // session, of which 661 rendered. The fallback for an unknown type already
-  // existed one line under the gate that made it unreachable.
-  if (isUndone) {
-    if (turn.title !== null) {
-      const body = truncateText(turn.title, { limit: titleCap, signal });
-      return `${markerPrefix}~~${body}~~`;
-    }
-    return `${markerPrefix}⨯`.trim();
-  }
-
-  if (turn.status === "extracted" && turn.title !== null) {
-    return `${markerPrefix}${truncateText(turn.title, { limit: titleCap, signal })}`;
-  }
-
-  return `${markerPrefix}⏳`.trim();
 }
 
 function sanitizeTimelineField(value: string): string {
@@ -3825,40 +3788,60 @@ export interface SegmentMilestoneRow {
   antecedents: string[];
   /** The owning session's title, for the transition line above the row. */
   sessionTitle: string | null;
+  /**
+   * Raw prompt text, for `titleOrPromptLabel`'s untitled fallback (ticket 05).
+   * `RankedSegmentMember` carries no prompt column, so this rides alongside it.
+   */
+  userPrompt: string | null;
 }
 
 /** Max `↳` addresses on one row before the rest fold into a trailing `+N`. */
 const MILESTONE_ANTECEDENT_CAP = MILESTONE_UNIT_PULLED_CAP;
 
+/** `↳` antecedents plus the self-corrector fact for one turn (ticket 05). */
+interface TurnRowLinks {
+  antecedents: string[];
+  isCorrector: boolean;
+}
+
 /**
- * `↳` addresses for a SET of kept rows, off the turn→turn edge table. Every
- * outgoing edge counts: an antecedent is a turn this row was built on,
- * whatever relation the writer named — the arrow is an index, not a claim
- * about the relation (spec: "箭头标记是纯地址索引"). Deduplicated by cited
- * turn, ordered by (session, prompt) so a row's antecedent list is stable
- * across renders.
+ * `↳` addresses AND the self-corrector flag (⚑) for a SET of turns, off the
+ * turn→turn edge table. Every outgoing edge counts toward `antecedents`:
+ * an antecedent is a turn this row was built on, whatever relation the writer
+ * named — the arrow is an index, not a claim about the relation (spec: "箭头
+ * 标记是纯地址索引"). Deduplicated by cited turn, ordered by (session, prompt)
+ * so a row's antecedent list is stable across renders. `isCorrector` is the
+ * SAME predicate `RANK_FACT_COLUMNS`' `isCorrector` uses (an outgoing
+ * `supersedes` edge) — a `RankedSegmentMember`-backed row reads it straight off
+ * the member instead (already paid for), but the plain `S<n>` turns view (no
+ * segment, no `RankedSegmentMember`) has no other way to learn it.
+ *
+ * Takes the narrow `{turnId, sessionId}` shape rather than
+ * `RankedSegmentMember` itself, so a caller holding either can pass it in
+ * without an adapter — a `RankedSegmentMember[]` still satisfies this
+ * structurally.
  *
  * Two queries for the whole set, never one pair per row: the `S<n>` milestone
  * view resolves this for every segment on the spine, and an N+1 here is paid
  * once per rendered row on the SessionStart injection path.
  */
-function resolveMilestoneAntecedents(
+function resolveTurnRowLinks(
   db: Database,
-  members: readonly RankedSegmentMember[],
-): Map<number, string[]> {
-  const result = new Map<number, string[]>();
-  for (const member of members) {
-    result.set(member.turnId, []);
+  turns: readonly { turnId: number; sessionId: number }[],
+): Map<number, TurnRowLinks> {
+  const result = new Map<number, TurnRowLinks>();
+  for (const turn of turns) {
+    result.set(turn.turnId, { antecedents: [], isCorrector: false });
   }
-  if (members.length === 0) {
+  if (turns.length === 0) {
     return result;
   }
 
   const citingIds = [...result.keys()];
   const placeholders = citingIds.map(() => "?").join(",");
   const edges = db
-    .query<{ citingId: number; citedId: number }, number[]>(
-      `SELECT DISTINCT citing_id AS citingId, cited_id AS citedId
+    .query<{ citingId: number; citedId: number; relation: string }, number[]>(
+      `SELECT DISTINCT citing_id AS citingId, cited_id AS citedId, relation
          FROM memory_edges
         WHERE citing_kind = 'turn' AND cited_kind = 'turn'
           AND citing_id IN (${placeholders})`,
@@ -3866,6 +3849,12 @@ function resolveMilestoneAntecedents(
     .all(...citingIds);
   if (edges.length === 0) {
     return result;
+  }
+
+  for (const edge of edges) {
+    if (edge.relation === "supersedes") {
+      result.get(edge.citingId)!.isCorrector = true;
+    }
   }
 
   const citedIds = [...new Set(edges.map((edge) => edge.citedId))];
@@ -3889,21 +3878,47 @@ function resolveMilestoneAntecedents(
     byCiter.set(edge.citingId, bucket);
   }
 
-  for (const member of members) {
-    const resolved = (byCiter.get(member.turnId) ?? []).sort((left, right) =>
+  for (const turn of turns) {
+    const resolved = (byCiter.get(turn.turnId) ?? []).sort((left, right) =>
       left.sessionId !== right.sessionId
         ? left.sessionId - right.sessionId
         : left.promptNumber - right.promptNumber,
     );
     const shown = resolved.slice(0, MILESTONE_ANTECEDENT_CAP).map((entry) =>
-      entry.sessionId === member.sessionId
+      entry.sessionId === turn.sessionId
         ? `T${entry.promptNumber}`
         : `S${entry.sessionId}/T${entry.promptNumber}`,
     );
     const folded = resolved.length - shown.length;
-    result.set(member.turnId, folded > 0 ? [...shown, `+${folded}`] : shown);
+    result.get(turn.turnId)!.antecedents = folded > 0 ? [...shown, `+${folded}`] : shown;
   }
 
+  return result;
+}
+
+/**
+ * Batch `user_prompt` fetch for `titleOrPromptLabel`'s fallback. `TurnRecord`
+ * already carries this column when a caller holds one (the plain `S<n>` turns
+ * view); this is for the `RankedSegmentMember`-backed paths, whose rank-facts
+ * query never selected it.
+ */
+function fetchUserPrompts(
+  db: Database,
+  turnIds: readonly number[],
+): Map<number, string | null> {
+  const result = new Map<number, string | null>();
+  if (turnIds.length === 0) {
+    return result;
+  }
+  const placeholders = turnIds.map(() => "?").join(",");
+  const rows = db
+    .query<{ id: number; userPrompt: string | null }, number[]>(
+      `SELECT id, user_prompt AS userPrompt FROM turns WHERE id IN (${placeholders})`,
+    )
+    .all(...turnIds);
+  for (const row of rows) {
+    result.set(row.id, row.userPrompt);
+  }
   return result;
 }
 
@@ -4000,7 +4015,8 @@ export function selectSegmentMilestonesByEdgeSignals(
 
   const chronologicalOrdinals = new Map(members.map((member, index) => [member.turnId, index + 1]));
   const keptMembers = members.filter((member) => admitted.has(member.turnId));
-  const antecedentsByTurnId = resolveMilestoneAntecedents(db, keptMembers);
+  const links = resolveTurnRowLinks(db, keptMembers);
+  const userPrompts = fetchUserPrompts(db, keptMembers.map((member) => member.turnId));
   const sessionTitles = new Map<number, string | null>();
   const kept: SegmentMilestoneRow[] = keptMembers.map((member) => {
     if (!sessionTitles.has(member.sessionId)) {
@@ -4009,8 +4025,9 @@ export function selectSegmentMilestonesByEdgeSignals(
     return {
       member,
       ordinal: chronologicalOrdinals.get(member.turnId)!,
-      antecedents: antecedentsByTurnId.get(member.turnId) ?? [],
+      antecedents: links.get(member.turnId)?.antecedents ?? [],
       sessionTitle: sessionTitles.get(member.sessionId) ?? null,
+      userPrompt: userPrompts.get(member.turnId) ?? null,
     };
   });
 
@@ -4037,11 +4054,24 @@ function renderSegmentMilestoneRow(
   const flag = member.isCorrector ? "⚑ " : "";
   const glyph = typeEmoji(member.type);
   const title = sanitizeTimelineField(
-    truncateText(member.title ?? "(untitled)", { limit: titleCap, signal }),
+    truncateText(titleOrPromptLabel(member.title, row.userPrompt), { limit: titleCap, signal }),
   );
   const stamp = `${formatLocalMonthDay(member.createdAtEpoch)} ${formatLocalTime(member.createdAtEpoch)}`;
   const address = renderTurnAddress(member.promptNumber, member.sessionId, includeSessionPrefix);
   return `${TIMELINE_TURN_INDENT}${flag}${address} ${stamp} ${glyph} ${title}`.trimEnd();
+}
+
+/** One milestone row plus its `↳` antecedent line, if it has any (spec 金样例). Shared by every caller that renders a single unit — the milestone body loop below and the `E<n>` turns view's per-item token-cost estimator alike. */
+function renderSegmentMilestoneUnitLines(
+  row: SegmentMilestoneRow,
+  titleCap: number,
+  signal?: TruncationSignal,
+): string[] {
+  const lines = [renderSegmentMilestoneRow(row, titleCap, false, signal)];
+  if (row.antecedents.length > 0) {
+    lines.push(`${TIMELINE_FIELD_INDENT}↳ ${row.antecedents.join(", ")}`);
+  }
+  return lines;
 }
 
 /**
@@ -4071,10 +4101,7 @@ function renderSegmentMilestoneLines(
       seenSessionIds.add(sessionId);
       runSessionId = sessionId;
     }
-    lines.push(renderSegmentMilestoneRow(row, titleCap, false, signal));
-    if (row.antecedents.length > 0) {
-      lines.push(`${TIMELINE_FIELD_INDENT}↳ ${row.antecedents.join(", ")}`);
-    }
+    lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
   }
 
   return lines;
@@ -4137,7 +4164,6 @@ export function renderTimeline(
   view: TimelineView,
   options: RenderTimelineOptions = {},
 ): string {
-  const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
   // One flag for the whole response (spec D1): every `truncateText` call this
   // render makes — turn table, phase list, or milestone body — reports into
@@ -4178,7 +4204,7 @@ export function renderTimeline(
 
   if (view.view !== "milestones") {
     return appendNavigationLegend(
-      assemble(renderTurnTable(view, promptCap, titleCap, signal)),
+      assemble(renderTurnTable(view, titleCap, signal)),
       { truncated: signal.truncated },
     );
   }
@@ -4333,17 +4359,6 @@ export interface SegmentTimelineInput {
   taskCausalityEraCutoffEpoch?: number;
 }
 
-export interface SegmentTurnPageRow {
-  member: RankedSegmentMember;
-  /** 1-based event-order position among ALL of the segment's members (spec D9's navigation handle) — not the page-local index. */
-  ordinal: number;
-  turn: TurnRecord;
-  /** Timestamp of the member one slot earlier in the SEGMENT's event order; null for the segment's first. Feeds the `metadata` slot's gap. */
-  previousEpoch: number | null;
-  /** The owning session's title, for this row's transition line. */
-  sessionTitle: string | null;
-}
-
 export interface SegmentTimelineView {
   view: TimelineViewKind;
   segment: SegmentRecord;
@@ -4351,8 +4366,15 @@ export interface SegmentTimelineView {
   totalMembers: number;
   pageBudget: number;
   titleCap: number;
-  // turns view
-  pageMembers: SegmentTurnPageRow[];
+  /**
+   * turns view. Same `SegmentMilestoneRow` shape the milestones view below
+   * builds — the turns view is now the whole segment, unfiltered, through the
+   * ONE row renderer this ticket (05) unified: a member on both pages of this
+   * view AND admitted into `keptMilestones` renders byte-identically either
+   * way, since both read the same `RankedSegmentMember`/antecedents/userPrompt
+   * facts into the same function (`renderSegmentMilestoneRow`).
+   */
+  pageMembers: SegmentMilestoneRow[];
   page: number;
   pageCount: number;
   // milestones view
@@ -4407,43 +4429,6 @@ function paginateByTokenBudget<T>(
   return { items: pages[clampedPage - 1] ?? [], page: clampedPage, pageCount };
 }
 
-/**
- * The turn-view row (spec 金样例 补充): the unified row form plus the
- * `metadata` field slot, exactly what a `recall` turn row renders — a bare
- * `[T<m>]` under its session's transition line, an unprefixed metadata line,
- * then `- content:`. The tabular `T<ordinal> [S<n>/T<m>] <time> …` template
- * this replaces was the last surviving tabular surface.
- *
- * `previousEpoch` is the previous member's timestamp IN THIS SEGMENT, so the
- * gap answers "how long since the last thing this segment did", which is the
- * only gap a cross-session membership can honestly state.
- */
-function renderSegmentTurnRow(
-  turn: TurnRecord,
-  previousEpoch: number | null,
-  includeSessionPrefix: boolean,
-  promptCap: number,
-  titleCap: number,
-  signal?: TruncationSignal,
-): string[] {
-  const title = sanitizeTimelineField(
-    truncateText(turn.title ?? "(untitled)", { limit: titleCap, signal }),
-  );
-  const excerpt = sanitizeTimelineField(
-    truncateText(cleanPromptForLabel(turn.userPrompt), { limit: promptCap, signal }),
-  );
-  const address = renderTurnAddress(turn.promptNumber, turn.sessionId, includeSessionPrefix);
-  const rewind = turn.wasRolledBack ? REWIND_MARKER : "";
-  const lines = [
-    `${TIMELINE_TURN_INDENT}${address} ${title}${rewind}`,
-    `${TIMELINE_FIELD_INDENT}${composeTurnMetadata(turn, previousEpoch)}`,
-  ];
-  if (excerpt !== "") {
-    lines.push(`${TIMELINE_FIELD_INDENT}- content: ${excerpt}`);
-  }
-  return lines;
-}
-
 export function buildSegmentTimelineView(
   db: Database,
   input: SegmentTimelineInput,
@@ -4461,59 +4446,47 @@ export function buildSegmentTimelineView(
   // builds its own fully-resolved rows in `selectSegmentMilestonesByEdgeSignals`.
   const rows = members.map((member, index) => ({ member, ordinal: index + 1 }));
 
-  let pageMembers: SegmentTurnPageRow[] = [];
+  let pageMembers: SegmentMilestoneRow[] = [];
   let page = Math.max(1, input.page ?? 1);
   let pageCount = 1;
   let keptMilestones: SegmentMilestoneRow[] = [];
   let demotedCount = 0;
 
   if (viewKind === "turns") {
+    // Ticket 05: the turns view is now the WHOLE segment through the same row
+    // renderer the milestones view uses (`renderSegmentMilestoneRow`) — no
+    // per-member `TurnRecord` fetch any more, since `RankedSegmentMember`
+    // already carries every field that renderer reads (title, type, stamp,
+    // address, `isCorrector`); only the prompt-fallback text and the `↳`
+    // antecedents are extra, and both are cheap batch queries over the whole
+    // membership rather than an N+1 per row.
     const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
-    // Every member's full TurnRecord, once — needed for the prompt excerpt
-    // `MemberRankFacts` does not carry. A segment's membership runs to dozens
-    // or a few hundred turns (segment-spine.ts's own "a few dozen" estimate
-    // for a session's spine), nowhere near a full-corpus scan.
     const sessionTitles = new Map<number, string | null>();
-    const withTurns = rows.flatMap((row, index) => {
-      const turn = getTurnById(db, row.member.turnId);
-      if (!turn) {
-        return [];
-      }
+    for (const row of rows) {
       if (!sessionTitles.has(row.member.sessionId)) {
         sessionTitles.set(row.member.sessionId, getSession(db, row.member.sessionId)?.title ?? null);
       }
-      return [
-        {
-          row,
-          turn,
-          previousEpoch: index > 0 ? rows[index - 1]!.member.createdAtEpoch : null,
-          sessionTitle: sessionTitles.get(row.member.sessionId) ?? null,
-        },
-      ];
-    });
+    }
+    const userPrompts = fetchUserPrompts(db, rows.map((row) => row.member.turnId));
+    const links = resolveTurnRowLinks(db, members);
+    const candidateRows: SegmentMilestoneRow[] = rows.map((row) => ({
+      member: row.member,
+      ordinal: row.ordinal,
+      antecedents: links.get(row.member.turnId)?.antecedents ?? [],
+      sessionTitle: sessionTitles.get(row.member.sessionId) ?? null,
+      userPrompt: userPrompts.get(row.member.turnId) ?? null,
+    }));
     const paged = paginateByTokenBudget(
-      withTurns,
+      candidateRows,
       page,
       pageSize,
       pageBudget,
-      (entry) =>
+      (row) =>
         estimateDiaryTokens(
-          renderSegmentTurnRow(
-            entry.turn,
-            entry.previousEpoch,
-            false,
-            PROMPT_COLUMN_CAP,
-            SEGMENT_TIMELINE_TITLE_CAP,
-          ).join("\n"),
+          renderSegmentMilestoneUnitLines(row, SEGMENT_TIMELINE_TITLE_CAP).join("\n"),
         ),
     );
-    pageMembers = paged.items.map((entry) => ({
-      member: entry.row.member,
-      ordinal: entry.row.ordinal,
-      turn: entry.turn,
-      previousEpoch: entry.previousEpoch,
-      sessionTitle: entry.sessionTitle,
-    }));
+    pageMembers = paged.items;
     page = paged.page;
     pageCount = paged.pageCount;
   } else {
@@ -4559,37 +4532,17 @@ export function renderSegmentTimeline(view: SegmentTimelineView): string {
   ];
 
   if (view.view === "turns") {
-    const lines = [...header];
-    const seenSessionIds = new Set<number>();
-    let runSessionId: number | null = null;
-    let first = true;
-    for (const entry of view.pageMembers) {
-      const sessionId = entry.member.sessionId;
-      if (sessionId !== runSessionId) {
-        lines.push(
-          renderSessionTransitionLine(
-            sessionId,
-            seenSessionIds.has(sessionId) ? null : entry.sessionTitle,
-            TIMELINE_SESSION_INDENT,
-          ),
-        );
-        seenSessionIds.add(sessionId);
-        runSessionId = sessionId;
-      }
-      lines.push(
-        ...renderSegmentTurnRow(
-          entry.turn,
-          entry.previousEpoch,
-          // Page ≥ 2's opening row carries the full address: its transition
-          // line may have been spent on the previous page (spec 补充裁决).
-          first && view.page > 1,
-          PROMPT_COLUMN_CAP,
-          view.titleCap,
-          signal,
-        ),
-      );
-      first = false;
-    }
+    // Ticket 05: the SAME row-group renderer the milestones branch below uses
+    // — a turn common to both pages of this view and the segment's kept
+    // milestones renders byte-identically either way (spec's own acceptance
+    // criterion). No more page≥2-gets-the-full-address special case: the
+    // golden sample never qualifies a row with `[S<n>][T<n>]` — a session's
+    // transition line is re-emitted at the top of every page already (`rows`
+    // starts fresh per page), which is what a reader landing on page 2 sees.
+    const lines = [
+      ...header,
+      ...renderSegmentMilestoneLines(view.pageMembers, view.titleCap, signal),
+    ];
     if (view.pageCount > 1) {
       lines.push("", `  showing: turns · page ${view.page}/${view.pageCount}`);
     }
@@ -4650,7 +4603,7 @@ export function timelineQuery(db: Database, input: TimelineInput): string {
         input.now,
         [
           { entityType: "segment", entityId: view.segment.id },
-          ...view.pageMembers.map((row) => ({ entityType: "turn" as const, entityId: row.turn.id })),
+          ...view.pageMembers.map((row) => ({ entityType: "turn" as const, entityId: row.member.turnId })),
           ...view.keptMilestones.map((row) => ({
             entityType: "turn" as const,
             entityId: row.member.turnId,

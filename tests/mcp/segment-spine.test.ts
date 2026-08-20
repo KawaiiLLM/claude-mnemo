@@ -407,10 +407,14 @@ describe("timeline dual-path rendering across the era boundary", () => {
       expect(row).not.toContain(" | ");
     }
     expect(output).not.toMatch(/\bG[0-4]\b/);
-    expect(output).toContain("        [T12] ");
-    // The page's first row carries the full address so the page is
-    // self-contained for a citation join (spec 补充裁决).
-    expect(output).toContain("        [S1][T1] ");
+    // Ticket 05: the row is `[T<n>] <stamp> <glyph> <title>` at the SHALLOW
+    // (4-space) indent this direct `S<n>` route uses (no `[E<n>]`/spine
+    // ancestor above its own session transition line) — no per-row
+    // `[S<n>][T<n>]` form anywhere; the session's own transition line states
+    // it once (spec 金样例).
+    expect(output).toContain("    [T12] ");
+    expect(output).not.toContain("[S1][T1]");
+    expect(output).toMatch(/^ {4}\[T1\] \d{2}-\d{2} \d{2}:\d{2} /m);
   });
 });
 

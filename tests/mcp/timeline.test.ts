@@ -2869,7 +2869,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1/T1..5" });
     const output = renderTimeline(view);
 
-    expect(output).toMatch(TURN_VIEW_METADATA_RE);
+    expect(output).toMatch(TURN_VIEW_ROW_RE);
   });
 
   it("showing line reports page counts when the candidate set exceeds pageSize", () => {
@@ -2957,9 +2957,12 @@ describe("renderTimeline", () => {
     const output = renderTimeline(buildTimelineView(db, { id: "S1/T19..21" }));
     const turn21Line = turnBlock(output, 21);
 
+    // Ticket 05: the row is `[T21] <stamp> <glyph> title` — the type glyph is
+    // part of every row now (spec's own title: "time, type, title"), so an
+    // untyped turn's row still carries `⏳` as its GLYPH; what this test
+    // guards is that the glyph no longer substitutes for a present title.
     expect(turn21Line).toContain("reviewed later");
-    expect(turn21Line).toContain("[T21] reviewed later");
-    expect(turn21Line).not.toContain("⏳");
+    expect(turn21Line).toMatch(/⏳ reviewed later$/);
   });
 
   it("the turn table carries no transcript line anchor ([S15069/T1020])", () => {
@@ -2987,7 +2990,11 @@ describe("renderTimeline", () => {
     const turn1Line = turnBlock(output, 1);
 
     expect(turn1Line).toBeDefined();
-    expect(turn1Line).toContain("[S1][T1] title for T1");
+    // Ticket 05: bare `[T1]` — the session's own transition line (`[S1]
+    // title`) states the session once, above the row; a per-row
+    // `[S<n>][T<n>]` prefix is a milestone-view-only device this ticket's
+    // golden samples never show on the direct `S<n>` route.
+    expect(turn1Line).toMatch(/^ {4}\[T1\] \d{2}-\d{2} \d{2}:\d{2} 🔵 title for T1$/);
   });
 
   it("renders titles longer than the legacy 37-char cap without truncation", () => {
@@ -3081,10 +3088,13 @@ describe("renderTimeline", () => {
     const turnPromptNumbers = (output: string) =>
       output
         .split("\n")
-        .filter((line) => /^ {8}(?:⨯ )?(?:\[S\d+\])?\[T\d+\] /.test(line))
+        .filter((line) => TURN_VIEW_ROW_RE.test(line))
         .map((line) => Number(line.match(/\[T(\d+)\]/)?.[1]));
     // Milestone rows are day-grouped `[T<n>] <date> <time> <emoji> <title>`
-    // lines; the turn view's rows are told apart by their `metadata` line.
+    // lines at the DEEP (8-space) indent; the turn view's own rows are told
+    // apart by the shallow (4-space) indent `TURN_VIEW_ROW_RE` matches
+    // (ticket 05: both views render the SAME row shape now, so indent depth
+    // — not a metadata line — is what still tells them apart).
     const milestonePromptNumbers = (output: string) =>
       output
         .split("\n")
@@ -3100,15 +3110,15 @@ describe("renderTimeline", () => {
       buildTimelineView(db, { id: "S1", view: "milestones" }),
     );
 
-    expect(defaultOutput).toMatch(TURN_VIEW_METADATA_RE);
+    expect(defaultOutput).toMatch(TURN_VIEW_ROW_RE);
     expect(defaultOutput).toContain("shape signals");
     expect(defaultOutput).not.toMatch(/\n\s+phases[:(]/);
-    expect(turnsOutput).toMatch(TURN_VIEW_METADATA_RE);
+    expect(turnsOutput).toMatch(TURN_VIEW_ROW_RE);
     expect(turnsOutput).toContain("shape signals");
     expect(turnsOutput).not.toMatch(/\n\s+phases[:(]/);
     expect(turnPromptNumbers(turnsOutput)).toEqual([1, 2, 3, 4, 5]);
     expect(milestonePromptNumbers(milestoneOutput)).toEqual([1, 3, 5]);
-    expect(milestoneOutput).not.toMatch(TURN_VIEW_METADATA_RE);
+    expect(milestoneOutput).not.toMatch(TURN_VIEW_ROW_RE);
     expect(milestoneOutput).toContain("shape signals");
     expect(milestoneOutput).not.toMatch(/\n\s+phases[:(]/);
   });
@@ -3186,17 +3196,12 @@ describe("renderTimeline", () => {
     expect(singlePageOutput).not.toContain("showing:");
   });
 
-  it("renderTimeline respects promptCap option", () => {
-    const db = createDatabase(":memory:");
-    const session = seedLongSession(db, 40);
-
-    const view = buildContextTimelineView(db, session.id);
-    const output = renderTimeline(view, { promptCap: 80, showEarlierHint: true });
-    const turn40Line = turnBlock(output, 40);
-
-    expect(turn40Line).toBeDefined();
-    expect(turn40Line).toContain("…");
-  });
+  // `RenderTimelineOptions.promptCap` retired with ticket 05: the turn row no
+  // longer carries an independent prompt excerpt (only a title, or the
+  // prompt as a FALLBACK when there is no title), so there is nothing left
+  // for a separate prompt-column cap to bound — `titleCap` governs the row's
+  // whole label now, and its own truncation is covered by "cuts a
+  // turn-table title on a word boundary" below.
 
   it("renders a compact pipe-delimited header without the separator row", () => {
     const db = createDatabase(":memory:");
@@ -3206,7 +3211,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1/T19..21" });
     const output = renderTimeline(view);
 
-    expect(output).toMatch(TURN_VIEW_METADATA_RE);
+    expect(output).toMatch(TURN_VIEW_ROW_RE);
     expect(output).not.toContain("───");
   });
 
@@ -3240,8 +3245,13 @@ describe("renderTimeline", () => {
     const line = turnBlock(output, 21);
 
     expect(line).toBeDefined();
-    expect(line).toContain("[S1][T21] left -> right");
-    expect(line).toContain("- prompt: raw prompt 21");
+    // Ticket 05: bare `[T21]` (no `[S1]` prefix — see the golden-sample
+    // test), title sanitized. AC#4: a titled turn's row never carries the
+    // raw prompt at all any more (no `- prompt:` field, no fallback — the
+    // fallback only fires when there is NO title).
+    expect(line).toMatch(/\[T21\] \d{2}-\d{2} \d{2}:\d{2} 🔵 left -> right$/);
+    expect(line).not.toContain("- prompt:");
+    expect(line).not.toContain("raw prompt 21");
     expect(line).not.toContain("left → right");
   });
 
@@ -3267,12 +3277,16 @@ describe("renderTimeline", () => {
     const output = renderTimeline(view);
     const turn21Line = turnBlock(output, 21);
 
+    // Ticket 05: the gap/stats `metadata` line is gone (composeTurnMetadata
+    // is recall's field now, not timeline's row) — what this test still
+    // guards is that a skipped turn is invisible on the turns view (no row,
+    // no placeholder marker) while its live neighbours render normally.
     expect(view.viewItemTotal).toBe(2);
     expect(view.pageTurns.map((row) => row.promptNumber)).toEqual([19, 21]);
     expect(turn21Line).toBeDefined();
-    expect(turn21Line).toContain("· +50s ·");
     expect(output).not.toContain("⏭");
     expect(output).not.toContain("T20 |");
+    expect(output).not.toMatch(/\[T20\]/);
   });
 
   it("renderTimeline shows earlier hint when rendering the last page", () => {
@@ -3291,10 +3305,14 @@ describe("renderTimeline", () => {
     const db = createDatabase(":memory:");
     seedSession(db);
 
+    // Ticket 05: both views render the SAME row shape now (address, inline
+    // stamp, glyph, title) — the turn view's own rows sit at the SHALLOW
+    // (4-space) indent (`TURN_VIEW_ROW_RE`, no `[E<n>]`/spine ancestor on the
+    // direct `S<n>` route), while the legacy (no era cutoff) milestone body
+    // stays at the deep (8-space) indent — so indent depth still tells the
+    // two views' rows apart.
     const turnRowCount = (s: string) =>
-      s.split("\n").filter((l) => /^ {8}(?:⨯ )?\[T\d+\] /.test(l)).length;
-    // A milestone row states its stamp inline; a turn row defers it to the
-    // `metadata` line below, so the trailing `\d` tells the two apart.
+      s.split("\n").filter((l) => TURN_VIEW_ROW_RE.test(l)).length;
     const milestoneRowCount = (s: string) =>
       s.split("\n").filter((l) => /^ {8}(?:\S+ )?\[T\d+\] \d/.test(l)).length;
 
@@ -3304,7 +3322,7 @@ describe("renderTimeline", () => {
     );
 
     expect(milestoneRowCount(milestone)).toBeLessThan(turnRowCount(full));
-    expect(milestone).not.toMatch(TURN_VIEW_METADATA_RE);
+    expect(milestone).not.toMatch(TURN_VIEW_ROW_RE);
     // T6 is kept (front-gutter milestone row); T2 is suppressed; T11 is folded
     // into the day's overflow rather than rendered as its own row.
     expect(milestone).toMatch(/^ {8}(?:\S+ )?\[T6\] /m);
@@ -3338,6 +3356,63 @@ describe("renderMilestoneDigest layout", () => {
   });
 });
 
+describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-row-form.md)", () => {
+  // The ticket's own verbatim fixture is `timeline(id="S15069/T1...")`:
+  //
+  //   [S15069] title
+  //       [T821] 08-17 18:19 ⚖️ title
+  //           ↳ T811, T812
+  //       [T822] 08-17 18:20 ⚖️ title
+  //
+  // The specific session/prompt numbers (S15069, T821/T822/T811/T812) are the
+  // ticket author's own illustrative session — unreproducible here (ids are
+  // DB auto-increment) — so this fixture reconstructs the SAME shape (a
+  // titled session, two same-day decision turns, the first citing two
+  // earlier turns as antecedents) and asserts the rendered block byte-for-
+  // byte against a literal expected string, which is the strongest form of
+  // "byte fixture" available without forcing specific row ids.
+  it("S<n> direct route: [S<n>] title / [T<n>] stamp glyph title / ↳ addresses, zero-indented at the top", () => {
+    const db = createDatabase(":memory:");
+    const t811Epoch = Math.floor(Date.UTC(2026, 7, 16, 9, 0) / 1000);
+    const t812Epoch = Math.floor(Date.UTC(2026, 7, 16, 9, 5) / 1000);
+    const t821Epoch = Math.floor(Date.UTC(2026, 7, 17, 18, 19) / 1000);
+    const t822Epoch = Math.floor(Date.UTC(2026, 7, 17, 18, 20) / 1000);
+    const session = seedTimelineSession(
+      db,
+      [
+        turn({ promptNumber: 811, type: "decision", title: "title", createdAtEpoch: t811Epoch }),
+        turn({ promptNumber: 812, type: "decision", title: "title", createdAtEpoch: t812Epoch }),
+        turn({ promptNumber: 821, type: "decision", title: "title", createdAtEpoch: t821Epoch }),
+        turn({ promptNumber: 822, type: "decision", title: "title", createdAtEpoch: t822Epoch }),
+      ],
+      { title: "title" },
+    );
+    const t821Id = getTurn(db, session.id, 821)!.id;
+    const t811Id = getTurn(db, session.id, 811)!.id;
+    const t812Id = getTurn(db, session.id, 812)!.id;
+    writeMemoryEdges(
+      db,
+      [
+        { citing: { kind: "turn", id: t821Id }, cited: { kind: "turn", id: t811Id }, relation: "depends-on", provenance: "judged" },
+        { citing: { kind: "turn", id: t821Id }, cited: { kind: "turn", id: t812Id }, relation: "depends-on", provenance: "judged" },
+      ],
+      t821Epoch,
+      { eligibleForRelation: "unrestricted" },
+    );
+
+    const output = renderTimeline(buildTimelineView(db, { id: `S${session.id}/T821..822` }));
+
+    expect(output).toContain(
+      [
+        `[S${session.id}] title`,
+        "    [T821] 08-17 18:19 ⚖️ title",
+        "        ↳ T811, T812",
+        "    [T822] 08-17 18:20 ⚖️ title",
+      ].join("\n"),
+    );
+  });
+});
+
 describe("timelineQuery", () => {
   it("builds and renders the timeline for a valid session id", () => {
     const db = createDatabase(":memory:");
@@ -3368,7 +3443,7 @@ describe("timelineQuery", () => {
 
     // The milestone view dispatches to the day-grouped digest, not the turn table.
     const milestoneOut = timelineQuery(db, { id: "S1", view: "milestones" });
-    expect(milestoneOut).not.toMatch(TURN_VIEW_METADATA_RE);
+    expect(milestoneOut).not.toMatch(TURN_VIEW_ROW_RE);
     expect(milestoneOut).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
   });
 
@@ -3409,9 +3484,9 @@ describe("timelineQuery", () => {
 
     const out = timelineQuery(db, { id: "S1" });
     const row = out.split("\n").find((line) => line.includes("alpha"))!;
-    // The title IS the rest of the row after its bracketed address (spec 金样
-    // 例 `[T823] title`); the prompt rides a `- prompt:` line below.
-    const shown = row.slice(row.lastIndexOf("] ") + 2);
+    // The title is the rest of the row after its address, stamp and type
+    // glyph (spec 金样例 `[T821] 08-17 18:19 ⚖️ title`, ticket 05).
+    const shown = row.match(/^\s*\[T\d+\] \d{2}-\d{2} \d{2}:\d{2} \S+ (.*)$/)![1]!;
 
     expect(shown).toEndWith("…");
     // Whatever survived is whole words: it is a prefix of the source that ends
@@ -3632,16 +3707,10 @@ describe("parseContentReferences", () => {
 
 /** Comfortably inside the task-causality era, so stored grades are read verbatim. */
 /**
- * The turn view's own signature after the table dissolved (spec 补充裁决
- * "turns 表溶解"): every row carries an UNPREFIXED `metadata` line at the
- * field rung. A milestone row states its stamp inline instead, so this
- * distinguishes the two views without a table header to look for.
- */
-/**
- * One turn's whole rendered unit in the turn view (spec 补充裁决 "turns 表溶
- * 解"): the address row, its unprefixed `metadata` line, and any field rows
- * under it. The table row this replaces was one line, so every assertion that
- * used to `.find(line.startsWith("T21 |"))` reads the block instead.
+ * One turn's whole rendered unit in the turn view (ticket 05, spec 金样例): the
+ * address+stamp+glyph+title row, plus its `↳` line when it has antecedents.
+ * The table row this replaces was one line, so every assertion that used to
+ * `.find(line.startsWith("T21 |"))` reads the block instead.
  */
 function turnBlock(output: string, promptNumber: number): string | undefined {
   const lines = output.split("\n");
@@ -3659,7 +3728,15 @@ function turnBlock(output: string, promptNumber: number): string | undefined {
   return block.join("\n");
 }
 
-const TURN_VIEW_METADATA_RE = /^ {12}\d{2}-\d{2} \d{2}:\d{2}/m;
+/**
+ * The plain `S<n>` turns view's own row signature (ticket 05): the address's
+ * stamp is inline now, same as a milestone row, but at the SHALLOW indent
+ * (`DIRECT_TURN_INDENT`, 4 spaces) this route uses — no `[E<n>]`/spine
+ * ancestor sits above it. A milestone row (legacy body OR era-nested) is
+ * always 8 spaces, so the indent alone still tells the two views apart
+ * without a metadata line to look for.
+ */
+const TURN_VIEW_ROW_RE = /^ {4}(?:⚑ )?(?:⨯ )?\[T\d+\] \d{2}-\d{2} \d{2}:\d{2}/m;
 
 const ERA_BASE = 1_785_000_000;
 
@@ -4034,17 +4111,18 @@ describe("unified row renderer — row formats (spec §D)", () => {
     expect(out).toContain(`[T1] 07-25 17:20 ⚖️ origin · "${MILESTONE_NOTIFICATION_MARKER}"`);
   });
 
-  it("the turns view carries time/gap/stats on a metadata line, and no grade anywhere", () => {
+  it("the turns view row carries its stamp inline, and no grade anywhere (ticket 05)", () => {
     const db = createDatabase(":memory:");
     seedDesignArc(db);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
 
-    // Spec 补充裁决: the table's columns became the `metadata` field slot, and
-    // the `G` column left with the grade DISPLAY.
-    expect(out).toMatch(TURN_VIEW_METADATA_RE);
+    // Ticket 05: no metadata line, no gap, no stats, no `G` column — the row's
+    // own stamp (`TURN_VIEW_ROW_RE`) is the only time signal left, and it
+    // rides the main line itself.
+    expect(out).toMatch(TURN_VIEW_ROW_RE);
     expect(out).not.toMatch(/\bG[0-4]\b/);
     const block = turnBlock(out, 5)!;
-    expect(block.split("\n")[1]).toMatch(/^ {12}\d{2}-\d{2} \d{2}:\d{2}/);
+    expect(block.split("\n")[0]).toMatch(TURN_VIEW_ROW_RE);
   });
 
   it("a turn with no main-row candidacy still renders its row and metadata", () => {
@@ -5004,9 +5082,9 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
       // Shape signals survive on every view.
       expect(out).toContain("shape signals (window T1-T6");
       if (view === "turns") {
-        expect(out).toMatch(TURN_VIEW_METADATA_RE);
+        expect(out).toMatch(TURN_VIEW_ROW_RE);
       } else {
-        expect(out).not.toMatch(TURN_VIEW_METADATA_RE);
+        expect(out).not.toMatch(TURN_VIEW_ROW_RE);
       }
       // ticket 04: `phases` retired — no view emits its digest header any more.
       expect(out).not.toContain("# | date | type | turns | span | work | lead title");
@@ -5408,7 +5486,7 @@ describe("timeline filter (ticket 04, spec \"Tools\")", () => {
   }
 
   const turnLine = (output: string, n: number) =>
-    new RegExp(`^ {8}(?:⨯ )?(?:\\[S\\d+\\])?\\[T${n}\\] `, "m").test(output);
+    new RegExp(`^ {4}(?:⚑ )?(?:⨯ )?\\[T${n}\\] `, "m").test(output);
 
   it("with no filter, every turn renders (the mutation baseline)", () => {
     const db = createDatabase(":memory:");
