@@ -425,3 +425,192 @@ describe("checkFieldGate — the three-judgment order", () => {
     }
   });
 });
+
+/**
+ * Ticket 06 (write-mode-edit-semantics spec D2/D5/D6): the read requirement
+ * is the ONLY difference between the two write modes. Both run the three
+ * judgments above unchanged; a `write` landing over content another writer
+ * put there additionally needs its grant to have come from a render that
+ * showed that field WHOLE (ticket 04's completeness records).
+ * `requireCompleteRead` is the caller's own answer to "is this a write, and
+ * is there existing content to lose" — the gate never guesses either.
+ */
+describe("checkFieldGate — `write` over existing content also requires a complete read (ticket 06)", () => {
+  /** A foreign writer's content plus this writer's grant recorded after it. */
+  function foreignContentThenGrant(field: string, writer = "session:1"): void {
+    stampField(db, "segment", 1, field, "session:9", 100);
+    recordReadGrant(db, writer, "segment", 1, 200, snapshotWriteGateSequence(db));
+  }
+
+  function recordCompleteness(field: string, complete: boolean, writer = "session:1"): void {
+    recordFieldCompleteness(
+      db,
+      writer,
+      [{ entityType: "segment", entityId: 1, field, complete }],
+      200,
+      snapshotWriteGateSequence(db),
+    );
+  }
+
+  test("a grant from a TRUNCATED render refuses the write and the message names the field", () => {
+    foreignContentThenGrant("goal");
+    recordCompleteness("goal", false);
+
+    const verdict = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", {
+      requireCompleteRead: true,
+    });
+
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("incomplete-read");
+      expect(verdict.message).toContain("goal");
+      expect(verdict.message).toContain("E1");
+    }
+  });
+
+  test("a grant from a COMPLETE render admits the same write", () => {
+    foreignContentThenGrant("goal");
+    recordCompleteness("goal", true);
+
+    expect(
+      checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", { requireCompleteRead: true }).ok,
+    ).toBe(true);
+  });
+
+  test("no completeness record at all is refused too — a field the granting render never showed was not read in full either", () => {
+    foreignContentThenGrant("goal");
+
+    const verdict = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", {
+      requireCompleteRead: true,
+    });
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("incomplete-read");
+    }
+  });
+
+  test("under that SAME truncated authorization an `edit` is admitted — the read requirement is the only difference between the modes", () => {
+    foreignContentThenGrant("goal");
+    recordCompleteness("goal", false);
+
+    // `edit` passes no requirement of its own; every other judgment is identical.
+    expect(checkFieldGate(db, "session:1", "segment", 1, "goal", "E1").ok).toBe(true);
+  });
+
+  test("a field never written by anyone is exempt — the create path has no old content to lose", () => {
+    recordCompleteness("goal", false);
+    expect(
+      checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", { requireCompleteRead: true }).ok,
+    ).toBe(true);
+  });
+
+  test("the field's own last writer is exempt in BOTH modes — writing is reading", () => {
+    stampField(db, "segment", 1, "goal", "session:1", 100);
+    recordCompleteness("goal", false);
+
+    expect(
+      checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", { requireCompleteRead: true }).ok,
+    ).toBe(true);
+    expect(checkFieldGate(db, "session:1", "segment", 1, "goal", "E1").ok).toBe(true);
+  });
+
+  test("staleness outranks the read requirement: a foreign write after the grant rejects BOTH modes, as stale", () => {
+    recordReadGrant(db, "session:1", "segment", 1, 100, snapshotWriteGateSequence(db));
+    recordCompleteness("goal", true);
+    stampField(db, "segment", 1, "goal", "session:9", 300);
+
+    const asWrite = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", {
+      requireCompleteRead: true,
+    });
+    const asEdit = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1");
+
+    expect(asWrite.ok).toBe(false);
+    expect(asEdit.ok).toBe(false);
+    if (!asWrite.ok && !asEdit.ok) {
+      expect(asWrite.reason).toBe("stale");
+      expect(asEdit.reason).toBe("stale");
+      // A complete read does not license a write onto a field that moved
+      // since: "看见" and "内容一致" are two premises, not one.
+      expect(asWrite.message).toContain("S9");
+    }
+  });
+
+  test("the three rejections are distinct reasons AND distinct text", () => {
+    // session:2's grant is taken BEFORE the foreign write (that is what makes
+    // it stale); session:3's after it, but truncated.
+    const beforeForeignWrite = snapshotWriteGateSequence(db);
+    stampField(db, "segment", 1, "goal", "session:9", 100);
+
+    const neverRead = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", {
+      requireCompleteRead: true,
+    });
+
+    recordReadGrant(db, "session:2", "segment", 1, 50, beforeForeignWrite);
+    const stale = checkFieldGate(db, "session:2", "segment", 1, "goal", "E1", {
+      requireCompleteRead: true,
+    });
+
+    recordReadGrant(db, "session:3", "segment", 1, 200, snapshotWriteGateSequence(db));
+    recordCompleteness("goal", false, "session:3");
+    const incomplete = checkFieldGate(db, "session:3", "segment", 1, "goal", "E1", {
+      requireCompleteRead: true,
+    });
+
+    expect(neverRead.ok).toBe(false);
+    expect(stale.ok).toBe(false);
+    expect(incomplete.ok).toBe(false);
+    if (!neverRead.ok && !stale.ok && !incomplete.ok) {
+      const reasons = [neverRead.reason, stale.reason, incomplete.reason];
+      expect(new Set(reasons).size).toBe(3);
+      const messages = [neverRead.message, stale.message, incomplete.message];
+      expect(new Set(messages).size).toBe(3);
+    }
+  });
+
+  test("one long field's truncation does not block a short field's write on the SAME entity", () => {
+    stampField(db, "segment", 1, "content", "session:9", 100);
+    stampField(db, "segment", 1, "goal", "session:9", 100);
+    recordReadGrant(db, "session:1", "segment", 1, 200, snapshotWriteGateSequence(db));
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [
+        { entityType: "segment", entityId: 1, field: "content", complete: false },
+        { entityType: "segment", entityId: 1, field: "goal", complete: true },
+      ],
+      200,
+      snapshotWriteGateSequence(db),
+    );
+
+    expect(
+      checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", { requireCompleteRead: true }).ok,
+    ).toBe(true);
+    expect(
+      checkFieldGate(db, "session:1", "segment", 1, "content", "E1", { requireCompleteRead: true })
+        .ok,
+    ).toBe(false);
+  });
+
+  test("the caller's own remedy clause is what the message tells the writer to do", () => {
+    foreignContentThenGrant("goal");
+    recordCompleteness("goal", false);
+
+    const withRemedy = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", {
+      requireCompleteRead: true,
+      completeReadRemedy: 're-read it whole with recall(id="E1", pageBudget=4000),',
+    });
+    const withoutRemedy = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", {
+      requireCompleteRead: true,
+    });
+
+    expect(withRemedy.ok).toBe(false);
+    expect(withoutRemedy.ok).toBe(false);
+    if (!withRemedy.ok && !withoutRemedy.ok) {
+      expect(withRemedy.message).toContain("pageBudget=4000");
+      // Both still say what the remedy is FOR — the fallback never leaves a
+      // writer without a next action.
+      expect(withoutRemedy.message).toContain("bigger budget");
+      expect(withRemedy.message).toContain("edit");
+    }
+  });
+});

@@ -2141,8 +2141,15 @@ describe("note tool write gate (ticket 03)", () => {
     expect(resultText(result)).toContain("recall");
     expect(getTurnById(db, turnId)?.type).toEqual(["design"]);
 
-    // Re-reading clears the staleness — the write proceeds.
-    recallMemory(db, { id: `S${sessionA}/T1`, readerId: sessionWriterId(sessionB) });
+    // Re-reading clears the staleness — the write proceeds. Ticket 06: the
+    // re-read must also DELIVER `type`, which rides the metadata line, or the
+    // retry trades its stale rejection for an incomplete-read one (pinned by
+    // "note write gate: the complete-read requirement" below).
+    recallMemory(db, {
+      id: `S${sessionA}/T1`,
+      filter: { fields: ["metadata"] },
+      readerId: sessionWriterId(sessionB),
+    });
     const retried = noteTool(
       db,
       { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "write" }, crossSession: true },
@@ -2197,6 +2204,342 @@ describe("note tool write gate (ticket 03)", () => {
     // The blocked write never landed — insight is still cleared, not
     // overwritten with the blind session's text.
     expect(getShadowNote(db, turnId)?.insight ?? null).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 06 (write-mode-edit-semantics spec D2/D5/D6): the gate judges both
+// modes identically for authorization and staleness; `write` alone
+// additionally needs the granting render to have shown THAT field whole.
+// Everything here goes through real `recallMemory` renders — a hand-written
+// completeness row would prove only what tests/db/write-gate.test.ts already
+// proves in isolation, not that a writer can actually earn one by reading.
+// ---------------------------------------------------------------------------
+
+describe("note write gate: the complete-read requirement (ticket 06)", () => {
+  let db: Database;
+  let sessionA: number;
+  let sessionB: number;
+  const ERA = { eraCutoffEpoch: 1 };
+
+  function insertTurn(sessionId: number, promptNumber: number): number {
+    return db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, ?, 'active', 'p', 100) RETURNING id`,
+      )
+      .get(sessionId, promptNumber)!.id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionA = upsertSession(db, {
+      contentSessionId: "complete-read-a",
+      project: "/tmp/complete-read",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+    sessionB = upsertSession(db, {
+      contentSessionId: "complete-read-b",
+      project: "/tmp/complete-read",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  /** A's note on a fresh turn, long enough that a tight budget must cut it. */
+  function seedLongNoteFromA(): { address: string; turnId: number } {
+    const turnId = insertTurn(sessionA, 1);
+    const address = `S${sessionA}/T1`;
+    noteTool(
+      db,
+      {
+        turn: address,
+        title: "A's title",
+        content: Array.from({ length: 40 }, (_, i) => `- row ${i} of A's content`).join("\n"),
+      },
+      { callerSessionId: sessionA, ...ERA },
+    );
+    return { address, turnId };
+  }
+
+  test("a truncated read refuses the overwrite and names the field; a complete read admits the same write", () => {
+    const { address, turnId } = seedLongNoteFromA();
+
+    // B reads it, but under a per-item budget too small to deliver `content`.
+    recallMemory(db, {
+      id: address,
+      filter: { fields: ["content"] },
+      turn: 20,
+      readerId: sessionWriterId(sessionB),
+    });
+
+    const refused = resultText(
+      noteTool(
+        db,
+        {
+          turn: address,
+          content: "- B replaces the whole thing",
+          mode: { content: "write" },
+          crossSession: true,
+        },
+        { callerSessionId: sessionB, ...ERA },
+      ),
+    );
+    expect(refused).toStartWith("Parameter error:");
+    expect(refused).toContain("content");
+    expect(refused).toContain(address);
+    expect(refused).toContain("recall");
+    // Nothing landed: A's rows are all still there.
+    expect(getShadowNote(db, turnId)?.content).toContain("- row 39 of A's content");
+
+    // The remedy the message names actually clears it.
+    recallMemory(db, {
+      id: address,
+      filter: { fields: ["content"] },
+      turn: 4000,
+      readerId: sessionWriterId(sessionB),
+    });
+    const admitted = noteTool(
+      db,
+      {
+        turn: address,
+        content: "- B replaces the whole thing",
+        mode: { content: "write" },
+        crossSession: true,
+      },
+      { callerSessionId: sessionB, ...ERA },
+    );
+    expect(isNoteSuccess(admitted)).toBe(true);
+    expect(getShadowNote(db, turnId)?.content).toBe("- B replaces the whole thing");
+  });
+
+  test("under that SAME truncated read an `edit` is admitted — the read requirement is the modes' only difference", () => {
+    const { address, turnId } = seedLongNoteFromA();
+    recallMemory(db, {
+      id: address,
+      filter: { fields: ["content"] },
+      turn: 20,
+      readerId: sessionWriterId(sessionB),
+    });
+
+    const result = noteTool(
+      db,
+      {
+        turn: address,
+        mode: {
+          content: { mode: "edit", oldString: "- row 0 of A's content", newString: "- row 0, edited by B" },
+        },
+        crossSession: true,
+      },
+      { callerSessionId: sessionB, ...ERA },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    const stored = getShadowNote(db, turnId)!.content;
+    expect(stored).toContain("- row 0, edited by B");
+    // The rows B never saw are untouched — which is exactly why `edit` needs
+    // no complete read.
+    expect(stored).toContain("- row 39 of A's content");
+  });
+
+  test("an `edit` success stamps the field, and the next writer is judged stale against it", () => {
+    const { address } = seedLongNoteFromA();
+    recallMemory(db, {
+      id: address,
+      filter: { fields: ["content"] },
+      turn: 4000,
+      readerId: sessionWriterId(sessionB),
+    });
+    // A holds a grant of its own, taken before B's edit lands.
+    recallMemory(db, {
+      id: address,
+      filter: { fields: ["content"] },
+      turn: 4000,
+      readerId: sessionWriterId(sessionA),
+    });
+
+    const edited = noteTool(
+      db,
+      {
+        turn: address,
+        mode: {
+          content: { mode: "edit", oldString: "- row 1 of A's content", newString: "- row 1, B was here" },
+        },
+        crossSession: true,
+      },
+      { callerSessionId: sessionB, ...ERA },
+    );
+    expect(isNoteSuccess(edited)).toBe(true);
+
+    const stale = resultText(
+      noteTool(
+        db,
+        {
+          turn: address,
+          mode: {
+            content: { mode: "edit", oldString: "- row 2 of A's content", newString: "- row 2, A again" },
+          },
+        },
+        { callerSessionId: sessionA, ...ERA },
+      ),
+    );
+    expect(stale).toStartWith("Parameter error:");
+    expect(stale).toContain(`S${sessionB}`);
+    expect(stale).toContain("content");
+  });
+
+  test("a field cleared to empty is exempt: the overwrite lands on a truncated read, because there is nothing left to lose", () => {
+    const { address, turnId } = seedLongNoteFromA();
+    // A gives the turn an insight, then clears it. The field is now WRITTEN
+    // (A's stamp stands) but empty.
+    noteTool(
+      db,
+      { turn: address, insight: "- A's first insight" },
+      { callerSessionId: sessionA, ...ERA },
+    );
+    noteTool(
+      db,
+      { turn: address, insight: null, mode: { insight: "write" } },
+      { callerSessionId: sessionA, ...ERA },
+    );
+
+    // B's read is deliberately budget-starved; `insight` is not even selected.
+    recallMemory(db, {
+      id: address,
+      filter: { fields: ["content"] },
+      turn: 20,
+      readerId: sessionWriterId(sessionB),
+    });
+
+    const result = noteTool(
+      db,
+      { turn: address, insight: "- B writes the first insight since the clear", crossSession: true },
+      { callerSessionId: sessionB, ...ERA },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(getShadowNote(db, turnId)?.insight).toBe(
+      "- B writes the first insight since the clear",
+    );
+  });
+
+  test("a long field's truncation does not block a short field's write on the same turn", () => {
+    const { address, turnId } = seedLongNoteFromA();
+
+    // One read, one budget: `content` is cut, `title` is the row label and
+    // always arrives whole.
+    recallMemory(db, {
+      id: address,
+      filter: { fields: ["title", "content"] },
+      turn: 20,
+      readerId: sessionWriterId(sessionB),
+    });
+
+    const titleWrite = noteTool(
+      db,
+      { turn: address, title: "B's title", mode: { title: "write" }, crossSession: true },
+      { callerSessionId: sessionB, ...ERA },
+    );
+    expect(isNoteSuccess(titleWrite)).toBe(true);
+    expect(getShadowNote(db, turnId)?.title).toBe("B's title");
+
+    // Same grant, same call shape, the long field: still refused.
+    const contentWrite = resultText(
+      noteTool(
+        db,
+        {
+          turn: address,
+          content: "- B replaces the whole thing",
+          mode: { content: "write" },
+          crossSession: true,
+        },
+        { callerSessionId: sessionB, ...ERA },
+      ),
+    );
+    expect(contentWrite).toStartWith("Parameter error:");
+    expect(contentWrite).toContain("content");
+  });
+
+  test("type/tags: the metadata line is what earns their completeness, and the rejection says so", () => {
+    const turnId = insertTurn(sessionA, 1);
+    const address = `S${sessionA}/T1`;
+    noteTool(
+      db,
+      { turn: address, type: ["design", "review"], tags: ["alpha", "bravo"] },
+      { callerSessionId: sessionA, ...ERA },
+    );
+
+    // B reads the turn the ordinary way — no metadata line, so `type` was
+    // never delivered at all.
+    recallMemory(db, {
+      id: address,
+      filter: { fields: ["content"] },
+      readerId: sessionWriterId(sessionB),
+    });
+    const refused = resultText(
+      noteTool(
+        db,
+        { turn: address, type: ["fix"], mode: { type: "write" }, crossSession: true },
+        { callerSessionId: sessionB, ...ERA },
+      ),
+    );
+    expect(refused).toStartWith("Parameter error:");
+    expect(refused).toContain("type");
+    // The remedy has to name the read that can actually deliver it, or the
+    // writer re-reads forever: type/tags have no `filter.fields` slot of
+    // their own.
+    expect(refused).toContain("metadata");
+    expect(getTurnById(db, turnId)?.type).toEqual(["design", "review"]);
+
+    recallMemory(db, {
+      id: address,
+      filter: { fields: ["metadata"] },
+      turn: 4000,
+      readerId: sessionWriterId(sessionB),
+    });
+    const admitted = noteTool(
+      db,
+      { turn: address, type: ["fix"], mode: { type: "write" }, crossSession: true },
+      { callerSessionId: sessionB, ...ERA },
+    );
+    expect(isNoteSuccess(admitted)).toBe(true);
+    expect(getTurnById(db, turnId)?.type).toEqual(["fix"]);
+  });
+
+  test("the same session keeps writing its own fields with no read at all — writing is reading is untouched", () => {
+    const { address, turnId } = seedLongNoteFromA();
+
+    const rewrite = noteTool(
+      db,
+      { turn: address, content: "- A rewrites its own field", mode: { content: "write" } },
+      { callerSessionId: sessionA, ...ERA },
+    );
+    expect(isNoteSuccess(rewrite)).toBe(true);
+
+    const reedit = noteTool(
+      db,
+      {
+        turn: address,
+        mode: {
+          content: { mode: "edit", oldString: "own field", newString: "own field again" },
+        },
+      },
+      { callerSessionId: sessionA, ...ERA },
+    );
+    expect(isNoteSuccess(reedit)).toBe(true);
+    expect(getShadowNote(db, turnId)?.content).toBe("- A rewrites its own field again");
   });
 });
 

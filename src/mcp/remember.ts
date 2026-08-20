@@ -13,13 +13,19 @@ import {
   getSegment,
   reassignSegmentMembers,
   replaceInSegmentWorkingStateField,
+  segmentEditableFieldValue,
   toggleSegmentStatus,
   writeSegmentWorkingStateField,
   type ReplaceSegmentWorkingStateFieldResult,
   type SegmentRecord,
 } from "../db/segments";
 import { countTurnsSince, touchSessionRememberActivity } from "../db/sessions";
-import { checkFieldGate, sessionWriterId, stampField } from "../db/write-gate";
+import {
+  checkFieldGate,
+  sessionWriterId,
+  stampField,
+  type FieldGateOptions,
+} from "../db/write-gate";
 import { decodeHtmlEntities } from "./note";
 import { renderSegmentCard } from "./segment-card";
 import {
@@ -439,18 +445,28 @@ function closedSegmentRejection(segmentId: number): string {
  * is unknown — the same "unknown always admits" latitude `note`'s own
  * cross-session guard gives an unidentified caller, since there is no writer
  * to attribute a stamp or a rejection to). Otherwise the rejection message,
- * already distinguishing "never-read" from "stale" in its own text.
+ * already distinguishing "never-read" from "stale" — and, ticket 06, from
+ * "read but not in full" — in its own text.
  */
 function checkSegmentFieldGate(
   db: Database,
   writer: string | null,
   segmentId: number,
   field: SegmentEditableField,
+  options: FieldGateOptions = {},
 ): string | null {
   if (!writer) {
     return null;
   }
-  const verdict = checkFieldGate(db, writer, "segment", segmentId, field, `E${segmentId}`);
+  const verdict = checkFieldGate(
+    db,
+    writer,
+    "segment",
+    segmentId,
+    field,
+    `E${segmentId}`,
+    options,
+  );
   return verdict.ok ? null : verdict.message;
 }
 
@@ -539,7 +555,29 @@ function handleWrite(
     | { kind: "ok"; segment: SegmentRecord };
 
   const outcome = writeTransaction(db, (): WriteOutcome => {
-    const rejection = checkSegmentFieldGate(db, writer, resolution.segment.id, field);
+    // Ticket 06 (spec D2): "does this field already hold something" is read
+    // INSIDE the transaction, not off the pre-transaction `resolution`
+    // snapshot — the same "检查-写入原子" discipline the gate check itself
+    // follows, so a field that gained content between the two cannot be
+    // overwritten under an exemption that was true a moment earlier.
+    const fresh = getSegment(db, resolution.segment.id);
+    if (!fresh) {
+      return { kind: "missing" };
+    }
+    const existing = segmentEditableFieldValue(fresh, field);
+    const rejection = checkSegmentFieldGate(db, writer, resolution.segment.id, field, {
+      // `write` replaces the field whole, so anything currently there that
+      // this writer's read did not show is what it would silently delete.
+      // An empty field (never written, or cleared) has nothing to lose.
+      requireCompleteRead: existing !== null && existing.trim() !== "",
+      // The card's field rows are elided against `pageBudget` (segment-card.ts's
+      // ladder), not against recall's per-item `turn` cap — so the segment
+      // surface names its OWN knob here rather than inheriting the gate's
+      // generic wording.
+      completeReadRemedy:
+        `re-read it whole with recall(id="E${resolution.segment.id}", ` +
+        `pageBudget=<a bigger token budget>),`,
+    });
     if (rejection) {
       return { kind: "gate-rejected", message: rejection };
     }
@@ -620,6 +658,10 @@ function handleEdit(
     | { kind: "replaced"; result: ReplaceSegmentWorkingStateFieldResult };
 
   const outcome = writeTransaction(db, (): ReplaceOutcome => {
+    // Ticket 06 (spec D3/D5/D6): `edit` runs the SAME three judgments —
+    // authorization and staleness are not relaxed for it — and only the
+    // complete-read requirement is left off, because an exact-match swap
+    // never touches the rows a truncated render hid.
     const rejection = checkSegmentFieldGate(db, writer, resolution.segment.id, field);
     if (rejection) {
       return { kind: "gate-rejected", message: rejection };

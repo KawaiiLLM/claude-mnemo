@@ -183,6 +183,22 @@ const SEGMENT_EDITABLE_PROPERTY: Record<
   insight: "insight",
 };
 
+/**
+ * One editable field's current text, addressed by the same external field
+ * name every writer types — the read-side counterpart of
+ * `writeSegmentWorkingStateField` below. Exported (ticket 06,
+ * write-mode-edit-semantics spec D2) so `mcp/remember.ts` can ask "does this
+ * field currently hold anything?" — the question that decides whether a
+ * `write` needs a complete read — without keeping a second copy of the
+ * field -> property mapping above.
+ */
+export function segmentEditableFieldValue(
+  segment: SegmentRecord,
+  field: SegmentEditableField,
+): string | null {
+  return segment[SEGMENT_EDITABLE_PROPERTY[field]];
+}
+
 function parseStringArray(value: string | null): string[] {
   if (!value) {
     return [];

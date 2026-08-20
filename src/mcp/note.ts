@@ -92,6 +92,73 @@ const NOTE_SET_MODE_FIELDS: readonly string[] = ["type", "tags"];
 // ticket 01 (ADR-0003): `grade` left this list along with the parameter
 // itself — the writer records facts, settlement assigns value.
 const TURN_MODE_FIELDS = ["title", "content", "insight", "type", "tags"] as const;
+type TurnModeField = (typeof TURN_MODE_FIELDS)[number];
+
+function hasText(value: string | null | undefined): boolean {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+/**
+ * Ticket 06 (spec D2): does this call's write to `field` land ON TOP of
+ * content already there? Only then does the gate additionally demand that
+ * the authorizing render delivered the field whole
+ * (`FieldGateOptions.requireCompleteRead`).
+ *
+ * Three separate exemptions, all of them "there is nothing here to lose":
+ * the edit form (it replaces only the span it matched, spec D3), an absent
+ * mode (a non-empty field with no mode never gets this far — the resolvers'
+ * own `modeRequiredMessage` refuses it, and letting that message win keeps
+ * the more specific diagnosis), and an empty field.
+ *
+ * Prose emptiness is read from BOTH stores this write would replace — the
+ * shadow note (the resolvers' own edit baseline) and the promoted `turns`
+ * row — because a `write` overwrites both. They agree for everything `note`
+ * itself wrote; taking either as "occupied" keeps the requirement honest for
+ * a turn whose prose reached `turns` by some other path.
+ */
+function writeOverwritesExistingTurnContent(
+  field: TurnModeField,
+  turn: TurnRecord,
+  note: { title: string | null; content: string | null; insight: string | null } | null,
+  mode: FieldMode | undefined,
+): boolean {
+  if (mode !== "write") {
+    return false;
+  }
+  switch (field) {
+    case "type":
+      return turn.type.length > 0;
+    case "tags":
+      return turn.tags.length > 0;
+    case "title":
+      return hasText(note?.title) || hasText(turn.title);
+    case "content":
+      return hasText(note?.content) || hasText(turn.content);
+    case "insight":
+      return hasText(note?.insight) || hasText(turn.insight);
+  }
+}
+
+/**
+ * Ticket 06 (spec D8: "拒绝报文必须指名是哪个字段被截断、补救动作是什么"):
+ * the read that actually brings THIS field back whole on the turn surface.
+ * `type`/`tags` need their own clause — neither is selectable by its own
+ * name (`filter.fields` has no such value); both render on the `metadata`
+ * line (mcp/format.ts's `composeTurnMetadata`), so a writer told only to
+ * "raise the budget" would re-read forever without ever earning a
+ * completeness record for them.
+ */
+function completeReadRemedyForTurnField(field: TurnModeField, address: string): string {
+  const selector = field === "type" || field === "tags" ? "metadata" : field;
+  const rider =
+    selector === "metadata"
+      ? " (type and tags both render on that metadata line)"
+      : "";
+  return (
+    `re-read it whole with recall(id="${address}", filter={fields:["${selector}"]}, ` +
+    `turn=<a bigger token budget>)${rider},`
+  );
+}
 
 export interface NoteToolInput {
   // `turn` is the only address this tool accepts now (ticket 09: the
@@ -994,24 +1061,42 @@ function handleTurnWrite(
   let result: TurnWriteTransactionResult;
   try {
     result = writeTransaction(db, (): TurnWriteTransactionResult => {
+      // Both current states are read FIRST (ticket 06: they were read just
+      // below before this ticket): the gate check needs to know, per field,
+      // whether this write would land over existing content, and reading
+      // them inside this same transaction keeps that judgment atomic with
+      // the write it guards.
+      const freshTurn = getTurnById(db, turn.id)!;
+      const existingNote = getShadowNote(db, turn.id);
+      const noteExisted = existingNote !== null;
+
       // Write gate (ticket 03): checked first, inside this transaction, for
       // every field the call actually provided — "检查-写入原子", no gap
       // between this passing and the fields it guards actually landing
       // below. `fail()` throws and unwinds the WHOLE transaction, the same
       // all-or-nothing shape every other whole-call validation in this
       // function already has: one rejected field blocks the rest too.
+      //
+      // Ticket 06 (spec D2/D5/D6): both modes run this identically — the
+      // edit form earns no exemption from authorization or staleness — and
+      // a `write` replacing existing content additionally has to have been
+      // granted by a render that showed that field whole.
       if (writer) {
         for (const field of providedFields) {
-          const verdict = checkFieldGate(db, writer, "turn", turn.id, field, addressLabel);
+          const verdict = checkFieldGate(db, writer, "turn", turn.id, field, addressLabel, {
+            requireCompleteRead: writeOverwritesExistingTurnContent(
+              field,
+              freshTurn,
+              existingNote,
+              modeMap[field],
+            ),
+            completeReadRemedy: completeReadRemedyForTurnField(field, addressLabel),
+          });
           if (!verdict.ok) {
             fail(verdict.message);
           }
         }
       }
-
-      const freshTurn = getTurnById(db, turn.id)!;
-      const existingNote = getShadowNote(db, turn.id);
-      const noteExisted = existingNote !== null;
 
       // Ticket 05: a field is "touched" by its own value OR by the edit
       // form on `mode.<field>` — the edit form carries its whole payload

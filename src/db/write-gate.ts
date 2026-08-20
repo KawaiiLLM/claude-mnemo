@@ -219,8 +219,10 @@ export function sweepReadGrantsForCompletedSessions(
 
 // ---------------------------------------------------------------------------
 // Per-field completeness (write-mode-edit-semantics spec D8, ticket 04 — the
-// RECORD half only). A later, blocked ticket decides what `write` REQUIRES
-// of this data; this module only stores what a render pass actually showed.
+// RECORD half). Ticket 06 adds the REQUIRE half at the bottom of this file
+// (`checkFieldGate`'s `requireCompleteRead`): a `write` replacing content
+// another writer put there must be authorized by a render that showed that
+// field whole.
 // ---------------------------------------------------------------------------
 
 export interface FieldCompletenessEntry {
@@ -372,13 +374,14 @@ export function stampField(
 export type WriteGateVerdict =
   | { ok: true }
   | { ok: false; reason: "never-read"; message: string }
-  | { ok: false; reason: "stale"; message: string; staleWriter: string };
+  | { ok: false; reason: "stale"; message: string; staleWriter: string }
+  | { ok: false; reason: "incomplete-read"; message: string };
 
 /**
- * Error text (spec: "报文两分... 两形态在报文层可区分"). `address` is the
- * caller's own display form for the entity ("E42", "S15069/T332") — this
- * module has no opinion on addressing, it only names the field and the other
- * writer.
+ * Error text (spec: "报文三分... 三形态在报文层可区分" — ticket 06 added the
+ * third). `address` is the caller's own display form for the entity ("E42",
+ * "S15069/T332") — this module has no opinion on addressing, it only names
+ * the field, the other writer, and what to do next.
  */
 function neverReadMessage(address: string): string {
   return `${address} has not been read this session — recall(id="${address}") first, then write it.`;
@@ -390,6 +393,56 @@ function staleMessage(field: string, address: string, staleWriter: string): stri
     `${field} on ${address} was changed by ${label} since you last read it — ` +
     `recall(id="${address}") again before writing ${field}.`
   );
+}
+
+/**
+ * Ticket 06 (write-mode-edit-semantics spec D2/D8): the third rejection. It
+ * MUST name the field and the remedy — "否则写者无从下手" — because the
+ * writer cannot otherwise tell which of the fields it just sent was the one
+ * its read never delivered whole. Covers both shapes of "not delivered in
+ * full" (a render that cut the field, and a render that never selected it at
+ * all): the record is absent in the second case, and the remedy — read it
+ * again until it comes back whole — is the same either way, so splitting
+ * them would buy a distinction the writer cannot act on differently.
+ *
+ * `remedy` comes from the CALLER (`FieldGateOptions.completeReadRemedy`)
+ * because the read that delivers a field whole differs per surface: a turn
+ * field is widened with `turn`, a segment card's with `pageBudget`, and a
+ * turn's `type`/`tags` are not selectable by their own names at all — they
+ * ride the `metadata` line. A gate that guessed one of those would send the
+ * other two writers back to a read that cannot possibly clear the rejection.
+ */
+function incompleteReadMessage(field: string, address: string, remedy?: string): string {
+  const howToRead =
+    remedy ?? `re-read it with a bigger budget until ${field} renders complete,`;
+  return (
+    `${field} on ${address} was not delivered in full by the read that granted this write —` +
+    ` it was cut short, or not shown at all. A whole-field write may not land over content you` +
+    ` have not seen whole: ${howToRead} then write it — or use edit, which changes only the` +
+    ` span it matches and needs no complete read.`
+  );
+}
+
+/**
+ * Ticket 06 (spec D2): the one thing `write` asks for beyond the three
+ * judgments, supplied by the CALLER because only the caller knows both the
+ * mode and whether the field currently holds anything.
+ */
+export interface FieldGateOptions {
+  /**
+   * Set by a `write` (whole-field replacement) that would land over content
+   * already there. The caller leaves it false/absent for an `edit` (it only
+   * touches the span it matched, spec D3) and for a `write` onto an empty
+   * field (the create path has no old content to lose).
+   */
+  requireCompleteRead?: boolean;
+  /**
+   * The rejection's own remedy clause — the exact read that would deliver
+   * THIS field whole on the caller's surface, phrased as an imperative
+   * ending in a comma ("re-read it with recall(...), "). Optional; the
+   * fallback names no specific call, so a caller that can name one should.
+   */
+  completeReadRemedy?: string;
 }
 
 /**
@@ -406,6 +459,26 @@ function staleMessage(field: string, address: string, staleWriter: string): stri
  *     (a create is not gated on having read the thing it creates).
  * (4) Otherwise -> reject, `never-read` when this writer holds no grant at
  *     all on the entity, `stale` when it does but the field outran it.
+ *
+ * Both write modes (`write` and `edit`, spec D1) go through this check
+ * identically — D5/D6: "看见" and "内容一致" are two independent premises, so
+ * an exact `oldString` match never substitutes for having read, and a foreign
+ * write since the read invalidates BOTH modes.
+ *
+ * `options.requireCompleteRead` (ticket 06, spec D2) is the one thing layered
+ * on top, and only `write` over existing content sets it: the grant must come
+ * from a render that showed THIS field whole (ticket 04's per-field
+ * completeness records). Its evaluation order matters —
+ *
+ * The two admissions that do NOT rest on a render (rule 3, never written by
+ * anyone; rule 2, this writer's own last write — "writing is reading") are
+ * tested FIRST, so the completeness requirement can only ever bite the case
+ * it exists for: replacing content ANOTHER writer put there. Rules 1/4 give
+ * exactly the verdicts they gave before this reordering (a grant is only
+ * consulted once a foreign stamp exists, which is the only case where it
+ * changed anything); what the order buys is that a create path and a
+ * self-rewrite are never blocked for want of a completeness record they had
+ * no way to earn.
  */
 export function checkFieldGate(
   db: Database,
@@ -414,27 +487,51 @@ export function checkFieldGate(
   entityId: number,
   field: string,
   address: string,
+  options: FieldGateOptions = {},
 ): WriteGateVerdict {
-  const grant = getReadGrant(db, writer, entityType, entityId);
   const stamp = getFieldStamp(db, entityType, entityId, field);
 
-  if (grant) {
-    const movedSinceRead =
-      stamp !== null && stamp.writer !== writer && stamp.writeSequence > grant.readSequence;
-    if (!movedSinceRead) {
-      return { ok: true };
-    }
-    return {
-      ok: false,
-      reason: "stale",
-      message: staleMessage(field, address, stamp!.writer),
-      staleWriter: stamp!.writer,
-    };
-  }
-
-  if (stamp === null || stamp.writer === writer) {
+  // Rule 3 — never written by anyone: the create path, admitted without a
+  // read and (ticket 06) without a complete one, since there is no old
+  // content an overwrite could silently drop.
+  if (stamp === null) {
     return { ok: true };
   }
 
-  return { ok: false, reason: "never-read", message: neverReadMessage(address) };
+  // Rule 2 — writing is reading: no field a writer already owns can go stale
+  // under its own hand, and the only content its overwrite can lose is
+  // content it put there itself.
+  if (stamp.writer === writer) {
+    return { ok: true };
+  }
+
+  // From here the field holds another writer's content.
+  const grant = getReadGrant(db, writer, entityType, entityId);
+  if (!grant) {
+    return { ok: false, reason: "never-read", message: neverReadMessage(address) };
+  }
+  if (stamp.writeSequence > grant.readSequence) {
+    return {
+      ok: false,
+      reason: "stale",
+      message: staleMessage(field, address, stamp.writer),
+      staleWriter: stamp.writer,
+    };
+  }
+
+  // Rule 1 admits — plus ticket 06's extra requirement for a whole-field
+  // `write`. An absent record and a `complete: false` record are the same
+  // answer: this writer's grant did not come with a full view of this field.
+  if (options.requireCompleteRead) {
+    const completeness = getFieldCompleteness(db, writer, entityType, entityId, field);
+    if (!completeness || !completeness.complete) {
+      return {
+        ok: false,
+        reason: "incomplete-read",
+        message: incompleteReadMessage(field, address, options.completeReadRemedy),
+      };
+    }
+  }
+
+  return { ok: true };
 }

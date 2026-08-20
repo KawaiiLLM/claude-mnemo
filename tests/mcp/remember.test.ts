@@ -1157,6 +1157,236 @@ describe("remember write gate (ticket 02)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Ticket 06 (write-mode-edit-semantics spec D2/D5/D6): the segment surface's
+// half of "both modes are gated the same, `write` alone also needs a complete
+// read". The segment card elides field rows against `pageBudget` (not
+// recall's per-item `turn` cap), so this is also where that knob's own remedy
+// wording is pinned.
+// ---------------------------------------------------------------------------
+
+describe("remember write gate: the complete-read requirement (ticket 06)", () => {
+  let db: Database;
+  let sessionA: number;
+  let sessionB: number;
+  let segmentId: number;
+
+  const LONG_DECISIONS = Array.from(
+    { length: 40 },
+    (_, i) => `- decision ${i}: a sentence long enough to make the card's ladder work`,
+  ).join("\n");
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionA = upsertSession(db, {
+      contentSessionId: "complete-read-a",
+      project: "/tmp/complete-read",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+    sessionB = upsertSession(db, {
+      contentSessionId: "complete-read-b",
+      project: "/tmp/complete-read",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+
+    segmentId = Number(
+      /Created E(\d+)/.exec(
+        resultText(
+          rememberTool(db, { verb: "create", title: "Complete-read lane" }, { callerSessionId: sessionA }),
+        ),
+      )![1],
+    );
+    // A owns both fields: one long, one short.
+    rememberTool(
+      db,
+      { verb: "write", id: `E${segmentId}`, field: "decisions", value: LONG_DECISIONS },
+      { callerSessionId: sessionA },
+    );
+    rememberTool(
+      db,
+      { verb: "write", id: `E${segmentId}`, field: "goal", value: "- ship the gate" },
+      { callerSessionId: sessionA },
+    );
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  /** B reads the card under a budget too small to deliver `decisions` whole. */
+  function readTruncated(): void {
+    recallMemory(db, {
+      id: `E${segmentId}`,
+      pageBudget: 60,
+      readerId: sessionWriterId(sessionB),
+    });
+  }
+
+  test("a truncated card refuses the whole-field write, names the field, and names the budget that would fix it", () => {
+    readTruncated();
+
+    const refused = resultText(
+      rememberTool(
+        db,
+        { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- B's single decision" },
+        { callerSessionId: sessionB },
+      ),
+    );
+
+    expect(refused).toStartWith("Parameter error:");
+    expect(refused).toContain("decisions");
+    expect(refused).toContain(`E${segmentId}`);
+    // The card's own knob, not recall's per-item `turn` cap — a writer sent
+    // to the wrong knob would re-read forever.
+    expect(refused).toContain("pageBudget");
+    expect(getSegment(db, segmentId)?.decisions).toBe(LONG_DECISIONS);
+
+    // Reading it whole is what clears the rejection.
+    recallMemory(db, {
+      id: `E${segmentId}`,
+      pageBudget: 8000,
+      readerId: sessionWriterId(sessionB),
+    });
+    const admitted = resultText(
+      rememberTool(
+        db,
+        { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- B's single decision" },
+        { callerSessionId: sessionB },
+      ),
+    );
+    expect(admitted).toStartWith("Wrote");
+    expect(getSegment(db, segmentId)?.decisions).toBe("- B's single decision");
+  });
+
+  test("under that SAME truncated card an `edit` is admitted", () => {
+    readTruncated();
+
+    const text = resultText(
+      rememberTool(
+        db,
+        {
+          verb: "edit",
+          id: `E${segmentId}`,
+          field: "decisions",
+          oldString: "- decision 0: a sentence long enough to make the card's ladder work",
+          newString: "- decision 0: rewritten by B",
+        },
+        { callerSessionId: sessionB },
+      ),
+    );
+
+    expect(text).toStartWith("Replaced text in");
+    const stored = getSegment(db, segmentId)!.decisions!;
+    expect(stored).toContain("- decision 0: rewritten by B");
+    // The rows B's read never showed survive — the reason `edit` needs no
+    // complete read in the first place.
+    expect(stored).toContain("- decision 39");
+  });
+
+  test("the long field's truncation does not block the short field's write on the same card", () => {
+    readTruncated();
+
+    const shortWrite = resultText(
+      rememberTool(
+        db,
+        { verb: "write", id: `E${segmentId}`, field: "goal", value: "- ship the gate, then rest" },
+        { callerSessionId: sessionB },
+      ),
+    );
+
+    expect(shortWrite).toStartWith("Wrote");
+    expect(getSegment(db, segmentId)?.goal).toBe("- ship the gate, then rest");
+  });
+
+  test("clearing a field to null is exempt from the requirement — an empty field has nothing to lose", () => {
+    readTruncated();
+    // A clears the long field. B's grant is now stale on `decisions`...
+    rememberTool(
+      db,
+      { verb: "write", id: `E${segmentId}`, field: "decisions", value: null },
+      { callerSessionId: sessionA },
+    );
+    // ...so B re-reads (the field is empty now, so nothing is truncated),
+    // then writes it whole. The completeness requirement never applies: the
+    // field holds nothing.
+    recallMemory(db, {
+      id: `E${segmentId}`,
+      pageBudget: 60,
+      readerId: sessionWriterId(sessionB),
+    });
+
+    const text = resultText(
+      rememberTool(
+        db,
+        { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- B starts it over" },
+        { callerSessionId: sessionB },
+      ),
+    );
+    expect(text).toStartWith("Wrote");
+    expect(getSegment(db, segmentId)?.decisions).toBe("- B starts it over");
+  });
+
+  test("an `edit` success stamps the field — the next writer is judged stale against it", () => {
+    // Both sessions hold a complete read of the card.
+    recallMemory(db, { id: `E${segmentId}`, pageBudget: 8000, readerId: sessionWriterId(sessionA) });
+    recallMemory(db, { id: `E${segmentId}`, pageBudget: 8000, readerId: sessionWriterId(sessionB) });
+
+    const edited = resultText(
+      rememberTool(
+        db,
+        {
+          verb: "edit",
+          id: `E${segmentId}`,
+          field: "goal",
+          oldString: "- ship the gate",
+          newString: "- ship the gate (B)",
+        },
+        { callerSessionId: sessionB },
+      ),
+    );
+    expect(edited).toStartWith("Replaced text in");
+
+    // A's grant predates B's edit: both of A's modes are now refused as
+    // stale, naming B.
+    const staleWrite = resultText(
+      rememberTool(
+        db,
+        { verb: "write", id: `E${segmentId}`, field: "goal", value: "- A overrides" },
+        { callerSessionId: sessionA },
+      ),
+    );
+    const staleEdit = resultText(
+      rememberTool(
+        db,
+        {
+          verb: "edit",
+          id: `E${segmentId}`,
+          field: "goal",
+          oldString: "- ship the gate (B)",
+          newString: "- ship the gate (A)",
+        },
+        { callerSessionId: sessionA },
+      ),
+    );
+
+    for (const text of [staleWrite, staleEdit]) {
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("goal");
+      expect(text).toContain(`S${sessionB}`);
+    }
+    expect(getSegment(db, segmentId)?.goal).toBe("- ship the gate (B)");
+  });
+});
+
 // Ticket 13 (spec "节奏与建段指导"), verb scope narrowed by ticket 09 and
 // renamed by ticket 05 (both spec "write-mode-edit-semantics"): every
 // successful FIELD-WRITING `remember` call — `create`, `write`, `edit` —
