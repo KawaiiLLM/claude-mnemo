@@ -128,27 +128,75 @@ function closeDebt(db: Database, sessionDbId: number, promptNumber: number): voi
 }
 
 /**
- * Move the one-time settlement transition watermark (spec D8, ticket 05,
- * [S15069/T1124]) to sit right after whatever turns already exist.
+ * Draw the one-time settlement transition (spec D8, tickets 05 + 09,
+ * [S15069/T1124]) right after whatever turns already exist: every session's
+ * whole history so far counts as ALREADY FINISHED, nothing is left mid-flight.
  *
- * The real migration (`ensureNoteSettlementWatermark`, db/schema.ts) stamps
- * this exactly once, the first time it finds the row missing — every fixture
- * in this file already has the row (`initializeSchema` in `beforeEach` stamps
- * it at 0, since no turns exist yet at that point). A fixture that wants a
- * mixed pre/post-watermark corpus therefore moves the ALREADY-stamped row
- * explicitly, the same way this file's era tests hand `eraCutoffEpoch`
- * straight to the scheduler rather than re-deriving it — production never
- * moves this row twice, but a test choosing where the line falls is a
- * different thing from a second migration re-stamping it.
+ * The real migration (`ensureNoteSettlementWatermark`, db/schema.ts) runs
+ * exactly once, the first time it finds the marker row missing — every fixture
+ * in this file already has the marker (`initializeSchema` in `beforeEach`
+ * writes it when no session exists yet, so it records no floors at all). A
+ * fixture that wants a mixed pre/post-transition corpus therefore writes the
+ * per-session floors itself, the same way this file's era tests hand
+ * `eraCutoffEpoch` straight to the scheduler rather than re-deriving it —
+ * production never draws this line twice, but a test choosing where it falls
+ * is a different thing from a second migration re-running.
+ *
+ * It writes the floors from prompt numbers alone and never reads
+ * `turns.status`, because these fixtures seed turns at the legacy `active`
+ * default on purpose (settlement reads the note-debt ledger, never the turn's
+ * status — see `seedTurns`). "Already finished" is this helper's own
+ * statement. The migration's own reading of `active`/`provisional` is pinned
+ * against the real `initializeSchema` in
+ * tests/db/schema.note-settlement-migration.test.ts, and against the mixed
+ * fixture at the bottom of this describe.
  */
-function stampWatermarkAtCurrentMaxTurnId(db: Database): void {
+function stampWatermarkOverExistingTurns(db: Database): void {
   db.exec(`
-    INSERT INTO note_settlement_watermark_state (id, watermark_turn_id, recorded_at_epoch)
-    VALUES (1, COALESCE((SELECT MAX(id) FROM turns), 0), 0)
-    ON CONFLICT(id) DO UPDATE SET
-      watermark_turn_id = excluded.watermark_turn_id,
-      recorded_at_epoch = excluded.recorded_at_epoch
+    INSERT OR REPLACE INTO note_settlement_watermark_floors (
+      session_id, finished_prompt_number
+    )
+    SELECT sessionId, finishedPromptNumber FROM (
+      SELECT
+        s.id AS sessionId,
+        COALESCE(
+          (SELECT MAX(t.prompt_number) FROM turns t WHERE t.session_id = s.id),
+          0
+        ) AS finishedPromptNumber
+      FROM sessions s
+    )
+    WHERE finishedPromptNumber > 0
   `);
+  db.exec(`
+    INSERT INTO note_settlement_watermark_state (id, recorded_at_epoch)
+    VALUES (1, 0)
+    ON CONFLICT(id) DO UPDATE SET recorded_at_epoch = excluded.recorded_at_epoch
+  `);
+}
+
+/**
+ * Re-arm the real one-time transition and run it: delete the marker (and any
+ * floors), then call `initializeSchema`, which is what a database that has
+ * never seen this build does on open. Unlike the helper above, this exercises
+ * the migration's OWN reading of `turns.status`.
+ */
+function runRealWatermarkMigration(db: Database): void {
+  db.exec("DELETE FROM note_settlement_watermark_floors");
+  db.exec("DELETE FROM note_settlement_watermark_state");
+  initializeSchema(db);
+}
+
+/** Take turns out of the unfinished pair the transition reads. */
+function finishTurns(
+  db: Database,
+  sessionDbId: number,
+  from: number,
+  to: number,
+): void {
+  db.query<unknown, [number, number, number]>(
+    `UPDATE turns SET status = 'extracted'
+     WHERE session_id = ? AND prompt_number BETWEEN ? AND ?`,
+  ).run(sessionDbId, from, to);
 }
 
 /** A fake clock the whole scheduler shares: epoch seconds derived from ms. */
@@ -728,7 +776,7 @@ describe("note settlement and the transition watermark (spec D8, ticket 05, [S15
     // An old install's leftover: well over the threshold, every turn decided
     // — without the watermark this alone would cut a window immediately.
     seedTurns(db, sessionDbId, 1, 60);
-    stampWatermarkAtCurrentMaxTurnId(db);
+    stampWatermarkOverExistingTurns(db);
 
     const stale = await scheduler.onTurnStop(sessionDbId);
     expect(stale.created).toHaveLength(0);
@@ -771,7 +819,7 @@ describe("note settlement and the transition watermark (spec D8, ticket 05, [S15
     );
     seedTurns(db, straddling, 1, 30, "noted", nowEpoch - 5 * DAY_SECONDS);
 
-    stampWatermarkAtCurrentMaxTurnId(db);
+    stampWatermarkOverExistingTurns(db);
 
     seedTurns(db, straddling, 31, 25, "noted", nowEpoch - 3 * DAY_SECONDS);
 
@@ -818,7 +866,7 @@ describe("note settlement and the transition watermark (spec D8, ticket 05, [S15
   test("manual backfill still reaches turns that existed before the watermark", async () => {
     const sessionDbId = seedSession(db, "content-watermark-backfill");
     seedTurns(db, sessionDbId, 1, 30);
-    stampWatermarkAtCurrentMaxTurnId(db);
+    stampWatermarkOverExistingTurns(db);
 
     // Every turn in this range predates the watermark — an automatic planner
     // would refuse it (below_window_floor), but backfill is exempt by trigger
@@ -835,6 +883,115 @@ describe("note settlement and the transition watermark (spec D8, ticket 05, [S15
     expect(result.ok).toBe(true);
     expect((result as { ok: true; job: NoteSettlementJob }).job).toMatchObject(
       { windowStart: 1, windowEnd: 30, triggerType: "backfill" },
+    );
+  });
+
+  /**
+   * Ticket 09's whole point, through the real migration rather than a fixture
+   * that decides the answer: three sessions in ONE database, each in a
+   * different state at the instant the transition runs, and the automatic
+   * planner has to give each one a different window.
+   *
+   * The straddling session is the case the retired global `MAX(turns.id)`
+   * watermark got wrong — its prompt 21 was mid-flight, so under the old shape
+   * it counted as "already there, therefore already finished" and no automatic
+   * window could ever start at or below it again, even after it finished
+   * normally seconds later.
+   */
+  test("a turn left unfinished at the transition enters the automatic window once it finishes, while a fully finished session stays out", async () => {
+    const clock = createClock();
+    const allFinished = seedSession(db, "content-transition-all-finished");
+    const straddling = seedSession(db, "content-transition-straddling");
+    const firstTurnLive = seedSession(db, "content-transition-first-live");
+    for (const sessionDbId of [allFinished, straddling, firstTurnLive]) {
+      seedTurns(db, sessionDbId, 1, 80);
+      finishTurns(db, sessionDbId, 1, 80);
+    }
+    // The mixed part: one session mid-flight in the MIDDLE of its history
+    // (a stranded turn, not just the newest one), one mid-flight at its very
+    // first prompt, one entirely done.
+    db.query<unknown, [number]>(
+      `UPDATE turns SET status = 'provisional'
+       WHERE session_id = ? AND prompt_number = 21`,
+    ).run(straddling);
+    db.query<unknown, [number]>(
+      `UPDATE turns SET status = 'active'
+       WHERE session_id = ? AND prompt_number = 1`,
+    ).run(firstTurnLive);
+
+    runRealWatermarkMigration(db);
+
+    // Both unfinished turns finish the ordinary way, right after the
+    // transition — exactly the sequence the old shape lost.
+    finishTurns(db, straddling, 21, 21);
+    finishTurns(db, firstTurnLive, 1, 1);
+
+    const { dispatch, calls } = recordingDispatch();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+      // Keep the residual scan out of it: this test is about the consecutive
+      // planner's floor, one session at a time.
+      activeSessionIds: () => [allFinished, straddling, firstTurnLive],
+    });
+
+    // Finished through its last turn: floor 80, and the session has no turn
+    // above it, so there is nothing to plan at all.
+    const finishedPass = await scheduler.onTurnStop(allFinished);
+    expect(finishedPass.created).toHaveLength(0);
+    expect(listNoteSettlementJobs(db, allFinished)).toHaveLength(0);
+
+    // Floor 20 — one below the turn that was mid-flight — so the window opens
+    // ON the recovered turn, not past it.
+    const straddlePass = await scheduler.onTurnStop(straddling);
+    expect(straddlePass.created).toHaveLength(1);
+    expect(straddlePass.created[0]).toMatchObject({
+      sessionId: straddling,
+      windowStart: 21,
+      windowEnd: 20 + NOTE_SETTLEMENT_WINDOW_CAP_TURNS,
+      triggerType: "consecutive",
+    });
+
+    // Unfinished at prompt 1 means an EMPTY finished prefix: no floor row at
+    // all, and the session is settled from its very first turn.
+    const livePass = await scheduler.onTurnStop(firstTurnLive);
+    expect(livePass.created).toHaveLength(1);
+    expect(livePass.created[0]).toMatchObject({
+      sessionId: firstTurnLive,
+      windowStart: 1,
+      windowEnd: NOTE_SETTLEMENT_WINDOW_CAP_TURNS,
+      triggerType: "consecutive",
+    });
+
+    expect(calls.map((job) => job.sessionId).sort()).toEqual(
+      [straddling, firstTurnLive].sort(),
+    );
+  });
+
+  test("manual backfill is unbound by the finished set, mixed statuses and all", async () => {
+    const sessionDbId = seedSession(db, "content-transition-backfill-mixed");
+    seedTurns(db, sessionDbId, 1, 40);
+    finishTurns(db, sessionDbId, 1, 40);
+    runRealWatermarkMigration(db);
+
+    // Floor 40: every turn in this range is inside the finished set, which is
+    // precisely what an automatic planner may not reach and what a backfill
+    // exists to reach anyway.
+    const result = enqueueBackfillNoteSettlementJob(
+      db,
+      sessionDbId,
+      1,
+      40,
+      5_000,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+
+    expect(result.ok).toBe(true);
+    expect((result as { ok: true; job: NoteSettlementJob }).job).toMatchObject(
+      { windowStart: 1, windowEnd: 40, triggerType: "backfill" },
     );
   });
 });

@@ -528,26 +528,54 @@ describe("note settlement transition watermark migration (ticket 05, D8)", () =>
     sessionDbId: number,
     promptNumber: number,
     createdAtEpoch = 10,
+    status = "extracted",
   ): number {
     return db
-      .query<{ id: number }, [number, number, number]>(
+      .query<{ id: number }, [number, number, string, number]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, user_prompt,
            assistant_response, created_at_epoch
-         ) VALUES (?, ?, 'active', 'prompt', 'reply', ?)
+         ) VALUES (?, ?, ?, 'prompt', 'reply', ?)
          RETURNING id`,
       )
-      .get(sessionDbId, promptNumber, createdAtEpoch)!.id;
+      .get(sessionDbId, promptNumber, status, createdAtEpoch)!.id;
   }
 
-  function watermarkRow(): { watermarkTurnId: number; recordedAtEpoch: number } | null {
+  function seedWatermarkSession(contentSessionId: string): number {
+    return upsertSession(db, {
+      contentSessionId,
+      project: "/tmp/project-note-settlement-watermark",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+  }
+
+  function watermarkRow(): { recordedAtEpoch: number } | null {
     return (
       db
-        .query<{ watermarkTurnId: number; recordedAtEpoch: number }, []>(
-          `SELECT watermark_turn_id AS watermarkTurnId, recorded_at_epoch AS recordedAtEpoch
+        .query<{ recordedAtEpoch: number }, []>(
+          `SELECT recorded_at_epoch AS recordedAtEpoch
            FROM note_settlement_watermark_state WHERE id = 1`,
         )
         .get() ?? null
+    );
+  }
+
+  /** Every recorded finished-set floor, session id → last finished prompt. */
+  function floorRows(): Record<number, number> {
+    const rows = db
+      .query<{ sessionId: number; finishedPromptNumber: number }, []>(
+        `SELECT session_id AS sessionId,
+                finished_prompt_number AS finishedPromptNumber
+         FROM note_settlement_watermark_floors ORDER BY session_id`,
+      )
+      .all();
+    return Object.fromEntries(
+      rows.map((row) => [row.sessionId, row.finishedPromptNumber]),
     );
   }
 
@@ -578,44 +606,36 @@ describe("note settlement transition watermark migration (ticket 05, D8)", () =>
     );
   }
 
-  test("the beforeEach install (no turns yet) stamps the watermark at 0", () => {
+  test("the beforeEach install (no sessions yet) writes the marker and no floors at all", () => {
     // Every other test file's `beforeEach` calls `initializeSchema` before it
-    // ever seeds a turn — this is the shape that makes the whole watermark
-    // design safe against the rest of the suite: a fresh test database always
-    // reads as "nothing existed yet", so every turn a fixture seeds afterward
-    // is unconditionally post-watermark.
-    expect(watermarkRow()).toEqual({ watermarkTurnId: 0, recordedAtEpoch: expect.any(Number) });
+    // ever seeds a session — this is the shape that makes the whole design
+    // safe against the rest of the suite: a fresh test database records no
+    // finished set whatsoever, so every session a fixture creates afterward
+    // floors at 0 and is unconditionally in scope.
+    expect(watermarkRow()).toEqual({ recordedAtEpoch: expect.any(Number) });
+    expect(floorRows()).toEqual({});
   });
 
-  test("stamps the watermark at the current MAX(turns.id) the first time the row is missing, and never restamps it", () => {
-    const sessionDbId = upsertSession(db, {
-      contentSessionId: "watermark-migration",
-      project: "/tmp/project-note-settlement-watermark",
-      title: null,
-      content: null,
-      insight: null,
-      createdAtEpoch: 1,
-      updatedAtEpoch: 1,
-      completedAtEpoch: null,
-    }).id;
+  test("records each session's contiguous FINISHED prefix the first time the marker is missing, and never recomputes it", () => {
+    const sessionDbId = seedWatermarkSession("watermark-migration");
 
     seedTurn(db, sessionDbId, 1);
     seedTurn(db, sessionDbId, 2);
-    const lastPreMigrationTurnId = seedTurn(db, sessionDbId, 3);
+    seedTurn(db, sessionDbId, 3);
 
-    // Simulate an install that has never run this migration: the row is
-    // absent (the table itself already exists — every `initializeSchema`
-    // call, this one's own `beforeEach` included, creates it unconditionally
-    // via `CREATE TABLE IF NOT EXISTS` — only the row is what a pre-ticket-05
-    // database lacks).
+    // Simulate an install that has never run this migration: the marker row is
+    // absent (the tables themselves already exist — every `initializeSchema`
+    // call, this one's own `beforeEach` included, creates them unconditionally
+    // via `CREATE TABLE IF NOT EXISTS` — only the row is what a database that
+    // has not transitioned lacks).
     db.exec("DELETE FROM note_settlement_watermark_state");
 
     initializeSchema(db);
 
-    expect(watermarkRow()?.watermarkTurnId).toBe(lastPreMigrationTurnId);
+    expect(floorRows()).toEqual({ [sessionDbId]: 3 });
 
     // More turns land, and the process restarts (initializeSchema reruns, as
-    // it does on every boot) — the watermark must not move.
+    // it does on every boot) — the finished set must not move.
     seedTurn(db, sessionDbId, 4);
     seedTurn(db, sessionDbId, 5);
     const stampedAfterFirstRun = watermarkRow();
@@ -624,6 +644,98 @@ describe("note settlement transition watermark migration (ticket 05, D8)", () =>
     initializeSchema(db);
 
     expect(watermarkRow()).toEqual(stampedAfterFirstRun);
+    expect(floorRows()).toEqual({ [sessionDbId]: 3 });
+  });
+
+  test("cuts each session's floor at its FIRST still-unfinished turn, across a mixed multi-session corpus", () => {
+    // Every state a session can be in at the transition, in one database.
+    const allFinished = seedWatermarkSession("watermark-mixed-all-finished");
+    const strandedMiddle = seedWatermarkSession("watermark-mixed-stranded");
+    const liveTail = seedWatermarkSession("watermark-mixed-live-tail");
+    const firstTurnLive = seedWatermarkSession("watermark-mixed-first-live");
+    const emptySession = seedWatermarkSession("watermark-mixed-empty");
+
+    for (let promptNumber = 1; promptNumber <= 4; promptNumber += 1) {
+      seedTurn(db, allFinished, promptNumber);
+      seedTurn(db, liveTail, promptNumber);
+      seedTurn(db, firstTurnLive, promptNumber, 10, promptNumber === 1 ? "active" : "extracted");
+      // A turn stranded in the MIDDLE, not at the tail: the case a global
+      // high-water mark cannot express at all, since prompts 3 and 4 above it
+      // were finished and prompt 2 was not.
+      seedTurn(
+        db,
+        strandedMiddle,
+        promptNumber,
+        10,
+        promptNumber === 2 ? "provisional" : "extracted",
+      );
+    }
+    // The ordinary live tail: the session's newest turn is still running.
+    db.query<unknown, [number]>(
+      `UPDATE turns SET status = 'active'
+       WHERE session_id = ? AND prompt_number = 4`,
+    ).run(liveTail);
+
+    db.exec("DELETE FROM note_settlement_watermark_state");
+    initializeSchema(db);
+
+    expect(floorRows()).toEqual({
+      // Nothing unfinished: the whole history is out of automatic scope.
+      [allFinished]: 4,
+      // Contiguous prefix, so it stops BELOW the stranded turn — prompts 3
+      // and 4 come back into scope with it, which is the accepted price of a
+      // window being a contiguous range.
+      [strandedMiddle]: 1,
+      [liveTail]: 3,
+      // `firstTurnLive` has an EMPTY finished prefix and `emptySession` has no
+      // turns: a floor of 0 is what a missing row already means, so neither is
+      // written at all.
+    });
+    expect(floorRows()[firstTurnLive]).toBeUndefined();
+    expect(floorRows()[emptySession]).toBeUndefined();
+  });
+
+  test("rebuilds a database still carrying the retired global watermark column, and re-arms the transition under the new shape", () => {
+    const sessionDbId = seedWatermarkSession("watermark-legacy-shape");
+    seedTurn(db, sessionDbId, 1);
+    seedTurn(db, sessionDbId, 2, 10, "provisional");
+    seedTurn(db, sessionDbId, 3);
+
+    // The shape ticket 05 shipped (unreleased): one global MAX(turns.id) for
+    // the whole database, already stamped.
+    db.exec(`
+      DROP TABLE note_settlement_watermark_state;
+      CREATE TABLE note_settlement_watermark_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        watermark_turn_id INTEGER NOT NULL,
+        recorded_at_epoch INTEGER NOT NULL
+      );
+      INSERT INTO note_settlement_watermark_state (id, watermark_turn_id, recorded_at_epoch)
+      VALUES (1, (SELECT MAX(id) FROM turns), 5);
+    `);
+
+    initializeSchema(db);
+
+    // The column is gone, and the stale stamp with it: it recorded a global
+    // turn id no planner reads any more, so the transition runs for the first
+    // time under the shape that can actually express a finished set.
+    expect(
+      db
+        .query<{ sql: string }, []>(
+          `SELECT sql FROM sqlite_master
+           WHERE type = 'table' AND name = 'note_settlement_watermark_state'`,
+        )
+        .get()!.sql,
+    ).not.toContain("watermark_turn_id");
+    expect(watermarkRow()).toEqual({ recordedAtEpoch: expect.any(Number) });
+    expect(floorRows()).toEqual({ [sessionDbId]: 1 });
+
+    // And it is one-shot again from here: the probe no longer matches, so no
+    // later boot rebuilds or recomputes anything.
+    const afterRebuild = watermarkRow();
+    initializeSchema(db);
+    expect(watermarkRow()).toEqual(afterRebuild);
+    expect(floorRows()).toEqual({ [sessionDbId]: 1 });
   });
 
   test("a job enqueued AFTER the watermark is stamped is never swept by a later initializeSchema call", () => {

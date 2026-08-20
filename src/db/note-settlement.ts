@@ -332,22 +332,28 @@ export function getEraFloorPromptNumber(
 }
 
 /**
- * The highest prompt_number, in this session, among turns that already
- * existed when the one-time settlement transition watermark was stamped
- * (spec D8, ticket 05, [S15069/T1124]) — 0 for a session with none, and 0
- * for a database that has not migrated the watermark in yet (the subquery's
- * `WHERE id = 1` row is simply absent, so `t.id <= NULL` is never true and
- * `MAX` sees no rows).
+ * The last prompt_number of this session's contiguous ALREADY-FINISHED prefix
+ * as of the one-time settlement transition (spec D8, tickets 05 + 09,
+ * [S15069/T1124]) — 0 when the session has no row, which covers all three of
+ * "born after the transition", "its first turn was still unfinished", and "the
+ * database has not run the transition yet".
  *
- * Keyed on `turns.id`, not `created_at_epoch`, unlike `getEraFloorPromptNumber`
- * above: the watermark marks "already in the table the instant this build's
- * migration ran", and a turn's autoincrement id is already a faithful record
- * of that — an epoch would also wall off any turn a test fixture (or a
- * clock-skewed real session) backdates below the migration's own wall-clock
- * moment, which is not what D8 means by "已完结".
+ * A stored lookup, not a derivation, and that is forced rather than chosen:
+ * `turns.status` is mutable, so once an `active`/`provisional` turn finishes,
+ * nothing in the turns table still records that it was unfinished at the
+ * transition. The migration computes the prefix once
+ * (`ensureNoteSettlementWatermark`, db/schema.ts) and this reads it back.
  *
- * Same shape as `getEraFloorPromptNumber` otherwise: a MAX over a boundary
- * rather than a per-turn filter, because the floor a WINDOW needs is
+ * Ticket 09 replaced the global `MAX(turns.id)` this shipped with. That form
+ * asked "did the turn EXIST at the transition", which walled a turn that was
+ * merely mid-flight out of automatic settlement permanently, even after it
+ * finished normally. The question the spec actually asks is "was it FINISHED",
+ * and no single global boundary can answer it: one database holds sessions
+ * whose low prompt numbers were unfinished alongside sessions whose high ones
+ * were already done, so the answer is per-session or it is wrong.
+ *
+ * Same shape as `getEraFloorPromptNumber` above otherwise: one contiguous
+ * boundary rather than a per-turn filter, because the floor a WINDOW needs is
  * contiguous-range, not per-turn.
  */
 export function getNoteSettlementWatermarkFloorPromptNumber(
@@ -356,12 +362,9 @@ export function getNoteSettlementWatermarkFloorPromptNumber(
 ): number {
   return (
     db
-      .query<{ floor: number | null }, [number]>(
-        `SELECT MAX(t.prompt_number) AS floor FROM turns t
-         WHERE t.session_id = ?
-           AND t.id <= (
-             SELECT watermark_turn_id FROM note_settlement_watermark_state WHERE id = 1
-           )`,
+      .query<{ floor: number }, [number]>(
+        `SELECT finished_prompt_number AS floor
+         FROM note_settlement_watermark_floors WHERE session_id = ?`,
       )
       .get(sessionId)?.floor ?? 0
   );
@@ -866,11 +869,9 @@ export function listResidualNoteSettlementCandidates(
                0
              ),
              COALESCE(
-               (SELECT MAX(t.prompt_number) FROM turns t
-                WHERE t.session_id = s.id
-                  AND t.id <= (
-                    SELECT watermark_turn_id FROM note_settlement_watermark_state WHERE id = 1
-                  )),
+               (SELECT w.finished_prompt_number
+                FROM note_settlement_watermark_floors w
+                WHERE w.session_id = s.id),
                0
              )
            ) + 1 AS windowStart

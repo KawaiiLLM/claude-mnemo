@@ -432,19 +432,55 @@ const SCHEMA_SQL = `
   ${NOTE_SETTLEMENT_JOBS_INDEX_DDL}
 
   -- The one-time settlement transition watermark (edge-mechanism-revision
-  -- spec D8, ticket 05, [S15069/T1124]). One row, written ONCE by whichever
-  -- build's migration first finds this table empty
+  -- spec D8, tickets 05 + 09, [S15069/T1124]). Written ONCE by whichever
+  -- build's migration first finds the marker row missing
   -- (ensureNoteSettlementWatermark, db/schema.ts) — never rewritten by any
-  -- later migration or runtime code. watermark_turn_id is a turns.id
-  -- high-water mark, not an epoch: every AUTOMATIC settlement planner
-  -- (consecutive/residual — db/note-settlement.ts) treats a turn at or below
-  -- it as already finished at migration time and refuses to plan a window
-  -- that starts at or before it; only an explicit manual backfill may still
-  -- reach one.
+  -- later migration or runtime code.
+  --
+  -- What it expresses is the set of turns ALREADY FINISHED at that instant,
+  -- NOT "everything that existed" (ticket 09). A turn still active or
+  -- provisional when the migration ran finishes normally afterwards and has
+  -- to enter the automatic window like any other; the single global
+  -- MAX(turns.id) high-water mark this shipped with could not state that —
+  -- it cannot say "prompt 5 unfinished, prompt 9 finished" — so it walled a
+  -- legitimately-unfinished turn out of automatic settlement forever.
+  --
+  -- Two facts, two tables:
+  --
+  --   note_settlement_watermark_state is the singleton MARKER. Its one row
+  --   means "this build's transition has run" and nothing more; it is the
+  --   one-shot gate for both halves of the migration (floors + job disposal).
+  --   It cannot be folded into the per-session table below because it must
+  --   exist even on a database that has no sessions at all — which is every
+  --   fresh install, and every test fixture.
+  --
+  --   note_settlement_watermark_floors is the FINISHED SET, one row per
+  --   session that had a non-empty one. finished_prompt_number is the last
+  --   prompt number such that EVERY turn at or below it in that session was
+  --   already out of active/provisional. A session with no row floors at
+  --   0 and is fully in scope: either it did not exist at the transition, or
+  --   its very first turn was still unfinished.
+  --
+  -- A contiguous prefix, not a MAX over the finished turns: a settlement
+  -- window is a contiguous prompt-number range, so a per-turn exemption set
+  -- is not expressible as a window floor, and a MAX would jump straight over
+  -- the unfinished turn and strand it — the exact bug being fixed. The
+  -- accepted consequence is the other side of that same coin: turns that were
+  -- already finished but sit ABOVE an unfinished one are re-admitted to the
+  -- automatic window. They were never settled by this build either, so
+  -- admitting them settles them for the first time rather than twice.
+  --
+  -- Every AUTOMATIC settlement planner (consecutive/residual —
+  -- db/note-settlement.ts) refuses to start a window at or below its session's
+  -- floor; only an explicit manual backfill may still reach one.
   CREATE TABLE IF NOT EXISTS note_settlement_watermark_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    watermark_turn_id INTEGER NOT NULL,
     recorded_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS note_settlement_watermark_floors (
+    session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    finished_prompt_number INTEGER NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS note_settlement_cursors (
@@ -1785,6 +1821,11 @@ export function initializeSchema(db: Database): void {
   ensureNoteSettlementTriggerVocabulary(db);
   ensureNoteSettlementJobsRetrySchema(db);
   ensureNoteSettlementProposalIdempotencyKey(db);
+  // Strictly before `ensureNoteSettlementWatermark`: it decides whether the
+  // transition has already run by looking for the marker row, and on a
+  // database still carrying the retired global-watermark shape that row
+  // answers for a mechanism that no longer exists.
+  retireGlobalNoteSettlementWatermarkShape(db);
   // After the trigger-vocabulary and retry-schema rebuilds above: this writes
   // 'abandoned'/'deterministic' into columns/CHECK values those two migrations
   // are what make legal in the first place.
@@ -2319,14 +2360,74 @@ function noteSettlementWatermarkIsUnset(db: Database): boolean {
 }
 
 /**
- * D8 (edge-mechanism-revision ticket 05, [S15069/T1124]): the moment this
- * migration first finds `note_settlement_watermark_state` empty, it (1)
- * disposes every AUTOMATIC job this database still has open and (2) stamps
- * the watermark at the current `MAX(turns.id)` — same transaction, because a
- * crash between the two steps must not leave a watermark in force with the
- * jobs it was supposed to retire still claimable, nor the reverse (jobs gone,
- * no watermark, so the next boot would try to dispose an already-clean table
+ * Retire the pre-ticket-09 GLOBAL watermark shape.
+ *
+ * `note_settlement_watermark_state` shipped (unreleased, d304ec4) as
+ * `(id, watermark_turn_id, recorded_at_epoch)` — one `MAX(turns.id)` for the
+ * whole database. Ticket 09 replaces that with the per-session finished-set
+ * floors above, and `CREATE TABLE IF NOT EXISTS` is a no-op on a database that
+ * already has the old three-column table, so the column has to go by rebuild.
+ *
+ * The row is DROPPED with it rather than carried across, and that is the
+ * point: an old-shape row is a stamp of a mechanism that no longer exists, so
+ * re-arming the one-shot under the NEW definition is what "this transition has
+ * not run here" actually means. Nothing is lost — the old row recorded a
+ * global turn id the new planners never read. Production is not even that
+ * case: its premature row was deleted during the incident remediation
+ * (dd25367, [S15069/T1138]), so it arrives at the release with an empty table
+ * of the old shape and stamps for the first time either way.
+ *
+ * Keyed on the stored DDL text rather than `PRAGMA table_info` for the same
+ * reason `ensureTurnTypeMultiValueColumn` is: one probe, no row loop, and it
+ * stops matching the instant the rebuild lands — so this runs exactly once per
+ * database and never again, which is what keeps the one-shot gate below
+ * one-shot.
+ */
+function retireGlobalNoteSettlementWatermarkShape(db: Database): void {
+  const sql = db
+    .query<{ sql: string }, []>(
+      `SELECT sql FROM sqlite_master
+       WHERE type = 'table' AND name = 'note_settlement_watermark_state'`,
+    )
+    .get()?.sql;
+  if (!sql?.includes("watermark_turn_id")) {
+    return;
+  }
+  db.exec(`
+    DROP TABLE note_settlement_watermark_state;
+    CREATE TABLE note_settlement_watermark_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      recorded_at_epoch INTEGER NOT NULL
+    );
+  `);
+}
+
+/**
+ * D8 (edge-mechanism-revision tickets 05 + 09, [S15069/T1124]): the moment
+ * this migration first finds `note_settlement_watermark_state` empty, it (1)
+ * disposes every AUTOMATIC job this database still has open and (2) records
+ * each session's ALREADY-FINISHED prefix — same transaction, because a crash
+ * between the two steps must not leave a watermark in force with the jobs it
+ * was supposed to retire still claimable, nor the reverse (jobs gone, no
+ * watermark, so the next boot would try to dispose an already-clean table
  * against a floor of zero and re-derive nothing).
+ *
+ * The floor per session is `MIN(prompt_number of a turn still active or
+ * provisional) - 1`, falling back to the session's highest prompt number when
+ * no turn is unfinished — the contiguous finished prefix, for the reason given
+ * on the table itself. A floor of 0 is not stored: it is exactly what a
+ * missing row already means, so the table stays sparse and every row in it
+ * states a real bound. Sessions with no turns at all therefore get no row,
+ * and neither does any session born after this instant.
+ *
+ * `active`/`provisional` is the unfinished pair every other live-turn reader
+ * in the codebase uses verbatim (worker/turn-liveness.ts, db/orphan-turns.ts,
+ * db/turn-settlement.ts). It is deliberately NOT narrowed by
+ * `realPromptPredicate`: a rolled-back or sidechain row left unfinished is
+ * still a turn whose settlement has not been decided, and pulling the floor
+ * back to it costs at most a few extra turns in one window, whereas skipping
+ * it would strand whatever follows it in the same way the global watermark
+ * did.
  *
  * Disposal, not the watermark write, is why this cannot be the naturally
  * idempotent shape `retireLegacyPendingNoteDebts` gets away with running on
@@ -2341,8 +2442,8 @@ function noteSettlementWatermarkIsUnset(db: Database): boolean {
  * A `pending`, orphaned `claimed`, or still-retriable `failed` row this finds
  * is, by construction, already pre-watermark: nothing can enqueue an
  * automatic job for a turn that does not exist yet, so any automatic job
- * already sitting in the table right now was cut from turns at or below
- * whatever `MAX(turns.id)` is about to become the watermark. Left alone, the
+ * already sitting in the table right now was cut from turns that all exist at
+ * this instant. Left alone, the
  * ordinary claim/reclaim path (`claimNextNoteSettlementJob`,
  * db/note-settlement.ts) would still pick one of these up on the session's
  * next event and settle straight across the boundary — the watermark folded
@@ -2389,11 +2490,30 @@ function ensureNoteSettlementWatermark(db: Database): void {
        WHERE status IN ('pending', 'claimed', 'failed')
          AND trigger_type != 'backfill'`,
     ).run(NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, nowEpoch);
+    db.exec(`
+      INSERT OR IGNORE INTO note_settlement_watermark_floors (
+        session_id, finished_prompt_number
+      )
+      SELECT sessionId, finishedPromptNumber FROM (
+        SELECT
+          s.id AS sessionId,
+          COALESCE(
+            (SELECT MIN(t.prompt_number) - 1 FROM turns t
+             WHERE t.session_id = s.id
+               AND t.status IN ('active', 'provisional')),
+            (SELECT MAX(t.prompt_number) FROM turns t
+             WHERE t.session_id = s.id),
+            0
+          ) AS finishedPromptNumber
+        FROM sessions s
+      )
+      WHERE finishedPromptNumber > 0
+    `);
     db.query<unknown, [number]>(
       `INSERT OR IGNORE INTO note_settlement_watermark_state (
-         id, watermark_turn_id, recorded_at_epoch
+         id, recorded_at_epoch
        )
-       SELECT 1, COALESCE((SELECT MAX(id) FROM turns), 0), ?`,
+       VALUES (1, ?)`,
     ).run(nowEpoch);
   });
 }
@@ -3923,6 +4043,7 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS note_settlement_debts");
   db.exec("DROP TABLE IF EXISTS note_settlement_proposals");
   db.exec("DROP TABLE IF EXISTS note_settlement_jobs");
+  db.exec("DROP TABLE IF EXISTS note_settlement_watermark_floors");
   db.exec("DROP TABLE IF EXISTS note_settlement_watermark_state");
   db.exec("DROP TABLE IF EXISTS note_settlement_cursors");
   db.exec("DROP TABLE IF EXISTS note_debt_cursor");
