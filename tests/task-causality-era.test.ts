@@ -85,7 +85,7 @@ describe("task-causality era", () => {
     noteTool(db, {
       turn: `S${sessionId}/T1`,
       type: ["correction"],
-      mode: { type: "overwrite" },
+      mode: { type: "write" },
     });
 
     const corrected = getTurn(db, sessionId, 1)!;

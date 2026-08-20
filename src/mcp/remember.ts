@@ -14,6 +14,7 @@ import {
   reassignSegmentMembers,
   replaceInSegmentWorkingStateField,
   toggleSegmentStatus,
+  writeSegmentWorkingStateField,
   type ReplaceSegmentWorkingStateFieldResult,
   type SegmentRecord,
 } from "../db/segments";
@@ -41,26 +42,42 @@ type ToolTextResult = {
 export type RememberVerb =
   | "create"
   | "attach"
-  | "append"
-  | "replace"
+  | "write"
+  | "edit"
   | "close"
   | "assign";
 const REMEMBER_VERBS: readonly RememberVerb[] = [
   "create",
   "attach",
-  "append",
-  "replace",
+  "write",
+  "edit",
   "close",
   "assign",
 ];
 
+// Ticket 05 (write-mode-edit-semantics, spec D1/D14): `append`/`replace`
+// retired — a caller still sending either gets this message naming the
+// replacement, instead of the generic "verb must be one of ..." the plain
+// `REMEMBER_VERBS` membership check below would otherwise give (same
+// precedent `note.ts`'s own `RETIRED_FIELD_MODE_REPLACEMENT` follows for
+// `mode.<field>`'s retired literals). `definitions.ts`'s own schema-layer
+// superRefine gives the identical message for a call that goes through the
+// real MCP validation path; this is the belt-and-braces copy for the
+// hand-rolled path most of this file's own tests call directly.
+const RETIRED_REMEMBER_VERB_REPLACEMENT: Record<string, string> = {
+  append:
+    "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
+  replace: "use `edit` instead — same oldString/newString shape.",
+};
+
 // Ticket 09 (spec "write-mode-edit-semantics"): the verbs that write a
 // segment FIELD — `create` (it seeds title and, when given, the goal row)
-// and the field-writing verbs proper (`append`/`replace`). `attach`/`close`/
-// `assign` move a segment between roster states or sessions without touching
-// any of its fields, so they are deliberately excluded — see
-// `touchSessionRememberActivity`'s call site below.
-const FIELD_WRITING_VERBS: readonly RememberVerb[] = ["create", "append", "replace"];
+// and the field-writing verbs proper (`write`/`edit`, ticket 05's rename of
+// `append`/`replace`). `attach`/`close`/`assign` move a segment between
+// roster states or sessions without touching any of its fields, so they are
+// deliberately excluded — see `touchSessionRememberActivity`'s call site
+// below.
+const FIELD_WRITING_VERBS: readonly RememberVerb[] = ["create", "write", "edit"];
 
 function isFieldWritingVerb(verb: RememberVerb): boolean {
   return FIELD_WRITING_VERBS.includes(verb);
@@ -72,15 +89,16 @@ export interface RememberToolInput {
   title?: unknown;
   goal?: unknown;
   members?: unknown;
-  // attach / append / replace / close / assign share `id` — a segment's
+  // attach / write / edit / close / assign share `id` — a segment's
   // `E<n>` address (ticket 15: the topic-name fallback retired). `assign`
   // alone treats `id` as OPTIONAL: omitted means "clear ownership" (ticket 02).
   id?: unknown;
-  // append / replace
+  // write / edit
   field?: unknown;
-  // append
-  rows?: unknown;
-  // replace
+  // write (ticket 05): the field's whole replacement text; null (or "")
+  // clears it.
+  value?: unknown;
+  // edit (ticket 05's rename of replace)
   oldString?: unknown;
   newString?: unknown;
   // assign (ticket 02, ownership-and-note-cadence spec): a turn interval
@@ -94,8 +112,8 @@ export interface RememberToolOptions {
   /**
    * The caller's mnemo session (same resolution as `note`'s `callerSessionId`
    * — spec D2, server.ts's direct-execution entry point only). `attach`
-   * requires it (there is nothing to bind without a session); `append`/
-   * `replace` degrade gracefully — the write still lands, the maintenance
+   * requires it (there is nothing to bind without a session); `write`/
+   * `edit` degrade gracefully — the write still lands, the maintenance
    * cadence line just says the caller session is unknown instead of a count.
    */
   callerSessionId?: number | null;
@@ -383,7 +401,9 @@ function handleAttach(
 }
 
 // ---------------------------------------------------------------------------
-// append
+// write / edit (ticket 05, write-mode-edit-semantics: the vocabulary switch
+// — `write` replaces a segment field whole, `edit` swaps an exactly-matched
+// span within it, retiring `append`/`replace`)
 // ---------------------------------------------------------------------------
 
 function isEditableField(value: unknown): value is SegmentEditableField {
@@ -450,23 +470,35 @@ function callerWriterId(callerSessionId: number | null | undefined): string | nu
   return typeof callerSessionId === "number" ? sessionWriterId(callerSessionId) : null;
 }
 
-function handleAppend(
+/**
+ * `remember`'s `write` verb (ticket 05, spec D2/D11): whole-field
+ * replacement, the segment surface's first capability of this shape — wired
+ * onto `writeSegmentWorkingStateField` (db/segments.ts, ticket 03's
+ * prefactor), which already carries the citation-rebuild and FTS-reindex
+ * duties this replaces. Supplied verbatim, no bullet-list normalization: the
+ * row-list convention still stands (ADR-0001), but `write` is for the
+ * caller who has read a field whole and is handing back the finished text —
+ * see the tool description's row-add idiom for the alternative when only
+ * one row needs to change.
+ */
+function handleWrite(
   db: Database,
   input: RememberToolInput,
   options: RememberToolOptions,
 ): ToolTextResult {
   if (typeof input.id !== "string" || input.id.trim() === "") {
-    return parameterError('id is required for append — an "E<n>" address.');
+    return parameterError('id is required for write — an "E<n>" address.');
   }
   if (!isEditableField(input.field)) {
     return parameterError(fieldRequiredMessage());
   }
-  if (
-    !Array.isArray(input.rows) ||
-    input.rows.length === 0 ||
-    !input.rows.every((value) => typeof value === "string")
-  ) {
-    return parameterError("rows must be a non-empty array of strings.");
+  if (input.value === undefined) {
+    return parameterError(
+      "value is required for write — the field's full replacement text, or null to clear it.",
+    );
+  }
+  if (input.value !== null && typeof input.value !== "string") {
+    return parameterError("value must be a string or null when present.");
   }
 
   const resolution = resolveSegmentTarget(db, input.id);
@@ -478,21 +510,17 @@ function handleAppend(
   }
 
   const field = input.field;
-  let rows: string[];
+  let value: string | null;
   try {
-    rows = (input.rows as string[]).map((raw, index) => {
-      const decoded = decodeHtmlEntities(raw);
-      if (decoded.trim() === "") {
-        fail(`rows[${index}] must not be empty.`);
-      }
+    if (input.value === null) {
+      value = null;
+    } else {
+      const decoded = decodeHtmlEntities(input.value);
       if (containsToolCallSyntax(decoded)) {
-        fail(toolCallSyntaxMessage(`rows[${index}]`));
+        fail(toolCallSyntaxMessage("value"));
       }
-      if (decoded.includes("\n")) {
-        fail(`rows[${index}] contains a newline — one row, one line.`);
-      }
-      return stripPrivateTags(decoded);
-    });
+      value = decoded.trim() === "" ? null : stripPrivateTags(decoded);
+    }
   } catch (error) {
     if (error instanceof RememberValidationError) {
       return parameterError(error.message);
@@ -505,17 +533,17 @@ function handleAppend(
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const writer = callerWriterId(options.callerSessionId);
 
-  type AppendOutcome =
+  type WriteOutcome =
     | { kind: "gate-rejected"; message: string }
     | { kind: "missing" }
     | { kind: "ok"; segment: SegmentRecord };
 
-  const outcome = writeTransaction(db, (): AppendOutcome => {
+  const outcome = writeTransaction(db, (): WriteOutcome => {
     const rejection = checkSegmentFieldGate(db, writer, resolution.segment.id, field);
     if (rejection) {
       return { kind: "gate-rejected", message: rejection };
     }
-    const updated = appendSegmentWorkingStateRows(db, resolution.segment.id, field, rows, nowEpoch);
+    const updated = writeSegmentWorkingStateField(db, resolution.segment.id, field, value, nowEpoch);
     if (!updated) {
       return { kind: "missing" };
     }
@@ -537,22 +565,21 @@ function handleAppend(
     priorUpdatedAtEpoch,
   );
 
-  return textResult(
-    `Appended ${rows.length} row(s) to ${field} on E${updated.id}. ${cadence}`,
-  );
+  const verb = value === null ? "Cleared" : "Wrote";
+  return textResult(`${verb} ${field} on E${updated.id}. ${cadence}`);
 }
 
 // ---------------------------------------------------------------------------
-// replace
+// edit (ticket 05's rename of replace — identical oldString/newString shape)
 // ---------------------------------------------------------------------------
 
-function handleReplace(
+function handleEdit(
   db: Database,
   input: RememberToolInput,
   options: RememberToolOptions,
 ): ToolTextResult {
   if (typeof input.id !== "string" || input.id.trim() === "") {
-    return parameterError('id is required for replace — an "E<n>" address.');
+    return parameterError('id is required for edit — an "E<n>" address.');
   }
   if (!isEditableField(input.field)) {
     return parameterError(fieldRequiredMessage());
@@ -881,10 +908,11 @@ function handleAssign(
  * `remember` — the segment (semantic) write surface, revived beside `note`
  * (episodic) per ADR-0002. Six verbs, one tool: `create` mints a segment
  * from the roster the caller has in view; `attach` binds the current session
- * to one and returns its fields; `append`/`replace` maintain one named
- * field (Working State, or content/insight); `close` toggles the segment off
- * (or back onto) the roster; `assign` (ticket 02) places or clears turn
- * ownership.
+ * to one and returns its fields; `write`/`edit` (ticket 05) maintain one
+ * named field (Working State, or content/insight) — `write` replaces it
+ * whole, `edit` swaps an exactly-matched span within it; `close` toggles the
+ * segment off (or back onto) the roster; `assign` (ticket 02) places or
+ * clears turn ownership.
  */
 /** The one shape every handler's rejection takes — see `parameterError` above. */
 function isParameterError(result: ToolTextResult): boolean {
@@ -896,7 +924,17 @@ export function rememberTool(
   rawInput: RememberToolInput,
   options: RememberToolOptions = {},
 ): ToolTextResult {
-  if (typeof rawInput.verb !== "string" || !REMEMBER_VERBS.includes(rawInput.verb as RememberVerb)) {
+  if (typeof rawInput.verb !== "string") {
+    return parameterError(`verb must be one of ${REMEMBER_VERBS.join(", ")}.`);
+  }
+  // Ticket 05 (spec D14): checked before the closed-vocabulary membership
+  // test below, so a retired verb gets its replacement named instead of the
+  // generic "verb must be one of ..." list.
+  const retiredReplacement = RETIRED_REMEMBER_VERB_REPLACEMENT[rawInput.verb];
+  if (retiredReplacement) {
+    return parameterError(`verb "${rawInput.verb}" has retired — ${retiredReplacement}`);
+  }
+  if (!REMEMBER_VERBS.includes(rawInput.verb as RememberVerb)) {
     return parameterError(`verb must be one of ${REMEMBER_VERBS.join(", ")}.`);
   }
 
@@ -906,10 +944,10 @@ export function rememberTool(
         return handleCreate(db, rawInput, options);
       case "attach":
         return handleAttach(db, rawInput, options);
-      case "append":
-        return handleAppend(db, rawInput, options);
-      case "replace":
-        return handleReplace(db, rawInput, options);
+      case "write":
+        return handleWrite(db, rawInput, options);
+      case "edit":
+        return handleEdit(db, rawInput, options);
       case "close":
         return handleClose(db, rawInput, options);
       case "assign":

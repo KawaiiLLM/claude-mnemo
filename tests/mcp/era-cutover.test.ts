@@ -262,7 +262,7 @@ describe("era cutover write path", () => {
           turn: `S${sessionId}/T11`,
           title: "second title",
           content: "second content",
-          mode: { title: "overwrite", content: "overwrite" },
+          mode: { title: "write", content: "write" },
         },
         { ...options, now: () => 3_400 },
       );
@@ -292,7 +292,7 @@ describe("era cutover write path", () => {
           title: "second title",
           content: "second content",
           insight: null,
-          mode: { title: "overwrite", content: "overwrite", insight: "overwrite" },
+          mode: { title: "write", content: "write", insight: "write" },
         },
         { ...options, now: () => 3_400 },
       );
@@ -452,7 +452,7 @@ describe("era cutover write path", () => {
           title: "fix+auth-bug: corrected after review, also reviewed the fix",
           content: "The first pass mischaracterised the turn.",
           type: ["review", "fix"],
-          mode: { title: "overwrite", content: "overwrite", type: "overwrite" },
+          mode: { title: "write", content: "write", type: "write" },
         },
         { ...options, now: () => 3_400 },
       );
@@ -494,7 +494,7 @@ describe("era cutover write path", () => {
           turn: `S${sessionId}/T11`,
           title: "a plain corrected title with no shape at all",
           content: "The correction dropped the <activity>+<topic>: shape.",
-          mode: { title: "overwrite", content: "overwrite" },
+          mode: { title: "write", content: "write" },
         },
         { ...options, now: () => 3_400 },
       );
@@ -507,7 +507,7 @@ describe("era cutover write path", () => {
           title: "a correction that really does mean none of them fit",
           content: "An explicit empty list is the way to say so.",
           type: [],
-          mode: { title: "overwrite", content: "overwrite", type: "overwrite" },
+          mode: { title: "write", content: "write", type: "write" },
         },
         { ...options, now: () => 3_500 },
       );
@@ -540,7 +540,7 @@ describe("era cutover write path", () => {
           title: "implement+login-flow: it was really about the redirect",
           content: "Second answer.",
           tags: ["login-flow", "oauth-redirect"],
-          mode: { title: "overwrite", content: "overwrite", tags: "overwrite" },
+          mode: { title: "write", content: "write", tags: "write" },
         },
         { ...options, now: () => 3_400 },
       );
@@ -556,7 +556,7 @@ describe("era cutover write path", () => {
           turn: `S${sessionId}/T11`,
           title: "implement+login-flow: wording only",
           content: "Third answer.",
-          mode: { title: "overwrite", content: "overwrite" },
+          mode: { title: "write", content: "write" },
         },
         { ...options, now: () => 3_500 },
       );

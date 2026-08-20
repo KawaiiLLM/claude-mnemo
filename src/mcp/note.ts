@@ -56,10 +56,38 @@ type ToolTextResult = {
   }>;
 };
 
-// D5/D5a: the one mode vocabulary. `append` accumulates (string concat with a
-// newline, array union); `overwrite` replaces the field whole, clear included.
-export type FieldMode = "append" | "overwrite";
-const FIELD_MODE_VALUES: readonly FieldMode[] = ["append", "overwrite"];
+// Ticket 05 (write-mode-edit-semantics, spec D1/D10): the one mode
+// vocabulary, now a discriminated union rather than a bare enum — `write`
+// replaces the field whole (clear included); the edit form carries its own
+// payload since there is nowhere else on the call to put it. `append` and
+// `overwrite` retired outright — `RETIRED_FIELD_MODE_REPLACEMENT` below is
+// what a caller still sending either gets instead of a generic error.
+export type FieldMode = "write" | FieldEditMode;
+export interface FieldEditMode {
+  mode: "edit";
+  oldString: string;
+  newString: string;
+}
+
+function isFieldEditMode(mode: FieldMode | undefined): mode is FieldEditMode {
+  return typeof mode === "object" && mode !== null;
+}
+
+// Ticket 05 (spec D14): the retired mode literals, each naming its own
+// replacement — same precedent the retired `topic`/`truncate`/`view`
+// parameters already set (definitions.ts), applied here at the runtime
+// layer too since most callers of `noteTool()` in this codebase's own tests
+// bypass the zod schema entirely.
+const RETIRED_FIELD_MODE_REPLACEMENT: Record<string, string> = {
+  overwrite: 'use "write" instead.',
+  append:
+    'use "write" to replace the field whole, or the edit form ({ mode: "edit", oldString, newString }) to change part of it.',
+};
+
+// Ticket 05 (spec D4): type/tags are set fields — "part of a list" is not a
+// span an oldString/newString pair can name, so the edit form is refused on
+// them outright, not given a set-flavoured meaning of its own.
+const NOTE_SET_MODE_FIELDS: readonly string[] = ["type", "tags"];
 
 // ticket 01 (ADR-0003): `grade` left this list along with the parameter
 // itself — the writer records facts, settlement assigns value.
@@ -314,9 +342,17 @@ function fail(message: string): never {
 
 function modeRequiredMessage(field: string): string {
   return (
-    `${field} is not empty; declare mode.${field} as "overwrite" (replace it ` +
-    'whole) or "append" (add to it) — omitting the mode is not allowed on a ' +
-    "field that already holds something."
+    `${field} is not empty; declare mode.${field} as "write" (replace it ` +
+    'whole) or the edit form ({ mode: "edit", oldString, newString }) ' +
+    "(change part of it) — omitting the mode is not allowed on a field " +
+    "that already holds something."
+  );
+}
+
+function editValueConflictMessage(field: string): string {
+  return (
+    `${field} was supplied together with mode.${field}'s edit form — the new ` +
+    `text belongs in mode.${field}.newString, not in ${field} itself.`
   );
 }
 
@@ -342,6 +378,17 @@ function resolveStringField(
   mode: FieldMode | undefined,
   opts: { nullable: boolean },
 ): FieldResolution<string | null> {
+  // Ticket 05 (spec D10): the edit form's payload lives entirely in
+  // `mode.<field>` — the field's own value is not also supplied. Routed here
+  // before anything else so the "value + edit form together" combo (D10) is
+  // caught regardless of which branch below would otherwise have handled
+  // `provided`.
+  if (isFieldEditMode(mode)) {
+    if (provided !== undefined) {
+      fail(editValueConflictMessage(field));
+    }
+    return resolveFieldEdit(field, existing, mode, opts);
+  }
   if (provided === null) {
     if (!opts.nullable) {
       fail(`${field} cannot be cleared; supply a replacement value instead of null.`);
@@ -362,16 +409,51 @@ function resolveStringField(
     fail(toolCallSyntaxMessage(field));
   }
   const isEmpty = existing === null || existing.trim() === "";
-  if (!isEmpty) {
-    if (mode === undefined) {
-      fail(modeRequiredMessage(field));
-    }
-    if (mode === "append") {
-      const base = existing!.trim();
-      return { value: base ? `${base}\n${decoded}` : decoded };
-    }
+  // Ticket 05 (trap #1): this is the branch that used to treat ANY
+  // non-`append` mode as a whole overwrite. `mode` here can only be
+  // `undefined` or `"write"` (edit is routed away above) — falling through
+  // to `return { value: decoded }` is a full replacement either way, exactly
+  // as spec D2 defines `write`. See the regression test in note.test.ts
+  // pinning that `mode: "edit"` never reaches this fallthrough.
+  if (!isEmpty && mode === undefined) {
+    fail(modeRequiredMessage(field));
   }
   return { value: decoded };
+}
+
+/**
+ * Ticket 05 (spec D3): the edit form's three-state contract, ported from the
+ * segment surface's already-shipped `replaceInSegmentWorkingStateField`
+ * (db/segments.ts) — unique hit succeeds, no hit rejects naming `oldString`,
+ * more than one hit rejects naming the count. `newString: ""` deletes the
+ * matched span; a non-nullable field (title/content) edited down to empty is
+ * refused rather than silently landing an empty string, the same "cannot be
+ * cleared" discipline `resolveStringField`'s own null branch already applies.
+ */
+function resolveFieldEdit(
+  field: string,
+  existing: string | null,
+  edit: FieldEditMode,
+  opts: { nullable: boolean },
+): FieldResolution<string | null> {
+  const current = existing ?? "";
+  const occurrences = current === "" ? 0 : current.split(edit.oldString).length - 1;
+  if (occurrences === 0) {
+    fail(`oldString ${JSON.stringify(edit.oldString)} not found in ${field}.`);
+  }
+  if (occurrences > 1) {
+    fail(
+      `oldString ${JSON.stringify(edit.oldString)} matches ${occurrences} times in ${field} — narrow it so it matches exactly once.`,
+    );
+  }
+  const replaced = current.split(edit.oldString).join(edit.newString);
+  if (replaced.trim() === "") {
+    if (opts.nullable) {
+      return { value: null };
+    }
+    fail(`${field} cannot be edited down to empty; supply a replacement instead of deleting all of it.`);
+  }
+  return { value: replaced };
 }
 
 function resolveClear(
@@ -386,9 +468,8 @@ function resolveClear(
   if (mode === undefined) {
     fail(modeRequiredMessage(field));
   }
-  if (mode === "append") {
-    fail(`${field} cannot be cleared with mode: "append" — use "overwrite".`);
-  }
+  // `mode` is guaranteed `"write"` here — the edit form is routed away by
+  // `resolveStringField` before this function is ever reached.
   return { value: null };
 }
 
@@ -411,20 +492,14 @@ function resolveTypeField(
       `${error instanceof Error ? error.message : String(error)}. Allowed: ${MEMORY_TYPES.join(", ")}.`,
     );
   }
+  // Ticket 05 (spec D4): `mode.type` can only be `undefined` or `"write"` by
+  // the time this runs — `parseModeMap` refuses the edit form on a set field
+  // before it ever reaches here — so there is no merge/union branch any
+  // more: a non-empty `type` always needs `mode.type: "write"` and always
+  // means the full replacement set (the accepted cost of D4's ruling).
   const isEmpty = existing.length === 0;
-  if (!isEmpty) {
-    if (mode === undefined) {
-      fail(modeRequiredMessage("type"));
-    }
-    if (mode === "append") {
-      const merged = [...existing];
-      for (const value of normalized) {
-        if (!merged.includes(value)) {
-          merged.push(value);
-        }
-      }
-      return { value: merged };
-    }
+  if (!isEmpty && mode === undefined) {
+    fail(modeRequiredMessage("type"));
   }
   return { value: normalized };
 }
@@ -445,20 +520,10 @@ function resolveTagsField(
   if (retired !== null) {
     fail(retiredTopicTagMessage(retired));
   }
+  // Ticket 05 (spec D4) — see the identical note on `resolveTypeField` above.
   const isEmpty = existing.length === 0;
-  if (!isEmpty) {
-    if (mode === undefined) {
-      fail(modeRequiredMessage("tags"));
-    }
-    if (mode === "append") {
-      const merged = [...existing];
-      for (const tag of decoded) {
-        if (!merged.includes(tag)) {
-          merged.push(tag);
-        }
-      }
-      return { value: merged };
-    }
+  if (!isEmpty && mode === undefined) {
+    fail(modeRequiredMessage("tags"));
   }
   return { value: decoded };
 }
@@ -625,6 +690,19 @@ function resolveRelationFields(
   return result;
 }
 
+const MODE_SHAPE_MESSAGE =
+  'must be "write" or an edit form ({ mode: "edit", oldString, newString }).';
+
+/**
+ * Ticket 05 (spec D1/D3/D4/D10/D14): parses `mode.<field>` into the
+ * discriminated union `FieldMode` — the one place every trap this ticket
+ * exists to close is checked in a single pass: a retired literal names its
+ * replacement (D14), an edit form on a set field is refused (D4), and the
+ * edit form's own hygiene (decode, tool-call-syntax, private-tag strip) runs
+ * once here rather than being duplicated across every prose field's own
+ * resolver — mirroring where `remember.ts`'s `handleReplace`/`handleEdit`
+ * already do the identical decode/strip for `oldString`/`newString`.
+ */
 function parseModeMap(
   raw: unknown,
   allowed: readonly string[],
@@ -633,17 +711,53 @@ function parseModeMap(
     return {};
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    fail('mode must be an object mapping field names to "overwrite" or "append".');
+    fail(`mode ${MODE_SHAPE_MESSAGE}`);
   }
   const result: Partial<Record<string, FieldMode>> = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!allowed.includes(key)) {
       fail(`mode.${key} names a field this call does not accept a mode for.`);
     }
-    if (!FIELD_MODE_VALUES.includes(value as FieldMode)) {
-      fail(`mode.${key} must be "overwrite" or "append".`);
+    if (typeof value === "string") {
+      if (value === "write") {
+        result[key] = "write";
+        continue;
+      }
+      const replacement = RETIRED_FIELD_MODE_REPLACEMENT[value];
+      if (replacement) {
+        fail(`mode.${key}: "${value}" has retired — ${replacement}`);
+      }
+      fail(`mode.${key} ${MODE_SHAPE_MESSAGE}`);
     }
-    result[key] = value as FieldMode;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      fail(`mode.${key} ${MODE_SHAPE_MESSAGE}`);
+    }
+    const editRaw = value as Record<string, unknown>;
+    if (editRaw.mode !== "edit") {
+      fail(`mode.${key} ${MODE_SHAPE_MESSAGE}`);
+    }
+    if (NOTE_SET_MODE_FIELDS.includes(key)) {
+      fail(
+        `mode.${key}: the edit form has no meaning on a set field — oldString/newString cannot ` +
+          `target part of a list; use mode.${key}: "write" with the full replacement set instead.`,
+      );
+    }
+    if (typeof editRaw.oldString !== "string" || editRaw.oldString === "") {
+      fail(`mode.${key}.oldString is required and must be a non-empty string.`);
+    }
+    if (typeof editRaw.newString !== "string") {
+      fail(`mode.${key}.newString is required (use "" to delete the matched text).`);
+    }
+    const oldString = decodeHtmlEntities(editRaw.oldString);
+    const newStringRaw = decodeHtmlEntities(editRaw.newString);
+    if (containsToolCallSyntax(oldString)) {
+      fail(toolCallSyntaxMessage(`mode.${key}.oldString`));
+    }
+    if (newStringRaw !== "" && containsToolCallSyntax(newStringRaw)) {
+      fail(toolCallSyntaxMessage(`mode.${key}.newString`));
+    }
+    const newString = newStringRaw === "" ? "" : stripPrivateTags(newStringRaw);
+    result[key] = { mode: "edit", oldString, newString };
   }
   return result;
 }
@@ -656,14 +770,6 @@ type DeclineOutcome =
   | { kind: "declined" }
   | { kind: "already-noted" }
   | { kind: "already-settled"; settledAs: string };
-
-function overwriteRequiredMessage(address: TurnAddress): string {
-  return (
-    `S${address.sessionId}/T${address.promptNumber} already has a note.` +
-    ' Declare mode.title/mode.content (or mode.insight) as "overwrite" or ' +
-    '"append" to confirm you want to touch it.'
-  );
-}
 
 function declineTurn(
   db: Database,
@@ -798,15 +904,6 @@ function handleTurnWrite(
     );
   }
 
-  const providedFields = TURN_MODE_FIELDS.filter(
-    (key) => (input as Record<string, unknown>)[key] !== undefined,
-  );
-  if (providedFields.length === 0) {
-    return parameterError(
-      `at least one of ${TURN_MODE_FIELDS.join(", ")} is required.`,
-    );
-  }
-
   let modeMap: Partial<Record<string, FieldMode>>;
   try {
     modeMap = parseModeMap(input.mode, TURN_MODE_FIELDS);
@@ -815,6 +912,21 @@ function handleTurnWrite(
       return parameterError(error.message);
     }
     throw error;
+  }
+
+  // Ticket 05: a field touched ONLY through the edit form (no field value of
+  // its own — D10's whole point) still has to reach the write-gate check
+  // below and the pre-cutoff guard just after it. Parsed above `providedFields`
+  // now (moved ahead of it, was after) so both can see it.
+  const providedFields = TURN_MODE_FIELDS.filter(
+    (key) =>
+      (input as Record<string, unknown>)[key] !== undefined ||
+      isFieldEditMode(modeMap[key]),
+  );
+  if (providedFields.length === 0) {
+    return parameterError(
+      `at least one of ${TURN_MODE_FIELDS.join(", ")} is required.`,
+    );
   }
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
@@ -867,7 +979,10 @@ function handleTurnWrite(
     !promotesTurnRecord &&
     (input.title !== undefined ||
       input.content !== undefined ||
-      input.insight !== undefined)
+      input.insight !== undefined ||
+      isFieldEditMode(modeMap.title) ||
+      isFieldEditMode(modeMap.content) ||
+      isFieldEditMode(modeMap.insight))
   ) {
     return parameterError(
       `S${address.sessionId}/T${address.promptNumber} is a pre-cutoff turn, whose prose has no reader —` +
@@ -898,8 +1013,11 @@ function handleTurnWrite(
       const existingNote = getShadowNote(db, turn.id);
       const noteExisted = existingNote !== null;
 
+      // Ticket 05: a field is "touched" by its own value OR by the edit
+      // form on `mode.<field>` — the edit form carries its whole payload
+      // there and needs no accompanying field value (D10).
       const titleResolution =
-        input.title !== undefined
+        input.title !== undefined || isFieldEditMode(modeMap.title)
           ? resolveStringField(
               "title",
               input.title,
@@ -909,7 +1027,7 @@ function handleTurnWrite(
             )
           : undefined;
       const contentResolution =
-        input.content !== undefined
+        input.content !== undefined || isFieldEditMode(modeMap.content)
           ? resolveStringField(
               "content",
               input.content,
@@ -919,7 +1037,7 @@ function handleTurnWrite(
             )
           : undefined;
       const insightResolution =
-        input.insight !== undefined
+        input.insight !== undefined || isFieldEditMode(modeMap.insight)
           ? resolveStringField(
               "insight",
               input.insight,

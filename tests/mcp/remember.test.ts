@@ -186,10 +186,10 @@ describe("remember tool (ticket 02)", () => {
     test("binds the session by E id and returns the fields — refuses without a caller session", () => {
       const segmentId = createViaTool("attach-by-id");
       rememberTool(db, {
-        verb: "append",
+        verb: "write",
         id: `E${segmentId}`,
         field: "goal",
-        rows: ["land the tool"],
+        value: "- land the tool",
       });
 
       const text = resultText(
@@ -207,10 +207,10 @@ describe("remember tool (ticket 02)", () => {
     test("binds the session by E id (with caller session) and returns the canonical segment card (ticket 03)", () => {
       const segmentId = createViaTool("attach-by-id-2");
       rememberTool(db, {
-        verb: "append",
+        verb: "write",
         id: `E${segmentId}`,
         field: "goal",
-        rows: ["land the tool"],
+        value: "- land the tool",
       });
 
       const text = resultText(
@@ -293,10 +293,14 @@ describe("remember tool (ticket 02)", () => {
   });
 
   // ---------------------------------------------------------------------
-  // append
+  // write (ticket 05, write-mode-edit-semantics: retires `append` — this
+  // describe block used to be "append" and every test below exercised
+  // accumulation; `write` replaces a field WHOLE, so the accumulation-shaped
+  // tests are rewritten rather than merely renamed — see each test's own
+  // comment for what changed and why.)
   // ---------------------------------------------------------------------
 
-  describe("append", () => {
+  describe("write", () => {
     // Fixed at epoch 100 — matching `seedTurn`/`seedTurnsSince`'s own baseline
     // — so the cadence tests below can control exactly how many of a
     // session's turns fall AFTER the segment's `updatedAtEpoch`.
@@ -307,27 +311,40 @@ describe("remember tool (ticket 02)", () => {
       return Number(/Created E(\d+)/.exec(text)![1]);
     }
 
-    test("appends rows, newline-joined, dash-prefixed even without a leading dash", () => {
-      const segmentId = createSegmentId("append-basic");
+    // Ticket 05 (spec D11): rewritten — `append`'s "dash-prefixed even
+    // without a leading dash" auto-normalization does not exist on `write`
+    // (db/segments.ts's own `writeSegmentWorkingStateField` doc comment:
+    // "no bullet-list normalization... write supplies the finished text
+    // itself"). This is the positive counterpart: `value` lands verbatim.
+    test("stores value verbatim — no automatic row-dashing (unlike the retired append)", () => {
+      const segmentId = createSegmentId("write-verbatim");
       const text = resultText(
         rememberTool(db, {
-          verb: "append",
+          verb: "write",
           id: `E${segmentId}`,
           field: "next_steps",
-          rows: ["- already dashed", "not yet dashed"],
+          value: "already dashed\nnot yet dashed",
         }),
       );
-      expect(text).toContain("Appended 2 row(s) to next_steps");
+      expect(text).toContain("Wrote next_steps");
       expect(getSegment(db, segmentId)?.nextSteps).toBe(
-        "- already dashed\n- not yet dashed",
+        "already dashed\nnot yet dashed",
       );
     });
 
-    test("a second append accumulates onto the first rather than overwriting", () => {
-      const segmentId = createSegmentId("append-accum");
-      rememberTool(db, { verb: "append", id: `E${segmentId}`, field: "done", rows: ["row one"] });
-      rememberTool(db, { verb: "append", id: `E${segmentId}`, field: "done", rows: ["row two"] });
-      expect(getSegment(db, segmentId)?.done).toBe("- row one\n- row two");
+    // Ticket 05 (spec D2): rewritten from "a second append accumulates onto
+    // the first rather than overwriting" — that is exactly the behaviour
+    // `write` does NOT have. A second `write` replaces the field whole; the
+    // caller composes the full text (first row + new row) itself, which is
+    // what the tool description's row-add idiom recommends `edit` for
+    // instead (see the `edit` describe block below).
+    test("a second write REPLACES the first rather than accumulating", () => {
+      const segmentId = createSegmentId("write-replaces");
+      rememberTool(db, { verb: "write", id: `E${segmentId}`, field: "done", value: "- row one" });
+      expect(getSegment(db, segmentId)?.done).toBe("- row one");
+
+      rememberTool(db, { verb: "write", id: `E${segmentId}`, field: "done", value: "- row two" });
+      expect(getSegment(db, segmentId)?.done).toBe("- row two");
     });
 
     // Ticket 02 (cadence-simplification, [S15069/T1057]): the "too soon"
@@ -335,12 +352,12 @@ describe("remember tool (ticket 02)", () => {
     // it the `decisions` exemption that existed ONLY to exempt from that one
     // line — there is nothing left to exempt once the line is gone.
     test("dense writes under 10 turns apart no longer draw a too-soon reminder", () => {
-      const segmentId = createSegmentId("append-dense");
+      const segmentId = createSegmentId("write-dense");
       // Zero turns have happened in this session since the segment's creation.
       const text = resultText(
         rememberTool(
           db,
-          { verb: "append", id: `E${segmentId}`, field: "next_steps", rows: ["soon"] },
+          { verb: "write", id: `E${segmentId}`, field: "next_steps", value: "- soon" },
           { callerSessionId: sessionId, now: () => 100 },
         ),
       );
@@ -350,11 +367,11 @@ describe("remember tool (ticket 02)", () => {
     });
 
     test("decisions writes get the identical receipt as any other field — no field-level exemption remains", () => {
-      const segmentId = createSegmentId("append-decisions-parity");
+      const segmentId = createSegmentId("write-decisions-parity");
       const text = resultText(
         rememberTool(
           db,
-          { verb: "append", id: `E${segmentId}`, field: "decisions", rows: ["ruled"] },
+          { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- ruled" },
           { callerSessionId: sessionId, now: () => 100 },
         ),
       );
@@ -363,12 +380,12 @@ describe("remember tool (ticket 02)", () => {
     });
 
     test("under 20 turns since this segment's last field update, the receipt states the bare count", () => {
-      const segmentId = createSegmentId("append-under-nudge");
+      const segmentId = createSegmentId("write-under-nudge");
       seedTurnsSince(100, 19, 1);
       const text = resultText(
         rememberTool(
           db,
-          { verb: "append", id: `E${segmentId}`, field: "next_steps", rows: ["still on track"] },
+          { verb: "write", id: `E${segmentId}`, field: "next_steps", value: "- still on track" },
           { callerSessionId: sessionId, now: () => 500 },
         ),
       );
@@ -382,12 +399,12 @@ describe("remember tool (ticket 02)", () => {
     // the ONE surviving maintenance reminder, so the receipt states the bare
     // turn count with no suffix regardless of how large the count gets.
     test("20+ consecutive turns with no update to any of this segment's fields still gets the bare count, no suffix", () => {
-      const segmentId = createSegmentId("append-at-nudge");
+      const segmentId = createSegmentId("write-at-nudge");
       seedTurnsSince(100, 20, 1);
       const text = resultText(
         rememberTool(
           db,
-          { verb: "append", id: `E${segmentId}`, field: "decisions", rows: ["late ruling"] },
+          { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- late ruling" },
           { callerSessionId: sessionId, now: () => 500 },
         ),
       );
@@ -395,31 +412,51 @@ describe("remember tool (ticket 02)", () => {
       expect(text).toContain("20 turns since this segment's last maintenance.");
     });
 
-    test("a row containing a newline is rejected — one row, one line", () => {
-      const segmentId = createSegmentId("append-newline");
+    // Ticket 05 (spec D2): rewritten — `append`'s "one row, one line"
+    // newline rejection does not apply to `write`: `value` is the field's
+    // WHOLE text, which is legitimately multi-line (that is the normal
+    // shape of a multi-row field). This is the positive counterpart:
+    // multi-line `value` is accepted and stored exactly.
+    test("a multi-line value is accepted verbatim — write has no per-row shape to enforce", () => {
+      const segmentId = createSegmentId("write-multiline");
       const text = resultText(
         rememberTool(db, {
-          verb: "append",
+          verb: "write",
           id: `E${segmentId}`,
           field: "goal",
-          rows: ["line one\nline two"],
+          value: "- line one\n- line two",
         }),
       );
-      expect(text).toStartWith("Parameter error:");
-      expect(getSegment(db, segmentId)?.goal).toBeNull();
+      expect(text).toContain("Wrote goal");
+      expect(getSegment(db, segmentId)?.goal).toBe("- line one\n- line two");
     });
 
-    test("tool-call markup in a row is rejected, nothing stored", () => {
-      const segmentId = createSegmentId("append-markup");
+    test("tool-call markup in value is rejected, nothing stored", () => {
+      const segmentId = createSegmentId("write-markup");
       const text = resultText(
         rememberTool(db, {
-          verb: "append",
+          verb: "write",
           id: `E${segmentId}`,
           field: "goal",
-          rows: ['bad <invoke name="x">'],
+          value: '- bad <invoke name="x">',
         }),
       );
       expect(text).toContain("tool-call syntax");
+      expect(getSegment(db, segmentId)?.goal).toBeNull();
+    });
+
+    // Ticket 05: null (or an all-whitespace value) clears the field — the
+    // segment surface's first whole-field clear (spec D2/D11); previously
+    // unrepresentable without append/replace juggling a field to empty.
+    test("null clears the field — the segment surface's first whole-field clear", () => {
+      const segmentId = createSegmentId("write-clear");
+      rememberTool(db, { verb: "write", id: `E${segmentId}`, field: "goal", value: "- ship it" });
+      expect(getSegment(db, segmentId)?.goal).toBe("- ship it");
+
+      const text = resultText(
+        rememberTool(db, { verb: "write", id: `E${segmentId}`, field: "goal", value: null }),
+      );
+      expect(text).toContain("Cleared goal");
       expect(getSegment(db, segmentId)?.goal).toBeNull();
     });
 
@@ -427,27 +464,27 @@ describe("remember tool (ticket 02)", () => {
     // non-open") — closing goes through remember's own `close` verb, and the
     // rejection names it as the way back.
     test("refuses a write on a closed segment, naming close as the way back", () => {
-      const segmentId = createSegmentId("append-closed");
+      const segmentId = createSegmentId("write-closed");
       rememberTool(db, { verb: "close", id: `E${segmentId}` });
       expect(getSegment(db, segmentId)?.status).toBe("closed");
 
       const text = resultText(
-        rememberTool(db, { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["late"] }),
+        rememberTool(db, { verb: "write", id: `E${segmentId}`, field: "goal", value: "- late" }),
       );
       expect(text).toStartWith("Parameter error:");
       expect(text).toContain("closed");
       expect(text).toContain(`remember(close, id="E${segmentId}")`);
     });
 
-    test("citations in an appended row create a memory edge (existing citation machinery reused)", () => {
+    test("citations in a written field create a memory edge (existing citation machinery reused)", () => {
       const turn = seedTurn(1, 100);
       const promptNumber = 1;
-      const segmentId = createSegmentId("append-citation");
+      const segmentId = createSegmentId("write-citation");
       rememberTool(db, {
-        verb: "append",
+        verb: "write",
         id: `E${segmentId}`,
         field: "decisions",
-        rows: [`ruled per [S${sessionId}/T${promptNumber}]`],
+        value: `- ruled per [S${sessionId}/T${promptNumber}]`,
       });
       const edges = getOutgoingEdges(db, { kind: "segment", id: segmentId });
       expect(edges.some((edge) => edge.cited.kind === "turn" && edge.cited.id === turn)).toBe(true);
@@ -455,22 +492,23 @@ describe("remember tool (ticket 02)", () => {
   });
 
   // ---------------------------------------------------------------------
-  // replace
+  // edit (ticket 05's rename of `replace` — identical oldString/newString
+  // shape and three-state contract; only the verb word changed)
   // ---------------------------------------------------------------------
 
-  describe("replace", () => {
+  describe("edit", () => {
     function createWithRow(label: string, field: string, row: string): number {
       const text = resultText(rememberTool(db, { verb: "create", title: label }));
       const segmentId = Number(/Created E(\d+)/.exec(text)![1]);
-      rememberTool(db, { verb: "append", id: `E${segmentId}`, field, rows: [row] });
+      rememberTool(db, { verb: "write", id: `E${segmentId}`, field, value: `- ${row}` });
       return segmentId;
     }
 
     test("replaces a unique match", () => {
-      const segmentId = createWithRow("replace-basic", "constraints", "stay under budget");
+      const segmentId = createWithRow("edit-basic", "constraints", "stay under budget");
       const text = resultText(
         rememberTool(db, {
-          verb: "replace",
+          verb: "edit",
           id: `E${segmentId}`,
           field: "constraints",
           oldString: "- stay under budget",
@@ -482,10 +520,10 @@ describe("remember tool (ticket 02)", () => {
     });
 
     test("newString: \"\" deletes the matched row cleanly, collapsing an emptied field to null", () => {
-      const segmentId = createWithRow("replace-delete", "reference", "stale pointer");
+      const segmentId = createWithRow("edit-delete", "reference", "stale pointer");
       const text = resultText(
         rememberTool(db, {
-          verb: "replace",
+          verb: "edit",
           id: `E${segmentId}`,
           field: "reference",
           oldString: "- stale pointer",
@@ -496,15 +534,19 @@ describe("remember tool (ticket 02)", () => {
       expect(getSegment(db, segmentId)?.reference).toBeNull();
     });
 
-    // [S15069/T1022] — the phantom-bullet regression: `append` normalizes a
-    // bare row INTO `- ` form, so callers naturally delete by the same bare
-    // text — which used to leave a contentless `- ` line the trim()-only
-    // cleaner kept (two shipped live on E60's next_steps).
+    // [S15069/T1022] — the phantom-bullet regression: `append` used to
+    // normalize a bare row INTO `- ` form, so callers naturally deleted by
+    // the same bare text — which used to leave a contentless `- ` line the
+    // trim()-only cleaner kept (two shipped live on E60's next_steps).
+    // `append` is gone (ticket 05), but the cleanup this regression test
+    // pins lives in the shared `replaceInSegmentWorkingStateField` `edit`
+    // still calls, so the scenario is reproduced by seeding the row
+    // dash-prefixed (as `write` requires) and deleting it by its bare text.
     test("deleting by BARE row text (no dash) leaves no phantom empty bullet", () => {
-      const segmentId = createWithRow("replace-delete-bare", "next_steps", "run the campaign");
+      const segmentId = createWithRow("edit-delete-bare", "next_steps", "run the campaign");
       const text = resultText(
         rememberTool(db, {
-          verb: "replace",
+          verb: "edit",
           id: `E${segmentId}`,
           field: "next_steps",
           oldString: "run the campaign",
@@ -516,10 +558,10 @@ describe("remember tool (ticket 02)", () => {
     });
 
     test("a missing oldString rejects loudly and leaves the field untouched", () => {
-      const segmentId = createWithRow("replace-missing", "goal", "ship it");
+      const segmentId = createWithRow("edit-missing", "goal", "ship it");
       const text = resultText(
         rememberTool(db, {
-          verb: "replace",
+          verb: "edit",
           id: `E${segmentId}`,
           field: "goal",
           oldString: "- never written",
@@ -532,18 +574,21 @@ describe("remember tool (ticket 02)", () => {
     });
 
     test("an ambiguous oldString (matches more than once) rejects loudly, naming the count, and leaves the field untouched", () => {
-      const segmentId = createWithRow("replace-ambiguous", "done", "shipped X");
+      const segmentId = createWithRow("edit-ambiguous", "done", "shipped X");
+      // Ticket 05: `append`'s second call is gone — `write` supplies the
+      // full two-row text directly (the row-add idiom's OWN alternative,
+      // "use write when you have the field read whole").
       rememberTool(db, {
-        verb: "append",
+        verb: "write",
         id: `E${segmentId}`,
         field: "done",
-        rows: ["shipped X again"],
+        value: "- shipped X\n- shipped X again",
       });
       const before = getSegment(db, segmentId)?.done;
 
       const text = resultText(
         rememberTool(db, {
-          verb: "replace",
+          verb: "edit",
           id: `E${segmentId}`,
           field: "done",
           oldString: "shipped X",
@@ -555,17 +600,17 @@ describe("remember tool (ticket 02)", () => {
       expect(getSegment(db, segmentId)?.done).toBe(before);
     });
 
-    test("dropping a row's only citation on replace removes its memory edge", () => {
+    test("dropping a row's only citation on edit removes its memory edge", () => {
       seedTurn(1, 100);
       const segmentId = createWithRow(
-        "replace-citation",
+        "edit-citation",
         "decisions",
         `ruled per [S${sessionId}/T1]`,
       );
       expect(getOutgoingEdges(db, { kind: "segment", id: segmentId }).length).toBeGreaterThan(0);
 
       rememberTool(db, {
-        verb: "replace",
+        verb: "edit",
         id: `E${segmentId}`,
         field: "decisions",
         oldString: `- ruled per [S${sessionId}/T1]`,
@@ -575,12 +620,12 @@ describe("remember tool (ticket 02)", () => {
     });
 
     test("refuses a write on a closed segment, naming close as the way back", () => {
-      const segmentId = createWithRow("replace-closed", "goal", "ship it");
+      const segmentId = createWithRow("edit-closed", "goal", "ship it");
       rememberTool(db, { verb: "close", id: `E${segmentId}` });
 
       const text = resultText(
         rememberTool(db, {
-          verb: "replace",
+          verb: "edit",
           id: `E${segmentId}`,
           field: "goal",
           oldString: "- ship it",
@@ -590,6 +635,65 @@ describe("remember tool (ticket 02)", () => {
       expect(text).toStartWith("Parameter error:");
       expect(text).toContain("closed");
       expect(text).toContain(`remember(close, id="E${segmentId}")`);
+    });
+
+    // Ticket 05 (spec D7): the row-add idiom the tool description documents
+    // — anchor on the last row and swap it for itself plus the new line —
+    // actually works, now that `append` is gone and this is the only
+    // dedicated add-a-row path.
+    test("the row-add idiom: anchoring edit on the last row adds a new one", () => {
+      const segmentId = createWithRow("edit-row-add-idiom", "next_steps", "first step");
+      const text = resultText(
+        rememberTool(db, {
+          verb: "edit",
+          id: `E${segmentId}`,
+          field: "next_steps",
+          oldString: "- first step",
+          newString: "- first step\n- second step",
+        }),
+      );
+      expect(text).toContain("Replaced text in next_steps");
+      expect(getSegment(db, segmentId)?.nextSteps).toBe("- first step\n- second step");
+    });
+  });
+
+  // Ticket 05 (write-mode-edit-semantics, spec D14): the retired verbs stay
+  // in the vocabulary with a message naming their replacement, checked at
+  // the runtime entry point (`rememberTool` itself, which most of this
+  // suite calls directly) — definitions.test.ts covers the schema-layer
+  // copy of the same rejection.
+  describe("retired verbs (ticket 05)", () => {
+    test("'append' names write/edit as its replacement, and nothing lands", () => {
+      const created = rememberTool(db, { verb: "create", title: "retired-append-target" });
+      const segmentId = /Created E(\d+)/.exec(resultText(created))![1];
+
+      const text = resultText(
+        rememberTool(db, { verb: "append", id: `E${segmentId}`, field: "goal", value: "- x" }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("retired");
+      expect(text).toContain("`write`");
+      expect(text).toContain("`edit`");
+      expect(getSegment(db, segmentId)?.goal).toBeNull();
+    });
+
+    test("'replace' names edit as its replacement, and nothing lands", () => {
+      const created = rememberTool(db, { verb: "create", title: "retired-replace-target", goal: "seed" });
+      const segmentId = /Created E(\d+)/.exec(resultText(created))![1];
+
+      const text = resultText(
+        rememberTool(db, {
+          verb: "replace",
+          id: `E${segmentId}`,
+          field: "goal",
+          oldString: "- seed",
+          newString: "- changed",
+        }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("retired");
+      expect(text).toContain("`edit`");
+      expect(getSegment(db, segmentId)?.goal).toBe("- seed"); // untouched
     });
   });
 
@@ -624,15 +728,15 @@ describe("remember tool (ticket 02)", () => {
       expect(getSegment(db, segmentId)?.status).toBe("open");
 
       // Writes are accepted again on the reopened segment.
-      const appendText = resultText(
-        rememberTool(db, { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["back open"] }),
+      const writeText = resultText(
+        rememberTool(db, { verb: "write", id: `E${segmentId}`, field: "goal", value: "- back open" }),
       );
-      expect(appendText).toStartWith("Appended");
+      expect(writeText).toStartWith("Wrote");
     });
 
     // Ticket 15 (topic registry retirement): `id` resolves ONLY as a
     // segment address — a non-address name is rejected, echoing the "E<n>"
-    // grammar, same as attach/append/replace.
+    // grammar, same as attach/write/edit.
     test("rejects a non-address name, echoing the E<n> address grammar", () => {
       createViaTool("not-an-address-anymore");
       const text = resultText(rememberTool(db, { verb: "close", id: "not-an-address-anymore" }));
@@ -847,8 +951,9 @@ describe("remember tool (ticket 02)", () => {
 
 // ---------------------------------------------------------------------------
 // Write gate (ticket 02, read-write-contract spec) — the gate's first
-// consumer surface: `remember`'s segment field writes (append/replace,
-// Working State included). `.scratch/read-write-contract/spec.md` "门(写面)".
+// consumer surface: `remember`'s segment field writes (`write`/`edit` —
+// ticket 05's rename of `append`/`replace` — Working State included).
+// `.scratch/read-write-contract/spec.md` "门(写面)".
 // ---------------------------------------------------------------------------
 
 describe("remember write gate (ticket 02)", () => {
@@ -895,24 +1000,24 @@ describe("remember write gate (ticket 02)", () => {
     const text = resultText(
       rememberTool(
         db,
-        { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["ship it"] },
+        { verb: "write", id: `E${segmentId}`, field: "goal", value: "- ship it" },
         { callerSessionId: sessionB },
       ),
     );
-    expect(text).toStartWith("Appended");
+    expect(text).toStartWith("Wrote");
   });
 
   test("the same session may keep rewriting its own field with no read in between", () => {
     const segmentId = createSegmentAs("self-rewrite");
     rememberTool(
       db,
-      { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["first"] },
+      { verb: "write", id: `E${segmentId}`, field: "goal", value: "- first" },
       { callerSessionId: sessionA },
     );
     const text = resultText(
       rememberTool(
         db,
-        { verb: "replace", id: `E${segmentId}`, field: "goal", oldString: "- first", newString: "- second" },
+        { verb: "edit", id: `E${segmentId}`, field: "goal", oldString: "- first", newString: "- second" },
         { callerSessionId: sessionA },
       ),
     );
@@ -923,14 +1028,14 @@ describe("remember write gate (ticket 02)", () => {
     const segmentId = createSegmentAs("never-read");
     rememberTool(
       db,
-      { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["from A"] },
+      { verb: "write", id: `E${segmentId}`, field: "goal", value: "- from A" },
       { callerSessionId: sessionA },
     );
 
     const text = resultText(
       rememberTool(
         db,
-        { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["from B, blind"] },
+        { verb: "write", id: `E${segmentId}`, field: "goal", value: "- from B, blind" },
         { callerSessionId: sessionB },
       ),
     );
@@ -951,7 +1056,7 @@ describe("remember write gate (ticket 02)", () => {
     // A writes first.
     rememberTool(
       db,
-      { verb: "append", id: `E${segmentId}`, field: "decisions", rows: ["A ruled first"] },
+      { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- A ruled first" },
       { callerSessionId: sessionA },
     );
 
@@ -961,7 +1066,7 @@ describe("remember write gate (ticket 02)", () => {
     const staleAttempt = resultText(
       rememberTool(
         db,
-        { verb: "append", id: `E${segmentId}`, field: "decisions", rows: ["B ruled blind"] },
+        { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- B ruled blind" },
         { callerSessionId: sessionB },
       ),
     );
@@ -971,16 +1076,24 @@ describe("remember write gate (ticket 02)", () => {
     expect(staleAttempt).toContain("recall");
     expect(getSegment(db, segmentId)?.decisions).toBe("- A ruled first");
 
-    // B recalls again, now sees A's write, and may proceed.
+    // B recalls again, now sees A's write, and may proceed. Uses `edit`
+    // (ticket 05's row-add idiom) rather than a second `write`, so the
+    // assertion below can still check A's row survived alongside B's.
     recallMemory(db, { id: `E${segmentId}`, readerId: sessionWriterId(sessionB) });
     const retried = resultText(
       rememberTool(
         db,
-        { verb: "append", id: `E${segmentId}`, field: "decisions", rows: ["B ruled after re-reading"] },
+        {
+          verb: "edit",
+          id: `E${segmentId}`,
+          field: "decisions",
+          oldString: "- A ruled first",
+          newString: "- A ruled first\n- B ruled after re-reading",
+        },
         { callerSessionId: sessionB },
       ),
     );
-    expect(retried).toStartWith("Appended");
+    expect(retried).toStartWith("Replaced text in");
     expect(getSegment(db, segmentId)?.decisions).toBe(
       "- A ruled first\n- B ruled after re-reading",
     );
@@ -990,7 +1103,7 @@ describe("remember write gate (ticket 02)", () => {
     const segmentId = createSegmentAs("entity-level-grant");
     rememberTool(
       db,
-      { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["from A"] },
+      { verb: "write", id: `E${segmentId}`, field: "goal", value: "- from A" },
       { callerSessionId: sessionA },
     );
     // B reads the segment card once — it covers every field, not just `goal`.
@@ -999,11 +1112,11 @@ describe("remember write gate (ticket 02)", () => {
     const text = resultText(
       rememberTool(
         db,
-        { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["from B, after reading"] },
+        { verb: "write", id: `E${segmentId}`, field: "goal", value: "- from B, after reading" },
         { callerSessionId: sessionB },
       ),
     );
-    expect(text).toStartWith("Appended");
+    expect(text).toStartWith("Wrote");
   });
 
   test("atomicity: a write that fails after the gate check leaves no stamp behind — check and write commit or fail together", () => {
@@ -1018,7 +1131,7 @@ describe("remember write gate (ticket 02)", () => {
     expect(() =>
       rememberTool(
         db,
-        { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["should not land"] },
+        { verb: "write", id: `E${segmentId}`, field: "goal", value: "- should not land" },
         {
           callerSessionId: sessionA,
           runWriteTransaction: (database, fn) => {
@@ -1044,9 +1157,10 @@ describe("remember write gate (ticket 02)", () => {
   });
 });
 
-// Ticket 13 (spec "节奏与建段指导"), verb scope narrowed by ticket 09
-// (spec "write-mode-edit-semantics"): every successful FIELD-WRITING
-// `remember` call — `create`, `append`, `replace` — stamps
+// Ticket 13 (spec "节奏与建段指导"), verb scope narrowed by ticket 09 and
+// renamed by ticket 05 (both spec "write-mode-edit-semantics"): every
+// successful FIELD-WRITING `remember` call — `create`, `write`, `edit` —
+// stamps
 // `sessions.last_remember_turn_id` — the session's MAX turn row id at that
 // moment (0 when no turn exists yet), the anchor `hooks/note-reminder.ts`'s
 // universal 20-turn check counts turns after. `attach`/`close`/`assign` do
@@ -1125,7 +1239,7 @@ describe("last_remember_turn_id stamp (ticket 13, id anchor 0.12.1)", () => {
     expect(getSession(db, sessionId)?.lastRememberTurnId).toBeNull();
   });
 
-  test("append also stamps it — a field-writing verb resets the clock same as create", () => {
+  test("write also stamps it — a field-writing verb resets the clock same as create", () => {
     const created = rememberTool(db, {
       verb: "create",
       title: "target segment",
@@ -1134,17 +1248,17 @@ describe("last_remember_turn_id stamp (ticket 13, id anchor 0.12.1)", () => {
 
     rememberTool(
       db,
-      { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["a goal row"] },
+      { verb: "write", id: `E${segmentId}`, field: "goal", value: "- a goal row" },
       { callerSessionId: sessionId, now: () => 6000 },
     );
 
     expect(getSession(db, sessionId)?.lastRememberTurnId).toBe(0);
   });
 
-  test("replace also stamps it — the other field-writing verb resets the clock too", () => {
+  test("edit also stamps it — the other field-writing verb resets the clock too", () => {
     const created = rememberTool(db, {
       verb: "create",
-      title: "target segment for replace",
+      title: "target segment for edit",
       goal: "seed row",
     });
     const segmentId = /Created E(\d+)/.exec(resultText(created))![1];
@@ -1152,7 +1266,7 @@ describe("last_remember_turn_id stamp (ticket 13, id anchor 0.12.1)", () => {
     rememberTool(
       db,
       {
-        verb: "replace",
+        verb: "edit",
         id: `E${segmentId}`,
         field: "goal",
         oldString: "- seed row",
@@ -1177,7 +1291,7 @@ describe("last_remember_turn_id stamp (ticket 13, id anchor 0.12.1)", () => {
       .get(sessionId)!.id;
     rememberTool(
       db,
-      { verb: "append", id: `E${segmentId}`, field: "goal", rows: ["field write"] },
+      { verb: "write", id: `E${segmentId}`, field: "goal", value: "- field write" },
       { callerSessionId: sessionId, now: () => 5000 },
     );
     expect(getSession(db, sessionId)?.lastRememberTurnId).toBe(fieldWriteTurn);

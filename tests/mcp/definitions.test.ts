@@ -475,13 +475,24 @@ describe("tool surface", () => {
         cites: [{ id: 1, relation: "supersedes" }],
       }),
     ).toThrow();
+    // Ticket 05 (write-mode-edit-semantics, spec D1): `mode.<field>` is now
+    // `"write"` or the edit form — `"overwrite"` retired (see the dedicated
+    // retired-literal test below).
     expect(
       noteInputSchema.parse({
         turn: "S1/T1",
         content: "c",
-        mode: { content: "overwrite" },
+        mode: { content: "write" },
       }).mode,
-    ).toEqual({ content: "overwrite" });
+    ).toEqual({ content: "write" });
+    expect(
+      noteInputSchema.parse({
+        turn: "S1/T1",
+        mode: {
+          content: { mode: "edit", oldString: "a", newString: "b" },
+        },
+      }).mode,
+    ).toEqual({ content: { mode: "edit", oldString: "a", newString: "b" } });
     expect(() =>
       noteInputSchema.parse({
         turn: "S1/T1",
@@ -491,24 +502,73 @@ describe("tool surface", () => {
     ).toThrow();
   });
 
+  // Ticket 05 (spec D14): the retired mode literals stay in the schema with
+  // a message naming their replacement, the same precedent the retired
+  // `topic`/`truncate`/`view` parameters already set — not a generic union
+  // error naming nothing.
+  it("the retired mode literals 'overwrite' and 'append' each name their replacement, and D4 refuses the edit form on a set field", () => {
+    const overwrite = noteInputSchema.safeParse({
+      turn: "S1/T1",
+      content: "c",
+      mode: { content: "overwrite" },
+    });
+    expect(overwrite.success).toBe(false);
+    const overwriteMessage = overwrite.success ? "" : overwrite.error.issues.map((i) => i.message).join(" ");
+    expect(overwriteMessage).toContain("retired");
+    expect(overwriteMessage).toContain('"write"');
+
+    const append = noteInputSchema.safeParse({
+      turn: "S1/T1",
+      content: "c",
+      mode: { content: "append" },
+    });
+    expect(append.success).toBe(false);
+    const appendMessage = append.success ? "" : append.error.issues.map((i) => i.message).join(" ");
+    expect(appendMessage).toContain("retired");
+    expect(appendMessage).toContain('"write"');
+    expect(appendMessage).toContain("edit");
+
+    // D4: the edit form has no meaning on a set field (type/tags).
+    const editOnTags = noteInputSchema.safeParse({
+      turn: "S1/T1",
+      mode: { tags: { mode: "edit", oldString: "a", newString: "b" } },
+    });
+    expect(editOnTags.success).toBe(false);
+    const editOnTagsMessage = editOnTags.success
+      ? ""
+      : editOnTags.error.issues.map((i) => i.message).join(" ");
+    expect(editOnTagsMessage).toContain("set field");
+  });
+
   // Ticket 02 (ADR-0001/0002): `remember` revives the retired tool name as
-  // the segment write surface, distinct from `note`. Ticket 05 adds `close`
-  // as a fifth verb and widens the field list to content/insight. Ticket 02
-  // (ownership-and-note-cadence spec) adds `assign` as a sixth.
+  // the segment write surface, distinct from `note`. Ticket 05 (vocabulary
+  // switch) renames the field-writing pair `append`/`replace` to `write`/
+  // `edit` and widens the field list to content/insight. Ticket 02
+  // (ownership-and-note-cadence spec) adds `assign` as a sixth verb.
   it("the remember description names all six verbs, the field list, markup/citation/English rules and stays capped", () => {
     const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
     expect(remember).toContain("`create`");
     expect(remember).toContain("`attach`");
-    expect(remember).toContain("`append`");
-    expect(remember).toContain("`replace`");
+    expect(remember).toContain("`write`");
+    expect(remember).toContain("`edit`");
     expect(remember).toContain("`close`");
     expect(remember).toContain("`assign`");
     expect(remember).toContain("goal, constraints, decisions, done, next_steps, reference");
     expect(remember).toContain("content, insight");
     expect(remember).toContain("Tool-call markup");
     expect(remember).toContain("Every field is written in English.");
-    expect(remember).toContain("under 10 turns draws a too-soon reminder");
-    expect(remember).toContain("`decisions` append is exempt");
+    // Ticket 05: the row-add idiom — `append` retired without a replacement
+    // verb, so the description has to teach it (spec D7): anchor `edit` on
+    // the last row to add one, or use `write` to reorder/rewrite whole.
+    expect(remember).toContain("anchoring `edit` on the last row");
+    expect(remember.toLowerCase()).toContain("reordering");
+    // Ticket 05: the "under 10 turns" too-soon reminder and its `decisions`
+    // exemption are gone — tickets 02+09 (856815b) already retired the
+    // BEHAVIOUR (formatMaintenanceCadence reports a bare turn count with no
+    // threshold branch); this description text was left stale until this
+    // ticket's own vocabulary rewrite touched the same paragraph.
+    expect(remember).not.toContain("too-soon reminder");
+    expect(remember).not.toContain("append is exempt");
     // Ticket 13 (spec "节奏与建段指导"): the 20-turn nudge retired off the
     // segment card's header outright — the description must not promise it
     // lives there any more, and must instead carry its own one-line timing
@@ -551,6 +611,35 @@ describe("tool surface", () => {
     expect(message.toLowerCase()).toContain("retired");
     expect(message.toLowerCase()).toContain("tag");
   });
+
+  // Ticket 05 (spec D14): `append`/`replace` retire as `verb` values —
+  // named with their replacement, same precedent as `topic` above, rather
+  // than zod's generic enum error.
+  it("a supplied verb 'append' or 'replace' is rejected, naming its replacement", () => {
+    const append = rememberInputSchema.safeParse({
+      verb: "append",
+      id: "E1",
+      field: "goal",
+      value: "- x",
+    });
+    expect(append.success).toBe(false);
+    const appendMessage = append.success ? "" : append.error.issues[0]?.message ?? "";
+    expect(appendMessage).toContain("retired");
+    expect(appendMessage).toContain("`write`");
+    expect(appendMessage).toContain("`edit`");
+
+    const replace = rememberInputSchema.safeParse({
+      verb: "replace",
+      id: "E1",
+      field: "goal",
+      oldString: "a",
+      newString: "b",
+    });
+    expect(replace.success).toBe(false);
+    const replaceMessage = replace.success ? "" : replace.error.issues[0]?.message ?? "";
+    expect(replaceMessage).toContain("retired");
+    expect(replaceMessage).toContain("`edit`");
+  });
 });
 
 describe("rememberInputShape", () => {
@@ -568,19 +657,19 @@ describe("rememberInputShape", () => {
   });
 
   // Ticket 05: field's enum widened from the six Working State columns to
-  // those six PLUS content/insight (ADR-0001's append/replace mechanism
-  // covers the summary trio's two prose fields too; title stays create-only).
+  // those six PLUS content/insight (ADR-0001's write/edit mechanism covers
+  // the summary trio's two prose fields too; title stays create-only).
   it("field's enum accepts the six Working State columns plus content/insight, and nothing else", () => {
     for (const field of ["goal", "constraints", "decisions", "done", "next_steps", "reference", "content", "insight"]) {
       expect(() =>
-        rememberInputSchema.parse({ verb: "append", id: "E1", field, rows: ["x"] }),
+        rememberInputSchema.parse({ verb: "write", id: "E1", field, value: "x" }),
       ).not.toThrow();
     }
     expect(() =>
-      rememberInputSchema.parse({ verb: "append", id: "E1", field: "title", rows: ["x"] }),
+      rememberInputSchema.parse({ verb: "write", id: "E1", field: "title", value: "x" }),
     ).toThrow();
     expect(() =>
-      rememberInputSchema.parse({ verb: "append", id: "E1", field: "not-a-field", rows: ["x"] }),
+      rememberInputSchema.parse({ verb: "write", id: "E1", field: "not-a-field", value: "x" }),
     ).toThrow();
   });
 

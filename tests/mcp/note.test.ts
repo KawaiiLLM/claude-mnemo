@@ -291,7 +291,7 @@ describe("note tool", () => {
         {
           turn: `S${sessionId}/T332`,
           content: "x".repeat(804), // 201 tok, over 2x of the 100 tok budget
-          mode: { content: "overwrite" },
+          mode: { content: "write" },
         },
         { now: () => 1000, env: {} },
       );
@@ -346,7 +346,7 @@ describe("note tool", () => {
           {
             turn: `S${sessionId}/T332`,
             content: "x".repeat(804), // 201 tok, over 1.5x of the 100 tok budget every time
-            mode: { content: "overwrite" },
+            mode: { content: "write" },
           },
           { now: () => 1000 + i, env: {} },
         );
@@ -373,7 +373,7 @@ describe("note tool", () => {
         turn: `S${sessionId}/T332`,
         title: "second title",
         content: "second content",
-        mode: { title: "overwrite", content: "overwrite" },
+        mode: { title: "write", content: "write" },
       },
       { now: () => 1200, env: {} },
     );
@@ -420,7 +420,7 @@ describe("note tool", () => {
         turn: `S${sessionId}/T332`,
         title: "implement+note: rewritten",
         content: "Still never touch turns.",
-        mode: { title: "overwrite", content: "overwrite" },
+        mode: { title: "write", content: "write" },
       },
       { now: () => 1200, env: {} },
     );
@@ -653,7 +653,7 @@ describe("note tool", () => {
         turn: `S${sessionId}/T332`,
         title: "corrected",
         content: "c",
-        mode: { title: "overwrite", content: "overwrite" },
+        mode: { title: "write", content: "write" },
       },
       { now: () => 1000, env: {} },
     );
@@ -1164,7 +1164,7 @@ describe("note tool citations (spec C6)", () => {
         turn: `S${sessionId}/T2`,
         title: "design+routing: revised, no longer citing T1",
         content: "Stands on its own now.",
-        mode: { title: "overwrite", content: "overwrite" },
+        mode: { title: "write", content: "write" },
       },
       { now: () => 1000, env: {}, eraCutoffEpoch: 1 },
     );
@@ -1459,7 +1459,7 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket
     // Self-forcing the double type (spec's own point): `review` alone
     // cannot carry `refines`, but `["review","design"]` can — the SAME
     // multi-type turn is now legal because its phase SET admits decision.
-    // `mode.type: "overwrite"` because the turn already carries a `type`
+    // `mode.type: "write"` because the turn already carries a `type`
     // (set directly for the fixture above) — the ordinary non-empty-field
     // rule, unrelated to the phase gate this test targets.
     const passed = noteTool(
@@ -1469,7 +1469,7 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket
         title: "design+review: reviewing this also revised the design",
         content: `Refines [S${sessionId}/T1].`,
         type: ["review", "design"],
-        mode: { type: "overwrite" },
+        mode: { type: "write" },
         refines: [`S${sessionId}/T1`],
       },
       { now: () => 950, env: {}, eraCutoffEpoch: 1 },
@@ -1540,7 +1540,7 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket
         title: "fix+routing: revised, now depends on a decision instead",
         content: `Depends on [S${sessionId}/T1].`,
         dependsOn: [`S${sessionId}/T1`],
-        mode: { title: "overwrite", content: "overwrite" },
+        mode: { title: "write", content: "write" },
       },
       { now: () => 950, env: {}, eraCutoffEpoch: 1 },
     );
@@ -1574,7 +1574,7 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket
         title: "design+routing: rests on the earlier finding, revised",
         content: `Grounded on [S${sessionId}/T2].`,
         groundedOn: [`S${sessionId}/T2`],
-        mode: { title: "overwrite", content: "overwrite" },
+        mode: { title: "write", content: "write" },
       },
       { now: () => 950, env: {}, eraCutoffEpoch: 1 },
     );
@@ -1597,7 +1597,7 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket
         title: "design+routing: tries to ground on another decision",
         content: `Grounded on [S${sessionId}/T4].`,
         groundedOn: [`S${sessionId}/T4`],
-        mode: { title: "overwrite", content: "overwrite" },
+        mode: { title: "write", content: "write" },
       },
       { now: () => 1000, env: {}, eraCutoffEpoch: 1 },
     );
@@ -1670,10 +1670,12 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket
 // tests cover the acceptance criteria that neither the pre-existing note.test
 // suite nor era-cutover.test.ts happen to exercise: that the old entry point
 // is actually gone (not merely unused), the mode requirement on a NON-empty
-// field for both a turn and a session, append accumulating versus overwrite
-// replacing (with the stored value checked after each), the receipt reporting
-// a post-write total rather than a delta, and content carrying tool-call
-// syntax being rejected outright.
+// field for both a turn and a session, the edit form changing part of a
+// field versus `write` replacing it whole (with the stored value checked
+// after each — ticket 05 rewrote this half: `append`/`overwrite` retired,
+// see "the edit form changes a span, write replaces it whole" below), the
+// receipt reporting a post-write total rather than a delta, and content
+// carrying tool-call syntax being rejected outright.
 describe("the merged write tool (ticket 03)", () => {
   let db: Database;
   let sessionId: number;
@@ -1784,36 +1786,46 @@ describe("the merged write tool (ticket 03)", () => {
       const withMode = noteTool(db, {
         session: `S${sessionId}`,
         title: "x",
-        mode: { title: "overwrite" },
+        mode: { title: "write" },
       } as never);
       expect(resultText(withMode)).toContain("session writes retired");
     });
   });
 
-  // Acceptance criterion 4: append accumulates, overwrite replaces — the
-  // stored value checked after each, on one field of each shape (string,
-  // array).
-  describe("append accumulates, overwrite replaces", () => {
-    test("a string field (turn content): append concatenates, overwrite replaces", () => {
+  // Ticket 05 (write-mode-edit-semantics, spec D1/D3/D4): `append`/
+  // `overwrite` retired outright — this block used to be "append
+  // accumulates, overwrite replaces" (ticket 03's acceptance criterion 4).
+  // Rewritten rather than deleted: the edit form is `append`'s nearest
+  // functional successor for a prose field (grow it without resupplying the
+  // whole text), and D4 means a set field (tags) gets no such successor at
+  // all — `edit` is refused there outright, `write` is the only verb.
+  describe("the edit form changes a span, write replaces it whole", () => {
+    test("a string field (turn content): edit swaps an exact span, write replaces the whole field", () => {
       noteTool(db, { turn: `S${sessionId}/T1`, title: "t", content: "first" });
       expect(getShadowNote(db, turnId)?.content).toBe("first");
 
       noteTool(db, {
         turn: `S${sessionId}/T1`,
-        content: "second",
-        mode: { content: "append" },
+        mode: {
+          content: { mode: "edit", oldString: "first", newString: "first\nsecond" },
+        },
       });
       expect(getShadowNote(db, turnId)?.content).toBe("first\nsecond");
 
       noteTool(db, {
         turn: `S${sessionId}/T1`,
         content: "third",
-        mode: { content: "overwrite" },
+        mode: { content: "write" },
       });
       expect(getShadowNote(db, turnId)?.content).toBe("third");
     });
 
-    test("an array field (turn tags): append unions, overwrite replaces whole", () => {
+    // Ticket 05 (spec D4): tags is a SET field — the edit form has no
+    // "span" to match inside a list, so it is refused outright rather than
+    // given a set-flavoured meaning (element add/remove) of its own. `write`
+    // is the only way to change it, and always states the full replacement
+    // set (the accepted cost of D4's ruling).
+    test("a set field (turn tags): edit is refused, write replaces the whole set", () => {
       noteTool(db, {
         turn: `S${sessionId}/T1`,
         title: "t",
@@ -1822,17 +1834,26 @@ describe("the merged write tool (ticket 03)", () => {
       });
       expect(getTurnById(db, turnId)!.tags).toEqual(["auth"]);
 
+      const rejected = noteTool(db, {
+        turn: `S${sessionId}/T1`,
+        mode: { tags: { mode: "edit", oldString: "auth", newString: "authn" } },
+      });
+      expect(resultText(rejected)).toStartWith("Parameter error:");
+      expect(resultText(rejected)).toContain("mode.tags");
+      expect(resultText(rejected)).toContain("set field");
+      expect(getTurnById(db, turnId)!.tags).toEqual(["auth"]); // untouched by the rejected call
+
       noteTool(db, {
         turn: `S${sessionId}/T1`,
-        tags: ["concurrency"],
-        mode: { tags: "append" },
+        tags: ["auth", "concurrency"],
+        mode: { tags: "write" },
       });
       expect(getTurnById(db, turnId)!.tags).toEqual(["auth", "concurrency"]);
 
       noteTool(db, {
         turn: `S${sessionId}/T1`,
         tags: ["delivery"],
-        mode: { tags: "overwrite" },
+        mode: { tags: "write" },
       });
       expect(getTurnById(db, turnId)!.tags).toEqual(["delivery"]);
     });
@@ -1863,22 +1884,28 @@ describe("the merged write tool (ticket 03)", () => {
     expect(turn.tags).toEqual(["auth"]);
   });
 
-  // Acceptance criterion 6: the receipt reports an accumulating field's total
-  // after the write, not the delta.
-  test("the receipt reports the post-write total of an appended field, not the delta", () => {
+  // Acceptance criterion 6 (ticket 03), ported onto the edit form by ticket
+  // 05 (`append` is gone): the receipt reports a grown field's total after
+  // the write, not the size of the span just changed.
+  test("the receipt reports the post-write total after an edit, not the size of the changed span", () => {
     noteTool(db, { turn: `S${sessionId}/T1`, title: "t", content: "a".repeat(40) });
     const result = noteTool(db, {
       turn: `S${sessionId}/T1`,
-      content: "b".repeat(40),
-      mode: { content: "append" },
+      mode: {
+        content: {
+          mode: "edit",
+          oldString: "a".repeat(40),
+          newString: `${"a".repeat(40)}\n${"b".repeat(40)}`,
+        },
+      },
     });
 
     const stored = getShadowNote(db, turnId)!.content;
     expect(stored.replace(/\n/g, "").length).toBe(80); // both halves survive
     // The receipt's content count reflects the full 80+1(newline) characters
-    // now stored (~21 tok at 4 chars/tok), not merely the 40 just appended
-    // (~10 tok) — a writer appending in small increments must see the total
-    // it has reached, not the size of its own last call.
+    // now stored (~21 tok at 4 chars/tok), not merely the 40 characters the
+    // edit's `newString` added — a writer growing a field one edit at a time
+    // must see the total it has reached, not the size of its own last call.
     expect(resultText(result)).toContain("content 21/100");
   });
 
@@ -2044,7 +2071,7 @@ describe("note tool write gate (ticket 03)", () => {
       noteTool(db, { turn: `S${sessionA}/T1`, type: ["design"] }, { callerSessionId: sessionA });
       const result = noteTool(
         db,
-        { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "overwrite" } },
+        { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "write" } },
         { callerSessionId: sessionA },
       );
       expect(isNoteSuccess(result)).toBe(true);
@@ -2059,7 +2086,7 @@ describe("note tool write gate (ticket 03)", () => {
 
       const result = noteTool(
         db,
-        { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "overwrite" }, crossSession: true },
+        { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "write" }, crossSession: true },
         { callerSessionId: sessionB },
       );
 
@@ -2104,7 +2131,7 @@ describe("note tool write gate (ticket 03)", () => {
 
     const result = noteTool(
       db,
-      { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "overwrite" }, crossSession: true },
+      { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "write" }, crossSession: true },
       { callerSessionId: sessionB },
     );
 
@@ -2118,7 +2145,7 @@ describe("note tool write gate (ticket 03)", () => {
     recallMemory(db, { id: `S${sessionA}/T1`, readerId: sessionWriterId(sessionB) });
     const retried = noteTool(
       db,
-      { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "overwrite" }, crossSession: true },
+      { turn: `S${sessionA}/T1`, type: ["fix"], mode: { type: "write" }, crossSession: true },
       { callerSessionId: sessionB },
     );
     expect(isNoteSuccess(retried)).toBe(true);
@@ -2153,7 +2180,7 @@ describe("note tool write gate (ticket 03)", () => {
     );
     noteTool(
       db,
-      { turn: `S${sessionA}/T1`, insight: null, mode: { insight: "overwrite" } },
+      { turn: `S${sessionA}/T1`, insight: null, mode: { insight: "write" } },
       { callerSessionId: sessionA },
     );
 
@@ -2170,5 +2197,139 @@ describe("note tool write gate (ticket 03)", () => {
     // The blocked write never landed — insight is still cleared, not
     // overwritten with the blind session's text.
     expect(getShadowNote(db, turnId)?.insight ?? null).toBeNull();
+  });
+});
+
+// Ticket 05 (write-mode-edit-semantics, spec D1/D3/D4/D10/D14): the
+// vocabulary switch itself. "the edit form changes a span, write replaces
+// it whole" (above) proves the new verbs work end to end; these tests pin
+// the four traps the ticket named as the ones that fail silently rather
+// than loudly if missed.
+describe("write/edit vocabulary switch (ticket 05)", () => {
+  let db: Database;
+  let sessionId: number;
+  let turnId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    sessionId = upsertSession(db, {
+      contentSessionId: "vocab-switch-session",
+      project: "claude-mnemo",
+      title: "Before",
+      content: "Initial",
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+
+    turnId = db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, 1, 'active', 'Do the thing', ?) RETURNING id`,
+      )
+      .get(sessionId, 100)!.id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // Trap #1 (the ticket's own framing): note.ts's resolver used to treat ANY
+  // non-`append` mode as a whole overwrite. This pins that `mode: "edit"`
+  // changes ONLY the matched span — a regression here means the resolver
+  // fell back onto that old branch and silently overwrote the whole field.
+  test("regression: mode 'edit' never degenerates into a whole-field overwrite", () => {
+    noteTool(db, {
+      turn: `S${sessionId}/T1`,
+      title: "t",
+      content: "The quick brown fox jumps over the lazy dog.",
+    });
+
+    noteTool(db, {
+      turn: `S${sessionId}/T1`,
+      mode: {
+        content: { mode: "edit", oldString: "lazy dog", newString: "sleeping dog" },
+      },
+    });
+
+    expect(getShadowNote(db, turnId)?.content).toBe(
+      "The quick brown fox jumps over the sleeping dog.",
+    );
+  });
+
+  test("edit's three states: unique hit succeeds, no hit rejects naming oldString, ambiguous rejects naming the count", () => {
+    noteTool(db, { turn: `S${sessionId}/T1`, title: "t", content: "alpha beta alpha" });
+
+    const missing = noteTool(db, {
+      turn: `S${sessionId}/T1`,
+      mode: { content: { mode: "edit", oldString: "gamma", newString: "delta" } },
+    });
+    expect(resultText(missing)).toStartWith("Parameter error:");
+    expect(resultText(missing)).toContain("gamma");
+    expect(resultText(missing)).toContain("not found");
+
+    const ambiguous = noteTool(db, {
+      turn: `S${sessionId}/T1`,
+      mode: { content: { mode: "edit", oldString: "alpha", newString: "omega" } },
+    });
+    expect(resultText(ambiguous)).toStartWith("Parameter error:");
+    expect(resultText(ambiguous)).toContain("2 times");
+    expect(getShadowNote(db, turnId)?.content).toBe("alpha beta alpha"); // untouched by either rejection
+
+    const ok = noteTool(db, {
+      turn: `S${sessionId}/T1`,
+      mode: { content: { mode: "edit", oldString: "beta", newString: "gamma" } },
+    });
+    expect(isNoteSuccess(ok)).toBe(true);
+    expect(getShadowNote(db, turnId)?.content).toBe("alpha gamma alpha");
+  });
+
+  // D10: the edit form's payload lives entirely in `mode.<field>` — the
+  // field's own value is not also supplied. This combo is a parameter
+  // error, not "value wins" or "edit wins" silently.
+  test("a field value supplied together with its edit form is a parameter error", () => {
+    noteTool(db, { turn: `S${sessionId}/T1`, title: "t", content: "first" });
+
+    const result = noteTool(db, {
+      turn: `S${sessionId}/T1`,
+      content: "second",
+      mode: { content: { mode: "edit", oldString: "first", newString: "second" } },
+    });
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("newString");
+    expect(getShadowNote(db, turnId)?.content).toBe("first"); // untouched
+  });
+
+  // D14: the retired literals stay in the vocabulary with a message naming
+  // their replacement, not a generic "must be ..." error — checked at the
+  // runtime entry point (`noteTool` itself), since most of this suite calls
+  // it directly rather than through `noteInputSchema`. definitions.test.ts
+  // covers the schema-layer copy of the same rejection.
+  test("the retired mode literals 'overwrite' and 'append' each name their replacement", () => {
+    noteTool(db, { turn: `S${sessionId}/T1`, title: "t", content: "first" });
+
+    const overwrite = noteTool(db, {
+      turn: `S${sessionId}/T1`,
+      content: "second",
+      mode: { content: "overwrite" },
+    });
+    expect(resultText(overwrite)).toStartWith("Parameter error:");
+    expect(resultText(overwrite)).toContain("retired");
+    expect(resultText(overwrite)).toContain('"write"');
+
+    const append = noteTool(db, {
+      turn: `S${sessionId}/T1`,
+      content: "second",
+      mode: { content: "append" },
+    });
+    expect(resultText(append)).toStartWith("Parameter error:");
+    expect(resultText(append)).toContain("retired");
+    expect(resultText(append)).toContain('"write"');
+    expect(resultText(append)).toContain("edit");
+
+    expect(getShadowNote(db, turnId)?.content).toBe("first"); // neither call landed
   });
 });

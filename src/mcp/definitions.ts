@@ -117,8 +117,8 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
   remember:
-    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Six verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`append\` adds rows to one named field; \`replace\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched row; \`close\` toggles the segment off the roster (still \`recall\`-able), or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership — or clears ownership if \`id\` is omitted. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. A closed segment refuses append/replace, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
-    "Maintenance is advisory, never a gate: every append/replace reports turns since this segment was last touched — under 10 turns draws a too-soon reminder (a `decisions` append is exempt — a lost ruling is the costliest loss).\n" +
+    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Six verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership — or clears ownership if \`id\` is omitted. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
+    "Maintenance is advisory, never a gate: every write/edit reports turns since this segment was last touched.\n" +
     "20-turn reminder: check membership, Working State, whether to create or attach — judgment lives in the Memory Rubric, not here.",
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
   // Stop hook and the completion gate already call the coverage predicate
@@ -202,9 +202,13 @@ export const workerRecallInputShape = {
   ...recallInputShape,
 };
 
-// D5/D5a: one mode vocabulary, shared by every field of both addressing
-// surfaces. `.strict()` further down means an unrecognised key (a field this
-// call's surface does not carry) is a parse error, not a silent drop.
+// Ticket 05 (write-mode-edit-semantics, spec D1/D3/D10/D14): one mode
+// vocabulary, shared by every field of both addressing surfaces (`note` and
+// `remember`) — `write` replaces a field whole, the edit form
+// `{ mode: "edit", oldString, newString }` swaps an exactly-matched span
+// within it. `append`/`overwrite` retired. `.strict()` further down means an
+// unrecognised key (a field this call's surface does not carry) is a parse
+// error, not a silent drop.
 //
 // ticket 01 (ADR-0003): `grade` is REMOVED from this vocabulary along with
 // the parameter itself — the writer records facts, the settlement subagent
@@ -212,20 +216,52 @@ export const workerRecallInputShape = {
 // `.strict()` parse error; no custom message is added for it (unlike the
 // retired session fields below), because there is nothing left to point the
 // caller at — grade simply left this tool.
-const fieldModeEnum = z.enum(["overwrite", "append"]);
+const fieldEditModeShape = z
+  .object({
+    mode: z.literal("edit"),
+    oldString: z.string(),
+    newString: z.string(),
+  })
+  .strict();
+
+// Ticket 05 (spec D14): the retired literals ("overwrite", "append") stay
+// declared as accepted union members ON PURPOSE — a caller sending one
+// parses successfully at the base-shape level, so `noteInputSchema`'s
+// `superRefine` below (which walks `mode`'s per-field entries) can reject it
+// with a message naming its replacement, the same precedent the retired
+// `topic`/`truncate`/`view` parameters already set, rather than zod's
+// generic union error naming nothing.
+const fieldModeValueShape = z.union([
+  z.literal("write"),
+  z.literal("overwrite"),
+  z.literal("append"),
+  fieldEditModeShape,
+]);
 const noteModeShape = z
   .object({
-    title: fieldModeEnum.optional(),
-    content: fieldModeEnum.optional(),
-    insight: fieldModeEnum.optional(),
-    type: fieldModeEnum.optional(),
-    tags: fieldModeEnum.optional(),
+    title: fieldModeValueShape.optional(),
+    content: fieldModeValueShape.optional(),
+    insight: fieldModeValueShape.optional(),
+    type: fieldModeValueShape.optional(),
+    tags: fieldModeValueShape.optional(),
   })
   .strict()
   .optional()
   .describe(
-    'Required when the target field already holds something: "overwrite" replaces it whole, "append" adds to it (text: newline-joined; type/tags: unioned). Not required when the field is empty or omitted — omitting the field itself leaves it untouched. Clearing a nullable field (insight) needs the field set to null plus its mode set to "overwrite".',
+    'Required when the target field already holds something: "write" replaces it whole (type/tags: the full replacement set — the edit form has no meaning on a set field). The edit form `{ mode: "edit", oldString, newString }` swaps an exactly-matched span within a text field ("" deletes the match); missing or ambiguous rejects loudly naming which. Not required when the field is empty or omitted — omitting the field itself leaves it untouched. Clearing a nullable field (insight) needs the field set to null plus its mode set to "write".',
   );
+
+// Ticket 05 (spec D14): shared by `noteInputSchema`'s superRefine below.
+const RETIRED_NOTE_MODE_LITERAL_MESSAGE: Record<string, string> = {
+  overwrite: 'use "write" instead.',
+  append:
+    'use "write" to replace the field whole, or the edit form ({ mode: "edit", oldString, newString }) to change part of it.',
+};
+// Ticket 05 (spec D4): type/tags are set fields — mirrors note.ts's own
+// `NOTE_SET_MODE_FIELDS`, kept as a small local literal rather than a
+// cross-file import since both sides are two-element and the coupling risk
+// is lower than the import.
+const NOTE_SET_MODE_FIELDS = new Set(["type", "tags"]);
 
 const TYPE_VOCABULARY_LIST = MEMORY_TYPES.join("/");
 
@@ -428,21 +464,31 @@ export const noteInputShape = {
 // `turn`/`session` dispatch already settled.
 //
 // ticket 05: `field`'s own enum widened from the six Working State fields to
-// `SEGMENT_EDITABLE_FIELDS` — content/insight join the same append/replace
+// `SEGMENT_EDITABLE_FIELDS` — content/insight join the same write/edit
 // mechanism (ADR-0001). `WORKING_STATE_FIELD_LIST` is declared above
 // `MNEMO_TOOL_DESCRIPTIONS`, which quotes it.
+//
+// ticket 05 (write-mode-edit-semantics, spec D1/D14): `append`/`replace`
+// retire as verbs, replaced by `write` (whole-field replacement, D11's new
+// capability on this surface) and `edit` (ticket 05's rename of `replace` —
+// identical oldString/newString shape). The retired two literals stay
+// declared as accepted enum members ON PURPOSE — a caller sending one
+// parses successfully, so `rememberInputSchema`'s `superRefine` below can
+// reject it with a message naming its replacement instead of zod's generic
+// enum error, the same precedent this schema's own retired `topic` already
+// set.
 export const rememberInputShape = {
   verb: z
-    .enum(["create", "attach", "append", "replace", "close", "assign"])
+    .enum(["create", "attach", "write", "edit", "close", "assign", "append", "replace"])
     .describe(
-      "create: mint a new segment. attach: bind the current session to one. append: add rows to a field. replace: find/replace text within one field. close: toggle the segment off the roster (or, called again, back on). assign: place turns into a segment (id set) or clear their ownership (id omitted).",
+      'create: mint a new segment. attach: bind the current session to one. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). assign: place turns into a segment (id set) or clear their ownership (id omitted).',
     ),
   id: z
     .string()
     .min(1)
     .optional()
     .describe(
-      'attach/append/replace/close: the target segment — an "E<n>" address only. assign: the same, but OPTIONAL — omit entirely to clear ownership on `turns` instead of placing them. Not used by create.',
+      'attach/write/edit/close: the target segment — an "E<n>" address only. assign: the same, but OPTIONAL — omit entirely to clear ownership on `turns` instead of placing them. Not used by create.',
     ),
   title: z
     .string()
@@ -482,7 +528,7 @@ export const rememberInputShape = {
     .enum(SEGMENT_EDITABLE_FIELDS)
     .optional()
     .describe(
-      "append/replace only (required): which field. Working State — " +
+      "write/edit only (required): which field. Working State — " +
         "goal: what this task is trying to achieve. " +
         "constraints: how the work must be done — norms, habits, standing preferences. " +
         "decisions: concrete rulings about the task itself, settled and binding. " +
@@ -492,23 +538,28 @@ export const rememberInputShape = {
         "Summary — content: the impression this arc leaves, what it is about and how it went. " +
         "insight: reusable experience this task has settled.",
     ),
-  rows: z
-    .array(z.string().min(1))
+  // Ticket 05: `write`'s own payload — the field's WHOLE replacement text,
+  // supplied verbatim (no automatic "- " row prefixing, unlike the retired
+  // `append`'s `rows`). `null` (or an all-whitespace string) clears the
+  // field.
+  value: z
+    .string()
+    .nullable()
     .optional()
     .describe(
-      'append only (required): one or more row texts to add, one line each — a leading "- " is added if you did not include it.',
+      "write only (required): the field's full replacement text; null (or an all-whitespace string) clears it. Supplied verbatim — compose the finished markdown yourself (read the field, edit the text, write it back).",
     ),
   oldString: z
     .string()
     .min(1)
     .optional()
     .describe(
-      "replace only (required): the exact existing text to find within `field` — missing or matching more than once rejects, naming which.",
+      "edit only (required): the exact existing text to find within `field` — missing or matching more than once rejects, naming which.",
     ),
   newString: z
     .string()
     .optional()
-    .describe('replace only (required): the replacement text; "" deletes the matched text.'),
+    .describe('edit only (required): the replacement text; "" deletes the matched text.'),
   // ticket 02 (ownership-and-note-cadence spec): `assign`'s own turn
   // selector — an interval OR a list, one array parameter for both shapes.
   turns: z
@@ -641,14 +692,56 @@ export const timelineInputSchema = z.object(timelineInputShape).strict();
 // ordinary unrecognised-key parse error, not a bespoke message: there is
 // nothing left on this schema to point the caller at, the same reasoning
 // `grade`'s retirement (ADR-0003) already settled for this file.
+// Ticket 05 (spec D4/D14): walks `mode`'s per-field entries — `mode` carries
+// one independent value per field rather than one scalar, so unlike
+// `truncate`/`view` above this can't be a single top-level presence check.
+// Two things are flagged: a retired literal ("overwrite"/"append"), named
+// with its replacement; and the edit form landing on a set field (type/
+// tags), which `parseModeMap` (mcp/note.ts) also refuses at the runtime
+// layer — this is the belt-and-braces copy for a call that goes through the
+// real MCP validation path (`server.ts` hands this schema straight to the
+// SDK, which parses every call against it before `noteTool()` ever runs).
 export const noteInputSchema = z
   .object(noteInputShape)
   .omit({ supersedes: true })
-  .strict();
+  .strict()
+  .superRefine((data, ctx) => {
+    const mode = data.mode;
+    if (!mode) {
+      return;
+    }
+    for (const [field, value] of Object.entries(mode)) {
+      if (typeof value === "string" && value in RETIRED_NOTE_MODE_LITERAL_MESSAGE) {
+        ctx.addIssue({
+          code: "custom",
+          message: `mode.${field}: "${value}" has retired — ${RETIRED_NOTE_MODE_LITERAL_MESSAGE[value]}`,
+          path: ["mode", field],
+        });
+        continue;
+      }
+      if (NOTE_SET_MODE_FIELDS.has(field) && typeof value === "object" && value !== null) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            `mode.${field}: the edit form has no meaning on a set field — oldString/newString cannot ` +
+            `target part of a list; use mode.${field}: "write" with the full replacement set instead.`,
+          path: ["mode", field],
+        });
+      }
+    }
+  });
 // Ticket 15 (topic registry retirement): `topic` is defined on
 // `rememberInputShape` (above) purely so this refine can name its
 // replacement — the same `truncate`/`view` precedent `recallInputSchema`
 // already set (see that schema's own superRefine).
+// Ticket 05 (spec D14): `append`/`replace` retired verbs, named separately
+// from `RETIRED_NOTE_MODE_LITERAL_MESSAGE` above — the two vocabularies
+// (note's `mode.<field>`, remember's `verb`) retired different words and a
+// caller only ever sees the message for the surface it actually called.
+const RETIRED_REMEMBER_VERB_MESSAGE: Record<string, string> = {
+  append: "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
+  replace: "use `edit` instead — same oldString/newString shape.",
+};
 export const rememberInputSchema = z
   .object(rememberInputShape)
   .strict()
@@ -659,6 +752,14 @@ export const rememberInputSchema = z
         message:
           "`topic` has retired — the topic registry folded into tags; tag the segment's member turns instead.",
         path: ["topic"],
+      });
+    }
+    const retiredVerb = RETIRED_REMEMBER_VERB_MESSAGE[data.verb];
+    if (retiredVerb) {
+      ctx.addIssue({
+        code: "custom",
+        message: `\`${data.verb}\` has retired — ${retiredVerb}`,
+        path: ["verb"],
       });
     }
   });
