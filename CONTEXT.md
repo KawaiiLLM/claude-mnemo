@@ -61,10 +61,18 @@ database object, never auto-adopted.
 ### Judging
 
 **Settlement**:
-The asynchronous re-check pass over a finished window of turns: corrects the four
-structured fields (type, tags, membership, edges) against the Memory Rubric, keeps
-the session narrative, and proposes segments for homeless turns. Never a first
-writer; a window with nothing to correct completes empty-handed.
+The asynchronous hindsight pass over a finished window of turns (50), holding the
+main agent's full write authority inside its range — note prose, type, tags,
+membership (creation and cross-segment reassignment included), and edges (check,
+mint, retract) — plus exactly one extra tool, commit. Judges by the same Memory
+Rubric text the main agent reads; corrects the explicit, leaves the doubtful; a
+window with nothing to correct completes empty-handed.
+_Avoid_: "never a first writer" (retired — a backfill rebuilds edges from zero)
+
+**Backfill (补结算)**:
+Operator-triggered settlement over an already-covered or pre-watermark range,
+rebuilding its edges from zero. At a plugin update nothing auto-settles: every
+turn already finished at that moment is manual-only territory.
 
 **Election (差额选举)** — _retired_:
 The competitive three-tier ranking settlement once ran. Machinery deleted
@@ -82,6 +90,25 @@ The rule that a summary-layer claim exists only with a turn citation.
 
 **Era**:
 A semantics boundary in stored data; reads never mix the two sides.
+
+### Citation graph
+
+**Edge (关系边)**:
+A standalone turn→turn relation declaration, decoupled from note prose. A pair
+may carry several relations when each states a fact the others cannot derive
+(the deletion test); self-edges are illegal; either writer may hard-delete a
+wrong one. Written under the citing turn's write authority — the cited turn
+need not have been read.
+
+**text-ref**:
+Best-effort extraction of turn addresses from prose — a display hint only, never
+a relation substrate.
+_Avoid_: upgrading (the retired path from bare pair to relation)
+
+**Release chain (发布链)**:
+The ritual every release turn performs: depends-on the landings it ships, encodes
+the rulings it solidifies, and a citation of the previous release. The first
+release is the chain's legal root.
 
 ### Write gate
 
