@@ -5,6 +5,8 @@ import {
   NOTE_TAKING_INSTRUCTIONS,
 } from "../../src/hooks/handlers/context-note-taking";
 import { MNEMO_TOOL_DESCRIPTIONS } from "../../src/mcp/definitions";
+import { MEMORY_RUBRIC_TEXT } from "../../src/shared/memory-rubric";
+import { NOTE_TOKEN_BUDGET } from "../../src/shared/note-budget";
 import { estimateTokens } from "../../src/utils/token-estimate";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
@@ -121,6 +123,49 @@ describe("note-taking instructions injection", () => {
     // The SessionStart block's own text: a pointer at the single home, not a
     // second copy of what the home says.
     expect(flat).toContain("Timing, fields, budgets, the skip test and replace live in the note tool's description");
+  });
+
+  // Ticket 01 (field-semantics spec, section C): this guard is RE-SCOPED, not
+  // bypassed — it now covers two kinds of single-home instead of one. The
+  // TIMING half above is unchanged (still the note tool's description alone).
+  // This half adds the field-DEFINITION table's own home: the rubric
+  // injection (shared/memory-rubric.ts) carries the table (existence), and
+  // carries none of the WRITING detail — budgets, the timing/skip/replace
+  // contract — which stays solely on the tool description, same discipline
+  // ticket 11 already enforces for judgment prose (tests/shared/
+  // memory-rubric.test.ts's own single-home grep guard). Byte-for-byte
+  // verbatim pinning of the table itself lives in that same rubric test file;
+  // this guard only needs to know the table is THERE and the write-detail is
+  // NOT.
+  test("the rubric injection carries the field-definition table (ticket 01 guard re-scope)", () => {
+    expect(MEMORY_RUBRIC_TEXT).toContain("## Fields");
+    expect(MEMORY_RUBRIC_TEXT).toContain("title   — the INDEX");
+    expect(MEMORY_RUBRIC_TEXT).toContain("content — the CONCLUSIONS");
+    expect(MEMORY_RUBRIC_TEXT).toContain("insight — REUSABLE experience");
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "goal        — what this task is trying to achieve.",
+    );
+  });
+
+  test("the rubric injection carries none of the writing detail — that stays on the tool description alone", () => {
+    const writeDetailSignatures = [
+      "note only FINISHED turns",
+      "never the one in progress",
+      "backlog relief appears",
+      "a future retriever would find nothing unique",
+      "Sentence deletion test",
+      "episode-deletion test",
+      "Closed vocabulary",
+      `~${NOTE_TOKEN_BUDGET.title} tok`,
+      `~${NOTE_TOKEN_BUDGET.content} tok`,
+      `~${NOTE_TOKEN_BUDGET.insight} tok`,
+    ];
+    for (const signature of writeDetailSignatures) {
+      expect(
+        MEMORY_RUBRIC_TEXT,
+        `rubric injection must not restate: ${signature}`,
+      ).not.toContain(signature);
+    }
   });
 
   test("it stays out of other events", async () => {

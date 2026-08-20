@@ -245,33 +245,41 @@ describe("note tool", () => {
     expect(resultText(result)).not.toContain("budget:");
   });
 
-  // ticket 01 (spec "Note contract revision"): budgets gain teeth at 2×. Below
-  // that line, over-budget is advisory only — the tests above already pin
-  // that (content 800 chars = 200 tok, exactly 2× its 100 tok budget, still
-  // lands). These pin the far side: past 2×, the write is refused outright.
-  describe("turn budget teeth at 2× (ticket 01)", () => {
-    test("title over 2x its budget is rejected, naming the field, its count and its budget; nothing stored", () => {
+  // ticket 01 (field-semantics spec, "01 — 字段定义进注入,预算硬拒改为回执提
+  // 醒"): the 2× hard rejection this describe used to pin is RETIRED — a
+  // field over budget, however far over, is now always stored. What replaces
+  // it is a receipt warning past 1.5×, fired on EVERY call that still lands
+  // over the line (no suppression state — the ruling's own reasoning: "如果
+  // 只提醒一次无法抑制一直超写"). Every test below INVERTS what its
+  // pre-ticket-01 namesake pinned:
+  //   - "title/content/insight over 2x ... rejected ... nothing stored"
+  //     -> the same oversized values now land, and the receipt warns.
+  //   - "an inherited over-2x field ... does not block a sibling field's
+  //     fresh write" is DROPPED outright, not inverted: the design decision
+  //     it existed to pin (scope the rejection check to only the field THIS
+  //     call resolves, so an inherited oversized field cannot block a
+  //     sibling) is moot now that nothing is ever blocked.
+  describe("turn budget: 2× no longer rejects, 1.5× warns every time (ticket 01)", () => {
+    test("title over 2x its budget is stored, and the receipt warns past 1.5×", () => {
       const result = noteTool(
         db,
         {
           turn: `S${sessionId}/T332`,
-          title: "x".repeat(164), // 41 tok, one over the 40 tok (2x of 20) line
+          title: "x".repeat(164), // 41 tok, over 1.5x (30) and 2x (40) of the 20 tok budget alike
           content: "c",
         },
         { now: () => 900, env: {} },
       );
 
-      expect(resultText(result)).toStartWith("Parameter error:");
-      expect(resultText(result)).toContain("title");
-      expect(resultText(result)).toContain("41 tok");
-      expect(resultText(result)).toContain("20 tok");
-      expect(resultText(result)).toContain("nothing stored");
-      // The whole call rolled back — content did not land either, even
-      // though content alone was well within its own budget.
-      expect(getShadowNote(db, targetTurnId)).toBeNull();
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain("title 41/20");
+      expect(resultText(result)).toContain(
+        "title is over 1.5× budget — an occasional overage is fine, a standing pattern of it is not.",
+      );
+      expect(getShadowNote(db, targetTurnId)?.title).toBe("x".repeat(164));
     });
 
-    test("content over 2x its budget is rejected on a rewrite, and the prior note survives untouched", () => {
+    test("content over 2x its budget on a rewrite is stored, replacing the prior note, and warns", () => {
       noteTool(
         db,
         { turn: `S${sessionId}/T332`, title: "first", content: "first content" },
@@ -282,68 +290,68 @@ describe("note tool", () => {
         db,
         {
           turn: `S${sessionId}/T332`,
-          content: "x".repeat(804), // 201 tok, one over the 200 tok (2x of 100) line
+          content: "x".repeat(804), // 201 tok, over 2x of the 100 tok budget
           mode: { content: "overwrite" },
         },
         { now: () => 1000, env: {} },
       );
 
-      expect(resultText(result)).toStartWith("Parameter error:");
-      expect(resultText(result)).toContain("content");
-      expect(resultText(result)).toContain("201 tok");
-      expect(resultText(result)).toContain("100 tok");
-      // The rejected rewrite left the earlier note exactly as it was.
-      expect(getShadowNote(db, targetTurnId)?.content).toBe("first content");
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain("content is over 1.5× budget");
+      // The rewrite actually landed — the prior content is gone, replaced.
+      expect(getShadowNote(db, targetTurnId)?.content).toBe("x".repeat(804));
     });
 
-    test("insight over 2x its budget is rejected; title/content in the same call do not land either", () => {
+    test("insight over 2x its budget is stored alongside title/content in the same call, and warns", () => {
       const result = noteTool(
         db,
         {
           turn: `S${sessionId}/T332`,
           title: "t",
           content: "c",
-          insight: "x".repeat(484), // 121 tok, one over the 120 tok (2x of 60) line
+          insight: "x".repeat(484), // 121 tok, over 2x of the 60 tok budget
         },
         { now: () => 900, env: {} },
       );
 
-      expect(resultText(result)).toStartWith("Parameter error:");
-      expect(resultText(result)).toContain("insight");
-      expect(resultText(result)).toContain("121 tok");
-      expect(resultText(result)).toContain("60 tok");
-      // Atomic: title/content in the SAME call did not land either.
-      expect(getShadowNote(db, targetTurnId)).toBeNull();
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain("insight is over 1.5× budget");
+      expect(getShadowNote(db, targetTurnId)?.insight).toBe("x".repeat(484));
+      // title/content in the same call landed too — nothing rolled back.
+      expect(getShadowNote(db, targetTurnId)?.title).toBe("t");
     });
 
-    // A design decision this suite pins deliberately: the check runs only
-    // against a field THIS call resolves, not one merely inherited for
-    // stripping/bracketing purposes. Without this, a pre-existing over-budget
-    // field (legacy data written before budget teeth existed) would block
-    // every future edit to any OTHER field on the same note forever.
-    test("an inherited over-2x field (pre-existing, untouched by this call) does not block a sibling field's fresh write", () => {
-      noteTool(
+    test("a field under 1.5× its budget does not warn", () => {
+      const result = noteTool(
         db,
         { turn: `S${sessionId}/T332`, title: "t", content: "c" },
         { now: () => 900, env: {} },
       );
-      // Simulate legacy data written before budget teeth existed — raw SQL,
-      // bypassing noteTool's own gate entirely.
-      db.query("UPDATE shadow_notes SET content = ? WHERE turn_id = ?").run(
-        "x".repeat(4000), // 1000 tok, wildly over 2x
-        targetTurnId,
-      );
 
-      const result = noteTool(
+      expect(resultText(result)).not.toContain("over 1.5×");
+    });
+
+    // Acceptance criterion: "连续三次超,三次都带" — no state suppresses a
+    // repeat warning across calls on the same field.
+    test("three consecutive over-1.5× writes to the same field warn all three times", () => {
+      noteTool(
         db,
-        { turn: `S${sessionId}/T332`, insight: "a fresh, well-sized insight" },
-        { now: () => 1000, env: {} },
+        { turn: `S${sessionId}/T332`, title: "t", content: "x".repeat(804) },
+        { now: () => 900, env: {} },
       );
 
-      expect(isNoteSuccess(result)).toBe(true);
-      expect(getShadowNote(db, targetTurnId)?.insight).toBe(
-        "a fresh, well-sized insight",
-      );
+      for (let i = 0; i < 3; i++) {
+        const result = noteTool(
+          db,
+          {
+            turn: `S${sessionId}/T332`,
+            content: "x".repeat(804), // 201 tok, over 1.5x of the 100 tok budget every time
+            mode: { content: "overwrite" },
+          },
+          { now: () => 1000 + i, env: {} },
+        );
+        expect(resultText(result)).toContain("content is over 1.5× budget");
+      }
     });
   });
 

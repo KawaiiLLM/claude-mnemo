@@ -69,37 +69,59 @@ function formatRatio(total: number, budget: number): string {
 }
 
 /**
- * Ticket 01 (spec "Note contract revision"): budgets gain teeth at 2×. Below
- * this multiple, going over budget is advisory only (`formatNoteBudget`
- * above) — a rewrite loop costs more than the overage in that band. Past it,
- * the write is refused outright, nothing stored, so a runaway field cannot
- * quietly become the norm.
+ * Ticket 01 (field-semantics spec, "01 — 字段定义进注入,预算硬拒改为回执提醒";
+ * [S15069/T1074]): the former 2× hard rejection — nothing stored past the
+ * line — is RETIRED outright. `content`'s new duty (every useful decision
+ * this turn produced, not a compressed single conclusion) collides with a
+ * gate that discards the whole write for running long; a field over budget
+ * is now always stored.
+ *
+ * What replaces it is a standing receipt warning, not a softer gate: past
+ * `BUDGET_WARNING_MULTIPLE`, `formatBudgetWarning` below adds a line to
+ * EVERY call that still lands over the line, with no memory of earlier
+ * calls — the user's own reasoning for "every time, not once": "如果只提醒
+ * 一次无法抑制一直超写" (a warning that only fires once cannot suppress a
+ * standing habit of writing over). Building any state to suppress a repeat
+ * warning would defeat the ruling outright.
  */
-export const BUDGET_REJECTION_MULTIPLE = 2;
+export const BUDGET_WARNING_MULTIPLE = 1.5;
 
 /**
- * The one hard-rejection check, shared by every budgeted field on both
- * addressing surfaces — turn title/content/insight against
- * `NOTE_TOKEN_BUDGET`, session title against its own guidance value — so the
- * multiple and the message shape cannot drift between them (same reasoning as
- * `formatNoteBudget` being the one receipt line). Returns the receipt-style
- * refusal message naming the field, its count and its budget when `value`
- * exceeds `BUDGET_REJECTION_MULTIPLE × budgetTokens`, or `null` when the
- * write may proceed — including when it is over budget but not yet over the
- * multiple, which stays the advisory-only case above.
+ * The receipt's warning line — separate from `formatNoteBudget`'s ratio line
+ * above, which stays exactly as it was (`content 168/100 → 191/120 (1.6×)`).
+ * Checks every field this receipt already measures (`title`/`content`, plus
+ * `insight` when one was written) against `BUDGET_WARNING_MULTIPLE`, and
+ * names every field currently over it — not just the field a given call
+ * happened to touch, so an inherited oversized field keeps surfacing until
+ * it is actually trimmed. Returns `null` when nothing is over the line, so a
+ * caller can push the line into the receipt conditionally without an empty
+ * string appearing.
+ *
+ * Wording is deliberate: an occasional overage costs nothing (that is what
+ * the advisory band below `BUDGET_WARNING_MULTIPLE` already tolerates), a
+ * standing pattern of it does — the line says so rather than just restating
+ * the ratio a second time.
  */
-export function budgetOverageRejection(
-  field: string,
-  value: string,
-  budgetTokens: number,
-): string | null {
-  const count = estimateTokens(value);
-  const limit = budgetTokens * BUDGET_REJECTION_MULTIPLE;
-  if (count <= limit) {
+export function formatBudgetWarning(fields: NoteBudgetFields): string | null {
+  const over: string[] = [];
+  if (estimateTokens(fields.title) > NOTE_TOKEN_BUDGET.title * BUDGET_WARNING_MULTIPLE) {
+    over.push("title");
+  }
+  if (estimateTokens(fields.content) > NOTE_TOKEN_BUDGET.content * BUDGET_WARNING_MULTIPLE) {
+    over.push("content");
+  }
+  if (
+    fields.insight &&
+    estimateTokens(fields.insight) > NOTE_TOKEN_BUDGET.insight * BUDGET_WARNING_MULTIPLE
+  ) {
+    over.push("insight");
+  }
+  if (over.length === 0) {
     return null;
   }
+  const verb = over.length > 1 ? "are" : "is";
   return (
-    `${field} is ${count} tok, over ${BUDGET_REJECTION_MULTIPLE}× its ${budgetTokens} tok ` +
-    `budget (limit ${limit}) — nothing stored.`
+    `${over.join(", ")} ${verb} over ${BUDGET_WARNING_MULTIPLE}× budget — an occasional ` +
+    "overage is fine, a standing pattern of it is not."
   );
 }

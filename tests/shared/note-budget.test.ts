@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import {
+  BUDGET_WARNING_MULTIPLE,
   NOTE_TOKEN_BUDGET,
+  formatBudgetWarning,
   formatNoteBudget,
 } from "../../src/shared/note-budget";
 import { NOTE_TAKING_INSTRUCTIONS } from "../../src/hooks/handlers/context-note-taking";
@@ -94,5 +96,65 @@ describe("note budget line", () => {
     expect(shape.insight.description).toContain(`~${NOTE_TOKEN_BUDGET.insight} tok`);
 
     expect(NOTE_TAKING_INSTRUCTIONS).not.toContain("tokens)");
+  });
+});
+
+// Ticket 01 (field-semantics spec): the 2× hard-rejection check
+// (`budgetOverageRejection`/`BUDGET_REJECTION_MULTIPLE`) is retired outright.
+// `formatBudgetWarning` is what replaces it — a receipt-only signal, never a
+// gate, that fires on every call whose current field state lands over
+// `BUDGET_WARNING_MULTIPLE`, with nothing remembered between calls.
+describe("note budget warning (1.5×, ticket 01)", () => {
+  test("is 1.5", () => {
+    expect(BUDGET_WARNING_MULTIPLE).toBe(1.5);
+  });
+
+  test("null when every field is within 1.5× its own budget", () => {
+    expect(
+      formatBudgetWarning({ title: "t".repeat(80), content: "c".repeat(400) }),
+    ).toBeNull();
+  });
+
+  test("names a single field over the line", () => {
+    const warning = formatBudgetWarning({
+      title: "t",
+      content: "c".repeat(604), // 151 tok, one over 1.5x of the 100 tok budget
+    });
+    expect(warning).toBe(
+      "content is over 1.5× budget — an occasional overage is fine, a standing pattern of it is not.",
+    );
+  });
+
+  test("names every field over the line, not just the first", () => {
+    const warning = formatBudgetWarning({
+      title: "t".repeat(124), // 31 tok, over 1.5x of the 20 tok budget
+      content: "c".repeat(604), // 151 tok, over 1.5x of the 100 tok budget
+    });
+    expect(warning).toBe(
+      "title, content are over 1.5× budget — an occasional overage is fine, a standing pattern of it is not.",
+    );
+  });
+
+  test("insight only counts when one was written", () => {
+    expect(
+      formatBudgetWarning({ title: "t", content: "c", insight: undefined }),
+    ).toBeNull();
+    expect(
+      formatBudgetWarning({ title: "t", content: "c", insight: "" }),
+    ).toBeNull();
+    expect(
+      formatBudgetWarning({ title: "t", content: "c", insight: "i".repeat(364) }), // 91 tok, over 1.5x of the 60 tok budget
+    ).toBe(
+      "insight is over 1.5× budget — an occasional overage is fine, a standing pattern of it is not.",
+    );
+  });
+
+  // The exact line this test exists to enforce: called again with the same
+  // oversized field, the warning fires again — no memory of the earlier call.
+  test("fires on every call, not just the first — no suppression state", () => {
+    const oversized = { title: "t", content: "c".repeat(604) };
+    expect(formatBudgetWarning(oversized)).not.toBeNull();
+    expect(formatBudgetWarning(oversized)).not.toBeNull();
+    expect(formatBudgetWarning(oversized)).not.toBeNull();
   });
 });

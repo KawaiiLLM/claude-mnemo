@@ -28,11 +28,7 @@ import {
 } from "../db/turns";
 import { checkFieldGate, sessionWriterId, stampField } from "../db/write-gate";
 import { isSegmentEra } from "../segment-era";
-import {
-  budgetOverageRejection,
-  formatNoteBudget,
-  NOTE_TOKEN_BUDGET,
-} from "../shared/note-budget";
+import { formatBudgetWarning, formatNoteBudget } from "../shared/note-budget";
 import {
   findRetiredTopicTag,
   retiredTopicTagMessage,
@@ -992,38 +988,13 @@ function handleTurnWrite(
         finalContent = bracketedContent;
         finalInsight = strippedInsight;
 
-        // ticket 01 (spec "Note contract revision"): budget teeth. Checked
-        // only against a field THIS call actually resolved (not one merely
-        // inherited above for stripping/bracketing purposes) — a pre-existing
-        // over-budget field this write never touches must not block an
-        // unrelated edit to a sibling field. The whole write fails atomically
-        // (fail() unwinds this transaction), so a rejected field's mere
-        // presence in the same call blocks the others too, same as every
-        // other whole-call validation in this function.
-        if (titleResolution !== undefined && finalTitle !== null) {
-          const rejection = budgetOverageRejection(
-            "title",
-            finalTitle,
-            NOTE_TOKEN_BUDGET.title,
-          );
-          if (rejection) fail(rejection);
-        }
-        if (contentResolution !== undefined && finalContent !== null) {
-          const rejection = budgetOverageRejection(
-            "content",
-            finalContent,
-            NOTE_TOKEN_BUDGET.content,
-          );
-          if (rejection) fail(rejection);
-        }
-        if (insightResolution !== undefined && finalInsight !== null) {
-          const rejection = budgetOverageRejection(
-            "insight",
-            finalInsight,
-            NOTE_TOKEN_BUDGET.insight,
-          );
-          if (rejection) fail(rejection);
-        }
+        // Ticket 01 (field-semantics spec): the former budget-teeth hard
+        // rejection at 2× lived here — checked only against a field this
+        // call actually resolved, refusing the whole write past the line.
+        // It is retired outright (BUDGET_REJECTION_MULTIPLE/
+        // budgetOverageRejection no longer exist): every field is stored
+        // regardless of size, and `formatBudgetWarning` on the receipt below
+        // is the only signal a runaway field now gets.
 
         upsertShadowNote(db, {
           turnId: turn.id,
@@ -1145,13 +1116,19 @@ function handleTurnWrite(
   ];
 
   if (result.touchedProse) {
-    parts.push(
-      `budget: ${formatNoteBudget({
-        title: result.finalTitle ?? "",
-        content: result.finalContent ?? "",
-        insight: result.finalInsight,
-      })}`,
-    );
+    const budgetFields = {
+      title: result.finalTitle ?? "",
+      content: result.finalContent ?? "",
+      insight: result.finalInsight,
+    };
+    parts.push(`budget: ${formatNoteBudget(budgetFields)}`);
+    // Ticket 01 (field-semantics spec): fires on every call that lands over
+    // 1.5×, no state kept between calls — see formatBudgetWarning's own doc
+    // comment for why a one-shot reminder was ruled out.
+    const budgetWarning = formatBudgetWarning(budgetFields);
+    if (budgetWarning) {
+      parts.push(budgetWarning);
+    }
     parts.push(
       rideTurnId === null
         ? "ride_turn: unknown."

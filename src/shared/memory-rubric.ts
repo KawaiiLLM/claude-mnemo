@@ -35,10 +35,48 @@ import { createHash } from "node:crypto";
  * naming by the task's actual shape. TIMING for when to consult this section
  * stays off this file, on `remember`'s own tool description (ticket 13's own
  * split, same three-way division ticket 11 already established).
+ *
+ * v3→v4 (ticket 01, field-semantics spec "01 — 字段定义进注入,预算硬拒改为回执
+ * 提醒"): prepended the `## Fields` section, verbatim from that ticket's own
+ * definition table — the turn's three fields and the segment's eight
+ * editable fields, each one sentence, so the writing agent can read what a
+ * field IS from the same injection that already tells it how a fact gets
+ * judged. Placed first, ahead of `## type`, because every later section
+ * presupposes the fields it is describing. WRITING DETAIL (budgets, the
+ * timing/skip/replace contract) stays off this block by the same stratification
+ * the rest of this file already follows — that prose's single home is the
+ * tool description (`mcp/definitions.ts`), never restated here.
  */
-export const MEMORY_RUBRIC_VERSION = "v3";
+export const MEMORY_RUBRIC_VERSION = "v4";
 
-export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v3
+export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v4
+
+## Fields
+
+Turn note — three fields, three jobs:
+- title   — the INDEX. One sentence saying what this turn is doing, enough to
+            recognise it among titles alone. Not the conclusion.
+- content — the CONCLUSIONS. Every useful decision this turn produced, each
+            rejected option with its reason. Assumes the title was just read.
+- insight — REUSABLE experience. A lesson still true once this turn is
+            forgotten, in this project or beyond. Not a conclusion of this turn.
+
+Segment, Working State — what a resuming session needs to continue:
+- goal        — what this task is trying to achieve.
+- constraints — how the work must be done: norms, habits, standing preferences.
+- decisions   — concrete rulings about the task itself, settled and binding.
+- done        — what is finished and verified.
+- next_steps  — what is waiting to be done.
+- reference   — durable pointers: source locations, specs, PRs, URLs. Not plans.
+
+Segment, Summary layer — what an outsider browsing the task reads:
+- content — the impression this arc leaves: what it is about and how it went.
+            A turn's content is an impression too; the difference is focus —
+            a turn's is its concrete conclusions, a segment's is not.
+- insight — reusable experience this task has settled.
+
+A segment's title is set at creation. Its type and tags are DERIVED from its
+member turns and recomputed when membership changes — never written by hand.
 
 ## type
 - 词表,每词一义:

@@ -8,11 +8,11 @@ import {
 } from "../shared/segment-fields";
 import { MEMORY_TYPES } from "../shared/type-vocabulary";
 
-// Ticket 05: hoisted above `MNEMO_TOOL_DESCRIPTIONS` (which quotes
-// `WORKING_STATE_FIELD_LIST`) as well as `rememberInputShape` (which quotes
-// `EDITABLE_FIELD_LIST`) — one source for each list, read by both the tool
-// description prose and the per-field zod `.describe()`.
-const EDITABLE_FIELD_LIST = SEGMENT_EDITABLE_FIELDS.join("/");
+// Ticket 05: hoisted above `MNEMO_TOOL_DESCRIPTIONS`, which quotes
+// `WORKING_STATE_FIELD_LIST` — one source for the list, read by both the tool
+// description prose and (ticket 01, field-semantics spec) `rememberInputShape`'s
+// `field` parameter, which now carries each editable field's own one-line
+// definition instead of this bare slash-joined name list.
 const WORKING_STATE_FIELD_LIST = SEGMENT_WORKING_STATE_FIELDS.join(", ");
 
 // Ticket 04 (spec "Tools"): the one structured filter grammar shared by
@@ -281,21 +281,21 @@ export const noteInputShape = {
     .nullable()
     .optional()
     .describe(
-      `Turn (~${NOTE_TOKEN_BUDGET.title} tok): one English claim sentence — this turn's conclusion, standing alone in a title-only list. No activity/topic prefix (type/tags carry that). Name the decider when a ruling landed. No session-local codewords without a gloss.`,
+      `Turn (~${NOTE_TOKEN_BUDGET.title} tok): the INDEX, not the conclusion — one English sentence saying what this turn is doing, standing alone in a title-only list, enough to recognise it among titles alone. No activity/topic prefix (type/tags carry that). Name the decider when a ruling landed. No session-local codewords without a gloss.`,
     ),
   content: z
     .string()
     .nullable()
     .optional()
     .describe(
-      `Turn only (~${NOTE_TOKEN_BUDGET.content} tok): assume the title was just read — expand, never restate. In order: the precision that makes the conclusion usable, each rejected alternative with a one-line reason, secondary conclusions, citations. Sentence deletion test: remove a sentence — if the conclusion's derivation still holds, cut it. No process narration (replay stores it).`,
+      `Turn only (~${NOTE_TOKEN_BUDGET.content} tok): the CONCLUSIONS — assume the title was just read, expand, never restate. Every useful decision this turn produced, each rejected alternative with a one-line reason, secondary conclusions, citations. Sentence deletion test: remove a sentence — if a decision's derivation still holds without it, cut it. No process narration (replay stores it).`,
     ),
   insight: z
     .string()
     .nullable()
     .optional()
     .describe(
-      `Turn only (~${NOTE_TOKEN_BUDGET.insight} tok, default omit): a task-scoped lesson under the episode-deletion test — delete the episode; does the sentence still teach someone useful prior knowledge?`,
+      `Turn only (~${NOTE_TOKEN_BUDGET.insight} tok, default omit): REUSABLE experience, not a conclusion of this turn — a task-scoped lesson under the episode-deletion test: delete the episode; does the sentence still teach someone useful prior knowledge?`,
     ),
   type: z
     .array(z.string())
@@ -429,8 +429,8 @@ export const noteInputShape = {
 //
 // ticket 05: `field`'s own enum widened from the six Working State fields to
 // `SEGMENT_EDITABLE_FIELDS` — content/insight join the same append/replace
-// mechanism (ADR-0001). `EDITABLE_FIELD_LIST`/`WORKING_STATE_FIELD_LIST` are
-// declared above `MNEMO_TOOL_DESCRIPTIONS`, which quotes the latter too.
+// mechanism (ADR-0001). `WORKING_STATE_FIELD_LIST` is declared above
+// `MNEMO_TOOL_DESCRIPTIONS`, which quotes it.
 export const rememberInputShape = {
   verb: z
     .enum(["create", "attach", "append", "replace", "close", "assign"])
@@ -472,10 +472,26 @@ export const rememberInputShape = {
     .describe(
       'create only, optional: seed member turn addresses ("S<session>/T<prompt>", as seen in context — from an approved proposal, never recalled or invented). Membership is recorded for exactly these turns; a call naming even one bad address seeds none.',
     ),
+  // Ticket 01 (field-semantics spec, "Fields" table): each of the eight
+  // editable fields gets its own one-line definition here, aligned with the
+  // definition table the Memory Rubric injects — this parameter is the one
+  // place a `remember` caller sees the field list rendered with its own
+  // schema, the same reasoning `noteInputShape`'s per-field `.describe()`s
+  // already follow.
   field: z
     .enum(SEGMENT_EDITABLE_FIELDS)
     .optional()
-    .describe(`append/replace only (required): which field — ${EDITABLE_FIELD_LIST}.`),
+    .describe(
+      "append/replace only (required): which field. Working State — " +
+        "goal: what this task is trying to achieve. " +
+        "constraints: how the work must be done — norms, habits, standing preferences. " +
+        "decisions: concrete rulings about the task itself, settled and binding. " +
+        "done: what is finished and verified. " +
+        "next_steps: what is waiting to be done. " +
+        "reference: durable pointers — source locations, specs, PRs, URLs; not plans. " +
+        "Summary — content: the impression this arc leaves, what it is about and how it went. " +
+        "insight: reusable experience this task has settled.",
+    ),
   rows: z
     .array(z.string().min(1))
     .optional()

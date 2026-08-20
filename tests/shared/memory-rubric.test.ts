@@ -40,7 +40,8 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   });
 
   test("the rubric's own sections are present verbatim (ticket's own normative text)", () => {
-    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v3");
+    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v4");
+    expect(MEMORY_RUBRIC_TEXT).toContain("## Fields");
     expect(MEMORY_RUBRIC_TEXT).toContain("## type");
     expect(MEMORY_RUBRIC_TEXT).toContain("## tags");
     expect(MEMORY_RUBRIC_TEXT).toContain("## 关系(turn→turn;从引用方记向被引方)");
@@ -56,8 +57,8 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
 
   // Ticket 13 (spec "节奏与建段指导"): v2→v3's own addition — the "建段"
   // section, verbatim from the ticket's three ruled lines.
-  test("v3 carries the 建段 section, verbatim, ticket 13's own three lines", () => {
-    expect(MEMORY_RUBRIC_VERSION).toBe("v3");
+  test("v4 carries the 建段 section, verbatim, ticket 13's own three lines", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v4");
     expect(MEMORY_RUBRIC_TEXT).toContain("## 建段");
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "琐碎、短时闲聊等组不成可命名工作流的 turn 无须建段;无归属是合法状态",
@@ -68,6 +69,44 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "无合适段才新建;以任务实际形状命名,开场臆测的名字会锚定错误",
     );
+  });
+
+  // Ticket 01 (field-semantics spec, "01 — 字段定义进注入,预算硬拒改为回执提
+  // 醒"): v3→v4's own addition — the `## Fields` table, byte-for-byte from
+  // the ticket's ruled wording (acceptance criterion "注入的 rubric 块含上面
+  // 那份定义表,逐字一致"). Pinned as ONE contiguous substring, not fragments,
+  // so a reflow or a dropped line fails this test the same way a dropped
+  // field would.
+  test("v4 carries the Fields section, byte-for-byte, ticket 01's own definition table", () => {
+    const fieldsTable =
+      "## Fields\n" +
+      "\n" +
+      "Turn note — three fields, three jobs:\n" +
+      "- title   — the INDEX. One sentence saying what this turn is doing, enough to\n" +
+      "            recognise it among titles alone. Not the conclusion.\n" +
+      "- content — the CONCLUSIONS. Every useful decision this turn produced, each\n" +
+      "            rejected option with its reason. Assumes the title was just read.\n" +
+      "- insight — REUSABLE experience. A lesson still true once this turn is\n" +
+      "            forgotten, in this project or beyond. Not a conclusion of this turn.\n" +
+      "\n" +
+      "Segment, Working State — what a resuming session needs to continue:\n" +
+      "- goal        — what this task is trying to achieve.\n" +
+      "- constraints — how the work must be done: norms, habits, standing preferences.\n" +
+      "- decisions   — concrete rulings about the task itself, settled and binding.\n" +
+      "- done        — what is finished and verified.\n" +
+      "- next_steps  — what is waiting to be done.\n" +
+      "- reference   — durable pointers: source locations, specs, PRs, URLs. Not plans.\n" +
+      "\n" +
+      "Segment, Summary layer — what an outsider browsing the task reads:\n" +
+      "- content — the impression this arc leaves: what it is about and how it went.\n" +
+      "            A turn's content is an impression too; the difference is focus —\n" +
+      "            a turn's is its concrete conclusions, a segment's is not.\n" +
+      "- insight — reusable experience this task has settled.\n" +
+      "\n" +
+      "A segment's title is set at creation. Its type and tags are DERIVED from its\n" +
+      "member turns and recomputed when membership changes — never written by hand.";
+
+    expect(MEMORY_RUBRIC_TEXT).toContain(fieldsTable);
   });
 });
 

@@ -256,7 +256,16 @@ describe("tool surface", () => {
   // verbatim on the field it governs.
   it("title/content/insight carry their admission tests verbatim on their own parameter", () => {
     const shape = noteInputSchema.shape;
-    expect(shape.title.description).toContain("one English claim sentence");
+    // Ticket 01 (field-semantics spec): title's contract flipped from "this
+    // turn's conclusion" to the INDEX — the probe that forced the change was
+    // a real title reading "one tool two shapes ruled" while the turn's
+    // actual content held four rulings, because the old contract asked the
+    // agent to compress to A conclusion rather than name what the turn was
+    // doing.
+    expect(shape.title.description).toContain("the INDEX, not the conclusion");
+    expect(shape.title.description).toContain(
+      "one English sentence saying what this turn is doing",
+    );
     expect(shape.title.description).toContain(
       "standing alone in a title-only list",
     );
@@ -268,8 +277,15 @@ describe("tool surface", () => {
       "No session-local codewords without a gloss",
     );
 
+    // content's contract keeps its wording, reframed as the CONCLUSIONS
+    // (plural, every useful decision) rather than "the conclusion" (singular)
+    // — title stopped compressing to one, so content has to carry all of them.
+    expect(shape.content.description).toContain("the CONCLUSIONS");
     expect(shape.content.description).toContain("assume the title was just read");
     expect(shape.content.description).toContain("expand, never restate");
+    expect(shape.content.description).toContain(
+      "Every useful decision this turn produced",
+    );
     expect(shape.content.description).toContain(
       "each rejected alternative with a one-line reason",
     );
@@ -278,6 +294,11 @@ describe("tool surface", () => {
       "No process narration (replay stores it)",
     );
 
+    // insight now states its own contrast with title/content explicitly:
+    // reusable experience, not a conclusion of this turn.
+    expect(shape.insight.description).toContain(
+      "REUSABLE experience, not a conclusion of this turn",
+    );
     expect(shape.insight.description).toContain(
       "a task-scoped lesson under the episode-deletion test",
     );
@@ -540,6 +561,31 @@ describe("rememberInputShape", () => {
     expect(() =>
       rememberInputSchema.parse({ verb: "append", id: "E1", field: "not-a-field", rows: ["x"] }),
     ).toThrow();
+  });
+
+  // Ticket 01 (field-semantics spec, acceptance criterion "段八个可编辑字段的
+  // 描述与定义表一致"): `field`'s own describe() is the one place a `remember`
+  // caller sees the eight editable fields with their own schema — each gets
+  // its one-line definition, aligned with the Memory Rubric's `## Fields`
+  // table (not required byte-identical there, only on the rubric injection).
+  it("field's describe() carries each of the eight editable fields' own definition, aligned with the Fields table", () => {
+    const description = rememberInputShape.field.description ?? "";
+    expect(description).toContain("goal: what this task is trying to achieve");
+    expect(description).toContain(
+      "constraints: how the work must be done — norms, habits, standing preferences",
+    );
+    expect(description).toContain(
+      "decisions: concrete rulings about the task itself, settled and binding",
+    );
+    expect(description).toContain("done: what is finished and verified");
+    expect(description).toContain("next_steps: what is waiting to be done");
+    expect(description).toContain(
+      "reference: durable pointers — source locations, specs, PRs, URLs; not plans",
+    );
+    expect(description).toContain(
+      "content: the impression this arc leaves, what it is about and how it went",
+    );
+    expect(description).toContain("insight: reusable experience this task has settled");
   });
 
   it("rejects a verb outside the closed vocabulary", () => {
