@@ -917,10 +917,12 @@ export function getSessionEffectiveCitations(
 
 /**
  * Session-local in-degree: for each cited turn in this session, how many turns
- * OF THE SAME SESSION cite it. Multiple relations between the same pair cannot
- * exist any more (spec C5), but the same pair discovered through two sources
- * still counts once — in-degree answers "how many turns consumed this", not
- * "how many claims were filed".
+ * OF THE SAME SESSION cite it. A pair may now carry SEVERAL relation rows at
+ * once (edge-mechanism-revision ticket 01, D2 — retired C5's "at most one
+ * relation per pair"), but a citing turn still counts once toward its target
+ * regardless of how many relation rows or discovery sources back that
+ * citation — in-degree answers "how many turns consumed this", not "how many
+ * claims were filed".
  *
  * Derived from the effective citations, NOT from the edge table alone: a legacy
  * turn (`cites_recorded = 0`) cites through its inline `[T<n>]` prose, and a

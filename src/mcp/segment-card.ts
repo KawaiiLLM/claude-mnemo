@@ -17,6 +17,7 @@ import { typeWordGlyph } from "../shared/type-vocabulary";
 import { estimateTokens } from "../utils/token-estimate";
 
 import {
+  composeTurnMetadata,
   DEFAULT_PREVIEW_COUNT,
   DEFAULT_TURN_TOKEN_BUDGET,
   formatEpoch,
@@ -626,6 +627,10 @@ export function renderSegmentMembersByOrdinal(
       id: turn.id,
       promptNumber: turn.promptNumber,
       title: turn.title,
+      // Ticket 12 follow-through (golden sample Image #7: the E<n>/T route is
+      // the sample's FIRST frame, metadata line included) — this route builds
+      // its own FormattedTurn, so the default-field change alone missed it.
+      metadata: composeTurnMetadata(turn, null),
       content: turn.content,
       status: turn.status,
       promptPreview: turn.userPrompt,

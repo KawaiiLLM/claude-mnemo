@@ -55,8 +55,11 @@ export interface MnemoConfig {
   noteSettlementModel: DreamAgentModel;
   /**
    * Decided turns that must accumulate before turn-stop planning cuts a window
-   * (db/note-settlement.ts carries the "why 25" reasoning; this is the config
-   * seam over the same number, ticket 02).
+   * (db/note-settlement.ts's `NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS` re-export
+   * carries the sizing reasoning; this is the config seam over the same
+   * number, ticket 02). Default 50 (`DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS`
+   * below) — retired history: an earlier fixed threshold was 25, hence the
+   * "consecutive 阈值 25→50" phrasing in edge-mechanism-revision spec D6.
    */
   noteSettlementThresholdTurns: number;
   /**

@@ -5,7 +5,7 @@
 v5 + 重写后的结算专款组成。
 
 **Ruling base:** spec D6、D7;[S15069/T1113](三裁)、[S15069/T1124](建段与
-跨段改派)。**显式回收** settlement-agentic 批次「结算不再重建笔记」的裁决。
+跨段改派)。**显式回收** ownership-and-note-cadence 批次「结算不再重建笔记」的裁决。
 
 **Blocked by:** 01、02、03。
 

@@ -155,9 +155,12 @@ export interface BuildNoteSettlementContextOptions {
   nowEpoch: number;
   /**
    * Lookback turn count. Defaults to the window's OWN size (ticket 04,
-   * [S15069/T963]: "前序注入数量=本窗口 turn 数") — a 25-turn window renders
-   * 25 preceding turns, a 50-turn window renders 50 — rather than the old
-   * fixed 50-turn constant.
+   * [S15069/T963]: "前序注入数量=本窗口 turn 数") — a 10-turn window renders
+   * 10 preceding turns, a 30-turn window renders 30 — rather than the old
+   * FIXED lookback constant this replaced (a flat count applied regardless
+   * of the window's own size; retired history, not this codebase's own
+   * `noteSettlementThresholdTurns`, which governs when a window CUTS, not
+   * how far its lookback reaches).
    */
   priorTurns?: number;
 }
@@ -194,8 +197,8 @@ export function buildNoteSettlementContext(
   const allTurns = getTurnsForSession(db, job.sessionId);
 
   // Lookback defaults to the window's OWN size (ticket 04: "前序注入数量=本
-  // 窗口 turn 数") — a 25-turn window renders 25 preceding turns, a 50-turn
-  // window renders 50.
+  // 窗口 turn 数") — a 10-turn window renders 10 preceding turns, a 30-turn
+  // window renders 30.
   const priorTurnsCount =
     options.priorTurns ?? job.windowEnd - job.windowStart + 1;
   const priorFloor = Math.max(1, job.windowStart - priorTurnsCount);
@@ -360,10 +363,15 @@ export function buildNoteSettlementContext(
     // renders a turn from two places:
     //
     //   - `renderSignal`, what `formatTurnCompact` delivered for title/content
-    //     (`type`/`tags` earn no entry: the compact field set does not select
-    //     the `metadata` line they ride on, so this render genuinely does not
-    //     show them — and the gate is left off those two fields for exactly
-    //     that reason, see the facade);
+    //     AND, since ticket 12 (edge-mechanism-revision spec) put `metadata`
+    //     into `DEFAULT_TURN_RENDER_FIELDS` — the same default set
+    //     `formatTurnCompact` renders at — `type`/`tags` too: the compact
+    //     render now shows the metadata line they ride on, so it earns a
+    //     genuine completeness entry for both the same way title/content
+    //     already did. Ticket 12 stops here on purpose (visibility only): the
+    //     write gate's `requireCompleteRead` is deliberately NOT extended to
+    //     consume this for settlement's own type/tags writes yet — that stays
+    //     the facade's call for a later ticket;
     //   - `insight`, which recall's collapsed view has no slot for and the
     //     PROMPT therefore renders itself, in full and never truncated
     //     (`renderWindowTurn`, worker/note-settlement-prompt.ts). Recorded

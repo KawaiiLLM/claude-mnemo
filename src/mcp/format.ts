@@ -672,21 +672,28 @@ export function capRenderToTokenBudget(
 export type TurnRenderFields = ReadonlySet<RecallTurnField>;
 
 /**
- * Default when `filter.fields` is unset: the row's own title plus `content`,
- * and nothing else (spec 金样例 补充: "其他字段槽位（默认只有content）"). The
- * `prompt` bullet left this default with the row redesign — the row label
- * already falls back to the prompt text when no title exists, so the bullet
- * only ever restated something the reader had. A caller after `prompt`,
- * `response`, `insight`, `files`, `observations` or `metadata` asks for it
+ * Default when `filter.fields` is unset: the row's own title, `metadata`
+ * (ticket 12, edge-mechanism-revision spec — the user's own re-pin of the
+ * 金样例 at [S15069/T1135]: "metadata 是默认行" — the "默认只有 content" prose
+ * limits which OTHER field slots default on, not whether metadata is one of
+ * the shown rows; d0590fe's read of that sentence as excluding metadata from
+ * the default set was itself the regression this ticket corrects), and
+ * `content`, and nothing else. The `prompt` bullet left this default with the
+ * row redesign — the row label already falls back to the prompt text when no
+ * title exists, so the bullet only ever restated something the reader had. A
+ * caller after `response`, `insight`, `files`, or `observations` asks for it
  * explicitly. `filter.fields` is
  * the SOLE field-selection mechanism (spec: "07 的 filter.fields 从加法机制
  * 升为唯一机制") — there is no longer a second, depth-driven default field
- * set for a caller to fall back on. (The browse feed's own default,
- * `DEFAULT_BROWSE_FIELDS` in recall.ts, is a separate, narrower set
- * purpose-built for that one-line-per-turn listing — unaffected.)
+ * set for a caller to fall back on; an explicit narrow selection (e.g. just
+ * `content`) still drops metadata the same way it always could. (The browse
+ * feed's own default, `DEFAULT_BROWSE_FIELDS` in recall.ts, is a separate,
+ * narrower set purpose-built for that one-line-per-turn listing —
+ * unaffected.)
  */
 export const DEFAULT_TURN_RENDER_FIELDS: TurnRenderFields = new Set<RecallTurnField>([
   "title",
+  "metadata",
   "content",
 ]);
 

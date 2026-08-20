@@ -20,8 +20,8 @@ Backfill、Citation graph 三词条),本票核对不重写。
 - 新 ADR 一份,记三个转向及其 trade-off:(1) 边与正文脱钩(回收 C7 双通道,
   含「为什么放弃正文锚与读被引检查」的诚实记述——C8 的语义伪边风险照旧存在,
   由 rubric 判断与撤边纠错承担);(2) 多关系对 + 硬删撤边;(3) 结算重武装
-  (显式回收 settlement-agentic 的「结算不再重建笔记」与 C7 先存栅栏,ADR-0007
-  相应补注指向本 ADR)。
+  (显式回收 ownership-and-note-cadence 的「结算不再重建笔记」与 settlement-
+  agentic 的 C7 先存栅栏,ADR-0007 相应补注指向本 ADR)。
 - 工具描述清扫:note 的关系参数 describe 删 C7 语言、加撤边参数教学;recall 描
   述不动(完整读教学是 write-mode 批次的,与本批无关)。
 - CONTEXT.md 三词条核对与最终实现一致,措辞偏差回来报告,不静默改。

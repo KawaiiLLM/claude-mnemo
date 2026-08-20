@@ -72,8 +72,8 @@ Memory Policy 独立块退役并入;hash 守卫机制照旧。review 词条改�
 定裁决时,按并列补相加 design/correction」。
 
 **D6 — 结算重武装。** consecutive 阈值 25→50(仅此触发器有阈值,其余事件驱动
-不变);facade 对 title/content/insight 的硬拒撤销——显式回收 settlement-
-agentic 批次「结算不再重建笔记」的裁决;归属动作开放建段与跨段改派;边动作 =
+不变);facade 对 title/content/insight 的硬拒撤销——显式回收 ownership-and-
+note-cadence 批次「结算不再重建笔记」的裁决;归属动作开放建段与跨段改派;边动作 =
 主 agent 同一套(D1–D3)。同门同要求:结算的上下文渲染须记 field completeness
 (关闭 write-mode 票 07 留的豁免口)。commit 不变:唯一多余工具、认领校验、
 终态标记。

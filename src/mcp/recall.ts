@@ -406,6 +406,13 @@ export function buildCollapsedTurnsForSession(
     filesModifiedCount: turn.filesModified.length,
     status: turn.status,
     wasRolledBack: turn.wasRolledBack,
+    // Ticket 12 (edge-mechanism-revision spec): `metadata` now rides in
+    // `DEFAULT_TURN_RENDER_FIELDS`, so `formatTurnCompact` (this builder's
+    // one caller, note-settlement-context.ts) renders it unconditionally —
+    // same `buildTurnView` convention (no previous-turn epoch: this builder
+    // is addressed by selector/session scope, not a session-ordered walk, so
+    // there is no honest "previous" to name here either).
+    metadata: composeTurnMetadata(turn, null),
   }));
 }
 

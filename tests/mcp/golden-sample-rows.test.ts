@@ -116,8 +116,10 @@ describe("金样例 — the rendered row contract", () => {
       [
         "[S15069] title",
         "    [T823] title [extracted] [rewind]",
+        "        08-01 00:13",
         "        - content: xxx",
         "    [T824] title [extracted] [rewind]",
+        "        08-01 00:13",
         "        - content: xxx",
       ].join("\n"),
     );
@@ -153,8 +155,10 @@ describe("金样例 — the rendered row contract", () => {
         "[E31] title",
         "    [S15069]",
         "        [T823] title [extracted] [rewind]",
+        "            08-01 00:13",
         "            - content: xxx",
         "        [T824] title [extracted] [rewind]",
+        "            08-01 00:13",
         "            - content: xxx",
       ].join("\n"),
     );
@@ -405,7 +409,13 @@ describe("金样例 — the rendered row contract", () => {
     expect(lines).toContain("        [T824] 08-17 18:25 ⏳ title");
   });
 
-  test("metadata joins filter.fields: recall leaves it out by default and renders it on request", () => {
+  // Ticket 12 (edge-mechanism-revision spec, [S15069/T1135] re-pin): metadata
+  // is a DEFAULT row, not an opt-in one — this test used to pin the opposite
+  // (metadata excluded unless explicitly requested), which was itself the
+  // regression the ruling base names (d0590fe). `filter.fields` stays the
+  // sole selection mechanism: an explicit NARROW selection can still drop
+  // metadata, just as it always could drop title or content.
+  test("metadata renders by default; an explicit narrow selection can still drop it", () => {
     insertSession(15069, null);
     insertTurn({
       sessionId: 15069,
@@ -422,18 +432,18 @@ describe("金样例 — the rendered row contract", () => {
     });
 
     const byDefault = recallMemory(db, { id: "S15069/T823" });
-    expect(byDefault).not.toContain("08-17 18:19");
-
-    const requested = recallMemory(db, {
-      id: "S15069/T823",
-      filter: { fields: ["title", "metadata", "content"] },
-    });
-    expect(requested.split("\n")).toEqual([
+    expect(byDefault.split("\n")).toEqual([
       "[S15069]",
       "    [T823] title [extracted]",
       "        08-17 18:19 · 🔧20 · design, research · #claude-mnemo #write-gate",
       "        - content: xxx",
     ]);
+
+    const narrowed = recallMemory(db, {
+      id: "S15069/T823",
+      filter: { fields: ["title", "content"] },
+    });
+    expect(narrowed).not.toContain("08-17 18:19");
   });
 
   test("metadata: an empty type and an empty tags list each drop their own segment, no orphan separator", () => {
@@ -581,7 +591,7 @@ describe("金样例 — the rendered row contract", () => {
 
     const page2 = recallMemory(db, { id: "E31/T*", page: 2, pageSize: 2 }).split("\n");
 
-    expect(page2).toEqual([
+    expect(page2.filter((line) => !/^\s+\d\d-\d\d \d\d:\d\d/.test(line))).toEqual([
       "page 2 / 2 (total 4)",
       "[E31] title",
       "        [S15069][T825] title [extracted]",
@@ -589,13 +599,30 @@ describe("金样例 — the rendered row contract", () => {
       "        [T826] title [extracted]",
       "            - content: xxx",
     ]);
+    // The metadata line rides between each title row and its field rows
+    // (golden sample Image #7); its clock varies with the fixture epochs, so
+    // it is pinned by shape and position rather than by literal time.
+    expect(page2[3]).toMatch(/^            \d\d-\d\d \d\d:\d\d/);
+    expect(page2[6]).toMatch(/^            \d\d-\d\d \d\d:\d\d/);
   });
 
   // -------------------------------------------------------------------------
   // 补充裁决: 搜索形态与浏览形态的唯一差异=排序
+  //
+  // Ticket 12 (edge-mechanism-revision spec): this ruling's byte-for-byte
+  // equality with the bare browse feed was always coincidental, not pinned —
+  // a search hit renders through `DEFAULT_TURN_RENDER_FIELDS` (a turn CARD,
+  // same as any id-addressed turn), while the bare browse feed uses its own,
+  // deliberately narrower `DEFAULT_BROWSE_FIELDS` (recall.ts, a one-line
+  // listing, unaffected by this ticket — see format.ts's own comment on
+  // `DEFAULT_TURN_RENDER_FIELDS`). The two defaults were identical before
+  // this ticket added `metadata` to the former only, so a search hit now
+  // carries the same metadata line any other turn card does; the RUNGS this
+  // test actually pins (transition line, bare turn row, `- content:` row,
+  // relevance ordering) are unchanged.
   // -------------------------------------------------------------------------
 
-  test("search shape = browse shape, differing only in ordering", () => {
+  test("search shape = browse shape in its rungs and ordering; a search hit is a turn card, so it also carries metadata", () => {
     insertSession(15069, "first");
     insertTurn({ sessionId: 15069, promptNumber: 1, title: "alpha", content: "needle here", epoch: CUTOFF + 1 });
     insertTurn({ sessionId: 15069, promptNumber: 2, title: "beta", content: "plain body", epoch: CUTOFF + 2 });
@@ -603,11 +630,13 @@ describe("金样例 — the rendered row contract", () => {
     const search = recallMemory(db, { query: "needle" }).split("\n");
 
     // Same rungs as the browse feed: a transition line, then a bare turn row,
-    // then a `- content:` field row. No session-header stats.
+    // then the metadata line, then a `- content:` field row. No session-header
+    // stats.
     expect(search[0]).toBe("[S15069] first");
     expect(search[1]).toBe("    [T1] alpha [extracted]");
-    expect(search[2]).toStartWith("        - content: ");
-    expect(search[2]).toContain("**needle**");
+    expect(search[2]).toBe("        08-01 00:00");
+    expect(search[3]).toStartWith("        - content: ");
+    expect(search[3]).toContain("**needle**");
     expect(search.some((line) => line.includes("💬") || line.includes("💡"))).toBe(false);
   });
 });
