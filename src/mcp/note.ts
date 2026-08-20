@@ -3,9 +3,11 @@ import type { Database } from "bun:sqlite";
 import {
   attachTurnRelations,
   recomputeTurnCitedPairs,
+  retractTurnRelations,
   type AttachTurnRelationsResult,
   type CitationRelation,
   type RecomputeTurnCitedPairsResult,
+  type RetractTurnRelationsResult,
   type TurnRelationFieldInput,
   type TurnRelationRejection,
   type TurnRelationRejectionReason,
@@ -77,6 +79,30 @@ export type { FieldEditMode, FieldMode } from "./field-mode";
 // itself — the writer records facts, settlement assigns value.
 const TURN_MODE_FIELDS = ["title", "content", "insight", "type", "tags"] as const;
 type TurnModeField = (typeof TURN_MODE_FIELDS)[number];
+
+/**
+ * Ticket 02 (edge-mechanism-revision D1): which field's write gate an EDGE
+ * write is judged by. `type`, for two reasons, and it is deliberately not a
+ * new field key of its own:
+ *
+ *   - it is the field the surviving machine check already reads. Whether a
+ *     relation is even legal is computed from the citing turn's `type`
+ *     (`phasesForTypes` -> `validateRelationTarget`), so "you have seen this
+ *     turn's type" is the premise the legality verdict rests on anyway.
+ *   - EVERY note write on a turn stamps `type` (the subsumption stamp at the
+ *     bottom of the write transaction), so it is the field that records
+ *     "somebody maintains this turn". A relation onto a turn another writer
+ *     owns, unread by this one, is therefore refused as `never-read`, while
+ *     a turn nobody has ever written admits — the same "a create is not
+ *     gated on having read the thing it creates" latitude every other field
+ *     gets.
+ *
+ * CHECKED, never STAMPED: an edge write changes no `type` value, and
+ * stamping one would tell settlement's yield gate (which reads exactly this
+ * stamp as "the agent has fresher knowledge of this turn") that a type
+ * correction landed when none did.
+ */
+const EDGE_WRITE_GATE_FIELD = "type";
 
 function hasText(value: string | null | undefined): boolean {
   return typeof value === "string" && value.trim() !== "";
@@ -166,12 +192,13 @@ export interface NoteToolInput {
   skip?: unknown;
   crossSession?: unknown;
 
-  // ticket 07 (spec C1/C5/C7): one named field per relation. Targets are
-  // address tokens this write's OWN title/content/insight post-state must
-  // already name — see `RELATION_FIELD_ENTRIES` / `resolveRelationFields`.
+  // ticket 07 (spec C1): one named field per relation. Targets are address
+  // tokens — see `RELATION_FIELD_ENTRIES` / `resolveRelationFields`.
   // ticket 01 (turn-edge-mechanism spec): `supersedes` retired from this
   // list — `refines`/`override`/`encodes`/`groundedOn` take its place in the
   // seven-word closed set ([S15069/T935] added `groundedOn` mid-flight).
+  // ticket 02 (edge-mechanism-revision D1): these no longer require the same
+  // call to touch a prose field, nor the body to name the target.
   evidenceFor?: unknown;
   evidenceAgainst?: unknown;
   groundedOn?: unknown;
@@ -179,6 +206,18 @@ export interface NoteToolInput {
   override?: unknown;
   encodes?: unknown;
   dependsOn?: unknown;
+
+  // ticket 02 (edge-mechanism-revision D3): the seven retraction mirrors —
+  // same address-list shape, `retract` + the relation field's own name, so a
+  // caller never has to learn a second spelling of the vocabulary. See
+  // `RETRACTION_FIELD_ENTRIES`.
+  retractEvidenceFor?: unknown;
+  retractEvidenceAgainst?: unknown;
+  retractGroundedOn?: unknown;
+  retractRefines?: unknown;
+  retractOverride?: unknown;
+  retractEncodes?: unknown;
+  retractDependsOn?: unknown;
 
   // D5/D5a: per-field mode, required whenever the target field is currently
   // non-empty. One object, shared vocabulary across every field of both
@@ -461,32 +500,83 @@ export const RELATION_FIELD_ENTRIES: ReadonlyArray<
   readonly [key: string, relation: TurnEdgeRelation]
 > = EDGE_RELATIONS.map((relation) => [RELATION_FIELD_NAME[relation], relation] as const);
 
+/**
+ * Ticket 02 (edge-mechanism-revision D3): the retraction surface, DERIVED from
+ * the relation field names above rather than spelled out a second time —
+ * `evidenceFor` -> `retractEvidenceFor`. One mechanical rule for all seven, so
+ * a relation added to `EDGE_RELATIONS` tomorrow gets its retraction parameter
+ * for free and the two halves cannot drift into different vocabularies.
+ * Exported for the same guard test that pins `RELATION_FIELD_ENTRIES` against
+ * the schema's real parameter names.
+ */
+export const RETRACTION_FIELD_ENTRIES: ReadonlyArray<
+  readonly [key: string, relation: TurnEdgeRelation]
+> = RELATION_FIELD_ENTRIES.map(
+  ([key, relation]) =>
+    [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relation] as const,
+);
+
 const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
   malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
   unresolved: "does not resolve to a turn or segment",
-  "not-cited":
-    "is not cited by this write's title, content or insight — attach a relation only to a pair the body actually names (spec C7)",
-  "duplicate-target":
-    "is already claimed by a different relation field in this same call — a pair carries at most one relation (spec C5)",
+  "self-loop":
+    "is this turn's own address — a turn cannot cite itself, whatever the relation",
+  "no-such-edge":
+    "is not a relation this turn currently carries — nothing was retracted; read the turn to see what it does carry",
 };
 
 function formatRelationRejections(
   rejections: readonly TurnRelationRejection[],
+  surface: "relation" | "retraction",
 ): string {
   const lines = rejections.map(
     (entry) => `${entry.relation} "${entry.raw}" ${RELATION_REJECTION_TEXT[entry.reason]}`,
   );
-  return `relation field rejected: ${lines.join("; ")}.`;
+  return `${surface} field rejected: ${lines.join("; ")}.`;
+}
+
+/**
+ * The seven relation (or seven retraction) parameters this call carries, as
+ * the shared `{relation, targets}` input both db-layer functions take. Throws
+ * the tool's own parameter error for a non-array value, so a caller sending
+ * `override: "S1/T2"` is told what shape the field takes rather than having
+ * the field silently ignored.
+ */
+function collectRelationFields(
+  entries: ReadonlyArray<readonly [key: string, relation: TurnEdgeRelation]>,
+  input: NoteToolInput,
+): TurnRelationFieldInput[] {
+  const fields: TurnRelationFieldInput[] = [];
+  for (const [key, relation] of entries) {
+    const provided = (input as Record<string, unknown>)[key];
+    if (provided === undefined) {
+      continue;
+    }
+    if (!Array.isArray(provided) || provided.some((value) => typeof value !== "string")) {
+      fail(`${key} must be an array of strings when present.`);
+    }
+    if (provided.length > 0) {
+      fields.push({ relation, targets: provided as string[] });
+    }
+  }
+  return fields;
+}
+
+/** Does this call carry any edge parameter at all — relation or retraction, empty list included? */
+function touchesEdgeFields(input: NoteToolInput): boolean {
+  return [...RELATION_FIELD_ENTRIES, ...RETRACTION_FIELD_ENTRIES].some(
+    ([key]) => (input as Record<string, unknown>)[key] !== undefined,
+  );
 }
 
 /**
  * Ticket 01 (turn-edge-mechanism spec) / [S15069/T939]: two checks
- * `attachTurnRelations` itself does NOT make, because that function is
- * shared plumbing settlement's own facade also calls with `supersedes` and
- * segment targets (spec: "既有 segment 端点的旧边冻结可读" — that history
- * stays legible through the generic path). `note`'s own seven-word surface
- * is narrower, so the narrowing lives here, one layer up, rather than
- * inside the shared function.
+ * `attachTurnRelations` itself does NOT make, because that function is the
+ * generic storage-vocabulary path — it accepts `supersedes` and segment
+ * targets so existing edges of that shape stay writable/legible (spec:
+ * "既有 segment 端点的旧边冻结可读"). `note`'s own seven-word surface is
+ * narrower, so the narrowing lives here, one layer up, rather than inside
+ * the shared function.
  *
  * The JUDGMENT itself — segment targets refused, phase-pair legality, which
  * half is missing — is `shared/turn-phase.ts`'s `validateRelationTarget`,
@@ -536,51 +626,34 @@ function checkRelationTargetPhase(
 }
 
 /**
- * Spec C7 (ticket 07): the main agent may attach a relation to a pair its OWN
- * write is creating, never to one this call did not itself cite — so this
- * only has an answer once `citations` (the same write's post-state, from
- * `recomputeTurnCitedPairs`) is known. A relation field present on a call
- * that never touched a citation-bearing field (title/content/insight), or
- * whose targets the resulting post-state does not name, fails the WHOLE
- * write rather than silently dropping the relation — a relation field is
- * structured input, not prose a model might hallucinate a bracket into.
+ * Ticket 02 (edge-mechanism-revision D1): a relation field stands on its own.
+ * The C7 co-occurrence contract this function used to enforce — the same call
+ * must touch title/content/insight, and that post-state must name the target
+ * — is GONE, not bypassed: content carries no citation obligation any more,
+ * so requiring the prose to license the edge could only be satisfied by
+ * writing citations for the machine's benefit.
+ *
+ * What is left is what a claim cannot be right about by construction, and it
+ * still fails the WHOLE write rather than silently dropping the relation (a
+ * relation field is structured input, not prose a model might hallucinate a
+ * bracket into): phase legality, address resolution, and self-reference.
  */
 function resolveRelationFields(
   db: Database,
   citingTurnId: number,
   citingTurnType: readonly string[],
   input: NoteToolInput,
-  citations: RecomputeTurnCitedPairsResult | null,
   nowEpoch: number,
 ): AttachTurnRelationsResult | null {
-  const fields: TurnRelationFieldInput[] = [];
-  for (const [key, relation] of RELATION_FIELD_ENTRIES) {
-    const provided = (input as Record<string, unknown>)[key];
-    if (provided === undefined) {
-      continue;
-    }
-    if (!Array.isArray(provided) || provided.some((value) => typeof value !== "string")) {
-      fail(`${key} must be an array of strings when present.`);
-    }
-    if (provided.length > 0) {
-      fields.push({ relation, targets: provided as string[] });
-    }
-  }
+  const fields = collectRelationFields(RELATION_FIELD_ENTRIES, input);
   if (fields.length === 0) {
     return null;
   }
-  if (citations === null) {
-    fail(
-      "evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn require this write to also touch a " +
-        "citation-bearing field (title, content or insight) whose post-state names the " +
-        "target — a relation cannot attach to a pair this call is not itself citing (spec C7).",
-    );
-  }
 
-  // Ticket 01: phase/segment-target legality, checked BEFORE `attachTurnRelations`'
-  // own citation/duplicate checks — a structurally illegal relation (wrong
-  // phase pair, a segment target) is rejected atomically with every other
-  // one found in the same call, the same all-or-nothing shape
+  // Ticket 01: phase/segment-target legality, checked BEFORE
+  // `attachTurnRelations`' own address checks — a structurally illegal
+  // relation (wrong phase pair, a segment target) is rejected atomically with
+  // every other one found in the same call, the same all-or-nothing shape
   // `attachTurnRelations` already gives its own rejections.
   const citingPhases = phasesForTypes(citingTurnType);
   const phaseIssues: string[] = [];
@@ -596,9 +669,33 @@ function resolveRelationFields(
     fail(`relation field rejected: ${phaseIssues.join("; ")}.`);
   }
 
-  const result = attachTurnRelations(db, citingTurnId, fields, citations.written, nowEpoch);
+  const result = attachTurnRelations(db, citingTurnId, fields, nowEpoch);
   if (result.rejected.length > 0) {
-    fail(formatRelationRejections(result.rejected));
+    fail(formatRelationRejections(result.rejected, "relation"));
+  }
+  return result;
+}
+
+/**
+ * Ticket 02 (edge-mechanism-revision D3): the retraction half of the same
+ * surface. No phase check runs here — legality governs what may be ASSERTED,
+ * and an edge that has become illegal (the turn's type was corrected since)
+ * is exactly one a writer must still be able to remove. An address carrying
+ * no such relation fails the whole call by name (`no-such-edge`), so
+ * "already gone" and "wrong address" stay distinguishable.
+ */
+function resolveRetractionFields(
+  db: Database,
+  citingTurnId: number,
+  input: NoteToolInput,
+): RetractTurnRelationsResult | null {
+  const fields = collectRelationFields(RETRACTION_FIELD_ENTRIES, input);
+  if (fields.length === 0) {
+    return null;
+  }
+  const result = retractTurnRelations(db, citingTurnId, fields);
+  if (result.rejected.length > 0) {
+    fail(formatRelationRejections(result.rejected, "retraction"));
   }
   return result;
 }
@@ -687,6 +784,7 @@ interface TurnWriteTransactionResult {
   finalTags: string[] | undefined;
   citations: RecomputeTurnCitedPairsResult | null;
   relations: AttachTurnRelationsResult | null;
+  retractions: RetractTurnRelationsResult | null;
   stripped: boolean;
 }
 
@@ -764,9 +862,18 @@ function handleTurnWrite(
       (input as Record<string, unknown>)[key] !== undefined ||
       isFieldEditMode(modeMap[key]),
   );
-  if (providedFields.length === 0) {
+  // Ticket 02 (edge-mechanism-revision D1): an edge parameter alone is a
+  // complete call. The entry gate exists to refuse a call that would do
+  // NOTHING, and a pure relation or retraction call does plenty — it just
+  // does it to the turn's edges rather than to its prose. Keeping the old
+  // "at least one field" wording here would have re-imposed the C7
+  // co-occurrence rule at the door, one layer above where it was deleted.
+  const touchesEdges = touchesEdgeFields(input);
+  if (providedFields.length === 0 && !touchesEdges) {
     return parameterError(
-      `at least one of ${TURN_MODE_FIELDS.join(", ")} is required.`,
+      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field` +
+        " (evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn)" +
+        " or one of their retract… mirrors is required.",
     );
   }
 
@@ -866,6 +973,24 @@ function handleTurnWrite(
             ),
             completeReadRemedy: completeReadRemedyForTurnField(field, addressLabel),
           });
+          if (!verdict.ok) {
+            fail(verdict.message);
+          }
+        }
+        // Ticket 02 (edge-mechanism-revision D1, spec user story 17): an edge
+        // write goes through the SAME gate, on the CITING turn — the turn
+        // whose record grows an edge — and the cited turn gets no read check
+        // at all ([S15069/T1124]). Without this a pure edge call would be the
+        // one write on this surface nobody had to have read.
+        if (touchesEdges) {
+          const verdict = checkFieldGate(
+            db,
+            writer,
+            "turn",
+            turn.id,
+            EDGE_WRITE_GATE_FIELD,
+            addressLabel,
+          );
           if (!verdict.ok) {
             fail(verdict.message);
           }
@@ -1030,12 +1155,15 @@ function handleTurnWrite(
         );
       }
 
+      // Retraction runs BEFORE the attach: correcting a wrong relation is
+      // "retract it, then write the right one" (D2/D3), and a caller doing
+      // both in one call means them in that order.
+      const retractions = resolveRetractionFields(db, turn.id, input);
       const relations = resolveRelationFields(
         db,
         turn.id,
         updatedTurn.type,
         input,
-        citations,
         nowEpoch,
       );
 
@@ -1075,6 +1203,7 @@ function handleTurnWrite(
         finalTags: tagsResolution?.value,
         citations,
         relations,
+        retractions,
         stripped,
       };
     });
@@ -1148,8 +1277,25 @@ function handleTurnWrite(
     }
   }
 
-  if (result.relations && result.relations.written.length > 0) {
-    parts.push(`Attached ${result.relations.written.length} relation(s).`);
+  // Ticket 02: a relation write is additive AND idempotent (D2), so the
+  // receipt says which of the two happened — "attached" for a row this call
+  // added, "already present" for one it merely restated. A writer that cannot
+  // tell them apart reads its own no-op as new work.
+  if (result.retractions && result.retractions.deleted.length > 0) {
+    parts.push(`Retracted ${result.retractions.deleted.length} relation(s).`);
+  }
+  if (result.relations) {
+    const attached = result.relations.written.length;
+    const restated = result.relations.restated.length;
+    if (attached > 0) {
+      parts.push(
+        restated > 0
+          ? `Attached ${attached} relation(s), ${restated} already present.`
+          : `Attached ${attached} relation(s).`,
+      );
+    } else if (restated > 0) {
+      parts.push(`${restated} relation(s) already present, nothing added.`);
+    }
   }
 
   return textResult(parts.join(" "));

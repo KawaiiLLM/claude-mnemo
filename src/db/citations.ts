@@ -1,11 +1,15 @@
 import type { Database } from "bun:sqlite";
 
 import {
+  getOutgoingEdges,
   pairKey,
   reconcileCitedPairs,
+  retractMemoryEdges,
   writeMemoryEdges,
   type CitingNode,
+  type EdgeNode,
   type MemoryEdge,
+  type RetractEdgeInput,
   type WriteEdgeInput,
 } from "./memory-edges";
 import {
@@ -284,8 +288,14 @@ export interface RecomputeTurnCitedPairsResult {
  * session's exposure ledger) — a hallucinated or unshown id is dropped and
  * logged, never written. Provenance is always `text-ref` (spec C12): nothing
  * in this call carries a relation, so there is no main-agent ASSERTION to
- * record, only a bare textual reference. Attaching a relation to a pair a
- * body creates is spec C7/ticket 07's, not this function's.
+ * record, only a bare textual reference.
+ *
+ * Edge-mechanism-revision D4 (ticket 02) DEMOTED what that bare row means: it
+ * is a display signal (the ↳ pull-through, cited counts) and nothing else. It
+ * is no longer the substrate a relation has to be "upgraded" from — a relation
+ * write (`attachTurnRelations` below) neither needs a bare row to exist nor
+ * consults one, so prose citation and edge declaration are two independent
+ * acts on the same turn.
  */
 export function recomputeTurnCitedPairs(
   db: Database,
@@ -318,14 +328,34 @@ export function recomputeTurnCitedPairs(
 }
 
 // ---------------------------------------------------------------------------
-// Relation attach (spec C1/C5/C7, ticket 07)
+// Relation attach and retraction (edge-mechanism-revision D1/D3, ticket 02;
+// relation vocabulary spec C1)
 // ---------------------------------------------------------------------------
 
+/**
+ * Edge-mechanism-revision D1 (ticket 02) RETIRED two of the four reasons this
+ * union used to carry, and neither is bypassed — both checks are gone:
+ *
+ *   - `not-cited`, spec C7's co-occurrence rule ("a relation may only attach
+ *     to a pair this same call's body already names"). Prose and edges are
+ *     decoupled now: content carries no citation obligation at all, so a rule
+ *     that made the body the licence for an edge could only be satisfied by
+ *     writing citations nobody reads.
+ *   - `duplicate-target`, the tool-surface half of "one relation per pair".
+ *     Storage stopped enforcing it in ticket 01 (D2: one row per (pair,
+ *     relation)), and a landing turn genuinely both `depends-on` a plan and
+ *     `encodes` a ruling about the same target.
+ *
+ * `self-loop` is the pre-check for the primitive's own refusal, raised here so
+ * the caller can name the address instead of reporting a silent drop.
+ * `no-such-edge` is RETRACTION-only: an address that resolved but carries no
+ * such relation on this turn.
+ */
 export type TurnRelationRejectionReason =
   | "malformed"
   | "unresolved"
-  | "not-cited"
-  | "duplicate-target";
+  | "self-loop"
+  | "no-such-edge";
 
 export interface TurnRelationRejection {
   relation: CitationRelation;
@@ -334,106 +364,211 @@ export interface TurnRelationRejection {
   reason: TurnRelationRejectionReason;
 }
 
-/** One named relation field's raw targets — mcp/note.ts's `evidenceFor` etc. */
+/**
+ * One named relation field's raw targets — mcp/note.ts's `evidenceFor` etc.,
+ * and (ticket 02) its `retractEvidenceFor` mirror, which addresses the same
+ * (relation, addresses) shape at `retractTurnRelations` instead.
+ */
 export interface TurnRelationFieldInput {
   relation: CitationRelation;
   targets: readonly string[];
 }
 
 export interface AttachTurnRelationsResult {
+  /** The (pair, relation) rows this call actually ADDED — one per accepted, not-already-stored input. */
   written: MemoryEdge[];
   /**
-   * Non-empty means the WHOLE call is invalid, and `written` is always empty
-   * alongside it. Unlike a bare `[S/T]` reference in prose — dropped and
-   * logged, never a reason to fail the note it arrived with — a relation
-   * field is structured caller input, not text a model might hallucinate a
-   * bracket into. A caller that gets back a malformed address or an uncited
-   * target gets ALL of them, to fix in one pass, rather than a write that
-   * silently applied the three relations that happened to be valid.
+   * Accepted inputs whose (pair, relation) row was ALREADY stored, so nothing
+   * changed. Reported rather than folded into `written` because D2 makes a
+   * relation write additive and idempotent: the caller's receipt has to be
+   * able to say "added" and "already there" apart, or a model re-asserting a
+   * relation it wrote yesterday reads its own no-op as new work.
+   */
+  restated: MemoryEdge[];
+  /**
+   * Non-empty means the WHOLE call is invalid, and `written`/`restated` are
+   * always empty alongside it. Unlike a bare `[S/T]` reference in prose —
+   * dropped and logged, never a reason to fail the note it arrived with — a
+   * relation field is structured caller input, not text a model might
+   * hallucinate a bracket into. A caller that gets back a malformed address
+   * or an unresolvable one gets ALL of them, to fix in one pass, rather than
+   * a write that silently applied the three relations that happened to be
+   * valid.
    */
   rejected: TurnRelationRejection[];
 }
 
+/** An address token resolved to an edge endpoint, or the reason it could not be. */
+function resolveRelationTargetNode(
+  db: Database,
+  raw: string,
+): EdgeNode | "malformed" | "unresolved" {
+  const reference = parseBareAddressReference(raw);
+  if (!reference) {
+    return "malformed";
+  }
+  const { accepted } = validateReferences(db, [reference]);
+  return accepted[0]?.node ?? "unresolved";
+}
+
+/** `(pair, relation)` as one string — the identity D2 gave a stored row. */
+function relationRowKey(
+  citing: CitingNode,
+  cited: EdgeNode,
+  relation: CitationRelation | null,
+): string {
+  return `${pairKey({ citing, cited })}|${relation ?? ""}`;
+}
+
+function storedRelationRowKeys(db: Database, citing: CitingNode): Set<string> {
+  return new Set(
+    getOutgoingEdges(db, citing).map((edge) =>
+      relationRowKey(citing, edge.cited, edge.relation),
+    ),
+  );
+}
+
 /**
- * Spec C7: the main agent may attach a relation to a pair its OWN write is
- * creating — it authored the prose in the same call, so the argument and the
- * claim arrive together. `bodyCitedPairs` is that write's post-state, the
- * SAME `written` result `recomputeTurnCitedPairs` just returned for this same
- * turn — "the body cites it" and "eligible for a relation" are therefore
- * literally the same test, with no second citation question to keep in sync
- * with the recompute above it.
+ * Edge-mechanism-revision D1 (ticket 02): a relation is declared on its own,
+ * with NO reference to what the citing turn's prose says. The spec's own
+ * words — "正文与边彻底脱钩" — retire the C7 co-occurrence contract this
+ * function used to enforce through a `bodyCitedPairs` parameter: content is
+ * prose again, and an edge is a structured claim beside it. What survives as
+ * a machine check is only what a claim cannot be wrong about by construction:
+ * the address resolves (references.ts), it is not this turn itself, and — one
+ * layer up, at the tool surface — the phase pair is legal and the citing
+ * turn's write gate admits the writer.
  *
  * Provenance is always `asserted` (spec C12): this is the main agent's own
- * classification, stated in the same call that supplied the reasoning for
- * it — distinct from a bare textual reference (`text-ref`, what the recompute
- * above writes for every OTHER pair the body names) and a settlement
- * attribution (`judged`, gated instead by the write-back's pre-state check,
- * not this function).
+ * classification — distinct from a bare textual reference (`text-ref`, what
+ * `recomputeTurnCitedPairs` writes for the pairs a body happens to name) and
+ * from a settlement attribution (`judged`).
  *
- * `writeMemoryEdges`'s own `eligibleForRelation` gate is handed the SAME
- * `bodyCitedPairs` set as a second, independent check: every target below is
- * already proven cited by the loop that builds `inputs`, so the shared gate
- * should never actually fire here — but C14's rule is that eligibility lives
- * in the shared write layer, not only in whichever caller happens to
- * validate first, so it is asked to prove it anyway.
+ * `writeMemoryEdges` is called `"unrestricted"` (its own word for "this
+ * caller answers for eligibility itself") rather than with a pair set: after
+ * D1 there IS no pre-existing-pair premise left to state — the checks above
+ * ARE this path's eligibility, and passing a set derived from the body would
+ * be the retired rule wearing a new name.
  */
 export function attachTurnRelations(
   db: Database,
   citingTurnId: number,
   fields: readonly TurnRelationFieldInput[],
-  bodyCitedPairs: readonly MemoryEdge[],
   nowEpoch: number,
 ): AttachTurnRelationsResult {
   const citing: CitingNode = { kind: "turn", id: citingTurnId };
-  const eligiblePairKeys = new Set(bodyCitedPairs.map((edge) => pairKey(edge)));
 
   const rejected: TurnRelationRejection[] = [];
-  const claimedBy = new Map<string, CitationRelation>();
   const inputs: WriteEdgeInput[] = [];
+  const claimed = new Set<string>();
 
   for (const field of fields) {
     for (const raw of field.targets) {
-      const reference = parseBareAddressReference(raw);
-      if (!reference) {
-        rejected.push({ relation: field.relation, raw, reason: "malformed" });
+      const node = resolveRelationTargetNode(db, raw);
+      if (typeof node === "string") {
+        rejected.push({ relation: field.relation, raw, reason: node });
         continue;
       }
-      const { accepted } = validateReferences(db, [reference]);
-      const node = accepted[0]?.node;
-      if (!node) {
-        rejected.push({ relation: field.relation, raw, reason: "unresolved" });
+      // Pre-check of `writeMemoryEdges`' own refusal, so the message can name
+      // the address the caller sent — the primitive's `rejected` entry knows
+      // only nodes, and a turn confirming itself would inflate the one
+      // mechanical confirmation signal the ranking has.
+      if (node.kind === "turn" && node.id === citingTurnId) {
+        rejected.push({ relation: field.relation, raw, reason: "self-loop" });
         continue;
       }
-      const key = pairKey({ citing, cited: node });
-      if (!eligiblePairKeys.has(key)) {
-        rejected.push({ relation: field.relation, raw, reason: "not-cited" });
+      const key = relationRowKey(citing, node, field.relation);
+      // The same claim twice in one call is one claim. Two DIFFERENT relations
+      // on the same pair are two claims and both land (D2).
+      if (claimed.has(key)) {
         continue;
       }
-      // A repeat of the SAME target under the SAME field is a harmless
-      // restatement; a DIFFERENT relation field claiming the same target is
-      // refused here. NOTE this is now a TOOL-SURFACE rule only: storage
-      // stopped enforcing "one relation per pair" with edge-mechanism-revision
-      // D2 (a pair may hold `depends-on` AND `encodes`), and lifting the
-      // refusal belongs to the ticket that reworks this tool's relation
-      // surface, not to the storage change that made it possible.
-      const priorClaim = claimedBy.get(key);
-      if (priorClaim !== undefined && priorClaim !== field.relation) {
-        rejected.push({ relation: field.relation, raw, reason: "duplicate-target" });
-        continue;
-      }
-      claimedBy.set(key, field.relation);
+      claimed.add(key);
       inputs.push({ citing, cited: node, relation: field.relation, provenance: "asserted" });
     }
   }
 
   if (rejected.length > 0 || inputs.length === 0) {
-    return { written: [], rejected };
+    return { written: [], restated: [], rejected };
   }
 
+  const alreadyStored = storedRelationRowKeys(db, citing);
   const { written } = writeMemoryEdges(db, inputs, nowEpoch, {
-    eligibleForRelation: eligiblePairKeys,
+    eligibleForRelation: "unrestricted",
   });
-  return { written, rejected: [] };
+
+  const added: MemoryEdge[] = [];
+  const restated: MemoryEdge[] = [];
+  for (const edge of written) {
+    const key = relationRowKey(citing, edge.cited, edge.relation);
+    (alreadyStored.has(key) ? restated : added).push(edge);
+  }
+  return { written: added, restated, rejected: [] };
+}
+
+export interface RetractTurnRelationsResult {
+  deleted: MemoryEdge[];
+  /** Same all-or-nothing contract as the attach path: non-empty means nothing was deleted. */
+  rejected: TurnRelationRejection[];
+}
+
+/**
+ * Edge-mechanism-revision D3 (ticket 02): remove one turn's relation,
+ * addressed by (pair, relation) — the corrective half of D2's additive write.
+ * A relation is never overwritten, so a wrong one is retracted and the right
+ * one written: two auditable acts instead of a silent replacement. Both
+ * writers have the same power here ([S15069/T1124]) — the main agent may
+ * retract what settlement judged and vice versa, because a false assertion
+ * must not outlive its refutation on account of who filed it.
+ *
+ * Existence is checked BEFORE anything is deleted, so a call naming one live
+ * relation and one that was never there deletes neither and reports the
+ * second by name (`no-such-edge`). A caller told only "0 deleted" cannot tell
+ * "already gone" from "wrong address", and a model given that answer guesses.
+ *
+ * Retracting a pair's last relation leaves the pair with NO row (the
+ * primitive's own rule): it is not downgraded to a bare row, since the
+ * retraction did not claim the citation still exists. A later prose write
+ * whose body still names the target puts the bare row back.
+ */
+export function retractTurnRelations(
+  db: Database,
+  citingTurnId: number,
+  fields: readonly TurnRelationFieldInput[],
+): RetractTurnRelationsResult {
+  const citing: CitingNode = { kind: "turn", id: citingTurnId };
+
+  const rejected: TurnRelationRejection[] = [];
+  const targets: RetractEdgeInput[] = [];
+  const addressed = new Set<string>();
+  const stored = storedRelationRowKeys(db, citing);
+
+  for (const field of fields) {
+    for (const raw of field.targets) {
+      const node = resolveRelationTargetNode(db, raw);
+      if (typeof node === "string") {
+        rejected.push({ relation: field.relation, raw, reason: node });
+        continue;
+      }
+      const key = relationRowKey(citing, node, field.relation);
+      if (!stored.has(key)) {
+        rejected.push({ relation: field.relation, raw, reason: "no-such-edge" });
+        continue;
+      }
+      if (addressed.has(key)) {
+        continue;
+      }
+      addressed.add(key);
+      targets.push({ citing, cited: node, relation: field.relation });
+    }
+  }
+
+  if (rejected.length > 0 || targets.length === 0) {
+    return { deleted: [], rejected };
+  }
+
+  const { deleted } = retractMemoryEdges(db, targets);
+  return { deleted, rejected: [] };
 }
 
 /**

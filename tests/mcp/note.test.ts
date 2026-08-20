@@ -140,6 +140,8 @@ describe("note tool", () => {
     // `replace`/`regrade`/`status`/`cites` are gone (spec D5a, E1). ticket 01
     // (ADR-0003) removed `grade`. ticket 09 (edge-ownership-impl) retired
     // `session` from this schema outright — `turn` is the only address left.
+    // ticket 02 (edge-mechanism-revision D3) added the seven `retract…`
+    // mirrors, one per relation.
     expect(Object.keys(noteInputSchema.shape)).toEqual([
       "turn",
       "title",
@@ -156,6 +158,13 @@ describe("note tool", () => {
       "override",
       "encodes",
       "dependsOn",
+      "retractEvidenceFor",
+      "retractEvidenceAgainst",
+      "retractGroundedOn",
+      "retractRefines",
+      "retractOverride",
+      "retractEncodes",
+      "retractDependsOn",
       "mode",
     ]);
     expect(note.rideTurnId).toBe(rideTurnId);
@@ -1173,7 +1182,7 @@ describe("note tool citations (spec C6)", () => {
   });
 });
 
-describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket 01)", () => {
+describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; prose decoupled by ticket 02)", () => {
   let db: Database;
   let sessionId: number;
   let earlierTurnId: number;
@@ -1279,11 +1288,11 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket
     expect(byTarget.get(anotherEarlierTurnId)).toBe("depends-on");
   });
 
-  // Requirement 2: a relation naming a turn the body does not cite is
-  // rejected — the whole call fails, nothing at all is written. Both turns
-  // are decision-phase so the phase gate passes and this test isolates the
-  // not-cited rejection specifically.
-  test("rejects a relation naming a turn the body does not cite (requirement 2)", () => {
+  // Ticket 02 (edge-mechanism-revision D1), the REVERSE of what spec C7 used
+  // to assert: a body that names no address at all still carries its
+  // relations. This is the acceptance criterion "正文完全不含目标地址时关系
+  // 照常写入" — the old contract failed exactly this call with `not-cited`.
+  test("a body naming no address at all still attaches the relation (C7's reverse)", () => {
     setType(targetTurnId, ["correction"]);
     setType(anotherEarlierTurnId, ["design"]);
 
@@ -1291,25 +1300,27 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket
       db,
       {
         turn: `S${sessionId}/T3`,
-        title: "correction+routing: mentions one, claims another",
-        content: `Mentions [S${sessionId}/T1].`,
+        title: "correction+routing: reverses an earlier call",
+        content: "Plain prose, no bracketed address anywhere.",
         override: [`S${sessionId}/T2`],
       },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
-    expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain("not cited");
-    expect(isNoteSuccess(result)).toBe(false);
-    // The whole transaction rolled back — not even the note itself landed.
-    expect(getShadowNote(db, targetTurnId)).toBeNull();
-    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(resultText(result)).toContain("Attached 1 relation(s).");
+    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.cited).toEqual({ kind: "turn", id: anotherEarlierTurnId });
+    expect(edges[0]?.relation).toBe("override");
+    // No "not cited" rejection survives anywhere on this surface.
+    expect(resultText(result)).not.toContain("not cited");
   });
 
-  // Requirement 3: the same target under two relation fields is rejected.
-  // The citing turn is dual-typed (evidence + decision) to satisfy BOTH
-  // evidenceFor's and override's source requirement at once.
-  test("rejects the same target claimed by two relation fields (requirement 3)", () => {
+  // Ticket 02 (D2, acceptance criterion 3): the same pair carries two
+  // relations. The citing turn is dual-typed (evidence + decision) so it
+  // satisfies BOTH evidenceFor's source requirement and override's.
+  test("two relation fields naming the SAME target both land, as two coexisting rows", () => {
     setType(targetTurnId, ["measure", "correction"]);
     setType(earlierTurnId, ["design"]);
 
@@ -1317,41 +1328,123 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket
       db,
       {
         turn: `S${sessionId}/T3`,
-        title: "measure+correction: conflicting claims",
-        content: `Cites [S${sessionId}/T1].`,
+        title: "measure+correction: two claims about one predecessor",
+        content: "Tested it, then overturned it.",
         evidenceFor: [`S${sessionId}/T1`],
         override: [`S${sessionId}/T1`],
       },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
-    expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain("already claimed by a different relation field");
-    expect(getShadowNote(db, targetTurnId)).toBeNull();
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(resultText(result)).toContain("Attached 2 relation(s).");
+    expect(resultText(result)).not.toContain("already claimed by a different relation field");
+    const relations = getOutgoingEdges(db, { kind: "turn", id: targetTurnId })
+      .filter((edge) => edge.cited.id === earlierTurnId)
+      .map((edge) => edge.relation)
+      .sort();
+    expect(relations).toEqual(["evidence-for", "override"]);
   });
 
-  test("a relation field with no citation-bearing field in the same call is rejected, atomically", () => {
+  // The same criterion reached the other way — two separate calls, which is
+  // how a real writer discovers the second relation later.
+  test("a second relation on the same pair, written by a later call, coexists with the first", () => {
+    setType(targetTurnId, ["implement", "correction"]);
     setType(earlierTurnId, ["design"]);
+
     noteTool(
       db,
-      { turn: `S${sessionId}/T3`, title: "design+routing: first pass", content: "c" },
-      { now: () => 800, env: {}, eraCutoffEpoch: 1 },
+      {
+        turn: `S${sessionId}/T3`,
+        title: "implement+correction: ships the decision it also revised",
+        content: "First pass.",
+        encodes: [`S${sessionId}/T1`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    const second = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
     );
 
-    // This second call touches only `type` — no title/content/insight, so
-    // there is no post-state for a relation to be eligible against. `type`
-    // here also happens to be decision-phase, so this isolates the
-    // "no citation-bearing field" rejection from the phase gate.
+    expect(isNoteSuccess(second)).toBe(true);
+    expect(resultText(second)).toContain("Attached 1 relation(s).");
+    const relations = getOutgoingEdges(db, { kind: "turn", id: targetTurnId })
+      .map((edge) => edge.relation)
+      .sort();
+    expect(relations).toEqual(["encodes", "override"]);
+  });
+
+  // Ticket 02: a relation field is now a complete call on its own — the
+  // former "requires a citation-bearing field in the same call" rejection is
+  // gone, not merely satisfiable another way.
+  test("a call carrying nothing but a relation field attaches the edge and writes no prose", () => {
+    setType(earlierTurnId, ["design"]);
+    setType(targetTurnId, ["correction"]);
+
     const result = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, type: ["correction"], override: [`S${sessionId}/T1`] },
+      { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(resultText(result)).toContain("Attached 1 relation(s).");
+    expect(resultText(result)).not.toContain("also touch a");
+    // No note was created by an edge-only call.
+    expect(getShadowNote(db, targetTurnId)).toBeNull();
+    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.relation).toBe("override");
+    expect(edges[0]?.provenance).toBe("asserted");
+  });
+
+  test("re-sending the same relation is reported as already present, not as new work", () => {
+    setType(earlierTurnId, ["design"]);
+    setType(targetTurnId, ["correction"]);
+
+    noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    const again = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(again)).toBe(true);
+    expect(resultText(again)).toContain("1 relation(s) already present, nothing added.");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(1);
+  });
+
+  test("a relation naming the citing turn itself is rejected by name", () => {
+    setType(targetTurnId, ["correction", "design"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T3`] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
     expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain("also touch a");
-    // The type write did not land either — the whole call rolled back.
-    expect(getTurnById(db, targetTurnId)?.type).toEqual([]);
+    expect(resultText(result)).toContain(`override "S${sessionId}/T3"`);
+    expect(resultText(result)).toContain("cannot cite itself");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  test("a call carrying no field and no edge parameter still names what it needs", () => {
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3` },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("a relation field");
+    expect(resultText(result)).toContain("retract");
   });
 
   // ticket 09 (edge-ownership-impl): `session` is retired from `note`
@@ -1663,6 +1756,288 @@ describe("note tool relation attach (spec C1/C5/C7, ticket 07; phase gate ticket
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain("segment address");
     expect(resultText(result)).toContain("turn-only");
+  });
+});
+
+// Ticket 02 (edge-mechanism-revision D3): the retraction mirrors —
+// `retract<Relation>`, address lists, same shape as the relation fields they
+// undo. A relation is never overwritten, so this is the only way a wrong one
+// leaves the graph.
+describe("note tool relation retraction (edge-mechanism-revision D3, ticket 02)", () => {
+  let db: Database;
+  let sessionId: number;
+  let earlierTurnId: number;
+  let targetTurnId: number;
+
+  function setType(turnId: number, types: readonly string[]): void {
+    db.query<unknown, [string, number]>("UPDATE turns SET type = ? WHERE id = ?").run(
+      JSON.stringify(types),
+      turnId,
+    );
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    sessionId = upsertSession(db, {
+      contentSessionId: "note-retraction-session",
+      project: "claude-mnemo",
+      title: "Note retractions",
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 110,
+      completedAtEpoch: null,
+    }).id;
+
+    const insertTurn = db.query<{ id: number }, [number, number, string, number]>(
+      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
+    );
+    earlierTurnId = insertTurn.get(sessionId, 1, "First earlier turn", 100)!.id;
+    targetTurnId = insertTurn.get(sessionId, 3, "The turn being noted", 110)!.id;
+    setType(earlierTurnId, ["design"]);
+    setType(targetTurnId, ["measure", "correction"]);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function relationsOn(turnId: number): Array<string | null> {
+    return getOutgoingEdges(db, { kind: "turn", id: turnId })
+      .map((edge) => edge.relation)
+      .sort();
+  }
+
+  test("retracts exactly the addressed relation, leaving the pair's other relation standing", () => {
+    noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        evidenceFor: [`S${sessionId}/T1`],
+        override: [`S${sessionId}/T1`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(relationsOn(targetTurnId)).toEqual(["evidence-for", "override"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, retractOverride: [`S${sessionId}/T1`] },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(resultText(result)).toContain("Retracted 1 relation(s).");
+    expect(relationsOn(targetTurnId)).toEqual(["evidence-for"]);
+  });
+
+  test("a retraction naming a relation this turn does not carry is rejected by name, and deletes nothing", () => {
+    noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    // One live relation and one that was never written, in the same call:
+    // all-or-nothing, so the live one survives too.
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        retractOverride: [`S${sessionId}/T1`],
+        retractEncodes: [`S${sessionId}/T1`],
+      },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("retraction field rejected");
+    expect(resultText(result)).toContain(`encodes "S${sessionId}/T1"`);
+    expect(resultText(result)).toContain("not a relation this turn currently carries");
+    expect(relationsOn(targetTurnId)).toEqual(["override"]);
+  });
+
+  test("retract plus attach in one call is how a wrong relation is corrected", () => {
+    noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        retractOverride: [`S${sessionId}/T1`],
+        refines: [`S${sessionId}/T1`],
+      },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(resultText(result)).toContain("Retracted 1 relation(s).");
+    expect(resultText(result)).toContain("Attached 1 relation(s).");
+    expect(relationsOn(targetTurnId)).toEqual(["refines"]);
+  });
+
+  test("a retraction addressed at another session's turn needs the crossSession confirmation", () => {
+    noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    const otherSessionId = upsertSession(db, {
+      contentSessionId: "note-retraction-other",
+      project: "claude-mnemo",
+      title: "Another session",
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 110,
+      completedAtEpoch: null,
+    }).id;
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, retractOverride: [`S${sessionId}/T1`] },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1, callerSessionId: otherSessionId },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("crossSession: true");
+    expect(relationsOn(targetTurnId)).toEqual(["override"]);
+  });
+});
+
+// Ticket 02 (edge-mechanism-revision D1, spec user story 17 / [S15069/T1124]):
+// an edge write is gated on the CITING turn — the turn whose record grows or
+// loses an edge — under the existing read-grant rules. The CITED turn gets no
+// read check at all, which is the ruling's other half.
+describe("note tool edge writes go through the citing turn's write gate (ticket 02)", () => {
+  let db: Database;
+  let sessionA: number;
+  let sessionB: number;
+  let citingTurnId: number;
+
+  function insertTurn(sessionId: number, promptNumber: number): number {
+    return db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, ?, 'extracted', 'p', 100) RETURNING id`,
+      )
+      .get(sessionId, promptNumber)!.id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionA = upsertSession(db, {
+      contentSessionId: "edge-gate-a",
+      project: "/tmp/edge-gate",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+    sessionB = upsertSession(db, {
+      contentSessionId: "edge-gate-b",
+      project: "/tmp/edge-gate",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+    insertTurn(sessionA, 1);
+    citingTurnId = insertTurn(sessionA, 2);
+    // Session A owns both turns' `type` — the field the gate judges an edge
+    // write by, and the field every note write stamps.
+    noteTool(db, { turn: `S${sessionA}/T1`, type: ["design"] }, { callerSessionId: sessionA });
+    noteTool(
+      db,
+      { turn: `S${sessionA}/T2`, type: ["correction"] },
+      { callerSessionId: sessionA },
+    );
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("a pure relation call on a turn another writer owns, never read, is refused", () => {
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionA}/T2`,
+        override: [`S${sessionA}/T1`],
+        crossSession: true,
+      },
+      { callerSessionId: sessionB },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("has not been read this session");
+    expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+  });
+
+  test("the same call lands once the caller has read the citing turn — and the CITED turn is never read at all", () => {
+    recallMemory(db, { id: `S${sessionA}/T2`, readerId: sessionWriterId(sessionB) });
+
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionA}/T2`,
+        override: [`S${sessionA}/T1`],
+        crossSession: true,
+      },
+      { callerSessionId: sessionB },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(resultText(result)).toContain("Attached 1 relation(s).");
+    expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toHaveLength(1);
+  });
+
+  test("a pure retraction call is gated identically", () => {
+    // Session A writes the edge it owns.
+    noteTool(
+      db,
+      { turn: `S${sessionA}/T2`, override: [`S${sessionA}/T1`] },
+      { callerSessionId: sessionA },
+    );
+
+    const refused = noteTool(
+      db,
+      {
+        turn: `S${sessionA}/T2`,
+        retractOverride: [`S${sessionA}/T1`],
+        crossSession: true,
+      },
+      { callerSessionId: sessionB },
+    );
+    expect(resultText(refused)).toStartWith("Parameter error:");
+    expect(resultText(refused)).toContain("has not been read this session");
+    expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toHaveLength(1);
+
+    // Read it, and the retraction lands — both writers hold the same power
+    // over an edge, whoever asserted it ([S15069/T1124]).
+    recallMemory(db, { id: `S${sessionA}/T2`, readerId: sessionWriterId(sessionB) });
+    const retracted = noteTool(
+      db,
+      {
+        turn: `S${sessionA}/T2`,
+        retractOverride: [`S${sessionA}/T1`],
+        crossSession: true,
+      },
+      { callerSessionId: sessionB },
+    );
+    expect(isNoteSuccess(retracted)).toBe(true);
+    expect(resultText(retracted)).toContain("Retracted 1 relation(s).");
+    expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
   });
 });
 

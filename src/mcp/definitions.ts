@@ -87,6 +87,14 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // softened to "used" or "built on". A paraphrase is not a cheaper version
   // of this text, it is the failure mode.
   //
+  // ticket 02 (edge-mechanism-revision D1/D3): the C7 half of that — "an
+  // uncited target rejects the call" — is RETIRED from this text along with
+  // the check itself. What replaces it is the opposite fact, which a caller
+  // now has to be told out loud or it will keep writing citations for a
+  // machine that stopped reading them: prose and edges are independent, a
+  // pair may carry several relations, and a wrong one is retracted rather
+  // than overwritten.
+  //
   // ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): `session`
   // retired from this call outright — session has no main-agent writer any
   // more (three layers, three writers: turn/segment stay the main agent's,
@@ -101,14 +109,15 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // the Memory Rubric alone) and this was the one piece of judgment still
   // sitting on the call-level description rather than the rubric. What
   // remains here is the call-level POINTER plus the FORMAT facts a rubric
-  // cannot state (turn-only, an uncited target rejects the call) — the
+  // cannot state (turn-only address lists; ticket 02 replaced the second of
+  // those, "an uncited target rejects the call", with its retirement) — the
   // single-home grep guard (tests/shared/memory-rubric.test.ts) asserts the
   // judgment prose itself appears nowhere on this surface.
   note:
     "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written — never just to write one turn's note early.\n" +
     "skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\n" +
     "Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\n" +
-    "Relations — evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn: turn-only address lists; an uncited target rejects the call. Which relation, if any — the judgment — lives in the Memory Rubric (SessionStart injection); this call only enforces the address/citation shape.\n" +
+    "Relations — evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn: turn-only address lists, declared independently of the prose (the body need not name the target, and a call carrying nothing but relations is valid). A pair may hold several relations at once; each `retract<Relation>` mirror deletes one. Which relation, if any — the judgment — lives in the Memory Rubric (SessionStart injection); this call only enforces address shape, phase legality, and your own read grant on the turn being written.\n" +
     "Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
@@ -361,26 +370,31 @@ export const noteInputShape = {
       "true to confirm a write addressed at a turn outside the caller's own session; required whenever the address's session differs from the caller's, refused otherwise.",
     ),
 
-  // ticket 07 (spec C1/C5/C7): one named field per relation, not a generic
+  // ticket 07 (spec C1): one named field per relation, not a generic
   // `{turn, relation}` list — an illegal relation is structurally
   // unrepresentable. Targets are address tokens, `S<session>/T<prompt>` or
-  // `E<segment>` (brackets optional), and each MUST already be named by
-  // this same call's title/content/insight post-state — mcp/note.ts rejects
-  // the whole call otherwise, it never silently drops one. No `mode`: unlike
-  // title/tags/type there is no PRIOR value at this layer to write over or
-  // edit — a relation write only ever ADDS a row (edge-mechanism-revision
-  // D2), and removing one is a retraction, not a mode.
+  // `E<segment>` (brackets optional). No `mode`: unlike title/tags/type there
+  // is no PRIOR value at this layer to write over or edit — a relation write
+  // only ever ADDS a row (edge-mechanism-revision D2), and removing one is a
+  // retraction, not a mode.
+  //
+  // ticket 02 (edge-mechanism-revision D1): the co-occurrence requirement
+  // these describes used to carry — "each target MUST already be named by
+  // this same call's title/content/insight post-state" — is deleted, along
+  // with the check. Each describe now states only the phase pair it needs
+  // and where the judgment lives; nothing on this surface asks the prose for
+  // permission any more.
   evidenceFor: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses this write's own body tests FOR its claim — see the tool description's relation procedure. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target.",
+      "Addresses whose claim this turn tests FOR. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target.",
     ),
   evidenceAgainst: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses this write's own body tests AGAINST its claim — see the tool description's relation procedure. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target.",
+      "Addresses whose claim this turn tests AGAINST. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target.",
     ),
   // ticket 01 (turn-edge-mechanism spec, [S15069/T935] mid-flight amendment):
   // `groundedOn` — a decision rests on an earlier finding, evidence-phase OR
@@ -391,7 +405,7 @@ export const noteInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Addresses the earlier finding this write's own decision rests on — counterfactual: if that finding were false, this decision would fall. Decision-phase (design/discuss/correction) source; evidence-phase (research/measure) OR delivery-phase (implement/refactor/fix/delegate/review/ops) target. Recorded, never scored.",
+      "Addresses the earlier finding this turn's decision rests on — counterfactual: if that finding were false, this decision would fall. Decision-phase (design/discuss/correction) source; evidence-phase (research/measure) OR delivery-phase (implement/refactor/fix/delegate/review/ops) target. Recorded, never scored.",
     ),
   // ticket 01 (turn-edge-mechanism spec): `refines`/`override` replace the
   // retired `supersedes` — a decision-phase turn's relation to a
@@ -411,13 +425,13 @@ export const noteInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Addresses a predecessor decision this write's own body continues or partially revises — decision-phase turns only (design/discuss/correction) on both ends; the predecessor is not wholly wrong. Judgment (refines vs. override) lives in the Memory Rubric.",
+      "Addresses a predecessor decision this turn continues or partially revises — decision-phase turns only (design/discuss/correction) on both ends; the predecessor is not wholly wrong. Judgment (refines vs. override) lives in the Memory Rubric.",
     ),
   override: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses a predecessor decision this write's own body overturns WHOLE — decision-phase turns only (design/discuss/correction) on both ends. Judgment (refines vs. override) lives in the Memory Rubric.",
+      "Addresses a predecessor decision this turn overturns WHOLE — decision-phase turns only (design/discuss/correction) on both ends. Judgment (refines vs. override) lives in the Memory Rubric.",
     ),
   // ticket 01: `encodes` — a delivery-phase turn (spec/ADR/ticket/commit/
   // release) naming the decision(s) it carries. Ticket 11: the minimal-set
@@ -428,13 +442,65 @@ export const noteInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Addresses the decision(s) this write's own artifact (spec/ADR/ticket/commit/release) carries — a delivery-phase turn (implement/refactor/fix/delegate/review/ops) citing a decision-phase (design/discuss/correction) target. Self-asserted, not mechanically checked; which decisions to name (the minimal set) is judgment — see the Memory Rubric.",
+      "Addresses the decision(s) this turn's artifact (spec/ADR/ticket/commit/release) carries — a delivery-phase turn (implement/refactor/fix/delegate/review/ops) citing a decision-phase (design/discuss/correction) target. Self-asserted, not mechanically checked; which decisions to name (the minimal set) is judgment — see the Memory Rubric.",
     ),
   dependsOn: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses this write's own conclusion depends on — see the tool description's relation procedure. Turn-only; requires a delivery-phase (implement/refactor/fix/delegate/review/ops) source and target.",
+      "Addresses this turn's own conclusion depends on. Turn-only; requires a delivery-phase (implement/refactor/fix/delegate/review/ops) source and target.",
+    ),
+
+  // ticket 02 (edge-mechanism-revision D3): the seven retraction mirrors. A
+  // relation is never overwritten (D2 makes a relation write purely
+  // additive), so correcting a wrong one is two auditable acts — retract,
+  // then write the right relation — and BOTH writers hold the same power
+  // over either's edges ([S15069/T1124]: a false assertion must not outlive
+  // its refutation on account of who filed it). The spelling is mechanical
+  // (`retract` + the relation parameter's own name), pinned against
+  // `mcp/note.ts`'s derived `RETRACTION_FIELD_ENTRIES` by a guard test, so
+  // the two halves of the vocabulary cannot drift apart.
+  retractEvidenceFor: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose evidence-for edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+    ),
+  retractEvidenceAgainst: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose evidence-against edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+    ),
+  retractGroundedOn: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose grounded-on edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+    ),
+  retractRefines: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose refines edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+    ),
+  retractOverride: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+    ),
+  retractEncodes: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose encodes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+    ),
+  retractDependsOn: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose depends-on edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
     ),
   // ticket 01 (turn-edge-mechanism spec): `supersedes` retired from the NOTE
   // TOOL's own surface — `noteInputSchema` below `.omit()`s this key, so a

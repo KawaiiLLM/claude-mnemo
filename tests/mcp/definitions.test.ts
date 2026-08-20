@@ -11,7 +11,7 @@ import {
   settlementNoteInputShape,
   workerRecallInputShape,
 } from "../../src/mcp/definitions";
-import { RELATION_FIELD_ENTRIES } from "../../src/mcp/note";
+import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../../src/mcp/note";
 import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import { estimateTokens } from "../../src/utils/token-estimate";
 import { z } from "zod";
@@ -186,7 +186,15 @@ describe("tool surface", () => {
     // stays here is the call-level pointer plus the format facts a rubric
     // cannot state.
     expect(note).toContain("turn-only address lists");
-    expect(note).toContain("an uncited target rejects the call");
+    // ticket 02 (edge-mechanism-revision D1/D3): the C7 co-occurrence fact
+    // this line used to state ("an uncited target rejects the call") is
+    // retired along with the check — the description now teaches the
+    // opposite, plus multi-relation and the retraction mirrors.
+    expect(note).not.toContain("an uncited target rejects the call");
+    expect(note).toContain("declared independently of the prose");
+    expect(note).toContain("a call carrying nothing but relations is valid");
+    expect(note).toContain("A pair may hold several relations at once");
+    expect(note).toContain("retract<Relation>");
     expect(note.toLowerCase()).toContain("memory rubric");
     expect(note).not.toContain(
       "If the cited turn were wrong, would the citing turn's conclusion also be wrong?",
@@ -413,6 +421,37 @@ describe("tool surface", () => {
     expect(fieldNames.length).toBe(EDGE_RELATIONS.length);
     for (const key of fieldNames) {
       expect(key in noteInputSchema.shape, `${key} should be a schema parameter`).toBe(true);
+    }
+  });
+
+  // ticket 02 (edge-mechanism-revision D3): the retraction half of the same
+  // vocabulary. `mcp/note.ts` DERIVES its parameter names from the relation
+  // ones (`retract` + the capitalised field name); this schema declares them
+  // by hand, one describe each, so the guard pins that the two agree — a
+  // relation added to `EDGE_RELATIONS` without its retraction parameter
+  // declared here fails right here.
+  it("RETRACTION_FIELD_ENTRIES mirrors the relation fields one for one, and every name is a real schema parameter", () => {
+    const relations = RETRACTION_FIELD_ENTRIES.map(([, relation]) => relation).sort();
+    expect(relations).toEqual([...EDGE_RELATIONS].sort());
+
+    const pairs = RELATION_FIELD_ENTRIES.map(([key, relation]) => [relation, key] as const);
+    for (const [key, relation] of RETRACTION_FIELD_ENTRIES) {
+      const relationField = pairs.find(([r]) => r === relation)![1];
+      expect(key).toBe(
+        `retract${relationField.charAt(0).toUpperCase()}${relationField.slice(1)}`,
+      );
+      expect(key in noteInputSchema.shape, `${key} should be a schema parameter`).toBe(true);
+    }
+  });
+
+  // ticket 02: settlement's own surface does NOT carry the retraction
+  // parameters yet — ticket 04 wires its facade to the same primitive. A
+  // parameter accepted on the wire and ignored by the handler would be worse
+  // than one that rejects, so this pins the gap deliberately rather than
+  // leaving it to be discovered as a silent drop.
+  it("the settlement note shape does not yet declare the retraction mirrors (ticket 04's)", () => {
+    for (const [key] of RETRACTION_FIELD_ENTRIES) {
+      expect(key in settlementNoteInputShape).toBe(false);
     }
   });
 

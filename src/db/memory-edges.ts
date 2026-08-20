@@ -249,11 +249,15 @@ export interface WriteMemoryEdgesOptions {
    * own tests go red) instead of costing the invariant quietly.
    *
    * `"unrestricted"` exists so an exempt path says so out loud rather than
-   * inheriting an exemption by omission. Nothing in production uses it — the
-   * two gated callers pass real sets (`db/citations.ts`'s body post-state,
-   * the settlement write-back's transaction pre-state) and the two bare-pair
-   * callers write no relations at all — so its only users are tests
-   * exercising the upsert itself.
+   * inheriting an exemption by omission. Edge-mechanism-revision D1 (ticket
+   * 02) made it the MAIN AGENT's answer: `db/citations.ts`'s
+   * `attachTurnRelations` no longer derives a set from the citing turn's
+   * prose (the retired C7 co-occurrence rule) and instead answers for
+   * eligibility itself, through address resolution, self-loop refusal, phase
+   * legality and the citing turn's write gate. The settlement write-back
+   * still passes a real set (its transaction pre-state) until ticket 04
+   * retires that fence too, and the bare-pair callers write no relations at
+   * all.
    */
   eligibleForRelation?: ReadonlySet<string> | "unrestricted";
 }
