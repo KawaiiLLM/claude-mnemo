@@ -35,10 +35,11 @@ import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
  * The settlement turn-write facade's DECISION function,
- * `evaluateSettlementTurnWrite` (spec G6/G7, D5/D5a, C7/C14; staged by spec
- * A7). Split into a pure decision function called twice — once with
- * `apply: false` (a dry run, exercised by the "stage vs apply" describe
- * block below) and once with `apply: true` (everywhere else in this file).
+ * `evaluateSettlementTurnWrite` (spec G6/G7, D5/D5a, C7/C14). Ticket 11 of
+ * edge-mechanism-revision deleted the staging engine and with it the
+ * `apply: false`/`true` split — the function evaluates and writes in one
+ * pass now, inside the caller's own transaction, so every test here
+ * exercises the one real path.
  *
  * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"): duty
  * 2 (turn prose reconstruction) retired outright. The old
@@ -307,82 +308,6 @@ describe("the retired topic: tag namespace is refused, not silently revived (tic
 // Stage vs apply (ticket 10b, spec A7 requirements 1/2): a dry run performs
 // no write and still reports the same decision a real write would.
 // ---------------------------------------------------------------------------
-
-describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A7 requirement 1/2)", () => {
-  test("a review dry run reports the write it would make without touching the row", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
-
-    const evaluation = evaluateSettlementTurnWrite(
-      db,
-      context,
-      { turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["widgets"] },
-      NOW,
-      { apply: false },
-    );
-
-    expect(evaluation.ok).toBe(true);
-    expect(evaluation.ok && evaluation.outcome.review).toEqual({
-      type: { value: ["design"], landed: true },
-      tags: { value: ["widgets"], landed: true },
-    });
-    // The load-bearing assertion: nothing landed.
-    const turn = getTurnById(db, t1)!;
-    expect(turn.type).toEqual([]);
-    expect(turn.tags).toEqual([]);
-  });
-
-  test("a relation dry run reports what would be attached without writing an edge", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    // Ticket 08: `dependsOn` is phase-gated (delivery -> delivery) — both
-    // ends need a delivery-phase type for the relation to clear the
-    // legality check.
-    updateTurnById(db, t1, { type: ["implement"] });
-    updateTurnById(db, t2, { type: ["implement"] });
-    const job = claimWindow(sessionDbId, 1, 2);
-
-    const evaluation = evaluateSettlementTurnWrite(
-      db,
-      // Ticket 07 (this batch): the citing turn must be in range for ANY
-      // turn-addressed call, a relation-only one included.
-      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
-      NOW,
-      { apply: false },
-    );
-
-    expect(evaluation.ok).toBe(true);
-    expect(evaluation.ok && evaluation.outcome.relations).toEqual({
-      written: 1,
-      restated: 0,
-      retracted: 0,
-    });
-    // The load-bearing assertion: nothing reached the edge table.
-    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
-  });
-
-  test("a dry run rejects exactly what a real write would reject — full validation, not a shape check", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const context = baseContext(job, { reviewableTurnIds: new Set() });
-
-    const evaluation = evaluateSettlementTurnWrite(
-      db,
-      context,
-      { turn: `S${sessionDbId}/T1`, type: ["design"] },
-      NOW,
-      { apply: false },
-    );
-
-    expect(evaluation.ok).toBe(false);
-    expect(!evaluation.ok && evaluation.message).toContain("reviewable window");
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Ticket 04 (edge-mechanism-revision D6): duty 2 is REVOKED — turn prose is
@@ -1064,7 +989,6 @@ describe("the reviewable-window check is unconditional (ticket 07, spec D6 渲�
       baseContext(job),
       { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
       NOW,
-      { apply: false },
     );
 
     expect(evaluation.ok).toBe(false);
@@ -1372,21 +1296,6 @@ describe("session-addressed narrative writes (ticket 09)", () => {
     expect(!result.ok && result.message).toContain("exactly one of turn or session");
   });
 
-  test("apply:false stages the receipt without writing — the mirror of the turn-write dry-run behaviour", () => {
-    const sessionDbId = seedSession();
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    const dryRun = evaluateSettlementTurnWrite(
-      db,
-      baseContext(job),
-      { session: `S${sessionDbId}`, title: "would-be title", mode: { title: "write" } },
-      NOW,
-      { apply: false },
-    );
-
-    expect(dryRun.ok).toBe(true);
-    expect(getSession(db, sessionDbId)?.title).toBe("settlement turn facade fixture");
-  });
 });
 
 // ---------------------------------------------------------------------------

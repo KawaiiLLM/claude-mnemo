@@ -101,8 +101,14 @@ type TurnModeField = (typeof TURN_MODE_FIELDS)[number];
  * stamping one would tell settlement's yield gate (which reads exactly this
  * stamp as "the agent has fresher knowledge of this turn") that a type
  * correction landed when none did.
+ *
+ * TICKET 11 (edge-mechanism-revision): EXPORTED, and the settlement facade
+ * imports it rather than hardcoding a second `"type"` of its own. The two
+ * surfaces used to state the same value twice with a comment on each side
+ * promising they matched — a promise nothing checked. One constant makes the
+ * divergence unrepresentable instead of merely discouraged.
  */
-const EDGE_WRITE_GATE_FIELD = "type";
+export const EDGE_WRITE_GATE_FIELD = "type";
 
 function hasText(value: string | null | undefined): boolean {
   return typeof value === "string" && value.trim() !== "";
@@ -550,6 +556,43 @@ export function formatRelationRejections(
     (entry) => `${entry.relation} "${entry.raw}" ${RELATION_REJECTION_TEXT[entry.reason]}`,
   );
   return `${surface} field rejected: ${lines.join("; ")}.`;
+}
+
+/**
+ * Ticket 11 (edge-mechanism-revision): the retraction receipt, in ONE register
+ * both write surfaces render — this tool and the settlement facade
+ * (`worker/note-settlement-turn-facade.ts`), which imports it rather than
+ * phrasing the same two numbers its own way.
+ *
+ * `restored` is ticket 10's own outcome and the reason this line needed a
+ * second number at all: retracting a pair's last relation puts the BARE row
+ * back when the citing prose still names the target, so "the classification is
+ * gone but the citation stands" is a third outcome distinct from both
+ * "removed" and "nothing happened". Without it on the receipt a writer has to
+ * query the graph to learn whether its own retraction cost the `↳`
+ * pull-through — and one that does not query assumes the worse of the two.
+ *
+ * Returns null when nothing was deleted: a retraction that deleted nothing
+ * cannot have restored anything either (the whole call is refused by name
+ * before any delete — `no-such-edge`), so there is no line to print.
+ *
+ * Takes COUNTS rather than the row arrays, so the settlement facade — whose
+ * outcome type carries numbers, not `MemoryEdge`s — renders the same words
+ * without materialising rows it does not keep.
+ */
+export function formatRetractionReceipt(counts: {
+  retracted: number;
+  restored: number;
+}): string | null {
+  if (counts.retracted === 0) {
+    return null;
+  }
+  return (
+    `Retracted ${counts.retracted} relation(s)` +
+    (counts.restored > 0
+      ? `, ${counts.restored} bare citation(s) restored (the prose still names them).`
+      : ".")
+  );
 }
 
 /**
@@ -1299,8 +1342,17 @@ function handleTurnWrite(
   // receipt says which of the two happened — "attached" for a row this call
   // added, "already present" for one it merely restated. A writer that cannot
   // tell them apart reads its own no-op as new work.
-  if (result.retractions && result.retractions.deleted.length > 0) {
-    parts.push(`Retracted ${result.retractions.deleted.length} relation(s).`);
+  if (result.retractions) {
+    // Ticket 11: one shared register with the settlement facade, and it now
+    // carries ticket 10's restored count — "classification removed, citation
+    // stands" is visible on the receipt instead of only in the graph.
+    const retractionLine = formatRetractionReceipt({
+      retracted: result.retractions.deleted.length,
+      restored: result.retractions.restored.length,
+    });
+    if (retractionLine) {
+      parts.push(retractionLine);
+    }
   }
   if (result.relations) {
     const attached = result.relations.written.length;

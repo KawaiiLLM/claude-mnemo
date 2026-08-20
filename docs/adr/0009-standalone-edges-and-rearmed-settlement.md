@@ -83,10 +83,19 @@ pair exists in any form, and a relation write drops the pair's bare row, whose e
 
 Retraction is a **hard delete**, and **both writers hold it over either's edges**
 ([S15069/T1124]: a false assertion must not outlive its refutation on account of who filed it).
-No tombstone — audit rides the existing dump-backup precedent. A mixed call whose addresses
-include one carrying no such edge deletes **nothing** and names the offender. Which relations may
-coexist is judgment, ruled by the rubric's **deletion test**: keep a relation only if removing it
-would lose a fact the others cannot derive; a weaker restatement of a fact already kept goes.
+**No tombstone, and the consequence stated plainly**: a retracted row leaves no trace in the live
+database, so "what did that run retract" is a question the live database **cannot answer** — not
+by a status column, not by a deleted-at stamp, not by a join. The only audit surface is **external**:
+the dump/backup snapshots, diffed across two points in time. A mixed call whose addresses include
+one carrying no such edge deletes **nothing** and names the offender. Which relations may coexist
+is judgment, ruled by the rubric's **deletion test**: keep a relation only if removing it would
+lose a fact the others cannot derive; a weaker restatement of a fact already kept goes.
+
+One live-database consequence is deliberately NOT a tombstone and should not be read as one:
+retracting a pair's **last** relation re-mints the pair's **bare** row when the citing prose still
+names the target (`restoreBareRowsForEmptiedPairs`), so the `↳` pull-through survives. That row
+records that the citation exists, never that a relation was removed — a pair the prose never named
+stays gone.
 
 Rejected alternative: keeping one relation per pair and adding a compound vocabulary word for
 each observed combination — it grows the word list combinatorially and forces a re-judgment of
@@ -119,15 +128,27 @@ writers share one attach path (spec C12's audit distinction), and **nothing down
 two** — a settlement relation is not weaker than an agent's.
 
 **The transition watermark.** Re-arming a 50-turn pass over a database of already-finished turns
-would make a plugin update a token storm. At migration a one-shot single-row table stamps
-`MAX(turns.id)`; every **automatic** planner computes its window from the watermark forward, and
-queued automatic jobs are swept to abandoned (provably complete: any such job was cut from turns
-that already existed, hence ≤ the stamp taken in the same instant). Manual `backfill` is exempt
-**structurally** — the bound applies to non-backfill trigger types only — so pre-watermark turns
-have exactly one settlement channel, and it is the operator's ([S15069/T1124], user story 13).
-The watermark is a **turn-id high-water mark, not an epoch**: a fresh database gets watermark 0,
-which is also production's truth, whereas a wall-clock stamp would wall off every fixture whose
-turns are seeded after schema init.
+would make a plugin update a token storm. At migration the transition records, **per session**, the
+**contiguous finished prefix** that already existed — the floor below which that session's turns are
+excluded from automatic settlement. Every **automatic** planner computes its window from its own
+session's floor forward, and queued automatic jobs are swept to abandoned (provably complete: any
+such job was cut from turns that already existed). Manual `backfill` is exempt **structurally** —
+the bound applies to non-backfill trigger types only — so pre-watermark turns have exactly one
+settlement channel, and it is the operator's ([S15069/T1124], user story 13).
+
+The shape is a **set of per-session floors, not a global high-water id** (repair 09, caef4be —
+the first cut stamped `MAX(turns.id)` and is retired). Each floor is `MIN(unfinished prompt) - 1`
+with a `MAX(prompt)` fallback, stored sparsely (`note_settlement_watermark_floors`; a missing row
+**is** floor 0), alongside the surviving singleton row as the bare one-shot marker, which must
+exist even for a database with zero sessions. A global id-based stamp fails on function, not on
+taste: turns still **in flight** at migration time sit below `MAX(turns.id)`, so a provisional turn
+that finished a minute later could never re-enter automatic settlement at all; symmetrically, a
+single global "below the oldest unfinished id" bound lets one stranded active turn anywhere drag
+the entire corpus back into automatic settlement. The accepted price of contiguity, pinned by
+fixture: **finished turns sitting above an unfinished one re-enter the window** — no single range
+can admit prompt 2 and exclude prompt 3 — and since this build never settled them, they settle
+once. The unfinished predicate matches turn-liveness **verbatim**; narrowing it (e.g. by the
+real-prompt predicate) re-creates the stranding bug for rolled-back rows stuck in `active`.
 
 ## Consequences
 
@@ -162,9 +183,10 @@ Recorded rather than papered over:
   writable and gated on rungs 1–4 only — the same shape ADR-0007 recorded for prose before this
   decision closed it, now narrowed to two fields. Needs its own ticket (the fix is a render
   change, not a gate change).
-- **`commit` metrics count neither prose nor retractions.** A run's reported write count
-  under-reports exactly the two capabilities this decision added, so "what did that settlement
-  pass do" is answerable from the DB but not from the receipt.
+- ~~**`commit` metrics count neither prose nor retractions.**~~ **Closed** by this batch's repair
+  11: the counts split one bucket per verb — prose writes, relations written/restated/retracted,
+  proposals, segments created, reassignments, session narrative — and `create` no longer reports
+  itself as a proposal. The receipt now answers "what did that settlement pass do" on its own.
 - **Scoring is untouched and is NOT final** (spec **D10**). The three scoring changes — an
   out-degree key, the override victim's treatment, and `grounded-on` as a fourth key — plus every
   election weight, wait for a graph worth scoring: they are judged after the edges are actually

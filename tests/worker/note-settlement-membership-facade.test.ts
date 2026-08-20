@@ -366,31 +366,6 @@ describe("propose — never creates a segment row, and is no longer a completion
     expect(proposals[0]!.title).toBe("retry's own (different) title");
   });
 
-  test("apply:false stores nothing and creates no segment", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    const job = claimWindow(sessionDbId, 1, 2);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1, t2]) }),
-      {
-        action: "propose",
-        addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
-        title: "a cluster",
-      },
-      NOW,
-      { apply: false },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(result.ok && result.outcome.proposalId).toBeNull();
-    expect(listRecentSettlementProposals(db, 3)).toEqual([]);
-    expect(
-      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM segments").get()!.count,
-    ).toBe(0);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -540,26 +515,6 @@ describe("reassign — cross-segment, bounded only by existence and status (tick
     expect(getSegmentMemberTurnIds(db, freshlyAttached.id)).toEqual([t1]);
   });
 
-  test("apply:false validates and reports without writing", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const attached = createSegment(db, { title: "target", nowEpoch: NOW });
-    attachSegmentToSession(db, sessionDbId, attached.id, NOW);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${attached.id}` },
-      NOW,
-      { apply: false },
-    );
-
-    expect(result.ok).toBe(true);
-    // The load-bearing assertion: nothing landed.
-    expect(getSegmentMemberTurnIds(db, attached.id)).toEqual([]);
-  });
-
   test("settlementMembershipWriteInputSchema accepts reassign", () => {
     expect(
       settlementMembershipWriteInputSchema.safeParse({
@@ -660,24 +615,6 @@ describe("create — settlement opens a segment (ticket 04)", () => {
     expect(listAttachedSegments(db, sessionDbId)).toEqual([]);
   });
 
-  test("apply:false validates and reports without minting anything", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "create", title: "would-be segment", turns: [`S${sessionDbId}/T1`] },
-      NOW,
-      { apply: false },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(result.ok && result.outcome.create?.segmentId).toBeNull();
-    expect(listAttachedSegments(db, sessionDbId)).toEqual([]);
-  });
-
   test("settlementMembershipWriteInputSchema accepts create and still refuses the retired assign", () => {
     expect(
       settlementMembershipWriteInputSchema.safeParse({
@@ -699,13 +636,16 @@ describe("create — settlement opens a segment (ticket 04)", () => {
 
 describe("renderSettlementMembershipWriteReceipt", () => {
   test("states the address count and that it creates no segment", () => {
-    const text = renderSettlementMembershipWriteReceipt(
-      { proposalId: 3, addressesResolved: 2 },
-      { staged: true },
-    );
+    const text = renderSettlementMembershipWriteReceipt({
+      proposalId: 3,
+      addressesResolved: 2,
+    });
     expect(text).toContain("2 address(es)");
     expect(text).toContain("creates no segment");
-    expect(text).toContain("pending commit");
+    // Ticket 11: with staging deleted there is one landing state, so the
+    // receipt states it plainly — the old "pending commit" register belonged
+    // to a staged write that no longer exists.
+    expect(text).toContain("Landed");
   });
 
   test("a proposal id of null (a dry run) still renders a receipt", () => {

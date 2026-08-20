@@ -35,10 +35,12 @@ import {
   bracketBareTurnReferences,
   completeReadRemedyForTurnField,
   formatRelationRejections,
+  formatRetractionReceipt,
   isValidPredecessorFor,
   parseSessionAddress,
   parseTurnAddress,
   writeOverwritesExistingTurnContent,
+  EDGE_WRITE_GATE_FIELD,
   RELATION_FIELD_ENTRIES,
   RETRACTION_FIELD_ENTRIES,
 } from "../mcp/note";
@@ -86,11 +88,12 @@ import {
  *
  * What is machine-checked on an edge write is exactly what the main agent's
  * surface checks (D1): the CITING turn's own write gate, address existence,
- * phase legality, self-reference. The gate FIELD for an edge write is `type`
- * — CHECKED, never STAMPED — mirroring `mcp/note.ts`'s
- * `EDGE_WRITE_GATE_FIELD`; see that constant's own comment for both halves of
- * the reasoning, and note that a divergence here would fork the two writers'
- * gate semantics, which is precisely what this batch retired.
+ * phase legality, self-reference. The gate FIELD for an edge write is
+ * `mcp/note.ts`'s own `EDGE_WRITE_GATE_FIELD` — CHECKED, never STAMPED — and
+ * as of ticket 11 it is IMPORTED, not mirrored: see that constant's own
+ * comment for both halves of the reasoning. A divergence here would fork the
+ * two writers' gate semantics, which is precisely what this batch retired, so
+ * the fork is now unrepresentable rather than merely discouraged.
  *
  * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"): duty 2
  * — turn prose reconstruction (title/content/insight) — retired outright.
@@ -150,27 +153,20 @@ import {
  * and the write gate already made it read.
  *
  * TICKET 05 (read-write-contract spec, "结算(直写改造)"): staging is UNWIRED.
- * `note-settlement-sdk-query.ts` now calls `evaluateSettlementTurnWrite`
- * directly with `apply: true`, inside its own `runWriteTransaction`, once per
- * tool call — gate check, write, and stamp in the SAME transaction ("检查-写
- * 入原子"), landing immediately with an immediate receipt. `note-settlement-
- * staging.ts` (spec A7's staged-commit engine) still exists and still compiles
- * against this function's `apply: false`/`true` split, but nothing calls it
- * any more; the split itself is kept because `apply: false` remains a genuine
- * dry run any caller could still use, not because anything still stages
- * through it.
+ * `note-settlement-sdk-query.ts` calls `evaluateSettlementTurnWrite` directly,
+ * inside its own `runWriteTransaction`, once per tool call — gate check, write
+ * and stamp in the SAME transaction ("检查-写入原子"), landing immediately with
+ * an immediate receipt.
  *
- * `evaluateSettlementTurnWrite` stays a plain decision function either way —
- * every READ it needs (turn lookup, reference resolution) always runs live
- * against the database; only the WRITES (`updateTurnById`, `upsertShadowNote`,
- * `attachTurnRelations`/`retractTurnRelations`, the write gate's own
- * `stampField`) are conditional on `apply: true`. Ticket 04 made the two edge
- * halves the one place where a dry run is now WEAKER than the real write: both
- * primitives validate and mutate in one indivisible step, so `apply: false`
- * reports the count it would attempt rather than re-implementing their checks
- * a second time. Every rejection a real call can produce still comes from a
+ * TICKET 11 (edge-mechanism-revision): `note-settlement-staging.ts` is DELETED
+ * outright, and with it this function's `apply: false`/`true` split. The dry
+ * run was kept one ticket longer on the theory that it remained a genuine
+ * probe any caller could use — but ticket 04 had already made it a DISHONEST
+ * one: both edge primitives validate and mutate indivisibly, so `apply: false`
+ * reported the count it would ATTEMPT rather than what would land, and no
+ * caller was left to be told the difference. A rejection still comes from a
  * check that runs BEFORE any write in the same call, so a refusal never leaves
- * half a call standing.
+ * half a call standing; that property came from ordering, not from the split.
  *
  * TICKET 08 (edge-ownership-impl, "settlement four-field check-and-
  * correct"): the relation half now consumes THE SAME validator the main
@@ -316,10 +312,6 @@ function collectRelationFields(
   return fields;
 }
 
-function countTargets(fields: readonly TurnRelationFieldInput[]): number {
-  return fields.reduce((total, field) => total + field.targets.length, 0);
-}
-
 /**
  * One reviewed field's own outcome (ticket 05, read-write-contract spec
  * "结算(直写改造)"): `landed` is what the write gate's per-field
@@ -356,6 +348,13 @@ export interface RelationOutcome {
   restated: number;
   /** Rows a `retract…` mirror deleted in this same call (D3). */
   retracted: number;
+  /**
+   * Ticket 10's own outcome, surfaced by ticket 11: BARE rows put back because
+   * the retraction emptied a pair the citing prose still names. A different
+   * fact from `retracted` — the classification is gone, the citation stands —
+   * and the receipt has to be able to say so without a follow-up query.
+   */
+  restored: number;
 }
 
 /**
@@ -409,17 +408,6 @@ export type SettlementTurnWriteEvaluation =
   | { ok: true; outcome: SettlementTurnWriteOutcome }
   | { ok: false; message: string };
 
-export interface EvaluateSettlementTurnWriteOptions {
-  /**
-   * `false` (the default, stage time): every READ still runs, but no
-   * mutating statement does — the caller gets the same receipt a real write
-   * would produce without anything reaching a live table (spec A7
-   * requirement 1/2). `true` (commit time): the identical decision logic
-   * runs again, fresh, and this time its mutations land for real.
-   */
-  apply: boolean;
-}
-
 // A session row has no insight, no facets and no edges — every one of these is
 // a TURN field, and a session-addressed call naming one is told so by name
 // rather than by a generic parse error. Derived for the two edge halves
@@ -457,7 +445,6 @@ function evaluateSettlementSessionWrite(
   rawInput: SettlementTurnWriteInput,
   modeMap: Partial<Record<string, FieldMode>>,
   nowEpoch: number,
-  options: EvaluateSettlementTurnWriteOptions,
 ): SettlementTurnWriteEvaluation {
   const sessionId = parseSessionAddress(rawInput.session!);
   if (sessionId === null) {
@@ -545,19 +532,17 @@ function evaluateSettlementSessionWrite(
     throw error;
   }
 
-  if (options.apply) {
-    updateSessionFields(
-      db,
-      sessionId,
-      {
-        title: resolved.title,
-        content: resolved.content,
-      },
-      nowEpoch,
-    );
-    for (const field of sessionFields) {
-      stampField(db, "session", sessionId, field, sessionWriter, nowEpoch);
-    }
+  updateSessionFields(
+    db,
+    sessionId,
+    {
+      title: resolved.title,
+      content: resolved.content,
+    },
+    nowEpoch,
+  );
+  for (const field of sessionFields) {
+    stampField(db, "session", sessionId, field, sessionWriter, nowEpoch);
   }
 
   const usage: string[] = [];
@@ -584,12 +569,11 @@ function evaluateSettlementSessionWrite(
 }
 
 /**
- * The settlement turn-write facade's whole decision (spec A7's staged split).
- * Every read below runs unconditionally; every write is gated on
- * `options.apply`. Returns a structured `{ ok, ... }` rather than throwing —
- * the caller (staging engine) decides what a failure means at its own layer
- * (a parameter error at stage time, a thrown commit-replay refusal at commit
- * time), which is not this function's business.
+ * The settlement turn-write facade's whole decision. Returns a structured
+ * `{ ok, ... }` rather than throwing — the caller (the direct-write engine)
+ * decides what a failure means at its own layer, which is not this function's
+ * business. Ticket 11 removed the `apply` parameter: there is one form, and it
+ * writes.
  *
  * Ticket 09: `session` (exclusive with `turn`) routes to
  * `evaluateSettlementSessionWrite` above — the rest of this function is
@@ -600,7 +584,6 @@ export function evaluateSettlementTurnWrite(
   context: SettlementTurnFacadeContext,
   rawInput: SettlementTurnWriteInput,
   nowEpoch: number,
-  options: EvaluateSettlementTurnWriteOptions,
 ): SettlementTurnWriteEvaluation {
   // Ticket 07 (spec D12): parsed ONCE, ahead of the address branch and against
   // the FULL field list `mcp/note.ts` parses against — one vocabulary for both
@@ -622,7 +605,7 @@ export function evaluateSettlementTurnWrite(
     if (rawInput.turn !== undefined) {
       return { ok: false, message: "exactly one of turn or session is required, not both." };
     }
-    return evaluateSettlementSessionWrite(db, context, rawInput, modeMap, nowEpoch, options);
+    return evaluateSettlementSessionWrite(db, context, rawInput, modeMap, nowEpoch);
   }
   if (rawInput.turn === undefined) {
     return { ok: false, message: "exactly one of turn or session is required." };
@@ -1004,12 +987,12 @@ export function evaluateSettlementTurnWrite(
   // Ticket 02 (D1, spec user story 17): an edge write goes through the SAME
   // gate as everything else, on the CITING turn — the turn whose record grows
   // an edge — and the cited turn gets no read check at all ([S15069/T1124]).
-  // The gate FIELD is `type` (`mcp/note.ts`'s `EDGE_WRITE_GATE_FIELD`, whose
-  // comment carries the reasoning): CHECKED, never STAMPED, because an edge
-  // write corrects no type and a stamp would tell the next settlement pass a
-  // type correction landed when none did.
+  // The gate FIELD is `mcp/note.ts`'s own `EDGE_WRITE_GATE_FIELD` (imported,
+  // ticket 11 — whose comment carries the reasoning): CHECKED, never STAMPED,
+  // because an edge write corrects no type and a stamp would tell the next
+  // settlement pass a type correction landed when none did.
   if (relationFields.length > 0 || retractionFields.length > 0) {
-    const verdict = checkFieldGate(db, writer, "turn", turn.id, "type", ref);
+    const verdict = checkFieldGate(db, writer, "turn", turn.id, EDGE_WRITE_GATE_FIELD, ref);
     if (!verdict.ok) {
       return { ok: false, message: verdict.message };
     }
@@ -1017,108 +1000,104 @@ export function evaluateSettlementTurnWrite(
 
   // ---- Apply ------------------------------------------------------------
   let relations: RelationOutcome | null = null;
-  if (options.apply) {
-    // Retraction runs BEFORE the attach: correcting a wrong relation is
-    // "retract it, then write the right one" (D2/D3), and a caller doing both
-    // in one call means them in that order. It is also the first mutation of
-    // the whole evaluation, so its own all-or-nothing rejection (an address
-    // carrying no such edge) still precedes every other write.
-    let retracted = 0;
-    if (retractionFields.length > 0) {
-      const result = retractTurnRelations(db, turn.id, retractionFields, nowEpoch);
-      if (result.rejected.length > 0) {
-        return { ok: false, message: formatRelationRejections(result.rejected, "retraction") };
-      }
-      retracted = result.deleted.length;
+  // Retraction runs BEFORE the attach: correcting a wrong relation is
+  // "retract it, then write the right one" (D2/D3), and a caller doing both
+  // in one call means them in that order. It is also the first mutation of
+  // the whole evaluation, so its own all-or-nothing rejection (an address
+  // carrying no such edge) still precedes every other write.
+  let retracted = 0;
+  let restored = 0;
+  if (retractionFields.length > 0) {
+    const result = retractTurnRelations(db, turn.id, retractionFields, nowEpoch);
+    if (result.rejected.length > 0) {
+      return { ok: false, message: formatRelationRejections(result.rejected, "retraction") };
     }
+    retracted = result.deleted.length;
+    // Ticket 10's restore, carried onto the receipt by ticket 11: emptying a
+    // pair whose prose still names the target puts the BARE row back, so the
+    // ↳ pull-through survives a retraction. Counted separately because "the
+    // citation stands" is not "the relation stands".
+    restored = result.restored.length;
+  }
 
-    if (landedUpdate.type !== undefined || landedUpdate.tags !== undefined) {
-      updateTurnById(db, turn.id, { ...landedUpdate, updatedAtEpoch: nowEpoch });
-      // Stamp gate (spec "检查-写入原子"): only the fields that actually
-      // landed, same writer identity the check above used — a yielded
-      // field must NOT be re-stamped, or a second correction attempt in
-      // this same run would find its own prior (rejected) call admitted.
-      if (landedUpdate.type !== undefined) {
-        stampField(db, "turn", turn.id, "type", writer, nowEpoch);
-      }
-      if (landedUpdate.tags !== undefined) {
-        stampField(db, "turn", turn.id, "tags", writer, nowEpoch);
-      }
+  if (landedUpdate.type !== undefined || landedUpdate.tags !== undefined) {
+    updateTurnById(db, turn.id, { ...landedUpdate, updatedAtEpoch: nowEpoch });
+    // Stamp gate (spec "检查-写入原子"): only the fields that actually
+    // landed, same writer identity the check above used — a yielded
+    // field must NOT be re-stamped, or a second correction attempt in
+    // this same run would find its own prior (rejected) call admitted.
+    if (landedUpdate.type !== undefined) {
+      stampField(db, "turn", turn.id, "type", writer, nowEpoch);
     }
+    if (landedUpdate.tags !== undefined) {
+      stampField(db, "turn", turn.id, "tags", writer, nowEpoch);
+    }
+  }
 
-    if (resolvedProse) {
-      upsertShadowNote(db, {
-        turnId: turn.id,
+  if (resolvedProse) {
+    upsertShadowNote(db, {
+      turnId: turn.id,
+      title: resolvedProse.finalTitle,
+      content: resolvedProse.finalContent,
+      insight: resolvedProse.finalInsight,
+      // `writer_origin` is the audit fact this write owes the reader: the
+      // text that now stands is settlement's, whoever wrote the previous
+      // draft. `writerModel`/`rideTurnId` have no settlement analogue — the
+      // model is not plumbed to this layer and a settlement pass rides no
+      // turn — and are left null rather than inherited, since a rewrite that
+      // kept them would attribute the new text to the old author.
+      writerOrigin: "settlement",
+      nowEpoch,
+    });
+    closeNoteDebtAsNoted(db, turn.id, nowEpoch);
+    if (promotesTurnRecord) {
+      const promoted = promoteTurnFromNote(db, turn.id, {
         title: resolvedProse.finalTitle,
         content: resolvedProse.finalContent,
         insight: resolvedProse.finalInsight,
-        // `writer_origin` is the audit fact this write owes the reader: the
-        // text that now stands is settlement's, whoever wrote the previous
-        // draft. `writerModel`/`rideTurnId` have no settlement analogue — the
-        // model is not plumbed to this layer and a settlement pass rides no
-        // turn — and are left null rather than inherited, since a rewrite that
-        // kept them would attribute the new text to the old author.
-        writerOrigin: "settlement",
-        nowEpoch,
+        updatedAtEpoch: nowEpoch,
       });
-      closeNoteDebtAsNoted(db, turn.id, nowEpoch);
-      if (promotesTurnRecord) {
-        const promoted = promoteTurnFromNote(db, turn.id, {
-          title: resolvedProse.finalTitle,
-          content: resolvedProse.finalContent,
-          insight: resolvedProse.finalInsight,
-          updatedAtEpoch: nowEpoch,
-        });
-        // The bare citation layer follows the prose that produced it
-        // (`reconcileCitedPairs`, narrowed to bare rows only — relation rows
-        // are standalone claims that die by retraction, never by a rewrite).
-        recomputeTurnCitedPairs(
-          db,
-          turn.id,
-          {
-            title: promoted?.title ?? resolvedProse.finalTitle,
-            content: promoted?.content ?? resolvedProse.finalContent,
-            insight: promoted?.insight ?? resolvedProse.finalInsight,
-          },
-          nowEpoch,
-          turn.sessionId,
-          context.logger,
-        );
-      }
-      for (const field of proseFields) {
-        stampField(db, "turn", turn.id, field, writer, nowEpoch);
-      }
+      // The bare citation layer follows the prose that produced it
+      // (`reconcileCitedPairs`, narrowed to bare rows only — relation rows
+      // are standalone claims that die by retraction, never by a rewrite).
+      recomputeTurnCitedPairs(
+        db,
+        turn.id,
+        {
+          title: promoted?.title ?? resolvedProse.finalTitle,
+          content: promoted?.content ?? resolvedProse.finalContent,
+          insight: promoted?.insight ?? resolvedProse.finalInsight,
+        },
+        nowEpoch,
+        turn.sessionId,
+        context.logger,
+      );
     }
+    for (const field of proseFields) {
+      stampField(db, "turn", turn.id, field, writer, nowEpoch);
+    }
+  }
 
-    if (relationFields.length > 0) {
-      // The main agent's own primitive (ticket 02), called with settlement's
-      // provenance — one attach path, one dedupe rule, one written/restated
-      // split, and `judged` as the single declared difference.
-      const attached = attachTurnRelations(db, turn.id, relationFields, nowEpoch, "judged");
-      if (attached.rejected.length > 0) {
-        // Unreachable in practice: the pass above already rejected every
-        // malformed, unresolvable and self-referential address by name. Kept
-        // because the primitive owns those checks and a silent drop here would
-        // be the one failure mode neither layer reports.
-        return { ok: false, message: formatRelationRejections(attached.rejected, "relation") };
-      }
-      relations = {
-        written: attached.written.length,
-        restated: attached.restated.length,
-        retracted,
-      };
-    } else if (retracted > 0) {
-      relations = { written: 0, restated: 0, retracted };
+  if (relationFields.length > 0) {
+    // The main agent's own primitive (ticket 02), called with settlement's
+    // provenance — one attach path, one dedupe rule, one written/restated
+    // split, and `judged` as the single declared difference.
+    const attached = attachTurnRelations(db, turn.id, relationFields, nowEpoch, "judged");
+    if (attached.rejected.length > 0) {
+      // Unreachable in practice: the pass above already rejected every
+      // malformed, unresolvable and self-referential address by name. Kept
+      // because the primitive owns those checks and a silent drop here would
+      // be the one failure mode neither layer reports.
+      return { ok: false, message: formatRelationRejections(attached.rejected, "relation") };
     }
-  } else if (relationFields.length > 0 || retractionFields.length > 0) {
-    // A dry run reports what it would ATTEMPT. Both edge primitives validate
-    // and mutate indivisibly, so this is the one place `apply: false` is a
-    // weaker probe than the real call rather than an identical one.
     relations = {
-      written: countTargets(relationFields),
-      restated: 0,
-      retracted: countTargets(retractionFields),
+      written: attached.written.length,
+      restated: attached.restated.length,
+      retracted,
+      restored,
     };
+  } else if (retracted > 0) {
+    relations = { written: 0, restated: 0, retracted, restored };
   }
 
   return {
@@ -1152,21 +1131,19 @@ export function evaluateSettlementTurnWrite(
 }
 
 /**
- * Render one turn-write outcome as tool-result text. `staged: true` is spec
- * A7 requirement 2's "the receipt says the write is staged, not written" —
- * used at stage time; `staged: false` is commit-time replay's internal
- * bookkeeping text (never shown on its own — `commit`'s own receipt
- * summarises the whole run).
+ * Render one turn-write outcome as tool-result text.
+ *
+ * Ticket 11: the `staged`/`replaced` options are GONE with the staging engine
+ * that was their only source. Every receipt reads "Landed", because every
+ * write already has by the time this renders — a "Staged … (pending commit)"
+ * string that no caller can produce is a lie waiting for a future caller to
+ * tell.
  */
 export function renderSettlementTurnWriteReceipt(
   outcome: SettlementTurnWriteOutcome,
-  options: { staged: boolean; replaced?: boolean },
 ): string {
-  const verb = options.staged ? "Staged" : "Landed";
+  const verb = "Landed";
   const parts: string[] = [];
-  if (options.replaced) {
-    parts.push(`(replaces the earlier staged call for ${outcome.ref})`);
-  }
   if (outcome.review) {
     const landedBits: string[] = [];
     const yieldedBits: string[] = [];
@@ -1188,7 +1165,7 @@ export function renderSettlementTurnWriteReceipt(
     }
     if (landedBits.length > 0) {
       parts.push(
-        `${verb} review for ${outcome.ref}: ${landedBits.join(", ")}${options.staged ? " (pending commit)" : ""}.`,
+        `${verb} review for ${outcome.ref}: ${landedBits.join(", ")}.`,
       );
     }
     if (yieldedBits.length > 0) {
@@ -1202,8 +1179,7 @@ export function renderSettlementTurnWriteReceipt(
     // the same words rather than left to guess from silence.
     parts.push(
       `${verb} note for ${outcome.ref}: ${outcome.prose.fields.join(", ")}` +
-        `${outcome.prose.noteExisted ? " (replaced the previous note)" : ""}` +
-        `${options.staged ? " (pending commit)" : ""}.`,
+        `${outcome.prose.noteExisted ? " (replaced the previous note)" : ""}.`,
     );
     parts.push(`budget: ${outcome.prose.budget}`);
     if (outcome.prose.budgetWarning) {
@@ -1214,8 +1190,12 @@ export function renderSettlementTurnWriteReceipt(
     }
   }
   if (outcome.relations) {
-    if (outcome.relations.retracted > 0) {
-      parts.push(`Retracted ${outcome.relations.retracted} relation(s).`);
+    // Ticket 11: the SAME register `mcp/note.ts` renders (its
+    // `formatRetractionReceipt`, imported), including ticket 10's restored
+    // count — one wording for both write surfaces, not two.
+    const retractionLine = formatRetractionReceipt(outcome.relations);
+    if (retractionLine) {
+      parts.push(retractionLine);
     }
     // Ticket 04: additive AND idempotent (D2), so the receipt says which of
     // the two happened — a writer that cannot tell "attached" from "already
@@ -1223,8 +1203,7 @@ export function renderSettlementTurnWriteReceipt(
     if (outcome.relations.written > 0) {
       parts.push(
         `${verb} ${outcome.relations.written} relation(s)` +
-          `${outcome.relations.restated > 0 ? `, ${outcome.relations.restated} already present` : ""}` +
-          `${options.staged ? " (pending commit)" : ""}.`,
+          `${outcome.relations.restated > 0 ? `, ${outcome.relations.restated} already present` : ""}.`,
       );
     } else if (outcome.relations.restated > 0) {
       parts.push(`${outcome.relations.restated} relation(s) already present, nothing added.`);
@@ -1237,7 +1216,6 @@ export function renderSettlementTurnWriteReceipt(
     ].filter((field): field is string => field !== null);
     parts.push(
       `${verb} session narrative for ${outcome.ref} (${fields.join(", ")})` +
-        `${options.staged ? " (pending commit)" : ""}` +
         `${outcome.session.usage.length > 0 ? `: ${outcome.session.usage.join(", ")}` : ""}.`,
     );
   }

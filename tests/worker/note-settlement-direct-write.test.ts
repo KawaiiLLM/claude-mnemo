@@ -206,10 +206,17 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
 
     expect(receipt.content[0]!.text).toContain("Committed");
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+    // Ticket 11 split the counts so a receipt can no longer report an act
+    // that did not happen (a `create` used to land in the proposal bucket);
+    // an empty-handed window states every one of them as zero.
     expect(engine.getLastCommitMetrics()).toEqual({
       turnsReviewed: 0,
       reviewsYieldedToLateNote: 0,
+      proseWritten: 0,
       relationsWritten: 0,
+      relationsRestated: 0,
+      relationsRetracted: 0,
+      segmentsCreated: 0,
       proposalsCreated: 0,
       sessionNarrativeWritten: 0,
       membersReassigned: 0,
@@ -336,6 +343,33 @@ describe("a reclaimed lease refuses every direct write, naming the lease (ticket
     expect(receipt.content[0]!.text).toContain("lease was reclaimed");
     expect(listOpenSegments(db)).toEqual([]);
     expect(listAttachedSegments(db, sessionDbId)).toEqual([]);
+  });
+
+  test("a create counts as a segment created, never as a proposal (ticket 11)", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+
+    engine.writeMembership({
+      action: "create",
+      title: "a real segment",
+      turns: [`S${sessionDbId}/T1`],
+    });
+    engine.commit();
+
+    const metrics = engine.getLastCommitMetrics()!;
+    // The defect ticket 11 names: `proposeAlreadyExisted` is undefined for a
+    // create, so the old `!outcome.proposeAlreadyExisted` test swallowed it
+    // into the proposal bucket and the receipt reported an act that never
+    // happened. A receipt that over-reports is worse than one that
+    // under-reports, so both halves are pinned.
+    expect(metrics.segmentsCreated).toBe(1);
+    expect(metrics.proposalsCreated).toBe(0);
   });
 
   test("remember(reassign): membership stays exactly where it was", () => {

@@ -22,17 +22,16 @@ import {
 
 /**
  * The settlement direct-write engine (ticket 05, read-write-contract spec
- * "结算(直写改造)") — what REPLACES `note-settlement-staging.ts`'s wiring
- * role. `note-settlement-sdk-query.ts` registers this module's three
+ * "结算(直写改造)") — what REPLACED the staged-commit engine, deleted outright
+ * by ticket 11 (edge-mechanism-revision) once it had been call-site-free for a
+ * whole batch. `note-settlement-sdk-query.ts` registers this module's three
  * functions under the `note`/`remember`/`commit` tool names.
  *
- * Every `note`/`remember` call now VALIDATES and LANDS in the SAME
- * transaction, immediately: `evaluateSettlementTurnWrite`/
- * `evaluateSettlementMembershipWrite` already run every read unconditionally
- * and gate every write behind `options.apply` (spec A7's own split, kept
- * because it is still a genuine dry-run boundary, not because anything
- * stages through it any more) — this engine simply always calls them with
- * `apply: true` and returns the receipt as a FACT ("Landed", never
+ * Every `note`/`remember` call VALIDATES and LANDS in the SAME transaction,
+ * immediately: `evaluateSettlementTurnWrite`/
+ * `evaluateSettlementMembershipWrite` have exactly one form now (ticket 11
+ * removed their `apply` split along with the staging engine that was its only
+ * consumer), and this engine returns their receipt as a FACT ("Landed", never
  * "Staged... pending commit"). There is no in-memory staged list, no replay,
  * and therefore no "refused commit, staging kept, re-stage and retry" story:
  * a rejected call is rejected right there, and a landed one is already
@@ -73,14 +72,40 @@ import {
  * field.
  */
 
+/**
+ * TICKET 11 (edge-mechanism-revision, peer 终审必改 6): one bucket per VERB,
+ * because a receipt that folds two verbs into one number cannot be read back
+ * as "what did that settlement pass do". Two specific dishonesties this shape
+ * retires:
+ *
+ *   - `create` used to land in `proposalsCreated`. The membership accumulator
+ *     branched on `reassign` and treated everything else as a proposal, so a
+ *     minted segment — the one membership act that creates durable state
+ *     nobody asked for — was reported as a text-only suggestion. `create` has
+ *     its own count now, and the accumulator branches on all three verbs by
+ *     name rather than on one of them plus an `else`.
+ *   - prose, restatements and retractions were counted NOWHERE (ADR-0009's own
+ *     recorded open item: "commit metrics count neither prose nor
+ *     retractions"). All three are the capabilities the re-arming added, so
+ *     the run's report under-stated exactly the new work.
+ */
 export interface NoteSettlementCommitCounts {
   /** Turns a `note` call actually carried a review (type/tags) for, landed or with at least one field yielded. */
   turnsReviewed: number;
   /** Of `turnsReviewed`, how many had at least one field (type/tags) rejected by the write gate as stale/never-read. */
   reviewsYieldedToLateNote: number;
+  /** `note` calls that landed turn prose (title/content/insight) — one per call, not per field. */
+  proseWritten: number;
+  /** Relation rows this run ADDED. */
   relationsWritten: number;
+  /** Accepted relation targets whose row was already stored — a restatement, not new work. */
+  relationsRestated: number;
+  /** Relation rows a `retract…` mirror deleted. */
+  relationsRetracted: number;
   /** A `propose` call that landed a NEW stored proposal — a duplicate that matched an earlier one (spec "propose 携幂等键") is not counted again. */
   proposalsCreated: number;
+  /** A `create` call that minted a segment and attached it to this session. */
+  segmentsCreated: number;
   /** A `session`-addressed `note` call that landed (title and/or content). */
   sessionNarrativeWritten: number;
   /** A `reassign` call that landed a membership correction. */
@@ -91,8 +116,12 @@ function emptyCommitCounts(): NoteSettlementCommitCounts {
   return {
     turnsReviewed: 0,
     reviewsYieldedToLateNote: 0,
+    proseWritten: 0,
     relationsWritten: 0,
+    relationsRestated: 0,
+    relationsRetracted: 0,
     proposalsCreated: 0,
+    segmentsCreated: 0,
     sessionNarrativeWritten: 0,
     membersReassigned: 0,
   };
@@ -111,8 +140,13 @@ function accumulateTurnWriteCounts(
       counts.reviewsYieldedToLateNote += 1;
     }
   }
+  if (outcome.prose) {
+    counts.proseWritten += 1;
+  }
   if (outcome.relations) {
     counts.relationsWritten += outcome.relations.written;
+    counts.relationsRestated += outcome.relations.restated;
+    counts.relationsRetracted += outcome.relations.retracted;
   }
   if (outcome.session) {
     counts.sessionNarrativeWritten += 1;
@@ -128,6 +162,13 @@ function accumulateMembershipWriteCounts(
     counts.membersReassigned += 1;
     return;
   }
+  if (input.action === "create") {
+    counts.segmentsCreated += 1;
+    return;
+  }
+  // `propose`, and ONLY propose: `proposeAlreadyExisted` is undefined for
+  // every other verb, so the old `!outcome.proposeAlreadyExisted` test
+  // swallowed a `create` into this bucket.
   if (!outcome.proposeAlreadyExisted) {
     counts.proposalsCreated += 1;
   }
@@ -136,8 +177,12 @@ function accumulateMembershipWriteCounts(
 function summarizeCounts(counts: NoteSettlementCommitCounts): string {
   const bits = [
     `${counts.turnsReviewed} turn review(s)`,
-    `${counts.relationsWritten} relation(s)`,
+    `${counts.proseWritten} note(s) written`,
+    `${counts.relationsWritten} relation(s) attached`,
+    `${counts.relationsRestated} already present`,
+    `${counts.relationsRetracted} retracted`,
     `${counts.proposalsCreated} proposal(s)`,
+    `${counts.segmentsCreated} segment(s) created`,
     `${counts.membersReassigned} reassignment(s)`,
   ];
   if (counts.sessionNarrativeWritten > 0) {
@@ -224,14 +269,13 @@ export function createSettlementDirectWriteEngine(
       // refusal-inside-transaction pattern), then reports as an ordinary
       // parameter error.
       evaluation = writeTransaction(db, () => {
-        // Ticket 08: the lease check is the FIRST statement in the SAME
+        // Ticket 08 (and taught in the settlement prompt's own Duties
+        // preamble, ticket 11): the lease check is the FIRST statement in the SAME
         // transaction as the write it guards. Its throw rolls the transaction
         // back for free, so no ordering discipline further down can be got
         // wrong — see `assertNoteSettlementJobClaimed`'s own doc comment.
         assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
-        const result = evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch, {
-          apply: true,
-        });
+        const result = evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch);
         if (!result.ok) {
           throw new DirectWriteRefused(result.message);
         }
@@ -247,9 +291,7 @@ export function createSettlementDirectWriteEngine(
       throw error;
     }
     accumulateTurnWriteCounts(counts, evaluation.outcome);
-    return textResult(
-      renderSettlementTurnWriteReceipt(evaluation.outcome, { staged: false }),
-    );
+    return textResult(renderSettlementTurnWriteReceipt(evaluation.outcome));
   }
 
   function writeMembership(rawInput: SettlementMembershipWriteInput): ToolTextResult {
@@ -267,9 +309,7 @@ export function createSettlementDirectWriteEngine(
         // stops a reclaimed claimant from planting durable state that
         // `commit` can then only complain about after the fact.
         assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
-        const result = evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch, {
-          apply: true,
-        });
+        const result = evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch);
         if (!result.ok) {
           throw new DirectWriteRefused(result.message);
         }
@@ -285,9 +325,7 @@ export function createSettlementDirectWriteEngine(
       throw error;
     }
     accumulateMembershipWriteCounts(counts, rawInput, evaluation.outcome);
-    return textResult(
-      renderSettlementMembershipWriteReceipt(evaluation.outcome, { staged: false }),
-    );
+    return textResult(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
 
   function commit(): ToolTextResult {

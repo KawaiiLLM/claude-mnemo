@@ -28,9 +28,9 @@ import {
 } from "../../src/worker/note-settlement-dispatch";
 import { createNoteSettlementScheduler } from "../../src/worker/note-settlement";
 import {
-  createSettlementStagingEngine,
-  type SettlementStagingEngine,
-} from "../../src/worker/note-settlement-staging";
+  createSettlementDirectWriteEngine,
+  type SettlementDirectWriteEngine,
+} from "../../src/worker/note-settlement-direct-write";
 import {
   evaluateSettlementTurnWrite,
   type SettlementTurnFacadeContext,
@@ -216,16 +216,20 @@ function seedFourTurnWindow(): Fixture {
 }
 
 /**
- * A stub `runQuery` that stages and (optionally) commits through the REAL
- * staging engine, standing in for what the SDK subprocess's tool calls would
- * do (spec A7). `build` receives the engine and the request the dispatch
+ * A stub `runQuery` that writes and (optionally) commits through the REAL
+ * direct-write engine — the same engine `note-settlement-sdk-query.ts` gives
+ * the SDK subprocess — standing in for what its tool calls would do. Ticket 11
+ * of edge-mechanism-revision deleted the staging engine this stub used to
+ * drive; the substitution is faithful because the two exposed the same three
+ * tools, and the live path had already been direct-write since the
+ * read-write-contract batch. `build` receives the engine and the request the dispatch
  * actually sent — everything a real `note-settlement-sdk-query.ts` would
  * have used to build its own `SettlementTurnFacadeContext` — so a test can
  * stage/commit against the SAME job identity and scoping the dispatch
  * computed, without a network or a subprocess.
  */
 function queryThatStages(
-  build: (engine: SettlementStagingEngine, request: NoteSettlementQueryRequest) => void,
+  build: (engine: SettlementDirectWriteEngine, request: NoteSettlementQueryRequest) => void,
 ): NoteSettlementQuery {
   return async (request) => {
     const context: SettlementTurnFacadeContext = {
@@ -235,7 +239,7 @@ function queryThatStages(
       reviewableTurnIds: request.reviewableTurnIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
     };
-    const engine = createSettlementStagingEngine({ db, context });
+    const engine = createSettlementDirectWriteEngine({ db, context, now: () => NOW });
     build(engine, request);
     // `commitMetrics` is `commit`'s own replay result, read the SAME way
     // `note-settlement-sdk-query.ts` reads it (once, after the model's "run"
@@ -502,20 +506,20 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       queryThatStages((engine) => {
         // T1's type was seeded above, so replacing it is a declared `write`
         // (ticket 07, spec D12).
-        engine.stageNoteWrite({
+        engine.writeNote({
           turn: "S1/T1",
           type: ["design"],
           tags: ["lease"],
           mode: { type: "write" },
         });
-        engine.stageNoteWrite({
+        engine.writeNote({
           turn: "S1/T3",
           type: ["implement", "correction"],
           tags: ["lease"],
           encodes: ["S1/T1"],
         });
-        engine.stageNoteWrite({ turn: "S1/T2", type: ["research"], tags: ["lease"] });
-        engine.stageMembershipWrite({
+        engine.writeNote({ turn: "S1/T2", type: ["research"], tags: ["lease"] });
+        engine.writeMembership({
           action: "propose",
           addresses: ["S1/T2", "S1/T4"],
           title: "a homeless cluster settlement noticed",
@@ -553,7 +557,11 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     expect(metricsSeen[0]!.commit).toEqual({
       turnsReviewed: 3,
       reviewsYieldedToLateNote: 0,
+      proseWritten: 0,
       relationsWritten: 1,
+      relationsRestated: 0,
+      relationsRetracted: 0,
+      segmentsCreated: 0,
       proposalsCreated: 1,
       sessionNarrativeWritten: 0,
       membersReassigned: 0,
@@ -583,29 +591,38 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     expect(metricsSeen[0]!.commit).toEqual({
       turnsReviewed: 0,
       reviewsYieldedToLateNote: 0,
+      proseWritten: 0,
       relationsWritten: 0,
+      relationsRestated: 0,
+      relationsRetracted: 0,
+      segmentsCreated: 0,
       proposalsCreated: 0,
       sessionNarrativeWritten: 0,
       membersReassigned: 0,
     });
   });
 
-  test("commit is the only path that completes a job — a run that stages a review but never calls commit lands nothing (requirement 9)", async () => {
+  test("commit is the only path that COMPLETES a job — a run that writes but never commits leaves the job unfinished (requirement 9)", async () => {
     const fixture = seedFourTurnWindow();
 
     const outcome = await dispatchWith(
       queryThatStages((engine) => {
-        engine.stageNoteWrite({ turn: "S1/T2", type: ["research"], tags: ["lease"] });
+        engine.writeNote({ turn: "S1/T2", type: ["research"], tags: ["lease"] });
         // Deliberately no engine.commit() call.
       }),
     )({ job: fixture.job });
 
     expect(outcome.ok).toBe(false);
-    // Nothing landed — staging without commit is exactly as durable as never
-    // having called a tool at all.
-    expect(getTurnById(db, fixture.turnIds[1]!)!.tags).toEqual([]);
+    // Requirement 9 is about JOB COMPLETION, and that half stands: no commit,
+    // no `done`, no cursor advance, so the window is re-settled later.
     expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
     expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
+    // What does NOT stand any more is "nothing landed": the read-write-contract
+    // batch made each tool call its own check-write-stamp transaction, so a
+    // write is durable the moment it returns. This assertion is the inverse of
+    // the one the staging era pinned here, and it is the shipped behaviour the
+    // stub was hiding while it still drove the (now deleted) staging engine.
+    expect(getTurnById(db, fixture.turnIds[1]!)!.tags).toEqual(["lease"]);
   });
 
   /**
@@ -623,7 +640,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const metricsSeen: NoteSettlementWindowMetrics[] = [];
     const outcome = await dispatchWith(
       queryThatStages((engine) => {
-        engine.stageNoteWrite({ turn: "S1/T2", type: ["research"], tags: [] });
+        engine.writeNote({ turn: "S1/T2", type: ["research"], tags: [] });
         // Deliberately no commit — this attempt fails, and it is the job's
         // last one.
       }),
@@ -680,7 +697,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
 
     const outcome = await dispatchWith(
       queryThatStages((engine) => {
-        engine.stageMembershipWrite({
+        engine.writeMembership({
           action: "propose",
           addresses: ["S1/T1", "S1/T3"],
           title: "should not land",
@@ -695,8 +712,13 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     )({ job: fixture.job });
 
     expect(outcome.ok).toBe(false);
+    // The job does not complete and its cursor does not move, so the window is
+    // re-settled later. The proposal itself LANDED — it was written while this
+    // dispatch still held a valid lease, and a direct write is durable on
+    // return; ticket 08's fence stops the writes that come AFTER the reclaim,
+    // and commit's own fence stops the completion. Nothing here is a segment.
     expect(listOpenSegments(db)).toHaveLength(0);
-    expect(listRecentSettlementProposals(db, 3)).toHaveLength(0);
+    expect(listRecentSettlementProposals(db, 3)).toHaveLength(1);
     expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
   });
 
@@ -720,7 +742,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
         for (const turnId of fixture.turnIds) {
           updateTurnById(db, turnId, { type: ["research"] });
         }
-        engine.stageMembershipWrite({
+        engine.writeMembership({
           action: "propose",
           addresses: ["S1/T1", "S1/T2"],
           title: "about to lose a member",
@@ -743,7 +765,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
         for (const turnId of [fixture.turnIds[0]!, fixture.turnIds[2]!, fixture.turnIds[3]!]) {
           updateTurnById(db, turnId, { type: ["research"] });
         }
-        engine.stageMembershipWrite({
+        engine.writeMembership({
           action: "propose",
           addresses: ["S1/T1", "S1/T3"],
           title: "a valid cluster this time",
@@ -767,8 +789,8 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const fixture = seedFourTurnWindow();
     const firstOutcome = await dispatchWith(
       queryThatStages((engine) => {
-        engine.stageNoteWrite({ turn: "S1/T1", type: ["design"], tags: ["settlement"] });
-        engine.stageNoteWrite({ turn: "S1/T3", type: ["implement"], tags: ["settlement"] });
+        engine.writeNote({ turn: "S1/T1", type: ["design"], tags: ["settlement"] });
+        engine.writeNote({ turn: "S1/T3", type: ["implement"], tags: ["settlement"] });
         engine.commit();
       }),
     )({ job: fixture.job });
@@ -793,14 +815,14 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       queryThatStages((engine) => {
         // T1's tag turned out wrong — corrected now that its real scale is
         // visible.
-        engine.stageNoteWrite({
+        engine.writeNote({
           turn: "S1/T1",
           type: ["design"],
           tags: ["revised"],
           mode: { type: "write", tags: "write" },
         });
         for (let promptNumber = 5; promptNumber <= 8; promptNumber += 1) {
-          engine.stageNoteWrite({
+          engine.writeNote({
             turn: `S1/T${promptNumber}`,
             type: ["implement"],
             tags: ["seam"],
@@ -842,7 +864,7 @@ describe("settlement payload at the scheduler seam", () => {
       dispatch: dispatchWith(
         queryThatStages((engine) => {
           for (let promptNumber = 1; promptNumber <= 4; promptNumber += 1) {
-            engine.stageNoteWrite({
+            engine.writeNote({
               turn: `S1/T${promptNumber}`,
               type: ["implement"],
               tags: ["scheduler seam"],
@@ -916,7 +938,11 @@ describe("settlement payload at the scheduler seam", () => {
     expect(metricsSeen[0]!.commit).toEqual({
       turnsReviewed: 0,
       reviewsYieldedToLateNote: 0,
+      proseWritten: 0,
       relationsWritten: 0,
+      relationsRestated: 0,
+      relationsRetracted: 0,
+      segmentsCreated: 0,
       proposalsCreated: 0,
       sessionNarrativeWritten: 0,
       membersReassigned: 0,

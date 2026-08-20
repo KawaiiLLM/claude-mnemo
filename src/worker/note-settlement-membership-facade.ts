@@ -114,15 +114,15 @@ export type SettlementMembershipWriteInput = z.infer<
 // ---------------------------------------------------------------------------
 
 export interface SettlementMembershipWriteOutcome {
-  /** `propose`: the stored proposal's id (the EARLIER one, on a duplicate — see `proposeAlreadyExisted`). `null` for a dry run or a `reassign` outcome. */
+  /** `propose`: the stored proposal's id (the EARLIER one, on a duplicate — see `proposeAlreadyExisted`). `null` for a `reassign` or `create` outcome. */
   proposalId: number | null;
   /**
    * `propose` only (ticket 05, spec "propose 携幂等键") — true when this
    * call's canonical address set already matched an earlier stored proposal
    * for this session, so `proposalId` names that EARLIER row rather than a
-   * new one. `undefined` for a dry run (nothing is looked up without
-   * `apply`) and for a `reassign` outcome, same "absent means not this
-   * verb's concern" convention `reassign` itself already uses below.
+   * new one. `undefined` for a `reassign` or `create` outcome, the same
+   * "absent means not this verb's concern" convention `reassign` itself
+   * already uses below.
    */
   proposeAlreadyExisted?: boolean;
   /** `propose`: addresses accepted. `reassign`: turns accepted — same "how many address tokens resolved" meaning either way. */
@@ -135,16 +135,16 @@ export interface SettlementMembershipWriteOutcome {
   reassign?: {
     /** `null` = reassigned to no segment (homeless). */
     targetSegmentId: number | null;
-    /** The segment(s) these turns were removed from, excluding the target itself — empty on a dry run. */
+    /** The segment(s) these turns were removed from, excluding the target itself. */
     vacatedSegmentIds: number[];
-    /** Turn ids actually linked to the target — empty when `targetSegmentId` is null, or on a dry run. */
+    /** Turn ids actually linked to the target — empty when `targetSegmentId` is null. */
     addedTurnIds: number[];
   };
-  /** Present ONLY for a `create` outcome (ticket 04). `segmentId` is null on a dry run. */
+  /** Present ONLY for a `create` outcome (ticket 04). */
   create?: {
     segmentId: number | null;
     title: string;
-    /** Seed members actually linked — empty when none were named, or on a dry run. */
+    /** Seed members actually linked — empty when none were named. */
     memberTurnIds: number[];
   };
 }
@@ -152,11 +152,6 @@ export interface SettlementMembershipWriteOutcome {
 export type SettlementMembershipWriteEvaluation =
   | { ok: true; outcome: SettlementMembershipWriteOutcome }
   | { ok: false; message: string };
-
-export interface EvaluateSettlementMembershipWriteOptions {
-  /** false = a dry run (reads only, a real receipt, nothing written); true = the commit-time write. */
-  apply: boolean;
-}
 
 /**
  * Turn addresses -> turn ids, de-duplicated, with one rejection line per bad
@@ -205,7 +200,6 @@ function evaluatePropose(
   context: SettlementTurnFacadeContext,
   rawInput: SettlementMembershipWriteInput,
   nowEpoch: number,
-  options: EvaluateSettlementMembershipWriteOptions,
 ): SettlementMembershipWriteEvaluation {
   if (!rawInput.title || rawInput.title.trim() === "") {
     return { ok: false, message: "propose requires title, a short suggested name for the cluster." };
@@ -264,30 +258,24 @@ function evaluatePropose(
     };
   }
 
-  let proposalId: number | null = null;
-  let proposeAlreadyExisted: boolean | undefined;
-  if (options.apply) {
-    // Ticket 05 (spec "propose 携幂等键"): keyed on session + the canonical
-    // address set, NOT this job — a re-claimed job after a lost lease is a
-    // NEW job id, so a job-scoped key could never dedupe the retry. A
-    // duplicate call lands on the SAME row (`alreadyExisted: true`) instead
-    // of a second one.
-    const stored = recordNoteSettlementProposal(db, {
-      jobId: context.jobId,
-      sessionId: context.sessionId,
-      title: rawInput.title,
-      addresses: refs,
-      nowEpoch,
-    });
-    proposalId = stored.record.id;
-    proposeAlreadyExisted = stored.alreadyExisted;
-  }
+  // Ticket 05 (spec "propose 携幂等键"): keyed on session + the canonical
+  // address set, NOT this job — a re-claimed job after a lost lease is a
+  // NEW job id, so a job-scoped key could never dedupe the retry. A
+  // duplicate call lands on the SAME row (`alreadyExisted: true`) instead
+  // of a second one.
+  const stored = recordNoteSettlementProposal(db, {
+    jobId: context.jobId,
+    sessionId: context.sessionId,
+    title: rawInput.title,
+    addresses: refs,
+    nowEpoch,
+  });
 
   return {
     ok: true,
     outcome: {
-      proposalId,
-      proposeAlreadyExisted,
+      proposalId: stored.record.id,
+      proposeAlreadyExisted: stored.alreadyExisted,
       addressesResolved: refs.length,
     },
   };
@@ -317,7 +305,6 @@ function evaluateReassign(
   context: SettlementTurnFacadeContext,
   rawInput: SettlementMembershipWriteInput,
   nowEpoch: number,
-  options: EvaluateSettlementMembershipWriteOptions,
 ): SettlementMembershipWriteEvaluation {
   const rawTurns = rawInput.turns ?? [];
   if (rawTurns.length < 1) {
@@ -337,7 +324,7 @@ function evaluateReassign(
       };
     }
     // Ticket 05 (spec: "渲染后被 detach/close 的段不可再收成员"), a LIVE read
-    // every call, dry run and commit alike: a segment closed since the roster
+    // on every call: a segment closed since the roster
     // was rendered must refuse a new member the same way `remember`'s own
     // append/replace already refuse one, for the same reason. A segment that
     // does not exist at all is refused by the same statement, naming that.
@@ -376,17 +363,6 @@ function evaluateReassign(
     };
   }
 
-  if (!options.apply) {
-    return {
-      ok: true,
-      outcome: {
-        proposalId: null,
-        addressesResolved: turnIds.length,
-        reassign: { targetSegmentId, vacatedSegmentIds: [], addedTurnIds: [] },
-      },
-    };
-  }
-
   const result = reassignSegmentMembers(db, turnIds, targetSegmentId, nowEpoch);
   return {
     ok: true,
@@ -420,7 +396,6 @@ function evaluateCreate(
   context: SettlementTurnFacadeContext,
   rawInput: SettlementMembershipWriteInput,
   nowEpoch: number,
-  options: EvaluateSettlementMembershipWriteOptions,
 ): SettlementMembershipWriteEvaluation {
   const title = rawInput.title?.trim() ?? "";
   if (title === "") {
@@ -437,17 +412,6 @@ function evaluateCreate(
       message:
         `turns rejected: ${rejections.join("; ")} — a segment is seeded with exactly ` +
         "the turns given, so a call naming even one bad address seeds none.",
-    };
-  }
-
-  if (!options.apply) {
-    return {
-      ok: true,
-      outcome: {
-        proposalId: null,
-        addressesResolved: turnIds.length,
-        create: { segmentId: null, title, memberTurnIds: [] },
-      },
     };
   }
 
@@ -478,36 +442,35 @@ export function evaluateSettlementMembershipWrite(
   context: SettlementTurnFacadeContext,
   rawInput: SettlementMembershipWriteInput,
   nowEpoch: number,
-  options: EvaluateSettlementMembershipWriteOptions,
 ): SettlementMembershipWriteEvaluation {
   if (rawInput.action === "reassign") {
-    return evaluateReassign(db, context, rawInput, nowEpoch, options);
+    return evaluateReassign(db, context, rawInput, nowEpoch);
   }
   if (rawInput.action === "create") {
-    return evaluateCreate(db, context, rawInput, nowEpoch, options);
+    return evaluateCreate(db, context, rawInput, nowEpoch);
   }
-  return evaluatePropose(db, context, rawInput, nowEpoch, options);
+  return evaluatePropose(db, context, rawInput, nowEpoch);
 }
 
 /**
- * Render one membership-write outcome as tool-result text (stage or
- * commit-time replay bookkeeping — same `staged` convention as
- * `renderSettlementTurnWriteReceipt`).
+ * Render one membership-write outcome as tool-result text.
+ *
+ * Ticket 11: the `staged`/`replaced` options retired with the staging engine
+ * that was their only source (`renderSettlementTurnWriteReceipt` lost the same
+ * pair). Every membership write has already landed by the time this renders,
+ * so "Landed" is the only honest verb and "(pending commit)" no longer has a
+ * caller that could truthfully ask for it.
  */
 export function renderSettlementMembershipWriteReceipt(
   outcome: SettlementMembershipWriteOutcome,
-  options: { staged: boolean; replaced?: boolean },
 ): string {
-  const verb = options.staged ? "Staged" : "Landed";
-  const replacedSuffix = options.replaced
-    ? " — replaces the earlier staged call for this same key"
-    : "";
+  const verb = "Landed";
   if (outcome.create) {
     const { segmentId, title, memberTurnIds } = outcome.create;
     return (
       `${verb} create: ${segmentId !== null ? `E${segmentId}` : "a new segment"} "${title}"` +
-      `${options.staged ? " (pending commit)" : ""}, attached to this session, ` +
-      `${memberTurnIds.length || outcome.addressesResolved} member(s) seeded.${replacedSuffix}`
+      `, attached to this session, ` +
+      `${memberTurnIds.length || outcome.addressesResolved} member(s) seeded.`
     );
   }
   if (outcome.reassign) {
@@ -517,17 +480,16 @@ export function renderSettlementMembershipWriteReceipt(
       vacatedSegmentIds.length > 0
         ? `, vacated ${vacatedSegmentIds.map((id) => `E${id}`).join(",")}`
         : "";
-    const landedNote = options.staged ? "" : `, ${addedTurnIds.length} linked`;
     return (
       `${verb} reassign: ${outcome.addressesResolved} turn(s) -> ${destination}` +
-      `${options.staged ? " (pending commit)" : ""}${vacatedNote}${landedNote}.${replacedSuffix}`
+      `${vacatedNote}, ${addedTurnIds.length} linked.`
     );
   }
   const duplicateNote = outcome.proposeAlreadyExisted
     ? " — already exists (matches an earlier proposal for the same turns; no second row created)"
     : "";
   return (
-    `${verb} propose: ${outcome.addressesResolved} address(es)${options.staged ? " (pending commit)" : ""}` +
-    `${outcome.proposalId !== null ? ` as proposal #${outcome.proposalId}` : ""} — creates no segment.${duplicateNote}${replacedSuffix}`
+    `${verb} propose: ${outcome.addressesResolved} address(es)` +
+    `${outcome.proposalId !== null ? ` as proposal #${outcome.proposalId}` : ""} — creates no segment.${duplicateNote}`
   );
 }
