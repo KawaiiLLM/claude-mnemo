@@ -19,7 +19,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.12.1", () => {
+  test("release metadata is consistently bumped to 0.13.0", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -44,12 +44,12 @@ describe("release artifacts", () => {
       "utf8",
     );
 
-    expect(packageJson.version).toBe("0.12.1");
-    expect(pluginManifest.version).toBe("0.12.1");
-    expect(marketplace.metadata?.version).toBe("0.12.1");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.12.1");
-    expect(diarySdkQuery).toContain('version: "0.12.1"');
-    expect(settlementSdkQuery).toContain('version: "0.12.1"');
+    expect(packageJson.version).toBe("0.13.0");
+    expect(pluginManifest.version).toBe("0.13.0");
+    expect(marketplace.metadata?.version).toBe("0.13.0");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.13.0");
+    expect(diarySdkQuery).toContain('version: "0.13.0"');
+    expect(settlementSdkQuery).toContain('version: "0.13.0"');
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -237,11 +237,16 @@ describe("release artifacts", () => {
       // into a collapsed run, and consecutive collapsed days cost one line.
       "collapseState",
       "noteHidden", // `+N more` conservation for a day with no rendered rows
-      // esbuild writes the bundle ASCII-escaped, so the CJK render literals are
-      // matched in their escaped form: `前件` (↳ fold counter past the
-      // 4-antecedent cap) and `被T` (🚫 back-link on a superseded ↳ row).
-      "\\u524D\\u4EF6",
+      // esbuild writes the bundle ASCII-escaped, so a CJK render literal is
+      // matched in its escaped form: `被T` (🚫 back-link on a superseded ↳ row).
       "\\u88ABT",
+      // The `前件` fold counter that used to sit beside it RETIRED with
+      // view-render-repair ticket 05's one row form — the fold renders a bare
+      // `+N` now, too generic to pin. What that marker was really guarding is
+      // the antecedent aggregation, so this pins the aggregator itself; it is
+      // also where edge-mechanism-revision ticket 10 put the by-pair dedupe,
+      // so a stale bundle here would double-print `↳ T1, T1`.
+      "resolveTurnRowLinks",
       "compareMilestoneRank", // one ordering for selection rank and budget degradation
       "citerPromptNumbers", // full citer list — antecedent re-homing after a removal
     ]) {
