@@ -258,6 +258,37 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     ).toBe(0);
   });
 
+  test("the incident crutch index is dropped on open (2026-08-21 plan B)", () => {
+    initializeSchema(db);
+    // The hand-created compatibility index that kept the live 0.12.1 bundle's
+    // 4-column ON CONFLICT preparing after the rehearsal incident rebuilt the
+    // production table early. This build's writers mint multi-relation pairs,
+    // which that index would refuse — it must not survive the open.
+    db.exec(
+      `CREATE UNIQUE INDEX idx_memory_edges_legacy_pair
+       ON memory_edges(citing_kind, citing_id, cited_kind, cited_id)`,
+    );
+
+    initializeSchema(db);
+
+    expect(
+      db
+        .query<{ count: number }, []>(
+          `SELECT COUNT(*) AS count FROM sqlite_master
+           WHERE type = 'index' AND name = 'idx_memory_edges_legacy_pair'`,
+        )
+        .get()!.count,
+    ).toBe(0);
+    // And multi-relation writes work again immediately after (fresh pair —
+    // the fixture's own migrated rows already occupy the low ids).
+    db.exec(
+      `INSERT INTO memory_edges VALUES ('turn', 91, 'turn', 92, 'encodes', 'asserted', 100)`,
+    );
+    db.exec(
+      `INSERT INTO memory_edges VALUES ('turn', 91, 'turn', 92, 'depends-on', 'asserted', 100)`,
+    );
+  });
+
   test("a fresh database is born in the new shape and skips the migration", () => {
     const fresh = createDatabase(":memory:");
     initializeSchema(fresh);

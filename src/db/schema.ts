@@ -1610,6 +1610,16 @@ function ensureMemoryEdgesSchema(db: Database): void {
     ensureMemoryEdgesMultiRelation(db);
   }
   db.exec(MEMORY_EDGES_DDL);
+  // 2026-08-21 incident crutch removal ([S15069/T1136]): a review rehearsal ran
+  // this migration against the production database ahead of release, and the
+  // still-live 0.12.1 bundle's `ON CONFLICT (citing_kind, citing_id,
+  // cited_kind, cited_id)` could no longer prepare against the rebuilt table.
+  // The stopgap (user-approved plan B) was a hand-created 4-column UNIQUE
+  // index restoring that clause — valid only while no writer can mint
+  // multi-relation pairs. This build's writers CAN, so the crutch must go the
+  // moment this code runs; the multi-relation staleness probe keys on the
+  // table's CHECK text and would never notice a surplus index on its own.
+  db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
   // Idempotent (CREATE TRIGGER IF NOT EXISTS) and safe to (re-)run on every
   // process start, including on a database whose triggers already exist from
   // an earlier version of this same function.
