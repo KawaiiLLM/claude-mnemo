@@ -261,21 +261,20 @@ export interface RecomputeTurnCitedPairsFields {
 export interface RecomputeTurnCitedPairsResult {
   /** The turn's full outgoing pair set after reconciliation. */
   written: MemoryEdge[];
-  /** Pairs dropped because no field supports them any more, relation included (spec C6). */
+  /** BARE rows dropped because no field names them any more; relation rows survive prose drift (edge-revision D1). */
   deleted: MemoryEdge[];
   /** References the body named that did not resolve, or that this session was never shown. */
   rejected: RejectedReference[];
 }
 
 /**
- * Spec C6: a bare `[S<session>/T<n>]`/`[E<n>]` in ANY of a turn's
- * citation-bearing fields is a real, storable citation, and a rewrite that
- * drops the reference drops the pair — relation included, since a relation
- * cannot outlive the pair that carries it. This is the sole write path left
- * for a turn's outgoing edges: the earlier `replaceTurnCitations` accepted a
- * bare `{turn, relation}` list with no prose backing it at all, which made
- * every rule below bypassable in one call (spec C6's "generic body-free
- * structured edge write is removed").
+ * Spec C6, narrowed to the BARE layer by edge-mechanism-revision D1: a bare
+ * `[S<session>/T<n>]`/`[E<n>]` in ANY of a turn's citation-bearing fields is
+ * a real, storable citation, and a rewrite that drops the reference drops the
+ * BARE row. Relation rows are standalone claims (attachTurnRelations below)
+ * and survive any prose rewrite — an ordinary note correction must never
+ * silently destroy edges nobody retracted; a wrong relation dies by
+ * retraction, not prose drift.
  *
  * `fields` is the turn's title/content/insight AS THEY STAND after the
  * caller's own write — `note`/`remember` pass the row a prior write in the

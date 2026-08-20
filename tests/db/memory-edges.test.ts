@@ -54,17 +54,19 @@ describe("universal memory edges", () => {
     db.close();
   });
 
-  // The four route-level "a rewrite drops its pair" tests were all written with
-  // a RELATIONLESS stale target, so narrowing this delete to
-  // `relation IS NULL` left three of the four green — a mutation that deletes
-  // only unattributed edges would have shipped. This is the shared causal
-  // witness the routes lean on: the stale pair here carries a relation, so the
-  // delete has to be relation-blind to pass.
-  describe("reconcileCitedPairs deletes a stale pair whatever relation it carries", () => {
-    test("a relation-bearing stale pair goes, and the surviving one keeps its relation", () => {
+  // Edge-mechanism-revision D1 (decoupling): prose drift owns only the BARE
+  // layer. This is the causal witness the routes lean on now — a stale pair
+  // that carries a relation KEEPS it (only retraction deletes a relation row),
+  // while a stale bare-only pair vanishes with the prose that named it. The
+  // earlier version of this test pinned the opposite ("relation-blind
+  // delete"), which under decoupling let an ordinary note correction silently
+  // destroy edges nobody retracted.
+  describe("reconcileCitedPairs touches only the bare layer", () => {
+    test("a relation-bearing stale pair survives; a bare-only stale pair goes", () => {
       const citer = addTurn(1);
       const keep = addTurn(2);
       const drop = addTurn(3);
+      const bareDrop = addTurn(4);
 
       writeMemoryEdges(
         db,
@@ -81,11 +83,17 @@ describe("universal memory edges", () => {
             relation: "supersedes",
             provenance: "judged",
           },
+          {
+            citing: { kind: "turn", id: citer },
+            cited: { kind: "turn", id: bareDrop },
+            relation: null,
+            provenance: "text-ref",
+          },
         ],
         500,
         { eligibleForRelation: "unrestricted" },
       );
-      expect(getOutgoingEdges(db, { kind: "turn", id: citer })).toHaveLength(2);
+      expect(getOutgoingEdges(db, { kind: "turn", id: citer })).toHaveLength(3);
 
       // The body now cites only `keep`.
       reconcileCitedPairs(
@@ -97,12 +105,14 @@ describe("universal memory edges", () => {
       );
 
       const survivors = getOutgoingEdges(db, { kind: "turn", id: citer });
-      expect(survivors).toHaveLength(1);
-      expect(survivors[0]!.cited).toEqual({ kind: "turn", id: keep });
+      expect(survivors).toHaveLength(2);
+      const byTarget = new Map(survivors.map((e) => [e.cited.id, e.relation]));
       // A bare re-statement of a pair that already carries a relation must not
-      // clear it (spec C14) — the reconcile is about which pairs exist, not
-      // about what they mean.
-      expect(survivors[0]!.relation).toBe("depends-on");
+      // clear it (spec C14), and prose withdrawing a mention must not clear a
+      // relation either (D1) — the bare-only pair is the only casualty.
+      expect(byTarget.get(keep)).toBe("depends-on");
+      expect(byTarget.get(drop)).toBe("supersedes");
+      expect(byTarget.has(bareDrop)).toBe(false);
     });
   });
 

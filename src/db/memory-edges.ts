@@ -594,15 +594,16 @@ export function getIncomingEdges(db: Database, cited: EdgeNode): MemoryEdge[] {
 export interface ReconcileCitedPairsResult {
   /** The citing node's full outgoing set after reconciliation — new pairs and pairs that already existed alike. */
   written: MemoryEdge[];
-  /** Pairs this call removed because no field supports them any more, relation included. */
+  /** BARE rows this call removed because no field names them any more; relation rows never appear here (they outlive prose). */
   deleted: MemoryEdge[];
 }
 
 /**
- * Spec C6: a pair exists if and only if the citing node's body's post-state
- * cites it. `citedNodes` is that post-state, already parsed and resolved by
- * the caller (references.ts) — this function's only job is to make
- * `memory_edges` agree with it, for ONE citing node's outgoing set.
+ * Spec C6, narrowed by edge-mechanism-revision D1 to the BARE layer: a bare
+ * pair row exists if and only if the citing node's body's post-state cites
+ * it. `citedNodes` is that post-state, already parsed and resolved by the
+ * caller (references.ts) — this function's only job is to make the bare rows
+ * of `memory_edges` agree with it, for ONE citing node's outgoing set.
  *
  * Two halves:
  *
@@ -610,10 +611,14 @@ export interface ReconcileCitedPairsResult {
  *     pair that already holds any row this is a no-op (D2), so relations
  *     attached by another writer survive a rewrite that still cites the same
  *     target, and the pair is never recorded twice.
- *   - every pair this node currently cites that is NOT in `citedNodes` is
- *     DELETED outright, relation and all — a relation cannot outlive the pair
- *     that carries it, and there is no "keep the relation, drop the pair"
- *     state for it to fall back to.
+ *   - every pair this node currently cites that is NOT in `citedNodes` loses
+ *     its BARE row only (edge-mechanism-revision D1, decoupling): the bare row
+ *     is prose's own record, so prose withdrawing the mention withdraws it.
+ *     RELATION rows are standalone claims declared through the relation
+ *     parameters and survive any prose rewrite — deleting them here would let
+ *     an ordinary note correction silently destroy edges nobody retracted.
+ *     A wrong relation dies by retraction (`retractMemoryEdges`), never by
+ *     prose drift.
  *
  * Whole-node rescan, not a per-field diff (spec C6's own text: turn, segment
  * and session field counts are all bounded, so re-deriving the full set on
@@ -635,12 +640,15 @@ export function reconcileCitedPairs(
 
   const existing = getOutgoingEdges(db, citing);
   const stale = existing.filter(
-    (edge) => !desired.has(`${edge.cited.kind}:${edge.cited.id}`),
+    (edge) =>
+      edge.relation === null &&
+      !desired.has(`${edge.cited.kind}:${edge.cited.id}`),
   );
 
   const del = db.query<unknown, [CitingNodeKind, number, EdgeNodeKind, number]>(
     `DELETE FROM memory_edges
-     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?`,
+     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
+       AND relation IS NULL`,
   );
   for (const edge of stale) {
     del.run(citing.kind, citing.id, edge.cited.kind, edge.cited.id);

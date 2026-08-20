@@ -1143,7 +1143,7 @@ describe("note tool citations (spec C6)", () => {
     ]);
   });
 
-  test("a rewrite (mode: overwrite) that drops a reference drops its pair and any relation it carried", () => {
+  test("a rewrite (mode: overwrite) that drops a reference drops the bare row but never a relation (decoupling, edge-revision D1)", () => {
     noteTool(
       db,
       {
@@ -1165,6 +1165,37 @@ describe("note tool citations (spec C6)", () => {
       ],
       950,
       { eligibleForRelation: "unrestricted" },
+    );
+
+    noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T2`,
+        title: "design+routing: revised, no longer citing T1",
+        content: "Stands on its own now.",
+        mode: { title: "write", content: "write" },
+      },
+      { now: () => 1000, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    // The relation row is a standalone claim — prose drift cannot delete it;
+    // only retraction can. The prose's own bare record is what a bare-only
+    // pair would have lost (the relation write already replaced it here, so
+    // the surviving set is exactly the relation row).
+    const survivors = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    expect(survivors).toHaveLength(1);
+    expect(survivors[0]?.relation).toBe("supersedes");
+  });
+
+  test("a rewrite that drops a reference deletes a BARE-only pair outright", () => {
+    noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T2`,
+        title: "design+routing: first pass",
+        content: `Cites [S${sessionId}/T1].`,
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
     noteTool(
