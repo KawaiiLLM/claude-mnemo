@@ -277,7 +277,7 @@ describe("SessionStart:rubric — the rubric ships through its own slot", () => 
     const result = await handler(createInput({ sessionId: "any" }));
     expect(result.continue).toBe(true);
     expect(result.hookSpecificOutput).toContain("<mnemo-memory-rubric");
-    expect(result.hookSpecificOutput).toContain("## 建段");
+    expect(result.hookSpecificOutput).toContain("## 段(归属与新建)");
   });
 
   test("the bare context body no longer carries the rubric (split, not concatenated)", async () => {

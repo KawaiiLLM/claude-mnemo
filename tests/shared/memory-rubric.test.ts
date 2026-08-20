@@ -40,12 +40,16 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   });
 
   test("the rubric's own sections are present verbatim (ticket's own normative text)", () => {
-    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v4");
+    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v5");
     expect(MEMORY_RUBRIC_TEXT).toContain("## Fields");
-    expect(MEMORY_RUBRIC_TEXT).toContain("## type");
-    expect(MEMORY_RUBRIC_TEXT).toContain("## tags");
+    // Ticket 03's four-section regroup: `## type`/`## tags` fold into
+    // `## Fields` as unheaded sub-blocks (no more standalone `## type`/
+    // `## tags` H2s), and `## 归属`/`## 建段` merge into one `## 段` section.
+    expect(MEMORY_RUBRIC_TEXT).toContain("type — 词表,每词一义:");
+    expect(MEMORY_RUBRIC_TEXT).toContain("tags — 名词,命名物");
     expect(MEMORY_RUBRIC_TEXT).toContain("## 关系(turn→turn;从引用方记向被引方)");
-    expect(MEMORY_RUBRIC_TEXT).toContain("## 归属");
+    expect(MEMORY_RUBRIC_TEXT).toContain("## 段(归属与新建)");
+    expect(MEMORY_RUBRIC_TEXT).toContain("## Policy(何时去读)");
     // The six discriminator sub-questions the note tool's own description
     // used to inline (ticket 11 migration).
     expect(MEMORY_RUBRIC_TEXT).toContain("evidence-for / evidence-against");
@@ -55,13 +59,21 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     expect(MEMORY_RUBRIC_TEXT).toContain("depends-on");
   });
 
-  // Ticket 13 (spec "节奏与建段指导"): v2→v3's own addition — the "建段"
-  // section, verbatim from the ticket's three ruled lines.
-  test("v4 carries the 建段 section, verbatim, ticket 13's own three lines", () => {
-    expect(MEMORY_RUBRIC_VERSION).toBe("v4");
-    expect(MEMORY_RUBRIC_TEXT).toContain("## 建段");
+  // Ticket 03 (edge-mechanism-revision spec "03 — Rubric v5 定稿入库,Policy
+  // 并入"): the old `## 建段` H2 (ticket 13's own three ruled lines) merges
+  // into the new `## 段(归属与新建)` section alongside `## 归属`. The first
+  // of the three lines drops its now-redundant ";无归属是合法状态" suffix
+  // (already stated by the 归属 bullet immediately above it in the same
+  // section — v4→v5 changelog item 4); the other two lines carry over
+  // verbatim.
+  test("v5 carries the 段 section's 建段 sub-part, verbatim, ticket 13's ruled lines (minus the v5-deduped suffix)", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v5");
+    expect(MEMORY_RUBRIC_TEXT).toContain("## 段(归属与新建)");
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "琐碎、短时闲聊等组不成可命名工作流的 turn 无须建段;无归属是合法状态",
+      "琐碎、短时闲聊等组不成可命名工作流的 turn 无须建段",
+    );
+    expect(MEMORY_RUBRIC_TEXT).not.toContain(
+      "无须建段;无归属是合法状态",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "需要建段时,先查 roster 有无合适的已有段——挂靠优先于新建",
@@ -74,17 +86,20 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // Ticket 01 (field-semantics spec, "01 — 字段定义进注入,预算硬拒改为回执提
   // 醒"): v3→v4's own addition — the `## Fields` table, byte-for-byte from
   // the ticket's ruled wording (acceptance criterion "注入的 rubric 块含上面
-  // 那份定义表,逐字一致"). Pinned as ONE contiguous substring, not fragments,
-  // so a reflow or a dropped line fails this test the same way a dropped
-  // field would.
+  // 那份定义表,逐字一致").
   //
   // Ticket 02 (field-semantics spec "02 — 长度随产出,结论先行") appended one
-  // more paragraph to this same contiguous block, after the three turn field
-  // definitions and before the segment fields — folded into this fixture
-  // rather than a second one, so the test keeps proving the two additions sit
-  // in the one place the tickets both specify.
-  test("v4 carries the Fields section, byte-for-byte, tickets 01+02's own definition table", () => {
-    const fieldsTable =
+  // more paragraph to this same block, after the three turn field
+  // definitions and before the segment fields.
+  //
+  // Ticket 03's four-section regroup folds `## type`/`## tags` INTO `## Fields`
+  // as sub-blocks sitting between the two halves pinned below, so the tickets
+  // 01+02 table is no longer one contiguous run start-to-end — it is pinned
+  // here as its two now-separated contiguous halves (opening through the
+  // length paragraph; the segment fields through the closing sentence), with
+  // an ordering check standing in for the single old contiguous assertion.
+  test("v5 carries the Fields section, byte-for-byte, tickets 01+02's own definition table (now split by the type/tags sub-blocks between)", () => {
+    const fieldsOpening =
       "## Fields\n" +
       "\n" +
       "Turn note — three fields, three jobs:\n" +
@@ -99,8 +114,9 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       "that produced a lot may run long; one that produced little must be terse.\n" +
       "Process detail belongs to replay — a summary cannot hold it, and trying makes\n" +
       "it hold nothing. Content leads with its conclusions: a reader's budget cuts\n" +
-      "the tail, so whatever merely supports a decision comes after the decision.\n" +
-      "\n" +
+      "the tail, so whatever merely supports a decision comes after the decision.";
+
+    const fieldsClosing =
       "Segment, Working State — what a resuming session needs to continue:\n" +
       "- goal        — what this task is trying to achieve.\n" +
       "- constraints — how the work must be done: norms, habits, standing preferences.\n" +
@@ -118,7 +134,11 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       "A segment's title is set at creation. Its type and tags are DERIVED from its\n" +
       "member turns and recomputed when membership changes — never written by hand.";
 
-    expect(MEMORY_RUBRIC_TEXT).toContain(fieldsTable);
+    expect(MEMORY_RUBRIC_TEXT).toContain(fieldsOpening);
+    expect(MEMORY_RUBRIC_TEXT).toContain(fieldsClosing);
+    expect(MEMORY_RUBRIC_TEXT.indexOf(fieldsOpening)).toBeLessThan(
+      MEMORY_RUBRIC_TEXT.indexOf(fieldsClosing),
+    );
   });
 });
 
@@ -136,18 +156,24 @@ describe("renderRubricBlock — its own block, no shared budget (ticket 14 roste
     expect(block).not.toContain("INCOMPLETE");
   });
 
-  // [S15069/T1028]: the Memory Policy rides the SAME slot as the rubric — one
-  // hook payload, two static tags — but must never leak into the rubric's
-  // OTHER consumer: the settlement prompt belongs to an agent with no recall
-  // tool, and retrieval policy there would teach a tool that does not exist.
-  test("the memory policy rides the rubric slot but never the shared rubric constant", () => {
+  // Ticket 03 (edge-mechanism-revision spec "03 — Rubric v5 定稿入库,Policy
+  // 并入"): the old sibling `MEMORY_POLICY_TEXT` block ([S15069/T1028]'s "和
+  // rubric 一个块" cohabitation) retires — Policy is now the rubric's own
+  // `## Policy` section, so it rides inside `MEMORY_RUBRIC_TEXT` itself and
+  // reaches BOTH the SessionStart injection and the settlement prompt (which
+  // has no recall tool) alike; there is no longer a second, rubric-only-
+  // consumer distinction to police here.
+  test("Policy is the rubric's own section — no more sibling policy block or tag", () => {
     const block = renderRubricBlock();
-    expect(block).toContain('<mnemo-memory-policy version="v1">');
+    expect(block).toContain("## Policy(何时去读)");
     expect(block).toContain("注入块只是索引,不是记忆本身");
     expect(block).toContain("先 recall/replay 原回合再落笔");
-    // The shared constant both consumers render stays policy-free.
-    expect(MEMORY_RUBRIC_TEXT).not.toContain("Memory Policy");
-    expect(MEMORY_RUBRIC_TEXT).not.toContain("recall/replay");
+    // The shared constant both consumers render now carries Policy directly.
+    expect(MEMORY_RUBRIC_TEXT).toContain("## Policy(何时去读)");
+    expect(MEMORY_RUBRIC_TEXT).toContain("recall/replay");
+    // The retired sibling block's own tag must never appear anywhere in the
+    // injected output.
+    expect(block).not.toContain("<mnemo-memory-policy");
   });
 
   // [S15069/T1029], the pi-hermes three-position lesson made deliberate: the
