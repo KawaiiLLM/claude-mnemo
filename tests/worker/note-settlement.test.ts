@@ -127,6 +127,30 @@ function closeDebt(db: Database, sessionDbId: number, promptNumber: number): voi
   ).run(sessionDbId, promptNumber);
 }
 
+/**
+ * Move the one-time settlement transition watermark (spec D8, ticket 05,
+ * [S15069/T1124]) to sit right after whatever turns already exist.
+ *
+ * The real migration (`ensureNoteSettlementWatermark`, db/schema.ts) stamps
+ * this exactly once, the first time it finds the row missing — every fixture
+ * in this file already has the row (`initializeSchema` in `beforeEach` stamps
+ * it at 0, since no turns exist yet at that point). A fixture that wants a
+ * mixed pre/post-watermark corpus therefore moves the ALREADY-stamped row
+ * explicitly, the same way this file's era tests hand `eraCutoffEpoch`
+ * straight to the scheduler rather than re-deriving it — production never
+ * moves this row twice, but a test choosing where the line falls is a
+ * different thing from a second migration re-stamping it.
+ */
+function stampWatermarkAtCurrentMaxTurnId(db: Database): void {
+  db.exec(`
+    INSERT INTO note_settlement_watermark_state (id, watermark_turn_id, recorded_at_epoch)
+    VALUES (1, COALESCE((SELECT MAX(id) FROM turns), 0), 0)
+    ON CONFLICT(id) DO UPDATE SET
+      watermark_turn_id = excluded.watermark_turn_id,
+      recorded_at_epoch = excluded.recorded_at_epoch
+  `);
+}
+
 /** A fake clock the whole scheduler shares: epoch seconds derived from ms. */
 function createClock(startMs = 1_700_000_000_000) {
   let ms = startMs;
@@ -670,6 +694,144 @@ describe("note settlement and the era boundary", () => {
     expect(listNoteSettlementJobs(db, shortEraHalf)).toHaveLength(0);
     expect(getNoteSettlementCursor(db, legacyOnly)).toBe(0);
     expect(listNoteDebt(db, legacyOnly)).toEqual(legacyOnlyDebtBefore);
+  });
+});
+
+describe("note settlement and the transition watermark (spec D8, ticket 05, [S15069/T1124])", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("consecutive planning skips a pre-watermark backlog and tiles the post-watermark half from the watermark forward", async () => {
+    const sessionDbId = seedSession(db, "content-watermark-consecutive");
+    const clock = createClock();
+    const { dispatch, calls } = recordingDispatch();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+    });
+
+    // An old install's leftover: well over the threshold, every turn decided
+    // — without the watermark this alone would cut a window immediately.
+    seedTurns(db, sessionDbId, 1, 60);
+    stampWatermarkAtCurrentMaxTurnId(db);
+
+    const stale = await scheduler.onTurnStop(sessionDbId);
+    expect(stale.created).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+    expect(countNoteSettlementJobs(db)).toBe(0);
+
+    // +1: the last turn of the fresh batch is not yet decided (spec D10).
+    seedTurns(db, sessionDbId, 61, NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS + 1);
+    const fresh = await scheduler.onTurnStop(sessionDbId);
+
+    expect(fresh.created).toHaveLength(1);
+    // The window starts right after the watermark (61), never at turn 1.
+    expect(fresh.created[0]!.windowStart).toBe(61);
+    expect(fresh.created[0]!.windowEnd).toBe(
+      60 + NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS,
+    );
+    expect(fresh.created[0]!.triggerType).toBe("consecutive");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("residual scan derives its own candidate window from the watermark forward, and an all-pre-watermark residual is left alone", async () => {
+    const clock = createClock();
+    const nowEpoch = clock.now();
+
+    // Oldest and largest, so it would be picked first on age — but every turn
+    // of it predates the watermark, so it has no residual at all.
+    const legacyOnly = seedSession(
+      db,
+      "content-watermark-residual-legacy",
+      nowEpoch - 6 * DAY_SECONDS,
+    );
+    seedTurns(db, legacyOnly, 1, 60, "noted", nowEpoch - 6 * DAY_SECONDS);
+
+    // 30 pre-watermark turns then 25 post-watermark ones: the residual is the
+    // post-watermark half only.
+    const straddling = seedSession(
+      db,
+      "content-watermark-residual-straddle",
+      nowEpoch - 3 * DAY_SECONDS,
+    );
+    seedTurns(db, straddling, 1, 30, "noted", nowEpoch - 5 * DAY_SECONDS);
+
+    stampWatermarkAtCurrentMaxTurnId(db);
+
+    seedTurns(db, straddling, 31, 25, "noted", nowEpoch - 3 * DAY_SECONDS);
+
+    // A live session, well past the threshold, whose own turn-stop is what
+    // rides the residual scan in.
+    const live = seedSession(db, "content-watermark-residual-live", nowEpoch);
+    seedTurns(
+      db,
+      live,
+      1,
+      NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS + 1,
+      "noted",
+      nowEpoch,
+    );
+
+    const { dispatch, calls } = recordingDispatch();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+      activeSessionIds: () => [live],
+    });
+
+    const pass = await scheduler.onTurnStop(live);
+
+    expect(pass.residualSessionIds).toEqual([straddling]);
+    // Had the residual scan's own SQL not clipped its candidate windowStart
+    // forward past the watermark, `insertJob`'s below_window_floor check
+    // (now watermark-aware too) would have refused the whole candidate
+    // outright rather than settling its post-watermark half.
+    const residual = listNoteSettlementJobs(db, straddling)[0]!;
+    expect(residual.windowStart).toBe(31);
+    expect(residual.windowEnd).toBe(55);
+    expect(calls.map((job) => job.sessionId)).toContain(straddling);
+
+    // The all-pre-watermark session produced no job and no state write at
+    // all — below-the-floor is a derived judgement, not a recorded one.
+    expect(listNoteSettlementJobs(db, legacyOnly)).toHaveLength(0);
+    expect(getNoteSettlementCursor(db, legacyOnly)).toBe(0);
+  });
+
+  test("manual backfill still reaches turns that existed before the watermark", async () => {
+    const sessionDbId = seedSession(db, "content-watermark-backfill");
+    seedTurns(db, sessionDbId, 1, 30);
+    stampWatermarkAtCurrentMaxTurnId(db);
+
+    // Every turn in this range predates the watermark — an automatic planner
+    // would refuse it (below_window_floor), but backfill is exempt by trigger
+    // type, not by any range check.
+    const result = enqueueBackfillNoteSettlementJob(
+      db,
+      sessionDbId,
+      1,
+      30,
+      5_000,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+
+    expect(result.ok).toBe(true);
+    expect((result as { ok: true; job: NoteSettlementJob }).job).toMatchObject(
+      { windowStart: 1, windowEnd: 30, triggerType: "backfill" },
+    );
   });
 });
 

@@ -431,6 +431,22 @@ const SCHEMA_SQL = `
   ${NOTE_SETTLEMENT_JOBS_TABLE_DDL}
   ${NOTE_SETTLEMENT_JOBS_INDEX_DDL}
 
+  -- The one-time settlement transition watermark (edge-mechanism-revision
+  -- spec D8, ticket 05, [S15069/T1124]). One row, written ONCE by whichever
+  -- build's migration first finds this table empty
+  -- (ensureNoteSettlementWatermark, db/schema.ts) — never rewritten by any
+  -- later migration or runtime code. watermark_turn_id is a turns.id
+  -- high-water mark, not an epoch: every AUTOMATIC settlement planner
+  -- (consecutive/residual — db/note-settlement.ts) treats a turn at or below
+  -- it as already finished at migration time and refuses to plan a window
+  -- that starts at or before it; only an explicit manual backfill may still
+  -- reach one.
+  CREATE TABLE IF NOT EXISTS note_settlement_watermark_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    watermark_turn_id INTEGER NOT NULL,
+    recorded_at_epoch INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS note_settlement_cursors (
     session_id INTEGER PRIMARY KEY
       REFERENCES sessions(id) ON DELETE CASCADE,
@@ -1759,6 +1775,10 @@ export function initializeSchema(db: Database): void {
   ensureNoteSettlementTriggerVocabulary(db);
   ensureNoteSettlementJobsRetrySchema(db);
   ensureNoteSettlementProposalIdempotencyKey(db);
+  // After the trigger-vocabulary and retry-schema rebuilds above: this writes
+  // 'abandoned'/'deterministic' into columns/CHECK values those two migrations
+  // are what make legal in the first place.
+  ensureNoteSettlementWatermark(db);
   dropLegacyMemoriesTable(db);
   // Last on purpose: every other turns-column migration above (parent_turn_id,
   // compact_boundary_uuid, consulted_memories, ...) must have
@@ -2275,6 +2295,97 @@ function ensureNoteSettlementProposalIdempotencyKey(db: Database): void {
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_note_settlement_proposals_session_addresses
        ON note_settlement_proposals(session_id, addresses_key)`,
   );
+}
+
+const NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE =
+  "superseded by the settlement transition watermark (edge-mechanism-revision ticket 05, spec D8) — resettle via manual backfill";
+
+function noteSettlementWatermarkIsUnset(db: Database): boolean {
+  return !db
+    .query<{ id: number }, []>(
+      "SELECT id FROM note_settlement_watermark_state WHERE id = 1",
+    )
+    .get();
+}
+
+/**
+ * D8 (edge-mechanism-revision ticket 05, [S15069/T1124]): the moment this
+ * migration first finds `note_settlement_watermark_state` empty, it (1)
+ * disposes every AUTOMATIC job this database still has open and (2) stamps
+ * the watermark at the current `MAX(turns.id)` — same transaction, because a
+ * crash between the two steps must not leave a watermark in force with the
+ * jobs it was supposed to retire still claimable, nor the reverse (jobs gone,
+ * no watermark, so the next boot would try to dispose an already-clean table
+ * against a floor of zero and re-derive nothing).
+ *
+ * Disposal, not the watermark write, is why this cannot be the naturally
+ * idempotent shape `retireLegacyPendingNoteDebts` gets away with running on
+ * every boot: THAT table never opens a fresh `pending` row after its own
+ * cutover, so nothing legitimate is ever left for a rerun to sweep. This
+ * table's whole job is to keep producing fresh `pending` rows forever — an
+ * unconditional rerun would abandon every ordinary window still waiting on
+ * its worker, on every process restart. The one-shot gate
+ * (`noteSettlementWatermarkIsUnset`, checked once outside the transaction and
+ * again inside it) is therefore load-bearing, not decoration.
+ *
+ * A `pending`, orphaned `claimed`, or still-retriable `failed` row this finds
+ * is, by construction, already pre-watermark: nothing can enqueue an
+ * automatic job for a turn that does not exist yet, so any automatic job
+ * already sitting in the table right now was cut from turns at or below
+ * whatever `MAX(turns.id)` is about to become the watermark. Left alone, the
+ * ordinary claim/reclaim path (`claimNextNoteSettlementJob`,
+ * db/note-settlement.ts) would still pick one of these up on the session's
+ * next event and settle straight across the boundary — the watermark folded
+ * into `getNoteSettlementWindowStart`/`listResidualNoteSettlementCandidates`
+ * only stops a NEW window from being PLANNED, it does nothing about a job
+ * already RECORDED.
+ *
+ * Same terminal-disposal shape as `retireLegacyPendingNoteDebts` (read-write-
+ * contract migration, spec D8 there — a different spec's D8, same letter): a
+ * plain `UPDATE … WHERE` write-off into an existing terminal state, not a
+ * table rebuild. `abandoned` asserts nothing new about the status vocabulary
+ * — it is the same terminal state `claimNextNoteSettlementJob`'s own at-cap
+ * reclaim already produces — and `failure_class = 'deterministic'` for the
+ * same reason `ensureNoteSettlementJobsRetrySchema` tags every pre-ticket-06
+ * `failed` row that way: a mis-tagged row only costs a retry it would not
+ * otherwise need, never the reverse. No debt row is synthesized (unlike the
+ * normal at-cap abandon path) — the precedent this follows does not write one
+ * either, and surfacing "these turns need a backfill" is explicitly this
+ * ticket's own out-of-scope (spec.md, Out of Scope): the operator runs
+ * backfill by choice, not because a debt queue told them to.
+ *
+ * `backfill` rows are excluded from disposal outright: they are the
+ * operator's own explicit request (`POST /settle`), never derived by any
+ * planner, and D8 exempts them from the watermark by name — a pending
+ * backfill is not "queued but unrun automatic work", it is a request still
+ * waiting its turn.
+ */
+function ensureNoteSettlementWatermark(db: Database): void {
+  if (!noteSettlementWatermarkIsUnset(db)) {
+    return;
+  }
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  runWriteTransaction(db, () => {
+    if (!noteSettlementWatermarkIsUnset(db)) {
+      return;
+    }
+    db.query<unknown, [string, number]>(
+      `UPDATE note_settlement_jobs
+       SET status = 'abandoned',
+           claimed_at_epoch = NULL,
+           failure_class = 'deterministic',
+           last_error = ?,
+           updated_at_epoch = ?
+       WHERE status IN ('pending', 'claimed', 'failed')
+         AND trigger_type != 'backfill'`,
+    ).run(NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, nowEpoch);
+    db.query<unknown, [number]>(
+      `INSERT OR IGNORE INTO note_settlement_watermark_state (
+         id, watermark_turn_id, recorded_at_epoch
+       )
+       SELECT 1, COALESCE((SELECT MAX(id) FROM turns), 0), ?`,
+    ).run(nowEpoch);
+  });
 }
 
 // `shadow_notes` arrives whole from SCHEMA_SQL (CREATE TABLE IF NOT EXISTS), but
@@ -3802,6 +3913,7 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS note_settlement_debts");
   db.exec("DROP TABLE IF EXISTS note_settlement_proposals");
   db.exec("DROP TABLE IF EXISTS note_settlement_jobs");
+  db.exec("DROP TABLE IF EXISTS note_settlement_watermark_state");
   db.exec("DROP TABLE IF EXISTS note_settlement_cursors");
   db.exec("DROP TABLE IF EXISTS note_debt_cursor");
   db.exec("DROP TABLE IF EXISTS note_debt");

@@ -332,8 +332,44 @@ export function getEraFloorPromptNumber(
 }
 
 /**
+ * The highest prompt_number, in this session, among turns that already
+ * existed when the one-time settlement transition watermark was stamped
+ * (spec D8, ticket 05, [S15069/T1124]) — 0 for a session with none, and 0
+ * for a database that has not migrated the watermark in yet (the subquery's
+ * `WHERE id = 1` row is simply absent, so `t.id <= NULL` is never true and
+ * `MAX` sees no rows).
+ *
+ * Keyed on `turns.id`, not `created_at_epoch`, unlike `getEraFloorPromptNumber`
+ * above: the watermark marks "already in the table the instant this build's
+ * migration ran", and a turn's autoincrement id is already a faithful record
+ * of that — an epoch would also wall off any turn a test fixture (or a
+ * clock-skewed real session) backdates below the migration's own wall-clock
+ * moment, which is not what D8 means by "已完结".
+ *
+ * Same shape as `getEraFloorPromptNumber` otherwise: a MAX over a boundary
+ * rather than a per-turn filter, because the floor a WINDOW needs is
+ * contiguous-range, not per-turn.
+ */
+export function getNoteSettlementWatermarkFloorPromptNumber(
+  db: Database,
+  sessionId: number,
+): number {
+  return (
+    db
+      .query<{ floor: number | null }, [number]>(
+        `SELECT MAX(t.prompt_number) AS floor FROM turns t
+         WHERE t.session_id = ?
+           AND t.id <= (
+             SELECT watermark_turn_id FROM note_settlement_watermark_state WHERE id = 1
+           )`,
+      )
+      .get(sessionId)?.floor ?? 0
+  );
+}
+
+/**
  * Where the next window begins: one past the latest of the cursor, the highest
- * window already enqueued, and the era floor.
+ * window already enqueued, the era floor, and the transition watermark floor.
  *
  * Consulting the enqueued windows and not just the cursor is what keeps windows
  * disjoint while a job is still open — the cursor deliberately does not move
@@ -343,7 +379,14 @@ export function getEraFloorPromptNumber(
  * The era floor is consulted independently of the cursor row rather than only
  * through it: a session settlement has never written about has no cursor row at
  * all, and deriving the bound is what lets the below-threshold trigger stay a
- * pure read (see `planNoteSettlementWindows`).
+ * pure read (see `planNoteSettlementWindows`). The watermark floor (spec D8,
+ * ticket 05) joins it here for the same reason and the same exemption shape:
+ * folding it into THIS bound rather than giving it its own dedicated check in
+ * `insertJob` (the way the era floor gets `below_era_floor`) is deliberate —
+ * the watermark is backfill-exempt exactly the way the monotonic floor
+ * already is, never universal the way the era floor is, so it belongs beside
+ * the terms that already share that exemption rather than beside the one
+ * that does not.
  *
  * `backfill` rows are excluded, for the same reason they are excluded from the
  * cursor walk: this bound exists to keep the AUTOMATIC tiling disjoint, and a
@@ -370,6 +413,7 @@ export function getNoteSettlementWindowStart(
       getNoteSettlementCursor(db, sessionId),
       highestEnqueued ?? 0,
       getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch),
+      getNoteSettlementWatermarkFloorPromptNumber(db, sessionId),
     ) + 1
   );
 }
@@ -758,7 +802,14 @@ export interface ListResidualNoteSettlementOptions {
  * The era floor enters the derived window start exactly as it does on the live
  * path, which is also what keeps a purely legacy session out: its window would
  * start one past its last turn, so it counts zero residual turns and never
- * reaches the threshold.
+ * reaches the threshold. The transition watermark floor (spec D8, ticket 05)
+ * joins it for the same reason: a residual candidate's `windowStart` must
+ * already be watermark-clean by the time it is derived, because
+ * `enqueueResidualNoteSettlementJob` routes through `insertJob`, whose
+ * `below_window_floor` check (via `getNoteSettlementWindowStart`, now
+ * watermark-aware too) would otherwise refuse the WHOLE candidate rather than
+ * clip it — silently dropping a session's legitimate post-watermark residual
+ * turns instead of settling them from the watermark forward.
  */
 export function listResidualNoteSettlementCandidates(
   db: Database,
@@ -812,6 +863,14 @@ export function listResidualNoteSettlementCandidates(
              COALESCE(
                (SELECT MAX(t.prompt_number) FROM turns t
                 WHERE t.session_id = s.id AND t.created_at_epoch < ?),
+               0
+             ),
+             COALESCE(
+               (SELECT MAX(t.prompt_number) FROM turns t
+                WHERE t.session_id = s.id
+                  AND t.id <= (
+                    SELECT watermark_turn_id FROM note_settlement_watermark_state WHERE id = 1
+                  )),
                0
              )
            ) + 1 AS windowStart

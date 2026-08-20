@@ -498,3 +498,218 @@ describe("note_settlement_jobs trigger vocabulary migration", () => {
     expect(before).toContain("'sessionend'");
   });
 });
+
+/**
+ * The one-time settlement transition watermark (edge-mechanism-revision spec
+ * D8, ticket 05, [S15069/T1124]). `note_settlement_watermark_state`'s
+ * `CREATE TABLE IF NOT EXISTS` ships inside `SCHEMA_SQL` itself, so the TABLE
+ * exists from a fixture's very first `initializeSchema` call (`beforeEach`
+ * below) same as every other test file in this suite — what varies, and what
+ * these tests simulate by deleting the row, is whether the single ROW this
+ * migration writes has landed yet. That is the same distinction the OTHER
+ * describe block in this file draws by rewriting `note_settlement_jobs`'s
+ * shape: there, the pre-migration state is a different table shape; here, it
+ * is simply an empty table.
+ */
+describe("note settlement transition watermark migration (ticket 05, D8)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function seedTurn(
+    db: Database,
+    sessionDbId: number,
+    promptNumber: number,
+    createdAtEpoch = 10,
+  ): number {
+    return db
+      .query<{ id: number }, [number, number, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt,
+           assistant_response, created_at_epoch
+         ) VALUES (?, ?, 'active', 'prompt', 'reply', ?)
+         RETURNING id`,
+      )
+      .get(sessionDbId, promptNumber, createdAtEpoch)!.id;
+  }
+
+  function watermarkRow(): { watermarkTurnId: number; recordedAtEpoch: number } | null {
+    return (
+      db
+        .query<{ watermarkTurnId: number; recordedAtEpoch: number }, []>(
+          `SELECT watermark_turn_id AS watermarkTurnId, recorded_at_epoch AS recordedAtEpoch
+           FROM note_settlement_watermark_state WHERE id = 1`,
+        )
+        .get() ?? null
+    );
+  }
+
+  function jobRow(
+    id: number,
+  ): {
+    status: string;
+    claimedAtEpoch: number | null;
+    failureClass: string | null;
+    lastError: string | null;
+  } | null {
+    return (
+      db
+        .query<
+          {
+            status: string;
+            claimedAtEpoch: number | null;
+            failureClass: string | null;
+            lastError: string | null;
+          },
+          [number]
+        >(
+          `SELECT status, claimed_at_epoch AS claimedAtEpoch,
+                  failure_class AS failureClass, last_error AS lastError
+           FROM note_settlement_jobs WHERE id = ?`,
+        )
+        .get(id) ?? null
+    );
+  }
+
+  test("the beforeEach install (no turns yet) stamps the watermark at 0", () => {
+    // Every other test file's `beforeEach` calls `initializeSchema` before it
+    // ever seeds a turn — this is the shape that makes the whole watermark
+    // design safe against the rest of the suite: a fresh test database always
+    // reads as "nothing existed yet", so every turn a fixture seeds afterward
+    // is unconditionally post-watermark.
+    expect(watermarkRow()).toEqual({ watermarkTurnId: 0, recordedAtEpoch: expect.any(Number) });
+  });
+
+  test("stamps the watermark at the current MAX(turns.id) the first time the row is missing, and never restamps it", () => {
+    const sessionDbId = upsertSession(db, {
+      contentSessionId: "watermark-migration",
+      project: "/tmp/project-note-settlement-watermark",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    seedTurn(db, sessionDbId, 1);
+    seedTurn(db, sessionDbId, 2);
+    const lastPreMigrationTurnId = seedTurn(db, sessionDbId, 3);
+
+    // Simulate an install that has never run this migration: the row is
+    // absent (the table itself already exists — every `initializeSchema`
+    // call, this one's own `beforeEach` included, creates it unconditionally
+    // via `CREATE TABLE IF NOT EXISTS` — only the row is what a pre-ticket-05
+    // database lacks).
+    db.exec("DELETE FROM note_settlement_watermark_state");
+
+    initializeSchema(db);
+
+    expect(watermarkRow()?.watermarkTurnId).toBe(lastPreMigrationTurnId);
+
+    // More turns land, and the process restarts (initializeSchema reruns, as
+    // it does on every boot) — the watermark must not move.
+    seedTurn(db, sessionDbId, 4);
+    seedTurn(db, sessionDbId, 5);
+    const stampedAfterFirstRun = watermarkRow();
+
+    initializeSchema(db);
+    initializeSchema(db);
+
+    expect(watermarkRow()).toEqual(stampedAfterFirstRun);
+  });
+
+  test("a job enqueued AFTER the watermark is stamped is never swept by a later initializeSchema call", () => {
+    const sessionDbId = upsertSession(db, {
+      contentSessionId: "watermark-no-sweep",
+      project: "/tmp/project-note-settlement-watermark",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    // The watermark is already stamped (at 0, from this describe's own
+    // beforeEach) — this is the ordinary post-migration steady state, not a
+    // simulated upgrade.
+    const freshJobId = seedJob(db, sessionDbId, 1, 50, "consecutive");
+
+    // Every later process boot re-runs initializeSchema. None of them may
+    // touch a job that was enqueued in the ordinary course of business after
+    // the migration already ran — the disposal pass is gated to the SAME
+    // one-shot moment as the watermark stamp itself.
+    initializeSchema(db);
+    initializeSchema(db);
+
+    expect(jobRow(freshJobId)?.status).toBe("pending");
+  });
+
+  test("disposes queued-but-unrun automatic jobs into 'abandoned' at the same moment it stamps the watermark, and leaves backfill/resolved jobs untouched", () => {
+    const sessionDbId = upsertSession(db, {
+      contentSessionId: "watermark-disposal",
+      project: "/tmp/project-note-settlement-watermark",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    const pendingConsecutive = seedJob(db, sessionDbId, 1, 50, "consecutive");
+    const claimedResidual = seedJob(db, sessionDbId, 51, 80, "residual");
+    db.exec(
+      `UPDATE note_settlement_jobs SET status = 'claimed', claimed_at_epoch = 20
+       WHERE id = ${claimedResidual}`,
+    );
+    const retriableFailed = seedJob(db, sessionDbId, 81, 130, "consecutive");
+    db.exec(
+      `UPDATE note_settlement_jobs SET status = 'failed', attempts = 1,
+         retry_at_epoch = 999999999 WHERE id = ${retriableFailed}`,
+    );
+    const doneConsecutive = seedJob(db, sessionDbId, 131, 180, "consecutive");
+    db.exec(`UPDATE note_settlement_jobs SET status = 'done' WHERE id = ${doneConsecutive}`);
+    const alreadyAbandoned = seedJob(db, sessionDbId, 181, 230, "residual");
+    db.exec(
+      `UPDATE note_settlement_jobs SET status = 'abandoned', failure_class = 'deterministic'
+       WHERE id = ${alreadyAbandoned}`,
+    );
+    const pendingBackfill = seedJob(db, sessionDbId, 500, 520, "backfill");
+
+    // Force this to read as the first-ever run of the migration (same
+    // technique as the test above).
+    db.exec("DELETE FROM note_settlement_watermark_state");
+
+    initializeSchema(db);
+
+    for (const id of [pendingConsecutive, claimedResidual, retriableFailed]) {
+      const row = jobRow(id)!;
+      expect(row.status).toBe("abandoned");
+      expect(row.claimedAtEpoch).toBeNull();
+      expect(row.failureClass).toBe("deterministic");
+      expect(row.lastError).toContain("watermark");
+    }
+
+    // Already-resolved jobs are untouched.
+    expect(jobRow(doneConsecutive)?.status).toBe("done");
+    const abandonedRow = jobRow(alreadyAbandoned)!;
+    expect(abandonedRow.status).toBe("abandoned");
+    expect(abandonedRow.lastError).toBeNull();
+
+    // Backfill is exempt by trigger type — it is the operator's own explicit
+    // request, not queued automatic work.
+    expect(jobRow(pendingBackfill)?.status).toBe("pending");
+
+    // The watermark itself landed alongside the disposal.
+    expect(watermarkRow()).not.toBeNull();
+  });
+});
