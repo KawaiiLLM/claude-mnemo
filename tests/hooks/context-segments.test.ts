@@ -1,4 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
@@ -173,6 +177,122 @@ describe("createSegmentBlockContextHandler", () => {
     const result = await createSegmentBlockContextHandler({ db }, 1, "milestones")(input());
     expect(result.hookSpecificOutput).toContain("admitted member");
     expect(result.hookSpecificOutput).not.toContain("overridden member");
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 01 regression: the live 0.12.1 outage. Every fixture above uses a
+// WRITABLE in-memory database and passes no readerId — structurally unable
+// to reproduce the bug (a writer identity reaching a readonly connection's
+// grant INSERT). This block is the one place in the suite that opens a
+// REAL readonly, FILE-BACKED handle, which is the only way the throw the
+// production hook path hit is observable at all.
+// ---------------------------------------------------------------------------
+
+describe("createSegmentBlockContextHandler — readonly file-backed DB (ticket 01 regression)", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop()!;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * Seeds a schema + one attached segment (with a member turn, so the
+   * milestones block has real content to render) on a WRITABLE file-backed
+   * connection, then reopens the SAME file readonly — the exact shape of
+   * the production `getDefaultSegmentBlockContextHandler` connection
+   * (`hooks/hook-command.ts` ~187-218). `journal_mode = DELETE` is set
+   * before closing the writable handle: a readonly connection to a
+   * WAL-mode database fails to open unless the -wal/-shm sidecar files are
+   * still present, which is not the shape under test here.
+   */
+  function seedReadonlyFileDatabase(): { db: Database; segmentId: number } {
+    const dir = mkdtempSync(join(tmpdir(), "context-segments-readonly-"));
+    tempDirs.push(dir);
+    const path = join(dir, "readonly-fixture.db");
+
+    const writable = new Database(path, { create: true });
+    initializeSchema(writable);
+    const session = upsertSession(writable, {
+      contentSessionId: "readonly-fixture-session",
+      project: "/projects/readonly-fixture",
+      title: "Readonly fixture",
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const segment = createSegment(writable, {
+      title: "Readonly fixture lane",
+      nowEpoch: 1_000,
+    });
+    const turn = writable
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+          session_id, prompt_number, status, user_prompt, assistant_response,
+          title, type, created_at_epoch
+        ) VALUES (?, 1, 'extracted', 'ship it readonly', 'shipped readonly',
+          'Ship the readonly regression', '["implement"]', 1000)
+        RETURNING id`,
+      )
+      .get(session.id)!;
+    addSegmentMembers(writable, segment.id, [turn.id], 1_000);
+    attachSegmentToSession(writable, session.id, segment.id, 1_000);
+    writable.exec("PRAGMA journal_mode = DELETE;");
+    writable.close();
+
+    const db = new Database(path, { readonly: true, create: false });
+    return { db, segmentId: segment.id };
+  }
+
+  test("the fields block renders real content, not a readonly-write error, and records no read grant", async () => {
+    const { db, segmentId } = seedReadonlyFileDatabase();
+
+    const result = await createSegmentBlockContextHandler({ db }, 1, "fields")(
+      input({ sessionId: "readonly-fixture-session" }),
+    );
+
+    expect(result.hookSpecificOutput).toContain(`[E${segmentId}] · fields`);
+    expect(result.hookSpecificOutput).not.toContain("readonly database");
+    expect(result.hookSpecificOutput).not.toContain("timeline error");
+
+    const grants = db
+      .query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM write_gate_reads`)
+      .get()!;
+    expect(grants.count).toBe(0);
+    db.close();
+  });
+
+  test("the milestones block renders real content, not a readonly-write error, and records no read grant", async () => {
+    const { db, segmentId } = seedReadonlyFileDatabase();
+
+    const result = await createSegmentBlockContextHandler({ db }, 1, "milestones")(
+      input({ sessionId: "readonly-fixture-session" }),
+    );
+
+    expect(result.hookSpecificOutput).toContain(`[E${segmentId}] · milestones`);
+    expect(result.hookSpecificOutput).not.toContain("readonly database");
+    expect(result.hookSpecificOutput).not.toContain("timeline error");
+
+    const grants = db
+      .query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM write_gate_reads`)
+      .get()!;
+    expect(grants.count).toBe(0);
+    db.close();
+  });
+
+  test("mutation check: reintroducing a writer identity on this connection reproduces the outage — proves the fixture actually exercises the readonly failure mode", async () => {
+    const { db, segmentId } = seedReadonlyFileDatabase();
+    const { renderAttachedSegmentBlock } = await import("../../src/hooks/session-composition");
+
+    expect(() =>
+      renderAttachedSegmentBlock(db, "fields", { id: segmentId }, null, "session:1"),
+    ).toThrow(/readonly database/i);
+
     db.close();
   });
 });

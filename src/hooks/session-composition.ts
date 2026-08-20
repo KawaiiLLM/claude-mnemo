@@ -138,12 +138,20 @@ export function renderAttachedSegmentBlock(
   segment: Pick<SegmentRecord, "id">,
   eraCutoffEpoch: number | null,
   /**
-   * Write gate (ticket 01): the reading session's own write-gate identity
-   * (`db/write-gate.ts`'s `sessionWriterId`) — SessionStart injection is a
-   * render like recall/timeline's own tool calls, so it records the SAME
-   * read grant for whatever segment it shows. Omitted only by tests that
-   * predate this ticket and by any caller with no session id to attribute a
-   * grant to.
+   * Write gate identity (`db/write-gate.ts`'s `sessionWriterId`) — OPTIONAL,
+   * and the SessionStart segment-block hook path (ticket 01, spec D9)
+   * deliberately never passes it. Those slots each run on their own
+   * read-only connection (`hook-command.ts`'s "parallel hook processes must
+   * not contend for the write lock" comment); a writer identity here makes
+   * the render tail attempt a `write_gate_reads` INSERT, which throws on a
+   * readonly handle — `milestones` surfaced the throw as a one-line error,
+   * `fields` threw past the handler's broad catch and the whole block
+   * vanished (the bug this ticket fixes). The read-write contract's grant
+   * basis for these two blocks is therefore "not granted, not expanded" —
+   * the roster's own grant (a separate renderer riding the sole writable
+   * bare `context` command, `handlers/context.ts`) is untouched. Only a
+   * caller on a writable connection — a future non-hook renderer, or a test
+   * exercising this primitive directly — should pass this.
    */
   readerId?: string | null,
 ): string {

@@ -11,7 +11,6 @@ import {
   type SegmentBlockKind,
 } from "../session-composition";
 import type { HookResult, NormalizedHookInput } from "../types";
-import { sessionWriterId } from "../../db/write-gate";
 
 export interface SegmentBlockContextHandlerDependencies {
   db: Database;
@@ -73,7 +72,6 @@ export function createSegmentBlockContextHandler(
         kind,
         segment,
         eraCutoffEpoch,
-        sessionWriterId(session.id),
       );
       return { continue: true, hookSpecificOutput };
     } catch {
