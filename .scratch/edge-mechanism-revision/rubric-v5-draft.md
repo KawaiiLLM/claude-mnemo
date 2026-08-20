@@ -89,6 +89,7 @@ member turns and recomputed when membership changes — never written by hand.
 - override/encodes 是软断言:拿不准 override,用 refines。
 - 发布仪式:发布 turn 收拢它交付的落地(depends-on)与它固化的裁决(encodes);
   存在上一次发布时引用它,首个发布是发布链的合法根。
+- 撤边:发现边为伪时撤除,按需改写——撤除与改判同为判断行为,不为整洁而撤。
 
 ## 段(归属与新建)
 

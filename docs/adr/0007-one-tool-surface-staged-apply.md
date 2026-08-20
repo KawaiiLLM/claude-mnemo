@@ -1,7 +1,8 @@
 # ADR-0007 — One tool surface; the subagent's writes apply on commit
 
 **Status:** staged-apply half superseded 2026-08-19 by ADR-0008; one-tool-surface half
-amended 2026-08-20 (was accepted · 2026-08-17) · source: S15069 T830
+amended 2026-08-20 twice — the second amendment ([ADR-0009](0009-standalone-edges-and-rearmed-settlement.md))
+revokes the scope limit and closes the open gap below (was accepted · 2026-08-17) · source: S15069 T830
 
 > The **staged-apply half** of this decision (the subagent's writes accumulate
 > and apply only on a closing `commit`) is **superseded** by
@@ -24,13 +25,26 @@ amended 2026-08-20 (was accepted · 2026-08-17) · source: S15069 T830
 > reach. The last differential behaviour went with it: the session field's implicit
 > whole-overwrite is a declared `write` now, resolved through the same string-field path as
 > every other field, and "no append" wording is deleted from the SDK descriptions and the
-> settlement prompt. What still differs is scope, not contract — settlement addresses a
-> `session` and refuses turn prose (title/content/insight stay the main agent's alone).
+> settlement prompt. ~~What still differs is scope, not contract — settlement addresses a
+> `session` and refuses turn prose (title/content/insight stay the main agent's alone).~~
+> **Retired 2026-08-20 by [ADR-0009](0009-standalone-edges-and-rearmed-settlement.md):** the
+> prose refusal is revoked. Settlement writes `title`/`content`/`insight` on any turn its
+> prompt rendered, through this same mode vocabulary and the same gate; the surviving scope
+> limits are the rendered window and the gate itself, not a field class.
 > (The mode ENGINE currently lives twice — `mcp/note.ts`'s module-private copy and
 > `mcp/field-mode.ts`'s verbatim port, held character-identical by a parity test, with the
 > fold-back recipe in that file's header. Implementation state, not a contract difference.)
 >
-> **Open gap, recorded rather than papered over:** settlement does **not** opt into
+> **Open gap — CLOSED 2026-08-20 by [ADR-0009](0009-standalone-edges-and-rearmed-settlement.md).**
+> Settlement's context render now records per-field completeness, so its writes pass rung 5 like
+> the main agent's: a whole-field `write` over another writer's text is refused when this
+> prompt showed that field only truncated, and the edit form is the way through. The paragraph
+> below is kept as the record of what was owed and what paid it. One residue survives, narrowed
+> to two fields: settlement's render carries no metadata line, so `type`/`tags` still earn no
+> completeness and are gated on rungs 1–4 only — see ADR-0009's open items.
+>
+> **The gap as it stood, 2026-08-19 to 2026-08-20 (historical, no longer true):** settlement
+> does **not** opt into
 > [ADR-0008](0008-read-write-contract.md)'s complete-read requirement (rung 5). Its own
 > context render records no per-field completeness, so demanding one today would reject
 > every correction of a non-empty field — the requirement would fire on evidence that

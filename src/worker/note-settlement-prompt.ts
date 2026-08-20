@@ -24,7 +24,14 @@ import type {
  *   - Duty 2 (笔记重建 — note reconstruction) is GONE. The RECONSTRUCTION
  *     section that used to list turns still owing a note, with their raw
  *     material, no longer appears; the write facade refuses title/content/
- *     insight outright now (worker/note-settlement-turn-facade.ts).
+ *     insight outright (worker/note-settlement-turn-facade.ts).
+ *     THE REFUSAL IS RETIRED — revoked by ticket 04 below (edge-mechanism-
+ *     revision D6, ADR-0009): settlement writes title/content/insight again,
+ *     through the same mode vocabulary, the same gate and the same
+ *     complete-read requirement the main agent's `note` obeys. What did NOT
+ *     come back is the RECONSTRUCTION section and its raw-material plumbing;
+ *     prose is judged from the window rendering below, like every other
+ *     field.
  *   - Duty 3 (MEMBERSHIP) narrows to PROPOSALS ONLY: `assign` is dead — the
  *     "Attached segments" section (a full-field render of each segment) is
  *     replaced by a bare ROSTER (id/title/topic — ticket 05's "结算不读段的

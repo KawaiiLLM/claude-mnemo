@@ -80,6 +80,18 @@ import { createHash } from "node:crypto";
  * (`depends-on`) and the rulings it fixes in place (`encodes`), and marks
  * the first release as the release chain's own legitimate root. Version
  * bumped v4 → v5.
+ *
+ * Still v5 (ticket 06, edge-mechanism-revision "ADR 与教学面收口"; user-ruled
+ * verbatim at [S15069/T1130]): ONE line appended to `## 关系`, after the
+ * release ritual — 撤边. Retraction was already the mechanism's contract from
+ * ticket 02 (D3's seven `retract…` mirrors, either writer, hard delete), but
+ * the shared judgment text never told either writer when to reach for it, so
+ * the one act that keeps a false assertion from outliving its refutation had
+ * no entry in the rubric that governs every other edge decision. The line
+ * rules retraction a JUDGMENT act on the same footing as reclassification —
+ * remove a false edge and rewrite as needed — and forbids the opposite
+ * failure mode, retracting for tidiness. Version stays v5: one addition to an
+ * existing section, nothing regrouped and nothing already there revised.
  */
 export const MEMORY_RUBRIC_VERSION = "v5";
 
@@ -162,6 +174,7 @@ member turns and recomputed when membership changes — never written by hand.
 - override/encodes 是软断言:拿不准 override,用 refines。
 - 发布仪式:发布 turn 收拢它交付的落地(depends-on)与它固化的裁决(encodes);
   存在上一次发布时引用它,首个发布是发布链的合法根。
+- 撤边:发现边为伪时撤除,按需改写——撤除与改判同为判断行为,不为整洁而撤。
 
 ## 段(归属与新建)
 

@@ -136,11 +136,13 @@ itself, constitute a field-level gate.
   behavioural difference between them anywhere in the system is rung 5. `overwrite`,
   `append` and `replace` retire; `append`'s capability survives as an `edit` anchored on the
   field's last row.
-- **Open gap — settlement does not opt into rung 5.** Its context render records no field
-  completeness, so requiring one today would reject every correction of a non-empty field.
-  Settlement therefore passes rungs 1–4 only; wiring the completeness record into its own
-  render is its own decision, recorded in [ADR-0007](0007-one-tool-surface-staged-apply.md)'s
-  amendment, not silently accepted as correct.
+- ~~**Open gap — settlement does not opt into rung 5.**~~ **Closed 2026-08-20 by
+  [ADR-0009](0009-standalone-edges-and-rearmed-settlement.md)**, which re-armed settlement's
+  prose writes and wired the completeness record into its own context render in the same
+  batch — the gap and the reason to close it arrived together. Settlement now passes all five
+  rungs; a whole-field `write` over another writer's text is refused when its prompt showed
+  that field truncated. Residue, narrowed to two fields: its render has no metadata line, so
+  `type`/`tags` earn no completeness and stay on rungs 1–4 (ADR-0009, open items).
 - Rewind does not retract a stamp: `v1` ships without a stamp history log, so a turn on a
   branch that later gets rewound still invalidated whichever other writer's grant it touched,
   once. Recorded as a known gap (Out of Scope), not silently accepted as correct.

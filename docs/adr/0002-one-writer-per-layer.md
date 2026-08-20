@@ -17,6 +17,19 @@
 > write-again-too-soon reminder left for it to be exempt from. A lost ruling is still the
 > costliest loss; nothing ever gated on cadence, so nothing about `decisions` changes in
 > practice.
+>
+> **Amendment 3 — the writer table is per-layer PRIMARY writer, not sole writer
+> (edge-mechanism-revision, [ADR-0009](0009-standalone-edges-and-rearmed-settlement.md)).**
+> Settlement holds the main agent's whole write surface inside the window its prompt rendered:
+> turn prose (title/content/insight) and type/tags as well as membership and edges. The row
+> reading "Grades, edge reconciliation, membership" is doubly out of date — grading retired
+> with ADR-0003, and the remaining duties are no longer a smaller field set than the main
+> agent's. Read the table as *who writes a layer first, live*; who may CORRECT it in hindsight
+> is one gate (ADR-0008), not one column. The membership bullet below narrows the same way:
+> settlement may now `create` a segment (auto-attached to the settling session, so the next
+> window sees it on the roster) and reassign a turn to any open segment, on this session's
+> roster or not — the "only among the session's attached segments" limit is revoked, while the
+> proposal verb and its ask-the-user discipline stand for the cases where nothing fits.
 
 ## Context
 

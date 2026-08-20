@@ -83,6 +83,27 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     );
   });
 
+  // Ticket 06 (edge-mechanism-revision, "ADR 与教学面收口"): the single line
+  // the user approved VERBATIM at [S15069/T1130], appended to the 关系
+  // section after the release ritual. The retraction MECHANISM shipped one
+  // ticket earlier (D3's seven `retract…` mirrors, either writer, hard
+  // delete) while the shared judgment text still said nothing about when to
+  // reach for it — this pins both the sentence and its position, since a line
+  // that drifted out of the 关系 section would stop governing the decision it
+  // is about.
+  test("v5 carries the approved 撤边 line, last in the 关系 section", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v5");
+    const retraction =
+      "- 撤边:发现边为伪时撤除,按需改写——撤除与改判同为判断行为,不为整洁而撤。";
+    expect(MEMORY_RUBRIC_TEXT).toContain(retraction);
+    expect(MEMORY_RUBRIC_TEXT.indexOf("- 发布仪式:")).toBeLessThan(
+      MEMORY_RUBRIC_TEXT.indexOf(retraction),
+    );
+    expect(MEMORY_RUBRIC_TEXT.indexOf(retraction)).toBeLessThan(
+      MEMORY_RUBRIC_TEXT.indexOf("## 段(归属与新建)"),
+    );
+  });
+
   // Ticket 01 (field-semantics spec, "01 — 字段定义进注入,预算硬拒改为回执提
   // 醒"): v3→v4's own addition — the `## Fields` table, byte-for-byte from
   // the ticket's ruled wording (acceptance criterion "注入的 rubric 块含上面

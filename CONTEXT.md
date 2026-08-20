@@ -2,8 +2,9 @@
 
 Persistent memory for Claude Code sessions: an episodic layer of recorded turns and
 a semantic layer of task containers, maintained by the agents that do the work.
-Vocabulary pinned by the 2026-08-17 segment redesign and the 2026-08-19
-edge-ownership redesign (ADR-0001…0008).
+Vocabulary pinned by the 2026-08-17 segment redesign, the 2026-08-19
+edge-ownership redesign and the 2026-08-20 edge-mechanism revision
+(ADR-0001…0009).
 
 ## Language
 
@@ -102,7 +103,8 @@ need not have been read.
 
 **text-ref**:
 Best-effort extraction of turn addresses from prose — a display hint only, never
-a relation substrate.
+a relation substrate. Persists as the pair's bare row, which lives and dies with
+the prose that names it; relation rows never do.
 _Avoid_: upgrading (the retired path from bare pair to relation)
 
 **Release chain (发布链)**:
