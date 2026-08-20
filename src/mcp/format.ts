@@ -2,6 +2,7 @@ import { renderFileTree } from "../shared/file-tree";
 import { estimateTokens } from "../utils/token-estimate";
 import { projectToolCall, type ProjectedCall } from "./tool-projection";
 import type { RecallTurnField } from "./memory-filter";
+import type { FieldCompletenessEntry, WriteGateEntityType } from "../db/write-gate";
 
 /**
  * One mark for a cut field, on every read surface. This renderer ended a cut
@@ -68,10 +69,24 @@ export const REWIND_MARKER = " [rewind]";
  */
 export interface TruncationSignal {
   truncated: boolean;
+  /**
+   * Per-field completeness this render pass actually delivered
+   * (write-mode-edit-semantics spec D8, ticket 04's RECORD half): which
+   * (entityType, entityId, field) triples this pass showed in FULL vs cut.
+   * Populated only by renderers that already carry per-field truncation
+   * information — `renderBrowseTurnBlock`'s own per-field `truncateText`
+   * calls (recall.ts), `renderNode`'s turn case below, the segment card's
+   * elision ladder (segment-card.ts) — never inferred from `truncated`
+   * itself, which is a whole-RESPONSE flag spanning many entities. A caller
+   * that never reads this back (most `TruncationSignal` consumers) pays
+   * nothing for it; `recallMemory` is the one place that flushes it to
+   * `write_gate_field_completeness` (db/write-gate.ts).
+   */
+  fieldCompleteness?: FieldCompletenessEntry[];
 }
 
 export function createTruncationSignal(): TruncationSignal {
-  return { truncated: false };
+  return { truncated: false, fieldCompleteness: [] };
 }
 
 function markTruncated(signal?: TruncationSignal): void {
@@ -79,6 +94,35 @@ function markTruncated(signal?: TruncationSignal): void {
     signal.truncated = true;
   }
 }
+
+/**
+ * Append one field-completeness fact to `signal` (ticket 04) — the in-memory
+ * collector every per-field-aware renderer pushes into; nothing here touches
+ * the database (that happens once, in `recallMemory`, via
+ * `db/write-gate.ts`'s `recordFieldCompleteness`). A no-op when `signal` is
+ * absent, same latitude `markTruncated` already gives a caller with nothing
+ * to record into.
+ */
+export function pushFieldCompleteness(
+  signal: TruncationSignal | undefined,
+  entityType: WriteGateEntityType,
+  entityId: number,
+  field: string,
+  complete: boolean,
+): void {
+  if (!signal) {
+    return;
+  }
+  (signal.fieldCompleteness ??= []).push({ entityType, entityId, field, complete });
+}
+
+/**
+ * The subset of `RecallTurnField` `note.ts`'s write gate actually checks
+ * (`checkFieldGate`/`stampField`: title, content, insight) — recording
+ * completeness for the rest (prompt/response/observations/files/metadata)
+ * would be dead weight, since nothing ever gates them.
+ */
+export const GATED_TURN_FIELDS: readonly RecallTurnField[] = ["title", "content", "insight"];
 
 /**
  * The one navigation notice for a whole rendered response (spec D1), said once
@@ -902,6 +946,42 @@ function formatTurnBody(
  * turn's own child (`renderTurnChildren`) and carry no budget of their own —
  * they are already inside their owning turn's capped block.
  */
+/**
+ * Ticket 04 (write-mode-edit-semantics spec D8): which of a turn node's
+ * write-gated fields THIS render delivered in full. `capRenderToTokenBudget`
+ * returns `body` UNCHANGED when nothing needed cutting and a strictly
+ * different string when it cut something (everything after the cut line
+ * dropped) — comparing the two gives this ONE node's own completeness,
+ * independent of the shared, response-scoped `signal.truncated` flag a
+ * multi-turn page aggregates across many nodes.
+ *
+ * `title` is unconditionally complete when selected: `capRenderToTokenBudget`
+ * never drops line 0 (the label), however small the budget — a structural
+ * guarantee, not an approximation. `content`/`insight` share `bodyComplete`:
+ * this renderer joins every selected field into ONE string before capping,
+ * so a cut anywhere in the body cannot be attributed to one field over
+ * another without re-parsing line ownership — recording both incomplete
+ * together never OVERCLAIMS completeness (the direction that matters here: a
+ * false "incomplete" only costs an unnecessary reread, a false "complete"
+ * would let an overwrite silently drop content this render never actually
+ * showed). `renderBrowseTurnBlock` (recall.ts) is the genuinely per-field
+ * counterpart for the bare browse feed, where each field gets its own
+ * `truncateText` call.
+ */
+function recordTurnFieldCompleteness(
+  turnId: number,
+  fields: TurnRenderFields,
+  bodyComplete: boolean,
+  signal?: TruncationSignal,
+): void {
+  for (const field of GATED_TURN_FIELDS) {
+    if (!fields.has(field)) {
+      continue;
+    }
+    pushFieldCompleteness(signal, "turn", turnId, field, field === "title" ? true : bodyComplete);
+  }
+}
+
 export function renderNode(node: RenderNode, options: RenderNodeOptions = {}): string {
   const budget = options.turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET;
 
@@ -914,11 +994,10 @@ export function renderNode(node: RenderNode, options: RenderNodeOptions = {}): s
       );
     case "turn": {
       const fields = options.fields ?? DEFAULT_TURN_RENDER_FIELDS;
-      return capRenderToTokenBudget(
-        formatTurnBody(node.value, fields, options),
-        budget,
-        options.signal,
-      );
+      const body = formatTurnBody(node.value, fields, options);
+      const capped = capRenderToTokenBudget(body, budget, options.signal);
+      recordTurnFieldCompleteness(node.value.id, fields, capped === body, options.signal);
+      return capped;
     }
     case "observation":
       return capRenderToTokenBudget(

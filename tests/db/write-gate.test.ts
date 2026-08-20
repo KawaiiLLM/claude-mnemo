@@ -9,8 +9,10 @@ import {
   claimWriterId,
   clearReadGrantsForWriter,
   formatWriterForDisplay,
+  getFieldCompleteness,
   getFieldStamp,
   nextWriteGateSequence,
+  recordFieldCompleteness,
   recordReadGrant,
   recordReadGrants,
   snapshotWriteGateSequence,
@@ -230,6 +232,128 @@ describe("janitor backstop", () => {
     }
     const swept = sweepReadGrantsForCompletedSessions(db, 2);
     expect(swept).toBeLessThanOrEqual(2);
+  });
+});
+
+describe("field completeness (write-mode-edit-semantics ticket 04, spec D8 — the RECORD half only)", () => {
+  test("an untruncated field render is recorded complete", () => {
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: true }],
+      100,
+      snapshotWriteGateSequence(db),
+    );
+    const record = getFieldCompleteness(db, "session:1", "segment", 1, "goal");
+    expect(record).not.toBeNull();
+    expect(record!.complete).toBe(true);
+  });
+
+  test("a truncated field render is recorded incomplete — a positive fact, not simply absent", () => {
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [{ entityType: "segment", entityId: 1, field: "content", complete: false }],
+      100,
+      snapshotWriteGateSequence(db),
+    );
+    const record = getFieldCompleteness(db, "session:1", "segment", 1, "content");
+    expect(record).not.toBeNull();
+    expect(record!.complete).toBe(false);
+  });
+
+  test("a field never shown by any render has no completeness record at all", () => {
+    expect(getFieldCompleteness(db, "session:1", "segment", 1, "goal")).toBeNull();
+  });
+
+  test("one long field truncated and one short field complete on the SAME entity are recorded independently — the long field's truncation does not connect the short one", () => {
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [
+        { entityType: "segment", entityId: 1, field: "content", complete: false },
+        { entityType: "segment", entityId: 1, field: "goal", complete: true },
+      ],
+      100,
+      snapshotWriteGateSequence(db),
+    );
+    expect(getFieldCompleteness(db, "session:1", "segment", 1, "content")!.complete).toBe(false);
+    expect(getFieldCompleteness(db, "session:1", "segment", 1, "goal")!.complete).toBe(true);
+  });
+
+  test("a field read truncated once and complete the next is recorded complete — the later render wins, never a permanent disqualification from the first", () => {
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: false }],
+      100,
+      snapshotWriteGateSequence(db),
+    );
+    expect(getFieldCompleteness(db, "session:1", "segment", 1, "goal")!.complete).toBe(false);
+
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: true }],
+      200,
+      snapshotWriteGateSequence(db),
+    );
+    expect(getFieldCompleteness(db, "session:1", "segment", 1, "goal")!.complete).toBe(true);
+
+    // Refreshes the same row rather than accumulating a second one — same
+    // discipline `recordReadGrant` itself already follows.
+    const rows = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM write_gate_field_completeness WHERE writer = 'session:1' AND entity_id = 1 AND field = 'goal'",
+      )
+      .get();
+    expect(rows?.count).toBe(1);
+  });
+
+  test("two different writers' completeness facts for the same field never collide", () => {
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: true }],
+      100,
+      snapshotWriteGateSequence(db),
+    );
+    recordFieldCompleteness(
+      db,
+      "session:2",
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: false }],
+      100,
+      snapshotWriteGateSequence(db),
+    );
+    expect(getFieldCompleteness(db, "session:1", "segment", 1, "goal")!.complete).toBe(true);
+    expect(getFieldCompleteness(db, "session:2", "segment", 1, "goal")!.complete).toBe(false);
+  });
+
+  test("recordFieldCompleteness is a no-op on an empty entries list", () => {
+    expect(() => recordFieldCompleteness(db, "session:1", [], 100, snapshotWriteGateSequence(db))).not.toThrow();
+    expect(getFieldCompleteness(db, "session:1", "segment", 1, "goal")).toBeNull();
+  });
+
+  test("clearReadGrantsForWriter also sweeps that writer's own completeness rows, and only that writer's", () => {
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: true }],
+      100,
+      snapshotWriteGateSequence(db),
+    );
+    recordFieldCompleteness(
+      db,
+      "session:2",
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: true }],
+      100,
+      snapshotWriteGateSequence(db),
+    );
+
+    clearReadGrantsForWriter(db, "session:1");
+
+    expect(getFieldCompleteness(db, "session:1", "segment", 1, "goal")).toBeNull();
+    expect(getFieldCompleteness(db, "session:2", "segment", 1, "goal")).not.toBeNull();
   });
 });
 

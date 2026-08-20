@@ -990,6 +990,42 @@ const SCHEMA_SQL = `
     PRIMARY KEY (entity_type, entity_id, field)
   );
 
+  -- Per-field completeness (write-mode-edit-semantics spec D8, ticket 04 —
+  -- the write gate's RECORD half only; what a write overwrite REQUIRES of
+  -- this data is a later, blocked ticket). A render pass that shows one of a
+  -- writer's own entities' fields records whether it delivered that field IN
+  -- FULL or cut — keyed per writer, like a read grant, so two writers' own
+  -- view of the same field's completeness never collide.
+  --
+  -- Deliberately entity_type + entity_id + field, NOT folded into
+  -- write_gate_reads (which is entity-grain: one row licenses every field):
+  -- completeness is a per-field fact of the write operation — a long
+  -- field's truncation must not connect a short field on the same entity.
+  --
+  -- PRIMARY KEY (writer, entity_type, entity_id, field): one row per writer
+  -- per field, upserted on every render — the LAST render to show a field
+  -- decides its completeness (a field read truncated once and complete the
+  -- next is complete, not permanently disqualified by the first read), the
+  -- same "re-reading refreshes, never accumulates" rule write_gate_reads
+  -- itself already follows.
+  CREATE TABLE IF NOT EXISTS write_gate_field_completeness (
+    writer TEXT NOT NULL,
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('segment', 'turn', 'session')),
+    entity_id INTEGER NOT NULL,
+    field TEXT NOT NULL,
+    complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
+    -- The SAME monotonic counter write_gate_reads.read_sequence and
+    -- write_gate_stamps.write_sequence key off (CONTEXT.md "Stale") — the
+    -- render-start snapshot this fact belongs to (snapshotWriteGateSequence,
+    -- captured before any row is read), never a record-time lookup.
+    recorded_sequence INTEGER NOT NULL,
+    recorded_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (writer, entity_type, entity_id, field)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_write_gate_field_completeness_entity
+    ON write_gate_field_completeness (entity_type, entity_id);
+
   -- The write gate's single monotonic counter (db/write-gate.ts). One row,
   -- incremented inside the SAME transaction as the field stamp it numbers —
   -- never read at epoch-second granularity, so two writers committing in the

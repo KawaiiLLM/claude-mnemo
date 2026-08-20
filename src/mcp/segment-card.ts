@@ -20,6 +20,7 @@ import {
   DEFAULT_PREVIEW_COUNT,
   DEFAULT_TURN_TOKEN_BUDGET,
   formatEpoch,
+  pushFieldCompleteness,
   RENDER_INDENT_STEP,
   renderNode,
   renderSessionTransitionLine,
@@ -483,6 +484,24 @@ export function renderSegmentCardRecord(
     options.signal
   ) {
     options.signal.truncated = true;
+  }
+
+  // Ticket 04 (write-mode-edit-semantics spec D8): the elision ladder above
+  // already knows, PER FIELD, whether it dropped anything — a completeness
+  // fact genuinely independent per field (unlike a turn node's own whole-body
+  // cut, format.ts's `recordTurnFieldCompleteness`), which is exactly what a
+  // later `write` judgment needs: one long field's truncation must not
+  // connect a short field on the same card. `!elides` (page ≥ 2) already
+  // carries `droppedCount: 0` for every field, so this reports every field
+  // complete there too, correctly.
+  for (const entry of elidedFields) {
+    pushFieldCompleteness(
+      options.signal,
+      "segment",
+      segment.id,
+      entry.field,
+      entry.droppedCount === 0,
+    );
   }
 
   const fieldByKey = new Map(elidedFields.map((entry) => [entry.field, entry] as const));

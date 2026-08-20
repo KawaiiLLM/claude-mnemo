@@ -172,11 +172,21 @@ function getReadGrant(
   );
 }
 
-/** Clears every read grant a writer holds — session-end cleanup (spec: "session 终结时清理其读集"). */
+/**
+ * Clears every read grant a writer holds — session-end cleanup (spec:
+ * "session 终结时清理其读集"). Also sweeps that writer's own per-field
+ * completeness rows (ticket 04): they are keyed by writer exactly like a
+ * grant, so a completed writer's completeness facts are just as stale as its
+ * grants and must not survive to be misread by anything reusing the id.
+ */
 export function clearReadGrantsForWriter(db: Database, writer: string): number {
-  return db
+  const clearedCompleteness = db
+    .query<unknown, [string]>(`DELETE FROM write_gate_field_completeness WHERE writer = ?`)
+    .run(writer).changes;
+  const clearedGrants = db
     .query<unknown, [string]>(`DELETE FROM write_gate_reads WHERE writer = ?`)
     .run(writer).changes;
+  return clearedGrants + clearedCompleteness;
 }
 
 /**
@@ -205,6 +215,95 @@ export function sweepReadGrantsForCompletedSessions(
     cleared += clearReadGrantsForWriter(db, row.writer);
   }
   return cleared;
+}
+
+// ---------------------------------------------------------------------------
+// Per-field completeness (write-mode-edit-semantics spec D8, ticket 04 — the
+// RECORD half only). A later, blocked ticket decides what `write` REQUIRES
+// of this data; this module only stores what a render pass actually showed.
+// ---------------------------------------------------------------------------
+
+export interface FieldCompletenessEntry {
+  entityType: WriteGateEntityType;
+  entityId: number;
+  field: string;
+  complete: boolean;
+}
+
+/**
+ * Records (or refreshes) `writer`'s completeness fact for every entry in
+ * `entries` — the seam a renderer's OWN per-field truncation signal
+ * (`format.ts`'s `TruncationSignal.fieldCompleteness`, `segment-card.ts`'s
+ * elision ladder) flushes through once its render pass is done. Later wins
+ * (ON CONFLICT overwrite): a field read truncated once and complete the next
+ * is recorded complete — it is never permanently disqualified by an earlier
+ * truncated read, the same "re-reading refreshes, never accumulates" rule
+ * `recordReadGrant` itself already follows.
+ *
+ * `sequence`: the SAME pre-render `snapshotWriteGateSequence(db)` value the
+ * caller's own `recordReadGrant(s)` call for this pass already carries (see
+ * that function's doc comment) — completeness belongs to what THIS render
+ * pass showed, never to whatever the counter reads at record time.
+ */
+export function recordFieldCompleteness(
+  db: Database,
+  writer: string,
+  entries: readonly FieldCompletenessEntry[],
+  nowEpoch: number,
+  sequence: number,
+): void {
+  if (entries.length === 0) {
+    return;
+  }
+  const stmt = db.query<unknown, [string, string, number, string, number, number, number]>(
+    `INSERT INTO write_gate_field_completeness
+       (writer, entity_type, entity_id, field, complete, recorded_sequence, recorded_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(writer, entity_type, entity_id, field) DO UPDATE SET
+       complete = excluded.complete,
+       recorded_sequence = excluded.recorded_sequence,
+       recorded_at_epoch = excluded.recorded_at_epoch`,
+  );
+  for (const entry of entries) {
+    stmt.run(
+      writer,
+      entry.entityType,
+      entry.entityId,
+      entry.field,
+      entry.complete ? 1 : 0,
+      sequence,
+      nowEpoch,
+    );
+  }
+}
+
+export interface FieldCompletenessRecord {
+  complete: boolean;
+  sequence: number;
+  recordedAtEpoch: number;
+}
+
+/** `writer`'s own last-recorded completeness fact for one field, or `null` if no render pass of theirs ever showed it. */
+export function getFieldCompleteness(
+  db: Database,
+  writer: string,
+  entityType: WriteGateEntityType,
+  entityId: number,
+  field: string,
+): FieldCompletenessRecord | null {
+  const row = db
+    .query<
+      { complete: number; sequence: number; recordedAtEpoch: number },
+      [string, string, number, string]
+    >(
+      `SELECT complete, recorded_sequence AS sequence, recorded_at_epoch AS recordedAtEpoch
+       FROM write_gate_field_completeness
+       WHERE writer = ? AND entity_type = ? AND entity_id = ? AND field = ?`,
+    )
+    .get(writer, entityType, entityId, field);
+  return row
+    ? { complete: row.complete === 1, sequence: row.sequence, recordedAtEpoch: row.recordedAtEpoch }
+    : null;
 }
 
 // ---------------------------------------------------------------------------

@@ -36,6 +36,8 @@ import {
   createTruncationSignal,
   DEFAULT_TURN_RENDER_FIELDS,
   DEFAULT_TURN_TOKEN_BUDGET,
+  GATED_TURN_FIELDS,
+  pushFieldCompleteness,
   RENDER_INDENT_STEP,
   REWIND_MARKER,
   renderNode,
@@ -71,6 +73,7 @@ import {
 } from "./segment-card";
 import { expandNumericSelector } from "./selectors";
 import {
+  recordFieldCompleteness,
   recordReadGrants,
   snapshotWriteGateSequence,
   type ReadGrantEntry,
@@ -2059,6 +2062,12 @@ function renderBrowseTurnBlock(
   signal: TruncationSignal | undefined,
 ): string {
   const titleText = fields.includes("title") ? turn.title : null;
+  if (fields.includes("title")) {
+    // Ticket 04 (spec D8): never truncated on this row — it IS the label
+    // (`formatBrowseTurnLabel`), rendered verbatim, never passed through
+    // `truncateText` the way the field lines below are.
+    pushFieldCompleteness(signal, "turn", turn.id, "title", true);
+  }
   const label = formatBrowseTurnLabel(
     turn,
     sessionId,
@@ -2089,6 +2098,13 @@ function renderBrowseTurnBlock(
       perFieldCharLimit !== undefined
         ? truncateText(text, { limit: perFieldCharLimit, signal })
         : text;
+    // Ticket 04 (spec D8): each field here gets its OWN `truncateText` call —
+    // genuinely per-field, unlike a `renderNode` turn body's single shared
+    // cut — so `rendered === text` (no cut happened) is an exact fact about
+    // THIS field alone, independent of whatever happened to its neighbours.
+    if (GATED_TURN_FIELDS.includes(field)) {
+      pushFieldCompleteness(signal, "turn", turn.id, field, rendered === text);
+    }
     // `metadata` is the one unprefixed field line (spec 金样例 补充): it
     // annotates the row above rather than naming a stored field.
     return field === "metadata"
@@ -2483,7 +2499,27 @@ function searchQueryResults(
 // (spec D1) rather than something each render site has to decide on its own.
 export function recallMemory(db: Database, input: RecallInput): string {
   const signal = createTruncationSignal();
-  return appendNavigationLegend(recallMemoryBody(db, input, signal), signal);
+  // Ticket 04 (spec D8): a SECOND pre-render snapshot, taken at this same
+  // instant `recallMemoryBody`'s own internal one is (a pure read of the
+  // counter — nothing between the two calls can have bumped it, since a
+  // render pass never writes) — the value the completeness flush below
+  // carries, matching every `recordReadGrant(s)` call this render pass makes
+  // downstream.
+  const sequence = snapshotWriteGateSequence(db);
+  const body = recallMemoryBody(db, input, signal);
+  // One flush point for the WHOLE response (mirrors `signal.truncated`
+  // itself): every nested render call below (`renderNode`'s turn case,
+  // `renderBrowseTurnBlock`, the segment card's elision ladder) only
+  // APPENDS to `signal.fieldCompleteness` in memory — this is the one place
+  // that turns it into a write, and only when there is a writer to
+  // attribute it to (same `readerId` latitude `recordReadGrants` already
+  // gives every render call site — a caller on a readonly handle that omits
+  // `readerId` triggers no write at all).
+  if (input.readerId && signal.fieldCompleteness && signal.fieldCompleteness.length > 0) {
+    const now = input.now ?? (() => Math.floor(Date.now() / 1000));
+    recordFieldCompleteness(db, input.readerId, signal.fieldCompleteness, now(), sequence);
+  }
+  return appendNavigationLegend(body, signal);
 }
 
 function recallMemoryBody(
