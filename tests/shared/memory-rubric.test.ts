@@ -77,7 +77,13 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // 那份定义表,逐字一致"). Pinned as ONE contiguous substring, not fragments,
   // so a reflow or a dropped line fails this test the same way a dropped
   // field would.
-  test("v4 carries the Fields section, byte-for-byte, ticket 01's own definition table", () => {
+  //
+  // Ticket 02 (field-semantics spec "02 — 长度随产出,结论先行") appended one
+  // more paragraph to this same contiguous block, after the three turn field
+  // definitions and before the segment fields — folded into this fixture
+  // rather than a second one, so the test keeps proving the two additions sit
+  // in the one place the tickets both specify.
+  test("v4 carries the Fields section, byte-for-byte, tickets 01+02's own definition table", () => {
     const fieldsTable =
       "## Fields\n" +
       "\n" +
@@ -88,6 +94,12 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       "            rejected option with its reason. Assumes the title was just read.\n" +
       "- insight — REUSABLE experience. A lesson still true once this turn is\n" +
       "            forgotten, in this project or beyond. Not a conclusion of this turn.\n" +
+      "\n" +
+      "Length tracks OUTPUT, not effort. A turn that produced nothing is a skip; one\n" +
+      "that produced a lot may run long; one that produced little must be terse.\n" +
+      "Process detail belongs to replay — a summary cannot hold it, and trying makes\n" +
+      "it hold nothing. Content leads with its conclusions: a reader's budget cuts\n" +
+      "the tail, so whatever merely supports a decision comes after the decision.\n" +
       "\n" +
       "Segment, Working State — what a resuming session needs to continue:\n" +
       "- goal        — what this task is trying to achieve.\n" +

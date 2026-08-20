@@ -46,6 +46,16 @@ import { createHash } from "node:crypto";
  * timing/skip/replace contract) stays off this block by the same stratification
  * the rest of this file already follows — that prose's single home is the
  * tool description (`mcp/definitions.ts`), never restated here.
+ *
+ * Still v4 (ticket 02, field-semantics spec "02 — 长度随产出,结论先行"):
+ * appended one paragraph to the end of `## Fields`'s turn-note block — after
+ * the three turn field definitions, before the segment fields — ruled
+ * verbatim from that ticket. It is the counterweight to `content`'s
+ * completeness duty (ticket 01) and the 1.5× receipt warning that replaced
+ * the old hard rejection: together those two could read as "longer is
+ * safer", so this paragraph states that length tracks the turn's OUTPUT, not
+ * the effort spent, and that `content` leads with its conclusions because a
+ * reader's budget cuts the tail.
  */
 export const MEMORY_RUBRIC_VERSION = "v4";
 
@@ -60,6 +70,12 @@ Turn note — three fields, three jobs:
             rejected option with its reason. Assumes the title was just read.
 - insight — REUSABLE experience. A lesson still true once this turn is
             forgotten, in this project or beyond. Not a conclusion of this turn.
+
+Length tracks OUTPUT, not effort. A turn that produced nothing is a skip; one
+that produced a lot may run long; one that produced little must be terse.
+Process detail belongs to replay — a summary cannot hold it, and trying makes
+it hold nothing. Content leads with its conclusions: a reader's budget cuts
+the tail, so whatever merely supports a decision comes after the decision.
 
 Segment, Working State — what a resuming session needs to continue:
 - goal        — what this task is trying to achieve.

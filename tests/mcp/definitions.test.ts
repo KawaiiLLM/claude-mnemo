@@ -294,6 +294,27 @@ describe("tool surface", () => {
       "No process narration (replay stores it)",
     );
 
+    // Ticket 02 (field-semantics spec "02 — 长度随产出,结论先行"): title gets
+    // only the length-tracks-output half (it has no tail to lead with —
+    // it's one sentence, not the conclusion); content gets both halves,
+    // since it is the field whose length actually varies and whose tail a
+    // reader's budget can cut.
+    expect(shape.title.description).toContain(
+      "Length tracks this turn's output, not the effort spent.",
+    );
+    expect(shape.content.description).toContain(
+      "Length tracks this turn's output, not the effort spent",
+    );
+    expect(shape.content.description).toContain(
+      "long when the turn produced a lot, terse when it produced little",
+    );
+    expect(shape.content.description).toContain(
+      "Lead with the conclusions",
+    );
+    expect(shape.content.description).toContain(
+      "a reader's budget cuts the tail",
+    );
+
     // insight now states its own contrast with title/content explicitly:
     // reusable experience, not a conclusion of this turn.
     expect(shape.insight.description).toContain(
