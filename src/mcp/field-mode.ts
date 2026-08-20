@@ -3,7 +3,6 @@ import {
   containsToolCallSyntax,
   toolCallSyntaxMessage,
 } from "../shared/tool-call-syntax";
-import { decodeHtmlEntities } from "./note";
 
 /**
  * The ONE field-mode vocabulary (write-mode-edit-semantics spec D1/D3/D4/D10/
@@ -11,27 +10,22 @@ import { decodeHtmlEntities } from "./note";
  * than each carrying its own rules.
  *
  * Ticket 07 (spec D12, "结算面与主 agent 完全一致"): settlement's write facade
- * (`worker/note-settlement-turn-facade.ts`) is the FIRST consumer. `mcp/note.ts`
- * still carries its own byte-identical copy of everything below — ticket 06 was
- * editing that file concurrently, so this ticket could not also move it, and
- * `tests/mcp/field-mode-parity.test.ts` pins the two copies to the same
- * messages until it does. Adopting it there is a delete-and-import with two
- * mechanical steps and no behaviour change:
+ * (`worker/note-settlement-turn-facade.ts`) was the first consumer; `mcp/note.ts`
+ * has since folded its byte-identical copy into this module too —
+ * `FieldMode`/`FieldEditMode`/`isFieldEditMode`/`parseModeMap`/
+ * `resolveStringField`/`resolveFieldEdit`/`resolveClear`/`modeRequiredMessage`
+ * all live here now, with `note.ts` importing what it still calls directly and
+ * re-exporting the two types for its own existing importers. `note.ts`'s
+ * `NoteValidationError` extends `FieldModeError` (not `Error`) so its catch
+ * sites, which test `instanceof FieldModeError`, keep catching both what its
+ * own `fail()` throws and what this module's throws.
  *
- *   1. `mcp/note.ts` drops `FieldMode`/`FieldEditMode`/`isFieldEditMode`/
- *      `RETIRED_FIELD_MODE_REPLACEMENT`/`NOTE_SET_MODE_FIELDS`/
- *      `modeRequiredMessage`/`editValueConflictMessage`/`MODE_SHAPE_MESSAGE`/
- *      `parseModeMap`/`resolveStringField`/`resolveFieldEdit`/`resolveClear`
- *      and imports them from here; `class NoteValidationError extends
- *      FieldModeError` (not `Error`) so its existing `instanceof
- *      NoteValidationError` catches keep catching what `fail()` throws AND
- *      what this module throws.
- *   2. `decodeHtmlEntities` (with `HTML_ENTITY_MAP`) MOVES here in the same
- *      edit and `mcp/note.ts` re-exports it (`export { decodeHtmlEntities }
- *      from "./field-mode"`, which keeps `mcp/remember.ts`'s import working) —
- *      otherwise note -> field-mode -> note is an import cycle. Until then
- *      this module imports it FROM note.ts, which is not a cycle because
- *      note.ts does not import this module yet.
+ * `decodeHtmlEntities` (with `HTML_ENTITY_MAP`) lives here too; `note.ts`
+ * re-exports it (`export { decodeHtmlEntities } from "./field-mode"`) so
+ * `mcp/remember.ts`'s existing import keeps working.
+ *
+ * `tests/mcp/field-mode-parity.test.ts` now compares this module against
+ * itself through `note.ts`'s own call — the signal it was written to wait for.
  */
 
 // ---------------------------------------------------------------------------
@@ -104,6 +98,19 @@ export function editValueConflictMessage(field: string): string {
 
 const MODE_SHAPE_MESSAGE =
   'must be "write" or an edit form ({ mode: "edit", oldString, newString }).';
+
+// ---------------------------------------------------------------------------
+// HTML entity decoding
+// ---------------------------------------------------------------------------
+
+const HTML_ENTITY_MAP: Record<string, string> = { lt: "<", gt: ">", amp: "&" };
+
+// The memory agent sometimes emits HTML-escaped text even though every field
+// here is plain text; decode once at the persistence boundary. Single-pass so
+// `&amp;lt;` decodes to `&lt;`, never `<`.
+export function decodeHtmlEntities(value: string): string {
+  return value.replace(/&(lt|gt|amp);/g, (_match, name: string) => HTML_ENTITY_MAP[name]!);
+}
 
 // ---------------------------------------------------------------------------
 // Parsing
