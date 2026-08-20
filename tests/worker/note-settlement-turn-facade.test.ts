@@ -347,7 +347,9 @@ describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A
 
     const evaluation = evaluateSettlementTurnWrite(
       db,
-      baseContext(job),
+      // Ticket 07 (this batch): the citing turn must be in range for ANY
+      // turn-addressed call, a relation-only one included.
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
       { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
       NOW,
       { apply: false },
@@ -801,7 +803,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // canonical refusal ("names a pair not eligible for a relation"), and it
     // is exactly the call a from-zero rebuild has to be able to make.
     const result = write(
-      baseContext(job),
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
       { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
       NOW,
     );
@@ -826,7 +828,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const job = claimWindow(sessionDbId, 1, 2);
 
     const result = write(
-      baseContext(job),
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
       {
         turn: `S${sessionDbId}/T2`,
         encodes: [`S${sessionDbId}/T1`],
@@ -850,9 +852,10 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
     const input = { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] };
+    const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
 
-    write(baseContext(job), input, NOW);
-    const again = write(baseContext(job), input, NOW + 1);
+    write(context, input, NOW);
+    const again = write(context, input, NOW + 1);
 
     expect(resultText(again)).toContain("already present, nothing added");
     expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(1);
@@ -865,14 +868,15 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     updateTurnById(db, t1, { type: ["implement"] });
     updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
     write(
-      baseContext(job),
+      context,
       { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
     const retracted = write(
-      baseContext(job),
+      context,
       { turn: `S${sessionDbId}/T2`, retractDependsOn: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
@@ -882,7 +886,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // `no-such-edge`, named per address — "already gone" and "wrong address"
     // stay distinguishable, and nothing is deleted.
     const missing = write(
-      baseContext(job),
+      context,
       { turn: `S${sessionDbId}/T2`, retractDependsOn: [`S${sessionDbId}/T1`] },
       NOW + 2,
     );
@@ -895,16 +899,17 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const t1 = seedTurn(sessionDbId, 1);
     updateTurnById(db, t1, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
 
     const unresolved = write(
-      baseContext(job),
+      context,
       { turn: `S${sessionDbId}/T1`, dependsOn: [`S${sessionDbId}/T999`] },
       NOW,
     );
     expect(resultText(unresolved)).toContain("does not resolve");
 
     const selfLoop = write(
-      baseContext(job),
+      context,
       { turn: `S${sessionDbId}/T1`, dependsOn: [`S${sessionDbId}/T1`] },
       NOW,
     );
@@ -923,9 +928,10 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // it — the gate field an edge write is judged by (mcp/note.ts's
     // EDGE_WRITE_GATE_FIELD, mirrored here).
     stampField(db, "turn", t2, "type", sessionWriterId(sessionDbId), NOW - 10);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
 
     const refused = write(
-      baseContext(job),
+      context,
       { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
       NOW,
     );
@@ -944,7 +950,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       snapshotWriteGateSequence(db),
     );
     const landed = write(
-      baseContext(job),
+      context,
       { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
@@ -967,13 +973,119 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const job = claimWindow(sessionDbId, 1, 2);
 
     const result = write(
-      baseContext(job),
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
       { turn: `S${sessionDbId}/T2`, evidenceFor: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
     expect(resultText(result)).toContain("Parameter error");
     expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 07 (edge-mechanism-revision; peer final-review must-fix 1,
+// [S15069/T1138]): the reviewable-window check is UNCONDITIONAL for every
+// turn-addressed call. It used to run only when the call also named type/tags
+// or prose, which left a pure-relation or pure-retraction call to be caught (if
+// at all) by the edge write gate — and the gate's third judgment admits a field
+// nobody has ever written, so a turn with no type chapter took edges from
+// outside the window. That is the peer's own reproduction, below.
+// ---------------------------------------------------------------------------
+
+describe("the reviewable-window check is unconditional (ticket 07, spec D6 渲染即授权)", () => {
+  /** The peer's repro shape: two turns, delivery phase on both, nothing stamped. */
+  function seedHiddenCitingTurn(): {
+    sessionDbId: number;
+    t1: number;
+    t2: number;
+    job: NoteSettlementJob;
+  } {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["implement"] });
+    updateTurnById(db, t2, { type: ["implement"] });
+    return { sessionDbId, t1, t2, job: claimWindow(sessionDbId, 1, 2) };
+  }
+
+  test("PEER REPRO: a relation-only call on an unrendered turn with no type chapter is refused — the gate alone let it through", () => {
+    const { sessionDbId, t2, job } = seedHiddenCitingTurn();
+    // T2 is deliberately absent from reviewableTurnIds and carries NO write-gate
+    // stamp on `type`, so the edge gate's own three judgments all admit.
+    const input = { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] };
+
+    const refused = write(baseContext(job), input, NOW);
+
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.message).toContain("reviewable window");
+    // Distinguishable from a write-gate refusal: the gate speaks of reading,
+    // this speaks of range. A reader who cannot tell them apart re-reads the
+    // turn and retries forever.
+    expect(!refused.ok && refused.message).not.toContain("has not been read this session");
+    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+
+    // The load-bearing half: range is the ONLY thing refusing it. The same call,
+    // same database, from a context that rendered T2, lands.
+    const landed = write(
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
+      input,
+      NOW + 1,
+    );
+    expect(resultText(landed)).toContain("1 relation");
+    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(1);
+  });
+
+  test("a retraction-only call on an unrendered turn is refused too, and the edge survives", () => {
+    const { sessionDbId, t2, job } = seedHiddenCitingTurn();
+    write(
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
+      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+
+    const refused = write(
+      baseContext(job),
+      { turn: `S${sessionDbId}/T2`, retractDependsOn: [`S${sessionDbId}/T1`] },
+      NOW + 1,
+    );
+
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.message).toContain("reviewable window");
+    expect(!refused.ok && refused.message).not.toContain("is not a relation this turn currently carries");
+    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(1);
+  });
+
+  test("the dry run refuses it as well — range is decided before anything a real write could do differently", () => {
+    const { sessionDbId, t2, job } = seedHiddenCitingTurn();
+
+    const evaluation = evaluateSettlementTurnWrite(
+      db,
+      baseContext(job),
+      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      NOW,
+      { apply: false },
+    );
+
+    expect(evaluation.ok).toBe(false);
+    expect(!evaluation.ok && evaluation.message).toContain("reviewable window");
+  });
+
+  test("range is checked on the CITING turn only — an in-window turn may still cite one the window never showed ([S15069/T1124])", () => {
+    const { sessionDbId, t1, t2, job } = seedHiddenCitingTurn();
+
+    // T1 (the CITED side) is NOT in reviewableTurnIds and gets no check of any
+    // kind: that is what lets a window connect to what came before it.
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
+      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+
+    expect(resultText(result)).toContain("1 relation");
+    const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.cited).toEqual({ kind: "turn", id: t1 });
   });
 });
 

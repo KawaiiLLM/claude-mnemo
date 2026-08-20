@@ -129,9 +129,12 @@ import {
  *   - title/content/insight, type and tags for any turn
  *     `context.reviewableTurnIds` names — the window plus its rendered
  *     lookback — each field admitted or refused by the write gate on its own;
- *   - a relation or a retraction on any address that resolves, judged by phase
- *     legality and the citing turn's own gate, with no pre-existence premise
- *     of any kind.
+ *   - a relation or a retraction whose CITING turn is likewise one
+ *     `context.reviewableTurnIds` names (ticket 07 of this batch made that
+ *     range check unconditional for every turn-addressed call, not a
+ *     side-effect of also naming prose or type/tags), pointed at any CITED
+ *     address that resolves, judged by phase legality and the citing turn's own
+ *     gate, with no pre-existence premise of any kind.
  *
  * TICKET 07 (write-mode-edit-semantics spec D12, "结算面与主 agent 完全一致"):
  * every field this facade writes now carries the SAME `mode` the main agent's
@@ -700,19 +703,28 @@ export function evaluateSettlementTurnWrite(
     return { ok: false, message: `${ref} is a compact marker, not a turn.` };
   }
 
-  // Scope (unchanged in kind, widened in what it covers): rendering IS
-  // authorization, so every field of a turn this prompt did not show is out of
-  // reach — prose included, now that prose is settlement's again.
-  if (
-    (touchesReview || proseFields.length > 0) &&
-    !context.reviewableTurnIds.has(turn.id)
-  ) {
+  // Scope, UNCONDITIONAL (ticket 07, edge-mechanism-revision; peer final-review
+  // must-fix 1, [S15069/T1138]; spec D6 "渲染即授权"): rendering IS
+  // authorization, so a turn this prompt did not show is out of reach for
+  // EVERY kind of write addressed at it — prose, type/tags, a relation and a
+  // retraction alike. This check used to run only when `touchesReview ||
+  // proseFields.length > 0`, which left a pure-relation or pure-retraction call
+  // to be caught, if at all, by the edge write gate further down; the gate's
+  // third judgment ("nobody ever wrote this field") ADMITS a hidden turn that
+  // carries no type chapter, so `T2 depends-on T1` landed on a turn outside the
+  // window — the peer reproduced exactly that. Range is now decided before the
+  // gate, on the CITING turn only.
+  //
+  // The CITED target is deliberately NOT range-checked ([S15069/T1124]): an
+  // edge is written on the citing side and the cited turn gets no check of any
+  // kind, which is what lets a window connect to what came before it.
+  if (!context.reviewableTurnIds.has(turn.id)) {
     return {
       ok: false,
       message:
         `${ref} is outside this dispatch's reviewable window (the window ` +
-        "plus its rendered lookback) — a turn's fields may only be " +
-        "written for a turn this prompt actually showed.",
+        "plus its rendered lookback) — a turn's fields and its edges may " +
+        "only be written for a turn this prompt actually showed.",
     };
   }
 

@@ -968,7 +968,7 @@ describe("ticket 08 — edge correction through the shared phase validator (requ
       NOW - 500,
     );
     const job = claimWindow(db, sessionDbId, 1, 2);
-    const context = baseContext(job);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
     const receipt = engine.stageNoteWrite({
@@ -996,7 +996,7 @@ describe("ticket 08 — edge correction through the shared phase validator (requ
       NOW - 500,
     );
     const job = claimWindow(db, sessionDbId, 1, 2);
-    const context = baseContext(job);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
     const receipt = engine.stageNoteWrite({
