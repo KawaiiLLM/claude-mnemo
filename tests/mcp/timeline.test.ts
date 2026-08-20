@@ -704,6 +704,81 @@ describe("skipped turns", () => {
   });
 });
 
+// Ticket 06 (view-render-repair, ruling [S15069/T1084]): rolled-back joins
+// skipped as a full timeline exclusion — mirrors the "skipped turns" block
+// above turn for turn, so the two conditions are proven under the SAME
+// shape rather than only through the shared `isTimelineExcludedTurn` unit.
+describe("rolled-back turns", () => {
+  it("excludes rolled-back turns from live aggregates (gap computation unaffected by a neighbour's exclusion)", () => {
+    const turns = [
+      turn({ promptNumber: 1, type: "discovery", createdAtEpoch: 1000 }),
+      turn({
+        promptNumber: 2,
+        wasRolledBack: true,
+        type: "decision",
+        createdAtEpoch: 1100,
+      }),
+      turn({ promptNumber: 3, type: "discovery", createdAtEpoch: 1200 }),
+    ];
+
+    expect(computeTypesDistribution(turns)).toEqual({
+      words: { discovery: 2 },
+      none: 0,
+    });
+
+    expect(segmentPhases(turns)).toHaveLength(1);
+
+    // The gap either side of T2 collapses into ONE T1→T3 gap, exactly as if
+    // T2 were never there — a rolled-back turn does not split or shorten a
+    // neighbour's gap.
+    const signals = detectShapeSignals(turns);
+    expect(signals.fastestGap).toEqual({
+      afterPromptNumber: 1,
+      ms: 200_000,
+    });
+    expect(signals.longestGap).toEqual({
+      afterPromptNumber: 1,
+      ms: 200_000,
+    });
+  });
+
+  it("filters rolled-back turns out without a marker or summary", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+
+    db.query(
+      "UPDATE turns SET was_rolled_back = 1 WHERE session_id = ? AND prompt_number = 19",
+    ).run(session.id);
+
+    const view = buildTimelineView(db, { id: "S1/T19..21" });
+    const output = renderTimeline(view);
+
+    expect(output).not.toContain("[rewind]");
+    expect(output).not.toContain("T19 |");
+    expect(output).not.toMatch(/\[T19\]/);
+  });
+
+  it("consumes no page budget: excluding a rolled-back OR skipped turn lets the same page fit more live turns", () => {
+    const db = createDatabase(":memory:");
+    seedTimelineSession(db, [
+      turn({ promptNumber: 1, type: "decision", createdAtEpoch: 1_779_782_400 }),
+      turn({ promptNumber: 2, type: "decision", wasRolledBack: true, createdAtEpoch: 1_779_782_460 }),
+      turn({ promptNumber: 3, type: "decision", status: "skipped", createdAtEpoch: 1_779_782_520 }),
+      turn({ promptNumber: 4, type: "decision", createdAtEpoch: 1_779_782_580 }),
+      turn({ promptNumber: 5, type: "decision", createdAtEpoch: 1_779_782_640 }),
+    ]);
+
+    // pageSize 3 over 5 raw rows, but only 3 of them are live: both excluded
+    // turns consume no seat, so the one page holds every live turn instead
+    // of overflowing to a second page the way 5 raw rows normally would.
+    const view = buildTimelineView(db, { id: "S1", view: "turns", page: 1, pageSize: 3 });
+
+    expect(view.viewItemTotal).toBe(3);
+    expect(view.pageCount).toBe(1);
+    expect(view.pageTurns.map((row) => row.promptNumber)).toEqual([1, 4, 5]);
+  });
+});
+
 describe("segmentPhases", () => {
   it("returns empty for no turns", () => {
     expect(segmentPhases([])).toEqual([]);
@@ -1898,7 +1973,15 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     expect(result.pulled).toHaveLength(0);
   });
 
-  it("revives a cited skipped turn as an antecedent with a prompt-prefix pseudo-title", () => {
+  // Ticket 06 (view-render-repair, ruling [S15069/T1084]): this used to be a
+  // `status: "skipped"` turn — skip's own "no main-row candidacy, but still
+  // pullable" carve-out is exactly what the ruling retires (a skipped turn
+  // is excluded from the citation universe entirely, so it can never be
+  // pulled through at all any more — see "the two turns ticket 06 excludes
+  // never appear, even pulled" below). Rewritten to a live G0 turn instead,
+  // so the prompt-prefix pseudo-title mechanism this test targets still has
+  // a legitimate pull-through case to exercise.
+  it("revives a cited low-grade turn as an antecedent with a prompt-prefix pseudo-title", () => {
     const longPrompt =
       "why does the extractor drop the boundary marker when the wrapper lands first and the turn is already claimed";
     const rows = [
@@ -1906,7 +1989,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
       turn({
         id: 2,
         promptNumber: 2,
-        status: "skipped",
+        significanceGrade: 0,
         type: null,
         title: null,
         userPrompt: longPrompt,
@@ -1937,9 +2020,9 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
       turn({
         id: 2,
         promptNumber: 2,
-        status: "skipped",
+        significanceGrade: 0,
         type: null,
-        title: "minimal title for a skipped turn",
+        title: "minimal title for a low-grade turn",
         userPrompt: "raw prompt text that must not win",
         createdAtEpoch: era + 60,
       }),
@@ -1949,7 +2032,82 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     const result = select(rows, {
       citations: structuredCitations({ 3: [[2, "evidence-for"]] }),
     });
-    expect(result.pulled[0]!.label).toBe("minimal title for a skipped turn");
+    expect(result.pulled[0]!.label).toBe("minimal title for a low-grade turn");
+  });
+
+  it("a skipped turn is never pulled through, even titled and cited (ticket 06, ruling [S15069/T1084])", () => {
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({
+        id: 2,
+        promptNumber: 2,
+        status: "skipped",
+        title: "a skipped turn with a real title",
+        userPrompt: "raw prompt text",
+        createdAtEpoch: era + 60,
+      }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, createdAtEpoch: era + 120 }),
+    ];
+
+    const result = select(rows, {
+      citations: structuredCitations({ 3: [[2, "evidence-for"]] }),
+    });
+
+    // T2 is absent everywhere — not kept, not pulled, not ranked, and its
+    // citer (T3) gets no corrector/always-keep status from citing it either.
+    expect(kept(result)).toEqual([1, 3]);
+    expect(result.pulled).toHaveLength(0);
+    expect(rankedPrompts(result)).not.toContain(2);
+  });
+
+  it("a rolled-back turn is never pulled through, even titled and cited (ticket 06, ruling [S15069/T1084])", () => {
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({
+        id: 2,
+        promptNumber: 2,
+        wasRolledBack: true,
+        significanceGrade: 0,
+        title: "a rolled-back turn with a real title",
+        userPrompt: "raw prompt text",
+        createdAtEpoch: era + 60,
+      }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, createdAtEpoch: era + 120 }),
+    ];
+
+    const result = select(rows, {
+      citations: structuredCitations({ 3: [[2, "evidence-for"]] }),
+    });
+
+    expect(kept(result)).toEqual([1, 3]);
+    expect(result.pulled).toHaveLength(0);
+    expect(rankedPrompts(result)).not.toContain(2);
+  });
+
+  it("a corrector citing ONLY a rolled-back victim gains no always-keep slot from that edge (ticket 06)", () => {
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({
+        id: 2,
+        promptNumber: 2,
+        wasRolledBack: true,
+        significanceGrade: 3,
+        title: "a rolled-back victim",
+        createdAtEpoch: era + 60,
+      }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "would-be corrector", significanceGrade: 0, createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 4, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 180 }),
+    ];
+
+    const result = select(rows, {
+      citations: structuredCitations({ 3: [[2, "supersedes"]] }),
+    });
+
+    // T2 does not exist for the election: it is never resolved as a victim,
+    // so T3 (which cites only T2) is not promoted to a corrector's
+    // always-keep slot by that edge — its own G0 keeps it out of `kept`.
+    expect(kept(result)).not.toContain(3);
+    expect(kept(result)).not.toContain(2);
   });
 
   it("assigns a shared antecedent to its earliest kept citer only", () => {
@@ -2213,8 +2371,9 @@ describe("milestone selection on a multi-day legacy fixture", () => {
  * The end-to-end guard: one hand-built session that puts every §C rule on the
  * same board at once — two legacy days read through the inline adapter, two era
  * days read through structured edges, a supersession on each side, a shared
- * antecedent, a skipped turn revived by a citation, and three classes of
- * always-keep anchor (endpoint, corrector, reversed-with-no-corrector).
+ * antecedent, a skipped turn cited but never revived (ticket 06, ruling
+ * [S15069/T1084]: total exclusion, no pull-through carve-out), and three
+ * classes of always-keep anchor (endpoint, corrector, reversed-with-no-corrector).
  *
  * Frozen by construction: fixed epochs, no `Date.now()` — each row's citation
  * source (inline prose vs structured edge) is stated by `mixedArcCitations`
@@ -2401,15 +2560,23 @@ describe("milestone selection on a mixed-era, multi-day arc (frozen fixture)", (
   it("pins the ↳ antecedents, their owners and their back-links", () => {
     // T7 and T20 are gone from `pulled` — each now keeps its own row instead
     // (see the always-keep test above), so pull-through's `keptIds` guard
-    // skips them. What is left is exactly the non-victim antecedents.
+    // skips them. T17 (skipped, ticket 06) is gone from `pulled` too — for a
+    // different reason: it is excluded from the citation universe before
+    // pull-through ever runs, not merely out-ranked by `keptIds`. What is
+    // left is exactly the non-victim, non-excluded antecedents.
     expect(
       result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber, p.effGrade]),
     ).toEqual([
       [2, 5, 1], // plain legacy causal reference
       [13, 14, 2], // era G2 evidence
-      [17, 18, 0], // skipped probe revived
       [21, 22, 2], // shared antecedent: earliest kept citer only
     ]);
+    // Ticket 06's own positive assertion: T17 is not resurrected anywhere —
+    // not as a main row, not as a ↳ row, not even in the scored pool — even
+    // though T18 cites it with a live structured edge.
+    expect(result.kept.map((row) => row.turn.promptNumber)).not.toContain(17);
+    expect(result.pulled.map((p) => p.turn.promptNumber)).not.toContain(17);
+    expect(result.ranked.map((row) => row.turn.promptNumber)).not.toContain(17);
     // None of the remaining ↳ rows carry a back-link — the two turns that DID
     // (T7, T20) moved to `kept`, where the data still populates (spec H3) even
     // though today's main-row renderer does not yet print it (unchanged by
@@ -2425,11 +2592,6 @@ describe("milestone selection on a mixed-era, multi-day arc (frozen fixture)", (
     ]);
     // T23 also cites T21, but a shared antecedent renders once.
     expect(result.pulled.filter((p) => p.citedByPromptNumber === 23)).toHaveLength(0);
-    // A skipped turn has no title, so the ↳ label falls back to its prompt.
-    // Index 2, not 3: T7's removal from `pulled` shifted everything after it.
-    expect(result.pulled[2]!.label).toBe(
-      "check whether the watchdog ever observes a frozen timestamp",
-    );
   });
 
   it("counts only turns with no rendered row at all in `+N more`", () => {
@@ -3033,6 +3195,25 @@ describe("renderTimeline", () => {
     expect(turn19Line).toContain("~~title for T19~~");
   });
 
+  // Ticket 06 (view-render-repair, ruling [S15069/T1084]): with rewind and
+  // skip retired, an unsettled turn — no note yet, never skipped — is the
+  // fallback's ONLY remaining live case, so it must keep working. T21 in
+  // `seedSession` already carries no type and no title (unsettled), status
+  // `extracted` (not skipped), so it renders normally with its prompt as the
+  // label instead of vanishing or showing `(untitled)`.
+  it("an unsettled turn (no note yet, never skipped) still renders, label falling back to its prompt", () => {
+    const db = createDatabase(":memory:");
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1/T21..21" });
+    const output = renderTimeline(view);
+    const turn21Line = turnBlock(output, 21);
+
+    expect(turn21Line).toBeDefined();
+    expect(turn21Line).toContain("raw prompt 21");
+    expect(view.pageTurns.map((row) => row.promptNumber)).toEqual([21]);
+  });
+
   it("renders compact turns as structural rows with line anchors and parsed tags", () => {
     const db = createDatabase(":memory:");
     const session = seedSession(db);
@@ -3337,9 +3518,14 @@ describe("renderMilestoneDigest layout", () => {
   it("renders day-grouped spine rows with front-gutter markers, no turn-table columns", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
+    // T2's "reversed" marker comes from the ROLE TAG here, not the DB rewind
+    // column (ticket 06, ruling [S15069/T1084], keeps these two separate: a
+    // `was_rolled_back` turn is excluded entirely — see the dedicated test
+    // below — while a tag-marked reversal is a normal, visible, always-keep
+    // row, unaffected by this ticket).
     const rows = [
       turn({ promptNumber: 1, type: "decision", title: "kick off the design", userPrompt: "PROMPTTEXT", createdAtEpoch: base }),
-      turn({ promptNumber: 2, type: "decision", title: "pivot the approach", wasRolledBack: true, createdAtEpoch: base + 60 }),
+      turn({ promptNumber: 2, type: "decision", title: "pivot the approach", tags: ["rolled-back"], createdAtEpoch: base + 60 }),
       turn({ promptNumber: 3, type: "feature", title: "shipped it", tags: ["merged"], filesModified: ["a.ts"], createdAtEpoch: base + 120 }),
     ];
     seedTimelineSession(db, rows);
@@ -3353,6 +3539,26 @@ describe("renderMilestoneDigest layout", () => {
     expect(out).toContain("🏁 [T3]"); // outcome marker in front gutter
     expect(out).toContain("✏️a.ts"); // modified-file basenames ride the row
     expect(out).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T1–T3 · \d+ kept/); // day header (full date, matches day-divider style)
+  });
+
+  it("a rolled-back turn (turns.was_rolled_back) never gets a row here, marked or not (ticket 06, ruling [S15069/T1084])", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ promptNumber: 1, type: "decision", title: "kick off the design", createdAtEpoch: base }),
+      turn({ promptNumber: 2, type: "decision", title: "pivot the approach", wasRolledBack: true, createdAtEpoch: base + 60 }),
+      turn({ promptNumber: 3, type: "feature", title: "shipped it", tags: ["merged"], filesModified: ["a.ts"], createdAtEpoch: base + 120 }),
+    ];
+    seedTimelineSession(db, rows);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    // Not greyed, not marked — absent. No `[T2]` row of any kind, and the
+    // day's kept count reflects only the two turns that still exist for
+    // the timeline.
+    expect(out).not.toContain("[T2]");
+    expect(out).not.toContain("pivot the approach");
+    expect(out).not.toContain("↩️");
+    expect(out).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T1–T3 · 2 kept/);
   });
 });
 
@@ -4591,9 +4797,12 @@ function seedSharedAntecedentArc(db: Database) {
 
 /**
  * A cross-day arc whose only antecedent lives on a day that owns no main row:
- * T2 is skipped (so it is no main-row candidate at all) and is cited by T3 and
- * T4, both of which sit on a later day and are both removable. Remove them and
- * T2 has nowhere to render — and no day group of its own to be counted in.
+ * T2 sits at G2 (so it is no main-row candidate at all — a live, non-excluded
+ * turn on purpose; ticket 06 retired status="skipped" here, since a skipped
+ * turn can no longer be pulled through at all and would defeat this fixture's
+ * own premise) and is cited by T3 and T4, both of which sit on a later day and
+ * are both removable. Remove them and T2 has nowhere to render — and no day
+ * group of its own to be counted in.
  */
 function seedOrphanDayArc(db: Database) {
   const day = 86_400;
@@ -4611,7 +4820,6 @@ function seedOrphanDayArc(db: Database) {
       promptNumber: 2,
       type: "discovery",
       significanceGrade: 2,
-      status: "skipped",
       userPrompt: "取证",
       title: "cross-day evidence",
       createdAtEpoch: ERA_BASE + day,
@@ -4657,8 +4865,11 @@ const LONG_ARC_MAIN_ROWS = 900;
 /**
  * A long session shaped like the one the SessionStart injection actually meets:
  * 900 main rows spread over a month, every sixth one an anchor the budget may
- * not drop, and a skipped antecedent every tenth row so the fitter has real
- * re-homing work to do as it removes citers.
+ * not drop, and a low-grade (G2, live) antecedent every tenth row so the
+ * fitter has real re-homing work to do as it removes citers. Live and not
+ * `status="skipped"` on purpose (ticket 06): a skipped turn can no longer be
+ * pulled through at all, which would leave this fixture with no antecedents
+ * to re-home.
  */
 function seedLongArcSession(db: Database) {
   const rows: TurnRecord[] = [];
@@ -4675,7 +4886,6 @@ function seedLongArcSession(db: Database) {
           promptNumber,
           type: "discovery",
           significanceGrade: 2,
-          status: "skipped",
           userPrompt: `证据 ${promptNumber}`,
           title: `evidence sample ${promptNumber} for the slicing survey`,
           createdAtEpoch: epoch,

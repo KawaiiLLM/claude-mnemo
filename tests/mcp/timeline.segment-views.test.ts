@@ -320,6 +320,45 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       const rendered = renderSegmentTimeline(view);
       expect(rendered).toMatch(/… \+2 more/);
     });
+
+    // Ticket 06 (view-render-repair, ruling [S15069/T1084]): the same
+    // exclusion `timeline.test.ts` proves against the plain `S<n>` route and
+    // `selectMilestoneTurns` directly, proven here through the SHARED
+    // selection function this route and the `S<n>` nested rows both call
+    // (`selectSegmentMilestonesByEdgeSignals`).
+    test("a rolled-back or skipped member is excluded outright — no seat, no `demotedCount`, election unaffected by its edge (ticket 06)", () => {
+      const rewound = makeTurn(1, { title: "rewound member" });
+      db.query("UPDATE turns SET was_rolled_back = 1 WHERE id = ?").run(rewound);
+      const skipped = makeTurn(2, { title: "skipped member" });
+      db.query("UPDATE turns SET status = 'skipped' WHERE id = ?").run(skipped);
+      const survivor = makeTurn(3, { title: "plain survivor" });
+      addSegmentMembers(db, segmentId, [rewound, skipped, survivor], CUTOFF);
+      // Both excluded members carry a live encodes edge — an excluded turn's
+      // own edge must not buy it (or anyone else) a seat.
+      const encoder = makeTurn(4, { title: "encoder" });
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: encoder },
+            cited: { kind: "turn", id: rewound },
+            relation: "encodes",
+            provenance: "judged",
+          },
+        ],
+        CUTOFF,
+        { eligibleForRelation: "unrestricted" },
+      );
+
+      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 10 });
+      const keptIds = view.keptMilestones.map((row) => row.member.turnId);
+      expect(keptIds).not.toContain(rewound);
+      expect(keptIds).not.toContain(skipped);
+      expect(keptIds).toContain(survivor);
+      // Neither excluded member ever reached candidacy, so neither is
+      // counted as a demoted overflow either — it consumed no seat to lose.
+      expect(view.demotedCount).toBe(0);
+    });
   });
 
   describe("turns view", () => {
@@ -348,6 +387,32 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       const i2 = lines.findIndex((line) => line.includes("[T2]") && line.includes("second"));
       expect(i1).toBeGreaterThan(-1);
       expect(i2).toBeGreaterThan(i1);
+    });
+
+    // Ticket 06 (view-render-repair, ruling [S15069/T1084]): the turns view
+    // reads `members` through the SAME already-filtered list the milestones
+    // view above does (`buildSegmentTimelineView`'s single `members`
+    // assignment), so this proves the exclusion on the OTHER branch that
+    // never calls `selectSegmentMilestonesByEdgeSignals` at all.
+    test("a rolled-back or skipped member never renders here either, and consumes no page budget (ticket 06)", () => {
+      const rewound = makeTurn(1, { title: "rewound member" });
+      db.query("UPDATE turns SET was_rolled_back = 1 WHERE id = ?").run(rewound);
+      const skipped = makeTurn(2, { title: "skipped member" });
+      db.query("UPDATE turns SET status = 'skipped' WHERE id = ?").run(skipped);
+      const survivor1 = makeTurn(3, { title: "plain survivor one" });
+      const survivor2 = makeTurn(4, { title: "plain survivor two" });
+      addSegmentMembers(db, segmentId, [rewound, skipped, survivor1, survivor2], CUTOFF);
+
+      const view = buildSegmentTimelineView(db, { segmentId, view: "turns", pageSize: 2 });
+      // pageSize 2 over 4 raw members, but only 2 are live: the one page
+      // holds both survivors instead of overflowing to a second page.
+      expect(view.totalMembers).toBe(2);
+      expect(view.pageCount).toBe(1);
+      expect(view.pageMembers.map((row) => row.member.turnId)).toEqual([survivor1, survivor2]);
+
+      const output = renderSegmentTimeline(view);
+      expect(output).not.toContain("rewound member");
+      expect(output).not.toContain("skipped member");
     });
 
     test("overflow paginates — every member is reachable across pages, never dropped", () => {

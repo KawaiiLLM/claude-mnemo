@@ -451,8 +451,10 @@ export interface KeptMilestone {
 
 /**
  * A turn pulled in under a kept main row because that row cites it (spec §C ⑤):
- * effGrade ≤ 2 — including `status = 'skipped'` rows, which have no main-row
- * candidacy at all — rendered as an indented `↳` line beneath its citer.
+ * effGrade ≤ 2, rendered as an indented `↳` line beneath its citer. A
+ * rolled-back or skipped turn is never one of these (ticket 06, ruling
+ * [S15069/T1084]) — it is excluded from the citation universe before
+ * selection ever considers it, so it can never be pulled through.
  */
 export interface PulledAntecedent {
   turn: TurnRecord;
@@ -1649,6 +1651,27 @@ export function compareMilestoneRank(
 }
 
 /**
+ * Ticket 06 (view-render-repair, ruling [S15069/T1084]): a turn excluded
+ * from every timeline row — not greyed, not marked, absent. Two conditions,
+ * each its own column, never conflated:
+ *
+ *   - rewind: `turns.was_rolled_back = 1`
+ *   - skip:   `turns.status = 'skipped'`
+ *
+ * `status = 'undone'` is a THIRD state the ruling did not name and this
+ * function does not touch — it stays exactly as visible as it was.
+ *
+ * Every caller that builds a candidate list for the turn table, milestone
+ * election, gap/shape analysis, or citation pull-through runs its input
+ * through this FIRST, at selection — never at render — so an excluded turn
+ * consumes no page budget, joins no milestone election, and does not
+ * disturb a neighbour's gap computation.
+ */
+function isTimelineExcludedTurn(turn: Pick<TurnRecord, "wasRolledBack" | "status">): boolean {
+  return turn.wasRolledBack || turn.status === "skipped";
+}
+
+/**
  * Grade-first milestone selection (spec §C, H1). The steps run in this order and
  * the order is load-bearing:
  *
@@ -1663,8 +1686,12 @@ export function compareMilestoneRank(
  *     is admitted on its own merit exactly like any other. The always-keep
  *     bullet above is the only place the graph still decides anything, and only
  *     for structural inclusion, never for grade.
- *   ③ pull-through: effGrade ≤ 2 turns (INCLUDING skipped ones) cited by a kept
- *     row become its ↳ antecedents
+ *   ③ pull-through: effGrade ≤ 2 turns cited by a kept row become its ↳
+ *     antecedents. A rolled-back or skipped turn (ticket 06, ruling
+ *     [S15069/T1084]) is never one of them — it is excluded before this
+ *     function sees it at all (below), on EITHER end of the edge: it cannot
+ *     be pulled in as an antecedent, and it cannot lend a corrector its
+ *     always-keep slot by being cited as a victim.
  *   ④ budget/degradation — NOT here. Selection returns the whole eligible set
  *     plus `ranked`; the unified renderer (ticket 03) does the cutting.
  */
@@ -1675,8 +1702,7 @@ export function selectMilestoneTurns(view: {
   compactBoundaries: number[];
   /**
    * Full-session turns, used to resolve a citation whose target sits *outside* a
-   * ranged `windowTurns` and to give pull-through the skipped rows the window
-   * filter would hide. Omit for a full-window view.
+   * ranged `windowTurns`. Omit for a full-window view.
    */
   sessionTurns?: TurnRecord[];
   taskCausalityEraCutoffEpoch?: number;
@@ -1689,12 +1715,20 @@ export function selectMilestoneTurns(view: {
   citations?: ReadonlyMap<number, EffectiveCitations>;
 }): MilestoneSelection {
   const eraCutoff = view.taskCausalityEraCutoffEpoch;
-  const universe = view.sessionTurns ?? view.windowTurns;
-  // Main-row candidates: a skipped turn has no candidacy (it can still be pulled
-  // in as an antecedent), and a compact marker is structural noise that the arc
-  // view no longer spends a row on.
+  const rawUniverse = view.sessionTurns ?? view.windowTurns;
+  // Ticket 06 (view-render-repair, ruling [S15069/T1084]): a rolled-back
+  // (`turns.was_rolled_back`) or skipped (`status = 'skipped'`) turn is
+  // excluded from the citation-resolution universe entirely, not merely from
+  // main-row candidacy — it can no longer be resolved as a citation target,
+  // so it cannot lend a corrector its always-keep slot and cannot be pulled
+  // in as a ↳ antecedent either. `status = 'undone'` is untouched (a
+  // different, third state; a separate ruling's scope).
+  const universe = rawUniverse.filter((turn) => !isTimelineExcludedTurn(turn));
+  // Main-row candidates: an excluded turn (above) never reaches candidacy on
+  // any bullet, and a compact marker is structural noise that the arc view
+  // no longer spends a row on.
   const seq = sortTurnsForAnalysis(view.windowTurns).filter(
-    (turn) => turn.status !== "skipped" && !turn.type.includes("compact"),
+    (turn) => !isTimelineExcludedTurn(turn) && !turn.type.includes("compact"),
   );
   if (seq.length === 0) {
     return {
@@ -1706,7 +1740,19 @@ export function selectMilestoneTurns(view: {
     };
   }
 
-  const citations = view.citations ?? inlineCitationFallback(universe);
+  // An excluded turn's own outgoing citations must not matter either: it can
+  // never become `row.turn` (already out of `seq`), so pull-through never
+  // reads its entry — but `citationInDegree` reads every entry in the map
+  // regardless of who does the iterating, and a turn ticket 06 excludes must
+  // not nudge another row's tie-break score by having cited it.
+  const excludedIds = new Set(
+    rawUniverse.filter((turn) => isTimelineExcludedTurn(turn)).map((turn) => turn.id),
+  );
+  const rawCitations = view.citations ?? inlineCitationFallback(universe);
+  const citations =
+    excludedIds.size === 0
+      ? rawCitations
+      : new Map([...rawCitations].filter(([citerId]) => !excludedIds.has(citerId)));
   const inDegree = citationInDegree(citations);
   const universeById = new Map(universe.map((turn) => [turn.id, turn]));
   const inWindowById = new Map(seq.map((turn) => [turn.id, turn]));
@@ -1882,10 +1928,11 @@ export function selectMilestoneTurns(view: {
 }
 
 /**
- * One-line label for a ↳ row. Existing skipped turns have no title at all — the
- * extraction prompt only starts titling them in ticket 05 — so a prompt prefix
- * stands in; without it a revived antecedent would render as `(untitled)` and
- * carry no information at all.
+ * One-line label for a ↳ row. An untitled low-grade turn (extraction only
+ * starts titling every turn in ticket 05) falls back to a prompt prefix;
+ * without it a pulled antecedent would render as `(untitled)` and carry no
+ * information at all. A skipped turn is never a candidate here at all
+ * (ticket 06) — it cannot be pulled through, titled or not.
  */
 function pulledAntecedentLabel(turn: TurnRecord, signal?: TruncationSignal): string {
   if (turn.title !== null && turn.title.trim() !== "") {
@@ -2039,9 +2086,19 @@ export function buildTimelineView(
   if (filterError) {
     throw new Error(filterError);
   }
-  const windowTurns = hasFilterCriteria(memoryFilter)
+  const filteredWindowTurns = hasFilterCriteria(memoryFilter)
     ? rangeWindowTurns.filter((turn) => turnMatchesFilter(turn, memoryFilter))
     : rangeWindowTurns;
+  // Ticket 06 (view-render-repair, ruling [S15069/T1084]): a rolled-back or
+  // skipped turn leaves the display candidate set HERE, unconditionally —
+  // unlike the `filter` input above, this narrowing is NOT paired with an
+  // unfiltered citation universe below; `selectMilestoneTurns` (fed
+  // `legacySessionTurns`/`legacyWindowTurns`, both derived from `windowTurns`
+  // or `allTurns`) and `selectSegmentMilestonesByEdgeSignals` (fed segment
+  // members separately) each re-apply the same exclusion to their own wider
+  // citation-resolution universe, so the turn cannot resurface as a pulled
+  // antecedent either. `status = 'undone'` is untouched.
+  const windowTurns = filteredWindowTurns.filter((turn) => !isTimelineExcludedTurn(turn));
   // Era split (spec D11, R2#7). The legacy selection runs over the pre-cutoff
   // turns ALONE — including the universe it resolves citations against — so no
   // era turn can be pulled into the legacy block as an antecedent and read under
@@ -2088,11 +2145,13 @@ export function buildTimelineView(
     sessionTurns: legacySessionTurns,
     citations,
   });
-  const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
+  // `windowTurns` is already exclusion-filtered above (ticket 06), so no
+  // second skip/rewind filter is needed here — the turns view's page budget
+  // is spent only on turns that still exist for the timeline.
   const pagedTurns =
     viewKind === "turns"
-      ? paginateItems(nonSkippedTurns, page, pageSize)
-      : emptyPaginatedItems<TurnRecord>(nonSkippedTurns.length, pageSize);
+      ? paginateItems(windowTurns, page, pageSize)
+      : emptyPaginatedItems<TurnRecord>(windowTurns.length, pageSize);
   const milestoneTail = viewKind === "milestones" && input.milestoneTail === true;
   const pagedMilestones =
     viewKind === "milestones"
@@ -2120,8 +2179,18 @@ export function buildTimelineView(
   const segmentSpine = renderSegments
     ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch, eraWindowTurnIds)
     : [];
+  // Ticket 06: `listOrphanAnchorTurns`'s own SQL already drops `skipped` (and
+  // `undone`), but it has no column for the DB rewind flag — its
+  // `MemberRankFacts.isRolledBack` is the unrelated edge-derived fact
+  // (segment-rank.ts's own doc comment). Cross-referenced against `allTurns`
+  // here instead of a second DB round trip.
+  const rolledBackTurnIds = new Set(
+    allTurns.filter((turn) => turn.wasRolledBack).map((turn) => turn.id),
+  );
   const orphanAnchors = renderSegments
-    ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds)
+    ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds).filter(
+        (row) => !rolledBackTurnIds.has(row.facts.turnId),
+      )
     : [];
   // Ticket 05/12: each spine segment's NESTED milestone rows — selected
   // eagerly here (this function has `db`) via the SAME lexicographic
@@ -3643,8 +3712,13 @@ function sanitizeTimelineField(value: string): string {
   return value.replaceAll("|", "/").replaceAll("→", "->");
 }
 
+// Ticket 06 (view-render-repair, ruling [S15069/T1084]): rolled-back joins
+// skipped here, so a rewound turn is treated the same way for aggregate
+// "liveness" purposes (the `types:` distribution, phase segmentation, gap
+// detection) that skip already was. `undone` is unaffected — a different,
+// pre-existing exclusion this ticket does not touch.
 function isTimelineLiveTurn(turn: TurnRecord): boolean {
-  return turn.status !== "undone" && turn.status !== "skipped";
+  return turn.status !== "undone" && !isTimelineExcludedTurn(turn);
 }
 
 function renderShapeSignals(
@@ -3897,6 +3971,46 @@ function resolveTurnRowLinks(
 }
 
 /**
+ * Ticket 06 (view-render-repair, ruling [S15069/T1084]): drops a rolled-back
+ * or skipped member before ordinal numbering, era eligibility or edge-signal
+ * ranking ever sees it. `RankedSegmentMember.status` already carries the
+ * skip half; the DB rewind flag (`turns.was_rolled_back`) does not ride on
+ * the rank-facts query at all — `segment-rank.ts`'s own `isRolledBack` is a
+ * DIFFERENT, edge-derived fact (an inbound `supersedes` edge — see its own
+ * doc comment), not the rewind column — so this reads it in one small
+ * batched query instead of reaching into that module.
+ */
+function excludeTimelineHiddenMembers<T extends { turnId: number; status: string }>(
+  db: Database,
+  members: readonly T[],
+): T[] {
+  const notSkipped = members.filter((member) => member.status !== "skipped");
+  if (notSkipped.length === 0) {
+    return notSkipped;
+  }
+  const rolledBackIds = fetchRolledBackTurnIds(
+    db,
+    notSkipped.map((member) => member.turnId),
+  );
+  return rolledBackIds.size === 0
+    ? notSkipped
+    : notSkipped.filter((member) => !rolledBackIds.has(member.turnId));
+}
+
+function fetchRolledBackTurnIds(db: Database, turnIds: readonly number[]): Set<number> {
+  if (turnIds.length === 0) {
+    return new Set();
+  }
+  const placeholders = turnIds.map(() => "?").join(",");
+  const rows = db
+    .query<{ id: number }, number[]>(
+      `SELECT id FROM turns WHERE id IN (${placeholders}) AND was_rolled_back = 1`,
+    )
+    .all(...turnIds);
+  return new Set(rows.map((row) => row.id));
+}
+
+/**
  * Batch `user_prompt` fetch for `titleOrPromptLabel`'s fallback. `TurnRecord`
  * already carries this column when a caller holds one (the plain `S<n>` turns
  * view); this is for the `RankedSegmentMember`-backed paths, whose rank-facts
@@ -3998,7 +4112,12 @@ export function selectSegmentMilestonesByEdgeSignals(
   pageSize: number,
   taskCausalityEraCutoffEpoch?: number,
 ): SegmentMilestoneEdgeSelection {
-  const eraEligible = members.filter((member) =>
+  // Ticket 06 (view-render-repair, ruling [S15069/T1084]): a rolled-back or
+  // skipped member is dropped before ordinal numbering, era eligibility or
+  // edge-signal ranking ever sees it — it admits no seat, and a live
+  // neighbour's ordinal is numbered as if it were never there.
+  const liveMembers = excludeTimelineHiddenMembers(db, members);
+  const eraEligible = liveMembers.filter((member) =>
     isTaskCausalityEra(member.createdAtEpoch, taskCausalityEraCutoffEpoch),
   );
   if (eraEligible.length === 0) {
@@ -4013,8 +4132,8 @@ export function selectSegmentMilestonesByEdgeSignals(
   );
   const admitted = new Set(ranked.slice(0, Math.max(0, pageSize)).map((member) => member.turnId));
 
-  const chronologicalOrdinals = new Map(members.map((member, index) => [member.turnId, index + 1]));
-  const keptMembers = members.filter((member) => admitted.has(member.turnId));
+  const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
+  const keptMembers = liveMembers.filter((member) => admitted.has(member.turnId));
   const links = resolveTurnRowLinks(db, keptMembers);
   const userPrompts = fetchUserPrompts(db, keptMembers.map((member) => member.turnId));
   const sessionTitles = new Map<number, string | null>();
@@ -4441,7 +4560,15 @@ export function buildSegmentTimelineView(
   const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
   const viewKind = input.view ?? "turns";
   const pageBudget = input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET;
-  const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  // Ticket 06 (view-render-repair, ruling [S15069/T1084]): excluded once,
+  // here — both branches below (turns view's `rows`, milestones view's own
+  // call into `selectSegmentMilestonesByEdgeSignals`) read this SAME
+  // already-live list, so a rolled-back or skipped member consumes no page
+  // budget and enters no milestone election on either view.
+  const members = excludeTimelineHiddenMembers(
+    db,
+    chronologicalSegmentMembers(db, segment, eraCutoffEpoch),
+  );
   // The turns view needs only the event-order handle; the milestones view
   // builds its own fully-resolved rows in `selectSegmentMilestonesByEdgeSignals`.
   const rows = members.map((member, index) => ({ member, ordinal: index + 1 }));

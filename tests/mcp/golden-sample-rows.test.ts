@@ -348,8 +348,16 @@ describe("金样例 — the rendered row contract", () => {
   // title`), with no metadata line and no `- content:` anywhere on ANY
   // timeline output. `[rewind]` does not carry over either — that marker is
   // recall's own row (format.ts's `FormattedTurn.wasRolledBack`), asserted on
-  // recall separately in this same file ("session turn listing" above);
-  // timeline's row form is time/type/title only (ticket 05's own title).
+  // recall separately in this same file ("session turn listing" above).
+  //
+  // T823 here is NOT rolled back (view-render-repair ticket 06, ruling
+  // [S15069/T1084] supersedes the original fixture, which used
+  // `rolledBack: true` to prove the row exists without a `[rewind]` marker):
+  // a rolled-back turn is now excluded from timeline's row set entirely, so
+  // it can no longer stand in for "the minimal row shape, unmarked" — it
+  // renders no row at all. `[rewind]`'s absence from a LIVE row is still
+  // proven by the trailing `not.toContain("[rewind]")` below; a dedicated
+  // "rolled-back turn has no row" case lives in timeline.test.ts.
   // -------------------------------------------------------------------------
 
   test("turns view: no tabular surface, no metadata line, no `- content:` — the SAME minimal row the milestones view uses", () => {
@@ -360,7 +368,6 @@ describe("金样例 — the rendered row contract", () => {
       promptNumber: 823,
       title: "title",
       epoch: T821_EPOCH,
-      rolledBack: true,
       toolCallCount: 20,
       filesModified: ["a.ts", "b.ts", "c.ts"],
     });

@@ -151,9 +151,13 @@ function seedInjectionArc(db: ReturnType<typeof createDatabase>): number {
       filesModified: ["src/slicing.md"],
       epoch: ERA_BASE + 60,
     },
+    // Live and G2 on purpose, not `status: "skipped"` (view-render-repair
+    // ticket 06, ruling [S15069/T1084]): a skipped turn is now excluded from
+    // the citation universe entirely and can never be pulled through as a ↳
+    // row, which would defeat this fixture's own "one pulled antecedent"
+    // premise.
     {
       promptNumber: 2,
-      status: "skipped",
       prompt: "取证",
       title: "Measured a 12-14% error",
       type: "discovery",
@@ -214,7 +218,6 @@ function seedLongArc(
       epoch += 300;
       rows.push({
         promptNumber,
-        status: "skipped",
         prompt: `证据 ${promptNumber}`,
         title: `evidence sample ${promptNumber} for the slicing survey`,
         type: "discovery",
