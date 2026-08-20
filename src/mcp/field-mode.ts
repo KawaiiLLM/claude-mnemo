@@ -1,0 +1,310 @@
+import { stripPrivateTags } from "../shared/tag-stripping";
+import {
+  containsToolCallSyntax,
+  toolCallSyntaxMessage,
+} from "../shared/tool-call-syntax";
+import { decodeHtmlEntities } from "./note";
+
+/**
+ * The ONE field-mode vocabulary (write-mode-edit-semantics spec D1/D3/D4/D10/
+ * D14), extracted so both write surfaces read it from the same place rather
+ * than each carrying its own rules.
+ *
+ * Ticket 07 (spec D12, "结算面与主 agent 完全一致"): settlement's write facade
+ * (`worker/note-settlement-turn-facade.ts`) is the FIRST consumer. `mcp/note.ts`
+ * still carries its own byte-identical copy of everything below — ticket 06 was
+ * editing that file concurrently, so this ticket could not also move it, and
+ * `tests/mcp/field-mode-parity.test.ts` pins the two copies to the same
+ * messages until it does. Adopting it there is a delete-and-import with two
+ * mechanical steps and no behaviour change:
+ *
+ *   1. `mcp/note.ts` drops `FieldMode`/`FieldEditMode`/`isFieldEditMode`/
+ *      `RETIRED_FIELD_MODE_REPLACEMENT`/`NOTE_SET_MODE_FIELDS`/
+ *      `modeRequiredMessage`/`editValueConflictMessage`/`MODE_SHAPE_MESSAGE`/
+ *      `parseModeMap`/`resolveStringField`/`resolveFieldEdit`/`resolveClear`
+ *      and imports them from here; `class NoteValidationError extends
+ *      FieldModeError` (not `Error`) so its existing `instanceof
+ *      NoteValidationError` catches keep catching what `fail()` throws AND
+ *      what this module throws.
+ *   2. `decodeHtmlEntities` (with `HTML_ENTITY_MAP`) MOVES here in the same
+ *      edit and `mcp/note.ts` re-exports it (`export { decodeHtmlEntities }
+ *      from "./field-mode"`, which keeps `mcp/remember.ts`'s import working) —
+ *      otherwise note -> field-mode -> note is an import cycle. Until then
+ *      this module imports it FROM note.ts, which is not a cycle because
+ *      note.ts does not import this module yet.
+ */
+
+// ---------------------------------------------------------------------------
+// Vocabulary
+// ---------------------------------------------------------------------------
+
+/**
+ * `write` replaces the field whole (clear included); the edit form carries its
+ * own payload, since there is nowhere else on the call to put it. `append` and
+ * `overwrite` retired outright — `RETIRED_FIELD_MODE_REPLACEMENT` below is what
+ * a caller still sending either gets instead of a generic error.
+ */
+export type FieldMode = "write" | FieldEditMode;
+export interface FieldEditMode {
+  mode: "edit";
+  oldString: string;
+  newString: string;
+}
+
+export function isFieldEditMode(mode: FieldMode | undefined): mode is FieldEditMode {
+  return typeof mode === "object" && mode !== null;
+}
+
+// Spec D14: the retired mode literals, each naming its own replacement — the
+// same precedent the retired `topic`/`truncate`/`view` parameters set
+// (mcp/definitions.ts), applied at the RUNTIME layer too, because the settlement
+// surface registers a raw zod SHAPE with the SDK's `tool()` and so has no
+// `superRefine` layer of its own to reject them first.
+export const RETIRED_FIELD_MODE_REPLACEMENT: Record<string, string> = {
+  overwrite: 'use "write" instead.',
+  append:
+    'use "write" to replace the field whole, or the edit form ({ mode: "edit", oldString, newString }) to change part of it.',
+};
+
+// Spec D4: type/tags are set fields — "part of a list" is not a span an
+// oldString/newString pair can name, so the edit form is refused on them
+// outright, not given a set-flavoured meaning of its own.
+export const SET_MODE_FIELDS: readonly string[] = ["type", "tags"];
+
+/** Every field of every addressing surface that carries a mode (spec D5a). */
+export const MODE_FIELDS = ["title", "content", "insight", "type", "tags"] as const;
+
+/**
+ * Thrown by everything below. Each write surface catches it at its own
+ * boundary and renders it in that surface's own rejection shape (a
+ * `Parameter error:` result for the note tool, an `{ ok: false, message }`
+ * evaluation for the settlement facade).
+ */
+export class FieldModeError extends Error {}
+
+function fail(message: string): never {
+  throw new FieldModeError(message);
+}
+
+export function modeRequiredMessage(field: string): string {
+  return (
+    `${field} is not empty; declare mode.${field} as "write" (replace it ` +
+    'whole) or the edit form ({ mode: "edit", oldString, newString }) ' +
+    "(change part of it) — omitting the mode is not allowed on a field " +
+    "that already holds something."
+  );
+}
+
+export function editValueConflictMessage(field: string): string {
+  return (
+    `${field} was supplied together with mode.${field}'s edit form — the new ` +
+    `text belongs in mode.${field}.newString, not in ${field} itself.`
+  );
+}
+
+const MODE_SHAPE_MESSAGE =
+  'must be "write" or an edit form ({ mode: "edit", oldString, newString }).';
+
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Parses `mode.<field>` into the discriminated union `FieldMode` — the one
+ * place every trap the vocabulary exists to close is checked in a single pass:
+ * a retired literal names its replacement (D14), an edit form on a set field is
+ * refused (D4), and the edit form's own hygiene (decode, tool-call-syntax,
+ * private-tag strip) runs once here rather than being duplicated across every
+ * prose field's own resolver.
+ *
+ * `allowed` is the caller's own field list: a mode naming a field THIS call
+ * does not carry is rejected by name rather than silently ignored.
+ */
+export function parseModeMap(
+  raw: unknown,
+  allowed: readonly string[],
+): Partial<Record<string, FieldMode>> {
+  if (raw === undefined) {
+    return {};
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    fail(`mode ${MODE_SHAPE_MESSAGE}`);
+  }
+  const result: Partial<Record<string, FieldMode>> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!allowed.includes(key)) {
+      fail(`mode.${key} names a field this call does not accept a mode for.`);
+    }
+    if (typeof value === "string") {
+      if (value === "write") {
+        result[key] = "write";
+        continue;
+      }
+      const replacement = RETIRED_FIELD_MODE_REPLACEMENT[value];
+      if (replacement) {
+        fail(`mode.${key}: "${value}" has retired — ${replacement}`);
+      }
+      fail(`mode.${key} ${MODE_SHAPE_MESSAGE}`);
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      fail(`mode.${key} ${MODE_SHAPE_MESSAGE}`);
+    }
+    const editRaw = value as Record<string, unknown>;
+    if (editRaw.mode !== "edit") {
+      fail(`mode.${key} ${MODE_SHAPE_MESSAGE}`);
+    }
+    if (SET_MODE_FIELDS.includes(key)) {
+      fail(
+        `mode.${key}: the edit form has no meaning on a set field — oldString/newString cannot ` +
+          `target part of a list; use mode.${key}: "write" with the full replacement set instead.`,
+      );
+    }
+    if (typeof editRaw.oldString !== "string" || editRaw.oldString === "") {
+      fail(`mode.${key}.oldString is required and must be a non-empty string.`);
+    }
+    if (typeof editRaw.newString !== "string") {
+      fail(`mode.${key}.newString is required (use "" to delete the matched text).`);
+    }
+    const oldString = decodeHtmlEntities(editRaw.oldString);
+    const newStringRaw = decodeHtmlEntities(editRaw.newString);
+    if (containsToolCallSyntax(oldString)) {
+      fail(toolCallSyntaxMessage(`mode.${key}.oldString`));
+    }
+    if (newStringRaw !== "" && containsToolCallSyntax(newStringRaw)) {
+      fail(toolCallSyntaxMessage(`mode.${key}.newString`));
+    }
+    const newString = newStringRaw === "" ? "" : stripPrivateTags(newStringRaw);
+    result[key] = { mode: "edit", oldString, newString };
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Resolution
+// ---------------------------------------------------------------------------
+
+export type FieldResolution<T> = { value: T };
+
+/**
+ * The one string-field resolver, shared by every prose field of every
+ * addressing surface (spec D5a: one mode vocabulary, no field gets a mechanism
+ * of its own).
+ *
+ * `nullable: false` rejects both an explicit `null` and an empty string — for a
+ * column whose schema requires it non-null, "clearing" is not an operation the
+ * surface can express; the caller supplies a replacement or leaves the field
+ * alone. `nullable: true` treats an empty string as a plain synonym for `null`
+ * and both route through the same mode-gated clear.
+ */
+export function resolveStringField(
+  field: string,
+  provided: unknown,
+  existing: string | null,
+  mode: FieldMode | undefined,
+  opts: { nullable: boolean },
+): FieldResolution<string | null> {
+  // Spec D10: the edit form's payload lives entirely in `mode.<field>` — the
+  // field's own value is not also supplied. Routed here before anything else
+  // so the "value + edit form together" combo is caught regardless of which
+  // branch below would otherwise have handled `provided`.
+  if (isFieldEditMode(mode)) {
+    if (provided !== undefined) {
+      fail(editValueConflictMessage(field));
+    }
+    return resolveFieldEdit(field, existing, mode, opts);
+  }
+  if (provided === null) {
+    if (!opts.nullable) {
+      fail(`${field} cannot be cleared; supply a replacement value instead of null.`);
+    }
+    return resolveClear(field, existing, mode);
+  }
+  if (typeof provided !== "string") {
+    fail(`${field} must be a string${opts.nullable ? " or null" : ""} when present.`);
+  }
+  const decoded = decodeHtmlEntities(provided);
+  if (decoded.trim() === "") {
+    if (opts.nullable) {
+      return resolveClear(field, existing, mode);
+    }
+    fail(`${field} must not be empty.`);
+  }
+  if (containsToolCallSyntax(decoded)) {
+    fail(toolCallSyntaxMessage(field));
+  }
+  const isEmpty = existing === null || existing.trim() === "";
+  // `mode` here can only be `undefined` or `"write"` (edit is routed away
+  // above) — falling through to `return { value: decoded }` is a full
+  // replacement either way, exactly as spec D2 defines `write`.
+  if (!isEmpty && mode === undefined) {
+    fail(modeRequiredMessage(field));
+  }
+  return { value: decoded };
+}
+
+/**
+ * Spec D3: the edit form's three-state contract, ported from the segment
+ * surface's `replaceInSegmentWorkingStateField` (db/segments.ts) — unique hit
+ * succeeds, no hit rejects naming `oldString`, more than one hit rejects naming
+ * the count. `newString: ""` deletes the matched span; a non-nullable field
+ * edited down to empty is refused rather than silently landing an empty string.
+ */
+export function resolveFieldEdit(
+  field: string,
+  existing: string | null,
+  edit: FieldEditMode,
+  opts: { nullable: boolean },
+): FieldResolution<string | null> {
+  const current = existing ?? "";
+  const occurrences = current === "" ? 0 : current.split(edit.oldString).length - 1;
+  if (occurrences === 0) {
+    fail(`oldString ${JSON.stringify(edit.oldString)} not found in ${field}.`);
+  }
+  if (occurrences > 1) {
+    fail(
+      `oldString ${JSON.stringify(edit.oldString)} matches ${occurrences} times in ${field} — narrow it so it matches exactly once.`,
+    );
+  }
+  const replaced = current.split(edit.oldString).join(edit.newString);
+  if (replaced.trim() === "") {
+    if (opts.nullable) {
+      return { value: null };
+    }
+    fail(`${field} cannot be edited down to empty; supply a replacement instead of deleting all of it.`);
+  }
+  return { value: replaced };
+}
+
+export function resolveClear(
+  field: string,
+  existing: string | null,
+  mode: FieldMode | undefined,
+): FieldResolution<string | null> {
+  const isEmpty = existing === null || existing.trim() === "";
+  if (isEmpty) {
+    return { value: null };
+  }
+  if (mode === undefined) {
+    fail(modeRequiredMessage(field));
+  }
+  // `mode` is guaranteed `"write"` here — the edit form is routed away by
+  // `resolveStringField` before this function is ever reached.
+  return { value: null };
+}
+
+/**
+ * The set-field half of the same rule (spec D4), factored out of what
+ * `mcp/note.ts`'s `resolveTypeField`/`resolveTagsField` do at their tails: a
+ * non-empty set always needs `mode.<field>: "write"` and always means the full
+ * replacement set. The edit form never reaches here — `parseModeMap` refuses it
+ * on a set field first.
+ */
+export function requireSetFieldMode(
+  field: string,
+  existing: readonly string[],
+  mode: FieldMode | undefined,
+): void {
+  if (existing.length > 0 && mode === undefined) {
+    fail(modeRequiredMessage(field));
+  }
+}

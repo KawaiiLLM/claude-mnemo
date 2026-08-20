@@ -53,9 +53,14 @@ const SETTLEMENT_ALLOWED_TOOLS = [
 /**
  * The restricted write facade's own description, separate from
  * `MNEMO_TOOL_DESCRIPTIONS.note` (mcp/definitions.ts) because the surface
- * really is smaller — no `skip`, no session addressing, no `crossSession`,
- * no append mode, no prose (title/content/insight — retired with duty 2,
- * ticket 05), and review is gated to a scope this dispatch alone defines.
+ * really is smaller — no `skip`, no `crossSession`, no turn prose
+ * (title/content/insight — retired with duty 2, ticket 05), plus the session
+ * address the main tool no longer has (ticket 09), and review is gated to a
+ * scope this dispatch alone defines. The MODE vocabulary is NOT part of that
+ * difference any more (ticket 07, spec D12): `write`/`edit` mean here exactly
+ * what they mean on the main agent's own `note`, out of the same engine
+ * (`mcp/field-mode.ts`), so this text describes them in the same words rather
+ * than describing settlement as the surface that lacks them.
  * The duty-level instructions (which turns are reviewable) live in the
  * settlement prompt, not here — this text states the CALL contract only.
  *
@@ -77,8 +82,10 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "On `turn`: does NOT accept title/content/insight — turn prose is the " +
   "main agent's alone to write. " +
   "type/tags: only for a turn shown in this prompt (window or " +
-  "preceding turns); each overwrites whole when present, omit to leave " +
-  "alone — there is no append. Each field is checked and applied " +
+  "preceding turns); omit to leave alone. A field that already holds " +
+  "something needs `mode.<field>: \"write\"` (the full replacement set) — " +
+  "the same rule, and the same words, the main agent's own `note` uses. " +
+  "Each field is checked and applied " +
   "INDEPENDENTLY: if another writer (the main agent's own later note, or a " +
   "prior settlement attempt) touched a field since this dispatch's context " +
   "was read, that ONE field yields (reported in the receipt, not written) " +
@@ -91,9 +98,14 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "structurally illegal pair is rejected, naming which half is missing). " +
   "Which relation, if any, is the Memory Rubric's own 关系 checklist " +
   "above — this call only enforces address/eligibility/phase shape. " +
-  "On `session`: `title`/`content` only, each overwritten whole when " +
-  "present (no append — compose the incremented text yourself from what " +
-  "you can already see) — type/tags/relations are refused.";
+  "On `session`: `title`/`content` only — type/tags/relations are refused. " +
+  "A field that already holds something needs `mode.<field>`: \"write\" " +
+  "replaces it whole (supply the finished text), or the edit form " +
+  "`{ mode: \"edit\", oldString, newString }` swaps one exactly-matched span " +
+  "inside it (`oldString` must match exactly once; add to the end by " +
+  "anchoring on the current last line and putting that line plus your new " +
+  "text in `newString`). With the edit form the field's own value is not " +
+  "also supplied — the new text belongs in `newString`.";
 
 /**
  * The `remember` tool's settlement-side call contract — `propose` and

@@ -355,6 +355,14 @@ describe("ticket 11 — the Memory Rubric renders byte-identical in both consume
     expect(prompt).toContain("still empty");
     expect(prompt.indexOf("SESSION NARRATIVE")).toBeLessThan(prompt.indexOf("4. COMMIT"));
 
+    // Ticket 07 (write-mode-edit-semantics spec D12): the prompt teaches the
+    // SHARED mode vocabulary for both write duties, and no longer teaches the
+    // difference it used to ("there is no append here") — that difference no
+    // longer exists.
+    expect(prompt).toContain('mode.<field>: "write"');
+    expect(prompt).toContain('{ mode: "edit", oldString, newString }');
+    expect(prompt.toLowerCase()).not.toContain("no append");
+
     db.close();
   });
 });

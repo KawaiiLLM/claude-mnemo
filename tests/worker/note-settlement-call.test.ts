@@ -400,7 +400,14 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const metricsSeen: NoteSettlementWindowMetrics[] = [];
     const outcome = await dispatchWith(
       queryThatStages((engine) => {
-        engine.stageNoteWrite({ turn: "S1/T1", type: ["design"], tags: ["lease"] });
+        // T1's type was seeded above, so replacing it is a declared `write`
+        // (ticket 07, spec D12).
+        engine.stageNoteWrite({
+          turn: "S1/T1",
+          type: ["design"],
+          tags: ["lease"],
+          mode: { type: "write" },
+        });
         engine.stageNoteWrite({
           turn: "S1/T3",
           type: ["implement", "correction"],
@@ -686,7 +693,12 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       queryThatStages((engine) => {
         // T1's tag turned out wrong — corrected now that its real scale is
         // visible.
-        engine.stageNoteWrite({ turn: "S1/T1", type: ["design"], tags: ["revised"] });
+        engine.stageNoteWrite({
+          turn: "S1/T1",
+          type: ["design"],
+          tags: ["revised"],
+          mode: { type: "write", tags: "write" },
+        });
         for (let promptNumber = 5; promptNumber <= 8; promptNumber += 1) {
           engine.stageNoteWrite({
             turn: `S1/T${promptNumber}`,

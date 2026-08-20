@@ -13,7 +13,16 @@ import { parseBareAddressReference, validateReferences } from "../db/references"
 import { getSession, updateSessionFields } from "../db/sessions";
 import { getTurn, getTurnById, updateTurnById } from "../db/turns";
 import { checkFieldGate, claimWriterId, stampField } from "../db/write-gate";
-import { settlementNoteInputShape } from "../mcp/definitions";
+import { noteInputShape, settlementNoteInputShape } from "../mcp/definitions";
+import {
+  FieldModeError,
+  isFieldEditMode,
+  MODE_FIELDS,
+  parseModeMap,
+  requireSetFieldMode,
+  resolveStringField,
+  type FieldMode,
+} from "../mcp/field-mode";
 import { parseSessionAddress, parseTurnAddress } from "../mcp/note";
 import {
   formatSessionFieldUsage,
@@ -81,12 +90,18 @@ import {
  *     a whole run's, because a run is many small transactions rather than
  *     one).
  *
- * Every field is whole-overwrite when present, omitted-leaves-alone
- * otherwise (spec D5a) — there is no `mode`, because there is no append: a
- * writer that could accumulate onto a field this project cannot audit inside
- * one live agentic run is exactly the replay hazard segment `extend` and
- * session `append` already carry, and this facade does not need to invent a
- * third case of it.
+ * TICKET 07 (write-mode-edit-semantics spec D12, "结算面与主 agent 完全一致"):
+ * every field this facade writes now carries the SAME `mode` the main agent's
+ * own `note` tool carries — `write` replaces the field whole, the edit form
+ * (`{ mode: "edit", oldString, newString }`) swaps an exactly-matched span
+ * within it, and a mode is REQUIRED on a field that already holds something.
+ * The engine is `mcp/field-mode.ts`, the single home both surfaces read;
+ * settlement has no whole-overwrite path of its own any more (the session
+ * narrative's implicit one is what D12 named). This retires the older comment
+ * this paragraph replaces ("there is no `mode`, because there is no append"):
+ * the difference it described no longer exists, and the append it feared is
+ * not what `edit` is — an edit anchors on text the writer has just been shown
+ * and the write gate already made it read.
  *
  * TICKET 05 (read-write-contract spec, "结算(直写改造)"): staging is UNWIRED.
  * `note-settlement-sdk-query.ts` now calls `evaluateSettlementTurnWrite`
@@ -206,7 +221,19 @@ export function parameterError(message: string): ToolTextResult {
 // for which fields are shared and which (title/content, turn) are declared
 // fresh because they describe an operation the main `note` tool does not
 // have.
-export const settlementTurnWriteInputShape = settlementNoteInputShape;
+//
+// Ticket 07 (write-mode-edit-semantics spec D12): `mode` joins it — the SAME
+// object `noteInputShape.mode` declares, not a settlement-flavoured copy, so
+// the two surfaces cannot drift into two vocabularies (the parity test
+// tests/worker/note-settlement-parity.test.ts asserts that identity at the
+// tool-REGISTRATION boundary, where a prose claim of sameness cannot reach).
+// Spread rather than added to `settlementNoteInputShape` itself only because
+// ticket 06 held `mcp/definitions.ts` open at the time; folding this one key
+// back into that shape is a pure move whenever someone touches it next.
+export const settlementTurnWriteInputShape = {
+  ...settlementNoteInputShape,
+  mode: noteInputShape.mode,
+};
 
 export const settlementTurnWriteInputSchema = z
   .object(settlementTurnWriteInputShape)
@@ -259,9 +286,9 @@ export interface RelationOutcome {
 
 /**
  * Ticket 09 (edge-ownership-impl, "结算顺手维护 session 叙事"): the outcome of
- * a `session`-addressed call — `title`/`content` written whole (settlement's
- * usual "no append, no null-clear" reconstruction semantics, same as the
- * retired main-agent prose path used to give a turn). `titleWritten`/
+ * a `session`-addressed call — `title`/`content` resolved through the shared
+ * `mode` vocabulary (ticket 07: `write` replaces whole, the edit form swaps a
+ * span; no null-clear on either path). `titleWritten`/
  * `contentWritten` distinguish "field present in the call" from "field
  * landed", since `title` is expected to be a no-op on most windows (it is
  * set once, when still empty — the session row itself is not visible to this
@@ -413,23 +440,26 @@ const SESSION_ONLY_FORBIDDEN_FIELDS = [
 /**
  * The session-narrative branch (ticket 09, edge-ownership-impl: "结算顺手维
  * 护 session 叙事"). Settlement is the session's SOLE writer now — `note`'s
- * own session address retired outright (`mcp/note.ts`). `title`/`content`
- * are whole-overwrite, no append, no null-clear — the same reconstruction
- * semantics the retired main-agent prose path used to give a turn, reused
- * here for the one address kind that still wants it: `title` set once (this
- * function does not special-case "already non-empty" — a repeat call simply
- * overwrites, so the PROMPT is what tells the model to leave it alone once
- * set — prompt-only enforcement USER-RATIFIED at [S15069/T1040] against a
- * hard first-set gate and an explicit-flag variant: T913's "极少改" allows
- * rare changes, and the prompt is the ruled keeper of that judgment),
- * `content` incremented by the model composing old-plus-new text
- * itself (it can already see the current session summary in its own
- * context) and submitting the whole result.
+ * own session address retired outright (`mcp/note.ts`). `title` is set once
+ * (this function does not special-case "already non-empty" beyond the mode
+ * requirement below — the PROMPT is what tells the model to leave it alone
+ * once set — prompt-only enforcement USER-RATIFIED at [S15069/T1040] against
+ * a hard first-set gate and an explicit-flag variant: T913's "极少改" allows
+ * rare changes, and the prompt is the ruled keeper of that judgment).
+ *
+ * TICKET 07 (write-mode-edit-semantics spec D12): the whole-overwrite this
+ * function used to perform IMPLICITLY is now the declared `mode.<field>:
+ * "write"`, and `content`'s increment has a second, cheaper expression —
+ * `mode.content` = the edit form, anchored on the tail of the text the model
+ * was just shown. Both run through `mcp/field-mode.ts`, the same engine the
+ * main agent's `note` uses; a non-empty field with no mode is refused with
+ * that engine's own message rather than silently clobbered.
  */
 function evaluateSettlementSessionWrite(
   db: Database,
   context: SettlementTurnFacadeContext,
   rawInput: SettlementTurnWriteInput,
+  modeMap: Partial<Record<string, FieldMode>>,
   nowEpoch: number,
   options: EvaluateSettlementTurnWriteOptions,
 ): SettlementTurnWriteEvaluation {
@@ -455,9 +485,21 @@ function evaluateSettlementSessionWrite(
     if (rawInput[key] !== undefined) {
       return { ok: false, message: `${key} is a turn field; this call addresses a session.` };
     }
+    // Ticket 07: a mode naming a turn-only field is the same mistake as the
+    // field itself, and gets the same message — `parseModeMap` admitted it
+    // because the VOCABULARY is shared across both address kinds; which
+    // fields this particular call may carry is this branch's own business.
+    if (modeMap[key] !== undefined) {
+      return { ok: false, message: `mode.${key} is a turn field; this call addresses a session.` };
+    }
   }
 
-  if (rawInput.title === undefined && rawInput.content === undefined) {
+  // Ticket 07 (spec D10): a field touched ONLY through the edit form carries
+  // no value of its own — it still counts as a field this call writes.
+  const sessionFields = (["title", "content"] as const).filter(
+    (field) => rawInput[field] !== undefined || isFieldEditMode(modeMap[field]),
+  );
+  if (sessionFields.length === 0) {
     return {
       ok: false,
       message: `at least one of ${SESSION_SUMMARY_FIELDS.join(", ")} is required.`,
@@ -477,9 +519,6 @@ function evaluateSettlementSessionWrite(
   // successor already re-narrated this session sees its grant stale and is
   // told to re-read, instead of whole-overwriting the newer narrative.
   const sessionWriter = claimWriterId(context.jobId, context.claimGeneration);
-  const sessionFields = (["title", "content"] as const).filter(
-    (field) => rawInput[field] !== undefined,
-  );
   for (const field of sessionFields) {
     const verdict = checkFieldGate(db, sessionWriter, "session", sessionId, field, ref);
     if (!verdict.ok) {
@@ -487,13 +526,36 @@ function evaluateSettlementSessionWrite(
     }
   }
 
+  // Ticket 07: mode resolution runs AFTER the gate, same order `mcp/note.ts`'s
+  // own turn write uses — the gate answers "have you read what is there", and
+  // an `edit` applied to text this writer never read is exactly what it
+  // exists to stop. `nullable: false`: settlement cannot CLEAR a session
+  // narrative (the shape carries no null and an edit that empties the field is
+  // refused), it replaces or edits it.
+  let resolved: Partial<Record<"title" | "content", string | null>>;
+  try {
+    resolved = Object.fromEntries(
+      sessionFields.map((field) => [
+        field,
+        resolveStringField(field, rawInput[field], session[field], modeMap[field], {
+          nullable: false,
+        }).value,
+      ]),
+    );
+  } catch (error) {
+    if (error instanceof FieldModeError) {
+      return { ok: false, message: error.message };
+    }
+    throw error;
+  }
+
   if (options.apply) {
     updateSessionFields(
       db,
       sessionId,
       {
-        title: rawInput.title,
-        content: rawInput.content,
+        title: resolved.title,
+        content: resolved.content,
       },
       nowEpoch,
     );
@@ -503,11 +565,8 @@ function evaluateSettlementSessionWrite(
   }
 
   const usage: string[] = [];
-  if (rawInput.title !== undefined) {
-    usage.push(formatSessionFieldUsage("title", rawInput.title));
-  }
-  if (rawInput.content !== undefined) {
-    usage.push(formatSessionFieldUsage("content", rawInput.content));
+  for (const field of sessionFields) {
+    usage.push(formatSessionFieldUsage(field, resolved[field] ?? null));
   }
 
   return {
@@ -519,8 +578,8 @@ function evaluateSettlementSessionWrite(
       relations: null,
       session: {
         sessionId,
-        titleWritten: rawInput.title !== undefined,
-        contentWritten: rawInput.content !== undefined,
+        titleWritten: sessionFields.includes("title"),
+        contentWritten: sessionFields.includes("content"),
         usage,
       },
     },
@@ -546,11 +605,27 @@ export function evaluateSettlementTurnWrite(
   nowEpoch: number,
   options: EvaluateSettlementTurnWriteOptions,
 ): SettlementTurnWriteEvaluation {
+  // Ticket 07 (spec D12): parsed ONCE, ahead of the address branch and against
+  // the FULL field list `mcp/note.ts` parses against — one vocabulary for both
+  // surfaces and both address kinds. Which of those fields a given call may
+  // actually carry is each branch's own refusal below, so a `mode.type` on a
+  // session call (or a `mode.title` on a turn call) is named for what it is
+  // rather than for being an unknown word.
+  let modeMap: Partial<Record<string, FieldMode>>;
+  try {
+    modeMap = parseModeMap(rawInput.mode, MODE_FIELDS);
+  } catch (error) {
+    if (error instanceof FieldModeError) {
+      return { ok: false, message: error.message };
+    }
+    throw error;
+  }
+
   if (rawInput.session !== undefined) {
     if (rawInput.turn !== undefined) {
       return { ok: false, message: "exactly one of turn or session is required, not both." };
     }
-    return evaluateSettlementSessionWrite(db, context, rawInput, nowEpoch, options);
+    return evaluateSettlementSessionWrite(db, context, rawInput, modeMap, nowEpoch, options);
   }
   if (rawInput.turn === undefined) {
     return { ok: false, message: "exactly one of turn or session is required." };
@@ -571,11 +646,14 @@ export function evaluateSettlementTurnWrite(
   // agent is the note's sole first-hand writer now, and a settlement call
   // still naming these fields is a caller running against a contract that no
   // longer exists, not a no-op.
-  if (
-    rawInput.title !== undefined ||
-    rawInput.content !== undefined ||
-    rawInput.insight !== undefined
-  ) {
+  // Ticket 07: a prose field reached through `mode.<field>` alone (the edit
+  // form carries its whole payload there, spec D10) is the same call the
+  // paragraph above refuses — checked by the same statement so the shared
+  // vocabulary cannot become a second door into a retired duty.
+  const forbiddenProseField = (["title", "content", "insight"] as const).find(
+    (field) => rawInput[field] !== undefined || modeMap[field] !== undefined,
+  );
+  if (forbiddenProseField) {
     return {
       ok: false,
       message:
@@ -648,6 +726,26 @@ export function evaluateSettlementTurnWrite(
           "plus its rendered lookback) — type/tags may only be " +
           "written for a turn this prompt actually showed.",
       };
+    }
+
+    // Ticket 07 (spec D4/D12): the SAME set-field rule the main agent's own
+    // `note` obeys — a type/tags that already holds something is replaced only
+    // when the call SAYS so (`mode.<field>: "write"`, the full replacement
+    // set). The edit form never reaches here: `parseModeMap` refuses it on a
+    // set field. This is an input verdict, not a gate verdict — it rejects the
+    // whole call before anything lands, rather than yielding one field.
+    try {
+      if (normalizedType !== undefined) {
+        requireSetFieldMode("type", turn.type, modeMap.type);
+      }
+      if (rawInput.tags !== undefined) {
+        requireSetFieldMode("tags", turn.tags, modeMap.tags);
+      }
+    } catch (error) {
+      if (error instanceof FieldModeError) {
+        return { ok: false, message: error.message };
+      }
+      throw error;
     }
 
     // Ticket 05 (read-write-contract spec "结算(直写改造)"): the write

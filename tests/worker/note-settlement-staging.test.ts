@@ -352,6 +352,11 @@ describe("acceptance criterion 5 — commit re-validates inside its own transact
       turn: `S${sessionDbId}/T1`,
       type: ["fix"],
       tags: ["settlement"],
+      // Ticket 07 (spec D12): declared up front, because by COMMIT time the
+      // agent's own note has filled both fields — a correction meaning to
+      // replace a non-empty set says so on this surface exactly as on the
+      // main agent's own `note`.
+      mode: { type: "write", tags: "write" },
     });
     // Stage time's own report: it would write, plainly — nothing about the
     // world has moved yet.
@@ -761,6 +766,7 @@ describe("session-addressed narrative writes stage through the same commit chann
       session: `S${sessionDbId}`,
       title: "the window's story",
       content: "what happened",
+      mode: { title: "write" },
     });
     expect(stageReceipt.content[0]!.text).toContain("pending commit");
     // Nothing landed yet.
@@ -797,7 +803,11 @@ describe("session-addressed narrative writes stage through the same commit chann
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
     engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["fix"], tags: [] });
-    engine.stageNoteWrite({ session: `S${sessionDbId}`, title: "session title" });
+    engine.stageNoteWrite({
+      session: `S${sessionDbId}`,
+      title: "session title",
+      mode: { title: "write" },
+    });
     expect(engine.pendingCount()).toBe(2);
 
     engine.commit();
@@ -846,7 +856,11 @@ describe("ticket 08 — type correction", () => {
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
     expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["design"] });
+    engine.stageNoteWrite({
+      turn: `S${sessionDbId}/T1`,
+      type: ["design"],
+      mode: { type: "write" },
+    });
     // Nothing landed yet — still staged.
     expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
 
@@ -864,7 +878,11 @@ describe("ticket 08 — tags correction", () => {
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, tags: ["claude-mnemo"] });
+    engine.stageNoteWrite({
+      turn: `S${sessionDbId}/T1`,
+      tags: ["claude-mnemo"],
+      mode: { tags: "write" },
+    });
     expect(getTurnById(db, t1)!.tags).toEqual(["wrong-project"]);
 
     expect(engine.commit().content[0]!.text).toContain("Committed");

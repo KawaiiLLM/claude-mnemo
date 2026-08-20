@@ -24,6 +24,8 @@ import {
   snapshotWriteGateSequence,
   stampField,
 } from "../../src/db/write-gate";
+import { noteInputShape } from "../../src/mcp/definitions";
+import { modeRequiredMessage } from "../../src/mcp/field-mode";
 import {
   evaluateSettlementTurnWrite,
   renderSettlementTurnWriteReceipt,
@@ -157,12 +159,11 @@ describe("settlementTurnWriteInputShape — the restricted surface (requirement 
   // settlement's own session-narrative write, exclusive with `turn`. See
   // the "session-addressed narrative writes" describe block further down
   // for its own behaviour.
-  test("declares no skip, crossSession, mode, or job-identity field", () => {
+  test("declares no skip, crossSession, or job-identity field — but DOES carry the main agent's own mode (ticket 07, spec D12)", () => {
     const keys = Object.keys(settlementTurnWriteInputShape);
     for (const forbidden of [
       "skip",
       "crossSession",
-      "mode",
       "jobId",
       "claimGeneration",
       "job",
@@ -170,10 +171,15 @@ describe("settlementTurnWriteInputShape — the restricted surface (requirement 
     ]) {
       expect(keys).not.toContain(forbidden);
     }
+    // Ticket 07 (spec D12) reverses this shape's earlier "no mode" clause:
+    // the vocabulary is shared now, and shared means the SAME object, not a
+    // settlement-flavoured look-alike.
+    expect(keys).toContain("mode");
+    expect(settlementTurnWriteInputShape.mode).toBe(noteInputShape.mode);
   });
 });
 
-describe("tags overwrite whole, never append (requirement 3)", () => {
+describe("tags are replaced whole, under the shared mode (requirement 3; ticket 07 spec D4/D12)", () => {
   test("a second call's tags list replaces the first's rather than unioning with it", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
@@ -183,10 +189,77 @@ describe("tags overwrite whole, never append (requirement 3)", () => {
     write(context, { turn: `S${sessionDbId}/T1`, tags: ["first", "second"] }, NOW);
     expect(getTurnById(db, t1)!.tags).toEqual(["first", "second"]);
 
-    write(context, { turn: `S${sessionDbId}/T1`, tags: ["third"] }, NOW + 1);
+    write(
+      context,
+      { turn: `S${sessionDbId}/T1`, tags: ["third"], mode: { tags: "write" } },
+      NOW + 1,
+    );
     // Whole replace: "first"/"second" are gone, not merged with "third" —
-    // there is no `mode`/append this facade could even be asked for.
+    // `write` on a set field IS the full replacement set (spec D4).
     expect(getTurnById(db, t1)!.tags).toEqual(["third"]);
+  });
+
+  test("replacing a non-empty set without declaring the mode is refused, in the main agent's own words", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    write(context, { turn: `S${sessionDbId}/T1`, tags: ["first"] }, NOW);
+    const result = write(context, { turn: `S${sessionDbId}/T1`, tags: ["second"] }, NOW + 1);
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toBe(modeRequiredMessage("tags"));
+    // Refused, not partially applied.
+    expect(getTurnById(db, t1)!.tags).toEqual(["first"]);
+  });
+
+  test("a retired mode literal names its replacement, and the edit form is refused on a set field", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const retired = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, type: ["design"], mode: { type: "overwrite" } },
+      NOW,
+    );
+    expect(retired.ok).toBe(false);
+    expect(!retired.ok && retired.message).toContain('"overwrite" has retired');
+    expect(!retired.ok && retired.message).toContain('use "write" instead');
+
+    const edited = write(
+      context,
+      {
+        turn: `S${sessionDbId}/T1`,
+        type: ["design"],
+        mode: { type: { mode: "edit", oldString: "a", newString: "b" } },
+      },
+      NOW,
+    );
+    expect(edited.ok).toBe(false);
+    expect(!edited.ok && edited.message).toContain("has no meaning on a set field");
+  });
+
+  test("a mode naming a prose field is refused the same way the field itself is", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(
+      context,
+      {
+        turn: `S${sessionDbId}/T1`,
+        type: ["design"],
+        mode: { content: { mode: "edit", oldString: "a", newString: "b" } },
+      },
+      NOW,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("no longer settlement's to write");
   });
 });
 
@@ -518,7 +591,7 @@ describe("type/tags are writable only for the window's reviewable turns (require
     // needed (pinned decision).
     const staleResult = write(
       baseContext(staleJob, { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW }),
-      { turn: `S${sessionDbId}/T1`, type: ["fix"] },
+      { turn: `S${sessionDbId}/T1`, type: ["fix"], mode: { type: "write" } },
       NOW + 3,
     );
     expect(resultText(staleResult)).toContain("Yielded for");
@@ -788,7 +861,15 @@ describe("session-addressed narrative writes (ticket 09)", () => {
 
     const result = write(
       baseContext(job),
-      { session: `S${sessionDbId}`, title: "a session title", content: "what happened this window" },
+      {
+        session: `S${sessionDbId}`,
+        title: "a session title",
+        content: "what happened this window",
+        // The fixture session already carries a title, so replacing it is a
+        // declared `write` now (ticket 07, spec D12) — `content` is still
+        // empty and needs none.
+        mode: { title: "write" },
+      },
       NOW,
     );
 
@@ -801,10 +882,14 @@ describe("session-addressed narrative writes (ticket 09)", () => {
     expect(resultText(result)).toContain("content");
   });
 
-  test("content alone lands without touching an existing title (whole-overwrite, no append)", () => {
+  test("content alone lands without touching an existing title; a second call replaces or edits it", () => {
     const sessionDbId = seedSession();
     const job = claimWindow(sessionDbId, 1, 1);
-    write(baseContext(job), { session: `S${sessionDbId}`, title: "first title" }, NOW);
+    write(
+      baseContext(job),
+      { session: `S${sessionDbId}`, title: "first title", mode: { title: "write" } },
+      NOW,
+    );
 
     const result = write(baseContext(job), { session: `S${sessionDbId}`, content: "increment one" }, NOW + 1);
 
@@ -813,10 +898,94 @@ describe("session-addressed narrative writes (ticket 09)", () => {
     expect(session.title).toBe("first title");
     expect(session.content).toBe("increment one");
 
-    // A second content-only call REPLACES rather than appending — the model
-    // is expected to compose the incremented text itself.
-    write(baseContext(job), { session: `S${sessionDbId}`, content: "increment two" }, NOW + 2);
+    // `write` on a non-empty field REPLACES it — the caller composes the
+    // whole finished text itself.
+    write(
+      baseContext(job),
+      { session: `S${sessionDbId}`, content: "increment two", mode: { content: "write" } },
+      NOW + 2,
+    );
     expect(getSession(db, sessionDbId)?.content).toBe("increment two");
+
+    // Ticket 07 (spec D3/D12): the same field's OTHER expression — the edit
+    // form, anchored on the tail of the text the writer was shown. The value
+    // itself is not supplied; the new text lives in `newString`.
+    const edited = write(
+      baseContext(job),
+      {
+        session: `S${sessionDbId}`,
+        mode: {
+          content: {
+            mode: "edit",
+            oldString: "increment two",
+            newString: "increment two\nincrement three",
+          },
+        },
+      },
+      NOW + 3,
+    );
+    expect(edited.ok).toBe(true);
+    expect(getSession(db, sessionDbId)?.content).toBe("increment two\nincrement three");
+  });
+
+  test("a non-empty session field with no mode is refused, in the main agent's own words", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = write(
+      baseContext(job),
+      { session: `S${sessionDbId}`, title: "silently clobbering the fixture title" },
+      NOW,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toBe(modeRequiredMessage("title"));
+    expect(getSession(db, sessionDbId)?.title).toBe("settlement turn facade fixture");
+  });
+
+  test("an edit whose oldString does not match exactly once is refused, naming which", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+    write(baseContext(job), { session: `S${sessionDbId}`, content: "row\nrow" }, NOW);
+
+    const missing = write(
+      baseContext(job),
+      {
+        session: `S${sessionDbId}`,
+        mode: { content: { mode: "edit", oldString: "absent", newString: "x" } },
+      },
+      NOW + 1,
+    );
+    expect(missing.ok).toBe(false);
+    expect(!missing.ok && missing.message).toContain("not found in content");
+
+    const ambiguous = write(
+      baseContext(job),
+      {
+        session: `S${sessionDbId}`,
+        mode: { content: { mode: "edit", oldString: "row", newString: "x" } },
+      },
+      NOW + 2,
+    );
+    expect(ambiguous.ok).toBe(false);
+    expect(!ambiguous.ok && ambiguous.message).toContain("matches 2 times in content");
+    expect(getSession(db, sessionDbId)?.content).toBe("row\nrow");
+  });
+
+  test("a mode naming a turn field on a session call is refused as a turn field", () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = write(
+      baseContext(job),
+      { session: `S${sessionDbId}`, content: "x", mode: { type: "write" } },
+      NOW,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toBe(
+      "mode.type is a turn field; this call addresses a session.",
+    );
   });
 
   test("rejects a call naming neither title nor content", () => {
@@ -916,7 +1085,7 @@ describe("session-addressed narrative writes (ticket 09)", () => {
     const dryRun = evaluateSettlementTurnWrite(
       db,
       baseContext(job),
-      { session: `S${sessionDbId}`, title: "would-be title" },
+      { session: `S${sessionDbId}`, title: "would-be title", mode: { title: "write" } },
       NOW,
       { apply: false },
     );
