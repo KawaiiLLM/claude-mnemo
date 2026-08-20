@@ -1715,11 +1715,11 @@ export function migrateTurnCitationsToEdges(db: Database): number {
   }
 
   const before = countMemoryEdges(db);
-  // `unrestricted`: this is a historical import of relations a writer already
-  // asserted, not a new classification anyone is entitled to make — the
-  // eligibility gate has no pre-state to check them against, and saying so out
-  // loud is the option's whole purpose.
-  writeMemoryEdges(db, inputs, 0, { eligibleForRelation: "unrestricted" });
+  // A historical import of relations a writer already asserted, not a new
+  // classification anyone is making here. (It used to have to say so out loud
+  // through `eligibleForRelation: "unrestricted"`; ticket 04 deleted that
+  // parameter along with the C7 rule it enforced.)
+  writeMemoryEdges(db, inputs, 0);
   return countMemoryEdges(db) - before;
 }
 

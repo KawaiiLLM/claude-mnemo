@@ -12,7 +12,7 @@ import {
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
-import { pairKey, writeMemoryEdges } from "../../src/db/memory-edges";
+import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { createSettlementDirectWriteEngine } from "../../src/worker/note-settlement-direct-write";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
@@ -97,8 +97,6 @@ function baseContext(
     sessionId: job.sessionId,
     reviewableTurnIds: new Set(),
     contextBuiltAtEpoch: NOW,
-    eligibleRelationPairKeys: new Set(),
-    attachedSegmentIds: new Set(),
     ...overrides,
   };
 }
@@ -241,23 +239,22 @@ describe("a rejected direct write leaves no partial state (one transaction per c
       db,
       [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
       NOW - 500,
-      { eligibleForRelation: "unrestricted" },
     );
     const job = claimWindow(sessionDbId, 1, 2);
     const engine = createSettlementDirectWriteEngine({
       db,
       context: baseContext(job, {
         reviewableTurnIds: new Set([t2]),
-        eligibleRelationPairKeys: new Set([
-          pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } }),
-        ]),
       }),
       now: () => NOW,
     });
 
     // implement = delivery-only: refines demands a decision-phase citing turn,
-    // so the relation half rejects — but only after the review half already
-    // ran its UPDATE under apply:true.
+    // so the relation half rejects. Ticket 04 moved every rejection AHEAD of
+    // the first mutation inside `evaluateSettlementTurnWrite`, so this now
+    // holds twice over — the evaluator writes nothing, and the engine's own
+    // per-call transaction would have rolled it back anyway. The assertion is
+    // kept as the outer guard: whichever layer changes, no partial state.
     const receipt = engine.writeNote({
       turn: "S" + sessionDbId + "/T2",
       type: ["implement"],

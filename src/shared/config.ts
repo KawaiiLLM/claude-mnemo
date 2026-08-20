@@ -111,7 +111,12 @@ export const DEFAULT_HARD_EXIT_TIMEOUT_MS = 70_000;
 // number, re-exported from db/note-settlement.ts and worker/note-settlement-
 // dispatch.ts so every existing import path stays valid.
 export const DEFAULT_NOTE_SETTLEMENT_MODEL: DreamAgentModel = "claude-sonnet-5";
-export const DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS = 25;
+// Edge-mechanism-revision D6 (ticket 04): 25 -> 50. Settlement is a hindsight
+// pass over arcs, and an arc rarely fits in 25 turns — the window has to be at
+// least as wide as the thing it is asked to connect. This is the ONLY
+// settlement trigger with a threshold at all; compact/residual/sessionend/
+// backfill stay event-driven, unchanged.
+export const DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS = 50;
 export const DEFAULT_NOTE_SETTLEMENT_CAP_TURNS = 50;
 export const DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
 

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createDatabase, isSqliteBusy } from "../../src/db/database";
-import { getOutgoingEdges, pairKey, reconcileCitedPairs, writeMemoryEdges } from "../../src/db/memory-edges";
+import { getOutgoingEdges, reconcileCitedPairs, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -123,8 +123,6 @@ function baseContext(
     sessionId: job.sessionId,
     reviewableTurnIds: new Set(),
     contextBuiltAtEpoch: NOW,
-    eligibleRelationPairKeys: new Set(),
-    attachedSegmentIds: new Set(),
     ...overrides,
   };
 }
@@ -202,7 +200,10 @@ describe("acceptance criterion 2 — a staged write validates fully and returns 
     expect(engine.pendingCount()).toBe(0);
   });
 
-  test("title/content/insight are refused outright — duty 2 retired", () => {
+  // Ticket 04 (edge-mechanism-revision D6) REVOKED duty 2's retirement: turn
+  // prose is settlement's to write again, so a staged call naming it stages
+  // like any other field instead of being refused at the door.
+  test("title/content/insight stage like any other field (duty 2 revoked, ticket 04)", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(db, sessionDbId, 1, 1);
@@ -211,14 +212,16 @@ describe("acceptance criterion 2 — a staged write validates fully and returns 
 
     const receipt = engine.stageNoteWrite({
       turn: `S${sessionDbId}/T1`,
-      title: "should be refused",
-      content: "prose reconstruction is retired",
+      title: "settlement's own note",
+      content: "What this turn settled, in hindsight.",
       insight: null,
     });
 
-    expect(receipt.content[0]!.text).toContain("Parameter error");
-    expect(receipt.content[0]!.text).toContain("no longer settlement's to write");
-    expect(engine.pendingCount()).toBe(0);
+    expect(receipt.content[0]!.text).not.toContain("Parameter error");
+    expect(receipt.content[0]!.text).toContain("Staged note for");
+    expect(engine.pendingCount()).toBe(1);
+    // Staged, not written: nothing reaches the note table before commit.
+    expect(getShadowNote(db, t1)).toBeNull();
   });
 
   test("a valid staged call reports the SAME decision a real write would make", () => {
@@ -590,66 +593,16 @@ describe("commit's own result feeds the job log, never the agent", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Ticket 10d finding 1 — frozen relation eligibility must not resurrect a
-// pair the main agent deleted between the snapshot and commit.
+// Ticket 04 (edge-mechanism-revision D1/D6): the "frozen ∩ current" describe
+// block that stood here is DELETED with the fence it guarded. Both halves —
+// the frozen pre-run snapshot (spec C7) and its intersection with the pair's
+// current existence (ticket 10d finding 1) — asked whether a relation may
+// attach to a pair, a question that no longer exists: a relation is a
+// standalone claim, so a pair the main agent's prose stopped naming is not a
+// reason to refuse one. Nothing replaces this block; `reconcileCitedPairs`
+// owning the bare layer alone (its own tests, tests/db/citations.test.ts) is
+// what now keeps a prose rewrite from touching relation rows at all.
 // ---------------------------------------------------------------------------
-
-describe("commit-time relation eligibility is frozen ∩ current, never frozen alone", () => {
-  test("T2's staged dependsOn(T1) is refused at commit after the main agent's own edit deletes the pair; nothing is resurrected", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    const job = claimWindow(db, sessionDbId, 1, 2);
-
-    // T2's body cites T1 AT SNAPSHOT TIME — a real, pre-existing bare pair,
-    // exactly what `getExistingEdgePairKeys` (worker/note-settlement-dispatch.ts)
-    // would have captured before this dispatch's model run began.
-    writeMemoryEdges(
-      db,
-      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
-      NOW - 500,
-      { eligibleForRelation: "unrestricted" },
-    );
-    const frozenSnapshot = new Set([
-      pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } }),
-    ]);
-    const context = baseContext(job, {
-      eligibleRelationPairKeys: frozenSnapshot,
-      reviewableTurnIds: new Set([t1, t2]),
-    });
-    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
-
-    // Ticket 08: dependsOn needs delivery-phase on both ends (was
-    // discuss/research — decision/evidence-phase — before the phase gate).
-    // The CITED side's phase check reads the LIVE database, so T1's
-    // delivery-phase type has to be seeded directly — a sibling stage call
-    // that also sets it is not yet applied when T2's dry-run phase check
-    // runs against T1.
-    updateTurnById(db, t1, { type: ["implement"] });
-    engine.stageNoteWrite({ turn: `S${sessionDbId}/T1`, type: ["implement"], tags: [] });
-    const staged = engine.stageNoteWrite({
-      turn: `S${sessionDbId}/T2`,
-      type: ["implement"],
-      tags: [],
-      dependsOn: [`S${sessionDbId}/T1`],
-    });
-    expect(staged.content[0]!.text).toContain("Staged");
-
-    // BEFORE commit, the main agent rewrites T2's body and its own
-    // `reconcileCitedPairs` call (mcp/note.ts's live write path) drops the
-    // citation — the pair no longer exists. The frozen snapshot above is
-    // untouched; it still names this pair.
-    reconcileCitedPairs(db, { kind: "turn", id: t2 }, [], NOW + 5, "text-ref");
-    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
-
-    const commitReceipt = engine.commit();
-
-    expect(commitReceipt.content[0]!.text).toContain("Commit refused");
-    expect(commitReceipt.content[0]!.text).toContain("no longer exists");
-    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
-    expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Spec A7a — staged entries are keyed, and re-staging a key REPLACES it.
@@ -903,7 +856,6 @@ describe("ticket 08 — membership correction", () => {
     const job = claimWindow(db, sessionDbId, 1, 1);
     const context = baseContext(job, {
       reviewableTurnIds: new Set([t1]),
-      attachedSegmentIds: new Set([wrongSegment.id, rightSegment.id]),
     });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
@@ -922,28 +874,48 @@ describe("ticket 08 — membership correction", () => {
     expect(getSegmentMemberTurnIds(db, rightSegment.id)).toEqual([t1]);
   });
 
-  test("an out-of-domain segment (not attached to this session) is refused, and nothing lands", () => {
+  // Ticket 04 (edge-mechanism-revision D6, "跨段改派") deleted the value
+  // domain this test used to pin: a segment this session never attached is a
+  // legal target now. A segment id naming NOTHING is still refused, which is
+  // the check that actually protects the write.
+  test("a segment id naming nothing is refused, and nothing lands", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    const notAttached = createSegment(db, { title: "another session's task", nowEpoch: NOW });
     const job = claimWindow(db, sessionDbId, 1, 1);
     const context = baseContext(job, {
       reviewableTurnIds: new Set([t1]),
-      attachedSegmentIds: new Set(),
     });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
     const receipt = engine.stageMembershipWrite({
       action: "reassign",
       turns: [`S${sessionDbId}/T1`],
-      id: `E${notAttached.id}`,
+      id: "E9999",
     });
 
     expect(receipt.content[0]!.text).toContain("Parameter error");
-    expect(receipt.content[0]!.text).toContain(`E${notAttached.id}`);
-    expect(receipt.content[0]!.text).toContain("not attached to this session");
+    expect(receipt.content[0]!.text).toContain("E9999");
+    expect(receipt.content[0]!.text).toContain("does not exist");
     expect(engine.pendingCount()).toBe(0);
-    expect(getSegmentMemberTurnIds(db, notAttached.id)).toEqual([]);
+  });
+
+  test("a segment another session owns is a legal target — cross-segment reassignment (ticket 04)", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const elsewhere = createSegment(db, { title: "another session's task", nowEpoch: NOW });
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+    });
+    const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
+
+    engine.stageMembershipWrite({
+      action: "reassign",
+      turns: [`S${sessionDbId}/T1`],
+      id: `E${elsewhere.id}`,
+    });
+    expect(engine.commit().content[0]!.text).toContain("Committed");
+    expect(getSegmentMemberTurnIds(db, elsewhere.id)).toEqual([t1]);
   });
 
   // Ticket 02's own fixture shape (tests/db/segments.test.ts, "type and tags
@@ -964,7 +936,6 @@ describe("ticket 08 — membership correction", () => {
     const job = claimWindow(db, sessionDbId, 1, 1);
     const context = baseContext(job, {
       reviewableTurnIds: new Set([t1]),
-      attachedSegmentIds: new Set([segment.id]),
     });
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
@@ -995,11 +966,9 @@ describe("ticket 08 — edge correction through the shared phase validator (requ
       db,
       [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
       NOW - 500,
-      { eligibleForRelation: "unrestricted" },
     );
     const job = claimWindow(db, sessionDbId, 1, 2);
-    const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
-    const context = baseContext(job, { eligibleRelationPairKeys: snapshot });
+    const context = baseContext(job);
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
     const receipt = engine.stageNoteWrite({
@@ -1025,11 +994,9 @@ describe("ticket 08 — edge correction through the shared phase validator (requ
       db,
       [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
       NOW - 500,
-      { eligibleForRelation: "unrestricted" },
     );
     const job = claimWindow(db, sessionDbId, 1, 2);
-    const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
-    const context = baseContext(job, { eligibleRelationPairKeys: snapshot });
+    const context = baseContext(job);
     const engine = createSettlementStagingEngine({ db, context, now: () => NOW });
 
     const receipt = engine.stageNoteWrite({
@@ -1058,12 +1025,9 @@ describe("ticket 08 — edge correction through the shared phase validator (requ
       db,
       [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
       NOW - 500,
-      { eligibleForRelation: "unrestricted" },
     );
     const job = claimWindow(db, sessionDbId, 1, 2);
-    const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
     const context = baseContext(job, {
-      eligibleRelationPairKeys: snapshot,
       reviewableTurnIds: new Set([t2]),
       contextBuiltAtEpoch: NOW,
     });

@@ -31,7 +31,11 @@ import {
   createSettlementStagingEngine,
   type SettlementStagingEngine,
 } from "../../src/worker/note-settlement-staging";
-import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
+import {
+  evaluateSettlementTurnWrite,
+  type SettlementTurnFacadeContext,
+} from "../../src/worker/note-settlement-turn-facade";
+import { sessionWriterId, stampField } from "../../src/db/write-gate";
 import {
   SETTLEMENT_ENABLED_CONFIG,
   SETTLEMENT_ERA_CUTOFF_EPOCH,
@@ -230,8 +234,6 @@ function queryThatStages(
       sessionId: request.sessionId,
       reviewableTurnIds: request.reviewableTurnIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
-      eligibleRelationPairKeys: request.eligibleRelationPairKeys,
-      attachedSegmentIds: request.attachedSegmentIds,
     };
     const engine = createSettlementStagingEngine({ db, context });
     build(engine, request);
@@ -311,14 +313,15 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain("How much does this task's future depend on this turn?");
     expect(prompt).not.toContain("Seats are CEILINGS");
     expect(prompt).not.toContain("TURN REVIEW");
-    expect(prompt).not.toContain("RECONSTRUCTION");
 
     // Ticket 08 (edge-ownership-impl) folded the old duty 2 (RELATIONS) into
     // a wider CORRECTION duty (type/tags/membership/edges); ticket 09
     // inserted duty 3 (SESSION NARRATIVE) between it and COMMIT, so COMMIT
-    // stays numbered "4.".
+    // stays numbered "4.". Ticket 04 (edge-mechanism-revision D7) renamed
+    // duty 2 to RECONCILIATION when prose came back into settlement's scope —
+    // the ORDER is what this test pins, and it is unchanged.
     const proposalsIndex = prompt.indexOf("1. PROPOSALS");
-    const correctionIndex = prompt.indexOf("2. CORRECTION");
+    const correctionIndex = prompt.indexOf("2. RECONCILIATION");
     const narrativeIndex = prompt.indexOf("3. SESSION NARRATIVE");
     const commitIndex = prompt.indexOf("4. COMMIT");
     expect(proposalsIndex).toBeGreaterThan(-1);
@@ -333,9 +336,16 @@ describe("settlement context assembly", () => {
   // correct"): the old pre-ticket-01 four-question relation ladder
   // (supersedes-first) is DELETED from the prompt — judgment lives only in
   // the Memory Rubric now, and this duty is a pointer at it, not a second
-  // restatement. What survives verbatim is the FORMAT/fence facts a rubric
-  // pointer cannot carry: the seven-word field list and the same-run
-  // eligibility fence (spec C7).
+  // restatement. What survives verbatim is the FORMAT facts a rubric pointer
+  // cannot carry: the seven-word field list, its retraction mirrors, and the
+  // phase rejection.
+  //
+  // Ticket 04 (edge-mechanism-revision D1/D7) re-judged the fence half: the
+  // "pair must already exist" sentences this test used to pin are now pinned
+  // as ABSENT, because the rule they taught is retired. An edge stands on its
+  // own, so a prompt still teaching the fence would teach a refusal the code
+  // no longer performs — the worst kind of drift, since the model would
+  // silently stop attempting legal work.
   test("the relation half is a rubric pointer, not a restated ladder", () => {
     const fixture = seedFourTurnWindow();
     const context = buildNoteSettlementContext(db, fixture.job, {
@@ -353,16 +363,107 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain('"used"');
     expect(prompt).not.toContain('"built on"');
 
-    // The pointer + fence + phase-rejection facts a rubric pointer cannot
-    // itself state.
+    // The pointer + phase-rejection facts a rubric pointer cannot itself
+    // state, plus the decoupling the fence's deletion left in its place.
     expect(prompt).toContain("Which relation, if any, is the Memory Rubric's");
-    expect(prompt).toContain("must already be a pair that existed");
-    expect(prompt).toContain("before this run started");
-    expect(prompt).toContain("you cannot invent a relation for a pair a call earlier");
+    expect(prompt).toContain("no prose citation and no pre-existing link");
+    expect(prompt).toContain("One pair may carry several relations at once");
     expect(prompt).toContain("rejected, naming which half is missing");
     expect(prompt).toContain(
       "note`'s evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn fields",
     );
+    expect(prompt).toContain("retractEvidenceFor/");
+
+    // The retired fence's own wording, pinned ABSENT — the rule is gone, so
+    // the sentences that taught it must not survive anywhere in the prompt.
+    expect(prompt).not.toContain("must already be a pair that existed");
+    expect(prompt).not.toContain("before this run started");
+    expect(prompt).not.toContain("you cannot invent a relation for a pair a call earlier");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 04 (edge-mechanism-revision D6, "同门同要求"): the REAL context build
+// is what earns settlement its complete-read grant. Ticket 07 left this as a
+// recorded gap — the render recorded no field completeness, so opting the gate
+// in would have refused every correction of a non-empty field. These two tests
+// run the actual render, not a hand-recorded fixture, so the wiring cannot rot
+// into a stub that always says "complete".
+// ---------------------------------------------------------------------------
+
+describe("the context render earns (or withholds) the complete-read grant", () => {
+  function settleContextFor(sessionDbId: number, job: NoteSettlementJob) {
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    return {
+      context,
+      facade: {
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        reviewableTurnIds: context.reviewableTurnIds,
+        contextBuiltAtEpoch: context.builtAtEpoch,
+      } satisfies SettlementTurnFacadeContext,
+    };
+  }
+
+  test("a note that fits the per-turn budget renders whole, and settlement may rewrite it", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1, {
+      note: { title: "a short title", content: "A short conclusion." },
+    });
+    // Another writer owns the field — without a foreign stamp the gate admits
+    // on rule 3 and never consults completeness at all.
+    stampField(db, "turn", t1, "content", sessionWriterId(sessionDbId), NOW - 900);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const { facade } = settleContextFor(sessionDbId, job);
+
+    const result = evaluateSettlementTurnWrite(
+      db,
+      facade,
+      {
+        turn: `S${sessionDbId}/T1`,
+        content: "In hindsight: what this turn actually settled.",
+        mode: { content: "write" },
+      },
+      NOW + 1,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(getShadowNote(db, t1)!.content).toBe(
+      "In hindsight: what this turn actually settled.",
+    );
+  });
+
+  test("a note the render had to cut short refuses the whole-field rewrite, in the gate's own words", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1, {
+      note: {
+        title: "a title",
+        // Far past the per-item token budget the settlement prompt renders
+        // turns at, so `formatTurnCompact` cuts the body and records
+        // `complete: false` for content.
+        content: Array.from({ length: 400 }, (_unused, i) => `sentence${i}`).join(" "),
+      },
+    });
+    stampField(db, "turn", t1, "content", sessionWriterId(sessionDbId), NOW - 900);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const { facade } = settleContextFor(sessionDbId, job);
+
+    const result = evaluateSettlementTurnWrite(
+      db,
+      facade,
+      {
+        turn: `S${sessionDbId}/T1`,
+        content: "a whole new content, over text I never saw whole",
+        mode: { content: "write" },
+      },
+      NOW + 1,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("was not delivered in full");
   });
 });
 
@@ -387,7 +488,6 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
         },
       ],
       NOW - 4_000,
-      { eligibleForRelation: "unrestricted" },
     );
     // The CITED side of a phase check reads the LIVE database (both at stage
     // time's dry run and inside commit's own replay) — a sibling stage call

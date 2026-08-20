@@ -713,6 +713,16 @@ export const timelineInputShape = {
 // facade is a plain re-export again. `tests/worker/note-settlement-parity.
 // test.ts` asserts the identity at the tool-REGISTRATION boundary, where a
 // prose claim of sameness cannot reach.
+//
+// Ticket 04 (edge-mechanism-revision D3/D6): the seven `retract…` mirrors
+// join, the SAME objects again — ticket 02 deliberately left them off this
+// shape ("a schema accepting parameters the facade ignores is worse than
+// rejection") and this ticket adds the parameters and the facade wiring
+// together, so a settlement retraction reaches `retractTurnRelations` the
+// same call the main agent's own does. `title`/`content` keep their separate
+// declaration for the one surviving reason: settlement's `session` address
+// writes them non-nullably. They are a TURN's prose too now (D6 revoked
+// "结算不再重建笔记"), through the same mode vocabulary and the same gate.
 export const settlementNoteInputShape = {
   turn: z.string().min(1).optional(),
   session: z.string().min(1).optional(),
@@ -729,6 +739,13 @@ export const settlementNoteInputShape = {
   override: noteInputShape.override,
   encodes: noteInputShape.encodes,
   dependsOn: noteInputShape.dependsOn,
+  retractEvidenceFor: noteInputShape.retractEvidenceFor,
+  retractEvidenceAgainst: noteInputShape.retractEvidenceAgainst,
+  retractGroundedOn: noteInputShape.retractGroundedOn,
+  retractRefines: noteInputShape.retractRefines,
+  retractOverride: noteInputShape.retractOverride,
+  retractEncodes: noteInputShape.retractEncodes,
+  retractDependsOn: noteInputShape.retractDependsOn,
 };
 
 // Ticket 04/11: `truncate` and `view` are defined on `recallInputShape`

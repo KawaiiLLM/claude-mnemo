@@ -170,7 +170,6 @@ describe("createSegmentBlockContextHandler", () => {
         },
       ],
       modernEpoch,
-      { eligibleForRelation: "unrestricted" },
     );
     attachSegmentToSession(db, session.id, segment.id, modernEpoch);
 

@@ -393,7 +393,6 @@ describe("session queries", () => {
           },
         ],
         250,
-        { eligibleForRelation: "unrestricted" },
       );
       expect(
         getOutgoingEdges(db, { kind: "session", id: sessionId }),
@@ -431,7 +430,6 @@ describe("session queries", () => {
           },
         ],
         250,
-        { eligibleForRelation: "unrestricted" },
       );
 
       updateSessionSummaryRewrite(

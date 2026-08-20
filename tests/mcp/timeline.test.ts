@@ -3603,7 +3603,6 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
         { citing: { kind: "turn", id: t821Id }, cited: { kind: "turn", id: t812Id }, relation: "depends-on", provenance: "judged" },
       ],
       t821Epoch,
-      { eligibleForRelation: "unrestricted" },
     );
 
     const output = renderTimeline(buildTimelineView(db, { id: `S${session.id}/T821..822` }));
@@ -3996,7 +3995,6 @@ function citeTurns(
       provenance: "judged" as const,
     })),
     ERA_BASE,
-    { eligibleForRelation: "unrestricted" },
   );
 }
 

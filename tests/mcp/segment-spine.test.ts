@@ -144,7 +144,6 @@ function seedEraFixture(
       },
     ],
     CUTOFF,
-    { eligibleForRelation: "unrestricted" },
   );
 
   const segment = createSegment(db, {

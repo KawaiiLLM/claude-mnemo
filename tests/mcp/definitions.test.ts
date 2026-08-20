@@ -444,14 +444,18 @@ describe("tool surface", () => {
     }
   });
 
-  // ticket 02: settlement's own surface does NOT carry the retraction
-  // parameters yet — ticket 04 wires its facade to the same primitive. A
-  // parameter accepted on the wire and ignored by the handler would be worse
-  // than one that rejects, so this pins the gap deliberately rather than
-  // leaving it to be discovered as a silent drop.
-  it("the settlement note shape does not yet declare the retraction mirrors (ticket 04's)", () => {
+  // ticket 04 (edge-mechanism-revision D3/D6) closed the gap ticket 02 pinned
+  // here: settlement's surface declares the retraction mirrors AND its facade
+  // wires them to `retractTurnRelations`, together, as that ticket required.
+  // Object IDENTITY, not shape equality — the same rule the parity test
+  // applies to the relation half: a settlement-flavoured copy of a describe
+  // would let the two writers drift into two vocabularies for one word.
+  it("the settlement note shape declares the retraction mirrors, as the SAME field objects", () => {
     for (const [key] of RETRACTION_FIELD_ENTRIES) {
-      expect(key in settlementNoteInputShape).toBe(false);
+      expect(key in settlementNoteInputShape).toBe(true);
+      expect(
+        (settlementNoteInputShape as Record<string, unknown>)[key],
+      ).toBe((noteInputShape as Record<string, unknown>)[key]);
     }
   });
 

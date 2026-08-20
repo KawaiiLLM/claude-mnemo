@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 
 import { isSqliteBusy } from "../db/database";
-import { getExistingEdgePairKeys } from "../db/memory-edges";
 import {
   getNoteSettlementJob,
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
@@ -80,9 +79,10 @@ export function classifySettlementFailure(error: unknown): NoteSettlementFailure
  * DELETED along with the segment-field reading it depended on — settlement
  * no longer reads a segment's content/insight at all. `reconstructableTurnIds`/
  * `rideTurnId`/`writerModel` (duty 2's own plumbing) and `attachedSegmentIds`
- * (the retired `assign` action's scope gate) are gone from the query request
- * for the same reason: nothing on the other side of the subprocess boundary
- * reads them any more.
+ * (ticket 08's membership domain, deleted by ticket 04 along with the
+ * restriction it encoded) are gone from the query request for the same
+ * reason: nothing on the other side of the subprocess boundary reads them any
+ * more.
  */
 
 /**
@@ -116,10 +116,11 @@ export interface NoteSettlementQueryRequest {
   sessionId: number;
   reviewableTurnIds: ReadonlySet<number>;
   contextBuiltAtEpoch: number;
-  /** Relation eligibility, snapshotted ONCE before this call's model run starts (spec C7, requirement 4). */
-  eligibleRelationPairKeys: ReadonlySet<string>;
-  /** Ticket 08: the legal domain for a membership `reassign` — this session's currently attached segment ids. */
-  attachedSegmentIds: ReadonlySet<number>;
+  // Ticket 04 (edge-mechanism-revision D6): `eligibleRelationPairKeys` — spec
+  // C7's frozen pre-run pair snapshot — is gone from this request, and
+  // `getExistingEdgePairKeys` (the query that built it) is gone from
+  // `db/memory-edges.ts` with it. A relation is a standalone claim now, so
+  // there is no pre-state for it to be eligible against.
 }
 
 /**
@@ -260,13 +261,6 @@ export function createNoteSettlementDispatch(
       return { ok: true };
     }
 
-    // Requirement 4 (spec C7/C14): taken ONCE, here, before the model run
-    // starts — not inside each tool call's own transaction. A pair this
-    // dispatch's own tool calls mint during the run must stay ineligible for
-    // a relation for the REST of the run, which only holds if every call
-    // shares one frozen snapshot rather than each re-reading the table fresh.
-    const eligibleRelationPairKeys = getExistingEdgePairKeys(db);
-
     let queryResult: NoteSettlementQueryResult;
     try {
       queryResult = await options.runQuery({
@@ -278,8 +272,6 @@ export function createNoteSettlementDispatch(
         sessionId: job.sessionId,
         reviewableTurnIds: context.reviewableTurnIds,
         contextBuiltAtEpoch: context.builtAtEpoch,
-        eligibleRelationPairKeys,
-        attachedSegmentIds: context.attachedSegmentIds,
       });
     } catch (error) {
       return {

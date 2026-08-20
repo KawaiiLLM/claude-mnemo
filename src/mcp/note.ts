@@ -126,7 +126,7 @@ function hasText(value: string | null | undefined): boolean {
  * itself wrote; taking either as "occupied" keeps the requirement honest for
  * a turn whose prose reached `turns` by some other path.
  */
-function writeOverwritesExistingTurnContent(
+export function writeOverwritesExistingTurnContent(
   field: TurnModeField,
   turn: TurnRecord,
   note: { title: string | null; content: string | null; insight: string | null } | null,
@@ -158,7 +158,10 @@ function writeOverwritesExistingTurnContent(
  * "raise the budget" would re-read forever without ever earning a
  * completeness record for them.
  */
-function completeReadRemedyForTurnField(field: TurnModeField, address: string): string {
+export function completeReadRemedyForTurnField(
+  field: TurnModeField,
+  address: string,
+): string {
   const selector = field === "type" || field === "tags" ? "metadata" : field;
   const rider =
     selector === "metadata"
@@ -525,7 +528,14 @@ const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
     "is not a relation this turn currently carries — nothing was retracted; read the turn to see what it does carry",
 };
 
-function formatRelationRejections(
+/**
+ * Exported (ticket 04, edge-mechanism-revision D6) so the settlement facade
+ * reports an address-level edge rejection in the SAME words this surface does:
+ * both writers now hold the same relation and retraction vocabulary, and a
+ * `no-such-edge` that read differently depending on who called it would be two
+ * contracts wearing one name.
+ */
+export function formatRelationRejections(
   rejections: readonly TurnRelationRejection[],
   surface: "relation" | "retraction",
 ): string {
@@ -788,7 +798,7 @@ interface TurnWriteTransactionResult {
   stripped: boolean;
 }
 
-function isValidPredecessorFor(
+export function isValidPredecessorFor(
   db: Database,
   turn: { id: number; sessionId: number; promptNumber: number },
 ): (candidateId: number) => boolean {

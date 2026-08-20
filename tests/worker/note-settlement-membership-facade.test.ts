@@ -15,6 +15,7 @@ import {
   createSegment,
   getSegment,
   getSegmentMemberTurnIds,
+  listAttachedSegments,
   toggleSegmentStatus,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -118,8 +119,6 @@ function baseContext(
     sessionId: job.sessionId,
     reviewableTurnIds: new Set(),
     contextBuiltAtEpoch: NOW,
-    eligibleRelationPairKeys: new Set(),
-    attachedSegmentIds: new Set(),
     ...overrides,
   };
 }
@@ -395,33 +394,50 @@ describe("propose — never creates a segment row, and is no longer a completion
 });
 
 // ---------------------------------------------------------------------------
-// reassign (ticket 08, edge-ownership-impl: "settlement four-field
-// check-and-correct") — the membership-CORRECTION verb. Domain = this
-// session's attached segments (`context.attachedSegmentIds`) ∪ homeless.
+// reassign (ticket 08) — the membership-correction verb. Ticket 04
+// (edge-mechanism-revision D6, "跨段改派") DELETED its value domain: any
+// segment that exists and is open is a legal target, whichever session it
+// belongs to. What still refuses is the segment's own lifecycle (closed) and
+// the window scope on the TURNS being moved.
 // ---------------------------------------------------------------------------
 
-describe("reassign — domain boundary (ticket 08)", () => {
-  test("naming a segment NOT on this session's attached-segment domain is rejected, and names it as not attached", () => {
+describe("reassign — cross-segment, bounded only by existence and status (ticket 04)", () => {
+  test("a segment this session never attached is a legal target — that is what cross-segment reassignment means", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    const notAttached = createSegment(db, { title: "elsewhere, never attached", nowEpoch: NOW });
+    const elsewhere = createSegment(db, { title: "elsewhere, never attached", nowEpoch: NOW });
 
     const result = evaluateSettlementMembershipWrite(
       db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]), attachedSegmentIds: new Set() }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${notAttached.id}` },
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${elsewhere.id}` },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(getSegmentMemberTurnIds(db, elsewhere.id)).toEqual([t1]);
+  });
+
+  test("a segment id naming nothing at all is still refused", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: "E9999" },
       NOW,
       { apply: true },
     );
 
     expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain(`E${notAttached.id}`);
-    expect(!result.ok && result.message).toContain("not attached to this session");
-    expect(getSegmentMemberTurnIds(db, notAttached.id)).toEqual([]);
+    expect(!result.ok && result.message).toContain("does not exist");
   });
 
-  test("naming a segment ON the attached-segment domain is accepted", () => {
+  test("naming an attached segment is accepted", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
@@ -430,10 +446,7 @@ describe("reassign — domain boundary (ticket 08)", () => {
 
     const result = evaluateSettlementMembershipWrite(
       db,
-      baseContext(job, {
-        reviewableTurnIds: new Set([t1]),
-        attachedSegmentIds: new Set([attached.id]),
-      }),
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${attached.id}` },
       NOW,
       { apply: true },
@@ -453,10 +466,7 @@ describe("reassign — domain boundary (ticket 08)", () => {
 
     const result = evaluateSettlementMembershipWrite(
       db,
-      baseContext(job, {
-        reviewableTurnIds: new Set([t1]),
-        attachedSegmentIds: new Set([attached.id]),
-      }),
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       { action: "reassign", turns: [`S${sessionDbId}/T1`] },
       NOW,
       { apply: true },
@@ -483,25 +493,22 @@ describe("reassign — domain boundary (ticket 08)", () => {
     expect(!result.ok && result.message).toContain("at least one turn address");
   });
 
-  // Ticket 05 (spec: "写事务内重验该段仍挂靠本会话(roster 快照仅提示)"): the
-  // FROZEN `context.attachedSegmentIds` is advisory only — the gate re-reads
-  // live attachment/status every call.
-  test("a segment closed AFTER the roster snapshot was taken is refused, even though the frozen snapshot still names it", () => {
+  // Ticket 05 (spec: "渲染后被 detach/close 的段不可再收成员"), surviving
+  // ticket 04's domain deletion: status is read LIVE, every call.
+  test("a segment closed after the roster was rendered is refused", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
     const attached = createSegment(db, { title: "closes mid-run", nowEpoch: NOW });
     attachSegmentToSession(db, sessionDbId, attached.id, NOW);
 
-    // The roster the PROMPT showed still names it attached...
-    const staleRoster = new Set([attached.id]);
-    // ...but the main agent closed it between context-build and this call.
+    // The main agent closed it between context-build and this call.
     toggleSegmentStatus(db, attached.id, NOW + 1);
     expect(getSegment(db, attached.id)!.status).toBe("closed");
 
     const result = evaluateSettlementMembershipWrite(
       db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]), attachedSegmentIds: staleRoster }),
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${attached.id}` },
       NOW + 2,
       { apply: true },
@@ -513,20 +520,17 @@ describe("reassign — domain boundary (ticket 08)", () => {
     expect(getSegmentMemberTurnIds(db, attached.id)).toEqual([]);
   });
 
-  test("a segment attached AFTER the roster snapshot was taken is accepted — the frozen snapshot is advisory, not authoritative", () => {
+  test("a segment attached after the roster was rendered is accepted — the rendered roster was never the gate", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
     const freshlyAttached = createSegment(db, { title: "attached mid-run", nowEpoch: NOW });
 
-    // The frozen roster the prompt showed does NOT name it — it was attached
-    // by the main agent AFTER context build.
-    const staleRoster = new Set<number>();
     attachSegmentToSession(db, sessionDbId, freshlyAttached.id, NOW + 1);
 
     const result = evaluateSettlementMembershipWrite(
       db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]), attachedSegmentIds: staleRoster }),
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${freshlyAttached.id}` },
       NOW + 2,
       { apply: true },
@@ -545,10 +549,7 @@ describe("reassign — domain boundary (ticket 08)", () => {
 
     const result = evaluateSettlementMembershipWrite(
       db,
-      baseContext(job, {
-        reviewableTurnIds: new Set([t1]),
-        attachedSegmentIds: new Set([attached.id]),
-      }),
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${attached.id}` },
       NOW,
       { apply: false },
@@ -573,6 +574,122 @@ describe("reassign — domain boundary (ticket 08)", () => {
         turns: ["S1/T1"],
       }).success,
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// create (ticket 04, edge-mechanism-revision D6, "建段") — settlement mints a
+// segment when no existing one fits, and it joins THIS session's roster so the
+// next window (and the main agent's SessionStart) can see it.
+// ---------------------------------------------------------------------------
+
+describe("create — settlement opens a segment (ticket 04)", () => {
+  test("mints the segment, attaches it to this session, and seeds the named members", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const job = claimWindow(sessionDbId, 1, 2);
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1, t2]) }),
+      {
+        action: "create",
+        title: "the arc this window actually shows",
+        turns: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
+      },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(true);
+    const segmentId = result.ok ? result.outcome.create!.segmentId! : 0;
+    expect(getSegment(db, segmentId)!.title).toBe("the arc this window actually shows");
+    expect(getSegmentMemberTurnIds(db, segmentId).sort()).toEqual([t1, t2].sort());
+    // On the roster: what makes the rubric's "check the roster before minting
+    // a new one" rule followable for the NEXT window.
+    expect(listAttachedSegments(db, sessionDbId).map((segment) => segment.id)).toEqual([
+      segmentId,
+    ]);
+  });
+
+  test("a seeded turn is evicted from its previous segment — one home, one write path", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const previous = createSegment(db, { title: "the wrong home", nowEpoch: NOW });
+    attachSegmentToSession(db, sessionDbId, previous.id, NOW);
+    addSegmentMembers(db, previous.id, [t1], NOW);
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { action: "create", title: "the right home", turns: [`S${sessionDbId}/T1`] },
+      NOW + 1,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(getSegmentMemberTurnIds(db, previous.id)).toEqual([]);
+  });
+
+  test("requires a title, and refuses a member address outside the rendered window", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const untitled = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { action: "create", title: "   " },
+      NOW,
+      { apply: true },
+    );
+    expect(untitled.ok).toBe(false);
+    expect(!untitled.ok && untitled.message).toContain("create requires title");
+
+    const outOfWindow = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set() }),
+      { action: "create", title: "a title", turns: [`S${sessionDbId}/T1`] },
+      NOW,
+      { apply: true },
+    );
+    expect(outOfWindow.ok).toBe(false);
+    expect(!outOfWindow.ok && outOfWindow.message).toContain("outside this dispatch's reviewable window");
+    expect(listAttachedSegments(db, sessionDbId)).toEqual([]);
+  });
+
+  test("apply:false validates and reports without minting anything", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { action: "create", title: "would-be segment", turns: [`S${sessionDbId}/T1`] },
+      NOW,
+      { apply: false },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.outcome.create?.segmentId).toBeNull();
+    expect(listAttachedSegments(db, sessionDbId)).toEqual([]);
+  });
+
+  test("settlementMembershipWriteInputSchema accepts create and still refuses the retired assign", () => {
+    expect(
+      settlementMembershipWriteInputSchema.safeParse({
+        action: "create",
+        title: "a segment",
+        turns: ["S1/T1"],
+      }).success,
+    ).toBe(true);
+    expect(
+      settlementMembershipWriteInputSchema.safeParse({ action: "assign", turns: ["S1/T1"] })
+        .success,
+    ).toBe(false);
   });
 });
 

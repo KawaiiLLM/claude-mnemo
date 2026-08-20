@@ -217,61 +217,36 @@ export interface WriteEdgesResult {
 
 /**
  * The pair's identity string (spec C5): `(citing kind:id)>(cited kind:id)`,
- * independent of relation. Exported so a caller can build an ELIGIBILITY set
- * in the same currency `writeMemoryEdges` checks it against — ticket 07's
- * `eligibleForRelation` (below) and the settlement write-back's pre-state
- * snapshot (`getExistingEdgePairKeys`) both key off this, rather than each
- * inventing its own pair-identity string that could quietly drift from it.
+ * independent of relation. Exported so every reader that has to talk about a
+ * pair as one value — the bare-layer reconcile below, a test's own bookkeeping
+ * — spells it the same way rather than inventing a second pair-identity string
+ * that could quietly drift from this one. (Ticket 04 retired its largest
+ * consumer, the C7 eligibility set; see the note under this function.)
  */
 export function pairKey(edge: Pick<WriteEdgeInput, "citing" | "cited">): string {
   return `${edge.citing.kind}:${edge.citing.id}>${edge.cited.kind}:${edge.cited.id}`;
 }
 
-export interface WriteMemoryEdgesOptions {
-  /**
-   * Ticket 07 (spec C7/C14): pair keys (see `pairKey`) that MAY receive a
-   * non-null relation on THIS call, or `"unrestricted"` to state that this
-   * caller answers for eligibility itself. Checked only against a
-   * relation-BEARING write — a bare (`relation: null`) edge is never gated,
-   * because C6/C7's "settlement writing a body whose citations create bare
-   * pairs stays legal" rule is about the pair, not about who classified it;
-   * gating bare writes would re-introduce the free-standing-edge problem C6
-   * already closed, from the opposite direction.
-   *
-   * **Omitting it DENIES every relation.** The first implementation made it
-   * opt-in — omitted meant no check at all — and a cross-session review
-   * named the consequence before it happened: a later caller that writes
-   * `relation: "supersedes"` and forgets the option would silently mint the
-   * unqualified relation-only edge C7 exists to forbid, and nothing would
-   * fail. Safety must not rest on every future caller remembering a
-   * parameter. Deny-by-default inverts that: a forgotten option costs the
-   * caller its relations loudly (`rejected: "relation-ineligible"`, and its
-   * own tests go red) instead of costing the invariant quietly.
-   *
-   * `"unrestricted"` exists so an exempt path says so out loud rather than
-   * inheriting an exemption by omission. Edge-mechanism-revision D1 (ticket
-   * 02) made it the MAIN AGENT's answer: `db/citations.ts`'s
-   * `attachTurnRelations` no longer derives a set from the citing turn's
-   * prose (the retired C7 co-occurrence rule) and instead answers for
-   * eligibility itself, through address resolution, self-loop refusal, phase
-   * legality and the citing turn's write gate. The settlement write-back
-   * still passes a real set (its transaction pre-state) until ticket 04
-   * retires that fence too, and the bare-pair callers write no relations at
-   * all.
-   */
-  eligibleForRelation?: ReadonlySet<string> | "unrestricted";
-}
-
-function mayCarryRelation(
-  options: WriteMemoryEdgesOptions,
-  edge: Pick<WriteEdgeInput, "citing" | "cited">,
-): boolean {
-  const eligible = options.eligibleForRelation;
-  if (eligible === undefined) {
-    return false;
-  }
-  return eligible === "unrestricted" || eligible.has(pairKey(edge));
-}
+/**
+ * Edge-mechanism-revision D1/D6 (ticket 04): `WriteMemoryEdgesOptions` and its
+ * `eligibleForRelation` gate are GONE — deleted, not defaulted to permissive
+ * (spec user story 18: "the C7-era co-occurrence machinery deleted, not
+ * bypassed, so that the retired contract cannot half-fire").
+ *
+ * That option asked one question — "which pairs may receive a relation on this
+ * call" — and that question WAS spec C7's pre-existence rule. Ticket 02
+ * retired it for the main agent (`attachTurnRelations` answered
+ * `"unrestricted"`), and this ticket retires settlement's own frozen
+ * pre-run snapshot, which was its last real user. What remains would have been
+ * a deny-by-default parameter with no caller able to deny anything: a future
+ * writer that forgot it would silently lose its relations to a rule this
+ * project no longer holds.
+ *
+ * Eligibility now lives entirely in each write path's own checks (D1: the
+ * citing turn's write gate, address existence, phase legality, self-loop
+ * refusal) — one layer, stated once, in `db/citations.ts` and the two tool
+ * surfaces above it.
+ */
 
 /**
  * Additive, idempotent edge write (D2).
@@ -300,10 +275,11 @@ function mayCarryRelation(
  * eligibility set for the relations attached in the same call, and the tool
  * layer counts it into a receipt.
  *
- * Eligibility — whether THIS call may attach a relation to THIS pair — is
- * `options.eligibleForRelation`; each caller computes its own set and this
- * function only enforces membership in whatever set it was handed, refusing
- * every relation when handed none.
+ * Eligibility — whether a relation may attach to a pair at all — is NOT this
+ * function's business any more (ticket 04, see the note above the options type
+ * this used to take): every caller answers for it through its own address
+ * resolution, phase legality and write gate, and this function writes what it
+ * is handed.
  *
  * Self-loops are rejected here with a reported reason, and again by the
  * table's own CHECK — a node confirming itself would inflate its own
@@ -321,7 +297,6 @@ export function writeMemoryEdges(
   db: Database,
   edges: readonly WriteEdgeInput[],
   nowEpoch: number,
-  options: WriteMemoryEdgesOptions = {},
 ): WriteEdgesResult {
   const written: MemoryEdge[] = [];
   const rejected: WriteEdgesResult["rejected"] = [];
@@ -423,17 +398,6 @@ export function writeMemoryEdges(
       rejected.push({ input: edge, reason: "invalid-provenance" });
       continue;
     }
-    // Ticket 07 (spec C7/C14): only a relation-BEARING write is gated — a
-    // bare write always passes, which is what keeps a mechanically derived
-    // bare pair (segment anchors, `reconcileCitedPairs`'s own recompute)
-    // legal regardless of who is writing it. A relation-bearing write with
-    // no eligibility stated is REFUSED, not waved through; see
-    // `WriteMemoryEdgesOptions` for why the default is deny.
-    if (edge.relation !== null && !mayCarryRelation(options, edge)) {
-      rejected.push({ input: edge, reason: "relation-ineligible" });
-      continue;
-    }
-
     const createdAtEpoch = edge.createdAtEpoch ?? nowEpoch;
     if (edge.relation !== null) {
       const row = insertRelationRow.get(
@@ -686,49 +650,6 @@ export function getEdgeInDegree(db: Database, cited: EdgeNode): number {
          )`,
       )
       .get(cited.kind, cited.id)?.count ?? 0
-  );
-}
-
-/**
- * Every stored pair, as `pairKey` strings (spec C7, ticket 07). The one
- * caller today is the settlement write-back's pre-state snapshot: a judged
- * relation is eligible only on a pair present BEFORE that transaction's own
- * writes land, and the snapshot has to be taken before ANY of them — a fresh
- * segment this same reply is about to create, its anchors, or an earlier
- * `edges` entry in the very same reply — because a snapshot taken even one
- * write later would see the call's own work and silently admit it.
- *
- * The whole table, not a query targeted at the reply's candidate pairs: the
- * candidates are only knowable after `edges`' tokens resolve, and a token
- * naming a segment THIS reply's own step 1 is about to mint cannot be
- * resolved before that step runs — so a targeted query would have to
- * reproduce the write-back's own ordering to get right, and get it wrong the
- * first time an ordering changed. Scanning the whole table sidesteps that
- * entirely and costs nothing worth optimising away at today's row counts.
- */
-export function getExistingEdgePairKeys(db: Database): ReadonlySet<string> {
-  return new Set(
-    db
-      .query<
-        {
-          citingKind: CitingNodeKind;
-          citingId: number;
-          citedKind: EdgeNodeKind;
-          citedId: number;
-        },
-        []
-      >(
-        `SELECT citing_kind AS citingKind, citing_id AS citingId,
-                cited_kind AS citedKind, cited_id AS citedId
-         FROM memory_edges`,
-      )
-      .all()
-      .map((row) =>
-        pairKey({
-          citing: { kind: row.citingKind, id: row.citingId },
-          cited: { kind: row.citedKind, id: row.citedId },
-        }),
-      ),
   );
 }
 

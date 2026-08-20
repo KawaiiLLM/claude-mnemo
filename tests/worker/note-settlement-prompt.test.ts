@@ -407,6 +407,67 @@ describe("ticket 04 — lookback scales with the window, one unified turn sectio
   });
 });
 
+/**
+ * Ticket 04 (edge-mechanism-revision D7): the settlement-specific half of the
+ * prompt. Four things the shared rubric cannot say, plus the two retirements
+ * whose WORDING must not outlive them.
+ */
+describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
+  test("task framing, authority, procedure and commit are all present, in that order", () => {
+    const prompt = renderPrompt();
+
+    // Hindsight task frame: check OR rebuild; a backfill window rebuilds from
+    // zero (the acceptance criterion's own words).
+    expect(prompt).toContain("HINDSIGHT pass over this window");
+    expect(prompt).toContain("Check or rebuild the notes");
+    expect(prompt).toContain("rebuild FROM ZERO");
+    // Authority statement.
+    expect(prompt).toContain("## Your authority");
+    expect(prompt).toContain("main agent's own write surface");
+    // Procedure: reconciliation = supply / correct / retract.
+    expect(prompt).toContain("## Procedure");
+    expect(prompt).toContain("SUPPLY what is missing");
+    expect(prompt).toContain("CORRECT what is wrong");
+    expect(prompt).toContain("RETRACT what is false");
+    // Commit as the terminal check, last.
+    expect(prompt.indexOf("## Your task")).toBeLessThan(prompt.indexOf("## Your authority"));
+    expect(prompt.indexOf("## Your authority")).toBeLessThan(prompt.indexOf("## Procedure"));
+    expect(prompt.indexOf("## Procedure")).toBeLessThan(prompt.indexOf("4. COMMIT"));
+  });
+
+  test("the shared rubric block is still what the prompt teaches judgment from", () => {
+    const prompt = renderPrompt();
+
+    // The hash guard's own block, byte-identical with the SessionStart
+    // injection's (pinned in full by the describe above this one).
+    expect(prompt).toContain(renderMemoryRubricBlock());
+    expect(prompt).toContain('hash="');
+  });
+
+  test("no pre-existence fence and no differential wording survives anywhere", () => {
+    const prompt = renderPrompt();
+
+    // The retired C7 fence.
+    expect(prompt).not.toContain("must already be a pair that existed");
+    expect(prompt).not.toContain("before this run started");
+    expect(prompt).not.toContain("not eligible for a relation");
+    // The retired "settlement is the surface that lacks things" framing.
+    expect(prompt.toLowerCase()).not.toContain("no append");
+    expect(prompt).not.toContain("no longer settlement's to write");
+    expect(prompt).not.toContain("the main agent is the note's sole writer");
+    expect(prompt).not.toContain("RE-CHECK, not a first write");
+  });
+
+  test("the prompt teaches the retraction mirrors and the membership create verb", () => {
+    const prompt = renderPrompt();
+
+    expect(prompt).toContain("retractEvidenceFor/");
+    expect(prompt).toContain("retractDependsOn");
+    expect(prompt).toContain('`action="create"`');
+    expect(prompt).toContain("joining an existing segment beats opening");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // The stitch (read-write-contract, ticket 07's deferred half): the session
 // summary renders through the UNIFIED renderer at sole-writer budgets, and

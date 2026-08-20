@@ -249,8 +249,11 @@ describe("shared config", () => {
   // db/note-settlement.ts and worker/note-settlement-dispatch.ts re-exporting
   // the defaults so every existing import path stays valid.
 
-  test("note settlement window sizes default to 25/50/100 and clamp into their bounds", () => {
-    expect(DEFAULT_CONFIG.noteSettlementThresholdTurns).toBe(25);
+  // Ticket 04 (edge-mechanism-revision D6): the consecutive threshold moved
+  // 25 -> 50 — settlement is a hindsight pass over arcs, and an arc rarely
+  // fits in 25 turns. Cap and backfill ceiling are untouched.
+  test("note settlement window sizes default to 50/50/100 and clamp into their bounds", () => {
+    expect(DEFAULT_CONFIG.noteSettlementThresholdTurns).toBe(50);
     expect(DEFAULT_CONFIG.noteSettlementCapTurns).toBe(50);
     expect(DEFAULT_CONFIG.noteSettlementBackfillMaxTurns).toBe(100);
 
@@ -302,14 +305,14 @@ describe("shared config", () => {
         // A string number is not a number: falls back to the default whole,
         // same as every other clampInteger field (e.g. hardExitTimeoutMs) —
         // clampInteger itself never warns, so neither does this.
-        noteSettlementThresholdTurns: "25",
+        noteSettlementThresholdTurns: "50",
         // A real negative integer clamps to the floor rather than falling
         // back to the default.
         noteSettlementBackfillMaxTurns: -5,
       }),
     );
     expect(loadConfig(home, { warn: (message) => warnings.push(message) })).toMatchObject({
-      noteSettlementThresholdTurns: 25,
+      noteSettlementThresholdTurns: 50,
       // Untouched default; still >= the fallback threshold, so the
       // cap/threshold coherence pass below has nothing to reconcile here.
       noteSettlementCapTurns: 50,

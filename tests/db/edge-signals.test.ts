@@ -83,7 +83,6 @@ describe("edge scoring signals", () => {
         },
       ],
       createdAtEpoch,
-      { eligibleForRelation: "unrestricted" },
     );
   }
 

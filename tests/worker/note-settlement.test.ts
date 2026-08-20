@@ -198,7 +198,11 @@ describe("note settlement triggers", () => {
     db.close();
   });
 
-  test("fires at exactly 25 consecutive decided turns, not before (ticket 04, [S15069/T963])", async () => {
+  test("fires at exactly 50 consecutive decided turns, not before (ticket 04, [S15069/T963]; threshold 25 -> 50 by edge-mechanism-revision D6)", async () => {
+    // The literal the rest of this test then expresses through the constant:
+    // settlement's window is 50 turns wide now, because an arc rarely fits in
+    // 25 and the pass is asked to connect arcs.
+    expect(NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS).toBe(50);
     const sessionDbId = seedSession(db, "content-consecutive");
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
@@ -219,17 +223,17 @@ describe("note settlement triggers", () => {
     expect(countNoteSettlementJobs(db)).toBe(0);
     expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
 
-    // Turn 25 itself is NOT yet decided (spec D10): the prompt clock only
+    // Turn 50 itself is NOT yet decided (spec D10): the prompt clock only
     // counts a turn as ended once a LATER one exists, so landing exactly turn
-    // 25 still reads as 24 decided turns.
+    // 50 still reads as 49 decided turns — 49 does not trigger.
     seedTurns(db, sessionDbId, NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS, 1);
     const stillShort = await scheduler.onTurnStop(sessionDbId);
 
     expect(stillShort.triggered).toBe(false);
     expect(calls).toHaveLength(0);
 
-    // Turn 26 is what makes turn 25 decided — the window closes one turn later
-    // than "landing turn 25" would suggest, and stays anchored at windowEnd 25
+    // Turn 51 is what makes turn 50 decided — the window closes one turn later
+    // than "landing turn 50" would suggest, and stays anchored at windowEnd 50
     // (the threshold, not the cap — a fresh window is cut at its minimum size
     // the moment it clears the threshold).
     seedTurns(db, sessionDbId, NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS + 1, 1);

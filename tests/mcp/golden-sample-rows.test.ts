@@ -144,7 +144,7 @@ describe("金样例 — the rendered row contract", () => {
       content: "xxx",
       rolledBack: true,
     });
-    addSegmentMembers(db, 31, [first, second], CUTOFF, { eligibleForRelation: "unrestricted" });
+    addSegmentMembers(db, 31, [first, second], CUTOFF);
 
     const output = recallMemory(db, { id: "E31/T1..10" });
 
@@ -179,7 +179,7 @@ describe("金样例 — the rendered row contract", () => {
       title: "title",
       type: ["research"],
     });
-    addSegmentMembers(db, 31, [member], CUTOFF, { eligibleForRelation: "unrestricted" });
+    addSegmentMembers(db, 31, [member], CUTOFF);
     attachSegmentToSession(db, 15069, 31, CUTOFF);
     attachSegmentToSession(db, 15088, 31, CUTOFF);
 
@@ -248,11 +248,11 @@ describe("金样例 — the rendered row contract", () => {
       epoch: T821_EPOCH + 86_400,
       type: ["design"],
     });
-    addSegmentMembers(db, 31, [t811, t812, t821, t822, s2t21], CUTOFF, { eligibleForRelation: "unrestricted" });
+    addSegmentMembers(db, 31, [t811, t812, t821, t822, s2t21], CUTOFF);
     writeMemoryEdges(db, [
       { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t811 }, relation: "refines", provenance: "asserted" },
       { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t812 }, relation: "refines", provenance: "asserted" },
-    ], CUTOFF, { eligibleForRelation: "unrestricted" });
+    ], CUTOFF);
 
     const output = timelineQuery(db, {
       id: "E31",
@@ -291,10 +291,10 @@ describe("金样例 — the rendered row contract", () => {
       epoch: T821_EPOCH,
       type: ["design"],
     });
-    addSegmentMembers(db, 31, [foreign, citer], CUTOFF, { eligibleForRelation: "unrestricted" });
+    addSegmentMembers(db, 31, [foreign, citer], CUTOFF);
     writeMemoryEdges(db, [
       { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: foreign }, relation: "refines", provenance: "asserted" },
-    ], CUTOFF, { eligibleForRelation: "unrestricted" });
+    ], CUTOFF);
 
     const output = timelineQuery(db, {
       id: "E31",
@@ -325,7 +325,7 @@ describe("金样例 — the rendered row contract", () => {
       epoch: T821_EPOCH + 172_800,
       type: ["design"],
     });
-    addSegmentMembers(db, 31, [a, b, c], CUTOFF, { eligibleForRelation: "unrestricted" });
+    addSegmentMembers(db, 31, [a, b, c], CUTOFF);
 
     const lines = timelineQuery(db, {
       id: "E31",
@@ -373,7 +373,7 @@ describe("金样例 — the rendered row contract", () => {
       toolCallCount: 20,
       filesModified: ["a.ts", "b.ts", "c.ts"],
     });
-    addSegmentMembers(db, 31, [first], CUTOFF, { eligibleForRelation: "unrestricted" });
+    addSegmentMembers(db, 31, [first], CUTOFF);
 
     const output = timelineQuery(db, { id: "E31", view: "turns" });
 
@@ -398,7 +398,7 @@ describe("金样例 — the rendered row contract", () => {
       title: "title",
       epoch: T821_EPOCH + 360,
     });
-    addSegmentMembers(db, 31, [first, second], CUTOFF, { eligibleForRelation: "unrestricted" });
+    addSegmentMembers(db, 31, [first, second], CUTOFF);
 
     const lines = timelineQuery(db, { id: "E31", view: "turns" }).split("\n");
     expect(lines).toContain("        [T823] 08-17 18:19 ⏳ title");

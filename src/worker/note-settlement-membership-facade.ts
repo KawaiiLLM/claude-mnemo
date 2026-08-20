@@ -3,7 +3,12 @@ import type { Database } from "bun:sqlite";
 
 import { recordNoteSettlementProposal } from "../db/note-settlement-proposals";
 import { parseBareAddressReference, validateReferences } from "../db/references";
-import { getAttachedSegmentIds, getSegment, reassignSegmentMembers } from "../db/segments";
+import {
+  attachSegmentToSession,
+  createSegment,
+  getSegment,
+  reassignSegmentMembers,
+} from "../db/segments";
 import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade";
 
 /**
@@ -31,8 +36,24 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  * turn 独自开启新任务是合法情形") — a single homeless turn opening its own
  * proposed task is now legal, not just a multi-turn cluster.
  *
+ * TICKET 04 (edge-mechanism-revision D6, "归属动作开放"): the membership half
+ * reaches parity with the main agent. `create` joins the verb list, and
+ * `reassign`'s VALUE DOMAIN — "this session's already-attached segments ∪
+ * homeless", ticket 08's restriction below — is DELETED: any segment that
+ * exists and is open is a legal target, which is what "跨段改派" means. The
+ * judgment that replaces it is not code but the shared Memory Rubric's own 段
+ * section ("只纠显性失配,存疑不动"), read by both writers.
+ *
+ * `create` ATTACHES the new segment to this dispatch's session as part of the
+ * same call, unlike the main agent's own `create` (which leaves attachment to
+ * a separate `attach` verb). Settlement has no live session to attach from
+ * later, and the rubric tells it to check the ROSTER before minting a segment
+ * — a created segment that never joined that roster would be invisible to the
+ * next window and to the main agent's SessionStart, which would make the rule
+ * unfollowable.
+ *
  * TICKET 08 (edge-ownership-impl, "settlement four-field check-and-correct"):
- * `reassign` joins `propose` as the second (and last) legal `action` — the
+ * `reassign` joins `propose` as the second legal `action` — the
  * MEMBERSHIP-CORRECTION path the ownership-and-note-cadence spec's own
  * "所有权" section reserves for settlement ([S15069/T912]/[T913]): "纠错走既
  * 有 staged-commit 通道…值域=该会话已挂靠段 ∪ 无归属，越界拒绝并报出该段不在
@@ -43,11 +64,8 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  * primitive) directly: every turn named is first evicted from wherever it
  * currently lives, then (if `id` is given) added to the target — one
  * transaction, single ownership enforced by the write. The legal domain is
- * `context.attachedSegmentIds` (this session's own roster) ∪ homeless (`id`
- * omitted) — naming any OTHER segment is refused, naming the segment as not
- * attached; attaching a brand-new segment to the session stays the main
- * agent's call alone (`remember`'s own `assign` verb, a different tool
- * registration entirely).
+ * this session's own roster ∪ homeless (`id` omitted) — a restriction ticket
+ * 04 has since deleted; see the paragraph above.
  *
  * Registered under the tool name `remember` (not `segment`) in
  * note-settlement-sdk-query.ts — the settlement subagent uses the same tool
@@ -66,18 +84,20 @@ export const settlementMembershipWriteInputShape = {
   /**
    * `assign` is dead (ticket 05) and stays dead — kept out of this enum
    * entirely (not merely refused downstream) so a stale caller gets zod's
-   * own "invalid enum value" rejection naming the two legal verbs. `propose`
-   * is the text-only exception channel; `reassign` (ticket 08) is the
-   * restricted membership-CORRECTION primitive.
+   * own "invalid enum value" rejection naming the legal verbs. `propose` is
+   * the text-only exception channel; `reassign` (ticket 08) moves turns
+   * between segments; `create` (ticket 04) mints one, which is what makes
+   * "attach to an existing segment, or open the right one" a decision
+   * settlement can actually carry out.
    */
-  action: z.enum(["propose", "reassign"]),
+  action: z.enum(["propose", "reassign", "create"]),
   /** propose only, required — at least one "S<session>/T<prompt>" turn address; this call's staging key. */
   addresses: z.array(z.string()).optional(),
-  /** propose only, required — a short suggested title for the cluster, shown to the user next session. */
+  /** propose/create, required — the cluster's suggested title (propose) or the new segment's own (create). */
   title: z.string().optional(),
-  /** reassign only, required — one or more "S<session>/T<prompt>" turn addresses to correct; this call's staging key. */
+  /** reassign (required) / create (optional seed members) — "S<session>/T<prompt>" turn addresses; this call's staging key. */
   turns: z.array(z.string()).optional(),
-  /** reassign only, optional — the target segment ("E<n>"), drawn from this session's roster; omit to clear ownership (homeless). */
+  /** reassign only, optional — the target segment ("E<n>"); omit to clear ownership (homeless). */
   id: z.string().min(1).optional(),
 };
 
@@ -120,6 +140,13 @@ export interface SettlementMembershipWriteOutcome {
     /** Turn ids actually linked to the target — empty when `targetSegmentId` is null, or on a dry run. */
     addedTurnIds: number[];
   };
+  /** Present ONLY for a `create` outcome (ticket 04). `segmentId` is null on a dry run. */
+  create?: {
+    segmentId: number | null;
+    title: string;
+    /** Seed members actually linked — empty when none were named, or on a dry run. */
+    memberTurnIds: number[];
+  };
 }
 
 export type SettlementMembershipWriteEvaluation =
@@ -129,6 +156,48 @@ export type SettlementMembershipWriteEvaluation =
 export interface EvaluateSettlementMembershipWriteOptions {
   /** false = a dry run (reads only, a real receipt, nothing written); true = the commit-time write. */
   apply: boolean;
+}
+
+/**
+ * Turn addresses -> turn ids, de-duplicated, with one rejection line per bad
+ * address. Shared by `reassign` and `create` (ticket 04) so both apply the
+ * SAME window scope: an address this prompt never rendered is refused, because
+ * rendering is what authorizes a write to a turn — a segment seeded from a
+ * turn the model only imagined would be worse than no segment at all.
+ */
+function resolveTurnAddresses(
+  db: Database,
+  context: SettlementTurnFacadeContext,
+  rawTurns: readonly string[],
+): { turnIds: number[]; rejections: string[] } {
+  const rejections: string[] = [];
+  const turnIds: number[] = [];
+  const seen = new Set<number>();
+  for (const raw of rawTurns) {
+    const parsed = parseBareAddressReference(raw);
+    if (!parsed || parsed.kind !== "turn") {
+      rejections.push(`"${raw}" is not a valid turn address`);
+      continue;
+    }
+    const { accepted } = validateReferences(db, [parsed], {
+      writerSessionId: context.sessionId,
+      logger: context.logger,
+    });
+    const node = accepted[0]?.node;
+    if (!node) {
+      rejections.push(`"${raw}" does not resolve to a turn`);
+      continue;
+    }
+    if (!context.reviewableTurnIds.has(node.id)) {
+      rejections.push(`"${raw}" is outside this dispatch's reviewable window`);
+      continue;
+    }
+    if (!seen.has(node.id)) {
+      seen.add(node.id);
+      turnIds.push(node.id);
+    }
+  }
+  return { turnIds, rejections };
 }
 
 function evaluatePropose(
@@ -233,17 +302,15 @@ function evaluatePropose(
  * transaction — the identical single-ownership guarantee the main agent's
  * own `remember(assign)` verb gets, on a narrower domain.
  *
- * Domain: this session's CURRENTLY attached segments (a LIVE read, ticket 05
- * pinned decision: "写事务内重验该段仍挂靠本会话(roster 快照仅提示)") ∪
- * homeless (`id` omitted). `context.attachedSegmentIds` — the roster snapshot
- * taken once at context-build time — is advisory only now: it is what the
- * PROMPT shows the model, but the actual gate re-reads
- * `db/segments.ts`'s `getAttachedSegmentIds` fresh, every call, so a segment
- * the main agent detached (or a NEW one it attached) between context-build
- * and this write is judged as it stands right now, not as it stood when the
- * roster was rendered. Any segment id outside that live set is refused,
- * naming it as not attached — settlement cannot grow a session's attachment
- * set, only the main agent can.
+ * Ticket 04 (edge-mechanism-revision D6, "跨段改派"): the DOMAIN restriction —
+ * this session's attached segments ∪ homeless — is DELETED. Any segment that
+ * exists and is still open may receive these turns, whichever session it was
+ * attached to, because a mis-homed turn's right home is frequently a segment
+ * this session never attached (that is precisely what "cross-segment" means).
+ * What survives is the CLOSED refusal below, which is not a domain rule: a
+ * closed segment is off the board for every writer, settlement included, and
+ * ticket 05's "渲染后被 detach/close 的段不可再收成员" is about the segment's
+ * own lifecycle rather than about settlement's reach.
  */
 function evaluateReassign(
   db: Database,
@@ -269,64 +336,30 @@ function evaluateReassign(
         message: `id must be an "E<n>" segment address; got "${rawInput.id}".`,
       };
     }
-    // Ticket 05: a LIVE read, not `context.attachedSegmentIds` (the frozen
-    // roster snapshot render time took) — the target must still be attached
-    // AT THE MOMENT this call is evaluated, dry run or commit alike.
-    const currentlyAttached = new Set(getAttachedSegmentIds(db, context.sessionId));
-    if (!currentlyAttached.has(parsedTarget.segmentId)) {
+    // Ticket 05 (spec: "渲染后被 detach/close 的段不可再收成员"), a LIVE read
+    // every call, dry run and commit alike: a segment closed since the roster
+    // was rendered must refuse a new member the same way `remember`'s own
+    // append/replace already refuse one, for the same reason. A segment that
+    // does not exist at all is refused by the same statement, naming that.
+    const targetSegment = getSegment(db, parsedTarget.segmentId);
+    if (!targetSegment) {
       return {
         ok: false,
-        message:
-          `E${parsedTarget.segmentId} is not attached to this session — settlement may only ` +
-          "reassign a turn to a segment already on this session's roster, or to no segment " +
-          "(omit id); attaching a NEW segment to this session is the main agent's call alone.",
+        message: `E${parsedTarget.segmentId} does not exist — reassign names an existing segment, or omit id for homeless.`,
       };
     }
-    // Ticket 05 (spec: "渲染后被 detach/close 的段不可再收成员"): attachment
-    // rows never expire (db/schema.ts's own comment on segment_attachments —
-    // "accumulate, never expire, no detach"), so CLOSE is the live half of
-    // this guard that actually fires in practice. A segment closed after the
-    // roster was rendered must refuse a new member the same way `remember`'s
-    // own append/replace already refuse one, for the same reason.
-    const targetSegment = getSegment(db, parsedTarget.segmentId);
-    if (!targetSegment || targetSegment.status === "closed") {
+    if (targetSegment.status === "closed") {
       return {
         ok: false,
         message:
           `E${parsedTarget.segmentId} is closed — settlement may not reassign a turn onto a ` +
-          "closed segment; it was open when the roster was rendered but has since been closed.",
+          "closed segment; reopen it or choose another home.",
       };
     }
     targetSegmentId = parsedTarget.segmentId;
   }
 
-  const rejections: string[] = [];
-  const turnIds: number[] = [];
-  const seen = new Set<number>();
-  for (const raw of rawTurns) {
-    const parsed = parseBareAddressReference(raw);
-    if (!parsed || parsed.kind !== "turn") {
-      rejections.push(`"${raw}" is not a valid turn address`);
-      continue;
-    }
-    const { accepted } = validateReferences(db, [parsed], {
-      writerSessionId: context.sessionId,
-      logger: context.logger,
-    });
-    const node = accepted[0]?.node;
-    if (!node) {
-      rejections.push(`"${raw}" does not resolve to a turn`);
-      continue;
-    }
-    if (!context.reviewableTurnIds.has(node.id)) {
-      rejections.push(`"${raw}" is outside this dispatch's reviewable window`);
-      continue;
-    }
-    if (!seen.has(node.id)) {
-      seen.add(node.id);
-      turnIds.push(node.id);
-    }
-  }
+  const { turnIds, rejections } = resolveTurnAddresses(db, context, rawTurns);
 
   if (rejections.length > 0) {
     return {
@@ -370,10 +403,75 @@ function evaluateReassign(
 }
 
 /**
- * The settlement membership facade's whole decision — dispatches on
- * `action` (ticket 08 widens this from `propose`-only to `propose` |
- * `reassign`; the zod shape already refuses any third value before this
- * runs).
+ * `create` (ticket 04, edge-mechanism-revision D6): mint a segment for work
+ * that has no home yet. Same primitives the main agent's own `create` uses —
+ * `createSegment` for the row, `reassignSegmentMembers` (never
+ * `addSegmentMembers` directly) for the seed members, so a seeded turn is
+ * evicted from wherever it currently lives and single ownership holds through
+ * one path rather than two.
+ *
+ * The one deliberate difference: this ALSO attaches the new segment to this
+ * dispatch's session. See the module doc comment for why — settlement has no
+ * later `attach` call available to it, and an unattached segment never reaches
+ * the roster the rubric tells it to consult first.
+ */
+function evaluateCreate(
+  db: Database,
+  context: SettlementTurnFacadeContext,
+  rawInput: SettlementMembershipWriteInput,
+  nowEpoch: number,
+  options: EvaluateSettlementMembershipWriteOptions,
+): SettlementMembershipWriteEvaluation {
+  const title = rawInput.title?.trim() ?? "";
+  if (title === "") {
+    return {
+      ok: false,
+      message: "create requires title, the new segment's own name — write it for the task's actual shape.",
+    };
+  }
+
+  const { turnIds, rejections } = resolveTurnAddresses(db, context, rawInput.turns ?? []);
+  if (rejections.length > 0) {
+    return {
+      ok: false,
+      message:
+        `turns rejected: ${rejections.join("; ")} — a segment is seeded with exactly ` +
+        "the turns given, so a call naming even one bad address seeds none.",
+    };
+  }
+
+  if (!options.apply) {
+    return {
+      ok: true,
+      outcome: {
+        proposalId: null,
+        addressesResolved: turnIds.length,
+        create: { segmentId: null, title, memberTurnIds: [] },
+      },
+    };
+  }
+
+  const segment = createSegment(db, { title, nowEpoch });
+  attachSegmentToSession(db, context.sessionId, segment.id, nowEpoch);
+  const memberTurnIds =
+    turnIds.length > 0
+      ? reassignSegmentMembers(db, turnIds, segment.id, nowEpoch).addedTurnIds
+      : [];
+
+  return {
+    ok: true,
+    outcome: {
+      proposalId: null,
+      addressesResolved: turnIds.length,
+      create: { segmentId: segment.id, title, memberTurnIds },
+    },
+  };
+}
+
+/**
+ * The settlement membership facade's whole decision — dispatches on `action`
+ * (ticket 04 widens ticket 08's pair to `propose` | `reassign` | `create`; the
+ * zod shape already refuses any fourth value before this runs).
  */
 export function evaluateSettlementMembershipWrite(
   db: Database,
@@ -384,6 +482,9 @@ export function evaluateSettlementMembershipWrite(
 ): SettlementMembershipWriteEvaluation {
   if (rawInput.action === "reassign") {
     return evaluateReassign(db, context, rawInput, nowEpoch, options);
+  }
+  if (rawInput.action === "create") {
+    return evaluateCreate(db, context, rawInput, nowEpoch, options);
   }
   return evaluatePropose(db, context, rawInput, nowEpoch, options);
 }
@@ -401,6 +502,14 @@ export function renderSettlementMembershipWriteReceipt(
   const replacedSuffix = options.replaced
     ? " — replaces the earlier staged call for this same key"
     : "";
+  if (outcome.create) {
+    const { segmentId, title, memberTurnIds } = outcome.create;
+    return (
+      `${verb} create: ${segmentId !== null ? `E${segmentId}` : "a new segment"} "${title}"` +
+      `${options.staged ? " (pending commit)" : ""}, attached to this session, ` +
+      `${memberTurnIds.length || outcome.addressesResolved} member(s) seeded.${replacedSuffix}`
+    );
+  }
   if (outcome.reassign) {
     const { targetSegmentId, vacatedSegmentIds, addedTurnIds } = outcome.reassign;
     const destination = targetSegmentId !== null ? `E${targetSegmentId}` : "homeless (no segment)";

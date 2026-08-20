@@ -227,8 +227,6 @@ describe("claude-mnemo smoke test", () => {
         sessionId: session.id,
         reviewableTurnIds: new Set([firstTurnId, secondTurnId]),
         contextBuiltAtEpoch: 0,
-        eligibleRelationPairKeys: new Set(),
-        attachedSegmentIds: new Set(),
       },
       { session: `S${session.id}`, title: "Auth race fix" },
       Math.floor(Date.now() / 1000),

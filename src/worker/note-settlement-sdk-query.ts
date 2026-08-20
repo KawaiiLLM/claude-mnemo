@@ -51,12 +51,14 @@ const SETTLEMENT_ALLOWED_TOOLS = [
 ] as const;
 
 /**
- * The restricted write facade's own description, separate from
- * `MNEMO_TOOL_DESCRIPTIONS.note` (mcp/definitions.ts) because the surface
- * really is smaller — no `skip`, no `crossSession`, no turn prose
- * (title/content/insight — retired with duty 2, ticket 05), plus the session
- * address the main tool no longer has (ticket 09), and review is gated to a
- * scope this dispatch alone defines. The MODE vocabulary is NOT part of that
+ * The settlement write facade's own description, separate from
+ * `MNEMO_TOOL_DESCRIPTIONS.note` (mcp/definitions.ts) because the CALL
+ * CONTRACT differs in three narrow ways: no `skip`, no `crossSession`, the
+ * session address the main tool no longer has (ticket 09), and a write scope
+ * this dispatch alone defines (the rendered window). Ticket 04
+ * (edge-mechanism-revision D6) removed the two differences that used to
+ * dominate this text — turn prose is settlement's again, and an edge no longer
+ * needs a pre-existing pair. The MODE vocabulary is NOT part of that
  * difference any more (ticket 07, spec D12): `write`/`edit` mean here exactly
  * what they mean on the main agent's own `note`, out of the same engine
  * (`mcp/field-mode.ts`), so this text describes them in the same words rather
@@ -72,19 +74,20 @@ const SETTLEMENT_ALLOWED_TOOLS = [
  * description below).
  */
 const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
-  "WRITE a CORRECTION to a turn's type/tags/relations, OR this " +
-  "session's narrative — lands immediately, in this same call. This is a " +
-  "RE-CHECK, not a first write: the main agent already wrote every field " +
-  "below for this window's turns; call this only when the Memory Rubric " +
-  "says a stored value is wrong. " +
+  "WRITE a turn's note, type/tags or edges, OR this " +
+  "session's narrative — lands immediately, in this same call. Hindsight " +
+  "work: supply what is missing, correct what is wrong, retract what is " +
+  "false, judged by the Memory Rubric in the prompt. " +
   "Exactly one of `turn` (\"S<session>/T<prompt>\", from the window or " +
   "preceding-turns section) or `session` (\"S<session>\", this session). " +
-  "On `turn`: does NOT accept title/content/insight — turn prose is the " +
-  "main agent's alone to write. " +
-  "type/tags: only for a turn shown in this prompt (window or " +
-  "preceding turns); omit to leave alone. A field that already holds " +
-  "something needs `mode.<field>: \"write\"` (the full replacement set) — " +
-  "the same rule, and the same words, the main agent's own `note` uses. " +
+  "On `turn`: title/content/insight, type/tags and the edge fields, only " +
+  "for a turn shown in this prompt; omit to leave alone. A first note for a " +
+  "turn needs title and content together. A field that already holds " +
+  "something needs `mode.<field>: \"write\"` (the full replacement text or " +
+  "set) or the edit form `{ mode: \"edit\", oldString, newString }` for one " +
+  "exactly-matched span — the same rule, and the same words, the main " +
+  "agent's own `note` uses; a whole-field `write` over text this prompt " +
+  "showed only truncated is refused, and the edit form is the way through. " +
   "Each field is checked and applied " +
   "INDEPENDENTLY: if another writer (the main agent's own later note, or a " +
   "prior settlement attempt) touched a field since this dispatch's context " +
@@ -92,13 +95,16 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "while the other still lands. " +
   "evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/" +
   "dependsOn: address lists — the SAME seven relations and phase-legality " +
-  "validator the main agent's own `note` tool uses; a target must already " +
-  "be a pair that existed before this run started AND still exist right " +
-  "now, and its two ends' `type` must satisfy the relation's phase pair (a " +
-  "structurally illegal pair is rejected, naming which half is missing). " +
+  "validator the main agent's own `note` tool uses. An edge stands on its " +
+  "own: no prose citation, no pre-existing link between the two turns, and " +
+  "one pair may carry several relations at once; its two ends' `type` must " +
+  "satisfy the relation's phase pair (a structurally illegal pair is " +
+  "rejected, naming which half is missing). Each has a retract… mirror " +
+  "(retractEvidenceFor …) that deletes that edge; an address carrying no " +
+  "such edge rejects the call, naming it, and nothing is deleted. " +
   "Which relation, if any, is the Memory Rubric's own 关系 checklist " +
-  "above — this call only enforces address/eligibility/phase shape. " +
-  "On `session`: `title`/`content` only — type/tags/relations are refused. " +
+  "above — this call only enforces address/phase shape. " +
+  "On `session`: `title`/`content` only — type/tags/edges are refused. " +
   "A field that already holds something needs `mode.<field>`: \"write\" " +
   "replaces it whole (supply the finished text), or the edit form " +
   "`{ mode: \"edit\", oldString, newString }` swaps one exactly-matched span " +
@@ -108,15 +114,17 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "also supplied — the new text belongs in `newString`.";
 
 /**
- * The `remember` tool's settlement-side call contract — `propose` and
- * `reassign` (ticket 08) are the two legal verbs; `assign` stays dead
- * (ticket 05). Registered under the SAME tool name the main agent's own
- * `remember` uses, a settlement-specific shape, the same relationship the
- * `note` facade already has to the main agent's `note` tool.
+ * The `remember` tool's settlement-side call contract — `propose` (ticket 05),
+ * `reassign` (ticket 08) and `create` (ticket 04, edge-mechanism-revision D6)
+ * are the legal verbs; `assign` stays dead (ticket 05). Registered under the
+ * SAME tool name the main agent's own `remember` uses, a settlement-specific
+ * shape, the same relationship the `note` facade already has to the main
+ * agent's `note` tool.
  */
 const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
-  "WRITE a text-only task proposal, OR a membership CORRECTION — lands " +
-  "immediately, in this same call. action: \"propose\" or \"reassign\". " +
+  "WRITE a text-only task proposal, a membership correction, or a new " +
+  "segment — lands immediately, in this same call. action: \"propose\", " +
+  "\"reassign\" or \"create\". " +
   "propose: addresses (one or more \"S<session>/T<prompt>\" turn " +
   "addresses — a single homeless turn may open its own proposal, or name a " +
   "cluster forming ONE coherent task) + title (a short suggested name) — " +
@@ -126,13 +134,15 @@ const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
   "storing a second one. NEVER creates a segment and is never auto-adopted " +
   "— do not propose an incoherent grab-bag. " +
   "reassign: turns (one or more \"S<session>/T<prompt>\" addresses to " +
-  "correct) + id (an \"E<n>\" CURRENTLY attached to this session) or id " +
-  "omitted to clear ownership (homeless). This is a RE-CHECK, not a first " +
-  "assignment — the main agent already placed these turns; correct only a " +
-  "DISPLAYED mismatch. A segment not attached right now is refused, " +
-  "naming it as not attached — attaching a NEW segment to this session is " +
-  "the main agent's call alone. Never required — this window may finish " +
-  "without ever calling this tool.";
+  "correct) + id (any OPEN \"E<n>\", on this session's roster or not — a " +
+  "turn's right home is often a segment this session never attached) or id " +
+  "omitted to clear ownership (homeless). Correct a DISPLAYED mismatch; a " +
+  "closed segment, or an id naming nothing, is refused. " +
+  "create: title (the new segment's own name, written for the task's actual " +
+  "shape) + optional turns to seed as its members. The segment is attached " +
+  "to this session, so the next window sees it on the roster — check that " +
+  "roster first: joining an existing segment beats minting a new one. " +
+  "Never required — this window may finish without ever calling this tool.";
 
 /** Ticket 06 (spec "commit 重定位"): claim validity + a run summary + the job's terminal mark — no separate `check` tool. */
 const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
@@ -210,8 +220,6 @@ export function createNoteSettlementSdkQuery(
       sessionId: request.sessionId,
       reviewableTurnIds: request.reviewableTurnIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
-      eligibleRelationPairKeys: request.eligibleRelationPairKeys,
-      attachedSegmentIds: request.attachedSegmentIds,
     };
     const writes = createSettlementDirectWriteEngine({
       db: options.db,

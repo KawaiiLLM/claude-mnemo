@@ -113,8 +113,6 @@ async function captureSettlementRegistration(db: Database): Promise<{
     sessionId: sessionDbId,
     reviewableTurnIds: new Set([t1]),
     contextBuiltAtEpoch: NOW,
-    eligibleRelationPairKeys: new Set(),
-    attachedSegmentIds: new Set(),
   });
 
   return { names, shapes, descriptions };
@@ -163,7 +161,15 @@ describe("settlement's tool surface is the main agent's plus exactly `commit` (t
       expect(registered.mode).toBe(noteInputShape.mode);
       // The other genuinely shared fields, same reasoning (ticket 07 of the
       // semantic-container spec established this; D12 only adds `mode`).
+      // Ticket 04 (edge-mechanism-revision D3/D6) EXTENDS the enumeration
+      // rather than relaxing it: `insight` and the seven retraction mirrors
+      // are shared objects too now — settlement writes turn prose again and
+      // retracts edges through the same primitive, so every field of that
+      // widened surface has to be the main agent's own object, not a
+      // look-alike. The tool-DIFFERENCE assertion above is untouched and
+      // still computes to exactly {commit}.
       for (const field of [
+        "insight",
         "type",
         "tags",
         "evidenceFor",
@@ -173,6 +179,13 @@ describe("settlement's tool surface is the main agent's plus exactly `commit` (t
         "override",
         "encodes",
         "dependsOn",
+        "retractEvidenceFor",
+        "retractEvidenceAgainst",
+        "retractGroundedOn",
+        "retractRefines",
+        "retractOverride",
+        "retractEncodes",
+        "retractDependsOn",
       ] as const) {
         expect(registered[field]).toBe(noteInputShape[field]);
       }

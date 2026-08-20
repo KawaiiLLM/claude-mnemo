@@ -244,8 +244,6 @@ describe("the hook is registered on the run's own job identity", () => {
       sessionId: sessionDbId,
       reviewableTurnIds: new Set([turnId]),
       contextBuiltAtEpoch: NOW,
-      eligibleRelationPairKeys: new Set(),
-      attachedSegmentIds: new Set(),
     });
 
     expect(stopDecision).toBe("block");

@@ -134,7 +134,6 @@ function seedSegmentMilestoneFixture(db: Database): {
       },
     ],
     CUTOFF,
-    { eligibleForRelation: "unrestricted" },
   );
 
   const encodedSeg = createSegment(db, {

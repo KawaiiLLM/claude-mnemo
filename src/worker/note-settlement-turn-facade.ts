@@ -2,16 +2,24 @@ import { z } from "zod";
 import type { Database } from "bun:sqlite";
 
 import {
-  getOutgoingEdges,
-  pairKey,
-  writeMemoryEdges,
-  type CitingNode,
-  type EdgeNode,
-  type WriteEdgeInput,
-} from "../db/memory-edges";
+  attachTurnRelations,
+  recomputeTurnCitedPairs,
+  retractTurnRelations,
+  type TurnRelationFieldInput,
+} from "../db/citations";
+import { resolveEraCutoff } from "../db/era";
+import type { EdgeNode } from "../db/memory-edges";
+import { closeNoteDebtAsNoted } from "../db/note-debt";
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import { getSession, updateSessionFields } from "../db/sessions";
-import { getTurn, getTurnById, updateTurnById } from "../db/turns";
+import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
+import {
+  getTurn,
+  getTurnById,
+  promoteTurnFromNote,
+  updateTurnById,
+  type TurnRecord,
+} from "../db/turns";
 import { checkFieldGate, claimWriterId, stampField } from "../db/write-gate";
 import { settlementNoteInputShape } from "../mcp/definitions";
 import {
@@ -23,17 +31,31 @@ import {
   resolveStringField,
   type FieldMode,
 } from "../mcp/field-mode";
-import { parseSessionAddress, parseTurnAddress } from "../mcp/note";
+import {
+  bracketBareTurnReferences,
+  completeReadRemedyForTurnField,
+  formatRelationRejections,
+  isValidPredecessorFor,
+  parseSessionAddress,
+  parseTurnAddress,
+  writeOverwritesExistingTurnContent,
+  RELATION_FIELD_ENTRIES,
+  RETRACTION_FIELD_ENTRIES,
+} from "../mcp/note";
 import {
   formatSessionFieldUsage,
   SESSION_SUMMARY_FIELDS,
 } from "../mcp/session-summary";
-import { findRetiredTopicTag, retiredTopicTagMessage } from "../shared/tag-stripping";
+import { isSegmentEra } from "../segment-era";
+import { formatBudgetWarning, formatNoteBudget } from "../shared/note-budget";
+import {
+  findRetiredTopicTag,
+  retiredTopicTagMessage,
+  stripPrivateTags,
+} from "../shared/tag-stripping";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
 import {
-  EDGE_RELATIONS,
   phasesForTypes,
-  RELATION_FIELD_NAME,
   validateRelationTarget,
   type TurnEdgeRelation,
   type TurnPhase,
@@ -43,17 +65,41 @@ import {
  * The settlement turn-write facade (spec G6/G7/D5/D5a; staged commit per
  * spec A7).
  *
+ * TICKET 04 (edge-mechanism-revision D6, "结算重武装"): this facade is the
+ * main agent's own write surface again, in hindsight. Two retirements this
+ * file used to enforce are EXPLICITLY REVOKED:
+ *
+ *   - "结算不再重建笔记" (ticket 05 below): title/content/insight are
+ *     writable, through the SAME `mode` vocabulary, the SAME write gate and —
+ *     ticket 07's recorded exemption, closed here — the same complete-read
+ *     requirement the main agent's `note` obeys. A settlement pass may rewrite
+ *     any note in the window it was shown; what stops it is the gate, not a
+ *     categorical refusal. `writer_origin` on the shadow row records who wrote
+ *     the text that now stands.
+ *   - spec C7's pre-existence fence: `context.eligibleRelationPairKeys`, its
+ *     pre-run snapshot, its frozen∩current intersection and the
+ *     `duplicate-target` mirror that refused two relations on one pair are all
+ *     DELETED (not bypassed — spec user story 18). A relation stands on its
+ *     own now (D1), so "the pair must already exist" was the one premise a
+ *     rebuild-from-zero settlement could never satisfy: the window it is asked
+ *     to connect starts with no edges at all.
+ *
+ * What is machine-checked on an edge write is exactly what the main agent's
+ * surface checks (D1): the CITING turn's own write gate, address existence,
+ * phase legality, self-reference. The gate FIELD for an edge write is `type`
+ * — CHECKED, never STAMPED — mirroring `mcp/note.ts`'s
+ * `EDGE_WRITE_GATE_FIELD`; see that constant's own comment for both halves of
+ * the reasoning, and note that a divergence here would fork the two writers'
+ * gate semantics, which is precisely what this batch retired.
+ *
  * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"): duty 2
- * — turn prose reconstruction (title/content/insight) — retires OUTRIGHT.
- * "结算不再重建笔记": the prose write path this file used to carry
- * (`context.reconstructableTurnIds`, `upsertReconstructedShadowNote`,
- * `context.rideTurnId`, `context.writerModel`) is GONE, not merely unused —
- * a call naming title/content/insight is now refused loudly rather than
- * silently ignored, the same "never silent" discipline the retired `topic:`
- * tag namespace already gets. Grade/type/tags stay reachable through this
- * same facade — the STRUCTURED correction path (type/tags/relations, and
- * membership through the sibling `remember` facade) survives; only the
- * PROSE path is what duty 2 took with it.
+ * — turn prose reconstruction (title/content/insight) — retired outright.
+ * REVOKED by ticket 04 above; the paragraph is kept because the plumbing it
+ * removed (`context.reconstructableTurnIds`, `upsertReconstructedShadowNote`,
+ * `context.rideTurnId`, `context.writerModel`) did NOT come back: prose lands
+ * through the ordinary `upsertShadowNote`/`promoteTurnFromNote` path the main
+ * agent uses, with no settlement-only "never over an agent note" clause — the
+ * write gate is the arbiter now, for both writers alike.
  *
  * TICKET 06 (ownership-and-note-cadence spec, "选举机器拆除"): the election
  * tier (ADR-0003) — the third grading semantics this facade used to accept
@@ -78,17 +124,14 @@ import {
  * UNRELATED and untouched — this ticket retires the WRITE surface only,
  * same split ADR-0003 already drew for the tier half.
  *
- * What is granted here, post-ticket-02:
+ * What is granted here, post-ticket-04:
  *
- *   - type/tags ONLY for a turn `context.reviewableTurnIds`
- *     names — the window plus its rendered lookback — and yields to an
- *     agent note that landed after this dispatch's context was read;
- *   - a relation ONLY on a pair already present in
- *     `context.eligibleRelationPairKeys` — a snapshot the caller takes ONCE
- *     before the model run starts (spec C7/C14: "a reply cannot create its
- *     own eligibility", generalised from a single transaction's pre-state to
- *     a whole run's, because a run is many small transactions rather than
- *     one).
+ *   - title/content/insight, type and tags for any turn
+ *     `context.reviewableTurnIds` names — the window plus its rendered
+ *     lookback — each field admitted or refused by the write gate on its own;
+ *   - a relation or a retraction on any address that resolves, judged by phase
+ *     legality and the citing turn's own gate, with no pre-existence premise
+ *     of any kind.
  *
  * TICKET 07 (write-mode-edit-semantics spec D12, "结算面与主 agent 完全一致"):
  * every field this facade writes now carries the SAME `mode` the main agent's
@@ -116,8 +159,15 @@ import {
  *
  * `evaluateSettlementTurnWrite` stays a plain decision function either way —
  * every READ it needs (turn lookup, reference resolution) always runs live
- * against the database; only the WRITES (`updateTurnById`, `writeMemoryEdges`,
- * the write gate's own `stampField`) are conditional on `apply: true`.
+ * against the database; only the WRITES (`updateTurnById`, `upsertShadowNote`,
+ * `attachTurnRelations`/`retractTurnRelations`, the write gate's own
+ * `stampField`) are conditional on `apply: true`. Ticket 04 made the two edge
+ * halves the one place where a dry run is now WEAKER than the real write: both
+ * primitives validate and mutate in one indivisible step, so `apply: false`
+ * reports the count it would attempt rather than re-implementing their checks
+ * a second time. Every rejection a real call can produce still comes from a
+ * check that runs BEFORE any write in the same call, so a refusal never leaves
+ * half a call standing.
  *
  * TICKET 08 (edge-ownership-impl, "settlement four-field check-and-
  * correct"): the relation half now consumes THE SAME validator the main
@@ -130,10 +180,11 @@ import {
  * here with the identical "which half is missing" message `mcp/note.ts`
  * produces, not a second, independently-worded rule. `supersedes` is retired
  * from this write surface too — frozen legacy, readable on old rows
- * (`db/citations.ts`), never written by either path any more. The same-run
- * eligibility fence (`context.eligibleRelationPairKeys`, spec C7) is
- * untouched — the phase check is an ADDITIONAL gate, not a replacement for
- * it.
+ * (`db/citations.ts`), never written by either path any more. Ticket 04
+ * finished the convergence: the phase check is now literally `mcp/note.ts`'s
+ * own `checkRelationTargetPhase`, and the write is its own
+ * `attachTurnRelations`, with `judged` provenance as the single declared
+ * difference between the two callers.
  */
 
 // ---------------------------------------------------------------------------
@@ -149,28 +200,17 @@ export interface SettlementTurnFacadeContext {
   reviewableTurnIds: ReadonlySet<number>;
   /** When this dispatch's context was read — the note-timestamp fence's boundary. */
   contextBuiltAtEpoch: number;
-  /**
-   * Pair keys (`memory-edges.ts`'s `pairKey`) eligible for a relation on THIS
-   * dispatch's whole model run — taken ONCE, before the run starts, by the
-   * caller (`worker/note-settlement-dispatch.ts`). Not recomputed per call:
-   * recomputing it fresh at the top of each tool call's own transaction would
-   * let an EARLIER call in the same run mint a pair and a LATER call in the
-   * same run treat that freshly-minted pair as "pre-existing" and self-license
-   * a relation on it — precisely the violation this snapshot exists to close.
-   * Unaffected by staging: nothing lands before `commit`, so the run's own
-   * writes never enter this set either way.
-   */
-  eligibleRelationPairKeys: ReadonlySet<string>;
-  /**
-   * Ticket 08 (edge-ownership-impl): the legal DOMAIN for a membership
-   * correction — this session's currently attached segment ids
-   * (`NoteSettlementContext.segmentRoster`, projected down to bare ids).
-   * `db/segments.ts`'s `listAttachedSegments` doc comment anticipates this
-   * exact field name. A membership reassign naming any other segment, or
-   * attaching a NEW one, is out of settlement's authority — the main agent
-   * alone grows a session's attachment set.
-   */
-  attachedSegmentIds: ReadonlySet<number>;
+  // Ticket 04 (edge-mechanism-revision D6): `eligibleRelationPairKeys` — the
+  // frozen pre-run pair snapshot spec C7 required — is GONE from this context,
+  // from the dispatch that built it and from `db/memory-edges.ts`'s own gate.
+  // Nothing replaces it: a relation is a standalone claim (D1), so there is no
+  // pre-state left for it to be eligible against.
+  // Ticket 04 (edge-mechanism-revision D6): `attachedSegmentIds` — ticket 08's
+  // membership DOMAIN — is gone from this context too, with the restriction it
+  // encoded. Settlement reassigns across segments and creates them, so "which
+  // segments may receive a turn" is no longer a question anything asks; the
+  // roster still renders in the prompt (`NoteSettlementContext.segmentRoster`)
+  // as orientation, which is all it ever was for the model.
   logger?: Pick<Console, "warn">;
 }
 
@@ -240,13 +280,42 @@ export type SettlementTurnWriteInput = z.infer<
   typeof settlementTurnWriteInputSchema
 >;
 
-// Ticket 08: derived from `EDGE_RELATIONS`/`RELATION_FIELD_NAME` — the SAME
-// derivation `mcp/note.ts`'s own `RELATION_FIELD_ENTRIES` uses — so the
-// seven-word closed set and its parameter spelling cannot drift apart
-// between the two write paths.
-const RELATION_FIELD_ENTRIES: ReadonlyArray<
-  readonly [key: string, relation: TurnEdgeRelation]
-> = EDGE_RELATIONS.map((relation) => [RELATION_FIELD_NAME[relation], relation] as const);
+// Ticket 08 derived its own `RELATION_FIELD_ENTRIES` here from the same
+// constants `mcp/note.ts` derives from; ticket 04 stopped deriving twice and
+// IMPORTS both that list and its `RETRACTION_FIELD_ENTRIES` mirror. Two
+// derivations from one constant cannot drift in their VALUES, but they can (and
+// did) drift in which halves of the vocabulary each surface wires up at all —
+// importing removes even that.
+
+/** The three prose fields, in the order a receipt reads best. */
+const PROSE_FIELDS = ["title", "content", "insight"] as const;
+type ProseField = (typeof PROSE_FIELDS)[number];
+
+/**
+ * The seven relation (or seven retraction) parameters this call carries, in
+ * the `{relation, targets}` shape both `db/citations.ts` primitives take. The
+ * zod shape has already proved each value is a `string[]`, so unlike
+ * `mcp/note.ts`'s own collector this one has no type-check to fail.
+ */
+function collectRelationFields(
+  entries: ReadonlyArray<readonly [key: string, relation: string]>,
+  rawInput: SettlementTurnWriteInput,
+): TurnRelationFieldInput[] {
+  const fields: TurnRelationFieldInput[] = [];
+  for (const [key, relation] of entries) {
+    const provided = (rawInput as Record<string, unknown>)[key] as
+      | string[]
+      | undefined;
+    if (provided !== undefined && provided.length > 0) {
+      fields.push({ relation: relation as TurnRelationFieldInput["relation"], targets: provided });
+    }
+  }
+  return fields;
+}
+
+function countTargets(fields: readonly TurnRelationFieldInput[]): number {
+  return fields.reduce((total, field) => total + field.targets.length, 0);
+}
 
 /**
  * One reviewed field's own outcome (ticket 05, read-write-contract spec
@@ -278,7 +347,29 @@ export interface ReviewOutcome {
 }
 
 export interface RelationOutcome {
+  /** Rows this call ADDED (ticket 04: `attachTurnRelations`' own additive count). */
   written: number;
+  /** Accepted targets whose (pair, relation) row was already stored — a restatement, not new work. */
+  restated: number;
+  /** Rows a `retract…` mirror deleted in this same call (D3). */
+  retracted: number;
+}
+
+/**
+ * Ticket 04 (edge-mechanism-revision D6): the prose half of a turn write —
+ * settlement's revoked duty 2. `fields` names what this call actually wrote,
+ * `noteExisted` distinguishes a first note from a rewrite (the receipt's own
+ * "Noted"/"Updated" split on the main agent's surface), and the two budget
+ * strings are the SAME feedback `mcp/note.ts` puts on every prose receipt —
+ * settlement writes under the same field budgets, so it is told about them in
+ * the same words.
+ */
+export interface ProseOutcome {
+  fields: ProseField[];
+  noteExisted: boolean;
+  stripped: boolean;
+  budget: string;
+  budgetWarning: string | null;
 }
 
 /**
@@ -305,6 +396,8 @@ export interface SettlementTurnWriteOutcome {
   turnId: number | null;
   review: ReviewOutcome | null;
   relations: RelationOutcome | null;
+  /** Ticket 04: the turn's own prose, `null` when this call wrote none. */
+  prose: ProseOutcome | null;
   /** `null` for a `turn`-addressed outcome. */
   session: SessionNarrativeOutcome | null;
 }
@@ -324,115 +417,18 @@ export interface EvaluateSettlementTurnWriteOptions {
   apply: boolean;
 }
 
-/**
- * Mirrors `writeMemoryEdges`'s own pre-write checks (self-loop, conflicting-
- * relation-on-one-pair, eligibility) WITHOUT writing, so a stage-time dry run
- * can report the identical verdict a real write would produce. Small,
- * deliberate duplication: modifying the shared `writeMemoryEdges` primitive
- * to grow a dry-run mode would touch every other caller (note.ts,
- * segments.ts) for one caller's benefit. Both stage (`apply: false`) and
- * commit (`apply: true`, immediately followed by the real `writeMemoryEdges`
- * call with the same accepted list) run this same function first, so the two
- * can never disagree about WHICH inputs are legal — only about whether they
- * are actually written.
- *
- * Ticket 10d finding 1: eligibility is the FROZEN pre-run snapshot
- * INTERSECTED with the pair's CURRENT existence, not the frozen set alone.
- * The freeze (ticket 07/C7) exists to stop a run self-licensing a pair its
- * OWN writes just minted mid-run; it says nothing about the pair surviving
- * to commit time. Without the current-state half, a stale frozen key can
- * RESURRECT a pair the main agent deleted between the snapshot and commit:
- * T2 cites T1 when the snapshot is taken, settlement stages `dependsOn(T1)`,
- * the main agent then rewrites T2's body and `reconcileCitedPairs` deletes
- * T2->T1 — the frozen set still names the key, so without this check
- * `writeMemoryEdges` would re-INSERT a relation-only pair T2's body no
- * longer supports, which is exactly what C6 forbids. Dropping the CURRENT
- * check reintroduces that bug; dropping the FROZEN check reintroduces the
- * self-licensing bug ticket 07 closed. Both constraints, not either — hence
- * the intersection, not a replacement.
- *
- * `currentPairKeys` is read from `citing`'s own outgoing edges — one query
- * regardless of how many candidates this call carries, and correct at BOTH
- * stage time (still frozen==current, ordinarily) and commit time (fresh,
- * inside the same transaction the write lands in), because this function
- * runs unconditionally at both, same as every other read in this file.
- */
-function evaluateRelationCandidates(
-  db: Database,
-  citing: CitingNode,
-  candidates: ReadonlyArray<{ key: string; relation: TurnEdgeRelation; node: EdgeNode }>,
-  eligiblePairKeys: ReadonlySet<string>,
-): { accepted: WriteEdgeInput[]; rejections: string[] } {
-  const currentPairKeys = new Set(
-    getOutgoingEdges(db, citing).map((edge) => pairKey({ citing, cited: edge.cited })),
-  );
-  const relationsByPair = new Map<string, Set<TurnEdgeRelation>>();
-  for (const candidate of candidates) {
-    const key = pairKey({ citing, cited: candidate.node });
-    const set = relationsByPair.get(key) ?? new Set<TurnEdgeRelation>();
-    set.add(candidate.relation);
-    relationsByPair.set(key, set);
-  }
-  const conflictingPairs = new Set(
-    [...relationsByPair.entries()]
-      .filter(([, relations]) => relations.size > 1)
-      .map(([key]) => key),
-  );
-
-  const accepted: WriteEdgeInput[] = [];
-  const rejections: string[] = [];
-  for (const candidate of candidates) {
-    if (citing.kind === candidate.node.kind && citing.id === candidate.node.id) {
-      rejections.push(`${candidate.key} names this turn itself (self-loop)`);
-      continue;
-    }
-    const key = pairKey({ citing, cited: candidate.node });
-    if (conflictingPairs.has(key)) {
-      rejections.push(
-        `${candidate.key} names a pair another relation field in this same ` +
-          "call already claims a different relation for",
-      );
-      continue;
-    }
-    if (!eligiblePairKeys.has(key)) {
-      rejections.push(
-        `${candidate.key} names a pair not eligible for a relation — settlement ` +
-          "may only attach a relation to a pair that already existed before " +
-          "this dispatch's model run began (spec C7)",
-      );
-      continue;
-    }
-    if (!currentPairKeys.has(key)) {
-      rejections.push(
-        `${candidate.key} names a pair that no longer exists — the citing ` +
-          "side's body has stopped citing it since this run's eligibility " +
-          "snapshot was taken (frozen ∩ current, spec C6/C7); a relation " +
-          "cannot outlive the citation it rests on",
-      );
-      continue;
-    }
-    accepted.push({
-      citing,
-      cited: candidate.node,
-      relation: candidate.relation,
-      provenance: "judged",
-    });
-  }
-  return { accepted, rejections };
-}
-
-const SESSION_ONLY_FORBIDDEN_FIELDS = [
+// A session row has no insight, no facets and no edges — every one of these is
+// a TURN field, and a session-addressed call naming one is told so by name
+// rather than by a generic parse error. Derived for the two edge halves
+// (ticket 04 adds the retraction mirrors) so a relation added to the
+// vocabulary tomorrow is refused here without anyone remembering to type it.
+const SESSION_ONLY_FORBIDDEN_FIELDS: readonly string[] = [
   "insight",
   "type",
   "tags",
-  "evidenceFor",
-  "evidenceAgainst",
-  "groundedOn",
-  "refines",
-  "override",
-  "encodes",
-  "dependsOn",
-] as const;
+  ...RELATION_FIELD_ENTRIES.map(([key]) => key),
+  ...RETRACTION_FIELD_ENTRIES.map(([key]) => key),
+];
 
 /**
  * The session-narrative branch (ticket 09, edge-ownership-impl: "结算顺手维
@@ -479,7 +475,7 @@ function evaluateSettlementSessionWrite(
   }
 
   for (const key of SESSION_ONLY_FORBIDDEN_FIELDS) {
-    if (rawInput[key] !== undefined) {
+    if ((rawInput as Record<string, unknown>)[key] !== undefined) {
       return { ok: false, message: `${key} is a turn field; this call addresses a session.` };
     }
     // Ticket 07: a mode naming a turn-only field is the same mistake as the
@@ -573,6 +569,7 @@ function evaluateSettlementSessionWrite(
       turnId: null,
       review: null,
       relations: null,
+      prose: null,
       session: {
         sessionId,
         titleWritten: sessionFields.includes("title"),
@@ -637,42 +634,32 @@ export function evaluateSettlementTurnWrite(
   }
   const ref = `S${address.sessionId}/T${address.promptNumber}`;
 
-  // Ticket 05 (ownership-and-note-cadence spec, "settlement demolition"):
-  // duty 2 — turn prose reconstruction — retires OUTRIGHT. title/content/
-  // insight are refused LOUDLY here rather than silently ignored: the main
-  // agent is the note's sole first-hand writer now, and a settlement call
-  // still naming these fields is a caller running against a contract that no
-  // longer exists, not a no-op.
-  // Ticket 07: a prose field reached through `mode.<field>` alone (the edit
-  // form carries its whole payload there, spec D10) is the same call the
-  // paragraph above refuses — checked by the same statement so the shared
-  // vocabulary cannot become a second door into a retired duty.
-  const forbiddenProseField = (["title", "content", "insight"] as const).find(
-    (field) => rawInput[field] !== undefined || modeMap[field] !== undefined,
+  // Ticket 04 (edge-mechanism-revision D6): the prose fields are settlement's
+  // again — ticket 05's outright refusal is REVOKED. A field touched ONLY
+  // through `mode.<field>` (the edit form carries its whole payload there,
+  // spec D10) counts as written, same rule `mcp/note.ts` applies.
+  const proseFields = PROSE_FIELDS.filter(
+    (field) => rawInput[field] !== undefined || isFieldEditMode(modeMap[field]),
   );
-  if (forbiddenProseField) {
-    return {
-      ok: false,
-      message:
-        "title/content/insight are no longer settlement's to write — turn " +
-        "prose reconstruction retired with duty 2; the main agent is the " +
-        "note's sole writer. This call may only carry type/tags " +
-        "and/or a relation field.",
-    };
-  }
 
   const touchesReview =
     rawInput.type !== undefined ||
     rawInput.tags !== undefined;
-  const relationFields = RELATION_FIELD_ENTRIES.filter(
-    ([key]) =>
-      (((rawInput as Record<string, unknown>)[key] as string[] | undefined)?.length ?? 0) > 0,
-  );
+  const relationFields = collectRelationFields(RELATION_FIELD_ENTRIES, rawInput);
+  const retractionFields = collectRelationFields(RETRACTION_FIELD_ENTRIES, rawInput);
 
-  if (!touchesReview && relationFields.length === 0) {
+  if (
+    proseFields.length === 0 &&
+    !touchesReview &&
+    relationFields.length === 0 &&
+    retractionFields.length === 0
+  ) {
     return {
       ok: false,
-      message: "at least one of type/tags, or a relation field is required.",
+      message:
+        "at least one of title, content, insight, type, tags, a relation field" +
+        " (evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn)" +
+        " or one of their retract… mirrors is required.",
     };
   }
 
@@ -713,17 +700,27 @@ export function evaluateSettlementTurnWrite(
     return { ok: false, message: `${ref} is a compact marker, not a turn.` };
   }
 
+  // Scope (unchanged in kind, widened in what it covers): rendering IS
+  // authorization, so every field of a turn this prompt did not show is out of
+  // reach — prose included, now that prose is settlement's again.
+  if (
+    (touchesReview || proseFields.length > 0) &&
+    !context.reviewableTurnIds.has(turn.id)
+  ) {
+    return {
+      ok: false,
+      message:
+        `${ref} is outside this dispatch's reviewable window (the window ` +
+        "plus its rendered lookback) — a turn's fields may only be " +
+        "written for a turn this prompt actually showed.",
+    };
+  }
+
+  const writer = claimWriterId(context.jobId, context.claimGeneration);
+
   let review: ReviewOutcome | null = null;
+  const landedUpdate: { type?: string[]; tags?: string[] } = {};
   if (touchesReview) {
-    if (!context.reviewableTurnIds.has(turn.id)) {
-      return {
-        ok: false,
-        message:
-          `${ref} is outside this dispatch's reviewable window (the window ` +
-          "plus its rendered lookback) — type/tags may only be " +
-          "written for a turn this prompt actually showed.",
-      };
-    }
 
     // Ticket 07 (spec D4/D12): the SAME set-field rule the main agent's own
     // `note` obeys — a type/tags that already holds something is replaced only
@@ -755,12 +752,7 @@ export function evaluateSettlementTurnWrite(
     // finds stale means an agent note (or another claim) stamped it after
     // that grant — this outcome's `yieldedReason` is exactly what teaches
     // that, in the gate's own words.
-    const writer = claimWriterId(context.jobId, context.claimGeneration);
     const outcome: ReviewOutcome = {};
-    const landedUpdate: {
-      type?: string[];
-      tags?: string[];
-    } = {};
 
     if (normalizedType !== undefined) {
       const verdict = checkFieldGate(db, writer, "turn", turn.id, "type", ref);
@@ -781,10 +773,254 @@ export function evaluateSettlementTurnWrite(
       }
     }
 
-    if (
-      options.apply &&
-      (landedUpdate.type !== undefined || landedUpdate.tags !== undefined)
-    ) {
+    review = outcome;
+  }
+
+  // ---- Prose (ticket 04, D6): validated here, applied below --------------
+  //
+  // Nothing in this block writes. The whole call's rejections are collected
+  // before the first mutation, so a refusal on the third field never leaves
+  // the first two standing — the same all-or-nothing shape `mcp/note.ts` gets
+  // for free from its single write transaction.
+  const existingNote = proseFields.length > 0 ? getShadowNote(db, turn.id) : null;
+  const noteExisted = existingNote !== null;
+  const eraCutoffEpoch = resolveEraCutoff(db);
+  const promotesTurnRecord = isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch);
+  let resolvedProse:
+    | {
+        title: string | null | undefined;
+        content: string | null | undefined;
+        insight: string | null | undefined;
+        stripped: boolean;
+        finalTitle: string;
+        finalContent: string;
+        finalInsight: string | null;
+      }
+    | null = null;
+
+  if (proseFields.length > 0) {
+    // The same destination rule the main agent obeys (`mcp/note.ts`): a
+    // pre-cutoff turn never promotes, so its prose could only land in
+    // `shadow_notes`, which no reader reads. Refusing says so at the call
+    // instead of writing a record nobody will ever meet. An UNCONFIGURED era
+    // (the rollback) means "every turn is legacy", and there the shadow row is
+    // the intended and only record — so the refusal is conditional on the era
+    // existing, exactly as it is on the main surface.
+    if (eraCutoffEpoch !== null && !promotesTurnRecord) {
+      return {
+        ok: false,
+        message:
+          `${ref} is a pre-cutoff turn, whose prose has no reader — title,` +
+          " content and insight cannot be written to it. Its type and tags are" +
+          " still writable.",
+      };
+    }
+
+    // The gate, per field, BEFORE mode resolution — the order is load-bearing
+    // on both surfaces: the gate answers "have you read what is there", and an
+    // `edit` applied to text this writer never read is what it exists to stop.
+    //
+    // `requireCompleteRead` is ticket 07's recorded exemption, closed (ticket
+    // 04's pinned decision "同门同要求"): a whole-field `write` over content
+    // another writer put there must be authorized by a render that showed the
+    // field WHOLE. Settlement earns that record in its own context build
+    // (worker/note-settlement-context.ts flushes the turn render's per-field
+    // completeness), so a note that fitted the per-turn budget is rewritable
+    // and a truncated one is refused — the identical verdict the main agent
+    // gets from a truncated recall, in the identical words, remedy included.
+    for (const field of proseFields) {
+      const verdict = checkFieldGate(db, writer, "turn", turn.id, field, ref, {
+        requireCompleteRead: writeOverwritesExistingTurnContent(
+          field,
+          turn,
+          existingNote,
+          modeMap[field],
+        ),
+        completeReadRemedy: completeReadRemedyForTurnField(field, ref),
+      });
+      if (!verdict.ok) {
+        return { ok: false, message: verdict.message };
+      }
+    }
+
+    let title: string | null | undefined;
+    let content: string | null | undefined;
+    let insight: string | null | undefined;
+    try {
+      title =
+        rawInput.title !== undefined || isFieldEditMode(modeMap.title)
+          ? resolveStringField("title", rawInput.title, existingNote?.title ?? null, modeMap.title, {
+              nullable: false,
+            }).value
+          : undefined;
+      content =
+        rawInput.content !== undefined || isFieldEditMode(modeMap.content)
+          ? resolveStringField(
+              "content",
+              rawInput.content,
+              existingNote?.content ?? null,
+              modeMap.content,
+              { nullable: false },
+            ).value
+          : undefined;
+      insight =
+        rawInput.insight !== undefined || isFieldEditMode(modeMap.insight)
+          ? resolveStringField(
+              "insight",
+              rawInput.insight,
+              existingNote?.insight ?? null,
+              modeMap.insight,
+              { nullable: true },
+            ).value
+          : undefined;
+    } catch (error) {
+      if (error instanceof FieldModeError) {
+        return { ok: false, message: error.message };
+      }
+      throw error;
+    }
+
+    if (!noteExisted && (title === undefined || content === undefined)) {
+      return {
+        ok: false,
+        message: "a first note for this turn requires both title and content.",
+      };
+    }
+
+    // Private-tag stripping and the bare-`T<n>` bracketing convenience, the
+    // same two normalizations every note on the main surface gets — a note is
+    // a note whoever wrote it, and a settlement rewrite that skipped them
+    // would produce prose the reader's own resolver cannot follow.
+    const rawTitle = title !== undefined ? title : existingNote?.title ?? null;
+    const rawContent = content !== undefined ? content : existingNote?.content ?? null;
+    const rawInsight = insight !== undefined ? insight : existingNote?.insight ?? null;
+    const strippedTitle = rawTitle === null ? null : stripPrivateTags(rawTitle);
+    const strippedContent = rawContent === null ? null : stripPrivateTags(rawContent);
+    const strippedInsight = rawInsight === null ? null : stripPrivateTags(rawInsight);
+    const finalContent =
+      strippedContent === null
+        ? null
+        : bracketBareTurnReferences(
+            strippedContent,
+            isValidPredecessorFor(db, {
+              id: turn.id,
+              sessionId: turn.sessionId,
+              promptNumber: turn.promptNumber,
+            }),
+          );
+
+    resolvedProse = {
+      title,
+      content,
+      insight,
+      stripped:
+        strippedTitle !== rawTitle ||
+        strippedContent !== rawContent ||
+        strippedInsight !== rawInsight,
+      // Non-null by construction past the first-note check above: either this
+      // call resolved them or the existing note supplied them.
+      finalTitle: strippedTitle as string,
+      finalContent: finalContent as string,
+      finalInsight: strippedInsight,
+    };
+  }
+
+  // ---- Relations (D1): address, self-reference, phase — and nothing else --
+  const citingPhases = (): ReadonlySet<TurnPhase> => {
+    // Ticket 08: the citing turn's phase set reflects THIS SAME call's own
+    // type correction when present — mirrors `mcp/note.ts`'s
+    // `resolveRelationFields`, which checks relation legality against the
+    // post-write type. UNLESS the type field itself yielded (the write gate
+    // found it stale): then the proposed type never reaches the database, and
+    // an edge judged by it would be a validator-endorsed illegal edge.
+    const typeCorrectionLands = review?.type === undefined || review.type.landed;
+    return phasesForTypes(typeCorrectionLands ? normalizedType ?? turn.type : turn.type);
+  };
+
+  if (relationFields.length > 0) {
+    const phases = citingPhases();
+    const rejections: string[] = [];
+    for (const field of relationFields) {
+      const key = RELATION_FIELD_ENTRIES.find(([, relation]) => relation === field.relation)![0];
+      for (const raw of field.targets) {
+        const reference = parseBareAddressReference(raw);
+        if (!reference) {
+          rejections.push(`${key} "${raw}" is not a valid address`);
+          continue;
+        }
+        const { accepted } = validateReferences(db, [reference], {
+          writerSessionId: context.sessionId,
+          logger: context.logger,
+        });
+        const node: EdgeNode | undefined = accepted[0]?.node;
+        if (!node) {
+          rejections.push(`${key} "${raw}" does not resolve to a turn or segment`);
+          continue;
+        }
+        if (node.kind === "turn" && node.id === turn.id) {
+          rejections.push(
+            `${key} "${raw}" is this turn's own address — a turn cannot cite itself,` +
+              " whatever the relation",
+          );
+          continue;
+        }
+        // Ticket 08 (one validator, both write paths): the SAME
+        // `validateRelationTarget` the main agent's `note` calls — segment
+        // targets refused, phase-pair legality checked, the rejection naming
+        // which half is missing.
+        const citedPhases =
+          node.kind === "turn"
+            ? phasesForTypes(getTurnById(db, node.id)?.type ?? [])
+            : (new Set<TurnPhase>() as ReadonlySet<TurnPhase>);
+        const legality = validateRelationTarget({
+          relation: field.relation as TurnEdgeRelation,
+          citingPhases: phases,
+          targetKind: node.kind,
+          citedPhases,
+        });
+        if (!legality.ok) {
+          rejections.push(`${key} "${raw}" ${legality.detail}`);
+          continue;
+        }
+      }
+    }
+    if (rejections.length > 0) {
+      return { ok: false, message: `relation field rejected: ${rejections.join("; ")}.` };
+    }
+  }
+
+  // Ticket 02 (D1, spec user story 17): an edge write goes through the SAME
+  // gate as everything else, on the CITING turn — the turn whose record grows
+  // an edge — and the cited turn gets no read check at all ([S15069/T1124]).
+  // The gate FIELD is `type` (`mcp/note.ts`'s `EDGE_WRITE_GATE_FIELD`, whose
+  // comment carries the reasoning): CHECKED, never STAMPED, because an edge
+  // write corrects no type and a stamp would tell the next settlement pass a
+  // type correction landed when none did.
+  if (relationFields.length > 0 || retractionFields.length > 0) {
+    const verdict = checkFieldGate(db, writer, "turn", turn.id, "type", ref);
+    if (!verdict.ok) {
+      return { ok: false, message: verdict.message };
+    }
+  }
+
+  // ---- Apply ------------------------------------------------------------
+  let relations: RelationOutcome | null = null;
+  if (options.apply) {
+    // Retraction runs BEFORE the attach: correcting a wrong relation is
+    // "retract it, then write the right one" (D2/D3), and a caller doing both
+    // in one call means them in that order. It is also the first mutation of
+    // the whole evaluation, so its own all-or-nothing rejection (an address
+    // carrying no such edge) still precedes every other write.
+    let retracted = 0;
+    if (retractionFields.length > 0) {
+      const result = retractTurnRelations(db, turn.id, retractionFields);
+      if (result.rejected.length > 0) {
+        return { ok: false, message: formatRelationRejections(result.rejected, "retraction") };
+      }
+      retracted = result.deleted.length;
+    }
+
+    if (landedUpdate.type !== undefined || landedUpdate.tags !== undefined) {
       updateTurnById(db, turn.id, { ...landedUpdate, updatedAtEpoch: nowEpoch });
       // Stamp gate (spec "检查-写入原子"): only the fields that actually
       // landed, same writer identity the check above used — a yielded
@@ -798,103 +1034,109 @@ export function evaluateSettlementTurnWrite(
       }
     }
 
-    review = outcome;
-  }
-
-  let relations: RelationOutcome | null = null;
-  if (relationFields.length > 0) {
-    const citing: CitingNode = { kind: "turn", id: turn.id };
-    // Ticket 08: the citing turn's phase set reflects THIS SAME call's own
-    // type correction when present — mirrors `mcp/note.ts`'s
-    // `resolveRelationFields`, which checks relation legality against
-    // `updatedTurn.type` (the post-write type), not the pre-write one. A
-    // turn corrected to `["design"]` in the same call that also attaches
-    // `refines` must be judged as a decision-phase turn, not by whatever it
-    // carried before this write.
-    //
-    // UNLESS the type field itself yielded (the write gate found it stale):
-    // then the proposed type never reaches the database, and an edge judged
-    // by it would be a validator-endorsed illegal edge (citing type in the
-    // DB may carry no legal phase half at all). Post-write state IS the
-    // persisted `turn.type` in that branch — the same rule, followed to
-    // where the write actually landed. A review that never touched `type`
-    // at all (`review?.type` undefined) is the ordinary case: the pre-write
-    // `turn.type` this call did not ask to change.
-    const typeCorrectionLands = review?.type === undefined || review.type.landed;
-    const citingPhases = phasesForTypes(
-      typeCorrectionLands ? (normalizedType ?? turn.type) : turn.type,
-    );
-    const candidates: Array<{ key: string; relation: TurnEdgeRelation; node: EdgeNode }> = [];
-    const rejections: string[] = [];
-    for (const [key, relation] of relationFields) {
-      for (const raw of (rawInput as Record<string, unknown>)[key] as string[] | undefined ?? []) {
-        const reference = parseBareAddressReference(raw);
-        if (!reference) {
-          rejections.push(`${key} "${raw}" is not a valid address`);
-          continue;
-        }
-        const { accepted } = validateReferences(db, [reference], {
-          writerSessionId: context.sessionId,
-          logger: context.logger,
+    if (resolvedProse) {
+      upsertShadowNote(db, {
+        turnId: turn.id,
+        title: resolvedProse.finalTitle,
+        content: resolvedProse.finalContent,
+        insight: resolvedProse.finalInsight,
+        // `writer_origin` is the audit fact this write owes the reader: the
+        // text that now stands is settlement's, whoever wrote the previous
+        // draft. `writerModel`/`rideTurnId` have no settlement analogue — the
+        // model is not plumbed to this layer and a settlement pass rides no
+        // turn — and are left null rather than inherited, since a rewrite that
+        // kept them would attribute the new text to the old author.
+        writerOrigin: "settlement",
+        nowEpoch,
+      });
+      closeNoteDebtAsNoted(db, turn.id, nowEpoch);
+      if (promotesTurnRecord) {
+        const promoted = promoteTurnFromNote(db, turn.id, {
+          title: resolvedProse.finalTitle,
+          content: resolvedProse.finalContent,
+          insight: resolvedProse.finalInsight,
+          updatedAtEpoch: nowEpoch,
         });
-        const node = accepted[0]?.node;
-        if (!node) {
-          rejections.push(`${key} "${raw}" does not resolve to a turn or segment`);
-          continue;
-        }
-        // Ticket 08 (requirement 1 — one validator, both write paths): the
-        // SAME `validateRelationTarget` the main agent's `note` tool calls
-        // (`mcp/note.ts`'s `checkRelationTargetPhase`) — segment targets
-        // refused, phase-pair legality checked, the rejection naming which
-        // half is missing (`explainRelationPhaseRejection`, wrapped inside
-        // `validateRelationTarget`'s own `detail`).
-        const citedPhases =
-          node.kind === "turn"
-            ? phasesForTypes(getTurnById(db, node.id)?.type ?? [])
-            : (new Set<TurnPhase>() as ReadonlySet<TurnPhase>);
-        const legality = validateRelationTarget({
-          relation,
-          citingPhases,
-          targetKind: node.kind,
-          citedPhases,
-        });
-        if (!legality.ok) {
-          rejections.push(`${key} "${raw}" ${legality.detail}`);
-          continue;
-        }
-        candidates.push({ key, relation, node });
+        // The bare citation layer follows the prose that produced it
+        // (`reconcileCitedPairs`, narrowed to bare rows only — relation rows
+        // are standalone claims that die by retraction, never by a rewrite).
+        recomputeTurnCitedPairs(
+          db,
+          turn.id,
+          {
+            title: promoted?.title ?? resolvedProse.finalTitle,
+            content: promoted?.content ?? resolvedProse.finalContent,
+            insight: promoted?.insight ?? resolvedProse.finalInsight,
+          },
+          nowEpoch,
+          turn.sessionId,
+          context.logger,
+        );
+      }
+      for (const field of proseFields) {
+        stampField(db, "turn", turn.id, field, writer, nowEpoch);
       }
     }
-    if (rejections.length > 0) {
-      return { ok: false, message: `relation field rejected: ${rejections.join("; ")}.` };
-    }
-    // Ticket 07/10a (spec C7/C14): eligibility is the PRE-RUN snapshot,
-    // not this call's own citations — settlement has no body of its own
-    // here to cite anything into, and even if it did, a pair this same
-    // run just minted must not license its own relation.
-    const evaluated = evaluateRelationCandidates(
-      db,
-      citing,
-      candidates,
-      context.eligibleRelationPairKeys,
-    );
-    if (evaluated.rejections.length > 0) {
-      return {
-        ok: false,
-        message: `relation field rejected: ${evaluated.rejections.join("; ")}.`,
+
+    if (relationFields.length > 0) {
+      // The main agent's own primitive (ticket 02), called with settlement's
+      // provenance — one attach path, one dedupe rule, one written/restated
+      // split, and `judged` as the single declared difference.
+      const attached = attachTurnRelations(db, turn.id, relationFields, nowEpoch, "judged");
+      if (attached.rejected.length > 0) {
+        // Unreachable in practice: the pass above already rejected every
+        // malformed, unresolvable and self-referential address by name. Kept
+        // because the primitive owns those checks and a silent drop here would
+        // be the one failure mode neither layer reports.
+        return { ok: false, message: formatRelationRejections(attached.rejected, "relation") };
+      }
+      relations = {
+        written: attached.written.length,
+        restated: attached.restated.length,
+        retracted,
       };
+    } else if (retracted > 0) {
+      relations = { written: 0, restated: 0, retracted };
     }
-    if (options.apply) {
-      const { written } = writeMemoryEdges(db, evaluated.accepted, nowEpoch, {
-        eligibleForRelation: context.eligibleRelationPairKeys,
-      });
-      relations = { written: written.length };
-    } else {
-      relations = { written: evaluated.accepted.length };
-    }
+  } else if (relationFields.length > 0 || retractionFields.length > 0) {
+    // A dry run reports what it would ATTEMPT. Both edge primitives validate
+    // and mutate indivisibly, so this is the one place `apply: false` is a
+    // weaker probe than the real call rather than an identical one.
+    relations = {
+      written: countTargets(relationFields),
+      restated: 0,
+      retracted: countTargets(retractionFields),
+    };
   }
 
-  return { ok: true, outcome: { ref, turnId: turn.id, review, relations, session: null } };
+  return {
+    ok: true,
+    outcome: {
+      ref,
+      turnId: turn.id,
+      review,
+      relations,
+      prose: resolvedProse
+        ? {
+            fields: [...proseFields],
+            noteExisted,
+            stripped: resolvedProse.stripped,
+            budget: formatNoteBudget({
+              title: resolvedProse.finalTitle,
+              content: resolvedProse.finalContent,
+              insight: resolvedProse.finalInsight,
+            }),
+            budgetWarning:
+              formatBudgetWarning({
+                title: resolvedProse.finalTitle,
+                content: resolvedProse.finalContent,
+                insight: resolvedProse.finalInsight,
+              }) || null,
+          }
+        : null,
+      session: null,
+    },
+  };
 }
 
 /**
@@ -941,10 +1183,40 @@ export function renderSettlementTurnWriteReceipt(
       parts.push(`Yielded for ${outcome.ref}: ${yieldedBits.join("; ")}.`);
     }
   }
-  if (outcome.relations) {
+  if (outcome.prose) {
+    // The main agent's own receipt vocabulary: "Noted" for a first note,
+    // "Updated (replaced the previous note)" for a rewrite, then the budget —
+    // settlement writes under the same budgets, so it is told about them in
+    // the same words rather than left to guess from silence.
     parts.push(
-      `${verb} ${outcome.relations.written} relation(s)${options.staged ? " (pending commit)" : ""}.`,
+      `${verb} note for ${outcome.ref}: ${outcome.prose.fields.join(", ")}` +
+        `${outcome.prose.noteExisted ? " (replaced the previous note)" : ""}` +
+        `${options.staged ? " (pending commit)" : ""}.`,
     );
+    parts.push(`budget: ${outcome.prose.budget}`);
+    if (outcome.prose.budgetWarning) {
+      parts.push(outcome.prose.budgetWarning);
+    }
+    if (outcome.prose.stripped) {
+      parts.push("Private-tagged content was removed before storing.");
+    }
+  }
+  if (outcome.relations) {
+    if (outcome.relations.retracted > 0) {
+      parts.push(`Retracted ${outcome.relations.retracted} relation(s).`);
+    }
+    // Ticket 04: additive AND idempotent (D2), so the receipt says which of
+    // the two happened — a writer that cannot tell "attached" from "already
+    // present" reads its own no-op as new work.
+    if (outcome.relations.written > 0) {
+      parts.push(
+        `${verb} ${outcome.relations.written} relation(s)` +
+          `${outcome.relations.restated > 0 ? `, ${outcome.relations.restated} already present` : ""}` +
+          `${options.staged ? " (pending commit)" : ""}.`,
+      );
+    } else if (outcome.relations.restated > 0) {
+      parts.push(`${outcome.relations.restated} relation(s) already present, nothing added.`);
+    }
   }
   if (outcome.session) {
     const fields = [

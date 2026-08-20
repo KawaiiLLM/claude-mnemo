@@ -1164,7 +1164,6 @@ describe("note tool citations (spec C6)", () => {
         },
       ],
       950,
-      { eligibleForRelation: "unrestricted" },
     );
 
     noteTool(

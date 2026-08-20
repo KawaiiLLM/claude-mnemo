@@ -107,7 +107,6 @@ function cite(
       provenance: "judged" as const,
     })),
     ERA_BASE,
-    { eligibleForRelation: "unrestricted" },
   );
 }
 

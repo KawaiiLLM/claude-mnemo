@@ -7,14 +7,20 @@ import { getShadowNote, type ShadowNoteRecord } from "../db/shadow-notes";
 import { getTurnsForSession } from "../db/turns";
 import {
   claimWriterId,
+  recordFieldCompleteness,
   recordReadGrants,
   snapshotWriteGateSequence,
+  type FieldCompletenessEntry,
   type ReadGrantEntry,
 } from "../db/write-gate";
 import { renderSessionMilestoneInjection } from "../hooks/milestone-injection";
 import { formatTurnAddress } from "../hooks/note-reminder";
 import { buildCollapsedTurnsForSession, recallMemory } from "../mcp/recall";
-import { formatTurnCompact, type FormattedTurn } from "../mcp/format";
+import {
+  createTruncationSignal,
+  formatTurnCompact,
+  type FormattedTurn,
+} from "../mcp/format";
 
 /**
  * Settlement context assembly (ownership-and-note-cadence spec, ticket 05).
@@ -123,14 +129,6 @@ export interface NoteSettlementContext {
    * `propose` and the model's own orientation.
    */
   segmentRoster: NoteSettlementSegmentRosterEntry[];
-  /**
-   * Ticket 08 (edge-ownership-impl): `segmentRoster`, projected down to bare
-   * ids — the legal DOMAIN for a membership correction
-   * (`SettlementTurnFacadeContext.attachedSegmentIds`). Kept alongside the
-   * rendered roster rather than derived by each reader, same split
-   * `reviewableTurnIds` already has against its own rendered lookback.
-   */
-  attachedSegmentIds: Set<number>;
   milestoneRendering: string;
   /**
    * Turn ids THIS prompt put in front of the model — window plus the rendered
@@ -237,6 +235,21 @@ export function buildNoteSettlementContext(
   // boundary either) — then split back into the two exposed fields, which
   // remain separate ONLY because `windowTurns` still answers "does this job's
   // own window have anything to settle" for the dispatch/facade layer.
+  // Ticket 04 (edge-mechanism-revision D6, "同门同要求"): the render's own
+  // per-field completeness, collected here and flushed at the bottom of this
+  // function. Settlement writes turn prose again, under the SAME gate the main
+  // agent obeys — including `requireCompleteRead`, which asks whether the read
+  // that authorized the write showed the field WHOLE. Ticket 07 recorded this
+  // as a deliberate gap ("settlement's context render never records field
+  // completeness, so opting in today would reject every correction of a
+  // non-empty field"); this closes it at the render, which is the only place
+  // that knows what it actually delivered. `formatTurnCompact` -> `renderNode`
+  // already pushes one entry per gated field per turn, `complete` = whether
+  // this node's body survived the per-item token budget uncut, so a note that
+  // fits renders whole and is rewritable, and one that overruns the budget is
+  // refused a whole-field `write` and told to use `edit` — exactly what the
+  // main agent gets from a truncated recall.
+  const renderSignal = createTruncationSignal();
   const renderedTurns: NoteSettlementWindowTurn[] = [];
   let previousCreatedAt: number | null = null;
   for (const turn of combinedRecords) {
@@ -254,7 +267,7 @@ export function buildNoteSettlementContext(
             note
               ? { ...collapsedView, title: note.title, content: note.content }
               : collapsedView,
-            { sessionId: job.sessionId },
+            { sessionId: job.sessionId, signal: renderSignal },
           )
         : "",
       createdAtEpoch: turn.createdAtEpoch,
@@ -293,7 +306,6 @@ export function buildNoteSettlementContext(
     windowTurns,
     priorTurns,
     segmentRoster,
-    attachedSegmentIds: new Set(segmentRoster.map((segment) => segment.id)),
     milestoneRendering: renderSessionMilestoneInjection(db, job.sessionId),
     // The UNIFIED renderer, sole-writer-sees-the-whole-document budgets
     // (read-write-contract spec: "结算消费方传大 turn 预算(全文可见)").
@@ -342,6 +354,42 @@ export function buildNoteSettlementContext(
     // settlement is the one writer, and this is its render pass).
     entries.push({ entityType: "session", entityId: job.sessionId });
     recordReadGrants(db, writer, entries, options.nowEpoch, sequence);
+
+    // Ticket 04: the completeness half of the same render pass, under the same
+    // writer and the same pre-render sequence. Two sources, because the prompt
+    // renders a turn from two places:
+    //
+    //   - `renderSignal`, what `formatTurnCompact` delivered for title/content
+    //     (`type`/`tags` earn no entry: the compact field set does not select
+    //     the `metadata` line they ride on, so this render genuinely does not
+    //     show them — and the gate is left off those two fields for exactly
+    //     that reason, see the facade);
+    //   - `insight`, which recall's collapsed view has no slot for and the
+    //     PROMPT therefore renders itself, in full and never truncated
+    //     (`renderWindowTurn`, worker/note-settlement-prompt.ts). Recorded
+    //     complete only when there is an insight to show, so a field this pass
+    //     never put on screen never counts as read.
+    //
+    // ORDER IS LOAD-BEARING: the session-summary render above
+    // (`recallMemory`, with `readerId` set) flushes ITS own completeness for
+    // every turn row it lists, at the sole-writer 200K budget — which would
+    // otherwise tell the gate that every turn's content was seen whole, even
+    // the ones the per-turn render below cut at 150 tokens. `recordFieldCompleteness`
+    // is last-wins, and this call runs after it, so what the SETTLEMENT
+    // rendering actually delivered is the fact that stands. Mutation-checked:
+    // neutering this call lets a truncated note be whole-overwritten.
+    const completeness: FieldCompletenessEntry[] = [
+      ...(renderSignal.fieldCompleteness ?? []),
+      ...renderedTurns
+        .filter((turn) => (turn.note?.insight ?? "").trim() !== "")
+        .map((turn) => ({
+          entityType: "turn" as const,
+          entityId: turn.turnId,
+          field: "insight",
+          complete: true,
+        })),
+    ];
+    recordFieldCompleteness(db, writer, completeness, options.nowEpoch, sequence);
   }
 
   return context;

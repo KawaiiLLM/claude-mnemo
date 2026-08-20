@@ -2,12 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import {
-  getOutgoingEdges,
-  pairKey,
-  reconcileCitedPairs,
-  writeMemoryEdges,
-} from "../../src/db/memory-edges";
+import { getOutgoingEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -19,6 +14,7 @@ import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import {
   claimWriterId,
+  recordFieldCompleteness,
   recordReadGrant,
   sessionWriterId,
   snapshotWriteGateSequence,
@@ -129,8 +125,6 @@ function baseContext(
     sessionId: job.sessionId,
     reviewableTurnIds: new Set(),
     contextBuiltAtEpoch: NOW,
-    eligibleRelationPairKeys: new Set(),
-    attachedSegmentIds: new Set(),
     ...overrides,
   };
 }
@@ -242,7 +236,12 @@ describe("tags are replaced whole, under the shared mode (requirement 3; ticket 
     expect(!edited.ok && edited.message).toContain("has no meaning on a set field");
   });
 
-  test("a mode naming a prose field is refused the same way the field itself is", () => {
+  // Ticket 04 (D6) re-judged this: `mode.content` alone used to be refused as
+  // a second door into a retired duty. Prose is settlement's again, so the
+  // edit form reaches the field — and is answered by the field-mode engine's
+  // own rejection when there is nothing there to edit, exactly as it answers
+  // the main agent.
+  test("an edit form on a prose field reaches the field, and fails on its own terms when the field is empty", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
@@ -259,7 +258,11 @@ describe("tags are replaced whole, under the shared mode (requirement 3; ticket 
     );
 
     expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain("no longer settlement's to write");
+    expect(!result.ok && result.message).not.toContain("no longer settlement's to write");
+    expect(!result.ok && result.message).toContain("content");
+    // Validated before anything applies: the review field on the same call
+    // did not land either.
+    expect(getTurnById(db, t1)!.type).toEqual([]);
   });
 });
 
@@ -336,43 +339,28 @@ describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
     // Ticket 08: `dependsOn` is phase-gated (delivery -> delivery) — both
-    // ends need a delivery-phase type for the relation to clear the new
-    // legality check before this test's own eligibility assertion runs.
+    // ends need a delivery-phase type for the relation to clear the
+    // legality check.
     updateTurnById(db, t1, { type: ["implement"] });
     updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
-    // The frozen snapshot names a pair only ever taken from a real row in
-    // THIS same database — a real pre-existing bare pair, so the fixture
-    // matches what a real pre-run snapshot would only ever contain (ticket
-    // 10d: eligibility is frozen INTERSECTED with current, so a key with no
-    // backing row is not a state the real snapshot builder ever produces).
-    writeMemoryEdges(
-      db,
-      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
-      NOW - 500,
-      { eligibleForRelation: "unrestricted" },
-    );
-    const snapshot = new Set([
-      pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } }),
-    ]);
-    const context = baseContext(job, { eligibleRelationPairKeys: snapshot });
 
     const evaluation = evaluateSettlementTurnWrite(
       db,
-      context,
+      baseContext(job),
       { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
       NOW,
       { apply: false },
     );
 
     expect(evaluation.ok).toBe(true);
-    expect(evaluation.ok && evaluation.outcome.relations).toEqual({ written: 1 });
-    // The dry run wrote nothing NEW — the one edge present is the fixture's
-    // own pre-existing BARE pair (relation still null), not a relation this
-    // `apply: false` call landed.
-    const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
-    expect(edges).toHaveLength(1);
-    expect(edges[0]!.relation).toBeNull();
+    expect(evaluation.ok && evaluation.outcome.relations).toEqual({
+      written: 1,
+      restated: 0,
+      retracted: 0,
+    });
+    // The load-bearing assertion: nothing reached the edge table.
+    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
   });
 
   test("a dry run rejects exactly what a real write would reject — full validation, not a shape check", () => {
@@ -395,34 +383,67 @@ describe("evaluateSettlementTurnWrite with apply:false performs no write (spec A
 });
 
 // ---------------------------------------------------------------------------
-// Ticket 05 (ownership-and-note-cadence spec, "settlement demolition"): duty
-// 2 (turn prose reconstruction) is gone. title/content/insight are refused
-// LOUDLY — never silently ignored — and nothing lands.
+// Ticket 04 (edge-mechanism-revision D6): duty 2 is REVOKED — turn prose is
+// settlement's to write again, through the same mode vocabulary and the same
+// three-judgment gate, complete-read requirement included ("同门同要求").
+// Acceptance criterion 1: a write succeeds, and all three rejections
+// (truncated / stale / never-read) are reproducible.
 // ---------------------------------------------------------------------------
 
-describe("title/content/insight are refused outright (duty 2 retired, ticket 05)", () => {
-  test("refuses a call naming all three prose fields, and nothing lands", () => {
+describe("turn prose is settlement's again, under the main agent's own gate (ticket 04, D6)", () => {
+  /** What the context build's own render pass records for a turn it showed whole. */
+  function grantWholeRead(
+    job: NoteSettlementJob,
+    turnId: number,
+    fields: readonly string[],
+    atEpoch = NOW,
+    complete = true,
+  ): void {
+    const writer = claimWriterId(job.id, job.claimGeneration);
+    const sequence = snapshotWriteGateSequence(db);
+    recordReadGrant(db, writer, "turn", turnId, atEpoch, sequence);
+    recordFieldCompleteness(
+      db,
+      writer,
+      fields.map((field) => ({
+        entityType: "turn" as const,
+        entityId: turnId,
+        field,
+        complete,
+      })),
+      atEpoch,
+      sequence,
+    );
+  }
+
+  test("writes a first note for a reviewable turn — title and content land together", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
 
     const result = write(
-      baseContext(job),
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       {
         turn: `S${sessionDbId}/T1`,
-        title: "should be refused",
-        content: "prose reconstruction is retired",
-        insight: null,
+        title: "settlement: the window's own note",
+        content: "What this turn actually settled.",
+        insight: "A lesson that outlives the turn.",
       },
       NOW,
     );
 
-    expect(resultText(result)).toContain("Parameter error");
-    expect(resultText(result)).toContain("no longer settlement's to write");
-    expect(getShadowNote(db, t1)).toBeNull();
+    expect(resultText(result)).not.toContain("Parameter error");
+    expect(resultText(result)).toContain("Landed note for");
+    expect(resultText(result)).toContain("budget:");
+    const note = getShadowNote(db, t1)!;
+    expect(note.title).toBe("settlement: the window's own note");
+    expect(note.content).toBe("What this turn actually settled.");
+    expect(note.insight).toBe("A lesson that outlives the turn.");
+    // The audit fact: the text that now stands is settlement's.
+    expect(note.writerOrigin).toBe("settlement");
   });
 
-  test("refuses a call naming just one prose field, even alongside a legal review field", () => {
+  test("a first note requires both title and content, the main agent's own rule", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
@@ -434,10 +455,14 @@ describe("title/content/insight are refused outright (duty 2 retired, ticket 05)
     );
 
     expect(resultText(result)).toContain("Parameter error");
+    expect(resultText(result)).toContain("requires both title and content");
+    expect(getShadowNote(db, t1)).toBeNull();
+    // Validated before anything applies: the legal review field on the same
+    // call did not land either.
     expect(getTurnById(db, t1)!.type).toEqual([]);
   });
 
-  test("an existing agent note is left untouched by a refused prose call", () => {
+  test("rewrites another writer's note when the render showed the field whole", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
@@ -445,18 +470,172 @@ describe("title/content/insight are refused outright (duty 2 retired, ticket 05)
       turnId: t1,
       title: "agent's own title",
       content: "agent's own content",
-      nowEpoch: NOW,
+      nowEpoch: NOW - 100,
     });
+    const agentWriter = sessionWriterId(sessionDbId);
+    stampField(db, "turn", t1, "content", agentWriter, NOW - 100);
+    grantWholeRead(job, t1, ["title", "content"]);
 
     const result = write(
-      baseContext(job),
-      { turn: `S${sessionDbId}/T1`, title: "settlement trying to overwrite", content: "x", insight: null },
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      {
+        turn: `S${sessionDbId}/T1`,
+        content: "In hindsight this turn settled the window shape.",
+        mode: { content: "write" },
+      },
+      NOW + 1,
+    );
+
+    expect(resultText(result)).not.toContain("Parameter error");
+    expect(resultText(result)).toContain("replaced the previous note");
+    const note = getShadowNote(db, t1)!;
+    expect(note.content).toBe("In hindsight this turn settled the window shape.");
+    // Untouched fields survive the partial rewrite.
+    expect(note.title).toBe("agent's own title");
+  });
+
+  test("REJECTION 1 (truncated): a whole-field write over content the render cut short is refused, and the edit form is the way through", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    upsertShadowNote(db, {
+      turnId: t1,
+      title: "agent's own title",
+      content: "first half. second half.",
+      nowEpoch: NOW - 100,
+    });
+    stampField(db, "turn", t1, "content", sessionWriterId(sessionDbId), NOW - 100);
+    // The render showed `content` TRUNCATED — a note over the per-turn token
+    // budget is exactly this case in production.
+    grantWholeRead(job, t1, ["content"], NOW, false);
+
+    const refused = write(
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      {
+        turn: `S${sessionDbId}/T1`,
+        content: "a whole new content",
+        mode: { content: "write" },
+      },
+      NOW + 1,
+    );
+
+    expect(resultText(refused)).toContain("Parameter error");
+    expect(resultText(refused)).toContain("was not delivered in full");
+    expect(resultText(refused)).toContain("filter={fields:[\"content\"]}");
+    expect(getShadowNote(db, t1)!.content).toBe("first half. second half.");
+
+    // The edit form touches only the span it matched, so it needs no complete
+    // read — the remedy the rejection itself names.
+    const edited = write(
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      {
+        turn: `S${sessionDbId}/T1`,
+        mode: {
+          content: { mode: "edit", oldString: "second half.", newString: "corrected half." },
+        },
+      },
+      NOW + 2,
+    );
+    expect(resultText(edited)).not.toContain("Parameter error");
+    expect(getShadowNote(db, t1)!.content).toBe("first half. corrected half.");
+  });
+
+  test("REJECTION 2 (stale): a note that landed after this claim's grant refuses the rewrite", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    upsertShadowNote(db, {
+      turnId: t1,
+      title: "agent's own title",
+      content: "agent's own content",
+      nowEpoch: NOW - 100,
+    });
+    grantWholeRead(job, t1, ["title", "content"]);
+    // The main agent rewrites the same field AFTER this dispatch's context
+    // was built.
+    stampField(db, "turn", t1, "content", sessionWriterId(sessionDbId), NOW + 5);
+
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      {
+        turn: `S${sessionDbId}/T1`,
+        content: "settlement's late overwrite",
+        mode: { content: "write" },
+      },
+      NOW + 6,
+    );
+
+    expect(resultText(result)).toContain("Parameter error");
+    expect(resultText(result)).toContain("was changed by");
+    expect(getShadowNote(db, t1)!.content).toBe("agent's own content");
+  });
+
+  test("REJECTION 3 (never-read): a turn this claim never read refuses the rewrite", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    upsertShadowNote(db, {
+      turnId: t1,
+      title: "agent's own title",
+      content: "agent's own content",
+      nowEpoch: NOW - 100,
+    });
+    stampField(db, "turn", t1, "content", sessionWriterId(sessionDbId), NOW - 100);
+    // No grant recorded for this claim at all — the context build never
+    // rendered this turn, yet the caller passed it as reviewable.
+
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      {
+        turn: `S${sessionDbId}/T1`,
+        content: "settlement writing blind",
+        mode: { content: "write" },
+      },
+      NOW + 1,
+    );
+
+    expect(resultText(result)).toContain("Parameter error");
+    expect(resultText(result)).toContain("has not been read this session");
+    expect(getShadowNote(db, t1)!.content).toBe("agent's own content");
+  });
+
+  test("prose for a turn outside the rendered window is refused — rendering is authorization", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set() }),
+      { turn: `S${sessionDbId}/T1`, title: "t", content: "c" },
       NOW,
     );
 
     expect(resultText(result)).toContain("Parameter error");
-    const note = getShadowNote(db, t1)!;
-    expect(note.title).toBe("agent's own title");
+    expect(resultText(result)).toContain("reviewable window");
+    expect(getShadowNote(db, t1)).toBeNull();
+  });
+
+  test("a non-empty prose field with no mode is refused in the main agent's own words", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    upsertShadowNote(db, {
+      turnId: t1,
+      title: "agent's own title",
+      content: "agent's own content",
+      nowEpoch: NOW - 100,
+    });
+    grantWholeRead(job, t1, ["title", "content"]);
+
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { turn: `S${sessionDbId}/T1`, content: "silently clobbering" },
+      NOW + 1,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toBe(modeRequiredMessage("content"));
+    expect(getShadowNote(db, t1)!.content).toBe("agent's own content");
   });
 });
 
@@ -600,31 +779,29 @@ describe("type/tags are writable only for the window's reviewable turns (require
 });
 
 // ---------------------------------------------------------------------------
-// Requirement 4 (relation half): pre-run snapshot, not per-call — and spec
-// A7 requirement 5: commit-time re-validation is a genuinely different check
-// from stage time, proven here by re-evaluating with a snapshot that moved.
+// Ticket 04 (edge-mechanism-revision D1/D3/D6): the relation half. Spec C7's
+// pre-existence fence is DELETED — the frozen pre-run snapshot, its
+// intersection with current state, and the one-relation-per-pair
+// `duplicate-target` mirror all went with it. What is left is what a claim
+// cannot be right about by construction: the address resolves, it is not this
+// turn, its phase pair is legal, and the citing turn's own write gate admits.
 // ---------------------------------------------------------------------------
 
-describe("relation eligibility comes from a pre-run snapshot, not per tool call (requirement 4/6, spec C7/C14)", () => {
-  test("attaches a relation to a pair present in the pre-run snapshot", () => {
+describe("a relation stands on its own — no pre-existing pair, no eligibility snapshot (D1)", () => {
+  test("attaches a relation between two turns that share no prior edge at all", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
     // Ticket 08: dependsOn needs delivery-phase on both ends.
     updateTurnById(db, t1, { type: ["implement"] });
     updateTurnById(db, t2, { type: ["implement"] });
-    // A pre-existing bare pair (a prior note's citation, in production).
-    writeMemoryEdges(
-      db,
-      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
-      NOW - 500,
-      { eligibleForRelation: "unrestricted" },
-    );
     const job = claimWindow(sessionDbId, 1, 2);
-    const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
 
+    // No bare pair is seeded: under the retired fence this call was the
+    // canonical refusal ("names a pair not eligible for a relation"), and it
+    // is exactly the call a from-zero rebuild has to be able to make.
     const result = write(
-      baseContext(job, { eligibleRelationPairKeys: snapshot }),
+      baseContext(job),
       { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
       NOW,
     );
@@ -633,164 +810,169 @@ describe("relation eligibility comes from a pre-run snapshot, not per tool call 
     const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
     expect(edges).toHaveLength(1);
     expect(edges[0]!.relation).toBe("depends-on");
+    // Settlement's attribution survives the move onto the main agent's own
+    // primitive — `judged`, not `asserted`.
     expect(edges[0]!.provenance).toBe("judged");
   });
 
-  test("a pair created during THIS run (after the snapshot was taken) cannot license a later call's relation", () => {
+  test("one pair carries two relations at once — the duplicate-target mirror is gone (D2)", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    // Ticket 08: `override` needs decision-phase on both ends (also proves
-    // `supersedes` — the field this test used to name — is gone from this
-    // surface: it retired to a read-only legacy value, ticket 08).
+    // T1 decision-phase, T2 delivery+decision: legal for `encodes` (delivery
+    // -> decision) and for `refines` (decision -> decision).
     updateTurnById(db, t1, { type: ["design"] });
-    updateTurnById(db, t2, { type: ["correction"] });
+    updateTurnById(db, t2, { type: ["implement", "correction"] });
     const job = claimWindow(sessionDbId, 1, 2);
-    // The snapshot was taken before the run started — no pair exists yet.
-    const snapshot = new Set<string>();
-
-    // Mid-run, some other write in the SAME dispatch mints the bare pair
-    // (e.g. another tool's body citing it) — but the snapshot this call was
-    // handed is still the frozen pre-run one.
-    writeMemoryEdges(
-      db,
-      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
-      NOW,
-      { eligibleForRelation: "unrestricted" },
-    );
 
     const result = write(
-      baseContext(job, { eligibleRelationPairKeys: snapshot }),
-      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
-      NOW + 1,
+      baseContext(job),
+      {
+        turn: `S${sessionDbId}/T2`,
+        encodes: [`S${sessionDbId}/T1`],
+        refines: [`S${sessionDbId}/T1`],
+      },
+      NOW,
     );
 
-    expect(resultText(result)).toContain("Parameter error");
-    expect(resultText(result)).toContain("not eligible");
-    const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
-    // The bare pair from the mid-run write survives untouched — refusing the
-    // relation must not also refuse the pair a different write legitimately
-    // created.
-    expect(edges).toHaveLength(1);
-    expect(edges[0]!.relation).toBeNull();
+    expect(resultText(result)).toContain("2 relation");
+    const relations = getOutgoingEdges(db, { kind: "turn", id: t2 })
+      .map((edge) => edge.relation)
+      .sort();
+    expect(relations).toEqual(["encodes", "refines"]);
   });
 
-  test("a relation-only edge naming a pair that never existed at all is refused", () => {
+  test("re-asserting a stored relation is a no-op the receipt names, not new work", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    // Ticket 08: evidenceFor needs an evidence-phase citing turn and a
-    // decision-phase cited turn.
+    updateTurnById(db, t1, { type: ["implement"] });
+    updateTurnById(db, t2, { type: ["implement"] });
+    const job = claimWindow(sessionDbId, 1, 2);
+    const input = { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] };
+
+    write(baseContext(job), input, NOW);
+    const again = write(baseContext(job), input, NOW + 1);
+
+    expect(resultText(again)).toContain("already present, nothing added");
+    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(1);
+  });
+
+  test("retracts an edge through the same primitive the main agent uses, and refuses one that is not there", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["implement"] });
+    updateTurnById(db, t2, { type: ["implement"] });
+    const job = claimWindow(sessionDbId, 1, 2);
+    write(
+      baseContext(job),
+      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+
+    const retracted = write(
+      baseContext(job),
+      { turn: `S${sessionDbId}/T2`, retractDependsOn: [`S${sessionDbId}/T1`] },
+      NOW + 1,
+    );
+    expect(resultText(retracted)).toContain("Retracted 1 relation(s)");
+    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+
+    // `no-such-edge`, named per address — "already gone" and "wrong address"
+    // stay distinguishable, and nothing is deleted.
+    const missing = write(
+      baseContext(job),
+      { turn: `S${sessionDbId}/T2`, retractDependsOn: [`S${sessionDbId}/T1`] },
+      NOW + 2,
+    );
+    expect(resultText(missing)).toContain("Parameter error");
+    expect(resultText(missing)).toContain("is not a relation this turn currently carries");
+  });
+
+  test("an unresolvable address and a self-reference are still refused, whole-call", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    updateTurnById(db, t1, { type: ["implement"] });
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const unresolved = write(
+      baseContext(job),
+      { turn: `S${sessionDbId}/T1`, dependsOn: [`S${sessionDbId}/T999`] },
+      NOW,
+    );
+    expect(resultText(unresolved)).toContain("does not resolve");
+
+    const selfLoop = write(
+      baseContext(job),
+      { turn: `S${sessionDbId}/T1`, dependsOn: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+    expect(resultText(selfLoop)).toContain("cannot cite itself");
+    expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
+  });
+
+  test("an edge write is gated on the CITING turn's `type` — checked, never stamped", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["implement"] });
+    updateTurnById(db, t2, { type: ["implement"] });
+    const job = claimWindow(sessionDbId, 1, 2);
+    // Another writer owns the citing turn's `type` and this claim never read
+    // it — the gate field an edge write is judged by (mcp/note.ts's
+    // EDGE_WRITE_GATE_FIELD, mirrored here).
+    stampField(db, "turn", t2, "type", sessionWriterId(sessionDbId), NOW - 10);
+
+    const refused = write(
+      baseContext(job),
+      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+    expect(resultText(refused)).toContain("has not been read this session");
+    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+
+    // Granted, the same call lands — and the edge write leaves the `type`
+    // stamp alone: it corrects no type, and stamping one would tell the next
+    // pass a type correction landed when none did.
+    recordReadGrant(
+      db,
+      claimWriterId(job.id, job.claimGeneration),
+      "turn",
+      t2,
+      NOW,
+      snapshotWriteGateSequence(db),
+    );
+    const landed = write(
+      baseContext(job),
+      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      NOW + 1,
+    );
+    expect(resultText(landed)).toContain("1 relation");
+    const stamp = db
+      .query<{ writer: string }, [number]>(
+        "SELECT writer FROM write_gate_stamps WHERE entity_type = 'turn' AND entity_id = ? AND field = 'type'",
+      )
+      .get(t2);
+    expect(stamp?.writer).toBe(sessionWriterId(sessionDbId));
+  });
+
+  test("a phase-illegal relation is refused in the validator's own words, and nothing lands", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    // `evidenceFor` needs an evidence-phase citing turn; T2 has none.
     updateTurnById(db, t1, { type: ["design"] });
-    updateTurnById(db, t2, { type: ["research"] });
+    updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
 
     const result = write(
-      baseContext(job, { eligibleRelationPairKeys: new Set() }),
+      baseContext(job),
       { turn: `S${sessionDbId}/T2`, evidenceFor: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
     expect(resultText(result)).toContain("Parameter error");
-    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
-  });
-
-  test("commit-time re-evaluation is truth: a pair present at stage time can be gone by commit time, and the outcome differs (spec A7 requirement 5)", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    // Ticket 08: dependsOn needs delivery-phase on both ends.
-    updateTurnById(db, t1, { type: ["implement"] });
-    updateTurnById(db, t2, { type: ["implement"] });
-    const job = claimWindow(sessionDbId, 1, 2);
-    // A real pre-existing bare pair — what the pre-run snapshot builder only
-    // ever takes a key FROM (ticket 10d: frozen alone is never enough).
-    writeMemoryEdges(
-      db,
-      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
-      NOW - 500,
-      { eligibleForRelation: "unrestricted" },
-    );
-    const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
-    const context = baseContext(job, { eligibleRelationPairKeys: snapshot });
-    const input: SettlementTurnWriteInput = {
-      turn: `S${sessionDbId}/T2`,
-      dependsOn: [`S${sessionDbId}/T1`],
-    };
-
-    // Stage time: the caller's own snapshot says this pair is eligible —
-    // evaluate() alone cannot see anything that would refuse it.
-    const staged = evaluateSettlementTurnWrite(db, context, input, NOW, { apply: false });
-    expect(staged.ok).toBe(true);
-    expect(staged.ok && staged.outcome.relations).toEqual({ written: 1 });
-
-    // The world moves: the SAME context object is reused for the commit-time
-    // call (as the staging engine does — one context per request), but here
-    // a fresh context with an emptied snapshot stands in for "the pre-run
-    // eligibility this run was handed no longer covers this pair" — the
-    // shape a real commit sees when the pair it staged against was itself
-    // struck from eligibility upstream. Re-evaluating with `apply: true`
-    // against that changed input is exactly what `commit`'s replay does.
-    const movedContext = baseContext(job, { eligibleRelationPairKeys: new Set() });
-    const atCommit = evaluateSettlementTurnWrite(db, movedContext, input, NOW + 10, {
-      apply: true,
-    });
-    expect(atCommit.ok).toBe(false);
-    expect(!atCommit.ok && atCommit.message).toContain("not eligible");
-    // The pre-existing BARE pair survives untouched — refusing the relation
-    // must not also erase the citation that made the pair eligible in the
-    // first place; only the relation itself never lands.
-    const survivingEdges = getOutgoingEdges(db, { kind: "turn", id: t2 });
-    expect(survivingEdges).toHaveLength(1);
-    expect(survivingEdges[0]!.relation).toBeNull();
-  });
-
-  // Ticket 10d (review test-gap finding): the test above replaces the
-  // FROZEN Set but never touches the DATABASE pair, which is precisely why
-  // it could not have caught the resurrection bug — a stale frozen key and
-  // a genuinely-deleted current pair are two different kinds of "the world
-  // moved", and only this second one is the bug the review found. This test
-  // holds the frozen snapshot FIXED (as `commit`'s own replay does — the
-  // snapshot never changes mid-run) and instead deletes the underlying
-  // `memory_edges` row between stage and commit, the way the main agent's
-  // own `reconcileCitedPairs` would when a body stops citing something.
-  test("a pair the frozen snapshot still names, but that the CURRENT database no longer has, is refused at commit — frozen alone must not resurrect it (ticket 10d finding 1, spec C6/C7)", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    // Ticket 08: dependsOn needs delivery-phase on both ends.
-    updateTurnById(db, t1, { type: ["implement"] });
-    updateTurnById(db, t2, { type: ["implement"] });
-    const job = claimWindow(sessionDbId, 1, 2);
-    // T2's body cites T1 at snapshot time — a real, pre-existing bare pair.
-    writeMemoryEdges(
-      db,
-      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
-      NOW - 500,
-      { eligibleForRelation: "unrestricted" },
-    );
-    const snapshot = new Set([pairKey({ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 } })]);
-    // The SAME context/snapshot throughout — nothing about the frozen set
-    // ever changes; only the database does.
-    const context = baseContext(job, { eligibleRelationPairKeys: snapshot });
-    const input: SettlementTurnWriteInput = {
-      turn: `S${sessionDbId}/T2`,
-      dependsOn: [`S${sessionDbId}/T1`],
-    };
-
-    const staged = evaluateSettlementTurnWrite(db, context, input, NOW, { apply: false });
-    expect(staged.ok).toBe(true);
-
-    // The main agent rewrites T2's body; `reconcileCitedPairs` deletes the
-    // pair because the new body no longer cites T1. The frozen snapshot
-    // above is untouched — it still names this pair as eligible.
-    reconcileCitedPairs(db, { kind: "turn", id: t2 }, [], NOW + 5, "text-ref");
-    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
-
-    const atCommit = evaluateSettlementTurnWrite(db, context, input, NOW + 10, { apply: true });
-    expect(atCommit.ok).toBe(false);
-    expect(!atCommit.ok && atCommit.message).toContain("no longer exists");
-    // The load-bearing assertion: nothing got resurrected.
     expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
   });
 });

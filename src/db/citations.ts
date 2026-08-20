@@ -8,6 +8,7 @@ import {
   writeMemoryEdges,
   type CitingNode,
   type EdgeNode,
+  type EdgeProvenance,
   type MemoryEdge,
   type RetractEdgeInput,
   type WriteEdgeInput,
@@ -438,22 +439,26 @@ function storedRelationRowKeys(db: Database, citing: CitingNode): Set<string> {
  * layer up, at the tool surface — the phase pair is legal and the citing
  * turn's write gate admits the writer.
  *
- * Provenance is always `asserted` (spec C12): this is the main agent's own
- * classification — distinct from a bare textual reference (`text-ref`, what
- * `recomputeTurnCitedPairs` writes for the pairs a body happens to name) and
- * from a settlement attribution (`judged`).
+ * Provenance (spec C12) says WHICH writer filed the claim, and is the only
+ * thing that differs between the two callers: `asserted` — the default — is
+ * the main agent's own classification, `judged` is settlement's hindsight
+ * attribution (ticket 04 routes the settlement facade through this same
+ * function rather than a second copy of it), and both are distinct from a bare
+ * textual reference (`text-ref`, what `recomputeTurnCitedPairs` writes for the
+ * pairs a body happens to name). Nothing downstream RANKS the two — a
+ * settlement relation is not weaker than an agent one ([S15069/T1124]: both
+ * writers hold the same power) — it is an audit fact about origin.
  *
- * `writeMemoryEdges` is called `"unrestricted"` (its own word for "this
- * caller answers for eligibility itself") rather than with a pair set: after
- * D1 there IS no pre-existing-pair premise left to state — the checks above
- * ARE this path's eligibility, and passing a set derived from the body would
- * be the retired rule wearing a new name.
+ * Eligibility is this function's own checks and nothing else: after D1 there IS
+ * no pre-existing-pair premise left to state, and ticket 04 deleted the
+ * parameter that used to carry one into `writeMemoryEdges`.
  */
 export function attachTurnRelations(
   db: Database,
   citingTurnId: number,
   fields: readonly TurnRelationFieldInput[],
   nowEpoch: number,
+  provenance: EdgeProvenance = "asserted",
 ): AttachTurnRelationsResult {
   const citing: CitingNode = { kind: "turn", id: citingTurnId };
 
@@ -483,7 +488,7 @@ export function attachTurnRelations(
         continue;
       }
       claimed.add(key);
-      inputs.push({ citing, cited: node, relation: field.relation, provenance: "asserted" });
+      inputs.push({ citing, cited: node, relation: field.relation, provenance });
     }
   }
 
@@ -492,9 +497,7 @@ export function attachTurnRelations(
   }
 
   const alreadyStored = storedRelationRowKeys(db, citing);
-  const { written } = writeMemoryEdges(db, inputs, nowEpoch, {
-    eligibleForRelation: "unrestricted",
-  });
+  const { written } = writeMemoryEdges(db, inputs, nowEpoch);
 
   const added: MemoryEdge[] = [];
   const restated: MemoryEdge[] = [];

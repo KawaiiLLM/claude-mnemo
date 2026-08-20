@@ -155,7 +155,6 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           },
         ],
         CUTOFF,
-        { eligibleForRelation: "unrestricted" },
       );
 
       const output = timelineQuery(db, { id: `E${segmentId}`, view: "milestones" });
@@ -214,7 +213,6 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           },
         ],
         CUTOFF,
-        { eligibleForRelation: "unrestricted" },
       );
 
       const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 10 });
@@ -241,7 +239,6 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           { citing: { kind: "turn", id: w1 }, cited: { kind: "turn", id: weak }, relation: "encodes", provenance: "judged" },
         ],
         CUTOFF,
-        { eligibleForRelation: "unrestricted" },
       );
 
       const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 2 });
@@ -273,7 +270,6 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           { citing: { kind: "turn", id: deliveryRefiner }, cited: { kind: "turn", id: deliveryHeavy }, relation: "refines", provenance: "judged" },
         ],
         CUTOFF,
-        { eligibleForRelation: "unrestricted" },
       );
 
       const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 1 });
@@ -347,7 +343,6 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           },
         ],
         CUTOFF,
-        { eligibleForRelation: "unrestricted" },
       );
 
       const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 10 });
@@ -584,7 +579,6 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
         { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t812 }, relation: "depends-on", provenance: "judged" },
       ],
       t821Epoch,
-      { eligibleForRelation: "unrestricted" },
     );
 
     const segment = createSegment(db, { title: "title", type: ["implement"], nowEpoch: t811Epoch });
