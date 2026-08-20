@@ -51,12 +51,26 @@ import {
  * note-cadence spec — see that function's own doc comment
  * (db/note-settlement-completion.ts).
  *
- * Per-write lease fencing is DELIBERATELY absent (pinned decision: "claim
- * 栅栏不再需要独立的逐写检查"). A lapsed claimant's writes are fenced out
- * field-by-field, as the NEW claimant's own writes land and go stale under
- * it — see `note-settlement-turn-facade.ts`'s write-gate integration. Only
- * `commit` itself still checks job-level claim validity, once, at the very
- * end of a run.
+ * TICKET 08 (edge-mechanism-revision, peer 终审必改 5): every direct write is
+ * lease-fenced PER CALL, not only at `commit`. The earlier reading — that a
+ * lapsed claimant is fenced out field-by-field by the write gate, so a
+ * job-level check at `commit` sufficed — does not hold for the writes that
+ * create state rather than overwrite it: `remember(create)` mints a segment
+ * and attaches it to the session, `reassign` moves membership, `propose`
+ * stores a proposal. None of those collide with a field stamp, so a reclaimed
+ * claimant could plant a stray segment on the session and only learn at
+ * `commit` that it never held the lease — by which time the segment exists
+ * and the next window renders it. `assertNoteSettlementJobClaimed` therefore
+ * runs as the FIRST statement inside each write's own transaction (the same
+ * predicate `commit` leans on, not a second one), so the fence and the write
+ * commit or vanish together: a lease that moved before this transaction
+ * opened aborts the call before any mutation runs.
+ *
+ * `commit`'s own end-of-run check is UNCHANGED and still required — per-write
+ * fencing is an ADDITIONAL gate, not a replacement. It is also not a
+ * substitute for the field-level write gate, which continues to arbitrate two
+ * writers that both hold a valid claim on different generations of the same
+ * field.
  */
 
 export interface NoteSettlementCommitCounts {
@@ -149,6 +163,15 @@ export interface CreateSettlementDirectWriteEngineOptions {
   context: SettlementTurnFacadeContext;
   /** Epoch seconds, injectable for tests; each call is stamped with its own reading. */
   now?: () => number;
+  /**
+   * Test seam only (same `options.runWriteTransaction ?? runWriteTransaction`
+   * port `mcp/note.ts` and `mcp/remember.ts` already expose): lets a test
+   * interleave a competing write INSIDE this engine's own transaction, which
+   * is the only way to prove the lease check and the mutation share one. Every
+   * one of the three tools routes through it — a seam that some writes escaped
+   * would report atomicity the engine does not actually have.
+   */
+  runWriteTransaction?: typeof runWriteTransaction;
 }
 
 export interface SettlementDirectWriteEngine {
@@ -164,11 +187,27 @@ export interface SettlementDirectWriteEngine {
  * as an ordinary parameter error (never escapes this module). */
 class DirectWriteRefused extends Error {}
 
+/**
+ * A lost lease is NOT a parameter error — the call was well-formed and the
+ * model can do nothing to make it succeed. Rendered in `commit`'s own
+ * "reclaimed / stop calling" register instead, naming the fence's reason
+ * verbatim (`not-claimed` vs `generation-mismatch`, with the job id), so the
+ * transcript records which of the two happened rather than a generic refusal.
+ */
+function leaseRefusal(error: NoteSettlementJobFenceError): ToolTextResult {
+  return textResult(
+    `Write refused — this dispatch's job lease was reclaimed (${error.message}). ` +
+      "Nothing was written. No further write or commit will succeed. " +
+      "Stop making tool calls.",
+  );
+}
+
 export function createSettlementDirectWriteEngine(
   options: CreateSettlementDirectWriteEngineOptions,
 ): SettlementDirectWriteEngine {
   const { db, context } = options;
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
 
   const counts = emptyCommitCounts();
   let lastCommitMetrics: NoteSettlementCommitCounts | null = null;
@@ -184,7 +223,12 @@ export function createSettlementDirectWriteEngine(
       // the transaction back whole (the staging engine's own
       // refusal-inside-transaction pattern), then reports as an ordinary
       // parameter error.
-      evaluation = runWriteTransaction(db, () => {
+      evaluation = writeTransaction(db, () => {
+        // Ticket 08: the lease check is the FIRST statement in the SAME
+        // transaction as the write it guards. Its throw rolls the transaction
+        // back for free, so no ordering discipline further down can be got
+        // wrong — see `assertNoteSettlementJobClaimed`'s own doc comment.
+        assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
         const result = evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch, {
           apply: true,
         });
@@ -194,6 +238,9 @@ export function createSettlementDirectWriteEngine(
         return result;
       });
     } catch (error) {
+      if (error instanceof NoteSettlementJobFenceError) {
+        return leaseRefusal(error);
+      }
       if (error instanceof DirectWriteRefused) {
         return parameterError(error.message);
       }
@@ -212,7 +259,14 @@ export function createSettlementDirectWriteEngine(
       // Same one-transaction-per-call discipline; this wrap is also what
       // makes the reassign path's live attachment/open re-check share a
       // transaction with the membership mutation it guards.
-      evaluation = runWriteTransaction(db, () => {
+      evaluation = writeTransaction(db, () => {
+        // Ticket 08, and this is the path the ticket was written for: a
+        // `create` mints a segment AND attaches it to the session, a
+        // `reassign` moves membership, a `propose` stores a row — none of
+        // them meet a field stamp on the way in, so nothing but this fence
+        // stops a reclaimed claimant from planting durable state that
+        // `commit` can then only complain about after the fact.
+        assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
         const result = evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch, {
           apply: true,
         });
@@ -222,6 +276,9 @@ export function createSettlementDirectWriteEngine(
         return result;
       });
     } catch (error) {
+      if (error instanceof NoteSettlementJobFenceError) {
+        return leaseRefusal(error);
+      }
       if (error instanceof DirectWriteRefused) {
         return parameterError(error.message);
       }
@@ -247,7 +304,7 @@ export function createSettlementDirectWriteEngine(
 
     const nowEpoch = now();
     try {
-      runWriteTransaction(db, () => {
+      writeTransaction(db, () => {
         // Ticket 06 (spec "commit 重定位"): claim validity + terminal mark,
         // nothing else — `completeNoteSettlementJobIfSegmentedCore` IS the
         // fence-and-CAS gate, already an empty shell of any duty-coverage

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
-import { createDatabase } from "../../src/db/database";
+import { createDatabase, runWriteTransaction } from "../../src/db/database";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -9,7 +9,15 @@ import {
   getNoteSettlementJob,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
+import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { initializeSchema } from "../../src/db/schema";
+import {
+  addSegmentMembers,
+  createSegment,
+  getSegmentMemberTurnIds,
+  listAttachedSegments,
+  listOpenSegments,
+} from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
@@ -267,5 +275,206 @@ describe("a rejected direct write leaves no partial state (one transaction per c
       .query("SELECT writer FROM write_gate_stamps WHERE entity_type = 'turn' AND entity_id = ? AND field = 'type'")
       .get(t2);
     expect(stamp).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 08 (edge-mechanism-revision, peer 终审必改 5): the lease is checked at
+// EVERY direct write, in that write's own transaction — not only at `commit`.
+// The membership verbs are why: `create`/`reassign`/`propose` create state
+// rather than overwrite a stamped field, so before this ticket a claimant that
+// had already lost its lease could plant a segment on the session and only be
+// told at `commit` — with the segment already visible to the next window.
+// ---------------------------------------------------------------------------
+
+function reclaimLease(jobId: number): void {
+  db.query<unknown, [number]>(
+    "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
+  ).run(jobId);
+}
+
+describe("a reclaimed lease refuses every direct write, naming the lease (ticket 08)", () => {
+  test("note: the turn write is refused and the row is untouched", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+    reclaimLease(job.id);
+
+    const receipt = engine.writeNote({ turn: `S${sessionDbId}/T1`, type: ["design"] });
+
+    expect(receipt.content[0]!.text).toContain("Write refused");
+    expect(receipt.content[0]!.text).toContain("lease was reclaimed");
+    // The reason is named, not merely alluded to — a stale generation reads
+    // differently from a job that is no longer claimed at all.
+    expect(receipt.content[0]!.text).toContain("claim generation");
+    expect(getTurnById(db, t1)!.type).toEqual([]);
+  });
+
+  test("remember(create): no segment is minted and nothing attaches to the session", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+    reclaimLease(job.id);
+
+    const receipt = engine.writeMembership({
+      action: "create",
+      title: "planted by a lapsed claimant",
+      turns: [`S${sessionDbId}/T1`],
+    });
+
+    expect(receipt.content[0]!.text).toContain("Write refused");
+    expect(receipt.content[0]!.text).toContain("lease was reclaimed");
+    expect(listOpenSegments(db)).toEqual([]);
+    expect(listAttachedSegments(db, sessionDbId)).toEqual([]);
+  });
+
+  test("remember(reassign): membership stays exactly where it was", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const home = createSegment(db, { title: "where T1 already lives", nowEpoch: NOW - 100 });
+    const target = createSegment(db, { title: "the would-be new home", nowEpoch: NOW - 100 });
+    addSegmentMembers(db, home.id, [t1], NOW - 100);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+    reclaimLease(job.id);
+
+    const receipt = engine.writeMembership({
+      action: "reassign",
+      turns: [`S${sessionDbId}/T1`],
+      id: `E${target.id}`,
+    });
+
+    expect(receipt.content[0]!.text).toContain("Write refused");
+    expect(receipt.content[0]!.text).toContain("lease was reclaimed");
+    // Neither half of the reassignment ran: not the eviction, not the add.
+    expect(getSegmentMemberTurnIds(db, home.id)).toEqual([t1]);
+    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([]);
+  });
+
+  test("remember(propose): no proposal row is stored", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+    reclaimLease(job.id);
+
+    const receipt = engine.writeMembership({
+      action: "propose",
+      addresses: [`S${sessionDbId}/T1`],
+      title: "a cluster nobody asked this run for",
+    });
+
+    expect(receipt.content[0]!.text).toContain("Write refused");
+    expect(receipt.content[0]!.text).toContain("lease was reclaimed");
+    expect(listRecentSettlementProposals(db, 3)).toEqual([]);
+  });
+
+  test("a job already marked done refuses with the not-claimed reason, not a generation mismatch", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+    db.query<unknown, [number]>(
+      "UPDATE note_settlement_jobs SET status = 'done' WHERE id = ?",
+    ).run(job.id);
+
+    const receipt = engine.writeNote({ turn: `S${sessionDbId}/T1`, type: ["design"] });
+
+    expect(receipt.content[0]!.text).toContain("not claimed");
+    expect(getTurnById(db, t1)!.type).toEqual([]);
+  });
+});
+
+describe("the lease check and the write share one transaction (ticket 08)", () => {
+  test("a reclaim landing INSIDE the write's own transaction takes the whole call with it", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+      // The competing reclaim runs after BEGIN IMMEDIATE and before the
+      // engine's own body — the one interleaving that tells the two designs
+      // apart. A fence evaluated OUTSIDE the transaction (at construction, or
+      // ahead of the BEGIN) would still see the generation it captured, let
+      // `create` through, and commit the reclaim and the new segment together.
+      // Because the refusal rolls the transaction back, the injected reclaim
+      // is rolled back with it — which is why the assertion below is about the
+      // segment, not about the job row.
+      runWriteTransaction: (database, fn) =>
+        runWriteTransaction(database, () => {
+          reclaimLease(job.id);
+          return fn();
+        }),
+    });
+
+    const receipt = engine.writeMembership({
+      action: "create",
+      title: "raced against a reclaim",
+      turns: [`S${sessionDbId}/T1`],
+    });
+
+    expect(receipt.content[0]!.text).toContain("lease was reclaimed");
+    expect(listOpenSegments(db)).toEqual([]);
+    expect(listAttachedSegments(db, sessionDbId)).toEqual([]);
+  });
+});
+
+describe("a valid claimant's direct writes are unchanged by the lease check (ticket 08)", () => {
+  test("create and reassign both land, and commit still reports them", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const job = claimWindow(sessionDbId, 1, 2);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1, t2]) }),
+      now: () => NOW,
+    });
+
+    const created = engine.writeMembership({
+      action: "create",
+      title: "a real task",
+      turns: [`S${sessionDbId}/T1`],
+    });
+    expect(created.content[0]!.text).toContain("Landed create");
+
+    const segments = listAttachedSegments(db, sessionDbId);
+    expect(segments).toHaveLength(1);
+    expect(getSegmentMemberTurnIds(db, segments[0]!.id)).toEqual([t1]);
+
+    const reassigned = engine.writeMembership({
+      action: "reassign",
+      turns: [`S${sessionDbId}/T2`],
+      id: `E${segments[0]!.id}`,
+    });
+    expect(reassigned.content[0]!.text).toContain("Landed reassign");
+    expect(getSegmentMemberTurnIds(db, segments[0]!.id)).toEqual([t1, t2]);
+
+    expect(engine.commit().content[0]!.text).toContain("Committed");
+    expect(engine.getLastCommitMetrics()!.membersReassigned).toBe(1);
   });
 });
