@@ -54,7 +54,9 @@ export interface MemoryFilterInput {
    * Ticket 07/11: which turn fields to render, any combination — the SOLE
    * field-selection mechanism (the collapsed/expanded depth switch it
    * replaced has fully retired, ticket 11). Unset falls back to
-   * `format.ts`'s `DEFAULT_TURN_RENDER_FIELDS` (title + content). Not a
+   * `format.ts`'s `DEFAULT_TURN_RENDER_FIELDS` — title + metadata + content
+   * since edge-mechanism-revision ticket 12 restored the golden sample's own
+   * default card. Not a
    * scoping criterion (see `hasFilterCriteria`) — `filter: { fields: [...] }`
    * alone does not force the search/listing path.
    */
