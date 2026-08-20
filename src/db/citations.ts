@@ -409,10 +409,13 @@ export function attachTurnRelations(
         rejected.push({ relation: field.relation, raw, reason: "not-cited" });
         continue;
       }
-      // Spec C5: at most one current relation per pair. A repeat of the SAME
-      // target under the SAME field (or byte-identical relation) is a
-      // harmless restatement; a DIFFERENT relation field claiming the same
-      // target is the illegal case requirement 3 names.
+      // A repeat of the SAME target under the SAME field is a harmless
+      // restatement; a DIFFERENT relation field claiming the same target is
+      // refused here. NOTE this is now a TOOL-SURFACE rule only: storage
+      // stopped enforcing "one relation per pair" with edge-mechanism-revision
+      // D2 (a pair may hold `depends-on` AND `encodes`), and lifting the
+      // refusal belongs to the ticket that reworks this tool's relation
+      // surface, not to the storage change that made it possible.
       const priorClaim = claimedBy.get(key);
       if (priorClaim !== undefined && priorClaim !== field.relation) {
         rejected.push({ relation: field.relation, raw, reason: "duplicate-target" });
@@ -439,10 +442,11 @@ export function attachTurnRelations(
  * A relationless (bare) pair is a real citation (spec C5) and is returned
  * here same as any other — filtering it out would empty C5 of its content,
  * since the whole point of pair identity is that an unattributed citation
- * exists. Ordering needs no `relation` tiebreak beyond the one already
- * written below: the pair's PRIMARY KEY (citing, cited) means at most one row
- * exists per `cited_id` for a fixed `citing_id`, so `cited_id ASC` alone is
- * already a total order and stays deterministic with NULLs present.
+ * exists. The `relation` tiebreak in the ORDER BY became load-bearing with
+ * edge-mechanism-revision D2: a pair may now hold several rows (one per
+ * relation, plus at most one bare), so `cited_id ASC` alone is no longer a
+ * total order. NULLs sort first, which keeps a pair's bare row ahead of its
+ * classified ones.
  */
 export function getTurnCitations(
   db: Database,

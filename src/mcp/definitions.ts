@@ -368,8 +368,8 @@ export const noteInputShape = {
   // this same call's title/content/insight post-state — mcp/note.ts rejects
   // the whole call otherwise, it never silently drops one. No `mode`: unlike
   // title/tags/type there is no PRIOR value at this layer to write over or
-  // edit, and `writeMemoryEdges`'s upsert (spec C14) already governs
-  // replacing a relation the pair carries from an earlier write.
+  // edit — a relation write only ever ADDS a row (edge-mechanism-revision
+  // D2), and removing one is a retraction, not a mode.
   evidenceFor: z
     .array(z.string())
     .optional()

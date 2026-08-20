@@ -216,16 +216,22 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
     expect(getSessionCitationInDegree(db, sessionB).size).toBe(0);
   });
 
-  test("a corrected relation on the same pair does not inflate in-degree", () => {
-    // Under spec C5 a pair carries at most one current relation: a SECOND
-    // write to the same pair replaces the relation in place rather than
-    // adding a second row (memory-edges.test.ts covers the upsert itself).
-    // What must still hold here is that in-degree counts the one surviving
-    // pair once, not zero and not twice.
+  test("a second relation on the same pair is a second row, and still one citer of the target", () => {
+    // Edge-mechanism-revision D2: identity is (pair, relation), so the second
+    // write ADDS a row rather than relabelling the first (memory-edges.test.ts
+    // covers the write path itself). What must still hold here is that
+    // in-degree counts the citing turn ONCE — it is one piece of work
+    // consuming the target, however many claims it filed about it.
     citeFrom(turns[1]!, turns[0]!, "evidence-for");
     citeFrom(turns[1]!, turns[0]!, "supersedes");
 
     expect(getTurnCitations(db, turns[1]!)).toEqual([
+      {
+        citingTurnId: turns[1]!,
+        citedTurnId: turns[0]!,
+        relation: "evidence-for",
+        createdAtEpoch: 500,
+      },
       {
         citingTurnId: turns[1]!,
         citedTurnId: turns[0]!,
@@ -368,7 +374,7 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
     ).toEqual([{ citingTurnId: turns[1]! }]);
   });
 
-  test("rejects a duplicate (citing, cited) pair at the composite key (spec C5: relation is not part of identity)", () => {
+  test("rejects a duplicate (citing, cited, relation) row, and a second BARE row for one pair (D2)", () => {
     const insert = db.query<unknown, [number, number, string | null]>(
       `INSERT INTO memory_edges
          (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
@@ -376,10 +382,17 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
     );
     insert.run(turns[1]!, turns[0]!, "evidence-for");
 
-    // A raw second insert of the SAME pair — even under a different relation
-    // — hits the primary key: the pair is the identity now, not the triple.
-    expect(() => insert.run(turns[1]!, turns[0]!, "supersedes")).toThrow();
-    expect(getTurnCitations(db, turns[1]!)).toHaveLength(1);
+    // Identity is the triple now: a DIFFERENT relation on the same pair is a
+    // legal second row, the same relation twice is not.
+    expect(() => insert.run(turns[1]!, turns[0]!, "supersedes")).not.toThrow();
+    expect(() => insert.run(turns[1]!, turns[0]!, "evidence-for")).toThrow();
+    expect(getTurnCitations(db, turns[1]!)).toHaveLength(2);
+
+    // The bare row is the one shape SQLite's UNIQUE cannot police on its own
+    // (it treats NULLs as distinct), so the partial unique index does.
+    insert.run(turns[2]!, turns[0]!, null);
+    expect(() => insert.run(turns[2]!, turns[0]!, null)).toThrow();
+    expect(getTurnCitations(db, turns[2]!)).toHaveLength(1);
   });
 
   test("rejects an unknown relation at the schema level", () => {

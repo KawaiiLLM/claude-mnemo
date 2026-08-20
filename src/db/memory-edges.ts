@@ -7,23 +7,35 @@ import {
 } from "./citations";
 
 /**
- * The universal citation graph (spec D7; identity narrowed by ticket 05/spec
- * C5). One table for every edge the system knows, whatever the endpoints are:
- * turn→turn, turn→segment, segment→segment, session→turn, session→segment.
+ * The universal citation graph (spec D7). One table for every edge the system
+ * knows, whatever the endpoints are: turn→turn, turn→segment, segment→segment,
+ * session→turn, session→segment.
  *
  * Three things are deliberately separate here:
  *
  *   - the PAIR, identified by (citing node, cited node) — the fact that one
  *     thing cites another, whether or not anyone has classified WHY yet;
- *   - its RELATION (spec C5), a nullable ATTRIBUTE of the pair rather than
- *     part of its identity — a bare/unattributed citation is a real, storable
- *     state, and correcting a relation updates the row instead of inserting
- *     a second one under the same pair;
+ *   - its RELATION. Edge-mechanism-revision D2 widens identity to
+ *     (pair, relation): ONE ROW PER RELATION, so a landing turn can say it
+ *     both `depends-on` a plan and `encodes` a ruling about the same target.
+ *     A pair may additionally hold ONE BARE row (`relation IS NULL`, a partial
+ *     unique index enforces the "at most one"), which records nothing except
+ *     that the pair exists. The bare row is therefore the pair's existence
+ *     record OF LAST RESORT: a bare write onto a pair that already has any row
+ *     is a no-op, and a relation write onto a pair that still carries a bare
+ *     row REPLACES it, because the relation row already records the same
+ *     existence fact and a second copy of it is noise every reader would have
+ *     to de-duplicate.
  *   - its PROVENANCE, how the system learned it (spec C12: it must tell apart
  *     the main agent's own assertion from a bare textual reference from a
  *     settlement attribution — three of `EDGE_PROVENANCES`' five values).
- *     Spec D8 counts a pair ONCE no matter how many provenances fired, so
- *     provenance sits outside the key as an audit layer.
+ *
+ * What is GONE (D2): the old "a non-null relation overwrites whatever the pair
+ * stored" upsert. A relation write can only ADD a row now; a wrong relation is
+ * corrected by RETRACTING it (`retractMemoryEdges`, D3) and writing the right
+ * one, so a correction is two auditable acts rather than a silent overwrite.
+ * Self-loops are refused twice over: at the write path (below, with a reported
+ * reason) and by a table-level CHECK, so no SQL path can mint one.
  */
 
 export const EDGE_NODE_KINDS = ["turn", "segment"] as const;
@@ -62,7 +74,7 @@ export interface CitingNode {
 export interface MemoryEdge {
   citing: CitingNode;
   cited: EdgeNode;
-  /** C5: an attribute of the pair, not part of its identity. Null = a bare, unattributed citation. */
+  /** D2: part of the row's identity. Null = the pair's bare, unattributed citation row. */
   relation: CitationRelation | null;
   provenance: EdgeProvenance;
   createdAtEpoch: number;
@@ -258,38 +270,48 @@ function mayCarryRelation(
 }
 
 /**
- * Idempotent edge write. A repeat of the same (citing, cited) pair is not a
- * second row (spec C5): a non-null incoming relation REPLACES the stored
- * relation AND the provenance recording where it came from, unconditionally —
- * no source ranking stands between an authorised write and the relation it
- * sets (spec C14). Eligibility — whether THIS call is entitled to set or
- * correct a relation on THIS pair — is `options.eligibleForRelation`: a
- * main-agent write needs the target cited in its own body's post-state, a
- * settlement write needs the pair already present in its transaction's
- * pre-state (ticket 07). Each caller computes its own set; this function
- * only enforces membership in whatever set it was handed, and refuses every
- * relation when handed none. A relation of `null` (a
- * bare reference) never clears or relabels an existing relation, and never
- * touches its provenance either — a citation in prose says the pair exists
- * and says nothing about its relation, so relation and provenance move as one
- * unit, driven only by a write that actually carries a relation.
- * `created_at_epoch` stays at the first sighting so "when did this edge
- * appear" stays answerable.
+ * Additive, idempotent edge write (D2).
  *
- * Self-loops are rejected — a node confirming itself would inflate its own
- * in-degree, the one mechanical confirmation signal the ranking has.
- * Naming the same target under two DIFFERENT non-null relations within one
- * call is also rejected — spec C5's "at most one current relation" — because
- * a single batch cannot express which of two claims about the same pair is
- * the correction and which is the mistake; both are dropped rather than
- * letting array order silently pick a winner. Existence of the endpoints is
- * NOT checked here: callers that take model-supplied ids validate through
- * db/references.ts first, while mechanical callers (rollback pairing,
- * membership derivation) already hold rows. Endpoint DELETION is handled
- * downstream of this function: spec C15's kind-aware `AFTER DELETE` triggers
- * on `turns`/`segments`/`sessions` (schema.ts) remove an edge the moment
- * either endpoint disappears, so this function never has to reason about
- * dangling ids.
+ *   - A RELATION-bearing write inserts one row per (pair, relation). Two
+ *     different relations on the same pair are two rows that coexist; a
+ *     repeat of the same (pair, relation) changes nothing — neither the
+ *     stored provenance nor `created_at_epoch`, both of which record the
+ *     FIRST sighting of that particular claim. A relation is never
+ *     overwritten by another relation: correcting one means retracting it
+ *     (`retractMemoryEdges`) and writing the replacement.
+ *   - A BARE write (`relation: null`) records only "this pair exists", so it
+ *     is skipped entirely when the pair already holds ANY row. Conversely a
+ *     relation write drops the pair's bare row, since the relation row now
+ *     carries that same existence fact; the alternative (both rows) would
+ *     hand every reader a duplicate to filter out, and would double the row
+ *     count of the ordinary main-agent write, which cites a target in prose
+ *     and classifies it in the same call.
+ *
+ * `written` holds exactly one row per ACCEPTED input, in input order: the row
+ * that now satisfies it. For a relation input that is the row carrying that
+ * relation; for a bare input it is whichever row records the pair (its own
+ * bare row when it was inserted, otherwise the pair's first stored row). That
+ * one-to-one shape is what callers depend on — `reconcileCitedPairs` returns
+ * it as "the pairs this node cites", db/citations.ts turns it into the
+ * eligibility set for the relations attached in the same call, and the tool
+ * layer counts it into a receipt.
+ *
+ * Eligibility — whether THIS call may attach a relation to THIS pair — is
+ * `options.eligibleForRelation`; each caller computes its own set and this
+ * function only enforces membership in whatever set it was handed, refusing
+ * every relation when handed none.
+ *
+ * Self-loops are rejected here with a reported reason, and again by the
+ * table's own CHECK — a node confirming itself would inflate its own
+ * in-degree, the one mechanical confirmation signal the ranking has, so no
+ * write path (this one, a migration, a hand-written statement) may mint one.
+ * Existence of the endpoints is NOT checked here: callers that take
+ * model-supplied ids validate through db/references.ts first, while
+ * mechanical callers (rollback pairing, membership derivation) already hold
+ * rows. Endpoint DELETION is handled downstream: spec C15's kind-aware
+ * `AFTER DELETE` triggers on `turns`/`segments`/`sessions` (schema.ts) remove
+ * an edge the moment either endpoint disappears, so this function never has
+ * to reason about dangling ids.
  */
 export function writeMemoryEdges(
   db: Database,
@@ -300,52 +322,81 @@ export function writeMemoryEdges(
   const written: MemoryEdge[] = [];
   const rejected: WriteEdgesResult["rejected"] = [];
 
-  const relationsByPair = new Map<string, Set<CitationRelation>>();
-  for (const edge of edges) {
-    if (
-      !isValidCitingNode(edge?.citing) ||
-      !isValidCitedNode(edge?.cited) ||
-      !isCitationRelation(edge.relation)
-    ) {
-      continue;
-    }
-    const key = pairKey(edge);
-    const relations = relationsByPair.get(key) ?? new Set<CitationRelation>();
-    relations.add(edge.relation);
-    relationsByPair.set(key, relations);
-  }
-  const conflictingPairs = new Set(
-    [...relationsByPair.entries()]
-      .filter(([, relations]) => relations.size > 1)
-      .map(([key]) => key),
-  );
-
-  const upsert = db.query<
+  const insertRelationRow = db.query<
     EdgeRow,
-    [CitingNodeKind, number, EdgeNodeKind, number, string | null, string, number]
+    [CitingNodeKind, number, EdgeNodeKind, number, string, string, number]
   >(
     `
       INSERT INTO memory_edges (
         citing_kind, citing_id, cited_kind, cited_id,
         relation, provenance, created_at_epoch
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id)
-        DO UPDATE SET
-          -- Spec C14: no rank test between an authorised write and the
-          -- relation it sets. A relation-bearing write replaces relation AND
-          -- provenance together, unconditionally; a bare write (relation
-          -- NULL) touches neither — it can create a pair but never modify a
-          -- relation one already carries.
-          relation = CASE
-            WHEN excluded.relation IS NOT NULL THEN excluded.relation
-            ELSE memory_edges.relation
-          END,
-          provenance = CASE
-            WHEN excluded.relation IS NOT NULL THEN excluded.provenance
-            ELSE memory_edges.provenance
-          END
+      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation)
+        -- D2: a repeat of the same claim is a NO-OP, not a correction. The
+        -- assignment is deliberately the stored value itself: SQLite only
+        -- runs RETURNING on a row the statement touched, and this write's
+        -- contract is that every accepted input yields the row that now
+        -- satisfies it, restatements included.
+        DO UPDATE SET relation = memory_edges.relation
       RETURNING ${EDGE_COLUMNS}
     `,
+  );
+
+  // The bare row is the pair's existence record of last resort, so it is
+  // inserted only when nothing else already records the pair. The guard is a
+  // WHERE NOT EXISTS rather than a conflict clause because "any row for this
+  // pair" is wider than the partial unique index, which can only stop a
+  // SECOND bare row.
+  const insertBarePairRow = db.query<
+    EdgeRow,
+    [
+      CitingNodeKind,
+      number,
+      EdgeNodeKind,
+      number,
+      string,
+      number,
+      CitingNodeKind,
+      number,
+      EdgeNodeKind,
+      number,
+    ]
+  >(
+    `
+      INSERT INTO memory_edges (
+        citing_kind, citing_id, cited_kind, cited_id,
+        relation, provenance, created_at_epoch
+      )
+      SELECT ?, ?, ?, ?, NULL, ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM memory_edges
+        WHERE citing_kind = ? AND citing_id = ?
+          AND cited_kind = ? AND cited_id = ?
+      )
+      RETURNING ${EDGE_COLUMNS}
+    `,
+  );
+
+  const dropBarePairRow = db.query<
+    unknown,
+    [CitingNodeKind, number, EdgeNodeKind, number]
+  >(
+    `DELETE FROM memory_edges
+     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
+       AND relation IS NULL`,
+  );
+
+  // NULLs sort first in SQLite's ASC, so a pair that still holds its bare row
+  // reports that row, and one that does not reports its lowest-named
+  // relation — deterministic either way.
+  const readPairRow = db.query<
+    EdgeRow,
+    [CitingNodeKind, number, EdgeNodeKind, number]
+  >(
+    `SELECT ${EDGE_COLUMNS} FROM memory_edges
+     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
+     ORDER BY relation ASC
+     LIMIT 1`,
   );
 
   for (const edge of edges) {
@@ -368,10 +419,6 @@ export function writeMemoryEdges(
       rejected.push({ input: edge, reason: "invalid-provenance" });
       continue;
     }
-    if (edge.relation !== null && conflictingPairs.has(pairKey(edge))) {
-      rejected.push({ input: edge, reason: "conflicting-relation" });
-      continue;
-    }
     // Ticket 07 (spec C7/C14): only a relation-BEARING write is gated — a
     // bare write always passes, which is what keeps a mechanically derived
     // bare pair (segment anchors, `reconcileCitedPairs`'s own recompute)
@@ -383,21 +430,139 @@ export function writeMemoryEdges(
       continue;
     }
 
-    const row = upsert.get(
+    const createdAtEpoch = edge.createdAtEpoch ?? nowEpoch;
+    if (edge.relation !== null) {
+      const row = insertRelationRow.get(
+        edge.citing.kind,
+        edge.citing.id,
+        edge.cited.kind,
+        edge.cited.id,
+        edge.relation,
+        edge.provenance,
+        createdAtEpoch,
+      );
+      dropBarePairRow.run(
+        edge.citing.kind,
+        edge.citing.id,
+        edge.cited.kind,
+        edge.cited.id,
+      );
+      if (row) {
+        written.push(mapEdgeRow(row));
+      }
+      continue;
+    }
+
+    const inserted = insertBarePairRow.get(
       edge.citing.kind,
       edge.citing.id,
       edge.cited.kind,
       edge.cited.id,
-      edge.relation,
       edge.provenance,
-      edge.createdAtEpoch ?? nowEpoch,
+      createdAtEpoch,
+      edge.citing.kind,
+      edge.citing.id,
+      edge.cited.kind,
+      edge.cited.id,
     );
+    const row =
+      inserted ??
+      readPairRow.get(
+        edge.citing.kind,
+        edge.citing.id,
+        edge.cited.kind,
+        edge.cited.id,
+      );
     if (row) {
       written.push(mapEdgeRow(row));
     }
   }
 
   return { written, rejected };
+}
+
+export interface RetractEdgeInput {
+  citing: CitingNode;
+  cited: EdgeNode;
+  /**
+   * The row to remove. `null` addresses the pair's BARE row specifically — it
+   * is not a wildcard over the pair's relations, because "this citation was
+   * never classified" and "this classification is wrong" are different
+   * retractions and a caller that means one must not silently get the other.
+   */
+  relation: CitationRelation | null;
+}
+
+export interface RetractEdgesResult {
+  deleted: MemoryEdge[];
+  rejected: Array<{ input: RetractEdgeInput; reason: string }>;
+}
+
+/**
+ * D3: hard-delete an edge, addressed by (pair, relation). Both writers (main
+ * agent, settlement) have the same power here — a false assertion must not
+ * outlive its refutation, and no tombstone is kept: the audit trail for edge
+ * history is the existing database dump/backup, not a graveyard row that every
+ * reader would then have to exclude.
+ *
+ * Retracting a pair's last relation leaves the pair with NO row at all. It is
+ * not silently downgraded to a bare row: resurrecting the pair as "cited but
+ * unclassified" would re-assert something the retraction did not claim. The
+ * body-driven reconcile (`reconcileCitedPairs`) puts a bare row back on the
+ * next write if the prose still names the target.
+ *
+ * Rejected reasons mirror the write path's currency (`invalid-node`,
+ * `invalid-relation`), plus `no-such-edge` for an address that resolved but
+ * matched nothing — a caller reporting a retraction to a model needs to tell
+ * "I removed it" apart from "there was nothing there", which a bare count
+ * cannot express.
+ */
+export function retractMemoryEdges(
+  db: Database,
+  edges: readonly RetractEdgeInput[],
+): RetractEdgesResult {
+  const deleted: MemoryEdge[] = [];
+  const rejected: RetractEdgesResult["rejected"] = [];
+
+  // `relation IS ?` rather than `=`: null-safe equality, so one statement
+  // addresses both a named relation and the bare row.
+  const del = db.query<
+    EdgeRow,
+    [CitingNodeKind, number, EdgeNodeKind, number, string | null]
+  >(
+    `DELETE FROM memory_edges
+     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
+       AND relation IS ?
+     RETURNING ${EDGE_COLUMNS}`,
+  );
+
+  for (const edge of edges) {
+    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
+      rejected.push({ input: edge, reason: "invalid-node" });
+      continue;
+    }
+    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
+      rejected.push({ input: edge, reason: "invalid-relation" });
+      continue;
+    }
+
+    const rows = del.all(
+      edge.citing.kind,
+      edge.citing.id,
+      edge.cited.kind,
+      edge.cited.id,
+      edge.relation,
+    );
+    if (rows.length === 0) {
+      rejected.push({ input: edge, reason: "no-such-edge" });
+      continue;
+    }
+    for (const row of rows) {
+      deleted.push(mapEdgeRow(row));
+    }
+  }
+
+  return { deleted, rejected };
 }
 
 export function getOutgoingEdges(db: Database, citing: CitingNode): MemoryEdge[] {
@@ -437,11 +602,10 @@ export interface ReconcileCitedPairsResult {
  *
  * Two halves:
  *
- *   - every pair in `citedNodes` is upserted with `relation: null` — a bare,
- *     unattributed citation (spec C5). For a pair that already existed this is
- *     a no-op on relation/provenance: `writeMemoryEdges`'s null-relation
- *     upsert never touches either (spec C14), so a relation attached by
- *     another writer survives a rewrite that still cites the same target.
+ *   - every pair in `citedNodes` is written bare (`relation: null`). For a
+ *     pair that already holds any row this is a no-op (D2), so relations
+ *     attached by another writer survive a rewrite that still cites the same
+ *     target, and the pair is never recorded twice.
  *   - every pair this node currently cites that is NOT in `citedNodes` is
  *     DELETED outright, relation and all — a relation cannot outlive the pair
  *     that carries it, and there is no "keep the relation, drop the pair"
@@ -494,9 +658,10 @@ export function reconcileCitedPairs(
 
 /**
  * De-duplicated in-degree (spec D8): how many DISTINCT nodes cite this one.
- * Two relations between the same pair cannot exist any more (spec C5), but a
- * pair seen through two provenances still counts once — in-degree answers
- * "how many pieces of work consumed this", not "how many claims were filed".
+ * The DISTINCT is load-bearing under D2's multi-relation storage — one citer
+ * that declares two relations about this node is two rows and still one
+ * citer — because in-degree answers "how many pieces of work consumed this",
+ * not "how many claims were filed".
  */
 export function getEdgeInDegree(db: Database, cited: EdgeNode): number {
   return (

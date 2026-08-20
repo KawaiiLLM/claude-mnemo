@@ -4,7 +4,13 @@ import { BUILD_ID } from "../shared/build-id";
 import { recordInitializerBuild } from "./build-state";
 import { isCitationRelation, type CitationRelation } from "./citations";
 import { runWriteTransaction } from "./database";
-import { rankEdgeProvenance, type EdgeProvenance } from "./memory-edges";
+import {
+  countMemoryEdges,
+  rankEdgeProvenance,
+  writeMemoryEdges,
+  type EdgeProvenance,
+  type WriteEdgeInput,
+} from "./memory-edges";
 import { canonicalizeSettlementProposalAddresses } from "./note-settlement-proposals";
 import { rebuildSearchIndex } from "./search";
 import { recomputeSegmentFacets, repairStaleSegmentFacets } from "./segments";
@@ -1046,19 +1052,35 @@ const SCHEMA_SQL = `
 // timeline's correction graph and the segment ranking key disagreed about the
 // same relation because they read different tables).
 //
-// PRIMARY KEY (citing, cited) — the PAIR is the identity. `relation` sits
-// OUTSIDE the key as a nullable ATTRIBUTE of the pair (spec C5): an
-// unattributed citation (a bare textual reference) is a real storable state,
-// and correcting a relation UPDATES the row instead of inserting a second one
-// under the same pair. `provenance` is also outside the key — the audit layer
-// telling you how the edge was learned, spanning five sources (spec C12: it
-// must tell apart the main agent's own assertion `asserted`, a bare textual
-// reference `text-ref`, and a settlement attribution `judged`, which the
-// pre-ticket-05 column conflated). A conflicting write on an existing pair is
-// resolved by writeMemoryEdges (db/memory-edges.ts, spec C14): a
-// relation-bearing write replaces relation and provenance together,
-// unconditionally — no source ranking gates the correction — while a bare
-// write leaves both untouched.
+// Identity is (citing, cited, relation) — edge-mechanism-revision D2: ONE ROW
+// PER RELATION, so the same pair can carry `depends-on` AND `encodes` at once
+// (a landing turn states both its process cause and the ruling it carries),
+// which the previous pair-only key could not express at all. Two constraints
+// hold that shape:
+//
+//   - UNIQUE over all five columns: one row per (pair, relation), so a
+//     restatement is idempotent rather than a duplicate;
+//   - a PARTIAL unique index over the four pair columns WHERE relation IS
+//     NULL: at most ONE bare row per pair. It cannot be a table constraint,
+//     because SQLite's UNIQUE treats NULLs as distinct and would happily
+//     store a hundred identical bare rows.
+//
+// A pair's bare row records nothing but "this pair exists"; the write path
+// (db/memory-edges.ts) therefore skips a bare write onto a pair that already
+// has any row, and drops the bare row when a relation row starts recording
+// the same existence fact.
+//
+// The self-loop CHECK is the storage-layer half of a rule the write path also
+// enforces (D2): a node citing itself would inflate its own in-degree, the one
+// mechanical confirmation signal the ranking has, so no SQL path may mint one.
+//
+// `provenance` stays outside the key — the audit layer telling you how the
+// edge was learned, spanning five sources (spec C12: it must tell apart the
+// main agent's own assertion `asserted`, a bare textual reference `text-ref`,
+// and a settlement attribution `judged`, which the pre-ticket-05 column
+// conflated). A relation is never overwritten in place any more (the old
+// "non-null relation wins" upsert is retired): a wrong edge is RETRACTED
+// (`retractMemoryEdges`, D3) and rewritten.
 //
 // No FOREIGN KEY on citing_id/cited_id: one INTEGER column spans the turn,
 // segment and session id spaces, so a single REFERENCES clause can never be
@@ -1086,8 +1108,9 @@ const SCHEMA_SQL = `
 // it (straight copy — pair identity already holds, only the CHECK text
 // changes). (No backticks inside the DDL template literal below — it is a
 // JS template string, and a stray backtick in a SQL comment would close it.)
-const MEMORY_EDGES_DDL = `
-  CREATE TABLE IF NOT EXISTS memory_edges (
+function memoryEdgesTableDdl(tableName: string): string {
+  return `
+  CREATE TABLE IF NOT EXISTS ${tableName} (
     citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
     citing_id INTEGER NOT NULL,
     cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
@@ -1103,12 +1126,26 @@ const MEMORY_EDGES_DDL = `
       provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
     ),
     created_at_epoch INTEGER NOT NULL,
-    PRIMARY KEY (citing_kind, citing_id, cited_kind, cited_id)
+    CHECK (citing_kind <> cited_kind OR citing_id <> cited_id),
+    UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation)
   );
+`;
+}
 
+// Kept apart from the table DDL because every rebuild below has to re-run
+// them: an index belongs to the table it was built on, so it dies with the
+// table a rebuild drops (and a rename drags its NAME along, which is what
+// makes a bare `IF NOT EXISTS` re-exec silently skip).
+const MEMORY_EDGES_INDEXES_DDL = `
   CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
     ON memory_edges(cited_kind, cited_id, relation);
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_edges_bare_pair
+    ON memory_edges(citing_kind, citing_id, cited_kind, cited_id)
+    WHERE relation IS NULL;
 `;
+
+const MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges")}${MEMORY_EDGES_INDEXES_DDL}`;
 
 // Spec C15: the retired `turn_citations` table carried `ON DELETE CASCADE`;
 // `memory_edges` cannot, because citing_id/cited_id are shared across three
@@ -1364,6 +1401,17 @@ function collapseAndRebuildMemoryEdges(db: Database): void {
 
   for (const bucket of groups.values()) {
     const sample = bucket[0]!;
+    // A self-loop is not storable any more (the new table's own CHECK), and a
+    // schema so old that it could hold one must not be able to abort the open
+    // it is being migrated by. Dropping it is lossless in the only sense that
+    // matters: the row asserted a node cites itself, which no reader has ever
+    // counted.
+    if (
+      sample.citingKind === sample.citedKind &&
+      sample.citingId === sample.citedId
+    ) {
+      continue;
+    }
     const winner = pickWinningLegacyRelation(bucket);
     insert.run(
       sample.citingKind,
@@ -1377,10 +1425,7 @@ function collapseAndRebuildMemoryEdges(db: Database): void {
   }
 
   db.exec("DROP TABLE memory_edges_pre_pair_identity");
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
-      ON memory_edges(cited_kind, cited_id, relation);
-  `);
+  db.exec(MEMORY_EDGES_INDEXES_DDL);
 }
 
 function ensureMemoryEdgesPairIdentity(db: Database): void {
@@ -1439,20 +1484,106 @@ function ensureMemoryEdgesRelationVocabulary(db: Database): void {
        SELECT
          citing_kind, citing_id, cited_kind, cited_id,
          relation, provenance, created_at_epoch
-       FROM memory_edges_pre_relation_vocabulary`,
+       FROM memory_edges_pre_relation_vocabulary
+       WHERE citing_kind <> cited_kind OR citing_id <> cited_id`,
     );
     db.exec("DROP TABLE memory_edges_pre_relation_vocabulary");
-    // The rename dragged idx_memory_edges_cited along to the old table (a
-    // rename keeps index names), so MEMORY_EDGES_DDL's IF NOT EXISTS above
-    // saw the name and skipped; now that the old table's drop took the index
-    // with it, this re-exec creates it against the new table — the same
-    // trailing re-exec `collapseAndRebuildMemoryEdges` needs for the same
-    // reason.
-    db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
-        ON memory_edges(cited_kind, cited_id, relation);
-    `);
+    // The rename dragged the indexes along to the old table (a rename keeps
+    // index names), so MEMORY_EDGES_DDL's IF NOT EXISTS above saw the names
+    // and skipped; now that the old table's drop took them with it, this
+    // re-exec builds them against the new table — the same trailing re-exec
+    // `collapseAndRebuildMemoryEdges` needs for the same reason.
+    db.exec(MEMORY_EDGES_INDEXES_DDL);
   });
+}
+
+/**
+ * Edge-mechanism-revision ticket 01 (D2): identity widens from the pair to
+ * (pair, relation), a self-loop CHECK enters the table, and a partial unique
+ * index pins the bare row to at most one per pair. None of the three is
+ * ALTERable, so an installation still carrying the four-column PRIMARY KEY
+ * needs SQLite's rebuild-and-swap.
+ *
+ * Detection reads the stored DDL for the self-loop CHECK — the one clause
+ * unique to this shape — so a fresh database and an already-migrated one both
+ * skip on a single probe, the same idiom as the two rebuilds above.
+ */
+function memoryEdgesMultiRelationIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("citing_kind <> cited_kind");
+}
+
+/**
+ * Build under a temporary name, copy, DROP the original, rename the
+ * replacement INTO the original's name — never rename the original away. The
+ * three `AFTER DELETE` prune triggers (on `turns`/`segments`/`sessions`) name
+ * `memory_edges` in their bodies, and a rename-away is the one shape where an
+ * engine that rewrites trigger bodies would silently repoint them at a table
+ * this function is about to drop; the swap direction is correct either way.
+ * The triggers themselves are untouched by the swap, which is what keeps
+ * ticket 01's "cascade behaviour survives the migration" requirement true
+ * without re-creating them here.
+ *
+ * `PRAGMA foreign_keys` is a no-op inside a transaction, so it is turned off
+ * on the connection before `runWriteTransaction` opens one and restored after;
+ * `foreign_key_check` runs INSIDE the transaction (0.11.0-era migration
+ * precedent), because a check after the commit turns a violation into a
+ * durable swap plus a skipped migration.
+ */
+function ensureMemoryEdgesMultiRelation(db: Database): void {
+  if (!memoryEdgesMultiRelationIsStale(db)) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesMultiRelationIsStale(db)) {
+        return;
+      }
+
+      db.exec(memoryEdgesTableDdl("memory_edges_multi_relation_rebuild"));
+      // Explicit column list on both sides. The old key made every source row
+      // unique under the new one (one row per pair is one row per (pair,
+      // relation) too), so the copy is straight — no collapse, no relabel.
+      // The one filtered case is a self-loop, which the new CHECK refuses:
+      // today's database holds none, and an unmigratable row must not be able
+      // to abort the open that would migrate it.
+      db.exec(
+        `INSERT INTO memory_edges_multi_relation_rebuild (
+           citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, created_at_epoch
+         )
+         SELECT
+           citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, created_at_epoch
+         FROM memory_edges
+         WHERE citing_kind <> cited_kind OR citing_id <> cited_id`,
+      );
+      db.exec("DROP TABLE memory_edges");
+      db.exec(
+        "ALTER TABLE memory_edges_multi_relation_rebuild RENAME TO memory_edges",
+      );
+      // The indexes belonged to the dropped table and died with it.
+      db.exec(MEMORY_EDGES_INDEXES_DDL);
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while widening identity to (pair, relation): ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
 }
 
 function ensureMemoryEdgesSchema(db: Database): void {
@@ -1460,6 +1591,7 @@ function ensureMemoryEdgesSchema(db: Database): void {
   if (!isFirstCreation) {
     ensureMemoryEdgesPairIdentity(db);
     ensureMemoryEdgesRelationVocabulary(db);
+    ensureMemoryEdgesMultiRelation(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   // Idempotent (CREATE TRIGGER IF NOT EXISTS) and safe to (re-)run on every
@@ -1479,52 +1611,31 @@ function ensureMemoryEdgesSchema(db: Database): void {
  * one-way migration; now it is a step on the way to dropping that table
  * outright, see `retireLegacyTurnCitationsTable`).
  *
- * Spec C16: on an OVERLAPPING pair the citation side wins — its relation and
- * provenance overwrite whatever `memory_edges` already holds for that pair,
- * with no rank test between them, because `turn_citations` was the timeline
- * correction graph's replace-set truth right up to its retirement, i.e. the
- * side that was actually being read.
- *
- * That win is conditional on the citation SAYING something. A `builds-on`
- * citation remaps to NULL (`remapLegacyRelation`, spec C2), which is the
- * absence of a statement about the relation and not a statement that there is
- * none — so it contributes only the pair, exactly as the live upsert's C14
- * rule already has it (`writeMemoryEdges` uses this same CASE). Without that
- * condition the fold-in would carry a NULL over a relation settlement had
- * corrected, in one irreversible pass that then drops the source table.
- * Measured before landing: 0 of the 1182 overlapping pairs are in that shape
- * today, so this closes an empty path — but an empty path in a one-shot
- * migration is the cheapest kind to close.
- *
- * Only `created_at_epoch` is pooled rather than replaced: the EARLIER of the
- * two timestamps survives, so the fold-in can only move "when did this edge
- * first appear" earlier, never later — and it moves independently of the
- * relation, so a relationless citation that predates the edge still corrects
- * the age. A pair present only in `memory_edges` is left untouched — this
- * function only ever iterates `turn_citations` rows, so it has nothing to say
- * about a pair that isn't one of them.
+ * The fold-in goes through `writeMemoryEdges`, not its own SQL, so the legacy
+ * rows land under exactly the storage rules every live write obeys (D2): a
+ * legacy relation the pair does not yet carry becomes an ADDITIONAL row rather
+ * than overwriting whatever `memory_edges` already holds, a legacy relation
+ * already present is a no-op, and a citation that remaps to NULL contributes
+ * the pair only if nothing records it yet. This retires spec C16's "the
+ * citation side wins on an overlap" rule, which was an artefact of the
+ * one-relation-per-pair key: with (pair, relation) identity there is no
+ * contest to settle — the citation's claim and the edge's claim both fit.
  *
  * A pair the legacy table held under two relations (its wider key allowed
- * that) is collapsed to the single relation `pickWinningLegacyRelation`
+ * that) is still collapsed to the single relation `pickWinningLegacyRelation`
  * selects, with the same builds-on/implements remap the schema rebuild uses
- * (spec C2). Legacy rows land on `judged` provenance: `turn_citations` was
- * only ever written from an explicit `cites` array, i.e. a writer assigned
- * that relation directly, and `judged` is the closest of the new vocabulary's
- * five values to "a model assigned this relation" without claiming it was
- * `asserted` by the SAME call that wrote the citing prose, which the
- * migration cannot know for certain rows this old.
+ * (spec C2): that collapse is about which of several ANCIENT relabellings to
+ * trust, not about storage width, and blindly importing all of them would mint
+ * relations no writer ever asserted. Legacy rows land on `judged` provenance:
+ * `turn_citations` was only ever written from an explicit `cites` array, i.e.
+ * a writer assigned that relation directly, and `judged` is the closest of the
+ * new vocabulary's five values to "a model assigned this relation" without
+ * claiming it was `asserted` by the SAME call that wrote the citing prose,
+ * which the migration cannot know for rows this old.
  *
- * Idempotent: the upsert's `DO UPDATE` is WHERE-guarded to fire only when
- * applying it would actually change the stored relation, provenance or
- * created_at_epoch, so a re-run over unchanged source data writes nothing.
- *
- * Returns the number of pairs this call actually INSERTED OR CHANGED — a
- * genuine no-op re-run (nothing in `turn_citations` says anything new)
- * returns 0, not a count of pairs merely revisited. `RETURNING` used to fire
- * only on insert (`DO NOTHING`); now that a conflict can also mutate a row,
- * "newly inserted" is no longer the whole story, so this is "newly inserted
- * or corrected" — the number a caller (and the migration tests) uses to
- * assert zero loss on the first pass and true idempotency (0) on a repeat.
+ * Returns how many ROWS this call added — a genuine no-op re-run (every
+ * legacy claim already stored) returns 0. Idempotency is `writeMemoryEdges`'s
+ * own, not a WHERE-guard maintained here.
  */
 export function migrateTurnCitationsToEdges(db: Database): number {
   if (!hasTable(db, "turn_citations") || !hasTable(db, "memory_edges")) {
@@ -1561,39 +1672,7 @@ export function migrateTurnCitationsToEdges(db: Database): number {
     }
   }
 
-  const insert = db.query<
-    { inserted: number },
-    [number, number, string | null, string, number]
-  >(
-    `INSERT INTO memory_edges (
-       citing_kind, citing_id, cited_kind, cited_id,
-       relation, provenance, created_at_epoch
-     ) VALUES ('turn', ?, 'turn', ?, ?, ?, ?)
-     ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id) DO UPDATE SET
-       -- Spec C16: a citation that STATES a relation wins outright on an
-       -- overlap — no rank test. A citation whose relation remapped to NULL
-       -- ('builds-on') states nothing about the relation, so it contributes
-       -- only the pair and never clears one the edge already carries: the
-       -- same CASE the live upsert uses for C14 (memory-edges.ts), because
-       -- the reason is the same one. Only the timestamp is pooled rather
-       -- than replaced, and it can only move earlier.
-       relation = CASE
-         WHEN excluded.relation IS NOT NULL THEN excluded.relation
-         ELSE memory_edges.relation
-       END,
-       provenance = CASE
-         WHEN excluded.relation IS NOT NULL THEN excluded.provenance
-         ELSE memory_edges.provenance
-       END,
-       created_at_epoch = MIN(memory_edges.created_at_epoch, excluded.created_at_epoch)
-     WHERE (excluded.relation IS NOT NULL
-            AND (memory_edges.relation IS NOT excluded.relation
-                 OR memory_edges.provenance IS NOT excluded.provenance))
-        OR memory_edges.created_at_epoch > excluded.created_at_epoch
-     RETURNING 1 AS inserted`,
-  );
-
-  let migrated = 0;
+  const inputs: WriteEdgeInput[] = [];
   for (const bucket of groups.values()) {
     const sample = bucket[0]!;
     // Every candidate here carries `judged` provenance (turn_citations was
@@ -1608,20 +1687,24 @@ export function migrateTurnCitationsToEdges(db: Database): number {
         createdAtEpoch: row.createdAtEpoch,
       })),
     );
-    if (
-      insert.get(
-        sample.citingTurnId,
-        sample.citedTurnId,
-        winner.relation,
-        winner.provenance,
-        winner.createdAtEpoch,
-      )
-    ) {
-      migrated += 1;
-    }
+    inputs.push({
+      citing: { kind: "turn", id: sample.citingTurnId },
+      cited: { kind: "turn", id: sample.citedTurnId },
+      relation: winner.relation,
+      provenance: winner.provenance,
+      // The row being carried across already happened at a real moment;
+      // re-stamping it "now" would make "when did this edge first appear" lie.
+      createdAtEpoch: winner.createdAtEpoch,
+    });
   }
 
-  return migrated;
+  const before = countMemoryEdges(db);
+  // `unrestricted`: this is a historical import of relations a writer already
+  // asserted, not a new classification anyone is entitled to make — the
+  // eligibility gate has no pre-state to check them against, and saying so out
+  // loud is the option's whole purpose.
+  writeMemoryEdges(db, inputs, 0, { eligibleForRelation: "unrestricted" });
+  return countMemoryEdges(db) - before;
 }
 
 // Ticket 05 (spec C13): the dual edge graph is resolved by collapsing to
