@@ -3618,6 +3618,104 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
   });
 });
 
+/**
+ * Ticket 10 (edge-mechanism-revision, peer 终审必改 4). D2 gave one pair one
+ * row PER RELATION, and the `↳` aggregation pushed a row at a time, so a citer
+ * that declared two relations about the same antecedent rendered its address
+ * twice — and spent two of the cap's four slots on one turn. The `↳` line is a
+ * pure address index ("箭头标记是纯地址索引"), so the fix is de-duplication at
+ * the aggregation, with the relation detail still feeding the ⚑ test.
+ */
+describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
+  const dayEpoch = (minute: number): number =>
+    Math.floor(Date.UTC(2026, 7, 17, 9, minute) / 1000);
+
+  const seedCiter = (
+    db: ReturnType<typeof createDatabase>,
+    antecedentCount: number,
+  ): { sessionId: number; citerId: number; antecedentIds: number[] } => {
+    const rows = [
+      ...Array.from({ length: antecedentCount }, (_unused, index) =>
+        turn({
+          promptNumber: 801 + index,
+          type: "decision",
+          title: "antecedent",
+          createdAtEpoch: dayEpoch(index),
+        }),
+      ),
+      turn({
+        promptNumber: 821,
+        type: "decision",
+        title: "the landing",
+        createdAtEpoch: dayEpoch(30),
+      }),
+    ];
+    const session = seedTimelineSession(db, rows, { title: "title" });
+    return {
+      sessionId: session.id,
+      citerId: getTurn(db, session.id, 821)!.id,
+      antecedentIds: Array.from(
+        { length: antecedentCount },
+        (_unused, index) => getTurn(db, session.id, 801 + index)!.id,
+      ),
+    };
+  };
+
+  it("renders a doubly-classified antecedent once, and still raises ⚑ for its supersedes", () => {
+    const db = createDatabase(":memory:");
+    const { sessionId, citerId, antecedentIds } = seedCiter(db, 1);
+    writeMemoryEdges(
+      db,
+      [
+        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: "depends-on", provenance: "asserted" },
+        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: "supersedes", provenance: "judged" },
+      ],
+      dayEpoch(30),
+    );
+
+    const output = renderTimeline(
+      buildTimelineView(db, { id: `S${sessionId}/T821..821` }),
+    );
+
+    // One address, one occurrence — not `↳ T801, T801`.
+    expect(output).toContain("↳ T801");
+    expect(output).not.toContain("↳ T801, T801");
+    expect(
+      output.split("\n").filter((line) => line.trim().startsWith("↳")),
+    ).toHaveLength(1);
+    // The ⚑ still reads the RELATION detail the aggregation de-duplicated:
+    // the `supersedes` row is a second row on the very pair that collapsed.
+    expect(output).toMatch(/⚑ \[T821\]/);
+  });
+
+  it("spends the cap and the +N fold on DISTINCT antecedents", () => {
+    const db = createDatabase(":memory:");
+    const { sessionId, citerId, antecedentIds } = seedCiter(db, 5);
+    writeMemoryEdges(
+      db,
+      [
+        ...antecedentIds.map((citedId) => ({
+          citing: { kind: "turn" as const, id: citerId },
+          cited: { kind: "turn" as const, id: citedId },
+          relation: "depends-on" as const,
+          provenance: "asserted" as const,
+        })),
+        // A second relation on the FIRST pair. Pre-fix this consumed a slot
+        // and pushed the fold to `+2`, hiding a turn nothing else showed.
+        { citing: { kind: "turn" as const, id: citerId }, cited: { kind: "turn" as const, id: antecedentIds[0]! }, relation: "encodes" as const, provenance: "asserted" as const },
+      ],
+      dayEpoch(30),
+    );
+
+    const output = renderTimeline(
+      buildTimelineView(db, { id: `S${sessionId}/T821..821` }),
+    );
+
+    // Cap is 4 addresses; 5 distinct antecedents fold exactly one.
+    expect(output).toContain("↳ T801, T802, T803, T804, +1");
+  });
+});
+
 describe("timelineQuery", () => {
   it("builds and renders the timeline for a valid session id", () => {
     const db = createDatabase(":memory:");

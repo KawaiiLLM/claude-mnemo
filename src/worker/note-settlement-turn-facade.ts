@@ -1025,7 +1025,7 @@ export function evaluateSettlementTurnWrite(
     // carrying no such edge) still precedes every other write.
     let retracted = 0;
     if (retractionFields.length > 0) {
-      const result = retractTurnRelations(db, turn.id, retractionFields);
+      const result = retractTurnRelations(db, turn.id, retractionFields, nowEpoch);
       if (result.rejected.length > 0) {
         return { ok: false, message: formatRelationRejections(result.rejected, "retraction") };
       }

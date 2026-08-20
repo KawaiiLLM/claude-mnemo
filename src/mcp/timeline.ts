@@ -3836,12 +3836,25 @@ function resolveTurnRowLinks(
     .all(...citedIds);
   const citedById = new Map(citedRows.map((row) => [row.id, row] as const));
 
+  // Ticket 10: the aggregation is keyed on the PAIR, not the row. D2 lets one
+  // pair hold several rows (one per relation), and the `↳` line is a pure
+  // address index — an antecedent named twice because its citer declared both
+  // `depends-on` and `encodes` about it rendered as `↳ T1 T1`, and burned two
+  // of the cap's slots on one address. The relation detail is NOT dropped: the
+  // ⚑ corrector test above still runs over every row, so a `supersedes`
+  // alongside another relation on the same pair still raises the flag.
   const byCiter = new Map<number, Array<{ sessionId: number; promptNumber: number }>>();
+  const seenPairs = new Set<string>();
   for (const edge of edges) {
     const cited = citedById.get(edge.citedId);
     if (!cited || !result.has(edge.citingId)) {
       continue;
     }
+    const pair = `${edge.citingId}>${edge.citedId}`;
+    if (seenPairs.has(pair)) {
+      continue;
+    }
+    seenPairs.add(pair);
     const bucket = byCiter.get(edge.citingId) ?? [];
     bucket.push({ sessionId: cited.sessionId, promptNumber: cited.promptNumber });
     byCiter.set(edge.citingId, bucket);

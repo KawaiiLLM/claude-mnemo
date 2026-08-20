@@ -25,7 +25,11 @@ import {
  *     is a no-op, and a relation write onto a pair that still carries a bare
  *     row REPLACES it, because the relation row already records the same
  *     existence fact and a second copy of it is noise every reader would have
- *     to de-duplicate.
+ *     to de-duplicate. That replacement is why RETRACTING the relation has to
+ *     hand the existence question back to prose rather than just deleting a
+ *     row (ticket 10, `restoreBareRowsForEmptiedPairs` in db/citations.ts):
+ *     the bare row it displaced was the body's own record, and the retraction
+ *     said nothing about the body.
  *   - its PROVENANCE, how the system learned it (spec C12: it must tell apart
  *     the main agent's own assertion from a bare textual reference from a
  *     settlement attribution — three of `EDGE_PROVENANCES`' five values).
@@ -473,11 +477,15 @@ export interface RetractEdgesResult {
  * history is the existing database dump/backup, not a graveyard row that every
  * reader would then have to exclude.
  *
- * Retracting a pair's last relation leaves the pair with NO row at all. It is
- * not silently downgraded to a bare row: resurrecting the pair as "cited but
- * unclassified" would re-assert something the retraction did not claim. The
- * body-driven reconcile (`reconcileCitedPairs`) puts a bare row back on the
- * next write if the prose still names the target.
+ * Retracting a pair's last relation leaves the pair with NO row at all, HERE.
+ * This primitive never downgrades it to a bare row: resurrecting the pair as
+ * "cited but unclassified" is a claim about the citing body, and this function
+ * cannot read one — it is handed nodes, which may be turns, segments or
+ * sessions. The caller that CAN read the body decides (ticket 10):
+ * `retractTurnRelations` re-scans the citing turn's title/content/insight for
+ * exactly the pairs this call emptied and restores the bare row for the ones
+ * the prose still names. A caller with no body to scan gets the plain
+ * hard-delete, which is the whole truth in that case.
  *
  * Rejected reasons mirror the write path's currency (`invalid-node`,
  * `invalid-relation`), plus `no-such-edge` for an address that resolved but

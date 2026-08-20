@@ -10,9 +10,14 @@ import {
   parseInlineCitations,
   recomputeTurnCitedPairs,
   retractTurnRelations,
+  type RecomputeTurnCitedPairsFields as RecomputeFields,
 } from "../../src/db/citations";
 import { createDatabase } from "../../src/db/database";
-import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
+import {
+  getEdgeInDegree,
+  getOutgoingEdges,
+  writeMemoryEdges,
+} from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -877,7 +882,11 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     expect(relationsOn(turns[2]!)).toEqual(["evidence-for"]);
   });
 
-  test("retracting a pair's last relation leaves the pair with no row at all — not a bare one", () => {
+  // Ticket 10, acceptance criterion 2: the fixture turns carry `title:
+  // 'fixture'` and no body, so nothing re-asserts the citation and the pair
+  // stays gone. This is the CURRENT behaviour pinned, not the old one: the
+  // bare row comes back only for a body that still names the target.
+  test("retracting a pair's last relation leaves the pair with no row at all when no prose names the target", () => {
     attachTurnRelations(
       db,
       turns[2]!,
@@ -885,11 +894,221 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       500,
     );
 
-    retractTurnRelations(db, turns[2]!, [
+    const result = retractTurnRelations(db, turns[2]!, [
       { relation: "evidence-for", targets: [`S${sessionId}/T1`] },
     ]);
 
+    expect(result.restored).toEqual([]);
     expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
+  });
+
+  // ------------------------------------------------------------------
+  // Bare restore on retraction (ticket 10, peer 终审必改 3)
+  // ------------------------------------------------------------------
+
+  describe("bare restore when a retraction empties a pair the body still names", () => {
+    const setBody = (turnId: number, fields: Partial<RecomputeFields>): void => {
+      db.query<unknown, [string | null, string | null, string | null, number]>(
+        "UPDATE turns SET title = ?, content = ?, insight = ? WHERE id = ?",
+      ).run(
+        fields.title ?? null,
+        fields.content ?? null,
+        fields.insight ?? null,
+        turnId,
+      );
+    };
+
+    // The whole reproduction chain in one test, because the bug is the
+    // COMPOSITION of three individually-correct rules, not any one of them:
+    // prose creates a bare row, a relation write REPLACES it (D2 one-fact-
+    // one-row), and a retraction hard-deletes without downgrading (D3). Only
+    // the sequence shows the citation evaporating.
+    test("prose → bare; relation replaces it; retraction puts it back", () => {
+      const body = `Builds on [S${sessionId}/T1].`;
+      setBody(turns[2]!, { content: body });
+
+      recomputeTurnCitedPairs(
+        db,
+        turns[2]!,
+        { title: null, content: body, insight: null },
+        500,
+        sessionId,
+      );
+      expect(relationsOn(turns[2]!)).toEqual([null]);
+
+      attachTurnRelations(
+        db,
+        turns[2]!,
+        [{ relation: "depends-on", targets: [`S${sessionId}/T1`] }],
+        600,
+      );
+      // Replaced, not accompanied — the pair holds exactly one row.
+      expect(relationsOn(turns[2]!)).toEqual(["depends-on"]);
+
+      const result = retractTurnRelations(
+        db,
+        turns[2]!,
+        [{ relation: "depends-on", targets: [`S${sessionId}/T1`] }],
+        700,
+      );
+
+      expect(result.rejected).toEqual([]);
+      expect(result.deleted.map((edge) => edge.relation)).toEqual(["depends-on"]);
+      expect(result.restored).toHaveLength(1);
+      expect(result.restored[0]?.cited).toEqual({ kind: "turn", id: turns[0]! });
+      expect(result.restored[0]?.relation).toBeNull();
+      // Provenance is the BODY's fact, not the withdrawn writer's assertion.
+      expect(result.restored[0]?.provenance).toBe("text-ref");
+      expect(result.restored[0]?.createdAtEpoch).toBe(700);
+
+      // Back to the post-prose state exactly: one bare row, and every
+      // downstream count (`↳` pull-through, cited counts) reads the same as
+      // it did before any relation was ever written.
+      expect(relationsOn(turns[2]!)).toEqual([null]);
+      expect(
+        getEffectiveCitations(db, { id: turns[2]!, content: body }).citedTurnIds,
+      ).toEqual([turns[0]!]);
+      expect(getEdgeInDegree(db, { kind: "turn", id: turns[0]! })).toBe(1);
+    });
+
+    test("title and insight re-assert the citation too, same three fields the recompute scans", () => {
+      setBody(turns[2]!, {
+        title: `reverses [S${sessionId}/T1]`,
+        insight: `same lesson as [S${sessionId}/T2]`,
+      });
+      attachTurnRelations(
+        db,
+        turns[2]!,
+        [
+          { relation: "override", targets: [`S${sessionId}/T1`] },
+          { relation: "refines", targets: [`S${sessionId}/T2`] },
+        ],
+        600,
+      );
+
+      const result = retractTurnRelations(
+        db,
+        turns[2]!,
+        [
+          { relation: "override", targets: [`S${sessionId}/T1`] },
+          { relation: "refines", targets: [`S${sessionId}/T2`] },
+        ],
+        700,
+      );
+
+      expect(
+        result.restored.map((edge) => edge.cited.id).sort((a, b) => a - b),
+      ).toEqual([turns[0]!, turns[1]!]);
+      expect(relationsOn(turns[2]!)).toEqual([null, null]);
+    });
+
+    // The bare row stays the existence record OF LAST RESORT: a pair that
+    // still carries a relation records itself, so restoring one there would
+    // reverse ticket 01's one-fact-one-row de-dup and double the reader's
+    // row count.
+    test("a pair keeping another relation gets no bare row", () => {
+      setBody(turns[2]!, { content: `Builds on [S${sessionId}/T1].` });
+      attachTurnRelations(
+        db,
+        turns[2]!,
+        [
+          { relation: "evidence-for", targets: [`S${sessionId}/T1`] },
+          { relation: "depends-on", targets: [`S${sessionId}/T1`] },
+        ],
+        600,
+      );
+
+      const result = retractTurnRelations(
+        db,
+        turns[2]!,
+        [{ relation: "depends-on", targets: [`S${sessionId}/T1`] }],
+        700,
+      );
+
+      expect(result.restored).toEqual([]);
+      expect(relationsOn(turns[2]!)).toEqual(["evidence-for"]);
+    });
+
+    // A retraction is not a reconcile: it repairs only what it just emptied.
+    // A target the body names but that carries no row at all is
+    // `recomputeTurnCitedPairs`' business, on the next prose write.
+    test("only the emptied pair is restored, never every address the body names", () => {
+      setBody(turns[2]!, {
+        content: `[S${sessionId}/T1] and [S${sessionId}/T2].`,
+      });
+      attachTurnRelations(
+        db,
+        turns[2]!,
+        [{ relation: "depends-on", targets: [`S${sessionId}/T1`] }],
+        600,
+      );
+
+      const result = retractTurnRelations(
+        db,
+        turns[2]!,
+        [{ relation: "depends-on", targets: [`S${sessionId}/T1`] }],
+        700,
+      );
+
+      expect(result.restored.map((edge) => edge.cited.id)).toEqual([turns[0]!]);
+      expect(
+        getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).map(
+          (edge) => edge.cited.id,
+        ),
+      ).toEqual([turns[0]!]);
+    });
+
+    // The cited side may be a segment (`[E<n>]`), so the restore has to match
+    // on the whole node address, not on a turn id.
+    test("a segment antecedent named in the body is restored the same way", () => {
+      const segment = createSegment(db, { title: "Prior chapter", nowEpoch: 200 });
+      setBody(turns[2]!, { content: `Continues [E${segment.id}].` });
+      attachTurnRelations(
+        db,
+        turns[2]!,
+        [{ relation: "refines", targets: [`E${segment.id}`] }],
+        600,
+      );
+
+      const result = retractTurnRelations(
+        db,
+        turns[2]!,
+        [{ relation: "refines", targets: [`E${segment.id}`] }],
+        700,
+      );
+
+      expect(result.restored).toHaveLength(1);
+      expect(result.restored[0]?.cited).toEqual({
+        kind: "segment",
+        id: segment.id,
+      });
+    });
+
+    // All-or-nothing survives the addition: a rejected address means nothing
+    // was deleted, so there is nothing to restore either.
+    test("a rejected retraction restores nothing", () => {
+      setBody(turns[2]!, { content: `Builds on [S${sessionId}/T1].` });
+      attachTurnRelations(
+        db,
+        turns[2]!,
+        [{ relation: "depends-on", targets: [`S${sessionId}/T1`] }],
+        600,
+      );
+
+      const result = retractTurnRelations(
+        db,
+        turns[2]!,
+        [
+          { relation: "depends-on", targets: [`S${sessionId}/T1`] },
+          { relation: "override", targets: [`S${sessionId}/T1`] },
+        ],
+        700,
+      );
+
+      expect(result.restored).toEqual([]);
+      expect(result.deleted).toEqual([]);
+      expect(relationsOn(turns[2]!)).toEqual(["depends-on"]);
+    });
   });
 });
 

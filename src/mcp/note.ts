@@ -152,24 +152,31 @@ export function writeOverwritesExistingTurnContent(
 /**
  * Ticket 06 (spec D8: "拒绝报文必须指名是哪个字段被截断、补救动作是什么"):
  * the read that actually brings THIS field back whole on the turn surface.
- * `type`/`tags` need their own clause — neither is selectable by its own
- * name (`filter.fields` has no such value); both render on the `metadata`
- * line (mcp/format.ts's `composeTurnMetadata`), so a writer told only to
- * "raise the budget" would re-read forever without ever earning a
- * completeness record for them.
+ *
+ * Ticket 12 (edge-mechanism-revision spec, [S15069/T1135]): `metadata` — and
+ * therefore `type`/`tags`, which render on its one line (mcp/format.ts's
+ * `composeTurnMetadata`) — joined `DEFAULT_TURN_RENDER_FIELDS`, so a PLAIN
+ * recall now earns type/tags completeness the same way it already did for
+ * title/content; the explicit `filter={fields:["metadata"]}` narrowing this
+ * remedy used to prescribe as the ONLY path is now just the fallback for a
+ * caller whose own prior read had narrowed `filter.fields` away from
+ * metadata — the field-selection mechanism itself is unchanged and still
+ * worth naming, just no longer the default recipe.
  */
 export function completeReadRemedyForTurnField(
   field: TurnModeField,
   address: string,
 ): string {
-  const selector = field === "type" || field === "tags" ? "metadata" : field;
-  const rider =
-    selector === "metadata"
-      ? " (type and tags both render on that metadata line)"
-      : "";
+  if (field === "type" || field === "tags") {
+    return (
+      `re-read it whole with recall(id="${address}", turn=<a bigger token budget>) ` +
+      `(type and tags render on the metadata line, included by default; add ` +
+      `filter={fields:["metadata"]} only if your last read had narrowed past it),`
+    );
+  }
   return (
-    `re-read it whole with recall(id="${address}", filter={fields:["${selector}"]}, ` +
-    `turn=<a bigger token budget>)${rider},`
+    `re-read it whole with recall(id="${address}", filter={fields:["${field}"]}, ` +
+    `turn=<a bigger token budget>),`
   );
 }
 
@@ -698,12 +705,13 @@ function resolveRetractionFields(
   db: Database,
   citingTurnId: number,
   input: NoteToolInput,
+  nowEpoch: number,
 ): RetractTurnRelationsResult | null {
   const fields = collectRelationFields(RETRACTION_FIELD_ENTRIES, input);
   if (fields.length === 0) {
     return null;
   }
-  const result = retractTurnRelations(db, citingTurnId, fields);
+  const result = retractTurnRelations(db, citingTurnId, fields, nowEpoch);
   if (result.rejected.length > 0) {
     fail(formatRelationRejections(result.rejected, "retraction"));
   }
@@ -1168,7 +1176,7 @@ function handleTurnWrite(
       // Retraction runs BEFORE the attach: correcting a wrong relation is
       // "retract it, then write the right one" (D2/D3), and a caller doing
       // both in one call means them in that order.
-      const retractions = resolveRetractionFields(db, turn.id, input);
+      const retractions = resolveRetractionFields(db, turn.id, input, nowEpoch);
       const relations = resolveRelationFields(
         db,
         turn.id,

@@ -68,11 +68,19 @@ export interface TurnCitationEdge {
   citingTurnId: number;
   citedTurnId: number;
   /**
-   * C5: an attribute of the pair, not part of its identity. Null = a bare,
-   * unattributed citation — a real, storable state that the generic readers
-   * below (`getTurnCitations`, `getSessionEffectiveCitations`) must surface,
-   * not filter out. Only relation-SPECIFIC logic (e.g. the `supersedes`
-   * branch in `mcp/timeline.ts`) may narrow on this field.
+   * Null = a bare, unattributed citation — a real, storable state that the
+   * generic readers below (`getTurnCitations`, `getSessionEffectiveCitations`)
+   * must surface, not filter out. Only relation-SPECIFIC logic (e.g. the
+   * `supersedes` branch in `mcp/timeline.ts`) may narrow on this field.
+   *
+   * Retired history: C5 (write-mode-edit-semantics era) read `relation` as an
+   * attribute of the pair, not part of its identity — at most one relation
+   * per (citing, cited) pair. edge-mechanism-revision ticket 01's D2 (multi-
+   * relation) superseded that: `relation` is now part of the row's identity,
+   * and the same pair may carry several relation rows at once (a bare,
+   * relation-NULL row still capped to one per pair by a partial unique
+   * index) — see this file's own edge-write path and the retraction mirrors
+   * in `mcp/note.ts`.
    */
   relation: CitationRelation | null;
   createdAtEpoch: number;
@@ -510,8 +518,126 @@ export function attachTurnRelations(
 
 export interface RetractTurnRelationsResult {
   deleted: MemoryEdge[];
+  /**
+   * Ticket 10: BARE rows put back because the retraction emptied a pair the
+   * citing node's prose still names. Reported separately from `deleted` — a
+   * receipt has to be able to say "the classification is gone but the citation
+   * stands", which is a different fact from either "removed" or "nothing
+   * happened".
+   */
+  restored: MemoryEdge[];
   /** Same all-or-nothing contract as the attach path: non-empty means nothing was deleted. */
   rejected: TurnRelationRejection[];
+}
+
+/** The citing node's citation-bearing text, as it stands at retraction time. */
+type CitingBodyFields = RecomputeTurnCitedPairsFields;
+
+/**
+ * Ticket 10 (peer 终审必改 3): a retraction must not make a citation the prose
+ * still asserts DISAPPEAR.
+ *
+ * Three separately-correct rules compose into one wrong outcome: a relation
+ * write REPLACES the pair's bare row (D2 — one fact, one row); a retraction
+ * HARD-DELETES the addressed row and refuses to downgrade it to a bare one
+ * (D3 — a retraction claims nothing); and the bare layer is only re-derived
+ * when prose is REWRITTEN (`recomputeTurnCitedPairs`, which in `mcp/note.ts`
+ * runs under `touchedProse` and, in both live callers, BEFORE the retraction
+ * anyway). So classifying a citation and then retracting the classification
+ * left the pair with no row at all, and the `↳` pull-through and the cited
+ * counts silently lost a target the body still names.
+ *
+ * The repair is at the retraction path rather than in the primitive: only here
+ * is it known that a pair was emptied BY a retraction, and only here is the
+ * citing node's body in reach. Rules unchanged: the bare row stays the pair's
+ * existence record OF LAST RESORT — it is put back only for a pair that now
+ * holds NO row, so a pair keeping another relation gains nothing, and bare and
+ * relation rows still never coexist (ticket 01's one-fact-one-row de-dup, which
+ * "keep both permanently" would have reversed at the cost of doubling every
+ * reader's row count).
+ *
+ * `fields` is the citing node's body, so this is kind-agnostic on purpose: a
+ * future segment- or session-citing retraction facade passes ITS OWN
+ * title/content/insight here and gets the same treatment, and a bodyless
+ * citing construct (a mechanical anchor) passes nulls and restores nothing —
+ * there is no prose to re-assert the citation.
+ *
+ * Provenance is `text-ref` (spec C12): what is being recorded is that the body
+ * names the target, which is exactly what a bare textual reference means. It
+ * is NOT the retracted row's provenance — the writer's assertion is what was
+ * just withdrawn.
+ */
+function restoreBareRowsForEmptiedPairs(
+  db: Database,
+  citing: CitingNode,
+  emptiedCandidates: readonly EdgeNode[],
+  fields: CitingBodyFields,
+  nowEpoch: number,
+): MemoryEdge[] {
+  if (emptiedCandidates.length === 0) {
+    return [];
+  }
+
+  const surviving = new Set(
+    getOutgoingEdges(db, citing).map((edge) => `${edge.cited.kind}:${edge.cited.id}`),
+  );
+  const emptied = new Map<string, EdgeNode>();
+  for (const node of emptiedCandidates) {
+    const key = `${node.kind}:${node.id}`;
+    if (!surviving.has(key)) {
+      emptied.set(key, node);
+    }
+  }
+  if (emptied.size === 0) {
+    return [];
+  }
+
+  // The body is RE-read, not diffed: the same whole-node rescan
+  // `reconcileCitedPairs` does, over the same three fields.
+  //
+  // Rejections are swallowed rather than logged. This rescan re-derives a body
+  // that was already validated (and its illegal references already reported)
+  // by the write that stored it; re-announcing them on an unrelated retraction
+  // would be noise attributed to the wrong act. No exposure-ledger gate exists
+  // any more (references.ts), so resolution here is exactly "does the address
+  // name a row".
+  const { accepted } = validateReferences(
+    db,
+    [
+      ...parseQualifiedReferences(fields.title),
+      ...parseQualifiedReferences(fields.content),
+      ...parseQualifiedReferences(fields.insight),
+    ],
+    { logger: { warn: () => {} } },
+  );
+
+  const inputs: WriteEdgeInput[] = [];
+  const claimed = new Set<string>();
+  for (const entry of accepted) {
+    const key = `${entry.node.kind}:${entry.node.id}`;
+    const node = emptied.get(key);
+    if (node === undefined || claimed.has(key)) {
+      continue;
+    }
+    claimed.add(key);
+    inputs.push({ citing, cited: node, relation: null, provenance: "text-ref" });
+  }
+  if (inputs.length === 0) {
+    return [];
+  }
+
+  return writeMemoryEdges(db, inputs, nowEpoch).written;
+}
+
+/** The turn's citation-bearing fields as stored — the text a restore rescans. */
+function readTurnBodyFields(db: Database, turnId: number): CitingBodyFields {
+  return (
+    db
+      .query<CitingBodyFields, [number]>(
+        "SELECT title, content, insight FROM turns WHERE id = ?",
+      )
+      .get(turnId) ?? { title: null, content: null, insight: null }
+  );
 }
 
 /**
@@ -528,15 +654,24 @@ export interface RetractTurnRelationsResult {
  * second by name (`no-such-edge`). A caller told only "0 deleted" cannot tell
  * "already gone" from "wrong address", and a model given that answer guesses.
  *
- * Retracting a pair's last relation leaves the pair with NO row (the
- * primitive's own rule): it is not downgraded to a bare row, since the
- * retraction did not claim the citation still exists. A later prose write
- * whose body still names the target puts the bare row back.
+ * Retracting a pair's last relation leaves the pair with NO row from the
+ * primitive's point of view — it is never DOWNGRADED to a bare row, because a
+ * retraction claims nothing about whether the citation still exists. What
+ * decides that is the citing turn's own prose, which this function re-reads
+ * for exactly the emptied pairs (ticket 10, `restoreBareRowsForEmptiedPairs`):
+ * a body that still names the target gets its bare row back under provenance
+ * `text-ref`, and a body that does not leaves the pair gone. The old
+ * behaviour — wait for the next prose rewrite — meant a retraction-only call
+ * (which never recomputes) silently dropped a citation the body asserts.
+ *
+ * `nowEpoch` stamps any such restored row and is optional only because both
+ * live callers predate it; it is the ordinary injected clock everywhere else.
  */
 export function retractTurnRelations(
   db: Database,
   citingTurnId: number,
   fields: readonly TurnRelationFieldInput[],
+  nowEpoch: number = Math.floor(Date.now() / 1000),
 ): RetractTurnRelationsResult {
   const citing: CitingNode = { kind: "turn", id: citingTurnId };
 
@@ -566,11 +701,18 @@ export function retractTurnRelations(
   }
 
   if (rejected.length > 0 || targets.length === 0) {
-    return { deleted: [], rejected };
+    return { deleted: [], restored: [], rejected };
   }
 
   const { deleted } = retractMemoryEdges(db, targets);
-  return { deleted, rejected: [] };
+  const restored = restoreBareRowsForEmptiedPairs(
+    db,
+    citing,
+    deleted.map((edge) => edge.cited),
+    readTurnBodyFields(db, citingTurnId),
+    nowEpoch,
+  );
+  return { deleted, restored, rejected: [] };
 }
 
 /**
