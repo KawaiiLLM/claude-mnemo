@@ -49,7 +49,7 @@ function completenessRow(
 
 function seedSessionWithTurn(
   contentSessionId: string,
-  overrides: { content?: string; insight?: string } = {},
+  overrides: { content?: string; insight?: string; type?: string[]; tags?: string[] } = {},
 ): { sessionId: number; turnId: number } {
   const sessionId = upsertSession(db, {
     contentSessionId,
@@ -63,14 +63,20 @@ function seedSessionWithTurn(
   }).id;
 
   const turnId = db
-    .query<{ id: number }, [number, string | null, string | null]>(
+    .query<{ id: number }, unknown[]>(
       `INSERT INTO turns (
          session_id, prompt_number, status, user_prompt, assistant_response,
-         title, content, insight, created_at_epoch
-       ) VALUES (?, 1, 'extracted', 'prompt', 'response', 'a title', ?, ?, 110)
+         title, content, insight, created_at_epoch, type, tags
+       ) VALUES (?, 1, 'extracted', 'prompt', 'response', 'a title', ?, ?, 110, ?, ?)
        RETURNING id`,
     )
-    .get(sessionId, overrides.content ?? "turn content", overrides.insight ?? null)!.id;
+    .get(
+      sessionId,
+      overrides.content ?? "turn content",
+      overrides.insight ?? null,
+      JSON.stringify(overrides.type ?? []),
+      JSON.stringify(overrides.tags ?? []),
+    )!.id;
 
   // Same explicit re-index every raw-INSERT turn fixture in this codebase
   // uses (recall.ticket14.test.ts) — the write path this bypasses normally
@@ -138,6 +144,76 @@ describe("the bare browse feed records per-field turn completeness (recall.ts's 
     });
 
     expect(completenessRow(db, "session:1", "turn", turnId, "title")?.complete).toBe(1);
+  });
+
+  test("ticket 10: type/tags ride the metadata field — a tight budget that truncates metadata records BOTH incomplete", () => {
+    const { turnId } = seedSessionWithTurn("browse-type-tags-completeness", {
+      type: ["discuss", "research", "design", "implement", "refactor"],
+      tags: ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"],
+    });
+
+    recallMemory(db, {
+      filter: { fields: ["metadata"] },
+      turn: 5,
+      readerId: "session:1",
+      now: () => 500,
+    });
+
+    expect(completenessRow(db, "session:1", "turn", turnId, "type")?.complete).toBe(0);
+    expect(completenessRow(db, "session:1", "turn", turnId, "tags")?.complete).toBe(0);
+  });
+
+  test("ticket 10: a generous budget that leaves metadata untruncated records type/tags complete", () => {
+    const { turnId } = seedSessionWithTurn("browse-type-tags-completeness-wide", {
+      type: ["discuss", "research", "design", "implement", "refactor"],
+      tags: ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"],
+    });
+
+    recallMemory(db, {
+      filter: { fields: ["metadata"] },
+      turn: 1000,
+      readerId: "session:1",
+      now: () => 500,
+    });
+
+    expect(completenessRow(db, "session:1", "turn", turnId, "type")?.complete).toBe(1);
+    expect(completenessRow(db, "session:1", "turn", turnId, "tags")?.complete).toBe(1);
+  });
+});
+
+describe("ticket 10: the detail render (format.ts's renderNode) records type/tags completeness the same way it does content/insight", () => {
+  test("metadata selected on an untruncated render records type/tags complete", () => {
+    const { turnId, sessionId } = seedSessionWithTurn("detail-type-tags-completeness", {
+      type: ["discuss"],
+      tags: ["alpha"],
+    });
+
+    recallMemory(db, {
+      id: `S${sessionId}/T1`,
+      filter: { fields: ["metadata"] },
+      readerId: "session:1",
+      now: () => 500,
+    });
+
+    expect(completenessRow(db, "session:1", "turn", turnId, "type")?.complete).toBe(1);
+    expect(completenessRow(db, "session:1", "turn", turnId, "tags")?.complete).toBe(1);
+  });
+
+  test("metadata NOT selected records no type/tags completeness fact at all", () => {
+    const { turnId, sessionId } = seedSessionWithTurn("detail-type-tags-no-metadata", {
+      type: ["discuss"],
+      tags: ["alpha"],
+    });
+
+    recallMemory(db, {
+      id: `S${sessionId}/T1`,
+      filter: { fields: ["title", "content"] },
+      readerId: "session:1",
+      now: () => 500,
+    });
+
+    expect(completenessRow(db, "session:1", "turn", turnId, "type")).toBeNull();
+    expect(completenessRow(db, "session:1", "turn", turnId, "tags")).toBeNull();
   });
 });
 

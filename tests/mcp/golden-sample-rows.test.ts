@@ -59,6 +59,7 @@ describe("金样例 — the rendered row contract", () => {
     content?: string | null;
     epoch?: number;
     type?: string[];
+    tags?: string[];
     rolledBack?: boolean;
     toolCallCount?: number;
     filesModified?: string[];
@@ -70,7 +71,7 @@ describe("金样例 — the rendered row contract", () => {
            user_prompt, assistant_response, content, files_read, files_modified,
            tags, was_rolled_back, tool_call_count
          ) VALUES (?, ?, 'extracted', ?, ?, ?, 'user prompt', 'assistant response',
-                   ?, '[]', ?, '[]', ?, ?)
+                   ?, '[]', ?, ?, ?, ?)
          RETURNING id`,
       )
       .get(
@@ -81,6 +82,7 @@ describe("金样例 — the rendered row contract", () => {
         options.epoch ?? CUTOFF + options.promptNumber,
         options.content ?? null,
         JSON.stringify(options.filesModified ?? []),
+        JSON.stringify(options.tags ?? []),
         options.rolledBack ? 1 : 0,
         options.toolCallCount ?? 0,
       )!.id;
@@ -412,6 +414,11 @@ describe("金样例 — the rendered row contract", () => {
       content: "xxx",
       epoch: T821_EPOCH,
       toolCallCount: 20,
+      // Ticket 10 (write-mode-edit-semantics spec D8): type/tags now ride on
+      // this SAME metadata line, so this sample turn carries both to prove
+      // the extended shape, not just the pre-ticket-10 time+stats prefix.
+      type: ["design", "research"],
+      tags: ["claude-mnemo", "write-gate"],
     });
 
     const byDefault = recallMemory(db, { id: "S15069/T823" });
@@ -424,7 +431,79 @@ describe("金样例 — the rendered row contract", () => {
     expect(requested.split("\n")).toEqual([
       "[S15069]",
       "    [T823] title [extracted]",
+      "        08-17 18:19 · 🔧20 · design, research · #claude-mnemo #write-gate",
+      "        - content: xxx",
+    ]);
+  });
+
+  test("metadata: an empty type and an empty tags list each drop their own segment, no orphan separator", () => {
+    insertSession(15069, null);
+    insertTurn({
+      sessionId: 15069,
+      promptNumber: 823,
+      title: "title",
+      content: "xxx",
+      epoch: T821_EPOCH,
+      toolCallCount: 20,
+      // type/tags both default to [] via insertTurn — nothing stored for
+      // either, so the metadata line must read exactly as it did before
+      // ticket 10: no trailing " · " for either missing segment.
+    });
+
+    const requested = recallMemory(db, {
+      id: "S15069/T823",
+      filter: { fields: ["title", "metadata", "content"] },
+    });
+    expect(requested.split("\n")).toEqual([
+      "[S15069]",
+      "    [T823] title [extracted]",
       "        08-17 18:19 · 🔧20",
+      "        - content: xxx",
+    ]);
+  });
+
+  test("metadata: type present but tags empty renders only the type segment — no orphan separator", () => {
+    insertSession(15069, null);
+    insertTurn({
+      sessionId: 15069,
+      promptNumber: 823,
+      title: "title",
+      content: "xxx",
+      epoch: T821_EPOCH,
+      type: ["design"],
+    });
+
+    const requested = recallMemory(db, {
+      id: "S15069/T823",
+      filter: { fields: ["title", "metadata", "content"] },
+    });
+    expect(requested.split("\n")).toEqual([
+      "[S15069]",
+      "    [T823] title [extracted]",
+      "        08-17 18:19 · design",
+      "        - content: xxx",
+    ]);
+  });
+
+  test("metadata: tags present but type empty renders only the tags segment — no orphan separator", () => {
+    insertSession(15069, null);
+    insertTurn({
+      sessionId: 15069,
+      promptNumber: 823,
+      title: "title",
+      content: "xxx",
+      epoch: T821_EPOCH,
+      tags: ["write-gate"],
+    });
+
+    const requested = recallMemory(db, {
+      id: "S15069/T823",
+      filter: { fields: ["title", "metadata", "content"] },
+    });
+    expect(requested.split("\n")).toEqual([
+      "[S15069]",
+      "    [T823] title [extracted]",
+      "        08-17 18:19 · #write-gate",
       "        - content: xxx",
     ]);
   });

@@ -33,6 +33,7 @@ import { typeListsEqual } from "../shared/type-vocabulary";
 
 import {
   appendNavigationLegend,
+  composeTurnMetadata,
   createTruncationSignal,
   DEFAULT_TURN_RENDER_FIELDS,
   DEFAULT_TURN_TOKEN_BUDGET,
@@ -61,10 +62,6 @@ import {
 } from "./memory-filter";
 import { estimateTokens } from "../utils/token-estimate";
 import { renderSegmentHeaderLines } from "./segment-spine";
-// The `metadata` field slot's one composer (spec 金样例 补充). It lives in
-// `timeline.ts` because that module owns this codebase's local-time rendering;
-// importing it is what keeps recall from growing a second one.
-import { composeTurnMetadata } from "./timeline";
 import {
   chronologicalSegmentMembers,
   renderSegmentCard,
@@ -2104,6 +2101,15 @@ function renderBrowseTurnBlock(
     // THIS field alone, independent of whatever happened to its neighbours.
     if (GATED_TURN_FIELDS.includes(field)) {
       pushFieldCompleteness(signal, "turn", turn.id, field, rendered === text);
+    }
+    // Ticket 10: `type`/`tags` ride inside this SAME `metadata` text — they
+    // have no `RecallTurnField` slot of their own (see
+    // `composeTurnMetadata`) — so their completeness fact is metadata's own
+    // per-field truncation outcome, recorded under their own field names.
+    if (field === "metadata") {
+      const metadataComplete = rendered === text;
+      pushFieldCompleteness(signal, "turn", turn.id, "type", metadataComplete);
+      pushFieldCompleteness(signal, "turn", turn.id, "tags", metadataComplete);
     }
     // `metadata` is the one unprefixed field line (spec 金样例 补充): it
     // annotates the row above rather than naming a stored field.

@@ -3,6 +3,7 @@ import { estimateTokens } from "../utils/token-estimate";
 import { projectToolCall, type ProjectedCall } from "./tool-projection";
 import type { RecallTurnField } from "./memory-filter";
 import type { FieldCompletenessEntry, WriteGateEntityType } from "../db/write-gate";
+import type { TurnRecord } from "../db/turns";
 
 /**
  * One mark for a cut field, on every read surface. This renderer ended a cut
@@ -121,8 +122,26 @@ export function pushFieldCompleteness(
  * (`checkFieldGate`/`stampField`: title, content, insight) — recording
  * completeness for the rest (prompt/response/observations/files/metadata)
  * would be dead weight, since nothing ever gates them.
+ *
+ * Ticket 10 (write-mode-edit-semantics spec D8) widened this from
+ * title/content/insight to also cover `type`/`tags` — note.ts's two
+ * collection fields (spec D4: `write`-only, never `edit`, so an untruncated
+ * read matters for them the same way it does for a text field). Neither has
+ * its own `RecallTurnField` slot in `filter.fields`: both render
+ * unconditionally inside the `metadata` line (`composeTurnMetadata` above),
+ * so `recordTurnFieldCompleteness` and `recall.ts`'s `renderBrowseTurnBlock`
+ * each gate their completeness on metadata's own selection/truncation
+ * outcome rather than on `fields.has("type")` — a call that would not even
+ * type-check, since neither literal is a `RecallTurnField`.
  */
-export const GATED_TURN_FIELDS: readonly RecallTurnField[] = ["title", "content", "insight"];
+type GatedTurnField = RecallTurnField | "type" | "tags";
+export const GATED_TURN_FIELDS: readonly GatedTurnField[] = [
+  "title",
+  "content",
+  "insight",
+  "type",
+  "tags",
+];
 
 /**
  * The one navigation notice for a whole rendered response (spec D1), said once
@@ -207,7 +226,7 @@ export interface FormattedTurn {
    * The `metadata` field slot (spec 金样例 补充, "turns 表溶解"): the audit
    * facts the dissolved turn table used to carry as columns — local time, gap
    * from the previous turn, tool/file counts — as ONE unprefixed line under
-   * the turn row. Composed by the caller (`timeline.ts`'s
+   * the turn row. Composed by the caller (this module's own
    * `composeTurnMetadata`, which owns this codebase's local-time rendering)
    * rather than here, so there is one implementation of "what time is it" and
    * not a second one inside the node renderer.
@@ -305,6 +324,157 @@ export function formatEpoch(epoch: number): string {
   const day = String(date.getUTCDate()).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
+}
+
+/**
+ * `Intl.DateTimeFormat` construction is the expensive half of formatting a
+ * timestamp, and the milestone budget fitter re-renders the same rows
+ * thousands of times while it binary-searches a trim knob. Constructing a
+ * formatter per call made a 900-row session take seconds; reusing one makes it
+ * milliseconds.
+ *
+ * Keyed on `process.env.TZ` because that is the ONLY thing that can change a
+ * formatter's answer within one process (the runtime reads it at construction)
+ * — a test that switches zones between cases gets its own entry rather than a
+ * stale one.
+ */
+const dateTimeFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
+/**
+ * Ticket 10 (write-mode-edit-semantics spec): relocated here from
+ * `timeline.ts` along with `composeTurnMetadata` — exported (it was module-
+ * private in timeline.ts) because `timeline.ts`'s own `formatLocalWeekday`/
+ * `getSystemTimezone` still call it directly and now import it back from
+ * here rather than defining a second cache.
+ */
+export function cachedFormatter(
+  kind: string,
+  locale: string | undefined,
+  options: Intl.DateTimeFormatOptions,
+): Intl.DateTimeFormat {
+  const key = `${kind}|${process.env.TZ ?? ""}`;
+  let formatter = dateTimeFormatterCache.get(key);
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat(locale, options);
+    dateTimeFormatterCache.set(key, formatter);
+  }
+  return formatter;
+}
+
+export function formatLocalTime(epochSeconds: number): string {
+  return cachedFormatter("time", undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(epochSeconds * 1000));
+}
+
+export function formatLocalDate(epochSeconds: number): string {
+  return cachedFormatter("date", "en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(epochSeconds * 1000));
+}
+
+/**
+ * Ticket 10: relocated from `timeline.ts` (was module-private there) — now
+ * exported since both this module's own `composeTurnMetadata` and
+ * `timeline.ts`'s several row stamps call it.
+ */
+export function formatLocalMonthDay(epochSeconds: number): string {
+  const [year, month, day] = formatLocalDate(epochSeconds).split("-");
+  void year;
+  return `${month}-${day}`;
+}
+
+export function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    const seconds = totalSeconds % 60;
+    return seconds === 0 ? `${totalMinutes}m` : `${totalMinutes}m${seconds}s`;
+  }
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}h ${minutes}m`;
+}
+
+export function formatGap(
+  currentEpochSeconds: number,
+  previousEpochSeconds: number | null,
+): string {
+  if (previousEpochSeconds === null) {
+    return "(start)";
+  }
+
+  return `+${formatDuration((currentEpochSeconds - previousEpochSeconds) * 1000)}`;
+}
+
+function renderStats(turn: TurnRecord): string {
+  const stats: string[] = [];
+  const toolCallCount = turn.toolCallCount ?? 0;
+
+  if (toolCallCount > 0) {
+    stats.push(`🔧${toolCallCount}`);
+  }
+  if (turn.filesRead.length > 0) {
+    stats.push(`📖${turn.filesRead.length}`);
+  }
+  if (turn.filesModified.length > 0) {
+    stats.push(`✏️${turn.filesModified.length}`);
+  }
+
+  return stats.length > 0 ? stats.join(" ") : "—";
+}
+
+/**
+ * The `metadata` field slot's content (spec 金样例 补充, `08-17 18:19 · +6m ·
+ * 🔧20 ✏️3`): everything the dissolved turn table carried as columns, on one
+ * unprefixed line under the row it describes. Composed from the SAME
+ * `formatLocalMonthDay`/`formatLocalTime`/`formatGap`/`renderStats` this
+ * module's other surfaces use, so a time never reads two ways in one response.
+ *
+ * `previousEpoch` null drops the gap segment rather than printing `(start)`:
+ * a caller with no session-scoped predecessor (recall's GLOBAL browse feed)
+ * has no gap to state, and inventing one would measure across a session
+ * boundary.
+ *
+ * Ticket 10 (write-mode-edit-semantics spec D2/D8): appends the turn's
+ * `type` (multi-valued, joined `", "`) and `tags` (each `#`-prefixed, space-
+ * separated — the roster's own convention, `recall.ts`'s `renderRosterLine`)
+ * after the stats segment. Neither field has a
+ * dedicated render surface of its own, so a `write` that overwrites either
+ * one could never earn the untruncated-read completeness record D2 requires
+ * — rendering them here, unconditionally, is what closes that gap. An empty
+ * array contributes no segment at all (same rule the gap/stats segments
+ * already follow), so the trailing separator never dangles.
+ *
+ * Ticket 10: relocated here from `timeline.ts` — `timeline.ts` stopped
+ * calling this once its own row form dropped the metadata line
+ * (view-render-repair ticket 05), leaving `recall.ts` as the only caller
+ * reaching across a file boundary for it.
+ */
+export function composeTurnMetadata(
+  turn: TurnRecord,
+  previousEpoch: number | null,
+): string {
+  const stats = renderStats(turn);
+  const typeSegment = turn.type.length > 0 ? turn.type.join(", ") : null;
+  const tagsSegment =
+    turn.tags.length > 0 ? turn.tags.map((tag) => `#${tag}`).join(" ") : null;
+  return [
+    `${formatLocalMonthDay(turn.createdAtEpoch)} ${formatLocalTime(turn.createdAtEpoch)}`,
+    ...(previousEpoch === null ? [] : [formatGap(turn.createdAtEpoch, previousEpoch)]),
+    ...(stats === "—" ? [] : [stats]),
+    ...(typeSegment ? [typeSegment] : []),
+    ...(tagsSegment ? [tagsSegment] : []),
+  ].join(" · ");
 }
 
 // Count badges (`💬1017 💡5950` on a session header, `💡32 ✏️3 🔧32` on a turn
@@ -975,6 +1145,17 @@ function recordTurnFieldCompleteness(
   signal?: TruncationSignal,
 ): void {
   for (const field of GATED_TURN_FIELDS) {
+    // Ticket 10: `type`/`tags` have no `RecallTurnField` slot of their own —
+    // they ride inside `metadata`'s single line (`composeTurnMetadata`
+    // above), so their completeness is gated on metadata's OWN selection
+    // rather than `fields.has(field)`, which would never be true for either
+    // literal.
+    if (field === "type" || field === "tags") {
+      if (fields.has("metadata")) {
+        pushFieldCompleteness(signal, "turn", turnId, field, bodyComplete);
+      }
+      continue;
+    }
     if (!fields.has(field)) {
       continue;
     }

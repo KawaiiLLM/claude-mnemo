@@ -31,13 +31,27 @@ import {
 
 import {
   appendNavigationLegend,
+  cachedFormatter,
   createTruncationSignal,
+  formatDuration,
+  formatGap,
+  formatLocalDate,
+  formatLocalMonthDay,
+  formatLocalTime,
   RENDER_INDENT_STEP,
   renderSessionTransitionLine,
   renderTurnAddress,
   truncateText,
   type TruncationSignal,
 } from "./format";
+// Ticket 10 (write-mode-edit-semantics spec): these four re-exports keep
+// existing external imports (tests/mcp/timeline.test.ts) resolving from
+// "./timeline" unchanged — the functions themselves now live in format.ts
+// (composeTurnMetadata's own dependency chain, moved there to avoid a
+// format.ts -> timeline.ts import cycle) alongside `cachedFormatter` and
+// `formatLocalMonthDay`, which this module still uses locally but nothing
+// outside it imports.
+export { formatDuration, formatGap, formatLocalDate, formatLocalTime };
 import {
   hasFilterCriteria,
   parseMemoryFilter,
@@ -772,78 +786,6 @@ export function cleanPromptForLabel(raw: string | null): string {
   return firstLine.replace(/\s+/g, " ").trim();
 }
 
-export function formatDuration(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
-  if (totalSeconds < 60) {
-    return `${totalSeconds}s`;
-  }
-
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  if (totalMinutes < 60) {
-    const seconds = totalSeconds % 60;
-    return seconds === 0 ? `${totalMinutes}m` : `${totalMinutes}m${seconds}s`;
-  }
-
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return `${hours}h ${minutes}m`;
-}
-
-export function formatGap(
-  currentEpochSeconds: number,
-  previousEpochSeconds: number | null,
-): string {
-  if (previousEpochSeconds === null) {
-    return "(start)";
-  }
-
-  return `+${formatDuration((currentEpochSeconds - previousEpochSeconds) * 1000)}`;
-}
-
-/**
- * `Intl.DateTimeFormat` construction is the expensive half of formatting a
- * timestamp, and the milestone budget fitter re-renders the same rows
- * thousands of times while it binary-searches a trim knob. Constructing a
- * formatter per call made a 900-row session take seconds; reusing one makes it
- * milliseconds.
- *
- * Keyed on `process.env.TZ` because that is the ONLY thing that can change a
- * formatter's answer within one process (the runtime reads it at construction)
- * — a test that switches zones between cases gets its own entry rather than a
- * stale one.
- */
-const dateTimeFormatterCache = new Map<string, Intl.DateTimeFormat>();
-
-function cachedFormatter(
-  kind: string,
-  locale: string | undefined,
-  options: Intl.DateTimeFormatOptions,
-): Intl.DateTimeFormat {
-  const key = `${kind}|${process.env.TZ ?? ""}`;
-  let formatter = dateTimeFormatterCache.get(key);
-  if (formatter === undefined) {
-    formatter = new Intl.DateTimeFormat(locale, options);
-    dateTimeFormatterCache.set(key, formatter);
-  }
-  return formatter;
-}
-
-export function formatLocalTime(epochSeconds: number): string {
-  return cachedFormatter("time", undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(new Date(epochSeconds * 1000));
-}
-
-export function formatLocalDate(epochSeconds: number): string {
-  return cachedFormatter("date", "en-CA", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(epochSeconds * 1000));
-}
-
 function formatLocalWeekday(epochSeconds: number): string {
   return cachedFormatter("weekday", "en-US", {
     weekday: "short",
@@ -852,12 +794,6 @@ function formatLocalWeekday(epochSeconds: number): string {
 
 function formatLocalDateWithWeekday(epochSeconds: number): string {
   return `${formatLocalDate(epochSeconds)} ${formatLocalWeekday(epochSeconds)}`;
-}
-
-function formatLocalMonthDay(epochSeconds: number): string {
-  const [year, month, day] = formatLocalDate(epochSeconds).split("-");
-  void year;
-  return `${month}-${day}`;
 }
 
 function formatLocalMonthDayWithWeekday(epochSeconds: number): string {
@@ -3665,47 +3601,6 @@ function renderPlainTurnRowLines(
     lines.push(`${DIRECT_FIELD_INDENT}↳ ${antecedents.join(", ")}`);
   }
   return lines;
-}
-
-function renderStats(turn: TurnRecord): string {
-  const stats: string[] = [];
-  const toolCallCount = turn.toolCallCount ?? 0;
-
-  if (toolCallCount > 0) {
-    stats.push(`🔧${toolCallCount}`);
-  }
-  if (turn.filesRead.length > 0) {
-    stats.push(`📖${turn.filesRead.length}`);
-  }
-  if (turn.filesModified.length > 0) {
-    stats.push(`✏️${turn.filesModified.length}`);
-  }
-
-  return stats.length > 0 ? stats.join(" ") : "—";
-}
-
-/**
- * The `metadata` field slot's content (spec 金样例 补充, `08-17 18:19 · +6m ·
- * 🔧20 ✏️3`): everything the dissolved turn table carried as columns, on one
- * unprefixed line under the row it describes. Composed from the SAME
- * `formatLocalMonthDay`/`formatLocalTime`/`formatGap`/`renderStats` this
- * module's other surfaces use, so a time never reads two ways in one response.
- *
- * `previousEpoch` null drops the gap segment rather than printing `(start)`:
- * a caller with no session-scoped predecessor (recall's GLOBAL browse feed)
- * has no gap to state, and inventing one would measure across a session
- * boundary.
- */
-export function composeTurnMetadata(
-  turn: TurnRecord,
-  previousEpoch: number | null,
-): string {
-  const stats = renderStats(turn);
-  return [
-    `${formatLocalMonthDay(turn.createdAtEpoch)} ${formatLocalTime(turn.createdAtEpoch)}`,
-    ...(previousEpoch === null ? [] : [formatGap(turn.createdAtEpoch, previousEpoch)]),
-    ...(stats === "—" ? [] : [stats]),
-  ].join(" · ");
 }
 
 function sanitizeTimelineField(value: string): string {
