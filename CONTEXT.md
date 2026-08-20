@@ -86,14 +86,20 @@ A semantics boundary in stored data; reads never mix the two sides.
 ### Write gate
 
 **Read grant (读授权)**:
-A writer's license to write an entity, earned by that entity appearing in its
-injected context or a recall/timeline render. Entity-level: one appearance
-licenses every field.
+A writer's license to write an entity, earned by that entity's content actually
+being rendered to it — a recall/timeline call, or an injected block that carries
+the content. A pointer line naming an entity is not a render of it.
+Entity-level: one appearance licenses every field.
 _Avoid_: lock (nothing is held; it's a license check at write time)
+
+**Complete read (完整读)**:
+A render that delivered one field untruncated. Overwriting a field that already
+holds something requires one; editing a matched span inside it does not — the
+difference between the two write modes is this read requirement, nothing else.
 
 **Stale (失效)**:
 A field another writer touched after the grant; writing it again requires a fresh
-read. Error messages distinguish stale from never-granted.
+read, in either write mode. Error messages distinguish stale from never-granted.
 
 **Writer (写者)**:
 The identity a write is attributed to — the caller session for agents, its own
@@ -120,6 +126,12 @@ content belong to settlement.
 The main agent's semantic write surface (记住): segment creation, attachment, and
 field maintenance.
 _Avoid_: the retired 0.x remember (merged into note)
+
+**Write mode (write/edit)**:
+The one vocabulary both write surfaces share. `write` replaces a field whole;
+`edit` swaps an exactly-matched span inside it, rejecting a miss or an ambiguous
+match rather than guessing.
+_Avoid_: overwrite, append, replace (the two retired vocabularies it replaces)
 
 **Tag**:
 A noun naming a thing — the project first, then subsystems or artifacts. Carries
