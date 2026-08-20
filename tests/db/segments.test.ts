@@ -19,8 +19,13 @@ import {
   listRecentSegments,
   repairStaleSegmentFacets,
   toggleSegmentStatus,
+  writeSegmentWorkingStateField,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import {
+  SEGMENT_EDITABLE_FIELDS,
+  type SegmentEditableField,
+} from "../../src/shared/segment-fields";
 import { resetTurnExtractionFields, updateTurnById } from "../../src/db/turns";
 import { normalizeTypeValues } from "../../src/shared/type-vocabulary";
 
@@ -918,6 +923,154 @@ describe("segments and membership", () => {
       expect(
         getOutgoingEdges(db, { kind: "segment", id: segment.id }),
       ).toEqual([]);
+    });
+  });
+
+  // write-mode-edit-semantics ticket 03 (spec D11): the segment surface's
+  // first whole-field write. Data-layer only — no gate here (ticket 06 owns
+  // the read-before-overwrite check); these tests call the function directly,
+  // as an already-admitted caller would.
+  describe("writeSegmentWorkingStateField (ticket 03, spec D11)", () => {
+    const FIELD_TO_PROPERTY: Record<
+      SegmentEditableField,
+      "goal" | "constraints" | "decisions" | "done" | "nextSteps" | "reference" | "content" | "insight"
+    > = {
+      goal: "goal",
+      constraints: "constraints",
+      decisions: "decisions",
+      done: "done",
+      next_steps: "nextSteps",
+      reference: "reference",
+      content: "content",
+      insight: "insight",
+    };
+
+    test("each of the eight editable fields is independently whole-field replaceable, read back as the new value", () => {
+      const segment = createSegment(db, { title: "whole-field write", nowEpoch: 100 });
+
+      for (const field of SEGMENT_EDITABLE_FIELDS) {
+        const property = FIELD_TO_PROPERTY[field];
+        const updated = writeSegmentWorkingStateField(
+          db,
+          segment.id,
+          field,
+          `new ${field} text`,
+          200,
+        );
+        expect(updated?.[property]).toBe(`new ${field} text`);
+        expect(getSegment(db, segment.id)?.[property]).toBe(`new ${field} text`);
+      }
+    });
+
+    test("returns null for a segment that does not exist, same contract as append/replace", () => {
+      expect(writeSegmentWorkingStateField(db, 999_999, "goal", "x", 100)).toBeNull();
+    });
+
+    test("does not touch the revision fence — matches append/replace, not applySegmentWrites' CAS path", () => {
+      const segment = createSegment(db, { title: "revision untouched", nowEpoch: 100 });
+      const updated = writeSegmentWorkingStateField(db, segment.id, "goal", "- x", 200);
+      expect(updated?.revision).toBe(segment.revision);
+    });
+
+    describe("null and empty-string clear semantics (spec D2, note-surface parity)", () => {
+      test("null clears an already-null field, and the write is real — updated_at_epoch still advances", () => {
+        const segment = createSegment(db, { title: "clear semantics", nowEpoch: 100 });
+        expect(segment.goal).toBeNull(); // never written
+
+        const clearedUntouched = writeSegmentWorkingStateField(db, segment.id, "goal", null, 200);
+        expect(clearedUntouched?.goal).toBeNull();
+        // "被写过的空" not "从未写过": the UPDATE ran and stamped the row,
+        // even though the value looks the same as an untouched field.
+        expect(clearedUntouched?.updatedAtEpoch).toBe(200);
+        expect(clearedUntouched?.updatedAtEpoch).not.toBe(segment.updatedAtEpoch);
+      });
+
+      test("null clears a field that held content", () => {
+        const segment = createSegment(db, { title: "clear with content", nowEpoch: 100 });
+        writeSegmentWorkingStateField(db, segment.id, "goal", "- ship it", 200);
+        expect(getSegment(db, segment.id)?.goal).toBe("- ship it");
+
+        const cleared = writeSegmentWorkingStateField(db, segment.id, "goal", null, 300);
+        expect(cleared?.goal).toBeNull();
+        expect(cleared?.updatedAtEpoch).toBe(300);
+      });
+
+      test("an empty or whitespace-only string clears the same as null — parity with the note surface", () => {
+        const segment = createSegment(db, {
+          title: "empty parity",
+          content: "has content",
+          nowEpoch: 100,
+        });
+
+        const clearedByEmpty = writeSegmentWorkingStateField(db, segment.id, "content", "", 200);
+        expect(clearedByEmpty?.content).toBeNull();
+
+        writeSegmentWorkingStateField(db, segment.id, "content", "restored", 300);
+        const clearedByWhitespace = writeSegmentWorkingStateField(
+          db,
+          segment.id,
+          "content",
+          "   \n  ",
+          400,
+        );
+        expect(clearedByWhitespace?.content).toBeNull();
+      });
+    });
+
+    describe("FTS reindex on overwrite (the trap this ticket exists to close)", () => {
+      test("the new text is findable and the overwritten text is not", () => {
+        const segment = createSegment(db, { title: "search parity", nowEpoch: 100 });
+        writeSegmentWorkingStateField(db, segment.id, "decisions", "- glimmerfrost-oldphrase", 200);
+        expect(readSegmentFtsExtra(segment.id)).toContain("glimmerfrost-oldphrase");
+
+        writeSegmentWorkingStateField(db, segment.id, "decisions", "- glimmerfrost-newphrase", 300);
+        expect(readSegmentFtsExtra(segment.id)).toContain("glimmerfrost-newphrase");
+        expect(readSegmentFtsExtra(segment.id)).not.toContain("glimmerfrost-oldphrase");
+      });
+
+      test("clearing to null also drops the field from the FTS row", () => {
+        const segment = createSegment(db, { title: "search clear", nowEpoch: 100 });
+        writeSegmentWorkingStateField(db, segment.id, "insight", "glimmerfrost-insight-text", 200);
+        expect(readSegmentFtsExtra(segment.id)).toContain("glimmerfrost-insight-text");
+
+        writeSegmentWorkingStateField(db, segment.id, "insight", null, 300);
+        expect(readSegmentFtsExtra(segment.id)).not.toContain("glimmerfrost-insight-text");
+      });
+    });
+
+    describe("citation rebuild on overwrite (the other half of the trap)", () => {
+      test("an overwrite drops the old reference's pair and creates the new one", () => {
+        const oldTarget = addTurn(1);
+        const newTarget = addTurn(2, 200);
+        const segment = createSegment(db, { title: "citation rebuild", nowEpoch: 100 });
+
+        writeSegmentWorkingStateField(db, segment.id, "reference", `See [S${sessionId}/T1].`, 200);
+        expect(
+          getOutgoingEdges(db, { kind: "segment", id: segment.id }).map((edge) => edge.cited),
+        ).toEqual([{ kind: "turn", id: oldTarget }]);
+
+        writeSegmentWorkingStateField(
+          db,
+          segment.id,
+          "reference",
+          `See [S${sessionId}/T2] instead.`,
+          300,
+        );
+        expect(
+          getOutgoingEdges(db, { kind: "segment", id: segment.id }).map((edge) => edge.cited),
+        ).toEqual([{ kind: "turn", id: newTarget }]);
+      });
+
+      test("clearing to null drops the field's citation, same as an overwrite that stops naming it", () => {
+        const target = addTurn(1);
+        const segment = createSegment(db, { title: "clear drops citation", nowEpoch: 100 });
+        writeSegmentWorkingStateField(db, segment.id, "goal", `Depends on [S${sessionId}/T1].`, 200);
+        expect(getOutgoingEdges(db, { kind: "segment", id: segment.id })).toHaveLength(1);
+        expect(target).toBeGreaterThan(0);
+
+        writeSegmentWorkingStateField(db, segment.id, "goal", null, 300);
+        expect(getOutgoingEdges(db, { kind: "segment", id: segment.id })).toHaveLength(0);
+      });
     });
   });
 });

@@ -1081,6 +1081,79 @@ export function replaceInSegmentWorkingStateField(
 }
 
 /**
+ * `remember`'s `write` verb (write-mode-edit-semantics ticket 03, spec D11):
+ * whole-field replacement — the one capability append/replace never gave the
+ * segment surface. Covers every one of `SEGMENT_EDITABLE_FIELDS`' eight
+ * columns, the same scope `SEGMENT_EDITABLE_PROPERTY` already maps.
+ *
+ * `value === null`, or an all-whitespace string, clears the field to `NULL` —
+ * the same "empty string is a synonym for null" convention
+ * `updateSessionFields` (db/sessions.ts) already applies to its own seven
+ * text fields (spec D2: "可空字段配显式 null 表示清空"). A non-empty value is
+ * stored exactly as given — `write` replaces the field's full text, not a row
+ * within it, so no bullet-list normalization or blank-line cleanup applies
+ * (those exist on `append`/`replace` because THEY compose onto an existing
+ * list; `write` supplies the finished text itself).
+ *
+ * The clear is a real write, not a no-op the caller can't observe: this
+ * function always issues the `UPDATE` and always advances `updated_at_epoch`,
+ * even when the computed value is byte-identical to what is already
+ * stored — including clearing a field that was already `NULL` — matching
+ * `updateSessionFields`'s own "D5: even a byte-identical rewrite must clear
+ * the staleness reminder" discipline. That is what makes a cleared field
+ * "被写过的空" (written-empty) rather than "从未写过" (never-written) even
+ * though the two are indistinguishable by VALUE alone: the write gate
+ * (ticket 06, write-gate.ts) is what stamps a field as written, on top of
+ * this call, and it can only do that if this layer never turns a clear into
+ * a skipped statement.
+ *
+ * Reuses the exact citation-reconciliation and FTS-reindex calls
+ * `appendSegmentWorkingStateRows`/`replaceInSegmentWorkingStateField` already
+ * make. A whole-field overwrite is the write shape most likely to both drop
+ * a citation (the old text naming it is gone) and orphan a search hit (the
+ * old text stays indexed) if either step is skipped — the trap this ticket
+ * exists to close.
+ *
+ * No revision fence and no read-authorization check, matching the two
+ * siblings above and NOT `applySegmentWrites`: ADR-0002 makes Working State
+ * maintenance advisory and single-writer-per-session, and gating this call is
+ * ticket 06's job, not this function's — the caller is assumed to have
+ * already been admitted.
+ *
+ * Returns the updated record, or `null` if the segment does not exist — the
+ * same contract as `appendSegmentWorkingStateRows`.
+ */
+export function writeSegmentWorkingStateField(
+  db: Database,
+  segmentId: number,
+  field: SegmentEditableField,
+  value: string | null,
+  nowEpoch: number,
+): SegmentRecord | null {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return null;
+  }
+
+  const stored = value === null || value.trim() === "" ? null : value;
+
+  const updated = mapSegmentRow(
+    db
+      .query<SegmentRow, [string | null, number, number]>(
+        `UPDATE segments SET ${field} = ?, updated_at_epoch = ? WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`,
+      )
+      .get(stored, nowEpoch, segmentId) ?? null,
+  );
+
+  if (updated) {
+    reconcileSegmentCitedPairs(db, updated, nowEpoch);
+    indexSegment(db, updated);
+  }
+  return updated;
+}
+
+/**
  * `remember`'s `close` verb (ticket 05, ADR-0005: "A finished task is
  * manually closed through remember and leaves the roster"). The status
  * vocabulary is two values with no state machine, so `close` is a TOGGLE
