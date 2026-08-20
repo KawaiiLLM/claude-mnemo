@@ -1,6 +1,17 @@
 # ADR-0001 — The segment is a per-topic, long-lived semantic container
 
-**Status:** accepted · 2026-08-17 · source: S15069 T736–T823
+**Status:** accepted · 2026-08-17 · source: S15069 T736–T823 · field-editing verbs amended
+2026-08-20
+
+> **Amendment (write-mode-edit-semantics, tickets 05–07):** the field-editing verbs are
+> **`write` and `edit`**, not `append` and `replace(old,new)`. `edit` is `replace` renamed —
+> same `oldString`/`newString` shape, same rejections (a miss names the `oldString`, an
+> ambiguous match names the count), same read-before-write force. `write` is new on this
+> surface: whole-field replacement, supplied verbatim, admitted only under
+> [ADR-0008](0008-read-write-contract.md)'s completeness rung — which is what keeps "silence
+> structurally cannot overwrite a statement" true now that a whole-field verb exists. Adding
+> a row is an `edit` anchored on the last row (`oldString` = that row, `newString` = that row
+> plus the new one). The fields' own content shape — markdown row lists — is unchanged.
 
 ## Context
 

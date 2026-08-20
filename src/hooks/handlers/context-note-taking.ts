@@ -41,8 +41,8 @@ export const NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
 You keep notes on your own turns. The injected "mnemo current turn" line
 and the backlog-relief block are the ONLY sources of a note address —
 never recall one from memory, never invent one.
-Timing, fields, budgets, the skip test and replace live in the note
-tool's description.
+Timing, fields, budgets, the skip test and the write modes live in the
+note tool's description.
 </mnemo-note-taking>`;
 
 /**

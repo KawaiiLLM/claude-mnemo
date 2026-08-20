@@ -13,7 +13,7 @@ import { parseBareAddressReference, validateReferences } from "../db/references"
 import { getSession, updateSessionFields } from "../db/sessions";
 import { getTurn, getTurnById, updateTurnById } from "../db/turns";
 import { checkFieldGate, claimWriterId, stampField } from "../db/write-gate";
-import { noteInputShape, settlementNoteInputShape } from "../mcp/definitions";
+import { settlementNoteInputShape } from "../mcp/definitions";
 import {
   FieldModeError,
   isFieldEditMode,
@@ -227,13 +227,10 @@ export function parameterError(message: string): ToolTextResult {
 // the two surfaces cannot drift into two vocabularies (the parity test
 // tests/worker/note-settlement-parity.test.ts asserts that identity at the
 // tool-REGISTRATION boundary, where a prose claim of sameness cannot reach).
-// Spread rather than added to `settlementNoteInputShape` itself only because
-// ticket 06 held `mcp/definitions.ts` open at the time; folding this one key
-// back into that shape is a pure move whenever someone touches it next.
-export const settlementTurnWriteInputShape = {
-  ...settlementNoteInputShape,
-  mode: noteInputShape.mode,
-};
+// Ticket 08 folded that key into `settlementNoteInputShape` itself — it was
+// spread here for one ticket only, while ticket 06 held `mcp/definitions.ts`
+// open — so this is a plain re-export again, one object, no local key.
+export const settlementTurnWriteInputShape = settlementNoteInputShape;
 
 export const settlementTurnWriteInputSchema = z
   .object(settlementTurnWriteInputShape)

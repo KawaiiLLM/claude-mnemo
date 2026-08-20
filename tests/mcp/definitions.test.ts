@@ -724,7 +724,11 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
   // groundedOn/refines/override join evidenceFor/evidenceAgainst/dependsOn,
   // and `supersedes` (the field this test used to assert reference-equality
   // for) is DROPPED from this shape outright, not merely left unequal.
-  it("type, tags and all seven relation fields are the SAME zod object as noteInputShape's", () => {
+  // Ticket 07/08 (write-mode-edit-semantics spec D12): `mode` joins that list
+  // — one write vocabulary for both surfaces, the same object, folded into
+  // this shape rather than spread onto it by the settlement facade.
+  it("mode, type, tags and all seven relation fields are the SAME zod object as noteInputShape's", () => {
+    expect(settlementNoteInputShape.mode).toBe(noteInputShape.mode);
     expect(settlementNoteInputShape.type).toBe(noteInputShape.type);
     expect(settlementNoteInputShape.tags).toBe(noteInputShape.tags);
     expect(settlementNoteInputShape.insight).toBe(noteInputShape.insight);
@@ -741,12 +745,15 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
     expect(Object.keys(settlementNoteInputShape)).not.toContain("supersedes");
   });
 
-  it("declares no skip, crossSession, mode, or job-identity field", () => {
+  // Ticket 08: `mode` LEFT this list — it is a shared field now (asserted by
+  // identity above), not a main-agent-only one. `skip`/`crossSession` stay
+  // forbidden: settlement never declines a turn and never writes outside the
+  // session it was dispatched for.
+  it("declares no skip, crossSession, or job-identity field", () => {
     const keys = Object.keys(settlementNoteInputShape);
     for (const forbidden of [
       "skip",
       "crossSession",
-      "mode",
       "jobId",
       "claimGeneration",
     ]) {

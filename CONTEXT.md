@@ -93,9 +93,13 @@ Entity-level: one appearance licenses every field.
 _Avoid_: lock (nothing is held; it's a license check at write time)
 
 **Complete read (完整读)**:
-A render that delivered one field untruncated. Overwriting a field that already
-holds something requires one; editing a matched span inside it does not — the
+A render that delivered one field untruncated. Writing a field whole over content
+ANOTHER writer put there requires one; editing a matched span inside it never
+does, and neither does an empty field or content you wrote yourself — the
 difference between the two write modes is this read requirement, nothing else.
+Which read delivers a field whole is surface-specific: a bigger `turn` cap for a
+turn field, a bigger `pageBudget` for a segment card's rows, and a
+metadata-selecting recall for a turn's type/tags (a plain recall shows neither).
 
 **Stale (失效)**:
 A field another writer touched after the grant; writing it again requires a fresh

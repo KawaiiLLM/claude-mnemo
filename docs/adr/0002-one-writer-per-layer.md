@@ -1,6 +1,22 @@
 # ADR-0002 — One writer per layer: note, remember, settlement
 
-**Status:** accepted · 2026-08-17 · source: S15069 T814–T823
+**Status:** accepted · 2026-08-17 · source: S15069 T814–T823 · verbs and cadence amended
+2026-08-20
+
+> **Amendment 1 — the verb column (write-mode-edit-semantics, ticket 05).** `remember`'s
+> surface reads `create` / `attach` / **`write`** / **`edit`** / `close` / `assign`. `edit`
+> is `replace` renamed; `write` replaces `append` and is strictly more (whole-field
+> replacement — an added row is now an `edit` anchored on the last row). See
+> [ADR-0001](0001-segment-as-semantic-container.md)'s own amendment and
+> [ADR-0008](0008-read-write-contract.md) for what admits a `write`.
+>
+> **Amendment 2 — the cadence clause shrank to one receipt.** The "too frequent" half
+> retired: a write under 10 turns draws no reminder, and the receipt is now a bare count of
+> turns since this segment's last maintenance plus the standing 20-turn nudge. `decisions`'
+> exemption goes with it — not overruled, but left without a premise: there is no
+> write-again-too-soon reminder left for it to be exempt from. A lost ruling is still the
+> costliest loss; nothing ever gated on cadence, so nothing about `decisions` changes in
+> practice.
 
 ## Context
 

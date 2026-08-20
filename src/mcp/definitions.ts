@@ -67,7 +67,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall:
-    "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory — never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim — especially one from behind a compact — comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id=\"E31, E32\"` or `id=\"S12, S15\"`) — each item parses through the same grammar below, renders in order, and shares this call's page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id=\"E<n>\"` (also `E*`, `E1..9`) recalls the segment card — the accumulated impression of one arc of work, not a session or a turn — so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. `id=\"E<n>/T<m>\"` (also `E<n>/T*`, `E<n>/T3..7`) addresses the segment's own members by their 1-based EVENT-ORDER position — a navigation handle only, never a citation (cite the rendered `[S<session>][T<prompt>]` address instead, since a late-settling member shifts the ordinal). `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, content); a segment card (`id=\"E<n>\"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets — `pageBudget` (page overflow → another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). `query` is pure full-text search — it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.",
+    "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory — never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim — especially one from behind a compact — comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id=\"E31, E32\"` or `id=\"S12, S15\"`) — each item parses through the same grammar below, renders in order, and shares this call's page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id=\"E<n>\"` (also `E*`, `E1..9`) recalls the segment card — the accumulated impression of one arc of work, not a session or a turn — so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. `id=\"E<n>/T<m>\"` (also `E<n>/T*`, `E<n>/T3..7`) addresses the segment's own members by their 1-based EVENT-ORDER position — a navigation handle only, never a citation (cite the rendered `[S<session>][T<prompt>]` address instead, since a late-settling member shifts the ordinal). `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, content); a segment card (`id=\"E<n>\"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets — `pageBudget` (page overflow → another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated — raise `turn` (or `pageBudget` on a segment card) and re-read if it came back cut. Since the default fields are title/content and a turn's `type`/`tags` ride the metadata line instead, correcting either of those needs `filter={fields:[\"metadata\"]}` first. `edit` needs a current read, never a complete one. `query` is pure full-text search — it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.",
   timeline:
     "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` (key chronological digest) — `phases` has retired. `filter` — the same structured grammar `recall` uses — AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
@@ -248,7 +248,7 @@ const noteModeShape = z
   .strict()
   .optional()
   .describe(
-    'Required when the target field already holds something: "write" replaces it whole (type/tags: the full replacement set — the edit form has no meaning on a set field). The edit form `{ mode: "edit", oldString, newString }` swaps an exactly-matched span within a text field ("" deletes the match); missing or ambiguous rejects loudly naming which. Not required when the field is empty or omitted — omitting the field itself leaves it untouched. Clearing a nullable field (insight) needs the field set to null plus its mode set to "write".',
+    'Required when the target field already holds something: "write" replaces it whole (type/tags: the full replacement set — the edit form has no meaning on a set field). The edit form `{ mode: "edit", oldString, newString }` swaps an exactly-matched span within a text field ("" deletes the match); missing or ambiguous rejects loudly naming which. Not required when the field is empty or omitted — omitting the field itself leaves it untouched. Clearing a nullable field (insight) needs the field set to null plus its mode set to "write". A "write" landing over content ANOTHER writer put there additionally requires that your authorizing read delivered THAT field untruncated: for title/content/insight, a recall with a big enough `turn` cap; for type/tags, `recall(id="S<n>/T<m>", filter={fields:["metadata"]})` specifically — a plain recall renders title/content and never those two, so it earns nothing for them. Your own content and an empty field are exempt, and the edit form never needs a complete read at all.',
   );
 
 // Ticket 05 (spec D14): shared by `noteInputSchema`'s superRefine below.
@@ -273,7 +273,7 @@ const TYPE_VOCABULARY_LIST = MEMORY_TYPES.join("/");
 // an empty field → written directly; present on a non-empty field → requires
 // `mode.<field>`. `type`'s own empty/clear state is `[]` (spec B7), so it
 // carries no separate nullable — every other field is `.nullable()` because
-// an explicit `null` is its clear expression once `mode.<field>: "overwrite"`
+// an explicit `null` is its clear expression once `mode.<field>: "write"`
 // authorises it (turn `title`/`content` reject `null` at the tool layer: the
 // note's shadow record requires them non-null, so "clearing" one is not an
 // operation this tool can express).
@@ -367,8 +367,8 @@ export const noteInputShape = {
   // `E<segment>` (brackets optional), and each MUST already be named by
   // this same call's title/content/insight post-state — mcp/note.ts rejects
   // the whole call otherwise, it never silently drops one. No `mode`: unlike
-  // title/tags/type there is no PRIOR value at this layer to append to or
-  // overwrite, and `writeMemoryEdges`'s upsert (spec C14) already governs
+  // title/tags/type there is no PRIOR value at this layer to write over or
+  // edit, and `writeMemoryEdges`'s upsert (spec C14) already governs
   // replacing a relation the pair carries from an earlier write.
   evidenceFor: z
     .array(z.string())
@@ -599,11 +599,12 @@ export const timelineInputShape = {
 // a vocabulary word, a description) reaches both surfaces from a single
 // edit here rather than needing a second, independently hand-kept copy
 // (worker/note-settlement-turn-facade.ts used to carry exactly that copy).
-// `title`/`content` are declared separately, on purpose: settlement's
-// reconstruction is a whole-rewrite with no append mode and no null-clear
-// (see that module's own doc comment), so `noteInputShape`'s nullable,
-// append-aware pair does not describe the same operation and must not be
-// shared. `turn` has no main-agent analogue at all and is declared fresh.
+// `title`/`content` are declared separately for ONE remaining reason: they
+// are non-nullable here (settlement corrects a field, it never clears one),
+// so `noteInputShape`'s `.nullable()` pair does not describe the same
+// operation. The write MODE is no longer a difference — both surfaces share
+// the `mode` object below. `turn` has no main-agent analogue at all and is
+// declared fresh.
 //
 // Ticket 06 (ownership-and-note-cadence spec, "选举机器拆除"): `tier`
 // (ADR-0003's election A/B/C) is RETIRED — settlement no longer assigns a
@@ -637,12 +638,22 @@ export const timelineInputShape = {
 // writable on either surface any more; `noteInputShape.supersedes` stays
 // declared only for its own `.omit()` comment's sake, with no remaining
 // reuser.
+//
+// Ticket 07 (write-mode-edit-semantics spec D12): `mode` is part of THIS
+// shape — the same object `noteInputShape` declares, so the two surfaces
+// cannot drift into two write vocabularies. It lived as a spread in
+// `worker/note-settlement-turn-facade.ts` for one ticket only (ticket 06
+// held this file open at the time); ticket 08 folded it back, and that
+// facade is a plain re-export again. `tests/worker/note-settlement-parity.
+// test.ts` asserts the identity at the tool-REGISTRATION boundary, where a
+// prose claim of sameness cannot reach.
 export const settlementNoteInputShape = {
   turn: z.string().min(1).optional(),
   session: z.string().min(1).optional(),
   title: z.string().optional(),
   content: z.string().optional(),
   insight: noteInputShape.insight,
+  mode: noteInputShape.mode,
   type: noteInputShape.type,
   tags: noteInputShape.tags,
   evidenceFor: noteInputShape.evidenceFor,

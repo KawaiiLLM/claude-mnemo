@@ -1,6 +1,11 @@
 # ADR-0008 — One gate, one renderer: read grants, freshness stamps, settlement direct-write
 
-**Status:** accepted · 2026-08-19 · source: S15069 grill rounds T953–T958 (two rounds of convergence)
+**Status:** accepted · 2026-08-19 · source: S15069 grill rounds T953–T958 (two rounds of
+convergence) · **baseline revised 2026-08-20** — the gate below is the write-mode-edit-
+semantics batch's shipped contract (tickets 05–07), not the pre-implementation draft: the
+mode vocabulary is `write`/`edit`, and the gate has a third rejection. Revised in place
+rather than annotated, because a reader who took the earlier four-rung text as the baseline
+would flatten the two modes back into one.
 
 ## Context
 
@@ -27,24 +32,61 @@ segment writes, settlement's four structured-field corrections) is judged per fi
 fixed order, inside the same transaction as the write and its stamp update — there is no
 window between judging the gate and landing the write for a second writer to land in:
 
-1. This writer's session has read the entity this call/session (injected into context, or
-   rendered by a `recall`/`timeline` call) — an entity-level grant, licensing every one of
-   its fields — **and** the field was not written by someone else since → **admit**.
-2. Not read, but the field's own last writer is this same writer → **admit** (writing is
-   reading: no field a writer already owns can go stale under its own hand).
-3. The field has never been written by anyone → **admit** (a create path needs no read).
-4. Otherwise → **reject**, with one of two distinct messages: never-granted ("recall
-   `<address>` first") or stale ("`<field>` was changed by `<writer>` at `<time>`, recall
-   again").
+1. The field has never been written by anyone → **admit** (a create path needs no read).
+2. The field's own last writer is this same writer → **admit** (writing is reading: no field
+   a writer already owns can go stale under its own hand, and the only content its
+   replacement can lose is content it put there itself).
+3. *From here the field holds another writer's content.* This writer's session holds no read
+   grant on the entity → **reject** `never-read` ("recall `<address>` first"). A grant is
+   earned by the entity being rendered to this writer this call/session (injected into
+   context, or rendered by a `recall`/`timeline` call); it is entity-level, licensing every
+   one of the entity's fields.
+4. A grant exists, but the field was stamped by that other writer after the grant was earned
+   → **reject** `stale` ("`<field>` was changed by `<writer>` at `<time>`, recall again").
+5. The grant is current, **and** this call's mode is `write` — whole-field replacement —
+   **and** the render that earned the grant did not deliver *that* field untruncated →
+   **reject** `incomplete-read`, naming the field and the remedy. `edit` never reaches this
+   rung: it replaces only the span its `oldString` matched, so it cannot lose what it never
+   saw.
+6. Otherwise → **admit**.
 
-**Rendering records grants.** One table (writer, entity class, entity id, `read_at`) is the
-read set; the single unified renderer that recall, timeline, and every context injection now
-share is the **only** place that writes to it, as a side effect of rendering. There is no
-TTL — a grant is invalidated only by a later write, never by time, and is cleared at session
-end (a janitor backstops any leak). This is the hinge: the read half of the contract (a
-rewritten renderer, two token budgets replacing the four-rung ladder) and the write half (the
-gate above) are one spec because the renderer's own output is the write half's admission
-evidence.
+**Write and edit differ in exactly one thing — rung 5.** Both modes stand under the same two
+premises, seen and unchanged-since-seen (rungs 3 and 4 judge them identically: an exact
+`oldString` match is not a substitute for having read, and a foreign write since the read
+invalidates both modes). Only the completeness requirement separates them, and only where
+there is something to destroy: a `write` onto an empty or never-written field is exempt
+(nothing to lose), and a `write` over the writer's own content is exempt because rung 2
+admits before rung 5 is ever reached. That order is load-bearing — the two admissions that
+rest on no render at all are tested first, so the completeness requirement can only bite the
+case it exists for. The stricter "any existing content" reading would need a mechanism this
+decision does not authorize: a write recording completeness for its own writer.
+
+**Rendering records grants, and per-field completeness.** One table (writer, entity class,
+entity id, `read_at`) is the read set; the single unified renderer that recall, timeline, and
+every context injection now share is the **only** place that writes to it, as a side effect
+of rendering. A second, finer record rides along: for each field the render touched, whether
+it was delivered **whole** or cut by a budget — the evidence rung 5 consults. A field the
+render never selected has no record at all, which the gate reads the same as truncated: this
+writer's grant did not come with a full view of it. Later wins; a field read truncated once
+and complete the next time is complete, never permanently disqualified. There is no TTL — a
+grant is invalidated only by a later write, never by time, and is cleared at session end (a
+janitor backstops any leak). This is the hinge: the read half of the contract (a rewritten
+renderer, two token budgets replacing the four-rung ladder) and the write half (the gate
+above) are one spec because the renderer's own output is the write half's admission evidence.
+
+**The remedy is the caller's, not the gate's.** A rejection at rung 5 must name the field and
+the exact read that would deliver it whole, because the writer cannot otherwise tell which of
+the fields it just sent was the one its read cut. That read differs per surface, so the gate
+takes it as a parameter rather than guessing: a **turn field** widens with recall's per-item
+`turn` cap; a **segment card's field rows** widen with `pageBudget` (the card elides rows
+against the page budget, not against `turn`); a turn's **`type`/`tags`** are not selectable
+by their own names at all — they ride the rendered metadata line, so the only read that earns
+completeness for them is a metadata-selecting recall
+(`recall(id="S<n>/T<m>", filter={fields:["metadata"]})`). A plain recall renders title and
+content, and therefore earns no completeness for type or tags: cross-session correction of
+either now costs one metadata-selecting read first. A gate that guessed one of these three
+remedies would send the other two writers back to a read that cannot possibly clear the
+rejection.
 
 **Freshness stamps.** A second table (entity class, entity id, field, last writer, a
 **monotonic sequence number**) tracks who touched a field last. The sequence number, not a
@@ -89,6 +131,16 @@ itself, constitute a field-level gate.
 - Settlement's three ad hoc fences (eligibility window, yield, claim CAS) collapse into
   instances of one mechanism — the freshness stamp plus the per-run writer identity — rather
   than staying a second, parallel write-safety system alongside the gate.
+- The two write modes are one mechanism with one branch, not two policies: `write` and `edit`
+  are the single vocabulary both write surfaces (`note`, `remember`) speak, and the only
+  behavioural difference between them anywhere in the system is rung 5. `overwrite`,
+  `append` and `replace` retire; `append`'s capability survives as an `edit` anchored on the
+  field's last row.
+- **Open gap — settlement does not opt into rung 5.** Its context render records no field
+  completeness, so requiring one today would reject every correction of a non-empty field.
+  Settlement therefore passes rungs 1–4 only; wiring the completeness record into its own
+  render is its own decision, recorded in [ADR-0007](0007-one-tool-surface-staged-apply.md)'s
+  amendment, not silently accepted as correct.
 - Rewind does not retract a stamp: `v1` ships without a stamp history log, so a turn on a
   branch that later gets rewound still invalidated whichever other writer's grant it touched,
   once. Recorded as a known gap (Out of Scope), not silently accepted as correct.

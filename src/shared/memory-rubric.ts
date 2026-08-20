@@ -43,7 +43,7 @@ import { createHash } from "node:crypto";
  * field IS from the same injection that already tells it how a fact gets
  * judged. Placed first, ahead of `## type`, because every later section
  * presupposes the fields it is describing. WRITING DETAIL (budgets, the
- * timing/skip/replace contract) stays off this block by the same stratification
+ * timing/skip/write-mode contract) stays off this block by the same stratification
  * the rest of this file already follows — that prose's single home is the
  * tool description (`mcp/definitions.ts`), never restated here.
  *

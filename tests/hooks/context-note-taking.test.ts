@@ -72,7 +72,7 @@ describe("note-taking instructions injection", () => {
 
     // The pointer at the single home, timing now included.
     expect(flat).toContain(
-      "Timing, fields, budgets, the skip test and replace live in the note tool's description",
+      "Timing, fields, budgets, the skip test and the write modes live in the note tool's description",
     );
 
     // Timing must NOT be restated here. These are the exact phrases that
@@ -122,7 +122,7 @@ describe("note-taking instructions injection", () => {
 
     // The SessionStart block's own text: a pointer at the single home, not a
     // second copy of what the home says.
-    expect(flat).toContain("Timing, fields, budgets, the skip test and replace live in the note tool's description");
+    expect(flat).toContain("Timing, fields, budgets, the skip test and the write modes live in the note tool's description");
   });
 
   // Ticket 01 (field-semantics spec, section C): this guard is RE-SCOPED, not
@@ -130,7 +130,7 @@ describe("note-taking instructions injection", () => {
   // TIMING half above is unchanged (still the note tool's description alone).
   // This half adds the field-DEFINITION table's own home: the rubric
   // injection (shared/memory-rubric.ts) carries the table (existence), and
-  // carries none of the WRITING detail — budgets, the timing/skip/replace
+  // carries none of the WRITING detail — budgets, the timing/skip/write-mode
   // contract — which stays solely on the tool description, same discipline
   // ticket 11 already enforces for judgment prose (tests/shared/
   // memory-rubric.test.ts's own single-home grep guard). Byte-for-byte

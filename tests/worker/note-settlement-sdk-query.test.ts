@@ -169,16 +169,15 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
       });
 
       expect(shapes.get("note")).toBe(settlementTurnWriteInputShape);
-      // Ticket 07 (write-mode-edit-semantics spec D12): the registered shape is
-      // `settlementNoteInputShape` PLUS the main agent's own `mode` — every
-      // field object still the SAME object `mcp/definitions.ts` exports, never
-      // a look-alike copy. (Object identity with `settlementNoteInputShape`
-      // itself ends here only because ticket 06 held that file open; the
-      // per-field identity below is what the assertion was ever protecting.)
+      // Ticket 08 (write-mode-edit-semantics): the registered shape is
+      // `settlementNoteInputShape` ITSELF again — `mode` folded back into that
+      // shape, so the facade's export is a plain re-export and this identity
+      // holds as it did before ticket 07 spread one key on top of it.
+      expect(shapes.get("note")).toBe(settlementNoteInputShape);
+      // Spec D12: the mode vocabulary reaching the settlement model is the
+      // main agent's own object, not a look-alike (also pinned at the
+      // registration seam by tests/worker/note-settlement-parity.test.ts).
       const registered = shapes.get("note") as Record<string, unknown>;
-      for (const [field, declaration] of Object.entries(settlementNoteInputShape)) {
-        expect(registered[field]).toBe(declaration);
-      }
       expect(registered.mode).toBe(noteInputShape.mode);
     } finally {
       db?.close();
