@@ -144,7 +144,25 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
 
     initializeSchema(db);
 
-    expect(allEdges(db)).toEqual(before);
+    // `initializeSchema` runs the FULL chain, flow-relations ticket 03's
+    // relation-contract narrow included — the fixture's old-vocabulary
+    // values (depends-on/encodes/grounded-on/refines) are renamed on the
+    // way, not just carried across byte-identical. Row COUNT and STRUCTURE
+    // are what "lossless" asserts here; the `relation` column's rename is
+    // covered by the vocabulary-flip and relation-contract migration tests.
+    const RENAME: Record<string, string> = {
+      "depends-on": "consume",
+      encodes: "grounds",
+      "grounded-on": "grounds",
+      refines: "extends",
+    };
+    const expected = before.map((edge) => {
+      const row = edge as { relation: string | null };
+      return row.relation === null
+        ? row
+        : { ...row, relation: RENAME[row.relation] ?? row.relation };
+    });
+    expect(allEdges(db)).toEqual(expected);
     expect(storedTableSql(db)).toContain("relation IS NOT NULL");
   });
 
@@ -162,15 +180,19 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
   test("a relation-carrying self insert is now accepted", () => {
     initializeSchema(db);
 
+    // 'encodes' is retired by flow-relations ticket 03's relation contract
+    // (the narrow CHECK no longer admits it) — 'grounds' is its replacement,
+    // and this test is only about the self-loop CHECK's own arm, not which
+    // word carries it.
     expect(() =>
-      insertEdge("turn", turnIds[0]!, "turn", turnIds[0]!, "encodes", "asserted", 160),
+      insertEdge("turn", turnIds[0]!, "turn", turnIds[0]!, "grounds", "asserted", 160),
     ).not.toThrow();
     expect(
       db
         .query<{ count: number }, [number, number]>(
           `SELECT COUNT(*) AS count FROM memory_edges
            WHERE citing_kind = 'turn' AND citing_id = ?
-             AND cited_kind = 'turn' AND cited_id = ? AND relation = 'encodes'`,
+             AND cited_kind = 'turn' AND cited_id = ? AND relation = 'grounds'`,
         )
         .get(turnIds[0]!, turnIds[0]!)!.count,
     ).toBe(1);

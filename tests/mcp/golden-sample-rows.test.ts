@@ -254,8 +254,8 @@ describe("金样例 — the rendered row contract", () => {
     });
     addSegmentMembers(db, 31, [t811, t812, t821, t822, s2t21], CUTOFF);
     writeMemoryEdges(db, [
-      { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t811 }, relation: "refines", provenance: "asserted" },
-      { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t812 }, relation: "refines", provenance: "asserted" },
+      { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t811 }, relation: "extends", provenance: "asserted" },
+      { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t812 }, relation: "extends", provenance: "asserted" },
     ], CUTOFF);
 
     const output = timelineQuery(db, {
@@ -297,7 +297,7 @@ describe("金样例 — the rendered row contract", () => {
     });
     addSegmentMembers(db, 31, [foreign, citer], CUTOFF);
     writeMemoryEdges(db, [
-      { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: foreign }, relation: "refines", provenance: "asserted" },
+      { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: foreign }, relation: "extends", provenance: "asserted" },
     ], CUTOFF);
 
     const output = timelineQuery(db, {

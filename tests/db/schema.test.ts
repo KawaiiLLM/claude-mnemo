@@ -1765,7 +1765,7 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
         {
           citing: { kind: "turn", id: discoveryId },
           cited: { kind: "turn", id: compactId },
-          relation: "depends-on",
+          relation: "consume",
           provenance: "asserted",
         },
       ],

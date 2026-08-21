@@ -887,7 +887,7 @@ describe("segments and membership", () => {
           {
             citing: { kind: "segment", id: segment.id },
             cited: { kind: "turn", id: target },
-            relation: "evidence-for",
+            relation: "verifies",
             provenance: "judged",
           },
         ],
@@ -908,7 +908,7 @@ describe("segments and membership", () => {
 
       const surviving = getOutgoingEdges(db, { kind: "segment", id: segment.id });
       expect(surviving).toHaveLength(1);
-      expect(surviving[0]?.relation).toBe("evidence-for");
+      expect(surviving[0]?.relation).toBe("verifies");
     });
 
     test("a reference naming no real row is dropped, not written", () => {

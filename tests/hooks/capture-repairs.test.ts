@@ -325,8 +325,8 @@ describe("capture repairs", () => {
       db.query(
         `INSERT INTO memory_edges
            (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, 'depends-on', 'judged', 700),
-                ('turn', ?, 'turn', ?, 'evidence-for', 'judged', 701)`,
+         VALUES ('turn', ?, 'turn', ?, 'consume', 'judged', 700),
+                ('turn', ?, 'turn', ?, 'verifies', 'judged', 701)`,
       ).run(turnId, neighbourId, neighbourId, turnId);
     }
 

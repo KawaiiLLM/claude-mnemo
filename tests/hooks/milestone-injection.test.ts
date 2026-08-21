@@ -103,7 +103,7 @@ function cite(
     citedPrompts.map((promptNumber) => ({
       citing: { kind: "turn" as const, id: citingId },
       cited: { kind: "turn" as const, id: turnDbId(db, sessionId, promptNumber) },
-      relation: "evidence-for" as const,
+      relation: "verifies" as const,
       provenance: "judged" as const,
     })),
     ERA_BASE,

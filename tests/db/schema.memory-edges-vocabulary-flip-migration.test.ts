@@ -123,9 +123,11 @@ describe("memory_edges vocabulary flip migration (flow-relations spec, ticket 02
     initializeSchema(db);
 
     expect(storedTableSql(db)).toContain("'narrows'");
-    // The old words stay in the CHECK too (old∪new, ticket 03 narrows it) —
-    // this ticket only ever widens.
-    expect(storedTableSql(db)).toContain("'depends-on'");
+    // `initializeSchema` runs the FULL chain, flow-relations ticket 03's
+    // relation-contract narrow included — 'depends-on' does NOT survive to
+    // the final stored CHECK, even though this migration's own job (widen +
+    // rename) is what ticket 03 depends on having already run.
+    expect(storedTableSql(db)).not.toContain("'depends-on'");
 
     expect(relationsOf(db, 1)).toEqual(["consume"]);
     expect(relationsOf(db, 3)).toEqual(["verifies"]);

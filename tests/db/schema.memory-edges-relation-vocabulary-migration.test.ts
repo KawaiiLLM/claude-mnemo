@@ -68,7 +68,7 @@ describe("memory_edges relation vocabulary migration", () => {
     db.close();
   });
 
-  test("a four-word CHECK rejects the new vocabulary; the migration widens it with rows intact", () => {
+  test("a four-word CHECK rejects the new vocabulary; the migration widens it, and later migrations in the same open carry it to the final contract", () => {
     // Before: the legacy constraint is the bug being fixed.
     expect(() =>
       db.exec(
@@ -79,16 +79,38 @@ describe("memory_edges relation vocabulary migration", () => {
     const before = allEdges(db);
     initializeSchema(db);
 
-    expect(storedTableSql(db)).toContain("'grounded-on'");
-    expect(allEdges(db)).toEqual(before);
+    // `initializeSchema` runs the FULL chain in one open — this migration's
+    // OWN widen is what lets flow-relations ticket 02's rename and ticket
+    // 03's relation-contract narrow run right behind it, so the FINAL
+    // observable CHECK is the narrow eight-word + supersedes contract, not
+    // the four-word-plus-new-vocabulary union this migration alone produces.
+    expect(storedTableSql(db)).not.toContain("'grounded-on'");
+    expect(storedTableSql(db)).toContain("'grounds'");
+    // The fixture's pre-existing rows are RENAMED by that same chain
+    // (evidence-for -> verifies); supersedes never moves.
+    const RENAME: Record<string, string> = { "evidence-for": "verifies" };
+    const expected = before.map((edge) => {
+      const row = edge as { relation: string | null };
+      return row.relation === null
+        ? row
+        : { ...row, relation: RENAME[row.relation] ?? row.relation };
+    });
+    expect(allEdges(db)).toEqual(expected);
 
-    // After: all four new words insert cleanly; garbage still does not.
+    // After: the eight-word + supersedes contract inserts cleanly; the
+    // retired words this migration alone would have widened for
+    // ('grounded-on'/'refines') no longer do, and garbage still does not.
     db.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 5, 'turn', 6, 'grounded-on', 'asserted', 300)",
+      "INSERT INTO memory_edges VALUES ('turn', 5, 'turn', 6, 'grounds', 'asserted', 300)",
     );
     db.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 7, 'turn', 8, 'refines', 'asserted', 400)",
+      "INSERT INTO memory_edges VALUES ('turn', 7, 'turn', 8, 'extends', 'asserted', 400)",
     );
+    expect(() =>
+      db.exec(
+        "INSERT INTO memory_edges VALUES ('turn', 9, 'turn', 10, 'grounded-on', 'asserted', 500)",
+      ),
+    ).toThrow();
     expect(() =>
       db.exec(
         "INSERT INTO memory_edges VALUES ('turn', 9, 'turn', 10, 'bogus-word', 'asserted', 500)",
@@ -114,16 +136,18 @@ describe("memory_edges relation vocabulary migration", () => {
     initializeSchema(db);
     initializeSchema(db);
     expect(allEdges(db)).toEqual(after);
-    expect(storedTableSql(db)).toContain("'grounded-on'");
+    expect(storedTableSql(db)).not.toContain("'grounded-on'");
+    expect(storedTableSql(db)).toContain("'grounds'");
   });
 
   test("a fresh database skips the migration entirely and already accepts the new words", () => {
     const fresh = createDatabase(":memory:");
     initializeSchema(fresh);
     fresh.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'encodes', 'asserted', 100)",
+      "INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)",
     );
-    expect(storedTableSql(fresh)).toContain("'grounded-on'");
+    expect(storedTableSql(fresh)).not.toContain("'grounded-on'");
+    expect(storedTableSql(fresh)).toContain("'grounds'");
     fresh.close();
   });
 });

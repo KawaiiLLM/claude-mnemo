@@ -33,31 +33,31 @@ import type { TurnRecord } from "./turns";
  * forms stay in prose for human readers and remain the only signal for turns
  * extracted before the edge table existed.
  */
-// Flow-relations spec, ticket 02 (the "expand half" — `.scratch/flow-relations/
-// spec.md`'s migration item 3): the eight-word vocabulary joins the storage
-// list ALONGSIDE the seven retired words, not in place of them — the DB
-// CHECK's word list is old∪new until ticket 03's contract half narrows it to
-// the eight words + `supersedes`. The migration (schema.ts) renames every
-// STORED row (depends-on->consume, evidence-for->verifies, evidence-against
-// ->refutes, grounded-on->grounds, refines->extends, encodes->grounds), so in
-// practice no live row carries the six renamed words after this ticket's
-// migration runs — they stay listed here only because the CHECK still admits
-// them and a value this constant refused would desync from what SQLite itself
-// accepts. `supersedes` STAYS permanently frozen-readable (10 measured
-// `supersedes` edges, none of which actually invalidated a predecessor's
-// whole conclusion) — never a relation a NEW write may request, whatever the
+// Flow-relations spec, ticket 03 (the "contract half" — `.scratch/flow-
+// relations/spec.md`'s migration item 3): narrowed to the eight-word
+// vocabulary + `supersedes`, matching `schema.ts`'s now-narrow
+// `memory_edges` CHECK (`MEMORY_EDGES_CONTRACT_RELATION_WORDS`). Ticket 02
+// (the "expand half") widened this to old∪new for one release so a
+// still-in-flight rename could not be rejected by a CHECK narrowed out from
+// under it; that window is over — the seven retired words (evidence-for/
+// evidence-against/depends-on/refines/encodes/grounded-on, plus `override`
+// which never moved) are gone from BOTH the DB CHECK and this constant, kept
+// in lockstep on purpose: a value this constant still accepted but the CHECK
+// no longer does would let `writeMemoryEdges`' `isCitationRelation` gate pass
+// a row through to an uncaught SQLite CHECK-constraint exception instead of
+// a clean `invalid-relation` rejection (this is the live write-path gate,
+// not a storage-layer historical record — contrast schema.ts's own
+// migration-internal remaps, which resolve every retired word to its
+// current replacement before it ever reaches this gate, precisely so they
+// never need to hand this constant an old word to recognize).
+// `supersedes` STAYS permanently frozen-readable (10 measured `supersedes`
+// edges, none of which actually invalidated a predecessor's whole
+// conclusion) — never a relation a NEW write may request, whatever the
 // CHECK admits. The EIGHT-word CLOSED set a fresh write may carry lives in
 // `shared/turn-phase.ts`'s `EDGE_RELATIONS` — narrower than this storage-level
 // list on purpose.
 export const CITATION_RELATIONS = [
-  "evidence-for",
-  "evidence-against",
-  "supersedes",
-  "depends-on",
-  "refines",
   "override",
-  "encodes",
-  "grounded-on",
   "narrows",
   "extends",
   "collects",
@@ -65,6 +65,7 @@ export const CITATION_RELATIONS = [
   "grounds",
   "verifies",
   "refutes",
+  "supersedes",
 ] as const;
 
 export type CitationRelation = (typeof CITATION_RELATIONS)[number];

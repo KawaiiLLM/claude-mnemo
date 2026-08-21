@@ -1442,7 +1442,7 @@ describe("buildCorrectionGraph", () => {
               {
                 citingTurnId: 30,
                 citedTurnId: 10,
-                relation: "depends-on" as const,
+                relation: "consume" as const,
                 createdAtEpoch: base + 120,
               },
             ],
@@ -1463,7 +1463,7 @@ describe("buildCorrectionGraph", () => {
       turn({ id: 30, promptNumber: 3, type: "feature", createdAtEpoch: era + 60 }),
     ];
     const g = buildCorrectionGraph(seq, {
-      citations: structuredCitations({ 30: [[20, "builds-on"], [20, "evidence-for"]] }),
+      citations: structuredCitations({ 30: [[20, "builds-on"], [20, "verifies"]] }),
       taskCausalityEraCutoffEpoch: era,
     });
     expect(g.correctors.size).toBe(0);
@@ -1548,7 +1548,7 @@ describe("buildCorrectionGraph", () => {
       turn({ id: 30, promptNumber: 3, type: "bugfix", createdAtEpoch: base + 60 }),
     ];
     const g = buildCorrectionGraph(seq, {
-      citations: structuredCitations({ 30: [[20, "builds-on"], [20, "evidence-for"]] }),
+      citations: structuredCitations({ 30: [[20, "builds-on"], [20, "verifies"]] }),
       taskCausalityEraCutoffEpoch: era,
     });
     expect(g.correctors.size).toBe(0);
@@ -1999,7 +1999,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     ];
 
     const result = select(rows, {
-      citations: structuredCitations({ 3: [[2, "evidence-for"]] }),
+      citations: structuredCitations({ 3: [[2, "verifies"]] }),
     });
 
     expect(kept(result)).toEqual([1, 3]);
@@ -2030,7 +2030,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     ];
 
     const result = select(rows, {
-      citations: structuredCitations({ 3: [[2, "evidence-for"]] }),
+      citations: structuredCitations({ 3: [[2, "verifies"]] }),
     });
     expect(result.pulled[0]!.label).toBe("minimal title for a low-grade turn");
   });
@@ -2050,7 +2050,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     ];
 
     const result = select(rows, {
-      citations: structuredCitations({ 3: [[2, "evidence-for"]] }),
+      citations: structuredCitations({ 3: [[2, "verifies"]] }),
     });
 
     // T2 is absent everywhere — not kept, not pulled, not ranked, and its
@@ -2076,7 +2076,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     ];
 
     const result = select(rows, {
-      citations: structuredCitations({ 3: [[2, "evidence-for"]] }),
+      citations: structuredCitations({ 3: [[2, "verifies"]] }),
     });
 
     expect(kept(result)).toEqual([1, 3]);
@@ -2120,8 +2120,8 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
 
     const result = select(rows, {
       citations: structuredCitations({
-        3: [[2, "evidence-for"]],
-        4: [[2, "evidence-for"]],
+        3: [[2, "verifies"]],
+        4: [[2, "verifies"]],
       }),
     });
 
@@ -2226,7 +2226,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     ];
 
     const result = select(rows, {
-      citations: structuredCitations({ 9: [[8, "evidence-for"]] }),
+      citations: structuredCitations({ 9: [[8, "verifies"]] }),
     });
     expect(kept(result)).toEqual([1, 7, 9, 11]);
     expect(result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber])).toEqual([
@@ -2474,13 +2474,13 @@ function mixedArcCitations() {
     // Structured edges: the relation is stated and authoritative.
     ...structuredCitations({
       10: [[9, "builds-on"]],
-      14: [[13, "evidence-for"]],
+      14: [[13, "verifies"]],
       18: [[17, "builds-on"]],
       22: [
         [20, "supersedes"],
-        [21, "evidence-for"],
+        [21, "verifies"],
       ],
-      23: [[21, "evidence-for"]],
+      23: [[21, "verifies"]],
     }),
   ]);
 }
@@ -3599,8 +3599,8 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
     writeMemoryEdges(
       db,
       [
-        { citing: { kind: "turn", id: t821Id }, cited: { kind: "turn", id: t811Id }, relation: "depends-on", provenance: "judged" },
-        { citing: { kind: "turn", id: t821Id }, cited: { kind: "turn", id: t812Id }, relation: "depends-on", provenance: "judged" },
+        { citing: { kind: "turn", id: t821Id }, cited: { kind: "turn", id: t811Id }, relation: "consume", provenance: "judged" },
+        { citing: { kind: "turn", id: t821Id }, cited: { kind: "turn", id: t812Id }, relation: "consume", provenance: "judged" },
       ],
       t821Epoch,
     );
@@ -3648,7 +3648,7 @@ describe("self-edged turn renders safely (ticket 05)", () => {
         {
           citing: { kind: "turn", id: turnId },
           cited: { kind: "turn", id: turnId },
-          relation: "encodes",
+          relation: "grounds",
           provenance: "asserted",
         },
       ],
@@ -3722,7 +3722,7 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     writeMemoryEdges(
       db,
       [
-        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: "depends-on", provenance: "asserted" },
+        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: "consume", provenance: "asserted" },
         { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: "supersedes", provenance: "judged" },
       ],
       dayEpoch(30),
@@ -3752,12 +3752,12 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
         ...antecedentIds.map((citedId) => ({
           citing: { kind: "turn" as const, id: citerId },
           cited: { kind: "turn" as const, id: citedId },
-          relation: "depends-on" as const,
+          relation: "consume" as const,
           provenance: "asserted" as const,
         })),
         // A second relation on the FIRST pair. Pre-fix this consumed a slot
         // and pushed the fold to `+2`, hiding a turn nothing else showed.
-        { citing: { kind: "turn" as const, id: citerId }, cited: { kind: "turn" as const, id: antecedentIds[0]! }, relation: "encodes" as const, provenance: "asserted" as const },
+        { citing: { kind: "turn" as const, id: citerId }, cited: { kind: "turn" as const, id: antecedentIds[0]! }, relation: "grounds" as const, provenance: "asserted" as const },
       ],
       dayEpoch(30),
     );
@@ -4302,10 +4302,10 @@ function seedDesignArc(db: Database) {
     }),
   ];
   const session = seedArcSession(db, rows);
-  citeTurns(db, session.id, 3, [[2, "evidence-for"]]);
+  citeTurns(db, session.id, 3, [[2, "verifies"]]);
   citeTurns(db, session.id, 5, [
     [3, "supersedes"],
-    [2, "evidence-for"],
+    [2, "verifies"],
   ]);
   return session;
 }
@@ -4636,8 +4636,8 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     ];
     const session = seedArcSession(db, rows);
     citeTurns(db, session.id, 4, [
-      [2, "evidence-for"],
-      [3, "evidence-for"],
+      [2, "verifies"],
+      [3, "verifies"],
     ]);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
     const block = unitBlockFor(out, 4);
@@ -4734,7 +4734,7 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
       db,
       session.id,
       6,
-      [2, 3, 4, 5].map((promptNumber) => [promptNumber, "evidence-for"]),
+      [2, 3, 4, 5].map((promptNumber) => [promptNumber, "verifies"]),
     );
 
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
@@ -4825,7 +4825,7 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
       db,
       session.id,
       8,
-      [2, 3, 4, 5, 6, 7].map((promptNumber) => [promptNumber, "evidence-for"]),
+      [2, 3, 4, 5, 6, 7].map((promptNumber) => [promptNumber, "verifies"]),
     );
 
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
@@ -4859,7 +4859,7 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
       }),
     ];
     const session = seedArcSession(db, rows);
-    citeTurns(db, session.id, 2, [[1, "evidence-for"]]);
+    citeTurns(db, session.id, 2, [[1, "verifies"]]);
 
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
     const out = renderTimeline(view);
@@ -4941,8 +4941,8 @@ function seedSharedAntecedentArc(db: Database) {
     }),
   ];
   const session = seedArcSession(db, rows);
-  citeTurns(db, session.id, 3, [[2, "evidence-for"]]);
-  citeTurns(db, session.id, 4, [[2, "evidence-for"]]);
+  citeTurns(db, session.id, 3, [[2, "verifies"]]);
+  citeTurns(db, session.id, 4, [[2, "verifies"]]);
   return session;
 }
 
@@ -5006,8 +5006,8 @@ function seedOrphanDayArc(db: Database) {
     }),
   ];
   const session = seedArcSession(db, rows);
-  citeTurns(db, session.id, 3, [[2, "evidence-for"]]);
-  citeTurns(db, session.id, 4, [[2, "evidence-for"]]);
+  citeTurns(db, session.id, 3, [[2, "verifies"]]);
+  citeTurns(db, session.id, 4, [[2, "verifies"]]);
   return session;
 }
 
@@ -5066,7 +5066,7 @@ function seedLongArcSession(db: Database) {
 
   const session = seedArcSession(db, rows);
   for (const [citing, cited] of antecedentOf) {
-    citeTurns(db, session.id, citing, [[cited, "evidence-for"]]);
+    citeTurns(db, session.id, citing, [[cited, "verifies"]]);
   }
   return session;
 }
@@ -5608,7 +5608,7 @@ describe("unified row renderer — frozen shapes", () => {
       }),
     ];
     const session = seedArcSession(db, rows);
-    citeTurns(db, session.id, 4, [[2, "evidence-for"]]);
+    citeTurns(db, session.id, 4, [[2, "verifies"]]);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
     expect(bodyRows(out)).toEqual([

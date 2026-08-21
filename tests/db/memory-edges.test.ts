@@ -73,7 +73,7 @@ describe("universal memory edges", () => {
           {
             citing: { kind: "turn", id: citer },
             cited: { kind: "turn", id: keep },
-            relation: "depends-on",
+            relation: "consume",
             provenance: "judged",
           },
           {
@@ -108,7 +108,7 @@ describe("universal memory edges", () => {
       // A bare re-statement of a pair that already carries a relation must not
       // clear it (spec C14), and prose withdrawing a mention must not clear a
       // relation either (D1) — the bare-only pair is the only casualty.
-      expect(byTarget.get(keep)).toBe("depends-on");
+      expect(byTarget.get(keep)).toBe("consume");
       expect(byTarget.get(drop)).toBe("supersedes");
       expect(byTarget.has(bareDrop)).toBe(false);
     });
@@ -131,7 +131,7 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: turnId },
           cited: { kind: "segment", id: segment.id },
-          relation: "depends-on",
+          relation: "consume",
           provenance: "retrieval",
         },
       ],
@@ -145,7 +145,7 @@ describe("universal memory edges", () => {
       {
         citing: { kind: "turn", id: turnId },
         cited: { kind: "segment", id: segment.id },
-        relation: "depends-on",
+        relation: "consume",
         provenance: "retrieval",
         createdAtEpoch: 300,
       },
@@ -161,7 +161,7 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "session", id: sessionId },
           cited: { kind: "segment", id: segment.id },
-          relation: "depends-on",
+          relation: "consume",
           provenance: "asserted",
         },
         {
@@ -187,7 +187,7 @@ describe("universal memory edges", () => {
     const edge = {
       citing: { kind: "turn" as const, id: citing },
       cited: { kind: "turn" as const, id: cited },
-      relation: "depends-on" as const,
+      relation: "consume" as const,
     };
 
     writeMemoryEdges(db, [{ ...edge, provenance: "retrieval" }], 300);
@@ -207,7 +207,7 @@ describe("universal memory edges", () => {
     // `written` into receipts and eligibility sets, so a no-op must not read
     // as "nothing is stored".
     expect(repeat.written).toHaveLength(1);
-    expect(repeat.written[0]?.relation).toBe("depends-on");
+    expect(repeat.written[0]?.relation).toBe("consume");
   });
 
   test("a bare write is storable, is superseded by a relation on the same pair, and never comes back over one (D2)", () => {
@@ -314,30 +314,30 @@ describe("universal memory edges", () => {
     const oneCall = writeMemoryEdges(
       db,
       [
-        { ...pair, relation: "depends-on", provenance: "asserted" },
-        { ...pair, relation: "encodes", provenance: "asserted" },
+        { ...pair, relation: "consume", provenance: "asserted" },
+        { ...pair, relation: "grounds", provenance: "asserted" },
       ],
       300,
     );
     expect(oneCall.rejected).toEqual([]);
     expect(oneCall.written.map((edge) => edge.relation)).toEqual([
-      "depends-on",
-      "encodes",
+      "consume",
+      "grounds",
     ]);
 
     // A third relation from a LATER call (settlement's hindsight pass) joins
     // them rather than replacing either.
     writeMemoryEdges(
       db,
-      [{ ...pair, relation: "evidence-for", provenance: "judged" }],
+      [{ ...pair, relation: "verifies", provenance: "judged" }],
       400,
     );
 
     const stored = getOutgoingEdges(db, pair.citing);
     expect(stored.map((edge) => edge.relation)).toEqual([
-      "depends-on",
-      "encodes",
-      "evidence-for",
+      "consume",
+      "grounds",
+      "verifies",
     ]);
     expect(countMemoryEdges(db)).toBe(3);
     // Each keeps its own provenance and moment — they are three separate
@@ -362,19 +362,19 @@ describe("universal memory edges", () => {
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: cited },
-            relation: "depends-on",
+            relation: "consume",
             provenance: "asserted",
           },
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: cited },
-            relation: "encodes",
+            relation: "grounds",
             provenance: "asserted",
           },
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: other },
-            relation: "depends-on",
+            relation: "consume",
             provenance: "asserted",
           },
         ],
@@ -390,13 +390,13 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: "depends-on",
+          relation: "consume",
         },
       ]);
 
       expect(result.rejected).toEqual([]);
       expect(result.deleted).toHaveLength(1);
-      expect(result.deleted[0]?.relation).toBe("depends-on");
+      expect(result.deleted[0]?.relation).toBe("consume");
       expect(result.deleted[0]?.cited).toEqual({ kind: "turn", id: cited });
       // The pair's OTHER relation survives, and so does the same relation on a
       // different pair.
@@ -406,8 +406,8 @@ describe("universal memory edges", () => {
           edge.relation,
         ]),
       ).toEqual([
-        [cited, "encodes"],
-        [other, "depends-on"],
+        [cited, "grounds"],
+        [other, "consume"],
       ]);
     });
 
@@ -427,7 +427,7 @@ describe("universal memory edges", () => {
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: classified },
-            relation: "refines",
+            relation: "extends",
             provenance: "asserted",
           },
         ],
@@ -459,7 +459,7 @@ describe("universal memory edges", () => {
       ]);
       expect(
         getOutgoingEdges(db, { kind: "turn", id: citing }).map((edge) => edge.relation),
-      ).toEqual(["refines"]);
+      ).toEqual(["extends"]);
     });
 
     test("reports an address that resolved but matched nothing, and a malformed one, apart", () => {
@@ -479,7 +479,7 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: 0 },
-          relation: "depends-on",
+          relation: "consume",
         },
       ]);
 
@@ -507,7 +507,7 @@ describe("universal memory edges", () => {
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: cited },
-            relation: "grounded-on",
+            relation: "grounds",
             provenance: "asserted",
           },
         ],
@@ -518,7 +518,7 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: "grounded-on",
+          relation: "grounds",
         },
       ]);
 
@@ -550,7 +550,7 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: turnId },
           cited: { kind: "turn", id: 0 },
-          relation: "depends-on",
+          relation: "consume",
           provenance: "text-ref",
         },
         {
@@ -587,7 +587,7 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: turnId },
           cited: { kind: "turn", id: turnId },
-          relation: "encodes",
+          relation: "grounds",
           provenance: "asserted",
         },
       ],
@@ -596,7 +596,7 @@ describe("universal memory edges", () => {
 
     expect(result.rejected).toEqual([]);
     expect(result.written).toHaveLength(1);
-    expect(result.written[0]?.relation).toBe("encodes");
+    expect(result.written[0]?.relation).toBe("grounds");
     expect(result.written[0]?.citing).toEqual({ kind: "turn", id: turnId });
     expect(result.written[0]?.cited).toEqual({ kind: "turn", id: turnId });
     expect(countMemoryEdges(db)).toBe(1);
@@ -615,7 +615,7 @@ describe("universal memory edges", () => {
         .query(
           `INSERT INTO memory_edges
              (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-           VALUES ('turn', ?, 'turn', ?, 'depends-on', 'asserted', 300)`,
+           VALUES ('turn', ?, 'turn', ?, 'consume', 'asserted', 300)`,
         )
         .run(turnId, turnId),
     ).not.toThrow();
@@ -636,7 +636,7 @@ describe("universal memory edges", () => {
         .query(
           `INSERT INTO memory_edges
              (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-           VALUES ('turn', ?, 'segment', ?, 'depends-on', 'asserted', 300)`,
+           VALUES ('turn', ?, 'segment', ?, 'consume', 'asserted', 300)`,
         )
         .run(turnId, turnId),
     ).not.toThrow();
@@ -657,13 +657,13 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: citerA },
           cited: { kind: "turn", id: cited },
-          relation: "depends-on",
+          relation: "consume",
           provenance: "retrieval",
         },
         {
           citing: { kind: "turn", id: citerB },
           cited: { kind: "turn", id: cited },
-          relation: "evidence-for",
+          relation: "verifies",
           provenance: "judged",
         },
       ],
@@ -771,9 +771,9 @@ describe("universal memory edges", () => {
           .get(legacy[pairIndex]!.citing, legacy[pairIndex]!.cited)?.relation ?? null;
 
       expect(relationFor(0)).toBeNull();
-      expect(relationFor(1)).toBe("depends-on");
+      expect(relationFor(1)).toBe("consume");
       expect(relationFor(2)).toBe("supersedes");
-      expect(relationFor(3)).toBe("evidence-for");
+      expect(relationFor(3)).toBe("verifies");
 
       const provenances = db
         .query<{ provenance: string }, []>(
@@ -856,7 +856,7 @@ describe("universal memory edges", () => {
         db.query(
           `INSERT INTO memory_edges
              (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-           VALUES ('turn', ?, 'turn', ?, 'depends-on', 'asserted', 2000)`,
+           VALUES ('turn', ?, 'turn', ?, 'consume', 'asserted', 2000)`,
         ).run(citing, cited);
         return { citing, cited };
       }
@@ -887,8 +887,8 @@ describe("universal memory edges", () => {
         // C16's overwrite rule existed to work around.
         expect(migrated).toBe(1);
         expect(readEdges(pair)).toEqual([
-          { relation: "depends-on", provenance: "asserted", createdAtEpoch: 2000 },
-          { relation: "evidence-for", provenance: "judged", createdAtEpoch: 1000 },
+          { relation: "consume", provenance: "asserted", createdAtEpoch: 2000 },
+          { relation: "verifies", provenance: "judged", createdAtEpoch: 1000 },
         ]);
         expect(countMemoryEdges(db)).toBe(2);
       });
@@ -959,9 +959,12 @@ describe("universal memory edges", () => {
 // frozen-readable and storage-legal — no migration, no remap to `override`
 // (spec: "局部替换 ≠ 整体作废"). This is a regression guard at the layer
 // underneath `note.ts`, independent of the tool surface: the storage CHECK
-// constraint and `isCitationRelation` both still admit it, and the four new
-// words (`refines`/`override`/`encodes`/`grounded-on`) are storage-legal too.
-describe("supersedes stays frozen-readable; the new relation words are storage-legal (ticket 01)", () => {
+// constraint and `isCitationRelation` both still admit it. Flow-relations
+// ticket 03 (the relation contract's narrow half) later retired
+// `refines`/`encodes`/`grounded-on` outright (renamed to `extends`/`grounds`/
+// `grounds`) — only `override` of that original ticket-01 quartet is still
+// storage-legal; the other three now belong in the REJECTED half below.
+describe("supersedes stays frozen-readable; override is still storage-legal; the retired words are cleanly rejected (tickets 01, 03)", () => {
   let db: Database;
   let sessionId: number;
 
@@ -1020,10 +1023,36 @@ describe("supersedes stays frozen-readable; the new relation words are storage-l
     );
   });
 
-  test("refines/override/encodes/grounded-on each pass the storage CHECK constraint", () => {
+  test("override still passes the storage CHECK constraint", () => {
+    const citing = addTurn(1);
+    const cited = addTurn(2);
+
+    const { written, rejected } = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: cited },
+          relation: "override",
+          provenance: "asserted",
+        },
+      ],
+      600,
+    );
+
+    expect(rejected).toEqual([]);
+    expect(written).toHaveLength(1);
+    expect(written[0]?.relation).toBe("override");
+  });
+
+  // Flow-relations ticket 03's relation contract: these three retired words
+  // are now cleanly rejected at the `isCitationRelation` write-path gate
+  // (`invalid-relation`) rather than reaching the DB CHECK at all — the gate
+  // and the CHECK are kept in lockstep on purpose (db/citations.ts).
+  test("refines/encodes/grounded-on are retired words: cleanly rejected, not written", () => {
     const citing = addTurn(1);
     let promptNumber = 2;
-    for (const relation of ["refines", "override", "encodes", "grounded-on"] as const) {
+    for (const relation of ["refines", "encodes", "grounded-on"] as const) {
       const cited = addTurn(promptNumber);
       promptNumber += 1;
 
@@ -1033,16 +1062,15 @@ describe("supersedes stays frozen-readable; the new relation words are storage-l
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: cited },
-            relation,
+            relation: relation as never,
             provenance: "asserted",
           },
         ],
         600,
       );
 
-      expect(rejected).toEqual([]);
-      expect(written).toHaveLength(1);
-      expect(written[0]?.relation).toBe(relation);
+      expect(written).toEqual([]);
+      expect(rejected.map((entry) => entry.reason)).toEqual(["invalid-relation"]);
     }
   });
 });

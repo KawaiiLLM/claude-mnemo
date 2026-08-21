@@ -58,8 +58,8 @@ describe("segment member derived rank (spec D8)", () => {
       )!.id;
   }
 
-  /** `citerCount` distinct turns cite `turnId`, each with one `depends-on` edge. */
-  function citeFrom(turnId: number, citerIds: readonly number[], relation: "depends-on" | "supersedes" = "depends-on"): void {
+  /** `citerCount` distinct turns cite `turnId`, each with one `consume` edge. */
+  function citeFrom(turnId: number, citerIds: readonly number[], relation: "consume" | "supersedes" = "consume"): void {
     writeMemoryEdges(
       db,
       citerIds.map((citingId) => ({
@@ -243,9 +243,9 @@ describe("segment member derived rank (spec D8)", () => {
     writeMemoryEdges(
       db,
       [
-        { citing: { kind: "turn", id: citerA }, cited: { kind: "turn", id: cited }, relation: "depends-on", provenance: "retrieval" },
-        { citing: { kind: "turn", id: citerA }, cited: { kind: "turn", id: cited }, relation: "depends-on", provenance: "judged" },
-        { citing: { kind: "turn", id: citerB }, cited: { kind: "turn", id: cited }, relation: "evidence-for", provenance: "judged" },
+        { citing: { kind: "turn", id: citerA }, cited: { kind: "turn", id: cited }, relation: "consume", provenance: "retrieval" },
+        { citing: { kind: "turn", id: citerA }, cited: { kind: "turn", id: cited }, relation: "consume", provenance: "judged" },
+        { citing: { kind: "turn", id: citerB }, cited: { kind: "turn", id: cited }, relation: "verifies", provenance: "judged" },
       ],
       ERA,
     );
@@ -267,13 +267,13 @@ describe("segment member derived rank (spec D8)", () => {
         {
           citing: { kind: "turn", id: citerA },
           cited: { kind: "turn", id: cited },
-          relation: "depends-on",
+          relation: "consume",
           provenance: "judged",
         },
         {
           citing: { kind: "turn", id: citerB },
           cited: { kind: "turn", id: cited },
-          relation: "depends-on",
+          relation: "consume",
           provenance: "judged",
         },
       ],
@@ -501,9 +501,9 @@ describe("segment spine and orphan anchors (spec D11)", () => {
     writeMemoryEdges(
       db,
       [
-        { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: cited }, relation: "depends-on", provenance: "judged" },
+        { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: cited }, relation: "consume", provenance: "judged" },
         { citing: { kind: "turn", id: corrector }, cited: { kind: "turn", id: victim }, relation: "supersedes", provenance: "judged" },
-        { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: skipped }, relation: "depends-on", provenance: "judged" },
+        { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: skipped }, relation: "consume", provenance: "judged" },
       ],
       CUTOFF,
     );

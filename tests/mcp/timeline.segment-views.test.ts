@@ -208,7 +208,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           {
             citing: { kind: "turn", id: encoder },
             cited: { kind: "turn", id: overridden },
-            relation: "encodes",
+            relation: "grounds",
             provenance: "judged",
           },
         ],
@@ -338,7 +338,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           {
             citing: { kind: "turn", id: encoder },
             cited: { kind: "turn", id: rewound },
-            relation: "encodes",
+            relation: "grounds",
             provenance: "judged",
           },
         ],
@@ -575,8 +575,8 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
     writeMemoryEdges(
       db,
       [
-        { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t811 }, relation: "depends-on", provenance: "judged" },
-        { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t812 }, relation: "depends-on", provenance: "judged" },
+        { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t811 }, relation: "consume", provenance: "judged" },
+        { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t812 }, relation: "consume", provenance: "judged" },
       ],
       t821Epoch,
     );

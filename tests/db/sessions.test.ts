@@ -388,7 +388,7 @@ describe("session queries", () => {
           {
             citing: { kind: "session", id: sessionId },
             cited: { kind: "turn", id: turnId },
-            relation: "depends-on",
+            relation: "consume",
             provenance: "judged",
           },
         ],
@@ -407,7 +407,7 @@ describe("session queries", () => {
 
       const surviving = getOutgoingEdges(db, { kind: "session", id: sessionId });
       expect(surviving.map((edge) => edge.cited.id)).toEqual([turnId]);
-      expect(surviving[0]?.relation).toBe("depends-on");
+      expect(surviving[0]?.relation).toBe("consume");
       expect(surviving.some((edge) => edge.cited.id === other)).toBe(false);
     });
 
@@ -425,7 +425,7 @@ describe("session queries", () => {
           {
             citing: { kind: "session", id: sessionId },
             cited: { kind: "turn", id: turnId },
-            relation: "evidence-for",
+            relation: "verifies",
             provenance: "judged",
           },
         ],
@@ -441,7 +441,7 @@ describe("session queries", () => {
 
       const surviving = getOutgoingEdges(db, { kind: "session", id: sessionId });
       expect(surviving).toHaveLength(1);
-      expect(surviving[0]?.relation).toBe("evidence-for");
+      expect(surviving[0]?.relation).toBe("verifies");
     });
   });
 });

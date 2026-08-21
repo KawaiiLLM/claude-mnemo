@@ -143,7 +143,25 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
 
     initializeSchema(db);
 
-    expect(allEdges(db)).toEqual(before);
+    // `initializeSchema` runs the FULL chain, flow-relations ticket 03's
+    // relation-contract narrow included — the fixture's old-vocabulary
+    // values (depends-on/encodes/grounded-on/refines) are renamed on the
+    // way, not just carried across byte-identical. Row COUNT and STRUCTURE
+    // are what this test asserts; the `relation` column's rename is covered
+    // by the vocabulary-flip and relation-contract migration tests.
+    const RENAME: Record<string, string> = {
+      "depends-on": "consume",
+      encodes: "grounds",
+      "grounded-on": "grounds",
+      refines: "extends",
+    };
+    const expected = before.map((edge) => {
+      const row = edge as { relation: string | null };
+      return row.relation === null
+        ? row
+        : { ...row, relation: RENAME[row.relation] ?? row.relation };
+    });
+    expect(allEdges(db)).toEqual(expected);
     expect(storedTableSql(db)).toContain("citing_kind <> cited_kind");
     expect(storedTableSql(db)).toContain(
       "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation)",
@@ -153,7 +171,12 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
   test("after the rebuild a pair can carry several relations, and each relation still only once", () => {
     initializeSchema(db);
 
-    insertEdge("turn", turnIds[0]!, "turn", turnIds[1]!, "encodes", "asserted", 160);
+    // The fixture's own row on this pair is 'depends-on' (renamed to
+    // 'consume' by the chain's rename). 'encodes' is retired by
+    // flow-relations ticket 03's relation contract; 'grounds' is its
+    // replacement — a SECOND, DIFFERENT relation on the same pair, so the
+    // count below is two (consume + grounds), not a collision.
+    insertEdge("turn", turnIds[0]!, "turn", turnIds[1]!, "grounds", "asserted", 160);
     expect(
       db
         .query<{ count: number }, [number, number]>(
@@ -164,7 +187,7 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
         .get(turnIds[0]!, turnIds[1]!)!.count,
     ).toBe(2);
     expect(() =>
-      insertEdge("turn", turnIds[0]!, "turn", turnIds[1]!, "encodes", "judged", 170),
+      insertEdge("turn", turnIds[0]!, "turn", turnIds[1]!, "grounds", "judged", 170),
     ).toThrow();
   });
 
@@ -187,7 +210,7 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     // of that ticket (the validator, not the CHECK, judges which relations
     // may self-cite); only the BARE self row stays banned at this layer.
     expect(() =>
-      insertEdge("turn", turnIds[0]!, "turn", turnIds[0]!, "depends-on", "asserted", 160),
+      insertEdge("turn", turnIds[0]!, "turn", turnIds[0]!, "consume", "asserted", 160),
     ).not.toThrow();
     expect(() =>
       insertEdge("segment", segmentIds[0]!, "segment", segmentIds[0]!, null, "text-ref", 160),
@@ -286,10 +309,10 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     // And multi-relation writes work again immediately after (fresh pair —
     // the fixture's own migrated rows already occupy the low ids).
     db.exec(
-      `INSERT INTO memory_edges VALUES ('turn', 91, 'turn', 92, 'encodes', 'asserted', 100)`,
+      `INSERT INTO memory_edges VALUES ('turn', 91, 'turn', 92, 'grounds', 'asserted', 100)`,
     );
     db.exec(
-      `INSERT INTO memory_edges VALUES ('turn', 91, 'turn', 92, 'depends-on', 'asserted', 100)`,
+      `INSERT INTO memory_edges VALUES ('turn', 91, 'turn', 92, 'consume', 'asserted', 100)`,
     );
   });
 
@@ -299,16 +322,16 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
 
     expect(storedTableSql(fresh)).toContain("citing_kind <> cited_kind");
     fresh.exec(
-      `INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'encodes', 'asserted', 100)`,
+      `INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)`,
     );
     fresh.exec(
-      `INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'depends-on', 'asserted', 100)`,
+      `INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'consume', 'asserted', 100)`,
     );
     // A fresh database is born in the FINAL shape, self-reference migration
     // (ticket 05) included: a RELATION-carrying self row is legal storage...
     expect(() =>
       fresh.exec(
-        `INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 1, 'depends-on', 'asserted', 100)`,
+        `INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 1, 'consume', 'asserted', 100)`,
       ),
     ).not.toThrow();
     // ...only the BARE self row stays banned.
