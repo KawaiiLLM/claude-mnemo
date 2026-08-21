@@ -592,7 +592,11 @@ describe("observation rows render the call they were, on the era side", () => {
     expect(fullOutput).toContain("src/worker/server.ts");
     expect(fullOutput).toContain("src/worker/diary-runtime.ts");
     expect(tightOutput).not.toContain("diary-runtime.ts");
-    expect(tightOutput).toContain("… truncated to fit the per-item token budget");
+    // Ticket 01 (render-boilerplate-trim spec): the marker shrank to a bare
+    // `…` line — check it as its OWN line, not a substring, since the cut
+    // line just above it can independently end in the same character via
+    // `truncateTextToTokenBudget`'s inline word-boundary cut.
+    expect(tightOutput.split("\n").some((line) => line.trim() === "…")).toBe(true);
   });
 });
 

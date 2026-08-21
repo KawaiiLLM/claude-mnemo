@@ -303,6 +303,55 @@ describe("recallMemory", () => {
 
     expect(observationOutput).toContain(`[O${authObservationId}] Auth mutex`);
     expect(observationOutput).toContain("- content: Guards refresh");
+
+    // Ticket 01 (render-boilerplate-trim spec, item 2): a session-ADDRESSED
+    // call keeps its full render, including the session's own `- content:`
+    // line; a turn-addressed call's session ANCESTOR header drops it — the
+    // reader asked about the turn, not the session's narrative.
+    expect(sessionOutput).toContain("- content: Fixes the refresh race");
+    expect(turnOutput).not.toContain("Fixes the refresh race");
+    expect(turnOutput).toContain("- content: Refresh overlap diagnosed");
+  });
+
+  // Ticket 01 (render-boilerplate-trim spec, item 2): the OTHER turn-addressed
+  // shape besides an id selector — a full-text query whose hits include turn
+  // rows within a session. The session-ONLY hit (matched on its own
+  // title/content, no turn/observation hit) is not an ancestor of anything
+  // and keeps its content; the turn-hit session header above matched turn
+  // rows is an ancestor and drops it.
+  test("a turn-level query hit's session ancestor drops content; a session-only hit keeps it", () => {
+    const session = upsertSession(db, {
+      contentSessionId: "session-ancestor-trim",
+      project: "claude-mnemo",
+      title: "Ancestor trim probe",
+      content: "SESSION_NARRATIVE_MARKER never belongs on a turn hit's ancestor line",
+      insight: null,
+      createdAtEpoch: 95_000,
+      updatedAtEpoch: 95_010,
+      completedAtEpoch: null,
+    });
+    saveTurn(db, {
+      sessionId: session.id,
+      promptNumber: 1,
+      userPrompt: "ANCESTOR_TRIM_QUERY_TERM shows up in the prompt",
+      assistantResponse: "response",
+      title: "Turn hit for ancestor trim",
+      content: "turn body",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 95_001,
+      updatedAtEpoch: 95_002,
+      observations: [],
+    });
+
+    const turnHit = recallMemory(db, { query: "ANCESTOR_TRIM_QUERY_TERM" });
+    expect(turnHit).toContain(`[S${session.id}]`);
+    expect(turnHit).toContain("Turn hit for ancestor trim");
+    expect(turnHit).not.toContain("SESSION_NARRATIVE_MARKER");
+
+    const sessionOnlyHit = recallMemory(db, { query: "SESSION_NARRATIVE_MARKER" });
+    expect(sessionOnlyHit).toContain("SESSION_NARRATIVE_MARKER");
   });
 
   test("prefers a session's recorded transcript path over the cwd-derived one", () => {

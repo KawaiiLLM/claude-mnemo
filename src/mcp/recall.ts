@@ -730,8 +730,18 @@ function renderTurnScope(
     if (!view) {
       continue;
     }
+    // Ticket 01 (render-boilerplate-trim spec, item 2): this session render
+    // is an ANCESTOR header above this run's turn rows, not the thing the
+    // caller addressed — a turn-addressed selector never asked about the
+    // session's own narrative. `content` drops here only; the id+title
+    // transition line still identifies which session owns the turns below
+    // it. No write-gate field-completeness is recorded for session content
+    // anywhere in this module, so dropping it records nothing different.
     lines.push(
-      renderNode({ type: "session", value: view }, { turnBudget, signal }),
+      renderNode(
+        { type: "session", value: { ...view, content: null } },
+        { turnBudget, signal },
+      ),
     );
 
     const sessionTurns = grouped.get(session.id) ?? [];
@@ -1486,9 +1496,19 @@ function renderGroupedSearchResults(
       );
     }
 
+    // Ticket 01 (render-boilerplate-trim spec, item 2): a turn-level query
+    // hit — `group.turnIds.size > 0`, the branch below the session-only-hit
+    // early return above — renders this session as the ANCESTOR header over
+    // its matched turn rows, not as the hit itself; `content` drops before
+    // bolding so the discarded text neither costs a `boldSearchSnippet` call
+    // nor spuriously marks `signal.truncated` for a window the reader never
+    // sees.
     const sessionView = withBasicSearchSnippet(
-      buildSessionSummary(db, session.id, eraCutoffEpoch) ??
-        buildSessionView(db, session, eraCutoffEpoch),
+      {
+        ...(buildSessionSummary(db, session.id, eraCutoffEpoch) ??
+          buildSessionView(db, session, eraCutoffEpoch)),
+        content: null,
+      },
       terms,
       snippetWindow,
       signal,

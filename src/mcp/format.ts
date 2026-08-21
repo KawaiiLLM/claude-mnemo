@@ -34,8 +34,23 @@ export const DEFAULT_PREVIEW_COUNT = 5;
  */
 export const DEFAULT_TURN_TOKEN_BUDGET = 150;
 
-/** The marker a token-budget-capped block ends with. */
-const TURN_BUDGET_TRUNCATION_MARKER = "  … truncated to fit the per-item token budget";
+/**
+ * The marker a token-budget-capped block ends with when lines after the cut
+ * are dropped. Ticket 01 (render-boilerplate-trim spec): shrunk from a
+ * 46-character restatement of what `NAVIGATION_LEGEND` already explains once
+ * per response, to a bare ellipsis — fired 55 times across a 13-call
+ * baseline, so the sentence's cost was per-item, not per-response, the way
+ * the legend's is. It is also now the SAME character
+ * `truncateTextToTokenBudget`'s own inline word-boundary cut already ends a
+ * line with (`FIELD_TRUNCATION_SUFFIX`), so a reader sees one "this was cut"
+ * convention, not two.
+ *
+ * Its remaining, non-redundant duty: when the last KEPT line fits whole and
+ * the lines after it are dropped silently, nothing in the kept text itself
+ * shows a cut happened — this marker, as its own line, is what still does
+ * (see the `remaining <= 0` branch below).
+ */
+const TURN_BUDGET_TRUNCATION_MARKER = "  …";
 
 /**
  * The indentation step of the one row hierarchy (spec 金样例): `[E]` → `[S]`

@@ -450,7 +450,7 @@ describe("per-item token budget (`turnBudget` — the `turn` param at the MCP se
       },
     });
 
-    expect(rendered).toContain("truncated to fit");
+    expect(rendered.split("\n").some((line) => line.trim() === "…")).toBe(true);
   });
 
   test("a bigger budget shows strictly more of the same content — no char-count knob involved", () => {
@@ -790,6 +790,6 @@ describe("an observation renders as the call it was", () => {
 
     expect(big).toContain("[O7] Bash(cat blob)"); // the label survives whole
     expect(big).toContain("…");
-    expect(big).toContain("truncated to fit");
+    expect(big.split("\n").some((line) => line.trim() === "…")).toBe(true);
   });
 });

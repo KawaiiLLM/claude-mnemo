@@ -130,7 +130,7 @@ describe("capRenderToTokenBudget", () => {
     const rendered = ["  - [S1][T1] a title", "    - desc: filler text here"].join("\n");
     const capped = capRenderToTokenBudget(rendered, 1);
     expect(capped.split("\n")[0]).toBe("  - [S1][T1] a title");
-    expect(capped).toContain("truncated to fit");
+    expect(capped.split("\n").some((line) => line.trim() === "…")).toBe(true);
   });
 
   test("leaves a render under budget untouched", () => {
@@ -141,6 +141,32 @@ describe("capRenderToTokenBudget", () => {
   test("undefined budget means uncapped", () => {
     const rendered = "x".repeat(5000);
     expect(capRenderToTokenBudget(rendered, undefined)).toBe(rendered);
+  });
+
+  // Ticket 01 (render-boilerplate-trim spec, item 1): the ONE corner the
+  // marker still earns its keep on. Budget = label (1 token) + the second
+  // line WHOLE (2 tokens) + the marker itself (1 token) exactly — the loop
+  // then hits a THIRD line with zero tokens left, drops it whole, and never
+  // touches the second line's own text (no inline cut, no "…" glued onto
+  // it). Without the marker line, the second line surviving whole while the
+  // third vanishes would leave nothing in the kept text to show a cut
+  // happened at all.
+  //
+  // RED-GREEN: this fails if the `remaining <= 0` branch's
+  // `kept.push(TURN_BUDGET_TRUNCATION_MARKER)` is deleted — the result would
+  // then be `"H\n22222222"`, with no line satisfying `line.trim() === "…"`.
+  test("the dropped-whole-lines corner: a fully-kept last line still gets the bare marker line", () => {
+    const rendered = ["H", "22222222", "99999999"].join("\n");
+    const capped = capRenderToTokenBudget(rendered, 4);
+    const lines = capped.split("\n");
+
+    expect(lines).toEqual(["H", "22222222", "  …"]);
+    // The kept content line is whole — no ellipsis glued onto it by a
+    // word-boundary cut. Only the marker's OWN line carries "…".
+    expect(lines[1]).toBe("22222222");
+    expect(lines[1]).not.toContain("…");
+    // The dropped line leaves no trace at all — not even a partial digit.
+    expect(capped).not.toContain("9");
   });
 });
 
@@ -662,13 +688,13 @@ describe("per-turn token budget (`turn` param)", () => {
 
     expect(estimateTokens(uncapped)).toBeGreaterThan(5);
     expect(capped).toContain("long turn"); // the label always survives
-    expect(capped).toContain("truncated to fit");
+    expect(capped.split("\n").some((line) => line.trim() === "…")).toBe(true);
     expect(capped.length).toBeLessThan(uncapped.length);
   });
 
   test("defaults to a card-scale cap without an explicit `turn` — no char knob left to lift it", () => {
     const output = recallMemory(db, { id: `S${sessionId}/T1` });
-    expect(output).toContain("truncated to fit");
+    expect(output.split("\n").some((line) => line.trim() === "…")).toBe(true);
     // Measure the capped BLOCK alone — `recallMemory` appends the one
     // response-wide navigation legend on top, which is not part of the
     // per-item budget this test is pinning.
