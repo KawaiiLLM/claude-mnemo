@@ -20,6 +20,7 @@ import {
   type RejectedReference,
 } from "./references";
 import type { TurnRecord } from "./turns";
+import { liveTurnSql } from "./turn-liveness";
 
 /**
  * Structured causal edges between turns (spec §B; identity/storage narrowed
@@ -60,7 +61,7 @@ export const CITATION_RELATIONS = [
   "override",
   "narrows",
   "extends",
-  "collects",
+  "indexes",
   "consume",
   "grounds",
   "verifies",
@@ -754,6 +755,13 @@ export function retractTurnRelations(
  * total order. NULLs sort first, which keeps a pair's bare row ahead of its
  * classified ones.
  */
+// Indexes-rescope spec law 8 / ticket 03: joined against `turns` on BOTH ends
+// and gated by the shared liveness predicate — a rolled-back or skipped turn
+// contributes no edge, whether it is the one asking (`citingTurnId` itself
+// dead/dormant) or the one being cited. Read live on every call, so a
+// skipped turn's edges reappear untouched the instant a late note promotes
+// it back (`db/turns.ts`'s `promoteTurnFromNote`) — nothing here needs to
+// know that happened.
 export function getTurnCitations(
   db: Database,
   citingTurnId: number,
@@ -761,14 +769,17 @@ export function getTurnCitations(
   return db
     .query<TurnCitationEdge, [number]>(
       `SELECT
-         citing_id AS citingTurnId,
-         cited_id AS citedTurnId,
-         relation,
-         created_at_epoch AS createdAtEpoch
-       FROM memory_edges
-       WHERE citing_kind = 'turn' AND citing_id = ?
-         AND cited_kind = 'turn'
-       ORDER BY cited_id ASC, relation ASC`,
+         e.citing_id AS citingTurnId,
+         e.cited_id AS citedTurnId,
+         e.relation,
+         e.created_at_epoch AS createdAtEpoch
+       FROM memory_edges e
+       JOIN turns citing ON citing.id = e.citing_id
+       JOIN turns cited ON cited.id = e.cited_id
+       WHERE e.citing_kind = 'turn' AND e.citing_id = ?
+         AND e.cited_kind = 'turn'
+         AND ${liveTurnSql("citing")} AND ${liveTurnSql("cited")}
+       ORDER BY e.cited_id ASC, e.relation ASC`,
     )
     .all(citingTurnId);
 }
@@ -847,13 +858,17 @@ export function getEffectiveCitations(
   const edges = getTurnCitations(db, turn.id);
   const citedTurnIds = dedupeCitedIds(edges);
 
-  const turnExists = db.query<{ id: number }, [number]>(
-    "SELECT id FROM turns WHERE id = ?",
+  // Ticket 03: a prose id resolving to a rolled-back or skipped turn is the
+  // same as a dangling one here — the structured side already excludes them
+  // via `getTurnCitations`'s liveness join above, and this predicate keeps
+  // the prose side agreeing (`liveTurnSql`, indexes-rescope spec law 8).
+  const liveTurnExists = db.query<{ id: number }, [number]>(
+    `SELECT id FROM turns WHERE id = ? AND ${liveTurnSql()}`,
   );
   appendUnseen(
     citedTurnIds,
     parseInlineCitations(turn.content).filter(
-      (id) => id !== turn.id && turnExists.get(id) != null,
+      (id) => id !== turn.id && liveTurnExists.get(id) != null,
     ),
   );
 
@@ -880,7 +895,13 @@ export function getEffectiveCitations(
  *   - self-citations — a turn confirming its own in-degree would break the one
  *     mechanical confirmation rule the settle pass has (§A).
  *
- * Turns with no effective citations are present with an empty list.
+ * Turns with no effective citations are present with an empty list. A
+ * rolled-back or skipped turn (indexes-rescope spec law 8 / ticket 03) is a
+ * DIFFERENT thing from that: it holds no key at all — it is not a node, so
+ * it cannot be "present with nothing". Both the turn listing and the edge
+ * join below apply the shared liveness predicate to every side they touch,
+ * so a dormant turn's citations of/by live turns vanish along with it and
+ * come back untouched the moment it is promoted.
  */
 export function getSessionEffectiveCitations(
   db: Database,
@@ -893,7 +914,7 @@ export function getSessionEffectiveCitations(
     >(
       `SELECT id, content
        FROM turns
-       WHERE session_id = ?
+       WHERE session_id = ? AND ${liveTurnSql()}
        ORDER BY prompt_number ASC, id ASC`,
     )
     .all(sessionId);
@@ -912,6 +933,7 @@ export function getSessionEffectiveCitations(
        JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
        JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
        WHERE citing.session_id = ? AND cited.session_id = ?
+         AND ${liveTurnSql("citing")} AND ${liveTurnSql("cited")}
        ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`,
     )
     .all(sessionId, sessionId);

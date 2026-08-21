@@ -6,6 +6,7 @@ import {
   type FlowEdgeInput,
   type FlowTurnInput,
 } from "../shared/flows";
+import { liveTurnSql } from "./turn-liveness";
 
 /**
  * The flow derivation's DB-facing half (flow-relations spec, ticket 02). Thin
@@ -49,9 +50,17 @@ export function deriveFlowsForSessions(
   }
 
   const sessionPlaceholders = uniqueSessionIds.map(() => "?").join(",");
+  // Indexes-rescope spec law 8 / ticket 03: a rolled-back or skipped turn is
+  // never a flow NODE. Excluding it here is sufficient for edges too, with no
+  // separate filter on the edges query below — `deriveFlows` (shared/
+  // flows.ts) already ignores any edge whose endpoint is not present in the
+  // `turns` array it is handed (its own documented contract: "Edges whose
+  // endpoints are not both in `turns` are ignored"), so a citing/cited id
+  // excluded here drops every edge that touches it, regardless of relation.
   const turnRows = db
     .query<{ id: number; type: string | null }, number[]>(
-      `SELECT id, type FROM turns WHERE session_id IN (${sessionPlaceholders})`,
+      `SELECT id, type FROM turns
+       WHERE session_id IN (${sessionPlaceholders}) AND ${liveTurnSql()}`,
     )
     .all(...uniqueSessionIds);
 

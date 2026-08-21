@@ -21,7 +21,7 @@ import {
 import { initializeSchema } from "../../src/db/schema";
 import { createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
-import { getTurnById } from "../../src/db/turns";
+import { getTurnById, promoteTurnFromNote } from "../../src/db/turns";
 
 describe("inline citation grammar", () => {
   // Each fixture asserts the EXACT expanded DB-id array — the grammar's whole
@@ -1461,4 +1461,148 @@ describe("session-wide effective citations", () => {
     expect(inDegree.has(selfCiter)).toBe(false);
   });
 
+});
+
+// Indexes-rescope spec law 8 / ticket 03: before this ticket NONE of
+// citations.ts's four read functions filtered `was_rolled_back` or `status`
+// at all — a rolled-back or skipped turn's edges and prose citations counted
+// toward in-degree and citation listings exactly like a live turn's. This
+// describe block pins the shared predicate at every one of those four
+// functions.
+describe("deleted/dormant node predicate (indexes-rescope spec law 8, ticket 03)", () => {
+  let db: Database;
+  let sessionId: number;
+
+  const insertTurn = (
+    promptNumber: number,
+    options: { status?: string; wasRolledBack?: boolean; content?: string | null } = {},
+  ): number =>
+    db
+      .query<{ id: number }, [number, number, string, number, string | null]>(
+        `INSERT INTO turns (session_id, prompt_number, status, was_rolled_back, content, title, created_at_epoch)
+         VALUES (?, ?, ?, ?, ?, 'fixture', 100) RETURNING id`,
+      )
+      .get(
+        sessionId,
+        promptNumber,
+        options.status ?? "extracted",
+        options.wasRolledBack ? 1 : 0,
+        options.content ?? null,
+      )!.id;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "citations-liveness",
+      project: "claude-mnemo",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("getTurnCitations excludes an edge whose CITED turn is rolled back, and returns nothing for a rolled-back CITING turn", () => {
+    const live = insertTurn(1);
+    const rolledBackTarget = insertTurn(2, { wasRolledBack: true });
+    const rolledBackCiter = insertTurn(3, { wasRolledBack: true });
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: live },
+          cited: { kind: "turn", id: rolledBackTarget },
+          relation: "consume",
+          provenance: "asserted",
+        },
+        {
+          citing: { kind: "turn", id: rolledBackCiter },
+          cited: { kind: "turn", id: live },
+          relation: "consume",
+          provenance: "asserted",
+        },
+      ],
+      500,
+    );
+
+    expect(getTurnCitations(db, live)).toEqual([]);
+    expect(getTurnCitations(db, rolledBackCiter)).toEqual([]);
+  });
+
+  test("getEffectiveCitations drops a prose reference to a rolled-back turn the same way it drops a dangling one", () => {
+    const rolledBackTarget = insertTurn(1, { wasRolledBack: true });
+    const citer = insertTurn(2, { content: `reverses [T${rolledBackTarget}]` });
+
+    expect(getEffectiveCitations(db, getTurnById(db, citer)!)).toEqual({
+      citedTurnIds: [],
+      edges: [],
+    });
+  });
+
+  // The full round trip through the REAL promotion path, not a hand-set
+  // status: an edge is written while the target is still live, session-end
+  // abandonment (simulated the way schema.ts's own sweep would leave it)
+  // marks the target `skipped`, and only `db/turns.ts`'s `promoteTurnFromNote`
+  // — the actual "a late note lands on a backlog turn" transition — brings it
+  // back. Covers `getSessionEffectiveCitations` and its `getSessionCitationInDegree`
+  // derivative in one pass.
+  test("a skipped turn's citations vanish while skipped and return, edges included and unrewritten, after the real promotion path", () => {
+    const anchor = insertTurn(1);
+    const dormant = insertTurn(2, { status: "active" });
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: dormant },
+          cited: { kind: "turn", id: anchor },
+          relation: "consume",
+          provenance: "asserted",
+        },
+      ],
+      500,
+    );
+    db.query("UPDATE turns SET status = 'skipped' WHERE id = ?").run(dormant);
+
+    const whileSkipped = getSessionEffectiveCitations(db, sessionId);
+    // Absent as a KEY — not "present with an empty list" — because a dormant
+    // turn is not a node at all.
+    expect(whileSkipped.has(dormant)).toBe(false);
+    expect(getSessionCitationInDegree(db, sessionId).get(anchor)).toBeUndefined();
+
+    promoteTurnFromNote(db, dormant, {
+      title: "late note",
+      content: "closes the backlog",
+      insight: null,
+      updatedAtEpoch: 600,
+    });
+
+    const restored = getSessionEffectiveCitations(db, sessionId);
+    expect(restored.get(dormant)?.citedTurnIds).toEqual([anchor]);
+    // The edge itself: same relation, same original timestamp — never
+    // rewritten by the promotion, only re-exposed.
+    expect(restored.get(dormant)?.edges).toEqual([
+      { citingTurnId: dormant, citedTurnId: anchor, relation: "consume", createdAtEpoch: 500 },
+    ]);
+    expect(getSessionCitationInDegree(db, sessionId).get(anchor)).toBe(1);
+  });
+
+  // Behavior parity: a fixture with nothing skipped or rolled back must read
+  // exactly as it did before this ticket (the predicate is a no-op absent
+  // dead/dormant rows). Reproduces the shape of the pre-existing "session-wide
+  // effective citations" fixture above in miniature.
+  test("behavior parity: an ordinary two-turn citation with nothing skipped or rolled back is unaffected", () => {
+    const anchor = insertTurn(1);
+    const citer = insertTurn(2, { content: `builds on [T${anchor}]` });
+
+    const effective = getSessionEffectiveCitations(db, sessionId);
+    expect([...effective.keys()]).toEqual([anchor, citer]);
+    expect(effective.get(citer)?.citedTurnIds).toEqual([anchor]);
+    expect(getSessionCitationInDegree(db, sessionId).get(anchor)).toBe(1);
+  });
 });

@@ -5,6 +5,7 @@ import {
   type TurnEdgeRelation,
   type TurnPhase,
 } from "../shared/turn-phase";
+import { liveTurnSql } from "./turn-liveness";
 
 /**
  * Per-turn scoring signals (turn-edge-mechanism spec, "三条计分规则" /
@@ -33,7 +34,7 @@ export interface RefinesExcessByPhase {
 }
 
 export interface TurnEdgeSignals {
-  /** True iff a LIVE (non-rolled-back) turn holds a current `override` edge targeting this turn. */
+  /** True iff a LIVE turn (`turn-liveness.ts`) holds a current `override` edge targeting this (also live) turn. */
   overridden: boolean;
   /**
    * Above-baseline `refines` in-degree, bucketed by each excess edge's
@@ -41,7 +42,7 @@ export interface TurnEdgeSignals {
    * edge counts as "baseline" and how a dual-phase source is bucketed once.
    */
   refinesExcess: RefinesExcessByPhase;
-  /** Raw in-degree of LIVE (non-rolled-back) `encodes` edges. */
+  /** Raw in-degree of LIVE `encodes` edges (both endpoints live — `turn-liveness.ts`). */
   encodesCount: number;
 }
 
@@ -134,14 +135,26 @@ interface RefinesRow {
  * signal half (spec: "边质量是本方案唯一的真风险，退化把最坏情况锁定在
  * 「与今天持平」").
  *
- * All three signals only ever count a LIVE (non-rolled-back) SOURCE turn.
- * `override` and `refines` say so explicitly in the spec/ticket; `encodes`
- * carries the same filter here too even though the ticket text does not
- * repeat it for that bullet — a rolled-back turn's assertions are void the
- * same way whichever relation they carry (a delivery turn the user undid
- * cannot credibly still be "encoding" a decision), so the exclusion is
- * applied uniformly rather than leaving `encodes` as the one signal a dead
- * turn can still feed. Flagged here as a judgment call the ticket left open.
+ * All three signals only ever count a LIVE SOURCE turn, and only ever
+ * compute a signal FOR a live target — indexes-rescope spec law 8 / ticket
+ * 03's shared predicate (`turn-liveness.ts`), applied to both the `citing`
+ * and `cited` joins below. `override` and `refines` said "live source"
+ * explicitly even before this ticket (non-rolled-back only, `status`
+ * unchecked); `encodes` carried the same filter even though the original
+ * ticket text did not repeat it for that bullet — a rolled-back turn's
+ * assertions are void the same way whichever relation they carry (a
+ * delivery turn the user undid cannot credibly still be "encoding" a
+ * decision), so the exclusion is applied uniformly rather than leaving
+ * `encodes` as the one signal a dead turn can still feed. This ticket widens
+ * that "live source" rule two ways: `status = 'skipped'` (dormant) now
+ * excludes a source the same as `was_rolled_back` always did, and the
+ * TARGET's own liveness is checked too — a rolled-back or skipped turn is
+ * not a node, so it is never a key any edge should be able to light up, even
+ * if a caller's `turnIds` happens to name one (it still gets the all-zero
+ * default below, same degradation guarantee as an id with no incoming edges
+ * at all). A dormant target's live-turn edges are not deleted, only hidden
+ * by this predicate, so they resume contributing untouched the moment a late
+ * note promotes it back (`db/turns.ts`'s `promoteTurnFromNote`).
  */
 export function getTurnEdgeSignals(
   db: Database,
@@ -163,9 +176,11 @@ export function getTurnEdgeSignals(
       `SELECT DISTINCT e.cited_id AS targetId
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
+       JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
          AND e.relation = 'override'
-         AND citing.was_rolled_back = 0
+         AND ${liveTurnSql("citing")}
+         AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})`,
     )
     .all(...uniqueIds);
@@ -178,9 +193,11 @@ export function getTurnEdgeSignals(
       `SELECT e.cited_id AS targetId, COUNT(*) AS count
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
+       JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
          AND e.relation = 'grounds'
-         AND citing.was_rolled_back = 0
+         AND ${liveTurnSql("citing")}
+         AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})
        GROUP BY e.cited_id`,
     )
@@ -204,9 +221,11 @@ export function getTurnEdgeSignals(
       `SELECT e.cited_id AS targetId, citing.type AS citingType
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
+       JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
          AND e.relation = 'extends'
-         AND citing.was_rolled_back = 0
+         AND ${liveTurnSql("citing")}
+         AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})
        ORDER BY e.cited_id ASC, e.created_at_epoch ASC, e.citing_id ASC`,
     )

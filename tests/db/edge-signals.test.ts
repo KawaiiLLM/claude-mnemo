@@ -12,6 +12,7 @@ import { writeMemoryEdges, type CitationRelation } from "../../src/db/memory-edg
 import { initializeSchema } from "../../src/db/schema";
 import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import { upsertSession } from "../../src/db/sessions";
+import { promoteTurnFromNote } from "../../src/db/turns";
 
 /**
  * Ticket 07 (turn-edge-mechanism spec) — the pure read layer that derives a
@@ -332,6 +333,76 @@ describe("edge scoring signals", () => {
     expect(signals.get(lonely)).toEqual(ZERO);
     expect(signals.get(999_999)).toEqual(ZERO);
     expect(getTurnEdgeSignals(db, [])).toEqual(new Map());
+  });
+
+  // Indexes-rescope spec law 8 / ticket 03: before this ticket only the
+  // CITING (source) side was ever filtered here, and only on
+  // `was_rolled_back` (never `status`). A rolled-back or skipped TARGET —
+  // the row this whole module keys its output by — was never checked at
+  // all, so a caller handing this function a dead/dormant id could still
+  // read real computed signals for it.
+  describe("deleted/dormant node predicate (indexes-rescope spec law 8, ticket 03)", () => {
+    test("a rolled-back TARGET reads all-zero signals even though its incoming edges are real and live-sourced", () => {
+      const rolledBackTarget = addTurn(1, { type: ["design"], wasRolledBack: true });
+      const liveAttacker = addTurn(2, { type: ["design"] });
+      const liveGrounder = addTurn(3, { type: ["implement"] });
+      edge(liveAttacker, rolledBackTarget, "override", 1000);
+      edge(liveGrounder, rolledBackTarget, "grounds", 1000);
+
+      const signal = getTurnEdgeSignalsForTurn(db, rolledBackTarget);
+      expect(signal).toEqual(ZERO);
+    });
+
+    // The round trip drives db/turns.ts's REAL promotion path
+    // (promoteTurnFromNote), not a hand-set status: the edges are written
+    // while the target is still live (exactly what a stranded, later-cited
+    // turn looks like), session end strands it to `skipped`, and only a late
+    // note's promotion should bring its signals back — untouched, the same
+    // edges, no re-write.
+    test("a skipped target's signals vanish while skipped and return, edges unrewritten, after the real promotion path", () => {
+      const dormant = addTurn(1, { type: ["design"] });
+      const attacker = addTurn(2, { type: ["design"] });
+      const grounder = addTurn(3, { type: ["implement"] });
+      edge(attacker, dormant, "override", 1000);
+      edge(grounder, dormant, "grounds", 1000);
+      db.query("UPDATE turns SET status = 'skipped' WHERE id = ?").run(dormant);
+
+      expect(getTurnEdgeSignalsForTurn(db, dormant)).toEqual(ZERO);
+
+      promoteTurnFromNote(db, dormant, {
+        title: "late note",
+        content: "closes the backlog",
+        insight: null,
+        updatedAtEpoch: 2000,
+      });
+
+      const restored = getTurnEdgeSignalsForTurn(db, dormant);
+      expect(restored.overridden).toBe(true);
+      expect(restored.encodesCount).toBe(1);
+    });
+
+    // A skipped SOURCE must stop feeding a live target's signals too — the
+    // symmetric case to edge-signals.ts's pre-existing rolled-back-source
+    // coverage above, now extended to the dormant half of the predicate.
+    test("a skipped source's override/grounds edges do not count toward a live target, and resume after promotion", () => {
+      const target = addTurn(1, { type: ["design"] });
+      const dormantSource = addTurn(2, { type: ["design"] });
+      edge(dormantSource, target, "override", 1000);
+      db.query("UPDATE turns SET status = 'skipped' WHERE id = ?").run(
+        dormantSource,
+      );
+
+      expect(getTurnEdgeSignalsForTurn(db, target).overridden).toBe(false);
+
+      promoteTurnFromNote(db, dormantSource, {
+        title: "late note",
+        content: "closes the backlog",
+        insight: null,
+        updatedAtEpoch: 2000,
+      });
+
+      expect(getTurnEdgeSignalsForTurn(db, target).overridden).toBe(true);
+    });
   });
 
   test("getTurnEdgeSignalsForTurn matches the batched result for a single id", () => {
