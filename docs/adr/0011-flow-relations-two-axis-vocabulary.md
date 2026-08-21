@@ -48,7 +48,7 @@ against?):
 | `collects` | JUDGING | same phase; the citing turn must itself be its branch's terminus, every target its OWN branch's member — never inherited (the one graph-state rejection) |
 | `grounds` | DEPENDING | cross-phase ONLY — within one phase, dependency is continuation (narrows/extends) or usage (consume); absorbs the old `encodes` |
 | `consume` | DEPENDING | same phase, cross-flow — I used its product, no liability |
-| `verifies` / `refutes` | TESTING | source must carry an evidence phase |
+| `verifies` / `refutes` | TESTING | source must carry an evidence phase; target decision or delivery, never evidence — a verdict's object is a claim of another kind, not the world evidence itself measures (S15069/T1215; agreement between measurements is the same fact twice, disagreement is `override`) |
 
 Splits and merges from ADR-0010's seven: `refines` → `extends` + `narrows`;
 `depends-on` → `consume` + `collects`; `encodes` merges into `grounds`;

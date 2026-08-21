@@ -121,8 +121,12 @@ graph state, not just field facts). grounds is cross-phase ONLY — within
 one phase, dependency is continuation (narrows/extends) or usage (consume),
 never grounds; it absorbed the old encodes. consume is same-phase,
 cross-flow: I used its product, no liability if it falls. verifies and
-refutes require the citing turn to carry an evidence phase — I tested the
-claim, for or against.
+refutes require the citing turn to carry an evidence phase and the cited a
+decision or delivery phase — never evidence: a verdict's object is a claim,
+and evidence's own object is the world (two measurements that agree are the
+same fact twice; one that disagrees is override). Every same-phase word is
+strictly same-phase, every cross-phase word strictly cross-phase — no word
+straddles the two scopes.
 _Avoid_: nine-cell grammar, per-word phase table, refines/encodes/
 depends-on/grounded-on/evidence-for/evidence-against (retired — refines
 split into narrows+extends, depends-on split into consume+collects, encodes

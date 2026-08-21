@@ -32,7 +32,7 @@ Machine-checkable legality — six rows:
 | `collects` | same phase; the citing turn must itself be the branch's terminus and every target a member of that branch — OWN structural membership, never inherited (**the one graph-state rejection**, sharpened S15069/T1206) | this flow ends here; the minimal set carrying its conclusion |
 | `consume` | same phase; cross-flow | I used its product, no liability |
 | `grounds` | **cross-phase only** — some (source, target) pairing with source ≠ target (user retightening S15069/T1209; within a phase, dependency is continuation or usage — stance words / consume own it; empty phase sets reject, so grounds regained a rejection channel; zero stored rows affected — both merge sources were cross-phase) | I fall with it (liability); absorbs old `encodes` |
-| `verifies` / `refutes` | source must carry an evidence phase | I tested the claim, for / against |
+| `verifies` / `refutes` | source must carry an evidence phase; target decision or delivery — never evidence (user ruling S15069/T1215: evidence's object is the WORLD, not another turn's claim; agreement = the same fact measured twice, disagreement = override; overruled the T1213 keep recommendation. Scope purity holds vocabulary-wide: five same-phase words, three cross-phase words, no word straddles) | I tested the claim, for / against |
 
 Stances (the rubric's teaching axis, not the machine's): JUDGING (override /
 narrows / extends / collects — after reading me, must the cited still be

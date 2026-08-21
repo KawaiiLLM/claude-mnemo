@@ -117,7 +117,10 @@ describe("EDGE_RELATIONS — the eight-word closed set (flow-relations spec)", (
 // ---------------------------------------------------------------------------
 const SIX_ROW_LEGAL_WORDS: Record<TurnPhase, Record<TurnPhase, readonly TurnEdgeRelation[]>> = {
   evidence: {
-    evidence: ["override", "collects", "consume", "verifies", "refutes"],
+    // T1215: no verdict pair on the diagonal — evidence's object is the
+    // world, not another turn's claim. Scope purity: every same-phase word
+    // strictly same-phase, every cross-phase word strictly cross-phase.
+    evidence: ["override", "collects", "consume"],
     decision: ["grounds", "verifies", "refutes"],
     delivery: ["grounds", "verifies", "refutes"],
   },
@@ -220,16 +223,16 @@ describe("explainRelationPhaseRejection — names the missing half", () => {
     expect(message).toContain("implement");
   });
 
-  test("verifies/refutes cited side missing: an evidence-phase source against an untyped target names all three legal target phases", () => {
+  test("verifies/refutes cited side missing: an evidence-phase source against an untyped target names the two legal target phases — never evidence (T1215)", () => {
     const message = explainRelationPhaseRejection(
       "verifies",
       new Set(["evidence"]),
       new Set([]),
     );
     expect(message).toContain("cited turn");
-    expect(message).toContain("evidence-phase");
     expect(message).toContain("decision-phase");
     expect(message).toContain("delivery-phase");
+    expect(message).not.toContain("evidence-phase");
   });
 
   test("narrows/extends citing side missing (decision-only pair): names decision as the one required phase, no 'or' clause", () => {
@@ -257,12 +260,14 @@ describe("RELATION_PHASE_REQUIREMENT — table shape (flow-relations spec: three
     }
   });
 
-  test("the evidence-source relations (verifies/refutes) each carry exactly three pairs, all sourced from evidence, toward every phase", () => {
+  test("the evidence-source relations (verifies/refutes) each carry exactly two cross-phase pairs — never toward evidence (T1215)", () => {
     for (const relation of ["verifies", "refutes"] as const) {
       const pairs = RELATION_PHASE_REQUIREMENT[relation];
-      expect(pairs.length).toBe(3);
+      expect(pairs.length).toBe(2);
       expect(pairs.every((pair) => pair.source === "evidence")).toBe(true);
-      expect(new Set(pairs.map((pair) => pair.target))).toEqual(new Set(TURN_PHASES));
+      expect(new Set(pairs.map((pair) => pair.target))).toEqual(
+        new Set(["decision", "delivery"]),
+      );
     }
   });
 

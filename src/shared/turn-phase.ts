@@ -50,8 +50,14 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  *                       `consume` own it. The self case is cross-phase by
  *                       construction: settlement + implementer entails both
  *                       a decision and a delivery half)
- *   verifies / refutes  source must carry an evidence phase; target
- *                       unrestricted
+ *   verifies / refutes  source must carry an evidence phase; target must
+ *                       carry a decision or delivery phase — never evidence
+ *                       (user ruling [S15069/T1215]: evidence's object is
+ *                       the WORLD, not another turn's claim — a re-measure
+ *                       that agrees is just the same fact measured twice, a
+ *                       re-measure that disagrees is `override`. Every
+ *                       cross-phase word is now strictly cross-phase, every
+ *                       same-phase word strictly same-phase)
  *
  * Splits and merges vs the retired seven-word set: `refines` -> `extends` +
  * `narrows`; `depends-on` -> `consume` + `collects`; `encodes` merges into
@@ -185,7 +191,13 @@ function buildRelationPhaseRequirement(): Record<TurnEdgeRelation, RelationPhase
     table[relation].push({ source: "decision", target: "decision" });
   }
   for (const relation of EVIDENCE_SOURCE_RELATIONS) {
+    // T1215: the verdict pair is strictly cross-phase — evidence never
+    // renders a verdict on evidence (its object is the world, not another
+    // turn's claim; agreement = the same fact twice, disagreement = override).
     for (const phase of TURN_PHASES) {
+      if (phase === "evidence") {
+        continue;
+      }
       table[relation].push({ source: "evidence", target: phase });
     }
   }
