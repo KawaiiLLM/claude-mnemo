@@ -70,7 +70,7 @@ export const RELATION_IS_SCORED: Record<TurnEdgeRelation, boolean> = {
   override: true,
   narrows: false,
   extends: true,
-  collects: false,
+  indexes: false,
   consume: false,
   grounds: true,
   verifies: false,

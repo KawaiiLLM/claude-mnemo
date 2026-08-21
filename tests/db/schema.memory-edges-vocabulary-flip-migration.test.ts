@@ -157,12 +157,16 @@ describe("memory_edges vocabulary flip migration (flow-relations spec, ticket 02
       expect(retiredWords.has(edge.relation ?? "")).toBe(false);
     }
 
-    // New words insert cleanly; garbage still does not.
+    // New words insert cleanly; garbage still does not. `indexes`, not the
+    // retired `collects` — `initializeSchema` runs the FULL chain, the
+    // indexes-rescope rename (ticket 01, `.scratch/indexes-rescope/spec.md`)
+    // included, so `collects` does not survive to the final stored CHECK any
+    // more than `depends-on` does above.
     db.exec(
       "INSERT INTO memory_edges VALUES ('turn', 90, 'turn', 91, 'narrows', 'asserted', 50)",
     );
     db.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 92, 'turn', 93, 'collects', 'asserted', 55)",
+      "INSERT INTO memory_edges VALUES ('turn', 92, 'turn', 93, 'indexes', 'asserted', 55)",
     );
     expect(() =>
       db.exec(

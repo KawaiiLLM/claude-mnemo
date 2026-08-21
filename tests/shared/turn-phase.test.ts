@@ -65,7 +65,7 @@ describe("EDGE_RELATIONS — the eight-word closed set (flow-relations spec)", (
   test("is exactly the eight words, supersedes excluded", () => {
     expect([...EDGE_RELATIONS].sort()).toEqual(
       [
-        "collects",
+        "indexes",
         "consume",
         "extends",
         "grounds",
@@ -79,7 +79,7 @@ describe("EDGE_RELATIONS — the eight-word closed set (flow-relations spec)", (
     // Old, retired words are not part of the write-time closed set either —
     // the CHECK still admits them at the storage layer (db/citations.ts's
     // CITATION_RELATIONS, the old∪new union) but a NEW write may not.
-    for (const retired of ["refines", "encodes", "grounded-on", "depends-on", "evidence-for", "evidence-against"]) {
+    for (const retired of ["refines", "encodes", "grounded-on", "depends-on", "evidence-for", "evidence-against", "collects"]) {
       expect(isTurnEdgeRelation(retired)).toBe(false);
     }
   });
@@ -106,33 +106,31 @@ describe("EDGE_RELATIONS — the eight-word closed set (flow-relations spec)", (
 // shows up as a mismatch here rather than being invisible to a test that
 // trusts the same construction it checks.
 //
-// `collects`' own graph-state hard check (P1's one graph fact — the citing
-// turn must itself be a flow's terminus, every target an OWN member) is NOT
-// part of this table: it lives one layer up, at the orchestration layer
-// (`mcp/note.ts`, using a flow derivation `shared/turn-phase.ts` has no DB
-// access to build) — `isRelationLegalForPhases`/`validateRelationTarget`
-// only ever answer collects' PHASE half here (same phase, like override).
-// The graph half is covered end-to-end in `tests/mcp/note.test.ts`'s "note
-// tool collects" describe block.
+// `indexes` (the retired `collects`) carries no graph-state check of its own
+// any more — indexes-rescope spec law 2, [S15069/T1232] retires the old
+// `collects` hard check (own-branch terminus/membership). This table and
+// `isRelationLegalForPhases`/`validateRelationTarget` state its WHOLE test:
+// same phase, like override. See `tests/mcp/note.test.ts`'s "note tool
+// indexes" describe block for the end-to-end write path.
 // ---------------------------------------------------------------------------
 const SIX_ROW_LEGAL_WORDS: Record<TurnPhase, Record<TurnPhase, readonly TurnEdgeRelation[]>> = {
   evidence: {
     // T1215: no verdict pair on the diagonal — evidence's object is the
     // world, not another turn's claim. Scope purity: every same-phase word
     // strictly same-phase, every cross-phase word strictly cross-phase.
-    evidence: ["override", "collects", "consume"],
+    evidence: ["override", "indexes", "consume"],
     decision: ["grounds", "verifies", "refutes"],
     delivery: ["grounds", "verifies", "refutes"],
   },
   decision: {
     evidence: ["grounds"],
-    decision: ["override", "narrows", "extends", "collects", "consume"],
+    decision: ["override", "narrows", "extends", "indexes", "consume"],
     delivery: ["grounds"],
   },
   delivery: {
     evidence: ["grounds"],
     decision: ["grounds"],
-    delivery: ["override", "collects", "consume"],
+    delivery: ["override", "indexes", "consume"],
   },
 };
 
@@ -208,7 +206,7 @@ describe("explainRelationPhaseRejection — names the missing half", () => {
     expect(message).toContain("design");
   });
 
-  // override/collects/consume: legal in EVERY same-phase pair, so a
+  // override/indexes/consume: legal in EVERY same-phase pair, so a
   // delivery-phase citing turn already satisfies the delivery/delivery pair
   // — pointing it at a decision-phase target fails on the CITED side, not
   // the citing side.
@@ -244,8 +242,8 @@ describe("explainRelationPhaseRejection — names the missing half", () => {
 });
 
 describe("RELATION_PHASE_REQUIREMENT — table shape (flow-relations spec: three reading rules, not seven hand-carved rows)", () => {
-  test("the same-phase relations (override/collects/consume) each carry all three same-phase pairs", () => {
-    for (const relation of ["override", "collects", "consume"] as const) {
+  test("the same-phase relations (override/indexes/consume) each carry all three same-phase pairs", () => {
+    for (const relation of ["override", "indexes", "consume"] as const) {
       const pairs = RELATION_PHASE_REQUIREMENT[relation];
       expect(pairs.length).toBe(3);
       expect(pairs.every((pair) => pair.source === pair.target)).toBe(true);

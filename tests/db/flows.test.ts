@@ -145,3 +145,77 @@ describe("deriveFlowsForSessions — deleted/dormant node predicate (indexes-res
     expect(derivation.homeless).toEqual([]);
   });
 });
+
+// The DB reader's own relation filter is a SECOND vocabulary, and it went
+// stale when `indexes` joined the inheriting set in shared/flows.ts: the pure
+// derivation inherited through indexes while this reader never SELECTed those
+// rows, so DB-backed inheritance was silently dark — a release indexing its
+// artifacts reached none of the flows it ships. Nothing tested the two
+// vocabularies against each other; this does.
+describe("deriveFlowsForSessions — the reader's relation filter carries every inheriting word", () => {
+  let db: Database;
+  let sessionId: number;
+
+  const insertTurn = (promptNumber: number, type: string[]): number =>
+    db
+      .query<{ id: number }, [number, number, string]>(
+        `INSERT INTO turns (session_id, prompt_number, status, type, was_rolled_back, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?, 0, 100)
+         RETURNING id`,
+      )
+      .get(sessionId, promptNumber, JSON.stringify(type))!.id;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "flows-inheriting-words",
+      project: "claude-mnemo",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("a release inherits its shipped lane's flow through an indexes edge", () => {
+    const decision = insertTurn(1, ["design"]);
+    const artifact = insertTurn(2, ["implement"]);
+    const release = insertTurn(3, ["ops"]);
+    writeMemoryEdges(
+      db,
+      [
+        // artifact rests on the ruling it implements (cross-phase)…
+        {
+          citing: { kind: "turn", id: artifact },
+          cited: { kind: "turn", id: decision },
+          relation: "grounds",
+          provenance: "asserted",
+        },
+        // …and the release gathers that artifact (same-phase aggregation).
+        {
+          citing: { kind: "turn", id: release },
+          cited: { kind: "turn", id: artifact },
+          relation: "indexes",
+          provenance: "asserted",
+        },
+      ],
+      500,
+    );
+
+    const derivation = deriveFlowsForSessions(db, [sessionId]);
+
+    // The decision holds the only flow; both delivery turns reach it —
+    // the artifact directly through grounds, the release transitively
+    // through indexes. Drop 'indexes' from the reader's filter and the
+    // release goes homeless while the artifact still lands.
+    expect(derivation.flowsByTurn.get(artifact)).toEqual([decision]);
+    expect(derivation.flowsByTurn.get(release)).toEqual([decision]);
+    expect(derivation.homeless).toEqual([]);
+  });
+});

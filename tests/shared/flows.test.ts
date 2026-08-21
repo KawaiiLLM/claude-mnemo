@@ -88,6 +88,18 @@ describe("inherited membership", () => {
     expect(result.homeless).toEqual([]);
   });
 
+  // Indexes-rescope spec (ticket 01, [S15069/T1231]): `indexes` joins
+  // `INHERITING_RELATIONS` — the renamed, widened `collects` — so a
+  // release-like delivery turn that INDEXES the artifacts it ships (rather
+  // than consuming them) still reaches the flows it ships. Same shape as the
+  // grounds test above, `indexes` in place of `grounds`.
+  test("indexes joins the inheritance set — a release-like delivery turn inherits through the indexes edge it wrote", () => {
+    const result = deriveFlows([decision(1), delivery(2)], [edge(2, "indexes", 1)]);
+    expect(result.flowsByTurn.get(2)).toEqual([1]);
+    expect(settlementsOfTurn(result, 2)).toEqual([1]);
+    expect(result.homeless).toEqual([]);
+  });
+
   test("inheritance is transitive to a fixpoint, and never runs backwards", () => {
     // 3 consumes 2 consumes (grounds) 1: membership reaches 3, and nothing
     // flows from a citing turn back down to the turn it cited.

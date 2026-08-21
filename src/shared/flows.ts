@@ -42,17 +42,19 @@ import { phasesForTypes } from "./turn-phase";
  *
  * ## Vocabulary
  *
- * Only the four words that carry flow STRUCTURE are read here — `narrows` and
- * `extends` (which build branches), `override` (which kills a terminus), and
- * `grounds`/`consume` (which carry inherited membership). The other words of
- * the eight-word vocabulary are deliberately inert in this module: `collects`
- * is a write-time membership CHECK (it consumes this derivation rather than
- * feeding it) and `verifies`/`refutes` confer no membership at all — an
- * evidence turn adjudicates a claim, it does not join the claim's flow. An
- * unrecognised relation string contributes nothing, the same "unmapped input
- * strengthens nothing" rule `phasesForTypes` applies to a turn's `type` list;
- * this module therefore does NOT re-declare the relation vocabulary, whose one
- * home is the write path.
+ * Only some of the eight-word vocabulary carries flow STRUCTURE, read here:
+ * `narrows` and `extends` (which build branches), `override` (which kills a
+ * terminus), and `grounds`/`consume`/`indexes` (which carry inherited
+ * membership — `INHERITING_RELATIONS`; indexes-rescope spec, [S15069/T1231]
+ * joined `indexes`, the renamed and widened `collects` — a release inheriting
+ * the flows of the artifacts it indexes is the motivating case). The
+ * remaining two words are deliberately inert in this module: `verifies`/
+ * `refutes` confer no membership at all — an evidence turn adjudicates a
+ * claim, it does not join the claim's flow. An unrecognised relation string
+ * contributes nothing, the same "unmapped input strengthens nothing" rule
+ * `phasesForTypes` applies to a turn's `type` list; this module therefore
+ * does NOT re-declare the relation vocabulary, whose one home is the write
+ * path.
  */
 
 /** Relations that BUILD a branch. Both ends must be decision-phase turns (definitional, spec's six-row table). */
@@ -61,8 +63,18 @@ export const STANCE_RELATIONS: ReadonlySet<string> = new Set(["narrows", "extend
 /** The relation that TERMINATES a branch: an overridden terminus settles nothing. */
 export const TERMINATING_RELATION = "override";
 
-/** Relations through which a non-decision turn INHERITS the flow of the turn it cites. */
-export const INHERITING_RELATIONS: ReadonlySet<string> = new Set(["grounds", "consume"]);
+/**
+ * Relations through which a non-decision turn INHERITS the flow of the turn
+ * it cites. `indexes` joined this set under the indexes-rescope amendment
+ * ([S15069/T1231]) — the renamed, widened `collects`: a release that
+ * `indexes` the artifacts it ships instead of `consume`-ing them must still
+ * reach the flows it ships (spec "Flow derivation").
+ */
+export const INHERITING_RELATIONS: ReadonlySet<string> = new Set([
+  "grounds",
+  "consume",
+  "indexes",
+]);
 
 export interface FlowTurnInput {
   /** Turn id, in whatever id space the caller addresses turns by (row id, or a window's prompt numbers). */
@@ -126,14 +138,22 @@ export function isFlowSettlement(derivation: FlowDerivation, turnId: number): bo
 }
 
 /**
- * Ticket 02: is `turnId` an OWN STRUCTURAL member — never inherited — of the
- * branch terminating at `terminusId`? `collects`' one hard, write-time graph
- * check (the spec's constitutive-interface word, S15069/T1202): the citing
- * turn must itself be `terminusId`, and every target must satisfy this
- * predicate against that same flow. Deliberately reads `Flow.members`
- * (structural cone membership) and never `flowsByTurn` (which also carries
- * INHERITED membership through grounds/consume) — collects' depth is
+ * Is `turnId` an OWN STRUCTURAL member — never inherited — of the branch
+ * terminating at `terminusId`? Deliberately reads `Flow.members` (structural
+ * cone membership) and never `flowsByTurn` (which also carries INHERITED
+ * membership through grounds/consume/indexes) — this predicate's depth is
  * exactly one hop of the branch itself, not the wider inheritance graph.
+ *
+ * Originally `collects`' one hard, write-time graph check (ticket 02, the
+ * spec's constitutive-interface word, [S15069/T1202]): the citing turn had to
+ * itself be `terminusId`, and every target had to satisfy this predicate
+ * against that same flow. The indexes-rescope amendment (law 2, [S15069/
+ * T1232]) RETIRES that write-time gate — `indexes` (the renamed, widened
+ * `collects`) carries no graph-state check of its own; the self-`grounds`
+ * settlement+implementer condition is the vocabulary's one remaining
+ * graph-state rejection. No write path calls this function any more; it
+ * stays as a general derivation-side reader for own-branch membership (e.g.
+ * review tooling, the turn-graph page).
  */
 export function isOwnFlowMember(
   derivation: FlowDerivation,

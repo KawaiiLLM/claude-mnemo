@@ -769,11 +769,13 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     expect(relations).toEqual(["extends", "grounds"]);
   });
 
-  // Peer final-audit finding 2 (S15069/T1217): the facade shares note.ts's
-  // collects gate but had ZERO collects coverage of its own — these two pins
-  // close that hole, including the dead-branch case the audit's repro proved
-  // bypassable under the old flowById.has check.
-  test("collects through the facade: a live settlement collects its member", () => {
+  // Indexes-rescope spec (ticket 01, [S15069/T1232]): `indexes` (the renamed,
+  // widened `collects`) carries NO graph-state check any more — the old
+  // "collects through the facade" pins (peer final-audit finding 2, S15069/
+  // T1217) covered the facade sharing note.ts's collects gate, dead-branch
+  // case included; these now confirm the identical dead-branch shape SUCCEEDS
+  // through the facade, since the gate itself retired.
+  test("indexes through the facade: a live settlement indexes its member", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t3 = seedTurn(sessionDbId, 3);
@@ -785,19 +787,19 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     write(context, { turn: `S${sessionDbId}/T3`, extends: [`S${sessionDbId}/T1`] }, NOW);
     const result = write(
       context,
-      { turn: `S${sessionDbId}/T3`, collects: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T3`, indexes: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
 
     expect(resultText(result)).toContain("1 relation");
     expect(
       getOutgoingEdges(db, { kind: "turn", id: t3 }).some(
-        (edge) => edge.relation === "collects",
+        (edge) => edge.relation === "indexes",
       ),
     ).toBe(true);
   });
 
-  test("collects through the facade: an overridden settlement (dead branch) is refused", () => {
+  test("indexes through the facade: an overridden settlement (dead branch) can still index — the graph-state gate retired", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t3 = seedTurn(sessionDbId, 3);
@@ -819,17 +821,16 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     );
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t3]) }),
-      { turn: `S${sessionDbId}/T3`, collects: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T3`, indexes: [`S${sessionDbId}/T1`] },
       NOW + 2,
     );
 
-    expect(resultText(result)).toContain("live settlement");
-    expect(resultText(result)).toContain("overridden");
+    expect(resultText(result)).toContain("1 relation");
     expect(
       getOutgoingEdges(db, { kind: "turn", id: t3 }).some(
-        (edge) => edge.relation === "collects",
+        (edge) => edge.relation === "indexes",
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   test("re-asserting a stored relation is a no-op the receipt names, not new work", () => {

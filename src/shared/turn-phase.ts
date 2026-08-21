@@ -36,13 +36,18 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  *   narrows / extends   both ends decision-phase; same flow (definitional —
  *                       the edge itself is what BUILDS the flow, so there is
  *                       nothing separate to check at write time)
- *   collects            same phase; the citing turn must itself be the
- *                       branch's TERMINUS and every target an OWN structural
- *                       member of that branch (the one graph-state
- *                       rejection — checked one layer up, using a flow
- *                       derivation; see `db/flows.ts`)
- *   consume             same phase; cross-flow (descriptive, not a write-time
- *                       check — P1: only `collects` gets a graph-fact reject)
+ *   indexes             same phase; SAME-PHASE AGGREGATION — this node
+ *                       gathers and represents these same-phase nodes
+ *                       carrying its effective content, readers reach them
+ *                       through it. Renamed from `collects`, whose one
+ *                       graph-state hard check (own-branch terminus/
+ *                       membership) RETIRES (indexes-rescope spec law 2,
+ *                       [S15069/T1232]) — `indexes` carries no graph-state
+ *                       gate of its own; the self-`grounds` settlement+
+ *                       implementer condition below is the vocabulary's
+ *                       ONE remaining graph-state rejection
+ *   consume             same phase; cross-flow (descriptive, never a
+ *                       write-time graph-fact check)
  *   grounds              cross-phase ONLY — some (source, target) pairing
  *                       with source ≠ target (user retightening
  *                       [S15069/T1209]; within a phase, dependency is
@@ -60,11 +65,13 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  *                       same-phase word strictly same-phase)
  *
  * Splits and merges vs the retired seven-word set: `refines` -> `extends` +
- * `narrows`; `depends-on` -> `consume` + `collects`; `encodes` merges into
- * `grounds` alongside `grounded-on`; `evidence-for`/`evidence-against` rename
- * to `verifies`/`refutes`; `override` survives with its flow/layer limit
- * REMOVED. `supersedes` stays frozen-readable storage only (`db/citations.ts`'s
- * `CITATION_RELATIONS`), never a member of this module's write vocabulary.
+ * `narrows`; `depends-on` -> `consume` + `indexes` (born `collects`; renamed
+ * and widened to same-phase aggregation by the indexes-rescope amendment,
+ * [S15069/T1231]); `encodes` merges into `grounds` alongside `grounded-on`;
+ * `evidence-for`/`evidence-against` rename to `verifies`/`refutes`;
+ * `override` survives with its flow/layer limit REMOVED. `supersedes` stays
+ * frozen-readable storage only (`db/citations.ts`'s `CITATION_RELATIONS`),
+ * never a member of this module's write vocabulary.
  *
  * ## Self-citation
  *
@@ -135,7 +142,7 @@ export const EDGE_RELATIONS = [
   "override",
   "narrows",
   "extends",
-  "collects",
+  "indexes",
   "consume",
   "grounds",
   "verifies",
@@ -152,8 +159,8 @@ export interface RelationPhasePair {
   target: TurnPhase;
 }
 
-/** `override`/`collects`/`consume`: legal in every SAME-phase pair — evidence-evidence, decision-decision, delivery-delivery alike. */
-const SAME_PHASE_RELATIONS: readonly TurnEdgeRelation[] = ["override", "collects", "consume"];
+/** `override`/`indexes`/`consume`: legal in every SAME-phase pair — evidence-evidence, decision-decision, delivery-delivery alike. */
+const SAME_PHASE_RELATIONS: readonly TurnEdgeRelation[] = ["override", "indexes", "consume"];
 
 /** `narrows`/`extends`: legal ONLY decision-decision — narrower than the same-phase group above, definitional to a branch. */
 const DECISION_ONLY_RELATIONS: readonly TurnEdgeRelation[] = ["narrows", "extends"];
@@ -391,7 +398,7 @@ export const RELATION_FIELD_NAME: Record<TurnEdgeRelation, string> = {
   override: "override",
   narrows: "narrows",
   extends: "extends",
-  collects: "collects",
+  indexes: "indexes",
   consume: "consume",
   grounds: "grounds",
   verifies: "verifies",

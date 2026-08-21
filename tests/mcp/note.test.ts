@@ -154,7 +154,7 @@ describe("note tool", () => {
       "override",
       "narrows",
       "extends",
-      "collects",
+      "indexes",
       "consume",
       "grounds",
       "verifies",
@@ -162,7 +162,7 @@ describe("note tool", () => {
       "retractOverride",
       "retractNarrows",
       "retractExtends",
-      "retractCollects",
+      "retractIndexes",
       "retractConsume",
       "retractGrounds",
       "retractVerifies",
@@ -1667,9 +1667,11 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
   // ---------------------------------------------------------------------
   // Flow-relations spec (ticket 02): the six-row law. Each row gets at least
   // one legal and one illegal example, naming the missing half — replacing
-  // ADR-0010's retired nine-cell matrix outright. `collects`' own graph-state
-  // hard check has its own dedicated describe block further down (P1's one
-  // graph-fact rejection needs a real flow, not just a phase pair).
+  // ADR-0010's retired nine-cell matrix outright. `indexes`' dedicated
+  // describe block further down demonstrates its retired graph-state gate
+  // (indexes-rescope spec, ticket 01) — every graph shape that used to be
+  // refused now succeeds, leaving phase legality (tested above, alongside
+  // override/narrows/extends/consume) as indexes' whole remaining test.
   // ---------------------------------------------------------------------
 
   test("override: same phase on either end (not limited to decision, unlike narrows/extends); illegal when the phases mismatch", () => {
@@ -1743,6 +1745,32 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     );
     expect(resultText(illegal)).toStartWith("Parameter error:");
     expect(resultText(illegal)).toContain("decision-phase");
+  });
+
+  // Indexes-rescope spec (ticket 01, [S15069/T1231]): `indexes` (the renamed,
+  // widened `collects`) is same-phase like override/consume — no flow or
+  // layer limit. Its dedicated "no graph-state gate" describe block further
+  // down covers the retired collects membership check; this is its phase
+  // test alone, same shape as override's and consume's above.
+  test("indexes: same phase on either end; illegal when the phases mismatch", () => {
+    setType(anotherEarlierTurnId, ["implement"]);
+    setType(targetTurnId, ["fix"]);
+
+    const legal = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, indexes: [`S${sessionId}/T2`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(legal)).toContain("Attached 1 relation(s).");
+
+    setType(earlierTurnId, ["design"]); // decision-phase — illegal indexes target
+    const illegal = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, indexes: [`S${sessionId}/T1`] },
+      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(illegal)).toStartWith("Parameter error:");
+    expect(resultText(illegal)).toContain("delivery-phase");
   });
 
   test("consume: same phase on either end; illegal when the phases mismatch", () => {
@@ -1984,13 +2012,17 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
   });
 });
 
-// Flow-relations spec (ticket 02, P1/S15069/T1202): `collects`' one
-// graph-state hard check — the constitutive interface word. Every other
-// relation's legality is phase-only; this is the exception, exercised
-// through the real `noteTool` call path so the derivation adapter
-// (`db/flows.ts`) is covered end-to-end, not just its pure core
-// (`shared/flows.ts`, ticket 01's own tests).
-describe("note tool collects (flow-relations spec, ticket 02: P1's one graph-state hard check)", () => {
+// Indexes-rescope spec (ticket 01, `.scratch/indexes-rescope/spec.md`'s law
+// 2, [S15069/T1232]): `indexes` (the renamed, widened `collects`) carries NO
+// graph-state check any more — T1202's terminus + own-branch hard rejection
+// RETIRES. Every graph shape the old `collects` describe block ("flow-
+// relations spec, ticket 02: P1's one graph-state hard check") used to
+// refuse now succeeds; the self-`grounds` settlement+implementer condition
+// (pinned separately, see "a design+implement turn self-grounds" above) is
+// the vocabulary's one remaining graph-state rejection. Exercised through the
+// real `noteTool` call path so a caller touching only `indexes` is confirmed
+// to build NO flow derivation at all (no `db/flows.ts` involvement).
+describe("note tool indexes (indexes-rescope spec, ticket 01: no graph-state gate)", () => {
   let db: Database;
   let sessionId: number;
   let earlierTurnId: number; // T1, mid-flow member of T3's branch
@@ -2009,9 +2041,9 @@ describe("note tool collects (flow-relations spec, ticket 02: P1's one graph-sta
     initializeSchema(db);
 
     sessionId = upsertSession(db, {
-      contentSessionId: "note-collects-session",
+      contentSessionId: "note-indexes-session",
       project: "claude-mnemo",
-      title: "Note collects",
+      title: "Note indexes",
       content: null,
       insight: null,
       createdAtEpoch: 100,
@@ -2042,10 +2074,10 @@ describe("note tool collects (flow-relations spec, ticket 02: P1's one graph-sta
     db.close();
   });
 
-  test("the settlement collects an in-branch member", () => {
+  test("the settlement indexes an in-branch member — the old legal case still legal", () => {
     const result = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, collects: [`S${sessionId}/T1`] },
+      { turn: `S${sessionId}/T3`, indexes: [`S${sessionId}/T1`] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
@@ -2053,15 +2085,14 @@ describe("note tool collects (flow-relations spec, ticket 02: P1's one graph-sta
     expect(resultText(result)).toContain("Attached 1 relation(s).");
     const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
     expect(
-      edges.some((edge) => edge.relation === "collects" && edge.cited.id === earlierTurnId),
+      edges.some((edge) => edge.relation === "indexes" && edge.cited.id === earlierTurnId),
     ).toBe(true);
   });
 
-  // Peer final-audit finding 2 (S15069/T1217): a dead branch's flow object
-  // survives its override with `settlement: null`, and the old
-  // `flowById.has` gate let its terminus keep collecting — ADR-0011 rules a
-  // dead branch has no terminus and cannot be collected.
-  test("an overridden settlement (dead branch) can no longer collect", () => {
+  // The retired collects rejection (peer final-audit finding 2, S15069/
+  // T1217): "an overridden settlement (dead branch) can no longer collect".
+  // indexes carries no graph-state check, so the identical shape now succeeds.
+  test("an overridden settlement (dead branch) can still index — the graph-state gate retired", () => {
     const overriderId = db
       .query<{ id: number }, [number, number, string, number]>(
         `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
@@ -2078,77 +2109,106 @@ describe("note tool collects (flow-relations spec, ticket 02: P1's one graph-sta
 
     const result = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, collects: [`S${sessionId}/T1`] },
+      { turn: `S${sessionId}/T3`, indexes: [`S${sessionId}/T1`] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
-    expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain("live settlement");
-    expect(resultText(result)).toContain("overridden");
+    expect(isNoteSuccess(result)).toBe(true);
     expect(
       getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).some(
-        (edge) => edge.relation === "collects",
+        (edge) => edge.relation === "indexes",
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  test("the settlement collecting an out-of-branch turn is rejected, naming the flow", () => {
+  test("indexing an out-of-branch turn succeeds — same-phase aggregation is not membership-gated", () => {
     const result = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, collects: [`S${sessionId}/T2`] },
+      { turn: `S${sessionId}/T3`, indexes: [`S${sessionId}/T2`] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
-    expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain(`collects "S${sessionId}/T2"`);
-    expect(resultText(result)).toContain(
-      `is not a member of the flow terminating at S${sessionId}/T3`,
-    );
-    // The setup `extends` edge survives; no `collects` edge was added.
+    expect(isNoteSuccess(result)).toBe(true);
     expect(
       getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).some(
-        (edge) => edge.relation === "collects",
+        (edge) => edge.relation === "indexes" && edge.cited.id === anotherEarlierTurnId,
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  test("a mid-flow (non-terminus) turn cannot collects — only the settlement may", () => {
+  test("a mid-flow (non-terminus) turn can index too — the settlement-only rule retired", () => {
     const result = noteTool(
       db,
-      { turn: `S${sessionId}/T1`, collects: [`S${sessionId}/T2`] },
+      { turn: `S${sessionId}/T1`, indexes: [`S${sessionId}/T2`] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
-    expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain(
-      "requires the citing turn to itself be a flow's live settlement",
-    );
-    expect(getOutgoingEdges(db, { kind: "turn", id: earlierTurnId })).toEqual([]);
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: earlierTurnId }).some(
+        (edge) => edge.relation === "indexes",
+      ),
+    ).toBe(true);
   });
 
-  // Delivery turns hold no flow of their own (spec's Structures section) —
-  // same phase on both ends so the phase check passes and it is the GRAPH
-  // check that refuses it: a delivery-phase turn can never be decision-phase,
-  // so it can never be a flow's terminus. No special case needed anywhere in
-  // the implementation — this is the natural consequence of "termini are
-  // decision turns" (shared/flows.ts).
-  test("a delivery-phase turn's collects is rejected naturally — delivery turns hold no flow of their own", () => {
+  // Delivery turns hold no flow of their own (spec's Structures section), but
+  // that no longer matters — indexes is legal for ANY same-phase pair, the
+  // motivating case being a release indexing the artifacts it ships.
+  test("two delivery-phase turns index each other — a release indexing the artifacts it ships", () => {
     const insertTurn = db.query<{ id: number }, [number, number, string, string, number]>(
       `INSERT INTO turns (session_id, prompt_number, status, user_prompt, type, created_at_epoch)
        VALUES (?, ?, 'extracted', ?, ?, ?) RETURNING id`,
     );
-    insertTurn.get(sessionId, 4, "A delivery citer", JSON.stringify(["implement"]), 115);
-    insertTurn.get(sessionId, 5, "A delivery target", JSON.stringify(["implement"]), 116);
+    insertTurn.get(sessionId, 4, "A release", JSON.stringify(["ops"]), 115);
+    insertTurn.get(sessionId, 5, "A shipped artifact", JSON.stringify(["implement"]), 116);
 
     const result = noteTool(
       db,
-      { turn: `S${sessionId}/T4`, collects: [`S${sessionId}/T5`] },
+      { turn: `S${sessionId}/T4`, indexes: [`S${sessionId}/T5`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+  });
+
+  test("indexes across phases is rejected — phase-illegal only, no graph-state wording", () => {
+    const insertTurn = db.query<{ id: number }, [number, number, string, string, number]>(
+      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, type, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?, ?, ?) RETURNING id`,
+    );
+    insertTurn.get(sessionId, 4, "A delivery turn", JSON.stringify(["implement"]), 115);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, indexes: [`S${sessionId}/T4`] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
     expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain(
-      "requires the citing turn to itself be a flow's live settlement",
+    expect(resultText(result)).toContain(`indexes "S${sessionId}/T4"`);
+    expect(resultText(result)).toContain("cited turn");
+    expect(resultText(result)).toContain("decision-phase");
+    // Never the retired graph-state wording.
+    expect(resultText(result)).not.toContain("live settlement");
+    expect(resultText(result)).not.toContain("member of the flow");
+  });
+
+  test("indexes refuses a self target, like every relation but grounds", () => {
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, indexes: [`S${sessionId}/T3`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain(`indexes "S${sessionId}/T3"`);
+    expect(resultText(result)).toContain("only `grounds` may ever cite the citing turn itself");
+    // Only the beforeEach setup's own `extends` edge survives — no `indexes`
+    // edge was added by the rejected self-citation attempt.
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).some(
+        (edge) => edge.relation === "indexes",
+      ),
+    ).toBe(false);
   });
 });
 

@@ -1207,11 +1207,40 @@ const MEMORY_EDGES_UNION_RELATION_WORDS: readonly string[] = [
   "refutes",
 ];
 
+// The eight-word-vocabulary contract list AS TICKET 03 (flow-relations spec)
+// LEFT IT — `collects` still named, `supersedes` frozen-readable alongside it.
+// Deliberately UNCHANGED by the indexes-rescope amendment (ticket 01,
+// `.scratch/indexes-rescope/spec.md`): this is `ensureMemoryEdgesRelationContract`'s
+// OWN historical rebuild target, paired with that function's OWN remap
+// (`remapVocabularyFlipRelation`, which does not know the word `indexes` —
+// that migration retired the SEVEN old words, not this one). A pre-0.14
+// database doing a full-chain jump in one open still needs this function to
+// land on a `collects`-bearing table exactly as it always has;
+// `ensureMemoryEdgesIndexesRename` below is chained immediately after it in
+// `ensureMemoryEdgesSchema` and finishes the job, renaming whatever
+// `collects` row that rebuild left onto `indexes`.
 const MEMORY_EDGES_CONTRACT_RELATION_WORDS: readonly string[] = [
   "override",
   "narrows",
   "extends",
   "collects",
+  "consume",
+  "grounds",
+  "verifies",
+  "refutes",
+  "supersedes",
+];
+
+// The CURRENT final word list (indexes-rescope spec, ticket 01): `collects`
+// renamed to `indexes`, same-phase aggregation, no graph-state gate. This is
+// what a FRESH database is born with (`MEMORY_EDGES_DDL` below) and what
+// `ensureMemoryEdgesIndexesRename`'s own rebuild narrows an existing
+// installation onto.
+const MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS: readonly string[] = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
   "consume",
   "grounds",
   "verifies",
@@ -1272,11 +1301,14 @@ const MEMORY_EDGES_INDEXES_DDL = `
 // chain first reaches them.
 const MEMORY_EDGES_UNION_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_UNION_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
 
-// The FINAL, narrow shape (ticket 03's "contract half"). Fresh-database
-// creation (`ensureMemoryEdgesSchema`'s unconditional trailing `db.exec`
-// below) and `ensureMemoryEdgesRelationContract`'s own rebuild target both
-// use this.
-const MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_CONTRACT_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
+// The CURRENT final, narrow shape. Fresh-database creation
+// (`ensureMemoryEdgesSchema`'s unconditional trailing `db.exec` below) uses
+// this — a fresh install is born with `indexes`, never `collects`, so it
+// skips both `ensureMemoryEdgesRelationContract` (targets the OLDER
+// `collects`-bearing `MEMORY_EDGES_CONTRACT_RELATION_WORDS`, ticket 03's own
+// shape) and `ensureMemoryEdgesIndexesRename` below — `hasTable` gates BOTH
+// out for a first creation, same as every earlier migration in this chain.
+const MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
 
 // Spec C15: the retired `turn_citations` table carried `ON DELETE CASCADE`;
 // `memory_edges` cannot, because citing_id/cited_id are shared across three
@@ -1975,10 +2007,18 @@ function memoryEdgesVocabularyFlipIsStale(db: Database): boolean {
  * time" — this migration neither deletes nor re-points them, only renames
  * the word they're stored under when that word is one of the six retired
  * ones).
+ *
+ * `remap` (indexes-rescope spec, ticket 01) is a THIRD reuse of this same
+ * collapse-and-rebuild shape — `ensureMemoryEdgesIndexesRename`'s own
+ * `collects`->`indexes` rename is a different word map over the same
+ * pair-collision problem, so it is parameterised rather than duplicated.
+ * Defaults to `remapVocabularyFlipRelation` so the two existing callers above
+ * need no change at all.
  */
 function collapseAndRebuildVocabularyFlip(
   db: Database,
   relationWords: readonly string[],
+  remap: (relation: string | null) => string | null = remapVocabularyFlipRelation,
 ): void {
   db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_vocabulary_flip");
   db.exec(memoryEdgesTableDdl("memory_edges", relationWords));
@@ -1995,7 +2035,7 @@ function collapseAndRebuildVocabularyFlip(
 
   const groups = new Map<string, VocabularyFlipRow[]>();
   for (const row of legacyRows) {
-    const newRelation = remapVocabularyFlipRelation(row.relation);
+    const newRelation = remap(row.relation);
     const key = `${row.citingKind} ${row.citingId} ${row.citedKind} ${row.citedId} ${newRelation ?? ""}`;
     const bucket = groups.get(key);
     if (bucket) {
@@ -2017,7 +2057,7 @@ function collapseAndRebuildVocabularyFlip(
 
   for (const bucket of groups.values()) {
     const sample = bucket[0]!;
-    const newRelation = remapVocabularyFlipRelation(sample.relation);
+    const newRelation = remap(sample.relation);
     const winner = pickWinningVocabularyFlipRow(bucket);
     insert.run(
       sample.citingKind,
@@ -2121,6 +2161,95 @@ function ensureMemoryEdgesRelationContract(db: Database): void {
   }
 }
 
+/**
+ * Indexes-rescope spec, ticket 01 (`.scratch/indexes-rescope/spec.md`'s
+ * migration item 1): `collects` renames to `indexes` — same-phase
+ * aggregation, no graph-state gate. `collects` never appeared in storage
+ * until ticket 02 of the flow-relations spec (spec.md: "narrows/collects
+ * start empty"), so unlike that migration's `encodes`/`grounded-on` merge
+ * this rename cannot collide (`indexes` never existed as a stored word
+ * before this migration, so no pair can already hold an `indexes` row for a
+ * `collects` row of the same pair to collapse against) — reused anyway
+ * through `remapIndexesRename`/`collapseAndRebuildVocabularyFlip`'s general
+ * collision-safe pass rather than a bare `SELECT *`, both to match precedent
+ * discipline and to satisfy the ticket's own "UNIQUE-collision-safe"
+ * requirement without relying on that argument holding forever.
+ */
+const INDEXES_RENAME_MAP: Readonly<Record<string, string>> = {
+  collects: "indexes",
+};
+
+function remapIndexesRename(relation: string | null): string | null {
+  if (relation === null) {
+    return null;
+  }
+  return INDEXES_RENAME_MAP[relation] ?? relation;
+}
+
+/**
+ * Detection reads the stored DDL for the OLD word `collects` — never the new
+ * word `indexes`' absence (the ticket's own explicit instruction, echoing the
+ * 0.14 sequencing-bug lesson `ensureMemoryEdgesRelationContract` above notes
+ * for `depends-on`: probing on the new word's absence cannot tell "already
+ * migrated" apart from "never reached", since a pristine pre-migration table
+ * also lacks the new word). Present once the CHECK still lists `'collects'`;
+ * absent once this migration's own rebuild (or a fresh database created
+ * straight from `MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS`) has landed.
+ */
+function memoryEdgesIndexesRenameIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && storedDdl.includes("'collects'");
+}
+
+/**
+ * Same rebuild-under-a-temporary-name-then-swap shape as
+ * `ensureMemoryEdgesVocabularyFlip`/`ensureMemoryEdgesRelationContract` above
+ * — a SINGLE combined step rather than a widen-then-narrow pair, unlike the
+ * seven-word retirement this rides on top of: this rename is not split
+ * across two releases (spec: "Migration (small; stored rows all post-era)"),
+ * so there is no in-flight-release window requiring an intermediate wide
+ * CHECK. Chained immediately after `ensureMemoryEdgesRelationContract` in
+ * `ensureMemoryEdgesSchema` so a pre-0.14 database doing a full-chain jump in
+ * one open still gets its `collects` row (left behind by that function's own
+ * `collects`-bearing rebuild target) renamed onto `indexes` in the same pass.
+ */
+function ensureMemoryEdgesIndexesRename(db: Database): void {
+  if (!memoryEdgesIndexesRenameIsStale(db)) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesIndexesRenameIsStale(db)) {
+        return;
+      }
+
+      collapseAndRebuildVocabularyFlip(
+        db,
+        MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS,
+        remapIndexesRename,
+      );
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while renaming collects to indexes: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 function ensureMemoryEdgesSchema(db: Database): void {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
@@ -2130,6 +2259,7 @@ function ensureMemoryEdgesSchema(db: Database): void {
     ensureMemoryEdgesSelfReferenceCheck(db);
     ensureMemoryEdgesVocabularyFlip(db);
     ensureMemoryEdgesRelationContract(db);
+    ensureMemoryEdgesIndexesRename(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   // 2026-08-21 incident crutch removal ([S15069/T1136]): a review rehearsal ran

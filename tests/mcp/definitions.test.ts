@@ -368,15 +368,16 @@ describe("tool surface", () => {
   });
 
   // Flow-relations spec (ticket 02): the eight-word closed set — override/
-  // narrows/extends/collects/consume/grounds/verifies/refutes — replaces the
+  // narrows/extends/indexes/consume/grounds/verifies/refutes — replaces the
   // retired seven-word set (and its own predecessor, supersedes) outright.
-  it("override/narrows/extends/collects/consume/grounds/verifies/refutes are present, and carry a reading only — the discriminators live in the Memory Rubric", () => {
+  // `collects` renamed to `indexes` (indexes-rescope spec, ticket 01).
+  it("override/narrows/extends/indexes/consume/grounds/verifies/refutes are present, and carry a reading only — the discriminators live in the Memory Rubric", () => {
     const shape = noteInputSchema.shape;
     for (const key of [
       "override",
       "narrows",
       "extends",
-      "collects",
+      "indexes",
       "consume",
       "grounds",
       "verifies",
@@ -401,7 +402,7 @@ describe("tool surface", () => {
       "override",
       "narrows",
       "extends",
-      "collects",
+      "indexes",
       "consume",
       "grounds",
       "verifies",
@@ -421,10 +422,19 @@ describe("tool surface", () => {
   // reading is genuinely new (no seven-word predecessor covered either),
   // and their describe()s are the only place a caller learns the mechanism
   // exists at all before hitting a rejection or a receipt warning.
-  it("collects states its branch-membership check; grounds states its no-restriction reach and self-citation gate", () => {
+  //
+  // Indexes-rescope spec (ticket 01): `collects` renamed to `indexes`
+  // (`shape.indexes` below) but its describe() PROSE is untouched by this
+  // ticket — ticket 01's ownership fence is param names/wiring only, prose
+  // describes belong to ticket 04 (`.scratch/indexes-rescope/issues/
+  // 04-rubric-v8-teaching.md`). So this still asserts the OLD collects-era
+  // branch-membership wording under the NEW key — expected to be REWRITTEN
+  // by ticket 04 to the new same-phase-aggregation reading, at which point
+  // these specific string assertions become stale and must update with it.
+  it("indexes (renamed from collects) still carries its pre-rescope describe() text; grounds states its no-restriction reach and self-citation gate", () => {
     const shape = noteInputSchema.shape;
-    expect(shape.collects.description).toContain("branch's settlement");
-    expect(shape.collects.description).toContain("already belongs to that same branch");
+    expect(shape.indexes.description).toContain("branch's settlement");
+    expect(shape.indexes.description).toContain("already belongs to that same branch");
 
     expect(shape.grounds.description).toContain("cross-phase only");
     expect(shape.grounds.description).toContain("mid-flow target still stores");
@@ -813,7 +823,7 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
       "override",
       "narrows",
       "extends",
-      "collects",
+      "indexes",
       "consume",
       "grounds",
       "verifies",
@@ -821,7 +831,7 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
       "retractOverride",
       "retractNarrows",
       "retractExtends",
-      "retractCollects",
+      "retractIndexes",
       "retractConsume",
       "retractGrounds",
       "retractVerifies",

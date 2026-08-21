@@ -51,7 +51,7 @@ import {
   SESSION_SUMMARY_FIELDS,
 } from "../mcp/session-summary";
 import { isSegmentEra } from "../segment-era";
-import { isFlowSettlement, isOwnFlowMember, type FlowDerivation } from "../shared/flows";
+import { isFlowSettlement, type FlowDerivation } from "../shared/flows";
 import { formatBudgetWarning, formatNoteBudget } from "../shared/note-budget";
 import {
   findRetiredTopicTag,
@@ -655,7 +655,7 @@ export function evaluateSettlementTurnWrite(
       ok: false,
       message:
         "at least one of title, content, insight, type, tags, a relation field" +
-        " (override/narrows/extends/collects/consume/grounds/verifies/refutes)" +
+        " (override/narrows/extends/indexes/consume/grounds/verifies/refutes)" +
         " or one of their retract… mirrors is required.",
     };
   }
@@ -944,24 +944,23 @@ export function evaluateSettlementTurnWrite(
   };
 
   // Flow-relations spec (ticket 02): a derivation is only needed when this
-  // call touches `collects` (the hard membership check) or `grounds` (the
-  // self-citation settlement gate, plus the post-write mid-flow warning) —
-  // scoped the SAME way `mcp/note.ts`'s `resolveRelationFields` scopes it,
-  // citing turn's own session plus every resolved target's own session.
-  // Declared here (outside the `if` below) so the receipt section further
-  // down can reuse it for `collectGroundsMidFlowWarnings` without a second
-  // derivation.
+  // call touches `grounds` (the self-citation settlement gate, plus the
+  // post-write mid-flow warning) — scoped the SAME way `mcp/note.ts`'s
+  // `resolveRelationFields` scopes it, citing turn's own session plus every
+  // resolved target's own session. `indexes` (the retired `collects`) needs
+  // no derivation any more — indexes-rescope spec law 2 retires its
+  // graph-state check. Declared here (outside the `if` below) so the receipt
+  // section further down can reuse it for `collectGroundsMidFlowWarnings`
+  // without a second derivation.
   let relationFlows: FlowDerivation | null = null;
 
   if (relationFields.length > 0) {
     const phases = citingPhases();
-    const needsFlows = relationFields.some(
-      (field) => field.relation === "collects" || field.relation === "grounds",
-    );
+    const needsFlows = relationFields.some((field) => field.relation === "grounds");
     if (needsFlows) {
       const sessionIds = new Set<number>([context.sessionId]);
       for (const field of relationFields) {
-        if (field.relation !== "collects" && field.relation !== "grounds") {
+        if (field.relation !== "grounds") {
           continue;
         }
         for (const raw of field.targets) {
@@ -1015,30 +1014,6 @@ export function evaluateSettlementTurnWrite(
         if (!legality.ok) {
           rejections.push(`${key} "${raw}" ${legality.detail}`);
           continue;
-        }
-
-        // Flow-relations spec, P1: collects' one graph-state hard check —
-        // the citing turn must itself be a flow's terminus; every target an
-        // OWN structural member of that SAME branch.
-        if (field.relation === "collects" && relationFlows !== null) {
-          // Peer final-audit finding 2 (S15069/T1217): same fix as note.ts —
-          // a dead branch's flow object survives with settlement null, so
-          // the gate must check live settlement-hood, not flow existence.
-          if (!isFlowSettlement(relationFlows, turn.id)) {
-            rejections.push(
-              `${key} "${raw}" requires the citing turn to itself be a flow's live settlement ` +
-                `(nothing further narrows/extends it, and no override killed its branch) — ` +
-                `${ref} is mid-flow, overridden, or belongs to no decision flow at all`,
-            );
-            continue;
-          }
-          if (node.kind === "turn" && !isOwnFlowMember(relationFlows, turn.id, node.id)) {
-            rejections.push(
-              `${key} "${raw}" is not a member of the flow terminating at ${ref} — ` +
-                "collects only names turns already inside this branch",
-            );
-            continue;
-          }
         }
       }
     }

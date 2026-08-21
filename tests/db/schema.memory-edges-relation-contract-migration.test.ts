@@ -112,7 +112,10 @@ describe("memory_edges relation contract migration (flow-relations spec, ticket 
     expect(storedTableSql(db)).not.toContain("'grounded-on'");
     expect(storedTableSql(db)).not.toContain("'refines'");
     expect(storedTableSql(db)).not.toContain("'encodes'");
-    for (const word of ["override", "narrows", "extends", "collects", "consume", "grounds", "verifies", "refutes", "supersedes"]) {
+    // `indexes`, not the retired `collects` — `initializeSchema` runs the
+    // FULL chain, the indexes-rescope rename (ticket 01, `.scratch/
+    // indexes-rescope/spec.md`) included.
+    for (const word of ["override", "narrows", "extends", "indexes", "consume", "grounds", "verifies", "refutes", "supersedes"]) {
       expect(storedTableSql(db)).toContain(`'${word}'`);
     }
 

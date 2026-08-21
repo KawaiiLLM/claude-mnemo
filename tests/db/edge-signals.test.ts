@@ -314,7 +314,7 @@ describe("edge scoring signals", () => {
       override: true,
       narrows: false,
       extends: true,
-      collects: false,
+      indexes: false,
       consume: false,
       grounds: true,
       verifies: false,

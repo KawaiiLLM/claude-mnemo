@@ -374,7 +374,7 @@ describe("settlement context assembly", () => {
     expect(prompt).toContain("One pair may carry several relations at once");
     expect(prompt).toContain("rejected, naming what is missing");
     expect(prompt).toContain(
-      "note`'s override/narrows/extends/collects/consume/grounds/verifies/refutes fields",
+      "note`'s override/narrows/extends/indexes/consume/grounds/verifies/refutes fields",
     );
     expect(prompt).toContain("retractOverride/");
 

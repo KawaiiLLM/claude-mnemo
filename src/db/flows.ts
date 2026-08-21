@@ -79,7 +79,7 @@ export function deriveFlowsForSessions(
       `SELECT citing_id AS citingId, cited_id AS citedId, relation
        FROM memory_edges
        WHERE citing_kind = 'turn' AND cited_kind = 'turn'
-         AND relation IN ('narrows', 'extends', 'override', 'grounds', 'consume')
+         AND relation IN ('narrows', 'extends', 'override', 'grounds', 'consume', 'indexes')
          AND (citing_id IN (${turnPlaceholders}) OR cited_id IN (${turnPlaceholders}))`,
     )
     .all(...turnIds, ...turnIds);

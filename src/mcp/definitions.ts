@@ -405,7 +405,7 @@ export const noteInputShape = {
     .describe(
       "Addresses a decision this turn still holds and adds a piece TO — same flow, decision-phase both ends. Judgment lives in the Memory Rubric.",
     ),
-  collects: z
+  indexes: z
     .array(z.string())
     .optional()
     .describe(
@@ -463,7 +463,7 @@ export const noteInputShape = {
     .describe(
       "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
     ),
-  retractCollects: z
+  retractIndexes: z
     .array(z.string())
     .optional()
     .describe(
@@ -725,7 +725,7 @@ export const settlementNoteInputShape = {
   override: noteInputShape.override,
   narrows: noteInputShape.narrows,
   extends: noteInputShape.extends,
-  collects: noteInputShape.collects,
+  indexes: noteInputShape.indexes,
   consume: noteInputShape.consume,
   grounds: noteInputShape.grounds,
   verifies: noteInputShape.verifies,
@@ -733,7 +733,7 @@ export const settlementNoteInputShape = {
   retractOverride: noteInputShape.retractOverride,
   retractNarrows: noteInputShape.retractNarrows,
   retractExtends: noteInputShape.retractExtends,
-  retractCollects: noteInputShape.retractCollects,
+  retractIndexes: noteInputShape.retractIndexes,
   retractConsume: noteInputShape.retractConsume,
   retractGrounds: noteInputShape.retractGrounds,
   retractVerifies: noteInputShape.retractVerifies,
