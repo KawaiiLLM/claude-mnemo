@@ -110,6 +110,39 @@ export interface FlowDerivation {
   homeless: number[];
 }
 
+/**
+ * Ticket 02 (flow-relations spec): is `turnId` itself a flow's SETTLEMENT —
+ * its own branch's terminus, not overridden? `Flow.id` is the terminus id
+ * (this module's own identity rule), so a turn is a settlement iff it keys a
+ * flow AND that flow's `settlement` equals its own id (the alternative,
+ * `settlement === null`, is the dead-branch case: a terminus someone
+ * overrode). Used by the write-time self-citation gate — `grounds` is the one
+ * relation that may cite the citing turn itself, and only when the citing
+ * turn is both a settlement and that settlement's implementer (a phase-set
+ * question the caller answers on its own, no derivation needed for that half).
+ */
+export function isFlowSettlement(derivation: FlowDerivation, turnId: number): boolean {
+  return derivation.flowById.get(turnId)?.settlement === turnId;
+}
+
+/**
+ * Ticket 02: is `turnId` an OWN STRUCTURAL member — never inherited — of the
+ * branch terminating at `terminusId`? `collects`' one hard, write-time graph
+ * check (the spec's constitutive-interface word, S15069/T1202): the citing
+ * turn must itself be `terminusId`, and every target must satisfy this
+ * predicate against that same flow. Deliberately reads `Flow.members`
+ * (structural cone membership) and never `flowsByTurn` (which also carries
+ * INHERITED membership through grounds/consume) — collects' depth is
+ * exactly one hop of the branch itself, not the wider inheritance graph.
+ */
+export function isOwnFlowMember(
+  derivation: FlowDerivation,
+  terminusId: number,
+  turnId: number,
+): boolean {
+  return derivation.flowById.get(terminusId)?.members.includes(turnId) ?? false;
+}
+
 /** The settlement(s) reachable from one turn: the settlements of every flow it belongs to, ascending, deduped. */
 export function settlementsOfTurn(derivation: FlowDerivation, turnId: number): number[] {
   const settlements = new Set<number>();

@@ -93,17 +93,17 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "prior settlement attempt) touched a field since this dispatch's context " +
   "was read, that ONE field yields (reported in the receipt, not written) " +
   "while the other still lands. " +
-  "evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/" +
-  "dependsOn: address lists — the SAME seven relations and phase-legality " +
-  "validator the main agent's own `note` tool uses. An edge stands on its " +
-  "own: no prose citation, no pre-existing link between the two turns, and " +
-  "one pair may carry several relations at once; its two ends' `type` must " +
-  "satisfy the relation's phase pair (a structurally illegal pair is " +
-  "rejected, naming which half is missing). Each has a retract… mirror " +
-  "(retractEvidenceFor …) that deletes that edge; an address carrying no " +
+  "override/narrows/extends/collects/consume/grounds/verifies/refutes: " +
+  "address lists — the SAME eight relations and legality validator the main " +
+  "agent's own `note` tool uses. An edge stands on its own: no prose " +
+  "citation, no pre-existing link between the two turns, and one pair may " +
+  "carry several relations at once; a structurally illegal call (wrong " +
+  "phase, an out-of-branch collects target, an illegal self-citation) is " +
+  "rejected, naming what is missing. Each has a retract… mirror " +
+  "(retractOverride …) that deletes that edge; an address carrying no " +
   "such edge rejects the call, naming it, and nothing is deleted. " +
   "Which relation, if any, is the Memory Rubric's own 关系 checklist " +
-  "above — this call only enforces address/phase shape. " +
+  "above — this call only enforces address/phase/flow shape. " +
   "On `session`: `title`/`content` only — type/tags/edges are refused. " +
   "A field that already holds something needs `mode.<field>`: \"write\" " +
   "replaces it whole (supply the finished text), or the edit form " +

@@ -263,10 +263,10 @@ describe("single-home grep guard — judgment prose lives ONLY in the Memory Rub
     }
   });
 
-  test("override/encodes/note each point at the Memory Rubric instead of restating judgment", () => {
+  test("override/grounds/note each point at the Memory Rubric instead of restating judgment", () => {
     expect(MNEMO_TOOL_DESCRIPTIONS.note.toLowerCase()).toContain("memory rubric");
     expect(noteInputShape.override.description?.toLowerCase()).toContain("memory rubric");
-    expect(noteInputShape.encodes.description?.toLowerCase()).toContain("memory rubric");
+    expect(noteInputShape.grounds.description?.toLowerCase()).toContain("memory rubric");
   });
 
   // The peer's P11: the remember description carried its own English judgment

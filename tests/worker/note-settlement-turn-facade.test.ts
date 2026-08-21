@@ -9,7 +9,6 @@ import {
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
-import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
@@ -720,7 +719,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    // Ticket 08: dependsOn needs delivery-phase on both ends.
+    // Flow-relations spec: consume needs the SAME phase on both ends.
     updateTurnById(db, t1, { type: ["implement"] });
     updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
@@ -730,14 +729,14 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // is exactly the call a from-zero rebuild has to be able to make.
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
     expect(resultText(result)).toContain("1 relation");
     const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
     expect(edges).toHaveLength(1);
-    expect(edges[0]!.relation).toBe("depends-on");
+    expect(edges[0]!.relation).toBe("consume");
     // Settlement's attribution survives the move onto the main agent's own
     // primitive — `judged`, not `asserted`.
     expect(edges[0]!.provenance).toBe("judged");
@@ -747,8 +746,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    // T1 decision-phase, T2 delivery+decision: legal for `encodes` (delivery
-    // -> decision) and for `refines` (decision -> decision).
+    // T1 decision-phase, T2 delivery+decision: legal for `grounds` (no
+    // restriction) and for `extends` (decision -> decision).
     updateTurnById(db, t1, { type: ["design"] });
     updateTurnById(db, t2, { type: ["implement", "correction"] });
     const job = claimWindow(sessionDbId, 1, 2);
@@ -757,8 +756,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       baseContext(job, { reviewableTurnIds: new Set([t2]) }),
       {
         turn: `S${sessionDbId}/T2`,
-        encodes: [`S${sessionDbId}/T1`],
-        refines: [`S${sessionDbId}/T1`],
+        grounds: [`S${sessionDbId}/T1`],
+        extends: [`S${sessionDbId}/T1`],
       },
       NOW,
     );
@@ -767,7 +766,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const relations = getOutgoingEdges(db, { kind: "turn", id: t2 })
       .map((edge) => edge.relation)
       .sort();
-    expect(relations).toEqual(["encodes", "refines"]);
+    expect(relations).toEqual(["extends", "grounds"]);
   });
 
   test("re-asserting a stored relation is a no-op the receipt names, not new work", () => {
@@ -777,7 +776,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     updateTurnById(db, t1, { type: ["implement"] });
     updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
-    const input = { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] };
+    const input = { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] };
     const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
 
     write(context, input, NOW);
@@ -797,13 +796,13 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
     write(
       context,
-      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
     const retracted = write(
       context,
-      { turn: `S${sessionDbId}/T2`, retractDependsOn: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, retractConsume: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
     expect(resultText(retracted)).toContain("Retracted 1 relation(s)");
@@ -813,7 +812,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // stay distinguishable, and nothing is deleted.
     const missing = write(
       context,
-      { turn: `S${sessionDbId}/T2`, retractDependsOn: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, retractConsume: [`S${sessionDbId}/T1`] },
       NOW + 2,
     );
     expect(resultText(missing)).toContain("Parameter error");
@@ -829,40 +828,43 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
     const unresolved = write(
       context,
-      { turn: `S${sessionDbId}/T1`, dependsOn: [`S${sessionDbId}/T999`] },
+      { turn: `S${sessionDbId}/T1`, consume: [`S${sessionDbId}/T999`] },
       NOW,
     );
     expect(resultText(unresolved)).toContain("does not resolve");
 
     const selfLoop = write(
       context,
-      { turn: `S${sessionDbId}/T1`, dependsOn: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T1`, consume: [`S${sessionDbId}/T1`] },
       NOW,
     );
-    expect(resultText(selfLoop)).toContain("cannot cite itself");
+    expect(resultText(selfLoop)).toContain("may ever cite the citing turn itself");
     expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
   });
 
-  // Relation-matrix spec, "自引用" (ticket 05): the settlement write path
+  // Flow-relations spec (ticket 02, "自引用"): the settlement write path
   // shares the SAME `validateRelationTarget` self branch as the main agent's
-  // `note` — a multi-phase turn may self-cite with a CROSS-PHASE relation.
-  test("a cross-phase self target is accepted through the settlement path (ticket 05)", () => {
+  // `note` — only `grounds` may ever self-cite, and only when the citing
+  // turn is both a flow's settlement (a one-node flow here: decision-phase,
+  // nothing narrows/extends it) and that settlement's implementer (its own
+  // type list also carries a delivery phase).
+  test("a self-grounds is accepted through the settlement path when the turn is both settlement and implementer", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    updateTurnById(db, t1, { type: ["research", "review"] });
+    updateTurnById(db, t1, { type: ["design", "implement"] });
     const job = claimWindow(sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
 
     const result = write(
       context,
-      { turn: `S${sessionDbId}/T1`, encodes: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T1`, grounds: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
     expect(resultText(result)).toContain("1 relation");
     const edges = getOutgoingEdges(db, { kind: "turn", id: t1 });
     expect(edges).toHaveLength(1);
-    expect(edges[0]?.relation).toBe("encodes");
+    expect(edges[0]?.relation).toBe("grounds");
     expect(edges[0]?.cited).toEqual({ kind: "turn", id: t1 });
   });
 
@@ -881,7 +883,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
     const refused = write(
       context,
-      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
       NOW,
     );
     expect(resultText(refused)).toContain("has not been read this session");
@@ -900,7 +902,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     );
     const landed = write(
       context,
-      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
     expect(resultText(landed)).toContain("1 relation");
@@ -916,14 +918,14 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    // `evidenceFor` needs an evidence-phase citing turn; T2 has none.
+    // `verifies` needs an evidence-phase citing turn; T2 has none.
     updateTurnById(db, t1, { type: ["design"] });
     updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, evidenceFor: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, verifies: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
@@ -933,126 +935,108 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 });
 
 // ---------------------------------------------------------------------------
-// T1191 (relation-matrix spec, "同流约束只压立场对"): the segment-crossing
-// warning on the stance pair (override/refines). The SAME
-// `collectSegmentCrossingWarnings` (mcp/note.ts) the main agent's own `note`
-// surface calls — exercised here through settlement's own write path so the
-// two writers cannot silently disagree about when it fires.
+// Flow-relations spec (ticket 02, P1): the `grounds` mid-flow warning. The
+// SAME `collectGroundsMidFlowWarnings` (mcp/note.ts) the main agent's own
+// `note` surface calls — exercised here through settlement's own write path
+// so the two writers cannot silently disagree about when it fires. Replaces
+// the retired segment-crossing warning (T1191, dcd17fe) along with the
+// vocabulary it was built for.
 // ---------------------------------------------------------------------------
 
-describe("segment-crossing warning on the stance pair (T1191)", () => {
-  test("a cross-segment override warns, naming both segments", () => {
+describe("grounds mid-flow warning (flow-relations spec, P1)", () => {
+  test("a grounds toward a mid-flow member warns, naming the branch's settlement", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    updateTurnById(db, t1, { type: ["design"] });
-    updateTurnById(db, t2, { type: ["correction"] });
-    const citingSegment = createSegment(db, { title: "Citing segment", nowEpoch: NOW });
-    const citedSegment = createSegment(db, { title: "Cited segment", nowEpoch: NOW });
-    addSegmentMembers(db, citingSegment.id, [t2], NOW);
-    addSegmentMembers(db, citedSegment.id, [t1], NOW);
-    const job = claimWindow(sessionDbId, 1, 2);
-
-    const result = write(
-      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
-      NOW,
-    );
-
-    expect(resultText(result)).toContain(
-      `warning: override toward S${sessionDbId}/T1 crosses segments ` +
-        `(E${citingSegment.id} -> E${citedSegment.id}) — the stance pair claims one workflow;` +
-        " re-judge or downgrade to depends-on.",
-    );
-  });
-
-  test("a cross-segment refines warns, naming both segments", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
+    const t3 = seedTurn(sessionDbId, 3);
     updateTurnById(db, t1, { type: ["design"] });
     updateTurnById(db, t2, { type: ["design"] });
-    const citingSegment = createSegment(db, { title: "Citing segment", nowEpoch: NOW });
-    const citedSegment = createSegment(db, { title: "Cited segment", nowEpoch: NOW });
-    addSegmentMembers(db, citingSegment.id, [t2], NOW);
-    addSegmentMembers(db, citedSegment.id, [t1], NOW);
-    const job = claimWindow(sessionDbId, 1, 2);
+    updateTurnById(db, t3, { type: ["implement"] });
+    const job = claimWindow(sessionDbId, 1, 3);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t2, t3]) });
+
+    // T2 extends T1 — T2 becomes the branch's settlement, T1 is mid-flow.
+    write(context, { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] }, NOW);
 
     const result = write(
-      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, refines: [`S${sessionDbId}/T1`] },
-      NOW,
+      context,
+      { turn: `S${sessionDbId}/T3`, grounds: [`S${sessionDbId}/T1`] },
+      NOW + 1,
     );
 
     expect(resultText(result)).toContain(
-      `warning: refines toward S${sessionDbId}/T1 crosses segments ` +
-        `(E${citingSegment.id} -> E${citedSegment.id})`,
+      `warning: grounds toward S${sessionDbId}/T1 is mid-flow — this flow settles at ` +
+        `S${sessionDbId}/T2; cite that instead.`,
     );
   });
 
-  test("both ends of the same segment stay silent", () => {
+  test("a grounds directly at the settlement stays silent", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
+    const t3 = seedTurn(sessionDbId, 3);
     updateTurnById(db, t1, { type: ["design"] });
-    updateTurnById(db, t2, { type: ["correction"] });
-    const segment = createSegment(db, { title: "Shared segment", nowEpoch: NOW });
-    addSegmentMembers(db, segment.id, [t1, t2], NOW);
-    const job = claimWindow(sessionDbId, 1, 2);
+    updateTurnById(db, t2, { type: ["design"] });
+    updateTurnById(db, t3, { type: ["implement"] });
+    const job = claimWindow(sessionDbId, 1, 3);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t2, t3]) });
+
+    write(context, { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] }, NOW);
 
     const result = write(
-      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
-      NOW,
+      context,
+      { turn: `S${sessionDbId}/T3`, grounds: [`S${sessionDbId}/T2`] },
+      NOW + 1,
     );
 
     expect(resultText(result)).toContain("1 relation");
     expect(resultText(result)).not.toContain("warning:");
-    expect(resultText(result)).not.toContain("crosses segments");
   });
 
-  test("one homeless end stays silent — nothing to compare", () => {
+  test("a grounds toward a dead (overridden) branch warns nothing — nothing settles there", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
+    const overrider = seedTurn(sessionDbId, 2);
+    const citer = seedTurn(sessionDbId, 3);
     updateTurnById(db, t1, { type: ["design"] });
-    updateTurnById(db, t2, { type: ["correction"] });
-    // Only the citing turn (t2) has a segment; t1 (cited) stays homeless.
-    const citingSegment = createSegment(db, { title: "Citing segment only", nowEpoch: NOW });
-    addSegmentMembers(db, citingSegment.id, [t2], NOW);
-    const job = claimWindow(sessionDbId, 1, 2);
+    updateTurnById(db, overrider, { type: ["design"] });
+    updateTurnById(db, citer, { type: ["implement"] });
+    const job = claimWindow(sessionDbId, 1, 3);
+    const context = baseContext(job, { reviewableTurnIds: new Set([overrider, citer]) });
+
+    write(context, { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] }, NOW);
 
     const result = write(
-      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
-      NOW,
-    );
-
-    expect(resultText(result)).not.toContain("warning:");
-    expect(resultText(result)).not.toContain("crosses segments");
-  });
-
-  test("a cross-segment depends-on stays silent — the constraint binds only the stance pair", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    updateTurnById(db, t1, { type: ["implement"] });
-    updateTurnById(db, t2, { type: ["implement"] });
-    const citingSegment = createSegment(db, { title: "Citing segment", nowEpoch: NOW });
-    const citedSegment = createSegment(db, { title: "Cited segment", nowEpoch: NOW });
-    addSegmentMembers(db, citingSegment.id, [t2], NOW);
-    addSegmentMembers(db, citedSegment.id, [t1], NOW);
-    const job = claimWindow(sessionDbId, 1, 2);
-
-    const result = write(
-      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
-      NOW,
+      context,
+      { turn: `S${sessionDbId}/T3`, grounds: [`S${sessionDbId}/T1`] },
+      NOW + 1,
     );
 
     expect(resultText(result)).toContain("1 relation");
     expect(resultText(result)).not.toContain("warning:");
-    expect(resultText(result)).not.toContain("crosses segments");
+  });
+
+  test("a consume toward a mid-flow member stays silent — the warning binds grounds only", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const t3 = seedTurn(sessionDbId, 3);
+    updateTurnById(db, t1, { type: ["design"] });
+    updateTurnById(db, t2, { type: ["design"] });
+    updateTurnById(db, t3, { type: ["design"] });
+    const job = claimWindow(sessionDbId, 1, 3);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t2, t3]) });
+
+    write(context, { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] }, NOW);
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T3`, consume: [`S${sessionDbId}/T1`] },
+      NOW + 1,
+    );
+
+    expect(resultText(result)).toContain("1 relation");
+    expect(resultText(result)).not.toContain("warning:");
   });
 });
 
@@ -1086,7 +1070,7 @@ describe("the reviewable-window check is unconditional (ticket 07, spec D6 渲�
     const { sessionDbId, t2, job } = seedHiddenCitingTurn();
     // T2 is deliberately absent from reviewableTurnIds and carries NO write-gate
     // stamp on `type`, so the edge gate's own three judgments all admit.
-    const input = { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] };
+    const input = { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] };
 
     const refused = write(baseContext(job), input, NOW);
 
@@ -1113,13 +1097,13 @@ describe("the reviewable-window check is unconditional (ticket 07, spec D6 渲�
     const { sessionDbId, t2, job } = seedHiddenCitingTurn();
     write(
       baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
     const refused = write(
       baseContext(job),
-      { turn: `S${sessionDbId}/T2`, retractDependsOn: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, retractConsume: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
 
@@ -1135,7 +1119,7 @@ describe("the reviewable-window check is unconditional (ticket 07, spec D6 渲�
     const evaluation = evaluateSettlementTurnWrite(
       db,
       baseContext(job),
-      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
@@ -1150,7 +1134,7 @@ describe("the reviewable-window check is unconditional (ticket 07, spec D6 渲�
     // kind: that is what lets a window connect to what came before it.
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
@@ -1371,8 +1355,8 @@ describe("session-addressed narrative writes (ticket 09)", () => {
     for (const extra of [
       { type: ["design"] },
       { tags: ["auth"] },
-      { evidenceFor: ["S1/T1"] },
-      { dependsOn: ["S1/T1"] },
+      { verifies: ["S1/T1"] },
+      { consume: ["S1/T1"] },
     ]) {
       const result = write(
         baseContext(job),

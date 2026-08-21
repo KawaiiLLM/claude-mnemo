@@ -73,7 +73,7 @@ import type {
  * (supersedes-first, ticket 11's own single-home migration had already
  * pulled its JUDGMENT into the rubric but left a narrower FOUR-relation,
  * tool-matched vocabulary behind) is gone: the relation half now names the
- * SAME seven words `noteInputShape` exposes and points at the rubric's own
+ * SAME eight words `noteInputShape` exposes and points at the rubric's own
  * 关系 three-step checklist for which one, rather than restating a
  * discriminator here. `remember` gains `reassign` alongside `propose` — the
  * membership-CORRECTION verb, domain = this session's attached-segment
@@ -275,14 +275,15 @@ export function renderNoteSettlementPrompt(
     "     DISPLAYED mismatch, leave a merely-uncertain case alone.",
     `   - edges: \`note\`'s ${EDGE_RELATIONS.map((relation) => RELATION_FIELD_NAME[relation]).join("/")} fields, and`,
     `     ${EDGE_RELATIONS.map((relation) => `retract${RELATION_FIELD_NAME[relation].charAt(0).toUpperCase()}${RELATION_FIELD_NAME[relation].slice(1)}`).join("/")}`,
-    "     to delete one. Same seven relations, same phase-legality validator",
+    "     to delete one. Same eight relations, same legality validator",
     "     and same address form the main agent's own `note` uses; an edge",
     "     needs no prose citation and no pre-existing link between the two",
     "     turns — declare it on its own, on any two addresses shown below.",
     "     One pair may carry several relations at once.",
     "     Which relation, if any, is the Memory Rubric's own 关系 checklist",
-    "     above; a structurally illegal phase pair is",
-    "     rejected, naming which half is missing. A retraction naming an edge",
+    "     above; a structurally illegal call (wrong phase, an out-of-branch",
+    "     collects target, an illegal self-citation) is",
+    "     rejected, naming what is missing. A retraction naming an edge",
     "     this turn does not carry is rejected too, and deletes nothing.",
     "   - `type` and `tags` are the two fields that yield INDEPENDENTLY: if",
     "     another writer touched one of them since this dispatch started,",

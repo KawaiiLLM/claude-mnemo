@@ -50,26 +50,30 @@ function zeroSignals(): TurnEdgeSignals {
 }
 
 /**
- * Ticket 07's exhaustive scoring decision for the seven-word closed set
- * (`shared/turn-phase.ts`'s `EDGE_RELATIONS`): exactly three relations feed a
- * signal, and this reader never issues a query for any of the other four
- * (`evidence-for`, `evidence-against`, `grounded-on`, `depends-on`) — the
- * frozen-legacy `supersedes` sits outside `EDGE_RELATIONS` entirely and is
- * likewise never queried here. A `Record<TurnEdgeRelation, boolean>` is
- * exhaustive AT COMPILE TIME: an eighth word joining `EDGE_RELATIONS` without
- * an entry here is a type error, the strongest form of "fails loudly"
- * available — `tests/db/edge-signals.test.ts`'s guard test is the runtime
- * half, proving (behaviourally, over a real graph) that every one of the
- * `false` relations below, `supersedes` included, moves no signal.
+ * Ticket 07's exhaustive scoring decision, ORIGINALLY keyed on the retired
+ * seven-word set. Flow-relations spec, ticket 02's interim ruling
+ * (`.scratch/flow-relations/spec.md`, migration item 6, "Election interim"):
+ * "keys re-map 1:1 by rename — the refines key reads extends, the encodes
+ * key reads grounds", override unchanged. This is a MINIMAL, ticket-02-
+ * authorized word swap only, forced by `shared/turn-phase.ts`'s
+ * `TurnEdgeRelation` type changing under this exhaustive `Record` — it does
+ * NOT redesign scoring for the new words `narrows`/`collects` (both left
+ * `false`, "scores nothing until ruled", the same interim distortion spec.md
+ * names) or reconsider whether `extends`'s excess-baseline signal still means
+ * the same thing once `narrows` exists as a separate word. Ticket 05 owns
+ * that redesign; this file's query literals below are updated only so far as
+ * needed to not silently read zero rows post-migration (`encodes`/`refines`
+ * no longer appear in storage at all after this ticket's rename).
  */
 export const RELATION_IS_SCORED: Record<TurnEdgeRelation, boolean> = {
-  "evidence-for": false,
-  "evidence-against": false,
-  "grounded-on": false,
-  refines: true,
   override: true,
-  encodes: true,
-  "depends-on": false,
+  narrows: false,
+  extends: true,
+  collects: false,
+  consume: false,
+  grounds: true,
+  verifies: false,
+  refutes: false,
 };
 
 function parseTypeArray(value: string | null): string[] {
@@ -175,7 +179,7 @@ export function getTurnEdgeSignals(
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'encodes'
+         AND e.relation = 'grounds'
          AND citing.was_rolled_back = 0
          AND e.cited_id IN (${placeholders})
        GROUP BY e.cited_id`,
@@ -201,7 +205,7 @@ export function getTurnEdgeSignals(
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'refines'
+         AND e.relation = 'extends'
          AND citing.was_rolled_back = 0
          AND e.cited_id IN (${placeholders})
        ORDER BY e.cited_id ASC, e.created_at_epoch ASC, e.citing_id ASC`,

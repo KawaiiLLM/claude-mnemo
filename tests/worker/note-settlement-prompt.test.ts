@@ -461,8 +461,8 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
   test("the prompt teaches the retraction mirrors and the membership create verb", () => {
     const prompt = renderPrompt();
 
-    expect(prompt).toContain("retractEvidenceFor/");
-    expect(prompt).toContain("retractDependsOn");
+    expect(prompt).toContain("retractOverride/");
+    expect(prompt).toContain("retractRefutes");
     expect(prompt).toContain('`action="create"`');
     expect(prompt).toContain("joining an existing segment beats opening");
   });

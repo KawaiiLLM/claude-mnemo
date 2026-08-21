@@ -8,6 +8,7 @@ import {
   type TurnRelationFieldInput,
 } from "../db/citations";
 import { resolveEraCutoff } from "../db/era";
+import { deriveFlowsForSessions } from "../db/flows";
 import type { EdgeNode } from "../db/memory-edges";
 import { closeNoteDebtAsNoted } from "../db/note-debt";
 import { parseBareAddressReference, validateReferences } from "../db/references";
@@ -33,7 +34,7 @@ import {
 } from "../mcp/field-mode";
 import {
   bracketBareTurnReferences,
-  collectSegmentCrossingWarnings,
+  collectGroundsMidFlowWarnings,
   completeReadRemedyForTurnField,
   formatRelationRejections,
   formatRetractionReceipt,
@@ -50,6 +51,7 @@ import {
   SESSION_SUMMARY_FIELDS,
 } from "../mcp/session-summary";
 import { isSegmentEra } from "../segment-era";
+import { isFlowSettlement, isOwnFlowMember, type FlowDerivation } from "../shared/flows";
 import { formatBudgetWarning, formatNoteBudget } from "../shared/note-budget";
 import {
   findRetiredTopicTag,
@@ -292,7 +294,7 @@ const PROSE_FIELDS = ["title", "content", "insight"] as const;
 type ProseField = (typeof PROSE_FIELDS)[number];
 
 /**
- * The seven relation (or seven retraction) parameters this call carries, in
+ * The eight relation (or eight retraction) parameters this call carries, in
  * the `{relation, targets}` shape both `db/citations.ts` primitives take. The
  * zod shape has already proved each value is a `string[]`, so unlike
  * `mcp/note.ts`'s own collector this one has no type-check to fail.
@@ -357,13 +359,13 @@ export interface RelationOutcome {
    */
   restored: number;
   /**
-   * T1191 (relation-matrix spec): one line per written/restated override or
-   * refines edge whose two ends own different segments — the SAME
-   * `collectSegmentCrossingWarnings` (mcp/note.ts) the main agent's own
+   * Flow-relations spec (ticket 02, P1): one line per written/restated
+   * `grounds` edge whose target is mid-flow with a settlement to name — the
+   * SAME `collectGroundsMidFlowWarnings` (mcp/note.ts) the main agent's own
    * surface calls, so the trigger condition and wording cannot drift between
-   * the two writers. Empty, never omitted, when nothing crosses.
+   * the two writers. Empty, never omitted, when nothing fires.
    */
-  segmentWarnings: string[];
+  groundsWarnings: string[];
 }
 
 /**
@@ -653,7 +655,7 @@ export function evaluateSettlementTurnWrite(
       ok: false,
       message:
         "at least one of title, content, insight, type, tags, a relation field" +
-        " (evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn)" +
+        " (override/narrows/extends/collects/consume/grounds/verifies/refutes)" +
         " or one of their retract… mirrors is required.",
     };
   }
@@ -941,8 +943,37 @@ export function evaluateSettlementTurnWrite(
     return phasesForTypes(typeCorrectionLands ? normalizedType ?? turn.type : turn.type);
   };
 
+  // Flow-relations spec (ticket 02): a derivation is only needed when this
+  // call touches `collects` (the hard membership check) or `grounds` (the
+  // self-citation settlement gate, plus the post-write mid-flow warning) —
+  // scoped the SAME way `mcp/note.ts`'s `resolveRelationFields` scopes it,
+  // citing turn's own session plus every resolved target's own session.
+  // Declared here (outside the `if` below) so the receipt section further
+  // down can reuse it for `collectGroundsMidFlowWarnings` without a second
+  // derivation.
+  let relationFlows: FlowDerivation | null = null;
+
   if (relationFields.length > 0) {
     const phases = citingPhases();
+    const needsFlows = relationFields.some(
+      (field) => field.relation === "collects" || field.relation === "grounds",
+    );
+    if (needsFlows) {
+      const sessionIds = new Set<number>([context.sessionId]);
+      for (const field of relationFields) {
+        if (field.relation !== "collects" && field.relation !== "grounds") {
+          continue;
+        }
+        for (const raw of field.targets) {
+          const reference = parseBareAddressReference(raw);
+          if (reference && reference.kind === "turn") {
+            sessionIds.add(reference.sessionId);
+          }
+        }
+      }
+      relationFlows = deriveFlowsForSessions(db, [...sessionIds]);
+    }
+
     const rejections: string[] = [];
     for (const field of relationFields) {
       const key = RELATION_FIELD_ENTRIES.find(([, relation]) => relation === field.relation)![0];
@@ -961,16 +992,14 @@ export function evaluateSettlementTurnWrite(
           rejections.push(`${key} "${raw}" does not resolve to a turn or segment`);
           continue;
         }
-        // Ticket 08 (one validator, both write paths): the SAME
-        // `validateRelationTarget` the main agent's `note` calls — segment
-        // targets refused, phase-pair legality checked, the rejection naming
-        // which half is missing. Ticket 05 (relation-matrix spec, "自引用")
-        // folded the self-reference gate into this SAME call rather than a
-        // blanket pre-check here: a self target is no longer refused on
-        // sight — `isSelfReference` routes it through `validateRelationTarget`'s
-        // self branch, which still excludes diagonal relations outright but
-        // now admits a cross-phase one when this turn's own `type` list spans
-        // both halves.
+        // One validator, both write paths: the SAME `validateRelationTarget`
+        // the main agent's `note` calls — segment targets refused, phase-pair
+        // legality checked, the rejection naming which half is missing.
+        // Flow-relations spec (ticket 02): the self-citation gate is now
+        // graph-dependent for `grounds` — `isSettlement` is a caller-supplied
+        // fact (`isFlowSettlement` against `relationFlows`), mirroring
+        // `mcp/note.ts`'s own `checkRelationTargetPhase`.
+        const isSelf = node.kind === "turn" && node.id === turn.id;
         const citedPhases =
           node.kind === "turn"
             ? phasesForTypes(getTurnById(db, node.id)?.type ?? [])
@@ -980,11 +1009,32 @@ export function evaluateSettlementTurnWrite(
           citingPhases: phases,
           targetKind: node.kind,
           citedPhases,
-          isSelfReference: node.kind === "turn" && node.id === turn.id,
+          isSelfReference: isSelf,
+          isSettlement: isSelf && relationFlows !== null ? isFlowSettlement(relationFlows, turn.id) : false,
         });
         if (!legality.ok) {
           rejections.push(`${key} "${raw}" ${legality.detail}`);
           continue;
+        }
+
+        // Flow-relations spec, P1: collects' one graph-state hard check —
+        // the citing turn must itself be a flow's terminus; every target an
+        // OWN structural member of that SAME branch.
+        if (field.relation === "collects" && relationFlows !== null) {
+          if (relationFlows.flowById.get(turn.id) === undefined) {
+            rejections.push(
+              `${key} "${raw}" requires the citing turn to itself be a flow's terminus ` +
+                `(nothing further narrows/extends it) — ${ref} is mid-flow, or belongs to no decision flow at all`,
+            );
+            continue;
+          }
+          if (node.kind === "turn" && !isOwnFlowMember(relationFlows, turn.id, node.id)) {
+            rejections.push(
+              `${key} "${raw}" is not a member of the flow terminating at ${ref} — ` +
+                "collects only names turns already inside this branch",
+            );
+            continue;
+          }
         }
       }
     }
@@ -1104,13 +1154,13 @@ export function evaluateSettlementTurnWrite(
       restated: attached.restated.length,
       retracted,
       restored,
-      segmentWarnings: collectSegmentCrossingWarnings(db, [
+      groundsWarnings: collectGroundsMidFlowWarnings(db, relationFlows, [
         ...attached.written,
         ...attached.restated,
       ]),
     };
   } else if (retracted > 0) {
-    relations = { written: 0, restated: 0, retracted, restored, segmentWarnings: [] };
+    relations = { written: 0, restated: 0, retracted, restored, groundsWarnings: [] };
   }
 
   return {
@@ -1221,9 +1271,10 @@ export function renderSettlementTurnWriteReceipt(
     } else if (outcome.relations.restated > 0) {
       parts.push(`${outcome.relations.restated} relation(s) already present, nothing added.`);
     }
-    // T1191: same shared warning `mcp/note.ts` prints, computed once at
-    // write time (`evaluateSettlementTurnWrite`) and carried on the outcome.
-    for (const warning of outcome.relations.segmentWarnings) {
+    // Flow-relations spec: same shared grounds mid-flow warning `mcp/note.ts`
+    // prints, computed once at write time (`evaluateSettlementTurnWrite`) and
+    // carried on the outcome.
+    for (const warning of outcome.relations.groundsWarnings) {
       parts.push(warning);
     }
   }

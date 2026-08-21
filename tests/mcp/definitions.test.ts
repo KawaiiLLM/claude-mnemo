@@ -367,90 +367,80 @@ describe("tool surface", () => {
     ).toThrow();
   });
 
-  // ticket 01: the seven-word closed set — refines/override/encodes/
-  // groundedOn replace supersedes; evidenceFor/evidenceAgainst/dependsOn are
-  // untouched by name.
-  it("refines/override/encodes/groundedOn are present, and carry FORMAT only — the discriminators moved to the Memory Rubric (ticket 11)", () => {
+  // Flow-relations spec (ticket 02): the eight-word closed set — override/
+  // narrows/extends/collects/consume/grounds/verifies/refutes — replaces the
+  // retired seven-word set (and its own predecessor, supersedes) outright.
+  it("override/narrows/extends/collects/consume/grounds/verifies/refutes are present, and carry a reading only — the discriminators live in the Memory Rubric", () => {
     const shape = noteInputSchema.shape;
-    expect(Object.keys(noteInputShape)).toContain("refines");
-    expect(Object.keys(noteInputShape)).toContain("override");
-    expect(Object.keys(noteInputShape)).toContain("encodes");
-    expect(Object.keys(noteInputShape)).toContain("groundedOn");
+    for (const key of [
+      "override",
+      "narrows",
+      "extends",
+      "collects",
+      "consume",
+      "grounds",
+      "verifies",
+      "refutes",
+    ] as const) {
+      expect(Object.keys(noteInputShape)).toContain(key);
+      expect(shape[key].description?.toLowerCase()).toContain("memory rubric");
+    }
 
-    // Format survives: the phase-pair facts a rubric cannot state. Ticket 01
-    // (relation-matrix spec) widened override's phase pair from
-    // decision-only to the full diagonal — the retired "decision-phase
-    // turns only" constraint must be GONE, not merely unasserted.
+    // Format survives at the reading level: override's flow/layer-unlimited
+    // reach, no restated phase-pair enumeration.
+    expect(shape.override.description).toContain("same phase");
     expect(shape.override.description).not.toContain("decision-phase turns only");
-    expect(shape.override.description).toContain("same phase on both ends");
-    expect(shape.encodes.description).toContain("delivery-phase turn");
-    expect(shape.encodes.description).toContain("not mechanically checked");
+    expect(shape.override.description).not.toContain("decision-phase (design/discuss/correction)");
 
-    // Ticket 11: the two discriminator questions (override vs. refines,
-    // encodes' minimal-set rule) are judgment — single home is the Memory
-    // Rubric now, never restated on the describe().
-    expect(shape.override.description).not.toContain(
-      "if the predecessor's any sub-conclusion still holds",
-    );
-    expect(shape.encodes.description).not.toContain(
-      "name only the minimal set that can derive the final conclusion",
-    );
-    expect(shape.override.description.toLowerCase()).toContain("memory rubric");
-    expect(shape.encodes.description.toLowerCase()).toContain("memory rubric");
+    // ADR-0009's three-way split narrows further here (ticket 02 addenda):
+    // the mechanical phase requirement itself moved OFF the describe() and
+    // into the validator's own rejection message — no relation still spells
+    // out the old verbose "(research/measure)"-style parenthetical
+    // enumeration.
+    for (const key of [
+      "override",
+      "narrows",
+      "extends",
+      "collects",
+      "consume",
+      "grounds",
+      "verifies",
+      "refutes",
+    ] as const) {
+      const description = shape[key].description ?? "";
+      expect(description).not.toContain("(research/measure)");
+      expect(description).not.toContain("(design/discuss/correction)");
+      expect(description).not.toContain(
+        "(implement/refactor/fix/delegate/review/ops)",
+      );
+    }
   });
 
-  // [S15069/T935] mid-flight amendment to ticket 01: `groundedOn` joined the
-  // closed set (now seven words) after this ticket was already underway —
-  // its own counterfactual discriminator and its "recorded, never scored"
-  // exclusion (ticket 07 must not read it as a scoring signal).
-  it("groundedOn carries its own counterfactual discriminator and states it is never scored (S15069/T935)", () => {
+  // Flow-relations spec: `collects`' hard graph-state check and `grounds`'
+  // mid-flow-warning/self-citation behaviour are the two relations whose
+  // reading is genuinely new (no seven-word predecessor covered either),
+  // and their describe()s are the only place a caller learns the mechanism
+  // exists at all before hitting a rejection or a receipt warning.
+  it("collects states its branch-membership check; grounds states its no-restriction reach and self-citation gate", () => {
     const shape = noteInputSchema.shape;
-    expect(shape.groundedOn.description).toContain(
-      "if that finding were false, this decision would fall",
+    expect(shape.collects.description).toContain("branch's settlement");
+    expect(shape.collects.description).toContain("already belongs to that same branch");
+
+    expect(shape.grounds.description).toContain("no phase restriction");
+    expect(shape.grounds.description).toContain("mid-flow target still stores");
+    expect(shape.grounds.description).toContain("absorbs the retired grounded-on/encodes");
+    expect(shape.grounds.description).toContain("if it were false");
+    expect(shape.grounds.description).toContain(
+      "may cite the citing turn itself only when this turn is both a flow's settlement",
     );
-    expect(shape.groundedOn.description.toLowerCase()).toContain("never scored");
   });
 
-  // Ticket 01 (relation-matrix spec, S15069/T1163–T1171) acceptance
-  // criterion 3: the seven relation descriptions state the WIDENED phase
-  // law — the diagonal for refines/override/dependsOn, the widened target
-  // for evidenceFor/evidenceAgainst/encodes, groundedOn unchanged — and no
-  // description still claims the retired, narrower constraint.
-  it("all seven relation descriptions state the nine-cell matrix's law, no retired constraint anywhere", () => {
+  it("verifies/refutes require an evidence-phase source only — no target restriction restated", () => {
     const shape = noteInputSchema.shape;
-
-    // evidenceFor/evidenceAgainst: target widened from decision-only to
-    // decision OR delivery.
-    for (const key of ["evidenceFor", "evidenceAgainst"] as const) {
+    for (const key of ["verifies", "refutes"] as const) {
       const description = shape[key].description ?? "";
-      expect(description).toContain("evidence-phase");
-      expect(description).toContain("decision-phase");
-      expect(description).toContain("delivery-phase");
+      expect(description).toContain("evidence-phase source");
     }
-
-    // refines/override/dependsOn: same-phase diagonal, not decision-only
-    // (refines/override) or delivery-only (dependsOn) any more.
-    for (const key of ["refines", "override", "dependsOn"] as const) {
-      const description = shape[key].description ?? "";
-      expect(description).toContain("evidence-phase");
-      expect(description).toContain("decision-phase");
-      expect(description).toContain("delivery-phase");
-      expect(description).not.toContain("decision-phase turns only");
-      expect(description).not.toContain("delivery-phase (implement/refactor/fix/delegate/review/ops) source and target");
-    }
-    // The diagonal now offers a real three-way choice on every same-phase
-    // pair — dependsOn's own describe needed the same Rubric pointer
-    // refines/override already carried.
-    expect(shape.dependsOn.description?.toLowerCase()).toContain("memory rubric");
-
-    // encodes: target widened from decision-only to decision OR evidence.
-    expect(shape.encodes.description).toContain("evidence-phase");
-    expect(shape.encodes.description).toContain("decision-phase");
-
-    // groundedOn is the one relation the spec pins UNCHANGED — still
-    // decision source, evidence OR delivery target, never decision-target.
-    expect(shape.groundedOn.description).toContain("evidence-phase");
-    expect(shape.groundedOn.description).toContain("delivery-phase");
   });
 
   // [S15069/T939] mid-flight amendment: schema enums and prompt vocabulary
@@ -807,27 +797,38 @@ describe("rememberInputShape", () => {
 // would still pass on two objects that happen to agree today and silently
 // drift tomorrow.
 describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)", () => {
-  // Ticket 08 (edge-ownership-impl, "settlement four-field check-and-
-  // correct"): the relation half widened from the pre-ticket-01 four-field
-  // set to the full seven-word vocabulary `noteInputShape` itself exposes —
-  // groundedOn/refines/override join evidenceFor/evidenceAgainst/dependsOn,
-  // and `supersedes` (the field this test used to assert reference-equality
-  // for) is DROPPED from this shape outright, not merely left unequal.
+  // Flow-relations spec (ticket 02): the relation half now carries the
+  // eight-word vocabulary `noteInputShape` itself exposes — `supersedes`
+  // (the field this test used to assert reference-equality for) stays
+  // DROPPED from this shape outright, not merely left unequal.
   // Ticket 07/08 (write-mode-edit-semantics spec D12): `mode` joins that list
   // — one write vocabulary for both surfaces, the same object, folded into
   // this shape rather than spread onto it by the settlement facade.
-  it("mode, type, tags and all seven relation fields are the SAME zod object as noteInputShape's", () => {
+  it("mode, type, tags and all eight relation fields (plus their retract mirrors) are the SAME zod object as noteInputShape's", () => {
     expect(settlementNoteInputShape.mode).toBe(noteInputShape.mode);
     expect(settlementNoteInputShape.type).toBe(noteInputShape.type);
     expect(settlementNoteInputShape.tags).toBe(noteInputShape.tags);
     expect(settlementNoteInputShape.insight).toBe(noteInputShape.insight);
-    expect(settlementNoteInputShape.evidenceFor).toBe(noteInputShape.evidenceFor);
-    expect(settlementNoteInputShape.evidenceAgainst).toBe(noteInputShape.evidenceAgainst);
-    expect(settlementNoteInputShape.groundedOn).toBe(noteInputShape.groundedOn);
-    expect(settlementNoteInputShape.refines).toBe(noteInputShape.refines);
-    expect(settlementNoteInputShape.override).toBe(noteInputShape.override);
-    expect(settlementNoteInputShape.encodes).toBe(noteInputShape.encodes);
-    expect(settlementNoteInputShape.dependsOn).toBe(noteInputShape.dependsOn);
+    for (const key of [
+      "override",
+      "narrows",
+      "extends",
+      "collects",
+      "consume",
+      "grounds",
+      "verifies",
+      "refutes",
+      "retractOverride",
+      "retractNarrows",
+      "retractExtends",
+      "retractCollects",
+      "retractConsume",
+      "retractGrounds",
+      "retractVerifies",
+      "retractRefutes",
+    ] as const) {
+      expect(settlementNoteInputShape[key]).toBe(noteInputShape[key]);
+    }
   });
 
   it("supersedes is not part of this shape any more (ticket 08) — frozen legacy, no writer on either surface", () => {

@@ -107,19 +107,19 @@ describe("edge scoring signals", () => {
     }
   });
 
-  test("one leapfrog refines on top of the baseline chain: only that node rises", () => {
+  test("one leapfrog extends on top of the baseline chain: only that node rises", () => {
     const t1 = addTurn(1, { type: ["design"] });
     const t2 = addTurn(2, { type: ["design"] });
     const t3 = addTurn(3, { type: ["design"] });
     const t4 = addTurn(4, { type: ["design"] });
     const t5 = addTurn(5, { type: ["design"] });
-    edge(t2, t1, "refines", 1000);
-    edge(t3, t2, "refines", 1000);
-    edge(t4, t3, "refines", 1000);
-    edge(t5, t4, "refines", 1000);
+    edge(t2, t1, "extends", 1000);
+    edge(t3, t2, "extends", 1000);
+    edge(t4, t3, "extends", 1000);
+    edge(t5, t4, "extends", 1000);
     // T5 leapfrogs all the way back to T1, arriving strictly AFTER T1's
     // baseline edge (from T2).
-    edge(t5, t1, "refines", 2000);
+    edge(t5, t1, "extends", 2000);
 
     const signals = getTurnEdgeSignals(db, [t1, t2, t3, t4, t5]);
     expect(signals.get(t1)).toEqual({
@@ -132,17 +132,17 @@ describe("edge scoring signals", () => {
     }
   });
 
-  test("refines source-phase bucketing: decision-sourced, delivery-sourced, and a dual-phase source counted once as decision", () => {
+  test("extends source-phase bucketing: decision-sourced, delivery-sourced, and a dual-phase source counted once as decision", () => {
     const target = addTurn(1, { type: ["design"] });
     const baseline = addTurn(2, { type: ["design"] });
     const decisionLeapfrog = addTurn(3, { type: ["design"] });
     const deliveryLeapfrog = addTurn(4, { type: ["ops"] });
     const dualPhaseLeapfrog = addTurn(5, { type: ["review", "design"] });
 
-    edge(baseline, target, "refines", 1000); // baseline, excluded
-    edge(decisionLeapfrog, target, "refines", 2000); // decision bucket
-    edge(deliveryLeapfrog, target, "refines", 3000); // delivery bucket
-    edge(dualPhaseLeapfrog, target, "refines", 4000); // decision bucket (counted once)
+    edge(baseline, target, "extends", 1000); // baseline, excluded
+    edge(decisionLeapfrog, target, "extends", 2000); // decision bucket
+    edge(deliveryLeapfrog, target, "extends", 3000); // delivery bucket
+    edge(dualPhaseLeapfrog, target, "extends", 4000); // decision bucket (counted once)
 
     const signal = getTurnEdgeSignalsForTurn(db, target);
     expect(signal.refinesExcess).toEqual({ decision: 2, delivery: 1 });
@@ -203,10 +203,10 @@ describe("edge scoring signals", () => {
     expect(signal.encodesCount).toBe(0);
   });
 
-  test("relation-matrix ticket 03 — L→E encodes: all-phase crediting pinned, a delivery-phase source still credits an evidence-phase target's encodesCount", () => {
+  test("flow-relations ticket 02 — L→E grounds (was encodes): all-phase crediting pinned, a delivery-phase source still credits an evidence-phase target's encodesCount", () => {
     const target = addTurn(1, { type: ["research"] });
     const deliverySource = addTurn(2, { type: ["implement"] });
-    edge(deliverySource, target, "encodes", 1000);
+    edge(deliverySource, target, "grounds", 1000);
 
     const signal = getTurnEdgeSignalsForTurn(db, target);
     expect(signal.encodesCount).toBe(1);
@@ -214,17 +214,17 @@ describe("edge scoring signals", () => {
     expect(signal.refinesExcess).toEqual({ decision: 0, delivery: 0 });
   });
 
-  test("encodes count: raw in-degree, live sources only", () => {
+  test("encodesCount (now sourced from grounds): raw in-degree, live sources only", () => {
     const decisionA = addTurn(1, { type: ["design"] });
     const decisionB = addTurn(2, { type: ["design"] });
     const deliveryX = addTurn(3, { type: ["implement"] });
     const deliveryY = addTurn(4, { type: ["ops"] });
     const rolledBackDelivery = addTurn(5, { type: ["implement"], wasRolledBack: true });
 
-    edge(deliveryX, decisionA, "encodes", 1000);
-    edge(deliveryY, decisionA, "encodes", 1000);
-    edge(deliveryX, decisionB, "encodes", 1000);
-    edge(rolledBackDelivery, decisionB, "encodes", 1000);
+    edge(deliveryX, decisionA, "grounds", 1000);
+    edge(deliveryY, decisionA, "grounds", 1000);
+    edge(deliveryX, decisionB, "grounds", 1000);
+    edge(rolledBackDelivery, decisionB, "grounds", 1000);
 
     const signals = getTurnEdgeSignals(db, [decisionA, decisionB]);
     expect(signals.get(decisionA)!.encodesCount).toBe(2);
@@ -238,11 +238,11 @@ describe("edge scoring signals", () => {
   // (citing_id = cited_id) satisfies that join and the WHERE the same as any
   // other row, so no code change was needed here; this pins that the query
   // shape does NOT accidentally exclude it.
-  test("a self-encodes counts toward the turn's own encodesCount (ticket 05)", () => {
+  test("a self-grounds counts toward the turn's own encodesCount (ticket 05)", () => {
     const selfEncoder = addTurn(1, { type: ["research", "review"] });
     const otherSource = addTurn(2, { type: ["implement"] });
-    edge(selfEncoder, selfEncoder, "encodes", 1000);
-    edge(otherSource, selfEncoder, "encodes", 1000);
+    edge(selfEncoder, selfEncoder, "grounds", 1000);
+    edge(otherSource, selfEncoder, "grounds", 1000);
 
     const signal = getTurnEdgeSignalsForTurn(db, selfEncoder);
     expect(signal.encodesCount).toBe(2);
@@ -268,15 +268,16 @@ describe("edge scoring signals", () => {
     expect(signals.get(dependsOnTarget)).toEqual(ZERO);
   });
 
-  test("guard: RELATION_IS_SCORED classifies exactly refines/override/encodes as scored, everything else in the seven-word closed set as not — compile-time exhaustive over EDGE_RELATIONS", () => {
+  test("guard: RELATION_IS_SCORED classifies exactly override/extends/grounds as scored (spec.md's election-interim 1:1 rename), everything else in the eight-word closed set as not — compile-time exhaustive over EDGE_RELATIONS", () => {
     expect(RELATION_IS_SCORED).toEqual({
-      "evidence-for": false,
-      "evidence-against": false,
-      "grounded-on": false,
-      refines: true,
       override: true,
-      encodes: true,
-      "depends-on": false,
+      narrows: false,
+      extends: true,
+      collects: false,
+      consume: false,
+      grounds: true,
+      verifies: false,
+      refutes: false,
     });
     // Every current closed-set word has an entry (TypeScript already enforces
     // this at compile time via the Record type; this is the runtime mirror).

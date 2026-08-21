@@ -19,7 +19,6 @@ import {
   validateReferences,
   type RejectedReference,
 } from "./references";
-import { DIAGONAL_RELATIONS, type TurnEdgeRelation } from "../shared/turn-phase";
 import type { TurnRecord } from "./turns";
 
 /**
@@ -34,15 +33,20 @@ import type { TurnRecord } from "./turns";
  * forms stay in prose for human readers and remain the only signal for turns
  * extracted before the edge table existed.
  */
-// Ticket 01 (turn-edge-mechanism spec): `refines`/`override`/`encodes`/
-// `grounded-on` join the storage vocabulary alongside the original four.
-// `supersedes` STAYS — existing edges are frozen-readable (10 measured
+// Flow-relations spec, ticket 02 (the "expand half" — `.scratch/flow-relations/
+// spec.md`'s migration item 3): the eight-word vocabulary joins the storage
+// list ALONGSIDE the seven retired words, not in place of them — the DB
+// CHECK's word list is old∪new until ticket 03's contract half narrows it to
+// the eight words + `supersedes`. The migration (schema.ts) renames every
+// STORED row (depends-on->consume, evidence-for->verifies, evidence-against
+// ->refutes, grounded-on->grounds, refines->extends, encodes->grounds), so in
+// practice no live row carries the six renamed words after this ticket's
+// migration runs — they stay listed here only because the CHECK still admits
+// them and a value this constant refused would desync from what SQLite itself
+// accepts. `supersedes` STAYS permanently frozen-readable (10 measured
 // `supersedes` edges, none of which actually invalidated a predecessor's
-// whole conclusion, so it is not remapped to `override` either) — but it is
-// no longer a relation a NEW write may request: `mcp/note.ts` dropped it from
-// its own parameter list, so the only surviving writer of `supersedes` is
-// settlement's own facade (`worker/note-settlement-turn-facade.ts`, outside
-// this ticket). The seven-word CLOSED set a fresh write may carry lives in
+// whole conclusion) — never a relation a NEW write may request, whatever the
+// CHECK admits. The EIGHT-word CLOSED set a fresh write may carry lives in
 // `shared/turn-phase.ts`'s `EDGE_RELATIONS` — narrower than this storage-level
 // list on purpose.
 export const CITATION_RELATIONS = [
@@ -54,6 +58,13 @@ export const CITATION_RELATIONS = [
   "override",
   "encodes",
   "grounded-on",
+  "narrows",
+  "extends",
+  "collects",
+  "consume",
+  "grounds",
+  "verifies",
+  "refutes",
 ] as const;
 
 export type CitationRelation = (typeof CITATION_RELATIONS)[number];
@@ -355,23 +366,25 @@ export function recomputeTurnCitedPairs(
  *     relation)), and a landing turn genuinely both `depends-on` a plan and
  *     `encodes` a ruling about the same target.
  *
- * `self-diagonal` (relation-matrix spec, "自引用", ticket 05 — renamed from
- * the old blanket `self-loop`): a DIAGONAL relation (refines/override/
- * depends-on) can never legally cite the citing turn itself, whatever its
- * phase, so this remains a hard, phase-blind refusal raised here rather than
- * left to the table CHECK (which now admits it) or to a silent drop. A
- * CROSS-PHASE relation's self-legality is a genuine phase question this
- * function cannot answer on its own (no `type` in scope) — that check runs
- * one layer up, in `mcp/note.ts`'s `checkRelationTargetPhase` /
+ * `self-not-grounds` (flow-relations spec, ticket 02 — renamed from the
+ * retired vocabulary's `self-diagonal`): ONLY `grounds` may ever legally cite
+ * the citing turn itself (this module's own header); every other relation
+ * compares two DIFFERENT turns by construction, so this remains a hard,
+ * phase-blind refusal raised here rather than left to the table CHECK (which
+ * admits any relation-carrying self row) or to a silent drop. Whether a
+ * self-`grounds` is ACTUALLY legal — the citing turn must be both a flow's
+ * settlement and that settlement's implementer — is a graph question this
+ * function cannot answer on its own (no flow derivation in scope) — that
+ * check runs one layer up, in `mcp/note.ts`'s `checkRelationTargetPhase` /
  * `shared/turn-phase.ts`'s `validateRelationTarget`, BEFORE this function is
- * ever called, so a phase-illegal cross-phase self target never reaches here
- * at all through that caller. `no-such-edge` is RETRACTION-only: an address
- * that resolved but carries no such relation on this turn.
+ * ever called, so an illegal self-`grounds` never reaches here at all through
+ * that caller. `no-such-edge` is RETRACTION-only: an address that resolved
+ * but carries no such relation on this turn.
  */
 export type TurnRelationRejectionReason =
   | "malformed"
   | "unresolved"
-  | "self-diagonal"
+  | "self-not-grounds"
   | "no-such-edge";
 
 export interface TurnRelationRejection {
@@ -490,20 +503,16 @@ export function attachTurnRelations(
         rejected.push({ relation: field.relation, raw, reason: node });
         continue;
       }
-      // Ticket 05: narrowed to DIAGONAL relations, phase-blind — a same-phase
-      // word can never legally cite the citing turn itself (see
-      // `TurnRelationRejectionReason`'s doc comment above). A CROSS-PHASE
-      // relation's self target is NOT refused here: `writeMemoryEdges` (the
-      // primitive `attachTurnRelations` calls below) now admits a relation-
-      // carrying self row unconditionally, trusting the caller for phase
-      // legality — the same trust model ordinary (non-self) phase-pair
-      // legality already has at this layer.
-      if (
-        node.kind === "turn" &&
-        node.id === citingTurnId &&
-        DIAGONAL_RELATIONS.includes(field.relation as TurnEdgeRelation)
-      ) {
-        rejected.push({ relation: field.relation, raw, reason: "self-diagonal" });
+      // Flow-relations spec (ticket 02): phase-blind — every relation but
+      // `grounds` can never legally cite the citing turn itself (see
+      // `TurnRelationRejectionReason`'s doc comment above). A self-`grounds`
+      // target is NOT refused here: `writeMemoryEdges` (the primitive
+      // `attachTurnRelations` calls below) admits a relation-carrying self
+      // row unconditionally, trusting the caller for the settlement+
+      // implementer legality that gate needs — the same trust model ordinary
+      // (non-self) phase-pair legality already has at this layer.
+      if (node.kind === "turn" && node.id === citingTurnId && field.relation !== "grounds") {
+        rejected.push({ relation: field.relation, raw, reason: "self-not-grounds" });
         continue;
       }
       const key = relationRowKey(citing, node, field.relation);

@@ -264,16 +264,17 @@ describe("a rejected direct write leaves no partial state (one transaction per c
       now: () => NOW,
     });
 
-    // implement = delivery-only: refines demands a decision-phase citing turn,
-    // so the relation half rejects. Ticket 04 moved every rejection AHEAD of
-    // the first mutation inside `evaluateSettlementTurnWrite`, so this now
-    // holds twice over — the evaluator writes nothing, and the engine's own
-    // per-call transaction would have rolled it back anyway. The assertion is
-    // kept as the outer guard: whichever layer changes, no partial state.
+    // implement = delivery-only: extends demands a decision-phase citing
+    // turn, so the relation half rejects. Ticket 04 moved every rejection
+    // AHEAD of the first mutation inside `evaluateSettlementTurnWrite`, so
+    // this now holds twice over — the evaluator writes nothing, and the
+    // engine's own per-call transaction would have rolled it back anyway.
+    // The assertion is kept as the outer guard: whichever layer changes, no
+    // partial state.
     const receipt = engine.writeNote({
       turn: "S" + sessionDbId + "/T2",
       type: ["implement"],
-      refines: ["S" + sessionDbId + "/T1"],
+      extends: ["S" + sessionDbId + "/T1"],
     });
 
     expect(receipt.content[0]!.text).toContain("Parameter error");

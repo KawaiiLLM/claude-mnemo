@@ -332,8 +332,8 @@ describe("settlement context assembly", () => {
     expect(correctionIndex).toBeGreaterThan(proposalsIndex);
     expect(narrativeIndex).toBeGreaterThan(correctionIndex);
     expect(commitIndex).toBeGreaterThan(narrativeIndex);
-    expect(prompt).toContain("evidenceFor");
-    expect(prompt).toContain("dependsOn");
+    expect(prompt).toContain("override");
+    expect(prompt).toContain("consume");
   });
 
   // Ticket 08 (edge-ownership-impl, "settlement four-field check-and-
@@ -372,11 +372,11 @@ describe("settlement context assembly", () => {
     expect(prompt).toContain("Which relation, if any, is the Memory Rubric's");
     expect(prompt).toContain("no prose citation and no pre-existing link");
     expect(prompt).toContain("One pair may carry several relations at once");
-    expect(prompt).toContain("rejected, naming which half is missing");
+    expect(prompt).toContain("rejected, naming what is missing");
     expect(prompt).toContain(
-      "note`'s evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn fields",
+      "note`'s override/narrows/extends/collects/consume/grounds/verifies/refutes fields",
     );
-    expect(prompt).toContain("retractEvidenceFor/");
+    expect(prompt).toContain("retractOverride/");
 
     // The retired fence's own wording, pinned ABSENT — the rule is gone, so
     // the sentences that taught it must not survive anywhere in the prompt.
@@ -476,11 +476,12 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const fixture = seedFourTurnWindow();
     // A judged relation is legal only on a pair present BEFORE this window's
     // run (spec C7) — seed the T3->T1 pair here (a prior bare citation, in
-    // production) so the `encodes` relation below is attaching to an
-    // existing pair, not minting one. `encodes` (not `dependsOn`) because T1
-    // is staged decision-phase (`design`) and T3 delivery+decision
-    // (`implement`+`correction`) — the phase pair `encodes` requires
-    // (ticket 08's phase-legality gate, `shared/turn-phase.ts`).
+    // production) so the `grounds` relation below is attaching to an
+    // existing pair, not minting one. `grounds` (not `consume`) because it
+    // carries no phase restriction at all — legal regardless of T1's staged
+    // decision-phase (`design`) and T3's delivery+decision
+    // (`implement`+`correction`) type (flow-relations spec's six-row law,
+    // `shared/turn-phase.ts`).
     writeMemoryEdges(
       db,
       [
@@ -516,7 +517,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
           turn: "S1/T3",
           type: ["implement", "correction"],
           tags: ["lease"],
-          encodes: ["S1/T1"],
+          grounds: ["S1/T1"],
         });
         engine.writeNote({ turn: "S1/T2", type: ["research"], tags: ["lease"] });
         engine.writeMembership({
@@ -532,7 +533,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
 
     // The judged relation (spec C7's pre-state gate).
     const judged = getOutgoingEdges(db, { kind: "turn", id: fixture.turnIds[2]! });
-    expect(judged.some((edge) => edge.relation === "encodes" && edge.provenance === "judged")).toBe(true);
+    expect(judged.some((edge) => edge.relation === "grounds" && edge.provenance === "judged")).toBe(true);
 
     // The proposal — text only, never a segment.
     const proposals = listRecentSettlementProposals(db, 3);

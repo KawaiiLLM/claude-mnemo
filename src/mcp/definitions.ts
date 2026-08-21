@@ -117,7 +117,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
     "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written — never just to write one turn's note early.\n" +
     "skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\n" +
     "Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\n" +
-    "Relations — evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn: turn-only address lists, declared independently of the prose (the body need not name the target, and a call carrying nothing but relations is valid). A pair may hold several relations at once; each `retract<Relation>` mirror deletes one. Which relation, if any — the judgment — lives in the Memory Rubric (SessionStart injection); this call only enforces address shape, phase legality, and your own read grant on the turn being written.\n" +
+    "Relations — override/narrows/extends/collects/consume/grounds/verifies/refutes: turn-only address lists, declared independently of the prose (the body need not name the target, and a call carrying nothing but relations is valid). A pair may hold several relations at once; each `retract<Relation>` mirror deletes one. Which relation, if any — the judgment — lives in the Memory Rubric (SessionStart injection); this call only enforces address shape, phase legality, the collects flow-membership check, and your own read grant on the turn being written.\n" +
     "Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
@@ -371,165 +371,141 @@ export const noteInputShape = {
       "true to confirm a write addressed at a turn outside the caller's own session; required whenever the address's session differs from the caller's, refused otherwise.",
     ),
 
-  // ticket 07 (spec C1): one named field per relation, not a generic
-  // `{turn, relation}` list — an illegal relation is structurally
-  // unrepresentable. Targets are address tokens, `S<session>/T<prompt>` or
-  // `E<segment>` (brackets optional). No `mode`: unlike title/tags/type there
-  // is no PRIOR value at this layer to write over or edit — a relation write
-  // only ever ADDS a row (edge-mechanism-revision D2), and removing one is a
+  // Flow-relations spec (ticket 02, "六行律" — the six-row law): the eight-
+  // word vocabulary that replaces ADR-0010's nine-cell grammar outright.
+  // Targets are address tokens, `S<session>/T<prompt>` (brackets optional) —
+  // segment targets are refused (relations are turn-only). No `mode`: unlike
+  // title/tags/type there is no PRIOR value at this layer to write over or
+  // edit — a relation write only ever ADDS a row, and removing one is a
   // retraction, not a mode.
   //
-  // ticket 02 (edge-mechanism-revision D1): the co-occurrence requirement
-  // these describes used to carry — "each target MUST already be named by
-  // this same call's title/content/insight post-state" — is deleted, along
-  // with the check. Each describe now states only the phase pair it needs
-  // and where the judgment lives; nothing on this surface asks the prose for
-  // permission any more.
-  evidenceFor: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "Addresses whose claim this turn tests FOR. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) OR delivery-phase (implement/refactor/fix/delegate/review/ops) target.",
-    ),
-  evidenceAgainst: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "Addresses whose claim this turn tests AGAINST. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) OR delivery-phase (implement/refactor/fix/delegate/review/ops) target.",
-    ),
-  // ticket 01 (turn-edge-mechanism spec, [S15069/T935] mid-flight amendment):
-  // `groundedOn` — a decision rests on an earlier finding, evidence-phase OR
-  // delivery-phase (a review/audit finding grounds a decision the same as a
-  // research finding). Recorded but excluded from every scoring surface —
-  // see `shared/turn-phase.ts`'s `UNSCORED_RELATIONS`.
-  groundedOn: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "Addresses the earlier finding this turn's decision rests on — counterfactual: if that finding were false, this decision would fall. Decision-phase (design/discuss/correction) source; evidence-phase (research/measure) OR delivery-phase (implement/refactor/fix/delegate/review/ops) target. Recorded, never scored.",
-    ),
-  // ticket 01 (turn-edge-mechanism spec): `refines`/`override` replace the
-  // retired `supersedes`, split by whether the predecessor's conclusion
-  // survives IN PART (`refines`) or not AT ALL (`override`).
-  // `supersedes` itself is REMOVED from this shape outright: a caller still
-  // sending it gets `.strict()`'s parse error, naming the unrecognised key —
-  // existing `supersedes` EDGES stay frozen-readable (db/citations.ts), only
-  // the write parameter is gone.
-  // ticket 11 (edge-ownership-impl): `refines`/`override`'s own discriminator
-  // — "if the predecessor's any sub-conclusion still holds, use refines" —
-  // moved to the Memory Rubric's 关系 section (single home for judgment;
-  // [S15069/T933]/[T939]). What stays here is FORMAT only: the phase pair
-  // both ends require, and a pointer to where the choice between the two is
-  // actually made.
-  // relation-matrix spec (S15069/T1163–T1171, ticket 01): the phase
-  // requirement widened from decision-only to the full diagonal — same
-  // phase on both ends, evidence/decision/delivery alike (a fact/fact
-  // improvement, or a shipped-artifact/shipped-artifact one, refines exactly
-  // as a decision/decision one always did) — and the diagonal now competes
-  // with `depends-on` too, so the Rubric pointer names all three.
-  refines: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "Addresses a predecessor this turn continues or partially revises, not wholly wrong — evidence-phase (research/measure), decision-phase (design/discuss/correction), or delivery-phase (implement/refactor/fix/delegate/review/ops), same phase on both ends. Judgment (refines vs. override vs. depends-on) lives in the Memory Rubric.",
-    ),
+  // ADR-0009's three-way split (FORMAT on each `.describe()`, TIMING on the
+  // tool description, JUDGMENT in the Memory Rubric alone) narrows further
+  // here: the mechanical phase requirement itself moved OFF this surface and
+  // into the validator's own rejection message (`shared/turn-phase.ts`) — a
+  // call that gets the phase wrong is told so, by name, at the point it
+  // fails, rather than reading it here first. What each describe below keeps
+  // is the one-line READING (which stance this word states) and a pointer to
+  // the Memory Rubric for the judgment of WHICH word to use.
   override: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses a predecessor this turn overturns WHOLE — evidence-phase (research/measure), decision-phase (design/discuss/correction), or delivery-phase (implement/refactor/fix/delegate/review/ops), same phase on both ends. Judgment (refines vs. override vs. depends-on) lives in the Memory Rubric.",
+      "Addresses a predecessor whose conclusion this turn holds is WRONG and replaces — same phase, no flow or layer limit. Judgment lives in the Memory Rubric.",
     ),
-  // ticket 01: `encodes` — a delivery-phase turn (spec/ADR/ticket/commit/
-  // release) naming the decision(s) it carries. Ticket 11: the minimal-set
-  // discriminator moved to the Memory Rubric (关系, question ④) — this
-  // describe keeps the format fact (self-asserted, not mechanically checked)
-  // and a pointer, not the rule itself.
-  // relation-matrix spec (ticket 01): target widened from decision-only to
-  // decision OR evidence — a delivery-phase artifact may equally curate the
-  // key VERIFICATION it carries, not only the decision (L->D and L->E share
-  // one discipline: name the minimal set worth showing).
-  encodes: z
+  narrows: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses the decision(s) or key finding(s) this turn's artifact (spec/ADR/ticket/commit/release) carries — a delivery-phase turn (implement/refactor/fix/delegate/review/ops) citing a decision-phase (design/discuss/correction) OR evidence-phase (research/measure) target. Self-asserted, not mechanically checked; which to name (the minimal set) is judgment — see the Memory Rubric.",
+      "Addresses a decision this turn still holds but cuts a piece OUT of — same flow, decision-phase both ends. Judgment lives in the Memory Rubric.",
     ),
-  // relation-matrix spec (ticket 01): `dependsOn` widened from delivery-only
-  // to the full diagonal, same as refines/override — a pure completion
-  // dependency now competes with them in every same-phase pair, not only
-  // delivery->delivery, so this describe carries the same Rubric pointer.
-  dependsOn: z
+  extends: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses this turn's own conclusion depends on. Turn-only; evidence-phase (research/measure), decision-phase (design/discuss/correction), or delivery-phase (implement/refactor/fix/delegate/review/ops), same phase on both ends. Judgment (refines vs. override vs. depends-on) lives in the Memory Rubric.",
+      "Addresses a decision this turn still holds and adds a piece TO — same flow, decision-phase both ends. Judgment lives in the Memory Rubric.",
+    ),
+  collects: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses the minimal set carrying this flow's conclusion — legal only when this turn is ITSELF the branch's settlement (nothing further narrows/extends it) and every address already belongs to that same branch; an out-of-branch target rejects the whole call, naming the flow. Judgment lives in the Memory Rubric.",
+    ),
+  consume: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses work this turn used, with no liability if it turns out wrong — cross-flow. Judgment lives in the Memory Rubric.",
+    ),
+  grounds: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false — no phase restriction, absorbs the retired grounded-on/encodes. A mid-flow target still stores; the receipt then names the branch's settlement to cite instead. Turn-only; may cite the citing turn itself only when this turn is both a flow's settlement and that settlement's implementer — every other relation refuses a self target outright. Judgment lives in the Memory Rubric.",
+    ),
+  verifies: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses the claim this turn tested FOR. Requires an evidence-phase source. Judgment lives in the Memory Rubric.",
+    ),
+  refutes: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses the claim this turn tested AGAINST. Requires an evidence-phase source. Judgment lives in the Memory Rubric.",
     ),
 
-  // ticket 02 (edge-mechanism-revision D3): the seven retraction mirrors. A
-  // relation is never overwritten (D2 makes a relation write purely
-  // additive), so correcting a wrong one is two auditable acts — retract,
-  // then write the right relation — and BOTH writers hold the same power
-  // over either's edges ([S15069/T1124]: a false assertion must not outlive
-  // its refutation on account of who filed it). The spelling is mechanical
-  // (`retract` + the relation parameter's own name), pinned against
-  // `mcp/note.ts`'s derived `RETRACTION_FIELD_ENTRIES` by a guard test, so
-  // the two halves of the vocabulary cannot drift apart.
-  retractEvidenceFor: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "Addresses whose evidence-for edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
-    ),
-  retractEvidenceAgainst: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "Addresses whose evidence-against edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
-    ),
-  retractGroundedOn: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "Addresses whose grounded-on edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
-    ),
-  retractRefines: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "Addresses whose refines edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
-    ),
+  // Flow-relations spec (ticket 02): the eight retraction mirrors. A relation
+  // is never overwritten (a relation write is purely additive), so correcting
+  // a wrong one is two auditable acts — retract, then write the right
+  // relation — and BOTH writers hold the same power over either's edges
+  // ([S15069/T1124]: a false assertion must not outlive its refutation on
+  // account of who filed it). The spelling is mechanical (`retract` + the
+  // relation parameter's own name), pinned against `mcp/note.ts`'s derived
+  // `RETRACTION_FIELD_ENTRIES` by a guard test, so the two halves of the
+  // vocabulary cannot drift apart.
   retractOverride: z
     .array(z.string())
     .optional()
     .describe(
       "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
     ),
-  retractEncodes: z
+  retractNarrows: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses whose encodes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+      "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
     ),
-  retractDependsOn: z
+  retractExtends: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses whose depends-on edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+      "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
     ),
-  // ticket 01 (turn-edge-mechanism spec): `supersedes` retired from the NOTE
-  // TOOL's own surface — `noteInputSchema` below `.omit()`s this key, so a
-  // caller sending it gets `.strict()`'s parse error naming the unrecognised
-  // key, same as any other retired field. Ticket 08 (edge-ownership-impl)
-  // retired settlement's own write of it too — `settlementNoteInputShape` no
-  // longer reuses this field object, so it now has NO reuser at all. It stays
-  // declared, unexported from the schema, purely as frozen documentation of
-  // the word this project once wrote and no longer does; `db/citations.ts`'s
-  // `CITATION_RELATIONS` is where the READ-side legacy value actually lives.
+  retractCollects: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose collects edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+    ),
+  retractConsume: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+    ),
+  retractGrounds: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+    ),
+  retractVerifies: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+    ),
+  retractRefutes: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Addresses whose refutes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+    ),
+  // Frozen legacy: `supersedes` retired from the NOTE TOOL's own surface —
+  // `noteInputSchema` below `.omit()`s this key, so a caller sending it gets
+  // `.strict()`'s parse error naming the unrecognised key, same as any other
+  // retired field. No reuser (settlement's own shape does not reuse this
+  // field object either); it stays declared, unexported from the schema,
+  // purely as frozen documentation of the word this project once wrote and
+  // no longer does; `db/citations.ts`'s `CITATION_RELATIONS` is where the
+  // READ-side legacy value actually lives.
   supersedes: z
     .array(z.string())
     .optional()
     .describe(
-      "Retired on the note tool (ticket 01) — use refines/override instead. Present here only for settlement's own surface.",
+      "Retired on the note tool — use extends/override instead. Present here only as frozen documentation.",
     ),
 
   mode: noteModeShape,
@@ -709,9 +685,9 @@ export const timelineInputShape = {
 // turn-only, refused by `evaluateSettlementTurnWrite`'s session branch.
 //
 // Ticket 08 (edge-ownership-impl, "settlement four-field check-and-
-// correct"): the relation half moves onto the SAME seven-word vocabulary
-// `noteInputShape` exposes (evidenceFor/evidenceAgainst/groundedOn/refines/
-// override/encodes/dependsOn — `shared/turn-phase.ts`'s `EDGE_RELATIONS`),
+// correct"): the relation half moves onto the SAME vocabulary `noteInputShape`
+// exposes (`shared/turn-phase.ts`'s `EDGE_RELATIONS` — the seven-word set at
+// ticket 08's own time, flow-relations ticket 02's eight words now),
 // replacing the narrower pre-ticket-01 four-field set this shape used to
 // carry. `supersedes` is dropped from THIS shape too — it is frozen legacy
 // (readable on old rows, `db/citations.ts`'s `CITATION_RELATIONS`) but not
@@ -746,20 +722,22 @@ export const settlementNoteInputShape = {
   mode: noteInputShape.mode,
   type: noteInputShape.type,
   tags: noteInputShape.tags,
-  evidenceFor: noteInputShape.evidenceFor,
-  evidenceAgainst: noteInputShape.evidenceAgainst,
-  groundedOn: noteInputShape.groundedOn,
-  refines: noteInputShape.refines,
   override: noteInputShape.override,
-  encodes: noteInputShape.encodes,
-  dependsOn: noteInputShape.dependsOn,
-  retractEvidenceFor: noteInputShape.retractEvidenceFor,
-  retractEvidenceAgainst: noteInputShape.retractEvidenceAgainst,
-  retractGroundedOn: noteInputShape.retractGroundedOn,
-  retractRefines: noteInputShape.retractRefines,
+  narrows: noteInputShape.narrows,
+  extends: noteInputShape.extends,
+  collects: noteInputShape.collects,
+  consume: noteInputShape.consume,
+  grounds: noteInputShape.grounds,
+  verifies: noteInputShape.verifies,
+  refutes: noteInputShape.refutes,
   retractOverride: noteInputShape.retractOverride,
-  retractEncodes: noteInputShape.retractEncodes,
-  retractDependsOn: noteInputShape.retractDependsOn,
+  retractNarrows: noteInputShape.retractNarrows,
+  retractExtends: noteInputShape.retractExtends,
+  retractCollects: noteInputShape.retractCollects,
+  retractConsume: noteInputShape.retractConsume,
+  retractGrounds: noteInputShape.retractGrounds,
+  retractVerifies: noteInputShape.retractVerifies,
+  retractRefutes: noteInputShape.retractRefutes,
 };
 
 // Ticket 04/11: `truncate` and `view` are defined on `recallInputShape`

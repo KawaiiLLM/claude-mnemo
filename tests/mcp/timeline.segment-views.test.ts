@@ -233,10 +233,10 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       writeMemoryEdges(
         db,
         [
-          { citing: { kind: "turn", id: e1 }, cited: { kind: "turn", id: strong }, relation: "encodes", provenance: "judged" },
-          { citing: { kind: "turn", id: e2 }, cited: { kind: "turn", id: strong }, relation: "encodes", provenance: "judged" },
-          { citing: { kind: "turn", id: e3 }, cited: { kind: "turn", id: strong }, relation: "encodes", provenance: "judged" },
-          { citing: { kind: "turn", id: w1 }, cited: { kind: "turn", id: weak }, relation: "encodes", provenance: "judged" },
+          { citing: { kind: "turn", id: e1 }, cited: { kind: "turn", id: strong }, relation: "grounds", provenance: "judged" },
+          { citing: { kind: "turn", id: e2 }, cited: { kind: "turn", id: strong }, relation: "grounds", provenance: "judged" },
+          { citing: { kind: "turn", id: e3 }, cited: { kind: "turn", id: strong }, relation: "grounds", provenance: "judged" },
+          { citing: { kind: "turn", id: w1 }, cited: { kind: "turn", id: weak }, relation: "grounds", provenance: "judged" },
         ],
         CUTOFF,
       );
@@ -264,10 +264,10 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       writeMemoryEdges(
         db,
         [
-          { citing: { kind: "turn", id: baselineA }, cited: { kind: "turn", id: decisionHeavy }, relation: "refines", provenance: "judged" },
-          { citing: { kind: "turn", id: decisionRefiner }, cited: { kind: "turn", id: decisionHeavy }, relation: "refines", provenance: "judged" },
-          { citing: { kind: "turn", id: baselineB }, cited: { kind: "turn", id: deliveryHeavy }, relation: "refines", provenance: "judged" },
-          { citing: { kind: "turn", id: deliveryRefiner }, cited: { kind: "turn", id: deliveryHeavy }, relation: "refines", provenance: "judged" },
+          { citing: { kind: "turn", id: baselineA }, cited: { kind: "turn", id: decisionHeavy }, relation: "extends", provenance: "judged" },
+          { citing: { kind: "turn", id: decisionRefiner }, cited: { kind: "turn", id: decisionHeavy }, relation: "extends", provenance: "judged" },
+          { citing: { kind: "turn", id: baselineB }, cited: { kind: "turn", id: deliveryHeavy }, relation: "extends", provenance: "judged" },
+          { citing: { kind: "turn", id: deliveryRefiner }, cited: { kind: "turn", id: deliveryHeavy }, relation: "extends", provenance: "judged" },
         ],
         CUTOFF,
       );

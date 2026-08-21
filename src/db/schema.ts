@@ -1156,17 +1156,27 @@ const SCHEMA_SQL = `
 // still the gate a fresh install uses to skip that fold — the same idiom as
 // ensureForkLineageColumns' one-time backfill.
 //
-// Ticket 01 (turn-edge-mechanism spec): the `relation` CHECK below widens with
-// `refines`/`override`/`encodes`/`grounded-on` alongside the four legacy
-// values. `supersedes` stays IN the CHECK — existing rows are frozen-readable and
-// settlement's own facade may still write it — even though mcp/note.ts no
-// longer offers it as a parameter (see db/citations.ts's CITATION_RELATIONS).
+// Flow-relations spec, ticket 02 (the "expand half" — spec.md's migration
+// item 3): the `relation` CHECK widens to old∪new — the retired seven-word
+// set (evidence-for/evidence-against/depends-on/refines/encodes/grounded-on,
+// plus supersedes and override which never moved) PLUS the eight-word
+// vocabulary that replaces it (override/narrows/extends/collects/consume/
+// grounds/verifies/refutes). Deliberately a UNION, not a swap: ticket 03's
+// own "contract half" narrows this to the eight words + supersedes once no
+// old-vocabulary row remains anywhere — this ticket only ever WIDENS a
+// CHECK, never narrows one, so a still-in-flight rehearsal or a caller this
+// migration has not yet reached can never be rejected by a CHECK this build
+// tightened out from under it. `supersedes` stays IN the CHECK permanently —
+// existing rows are frozen-readable and settlement's own facade may still
+// write it — even though mcp/note.ts never offered it as a parameter (see
+// db/citations.ts's CITATION_RELATIONS).
 // NOTE: "CREATE TABLE IF NOT EXISTS" only applies this widened list to a
 // FRESH database — an existing installation's physical CHECK constraint
-// predates this change; `ensureMemoryEdgesRelationVocabulary` below rebuilds
-// it (straight copy — pair identity already holds, only the CHECK text
-// changes). (No backticks inside the DDL template literal below — it is a
-// JS template string, and a stray backtick in a SQL comment would close it.)
+// predates this change; `ensureMemoryEdgesVocabularyFlip` below rebuilds it
+// AND renames every existing row's `relation` value per the migration's
+// mapping table in the same rebuild-and-swap pass. (No backticks inside the
+// DDL template literal below — it is a JS template string, and a stray
+// backtick in a SQL comment would close it.)
 function memoryEdgesTableDdl(tableName: string): string {
   return `
   CREATE TABLE IF NOT EXISTS ${tableName} (
@@ -1178,7 +1188,9 @@ function memoryEdgesTableDdl(tableName: string): string {
       relation IS NULL OR
       relation IN (
         'evidence-for', 'evidence-against', 'supersedes', 'depends-on',
-        'refines', 'override', 'encodes', 'grounded-on'
+        'refines', 'override', 'encodes', 'grounded-on',
+        'narrows', 'extends', 'collects', 'consume', 'grounds',
+        'verifies', 'refutes'
       )
     ),
     provenance TEXT NOT NULL CHECK (
@@ -1734,6 +1746,197 @@ function ensureMemoryEdgesSelfReferenceCheck(db: Database): void {
   }
 }
 
+/**
+ * Flow-relations spec, ticket 02 (spec.md's migration items 1-3): the
+ * mechanical rename map — `depends-on`->`consume`, `evidence-for`->
+ * `verifies`, `evidence-against`->`refutes`, `grounded-on`->`grounds`,
+ * `refines`->`extends` (BLANKET, T1202's ruling: T906/T952/T913's known
+ * subtraction cases are deliberately included, not special-cased here),
+ * `encodes`->`grounds` (the encodes/grounded-on MERGE). `override` and
+ * `supersedes` are absent — both keep their own value unchanged. `narrows`/
+ * `collects` never appear on the left because no stored row carries them yet
+ * (spec: "narrows/collects start empty").
+ */
+const VOCABULARY_FLIP_RENAME: Readonly<Record<string, string>> = {
+  "depends-on": "consume",
+  "evidence-for": "verifies",
+  "evidence-against": "refutes",
+  "grounded-on": "grounds",
+  refines: "extends",
+  encodes: "grounds",
+};
+
+function remapVocabularyFlipRelation(relation: string | null): string | null {
+  if (relation === null) {
+    return null;
+  }
+  return VOCABULARY_FLIP_RENAME[relation] ?? relation;
+}
+
+interface VocabularyFlipRow {
+  citingKind: string;
+  citingId: number;
+  citedKind: string;
+  citedId: number;
+  relation: string | null;
+  provenance: EdgeProvenance;
+  createdAtEpoch: number;
+}
+
+/**
+ * The encodes/grounded-on merge is the one rename that can COLLIDE: a pair
+ * that already held both (a multi-phase turn writing `groundedOn` toward one
+ * target and `encodes` toward the same one, two separate rows under the old
+ * one-row-per-(pair,relation) identity) would produce two `grounds` rows for
+ * the same pair post-rename, which the table's own UNIQUE constraint
+ * refuses. Collapsed here with the SAME provenance-rank tie-break
+ * `pickWinningLegacyRelation` (this file, ticket 05's pair-identity
+ * collapse) already established for an analogous multi-candidate-per-pair
+ * problem: higher-authority provenance wins, ties fall back to the earliest
+ * `created_at_epoch`, which the winner's own row does NOT need to carry (the
+ * timestamp is pooled across the whole group so "when did this edge first
+ * appear" survives the collapse regardless of which candidate's provenance
+ * won).
+ */
+function pickWinningVocabularyFlipRow(
+  candidates: readonly VocabularyFlipRow[],
+): { provenance: EdgeProvenance; createdAtEpoch: number } {
+  const winner = [...candidates].sort((left, right) => {
+    const rankDiff = rankEdgeProvenance(right.provenance) - rankEdgeProvenance(left.provenance);
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+    return left.createdAtEpoch - right.createdAtEpoch;
+  })[0]!;
+  return {
+    provenance: winner.provenance,
+    createdAtEpoch: Math.min(...candidates.map((candidate) => candidate.createdAtEpoch)),
+  };
+}
+
+/**
+ * Detection reads the stored DDL for the newest word only (`'narrows'`),
+ * the same single-probe idiom every earlier `memory_edges` rebuild in this
+ * file uses — present once `memoryEdgesTableDdl`'s widened CHECK has landed
+ * (this migration's own rebuild, or a fresh database created straight from
+ * it), absent on every database this migration has not reached yet.
+ */
+function memoryEdgesVocabularyFlipIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'narrows'");
+}
+
+/**
+ * Same rebuild-under-a-temporary-name-then-swap shape as
+ * `ensureMemoryEdgesMultiRelation`/`ensureMemoryEdgesSelfReferenceCheck`
+ * (0.13.0 temp-name precedent): build the new table (already carrying the
+ * widened CHECK via `memoryEdgesTableDdl`), copy every row across with its
+ * `relation` remapped, drop the old table, rename the replacement into
+ * place — never rename the original away (the three endpoint prune triggers
+ * name `memory_edges` in their bodies). Grouped in TypeScript rather than
+ * pure SQL for the same reason `collapseAndRebuildMemoryEdges` reads its
+ * source table into JS: the winner-selection judgment for a collision
+ * (`pickWinningVocabularyFlipRow`) is not cheaply expressible as one SQL
+ * statement, and the whole table is small (spec.md: 849 relation edges on
+ * the full production database).
+ *
+ * Neither filtered nor width-changing otherwise: unlike the multi-relation/
+ * self-reference rebuilds, table IDENTITY (columns, PK, unique index) is
+ * unchanged here — only the CHECK's allowed value list widens and existing
+ * rows' `relation` VALUES rename. A pair with no colliding candidate copies
+ * straight across, mid-flow-target edges included (P1: "valid as of write
+ * time" — this migration neither deletes nor re-points them, only renames
+ * the word they're stored under when that word is one of the six being
+ * renamed).
+ */
+function collapseAndRebuildVocabularyFlip(db: Database): void {
+  db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_vocabulary_flip");
+  db.exec(memoryEdgesTableDdl("memory_edges"));
+
+  const legacyRows = db
+    .query<VocabularyFlipRow, []>(
+      `SELECT
+         citing_kind AS citingKind, citing_id AS citingId,
+         cited_kind AS citedKind, cited_id AS citedId,
+         relation, provenance, created_at_epoch AS createdAtEpoch
+       FROM memory_edges_pre_vocabulary_flip`,
+    )
+    .all();
+
+  const groups = new Map<string, VocabularyFlipRow[]>();
+  for (const row of legacyRows) {
+    const newRelation = remapVocabularyFlipRelation(row.relation);
+    const key = `${row.citingKind} ${row.citingId} ${row.citedKind} ${row.citedId} ${newRelation ?? ""}`;
+    const bucket = groups.get(key);
+    if (bucket) {
+      bucket.push(row);
+    } else {
+      groups.set(key, [row]);
+    }
+  }
+
+  const insert = db.query<
+    unknown,
+    [string, number, string, number, string | null, string, number]
+  >(
+    `INSERT INTO memory_edges (
+       citing_kind, citing_id, cited_kind, cited_id,
+       relation, provenance, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  for (const bucket of groups.values()) {
+    const sample = bucket[0]!;
+    const newRelation = remapVocabularyFlipRelation(sample.relation);
+    const winner = pickWinningVocabularyFlipRow(bucket);
+    insert.run(
+      sample.citingKind,
+      sample.citingId,
+      sample.citedKind,
+      sample.citedId,
+      newRelation,
+      winner.provenance,
+      winner.createdAtEpoch,
+    );
+  }
+
+  db.exec("DROP TABLE memory_edges_pre_vocabulary_flip");
+  db.exec(MEMORY_EDGES_INDEXES_DDL);
+}
+
+function ensureMemoryEdgesVocabularyFlip(db: Database): void {
+  if (!memoryEdgesVocabularyFlipIsStale(db)) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesVocabularyFlipIsStale(db)) {
+        return;
+      }
+
+      collapseAndRebuildVocabularyFlip(db);
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while flipping the relation vocabulary: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 function ensureMemoryEdgesSchema(db: Database): void {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
@@ -1741,6 +1944,7 @@ function ensureMemoryEdgesSchema(db: Database): void {
     ensureMemoryEdgesRelationVocabulary(db);
     ensureMemoryEdgesMultiRelation(db);
     ensureMemoryEdgesSelfReferenceCheck(db);
+    ensureMemoryEdgesVocabularyFlip(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   // 2026-08-21 incident crutch removal ([S15069/T1136]): a review rehearsal ran
