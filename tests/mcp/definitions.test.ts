@@ -377,8 +377,12 @@ describe("tool surface", () => {
     expect(Object.keys(noteInputShape)).toContain("encodes");
     expect(Object.keys(noteInputShape)).toContain("groundedOn");
 
-    // Format survives: the phase-pair facts a rubric cannot state.
-    expect(shape.override.description).toContain("decision-phase turns only");
+    // Format survives: the phase-pair facts a rubric cannot state. Ticket 01
+    // (relation-matrix spec) widened override's phase pair from
+    // decision-only to the full diagonal — the retired "decision-phase
+    // turns only" constraint must be GONE, not merely unasserted.
+    expect(shape.override.description).not.toContain("decision-phase turns only");
+    expect(shape.override.description).toContain("same phase on both ends");
     expect(shape.encodes.description).toContain("delivery-phase turn");
     expect(shape.encodes.description).toContain("not mechanically checked");
 
@@ -405,6 +409,48 @@ describe("tool surface", () => {
       "if that finding were false, this decision would fall",
     );
     expect(shape.groundedOn.description.toLowerCase()).toContain("never scored");
+  });
+
+  // Ticket 01 (relation-matrix spec, S15069/T1163–T1171) acceptance
+  // criterion 3: the seven relation descriptions state the WIDENED phase
+  // law — the diagonal for refines/override/dependsOn, the widened target
+  // for evidenceFor/evidenceAgainst/encodes, groundedOn unchanged — and no
+  // description still claims the retired, narrower constraint.
+  it("all seven relation descriptions state the nine-cell matrix's law, no retired constraint anywhere", () => {
+    const shape = noteInputSchema.shape;
+
+    // evidenceFor/evidenceAgainst: target widened from decision-only to
+    // decision OR delivery.
+    for (const key of ["evidenceFor", "evidenceAgainst"] as const) {
+      const description = shape[key].description ?? "";
+      expect(description).toContain("evidence-phase");
+      expect(description).toContain("decision-phase");
+      expect(description).toContain("delivery-phase");
+    }
+
+    // refines/override/dependsOn: same-phase diagonal, not decision-only
+    // (refines/override) or delivery-only (dependsOn) any more.
+    for (const key of ["refines", "override", "dependsOn"] as const) {
+      const description = shape[key].description ?? "";
+      expect(description).toContain("evidence-phase");
+      expect(description).toContain("decision-phase");
+      expect(description).toContain("delivery-phase");
+      expect(description).not.toContain("decision-phase turns only");
+      expect(description).not.toContain("delivery-phase (implement/refactor/fix/delegate/review/ops) source and target");
+    }
+    // The diagonal now offers a real three-way choice on every same-phase
+    // pair — dependsOn's own describe needed the same Rubric pointer
+    // refines/override already carried.
+    expect(shape.dependsOn.description?.toLowerCase()).toContain("memory rubric");
+
+    // encodes: target widened from decision-only to decision OR evidence.
+    expect(shape.encodes.description).toContain("evidence-phase");
+    expect(shape.encodes.description).toContain("decision-phase");
+
+    // groundedOn is the one relation the spec pins UNCHANGED — still
+    // decision source, evidence OR delivery target, never decision-target.
+    expect(shape.groundedOn.description).toContain("evidence-phase");
+    expect(shape.groundedOn.description).toContain("delivery-phase");
   });
 
   // [S15069/T939] mid-flight amendment: schema enums and prompt vocabulary

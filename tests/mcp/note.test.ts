@@ -1648,9 +1648,16 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     expect(resultText(legal)).toContain("Attached 1 relation(s).");
   });
 
-  // The pure-review case is its own acceptance criterion: rejected, told to
-  // add `design`, admitted once added.
-  test("a pure-review turn attempting refines is rejected and told to add a decision-phase type; passes once design is added", () => {
+  // Ticket 01 (relation-matrix spec): `review` alone (delivery-phase) is now
+  // a LEGAL `refines` SOURCE — the diagonal relaxation admits every
+  // same-phase pair, not decision->decision only. So a pure-review turn
+  // pointed at a decision-phase target is rejected on the CITED side (the
+  // target needs a delivery-phase type to match), not because the citing
+  // turn itself lacks a decision-phase type. Adding `design` widens the
+  // CITING turn's own phase set instead, so its decision->decision pair now
+  // matches the target — same outcome as before the rewrite, different
+  // mechanism.
+  test("a pure-review turn attempting refines against a decision-phase target is rejected naming the missing delivery-phase target; passes once design is added", () => {
     setType(earlierTurnId, ["design"]);
     setType(targetTurnId, ["review"]);
 
@@ -1665,17 +1672,18 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
     expect(resultText(rejected)).toStartWith("Parameter error:");
-    expect(resultText(rejected)).toContain("decision-phase");
-    expect(resultText(rejected)).toContain("design");
+    expect(resultText(rejected)).toContain("delivery-phase");
+    expect(resultText(rejected)).toContain("implement");
     // The whole call rolled back — no note landed from the rejected attempt.
     expect(getShadowNote(db, targetTurnId)).toBeNull();
 
     // Self-forcing the double type (spec's own point): `review` alone
-    // cannot carry `refines`, but `["review","design"]` can — the SAME
-    // multi-type turn is now legal because its phase SET admits decision.
-    // `mode.type: "write"` because the turn already carries a `type`
-    // (set directly for the fixture above) — the ordinary non-empty-field
-    // rule, unrelated to the phase gate this test targets.
+    // is legal against a DELIVERY-phase target, but not this DECISION-phase
+    // one; `["review","design"]` widens the citing turn's own phase set so
+    // its decision->decision pair also matches. `mode.type: "write"` because
+    // the turn already carries a `type` (set directly for the fixture
+    // above) — the ordinary non-empty-field rule, unrelated to the phase
+    // gate this test targets.
     const passed = noteTool(
       db,
       {
@@ -1690,6 +1698,47 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     );
     expect(isNoteSuccess(passed)).toBe(true);
     expect(resultText(passed)).toContain("Attached 1 relation(s).");
+  });
+
+  // Ticket 01's own headline example (relation-matrix spec): an E->E
+  // `refines` write that REJECTED before this ticket (refines was
+  // decision->decision only) is now legal — exercised through the real
+  // `noteTool` call path, not just the phase-table unit test.
+  test("evidence -> evidence: refines is legal between two evidence-phase turns (the diagonal relaxation, was illegal pre-matrix)", () => {
+    setType(earlierTurnId, ["research"]);
+    setType(targetTurnId, ["measure"]);
+
+    const legal = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "measure+routing: a tighter measurement of the same claim",
+        content: `Refines [S${sessionId}/T1].`,
+        refines: [`S${sessionId}/T1`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(legal)).toContain("Attached 1 relation(s).");
+  });
+
+  // The delivery diagonal's own new competitor: `depends-on` used to be the
+  // ONLY legal word between two delivery-phase turns; now `refines` and
+  // `override` are legal there too (though the caller must still pick one).
+  test("delivery -> delivery: refines is now legal between two delivery-phase turns (was depends-on's exclusive cell pre-matrix)", () => {
+    setType(earlierTurnId, ["implement"]);
+    setType(targetTurnId, ["ops"]);
+
+    const legal = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "ops+routing: a follow-up rollout improving the earlier one",
+        content: `Refines [S${sessionId}/T1].`,
+        refines: [`S${sessionId}/T1`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(legal)).toContain("Attached 1 relation(s).");
   });
 
   test("delivery -> decision: encodes is legal from a delivery-phase turn, illegal from a decision-phase-only turn", () => {

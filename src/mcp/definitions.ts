@@ -389,13 +389,13 @@ export const noteInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Addresses whose claim this turn tests FOR. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target.",
+      "Addresses whose claim this turn tests FOR. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) OR delivery-phase (implement/refactor/fix/delegate/review/ops) target.",
     ),
   evidenceAgainst: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses whose claim this turn tests AGAINST. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target.",
+      "Addresses whose claim this turn tests AGAINST. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) OR delivery-phase (implement/refactor/fix/delegate/review/ops) target.",
     ),
   // ticket 01 (turn-edge-mechanism spec, [S15069/T935] mid-flight amendment):
   // `groundedOn` — a decision rests on an earlier finding, evidence-phase OR
@@ -409,9 +409,8 @@ export const noteInputShape = {
       "Addresses the earlier finding this turn's decision rests on — counterfactual: if that finding were false, this decision would fall. Decision-phase (design/discuss/correction) source; evidence-phase (research/measure) OR delivery-phase (implement/refactor/fix/delegate/review/ops) target. Recorded, never scored.",
     ),
   // ticket 01 (turn-edge-mechanism spec): `refines`/`override` replace the
-  // retired `supersedes` — a decision-phase turn's relation to a
-  // decision-phase predecessor, split by whether the predecessor's
-  // conclusion survives IN PART (`refines`) or not AT ALL (`override`).
+  // retired `supersedes`, split by whether the predecessor's conclusion
+  // survives IN PART (`refines`) or not AT ALL (`override`).
   // `supersedes` itself is REMOVED from this shape outright: a caller still
   // sending it gets `.strict()`'s parse error, naming the unrecognised key —
   // existing `supersedes` EDGES stay frozen-readable (db/citations.ts), only
@@ -422,34 +421,48 @@ export const noteInputShape = {
   // [S15069/T933]/[T939]). What stays here is FORMAT only: the phase pair
   // both ends require, and a pointer to where the choice between the two is
   // actually made.
+  // relation-matrix spec (S15069/T1163–T1171, ticket 01): the phase
+  // requirement widened from decision-only to the full diagonal — same
+  // phase on both ends, evidence/decision/delivery alike (a fact/fact
+  // improvement, or a shipped-artifact/shipped-artifact one, refines exactly
+  // as a decision/decision one always did) — and the diagonal now competes
+  // with `depends-on` too, so the Rubric pointer names all three.
   refines: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses a predecessor decision this turn continues or partially revises — decision-phase turns only (design/discuss/correction) on both ends; the predecessor is not wholly wrong. Judgment (refines vs. override) lives in the Memory Rubric.",
+      "Addresses a predecessor this turn continues or partially revises, not wholly wrong — evidence-phase (research/measure), decision-phase (design/discuss/correction), or delivery-phase (implement/refactor/fix/delegate/review/ops), same phase on both ends. Judgment (refines vs. override vs. depends-on) lives in the Memory Rubric.",
     ),
   override: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses a predecessor decision this turn overturns WHOLE — decision-phase turns only (design/discuss/correction) on both ends. Judgment (refines vs. override) lives in the Memory Rubric.",
+      "Addresses a predecessor this turn overturns WHOLE — evidence-phase (research/measure), decision-phase (design/discuss/correction), or delivery-phase (implement/refactor/fix/delegate/review/ops), same phase on both ends. Judgment (refines vs. override vs. depends-on) lives in the Memory Rubric.",
     ),
   // ticket 01: `encodes` — a delivery-phase turn (spec/ADR/ticket/commit/
   // release) naming the decision(s) it carries. Ticket 11: the minimal-set
   // discriminator moved to the Memory Rubric (关系, question ④) — this
   // describe keeps the format fact (self-asserted, not mechanically checked)
   // and a pointer, not the rule itself.
+  // relation-matrix spec (ticket 01): target widened from decision-only to
+  // decision OR evidence — a delivery-phase artifact may equally curate the
+  // key VERIFICATION it carries, not only the decision (L->D and L->E share
+  // one discipline: name the minimal set worth showing).
   encodes: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses the decision(s) this turn's artifact (spec/ADR/ticket/commit/release) carries — a delivery-phase turn (implement/refactor/fix/delegate/review/ops) citing a decision-phase (design/discuss/correction) target. Self-asserted, not mechanically checked; which decisions to name (the minimal set) is judgment — see the Memory Rubric.",
+      "Addresses the decision(s) or key finding(s) this turn's artifact (spec/ADR/ticket/commit/release) carries — a delivery-phase turn (implement/refactor/fix/delegate/review/ops) citing a decision-phase (design/discuss/correction) OR evidence-phase (research/measure) target. Self-asserted, not mechanically checked; which to name (the minimal set) is judgment — see the Memory Rubric.",
     ),
+  // relation-matrix spec (ticket 01): `dependsOn` widened from delivery-only
+  // to the full diagonal, same as refines/override — a pure completion
+  // dependency now competes with them in every same-phase pair, not only
+  // delivery->delivery, so this describe carries the same Rubric pointer.
   dependsOn: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses this turn's own conclusion depends on. Turn-only; requires a delivery-phase (implement/refactor/fix/delegate/review/ops) source and target.",
+      "Addresses this turn's own conclusion depends on. Turn-only; evidence-phase (research/measure), decision-phase (design/discuss/correction), or delivery-phase (implement/refactor/fix/delegate/review/ops), same phase on both ends. Judgment (refines vs. override vs. depends-on) lives in the Memory Rubric.",
     ),
 
   // ticket 02 (edge-mechanism-revision D3): the seven retraction mirrors. A

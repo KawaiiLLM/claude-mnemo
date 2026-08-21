@@ -8,9 +8,12 @@ import {
   phasesForTypes,
   RELATION_FIELD_NAME,
   RELATION_PHASE_REQUIREMENT,
+  TURN_PHASES,
   TYPE_PHASE,
   UNSCORED_RELATIONS,
   validateRelationTarget,
+  type TurnEdgeRelation,
+  type TurnPhase,
 } from "../../src/shared/turn-phase";
 import { MEMORY_TYPES } from "../../src/shared/type-vocabulary";
 
@@ -84,10 +87,78 @@ describe("EDGE_RELATIONS — the seven-word closed set", () => {
   });
 });
 
-// One legal + one illegal example per phase-pair row (ticket 01 acceptance
-// criterion 2), plus the exists-rule / grounded-on OR coverage this module
-// owns directly.
-describe("isRelationLegalForPhases — one legal/illegal example per phase pair", () => {
+// ---------------------------------------------------------------------------
+// Relation-matrix spec (S15069/T1163–T1171), ticket 01, acceptance criterion
+// 1: the nine-cell matrix, exhaustively — all nine (source phase, target
+// phase) pairs against all seven relation words.
+//
+// `NINE_CELL_LEGAL_WORDS` is transcribed BY HAND from spec.md's own table,
+// independent of `RELATION_PHASE_REQUIREMENT`'s construction (the two-rule
+// generator in `shared/turn-phase.ts`) — this test re-derives its
+// expectation from the spec text, not from the code under test, so a mistake
+// in the generator (a swapped source/target, a missing widened pair, a
+// diagonal relation left off one phase) shows up as a mismatch here instead
+// of being invisible to a test that trusts the same construction it checks.
+// ---------------------------------------------------------------------------
+const NINE_CELL_LEGAL_WORDS: Record<TurnPhase, Record<TurnPhase, readonly TurnEdgeRelation[]>> = {
+  evidence: {
+    evidence: ["refines", "override", "depends-on"],
+    decision: ["evidence-for", "evidence-against"],
+    delivery: ["evidence-for", "evidence-against"],
+  },
+  decision: {
+    evidence: ["grounded-on"],
+    decision: ["refines", "override", "depends-on"],
+    delivery: ["grounded-on"],
+  },
+  delivery: {
+    evidence: ["encodes"],
+    decision: ["encodes"],
+    delivery: ["refines", "override", "depends-on"],
+  },
+};
+
+describe("the nine-cell matrix — all nine (source, target) phase pairs x all seven relation words (ticket 01 acceptance criterion 1)", () => {
+  for (const source of TURN_PHASES) {
+    for (const target of TURN_PHASES) {
+      const legalWords = new Set(NINE_CELL_LEGAL_WORDS[source][target]);
+
+      test(`${source} -> ${target}: exactly {${[...legalWords].join(", ")}} accepted, every other word rejected naming the missing half`, () => {
+        for (const relation of EDGE_RELATIONS) {
+          const legal = isRelationLegalForPhases(relation, new Set([source]), new Set([target]));
+          expect(legal, `${relation} at ${source}->${target}`).toBe(legalWords.has(relation));
+
+          if (legal) {
+            continue;
+          }
+          const result = validateRelationTarget({
+            relation,
+            citingPhases: new Set([source]),
+            targetKind: "turn",
+            citedPhases: new Set([target]),
+          });
+          expect(result.ok, `${relation} at ${source}->${target} should be rejected`).toBe(false);
+          if (!result.ok) {
+            expect(result.reason).toBe("phase-illegal");
+            // The rejection names the missing half: which side, and a
+            // phase-word clause for it.
+            expect(result.detail).toMatch(/citing turn|cited turn/);
+            expect(result.detail).toMatch(/(evidence|decision|delivery)-phase/);
+          }
+        }
+      });
+    }
+  }
+});
+
+// Ticket 01 acceptance criterion 2 — the REGRESSION block: every class that
+// was legal (or illegal) BEFORE the nine-cell rewrite must still be legal
+// (or illegal) after it. Every assertion below already held against the
+// pre-matrix single-pair table and continues to hold against the widened
+// one — the rewrite is a pure relaxation, so nothing here needed to change
+// when the matrix landed — plus the exists-rule / grounded-on OR coverage
+// this module owns directly.
+describe("regression: pre-matrix legal/illegal classes (E->D evidence, D->D refines/override, D->E|L grounded-on, L->D encodes, L->L depends-on)", () => {
   test("evidence -> decision: evidence-for/against", () => {
     expect(
       isRelationLegalForPhases("evidence-for", new Set(["evidence"]), new Set(["decision"])),
@@ -151,15 +222,32 @@ describe("isRelationLegalForPhases — one legal/illegal example per phase pair"
 });
 
 describe("explainRelationPhaseRejection — names the missing half", () => {
-  test("citing side missing: names the required source phase and its canonical type word", () => {
+  // `refines` is now diagonal-legal from EVERY recognised phase (the
+  // relation-matrix widening), so a single-phase citing turn always
+  // satisfies SOME diagonal pair and the rejection falls to the cited side
+  // instead (covered by the dedicated diagonal-mismatch test below). The
+  // "citing side missing entirely" branch now only fires for a turn with NO
+  // recognised phase at all (empty or fully-legacy `type`) — an empty
+  // citing-phase set exercises exactly that.
+  test("citing side missing: a phase-less citing turn names every diagonal source phase, decision's included", () => {
+    const message = explainRelationPhaseRejection("refines", new Set([]), new Set(["decision"]));
+    expect(message).toContain("citing turn");
+    expect(message).toContain("decision-phase");
+    expect(message).toContain("design");
+  });
+
+  // The relaxation's own new failure shape: a delivery-phase citing turn is
+  // now a LEGAL refines source (the diagonal), so pointing it at a
+  // decision-phase target fails on the CITED side, not the citing side.
+  test("cited side missing (diagonal mismatch): a delivery-phase citing turn pointed at a decision-phase target names the missing delivery-phase target", () => {
     const message = explainRelationPhaseRejection(
       "refines",
       new Set(["delivery"]),
       new Set(["decision"]),
     );
-    expect(message).toContain("citing turn");
-    expect(message).toContain("decision-phase");
-    expect(message).toContain("design");
+    expect(message).toContain("cited turn");
+    expect(message).toContain("delivery-phase");
+    expect(message).toContain("implement");
   });
 
   test("cited side missing (citing side fine): names the required target phase", () => {
@@ -186,11 +274,24 @@ describe("explainRelationPhaseRejection — names the missing half", () => {
   });
 });
 
-describe("RELATION_PHASE_REQUIREMENT — table shape", () => {
-  test("every relation but grounded-on names exactly one phase pair", () => {
-    for (const relation of EDGE_RELATIONS) {
+describe("RELATION_PHASE_REQUIREMENT — table shape (relation-matrix spec: two reading rules, not seven hand-carved rows)", () => {
+  test("the diagonal relations (refines/override/depends-on) each carry all three same-phase pairs", () => {
+    for (const relation of ["refines", "override", "depends-on"] as const) {
       const pairs = RELATION_PHASE_REQUIREMENT[relation];
-      expect(pairs.length).toBe(relation === "grounded-on" ? 2 : 1);
+      expect(pairs.length).toBe(3);
+      expect(pairs.every((pair) => pair.source === pair.target)).toBe(true);
+      expect(new Set(pairs.map((pair) => pair.source))).toEqual(new Set(TURN_PHASES));
+    }
+  });
+
+  test("the cross-phase relations (evidence-for/against, grounded-on, encodes) each carry exactly two pairs, toward the other two phases", () => {
+    for (const relation of ["evidence-for", "evidence-against", "grounded-on", "encodes"] as const) {
+      const pairs = RELATION_PHASE_REQUIREMENT[relation];
+      expect(pairs.length).toBe(2);
+      expect(pairs.every((pair) => pair.source !== pair.target)).toBe(true);
+      // Both pairs share the SAME source phase — this relation always speaks
+      // from one fixed phase, toward both others.
+      expect(new Set(pairs.map((pair) => pair.source)).size).toBe(1);
     }
   });
 });
@@ -241,8 +342,10 @@ describe("validateRelationTarget — the shared judgment, called directly (ticke
   });
 
   // Identical semantics to `mcp/note.ts`'s "pure-review turn attempting
-  // refines" end-to-end test: same missing-half message shape, naming the
-  // decision phase.
+  // refines" end-to-end test: same missing-half message shape. `delivery` is
+  // now a legal `refines` source (the diagonal relaxation), so this fails on
+  // the CITED side — it names the missing delivery-phase target, not a
+  // missing decision-phase citing type.
   test("a phase-illegal turn target is rejected, naming the missing half — matches the note tool's own end-to-end wording", () => {
     const result = validateRelationTarget({
       relation: "refines",
@@ -253,8 +356,8 @@ describe("validateRelationTarget — the shared judgment, called directly (ticke
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toBe("phase-illegal");
-      expect(result.detail).toContain("decision-phase");
-      expect(result.detail).toContain("citing turn");
+      expect(result.detail).toContain("delivery-phase");
+      expect(result.detail).toContain("cited turn");
     }
   });
 

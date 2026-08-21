@@ -109,30 +109,73 @@ export interface RelationPhasePair {
 }
 
 /**
- * The phase pair(s) each relation requires (spec's relation table). Every
- * relation but one names exactly one pair: evidence -> decision (evidence-
- * for/against), decision -> decision (refines/override), delivery ->
- * decision (encodes), delivery -> delivery (depends-on). `grounded-on` is the
- * one exception — a decision-phase citing turn may ground itself on EITHER
- * an evidence-phase OR a delivery-phase predecessor (a review/audit finding
- * grounds a decision exactly as a research finding does), so it carries TWO
- * pairs and is legal if either matches (an OR, not an AND, across the list).
+ * The phase pair(s) each relation requires — the relation-matrix spec's
+ * nine-cell grammar (S15069/T1163–T1171), which replaced the original seven
+ * hand-carved single-pair rows with two reading rules:
+ *
+ *   Rule 1 — DIAGONAL (same phase on both ends): `refines`, `override` and
+ *   `depends-on` are each legal in EVERY same-phase pair — evidence-
+ *   >evidence and delivery->delivery exactly as much as decision->decision,
+ *   not decision->decision only. Which of the three to use is a guarantee-
+ *   strength judgment (override: predecessor wrong & replaceable; refines:
+ *   predecessor right & improved on, not replaceable; depends-on: only a
+ *   completion dependency, no correctness claim) that lives in the Memory
+ *   Rubric, not in this phase-legality table.
+ *
+ *   Rule 2 — CROSS-PHASE (different phase on each end): the relation word is
+ *   fixed by the citing (SOURCE) turn's own phase, and is admitted toward
+ *   BOTH other phases — an evidence source always speaks `evidence-for`/
+ *   `evidence-against` (toward decision OR delivery), a decision source
+ *   always speaks `grounded-on` (toward evidence OR delivery, unchanged from
+ *   the original table), a delivery source always speaks `encodes` (toward
+ *   decision OR evidence).
+ *
+ * `DIAGONAL_RELATIONS` and `CROSS_PHASE_SOURCE` below are literally these two
+ * rules as data; `RELATION_PHASE_REQUIREMENT` is their product, built once at
+ * module load so every consumer keeps seeing one flat OR-list of pairs per
+ * relation — `isRelationLegalForPhases`'s contract, and the shape of this
+ * exported table, are unchanged by the rewrite.
  */
+const DIAGONAL_RELATIONS: readonly TurnEdgeRelation[] = ["refines", "override", "depends-on"];
+
+/** Rule 2's table: source phase -> the relation word(s) it speaks, and the two other phases each may target. */
+const CROSS_PHASE_SOURCE: Record<
+  TurnPhase,
+  { relations: readonly TurnEdgeRelation[]; targets: readonly TurnPhase[] }
+> = {
+  evidence: {
+    relations: ["evidence-for", "evidence-against"],
+    targets: ["decision", "delivery"],
+  },
+  decision: { relations: ["grounded-on"], targets: ["evidence", "delivery"] },
+  delivery: { relations: ["encodes"], targets: ["decision", "evidence"] },
+};
+
+function buildRelationPhaseRequirement(): Record<TurnEdgeRelation, RelationPhasePair[]> {
+  const table = Object.fromEntries(
+    EDGE_RELATIONS.map((relation) => [relation, [] as RelationPhasePair[]]),
+  ) as Record<TurnEdgeRelation, RelationPhasePair[]>;
+
+  for (const phase of TURN_PHASES) {
+    for (const relation of DIAGONAL_RELATIONS) {
+      table[relation].push({ source: phase, target: phase });
+    }
+  }
+  for (const phase of TURN_PHASES) {
+    const { relations, targets } = CROSS_PHASE_SOURCE[phase];
+    for (const relation of relations) {
+      for (const target of targets) {
+        table[relation].push({ source: phase, target });
+      }
+    }
+  }
+  return table;
+}
+
 export const RELATION_PHASE_REQUIREMENT: Record<
   TurnEdgeRelation,
   readonly RelationPhasePair[]
-> = {
-  "evidence-for": [{ source: "evidence", target: "decision" }],
-  "evidence-against": [{ source: "evidence", target: "decision" }],
-  "grounded-on": [
-    { source: "decision", target: "evidence" },
-    { source: "decision", target: "delivery" },
-  ],
-  refines: [{ source: "decision", target: "decision" }],
-  override: [{ source: "decision", target: "decision" }],
-  encodes: [{ source: "delivery", target: "decision" }],
-  "depends-on": [{ source: "delivery", target: "delivery" }],
-};
+> = buildRelationPhaseRequirement();
 
 /**
  * A relation is legal iff SOME (source phase, target phase) pair it admits
@@ -166,11 +209,18 @@ function phaseRequirementClause(
 }
 
 /**
- * The rejection detail naming which HALF is missing (turn-edge-mechanism
- * spec's own worked example: "refines needs the source to carry a
- * decision-phase type, add design"). Only ever called once
- * `isRelationLegalForPhases` has already said no, so at least one clause is
- * always produced.
+ * The rejection detail naming which HALF is missing (worked example:
+ * "encodes needs the citing turn to carry a delivery-phase type, add
+ * implement"). Only ever called once `isRelationLegalForPhases` has already
+ * said no, so at least one clause is always produced.
+ *
+ * Since the relation-matrix rewrite widened `refines`/`override`/
+ * `depends-on` to all three diagonal phases, the CITING side of those three
+ * is only ever reported missing for a turn with NO recognised phase at all
+ * (an empty or fully-legacy `type` list) — any recognised type satisfies
+ * SOME diagonal pair, so a same-relation cross-phase mismatch (e.g. a
+ * delivery-phase turn pointing `refines` at a decision-phase target) is
+ * reported on the CITED side instead.
  *
  * Reports the CITING side first: if no listed pair's source phase is present
  * at all, that is reported (the writer's own type is the more direct lever);
