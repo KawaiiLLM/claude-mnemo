@@ -64,8 +64,10 @@ describe("edge scoring signals", () => {
   }
 
   /** Direct edge writer — bypasses mcp/note.ts's phase validation on purpose: this module is a
-   * READER and must handle whatever shape the graph carries, ticket-01-legal or not (e.g. a
-   * `refines` edge whose source phase drifted after the edge was written). */
+   * READER and must handle whatever shape the graph carries, ticket-01-legal or not (e.g. an
+   * `extends` edge whose endpoints are evidence-phase — legal under the retired nine-cell
+   * grammar's same-phase `refines` diagonal, no longer writable fresh under the six-row law, but
+   * still exactly what the blanket refines->extends rename left sitting in the graph). */
   function edge(
     citingId: number,
     citedId: number,
@@ -150,25 +152,28 @@ describe("edge scoring signals", () => {
     expect(signal.encodesCount).toBe(0);
   });
 
-  test("relation-matrix ticket 03 — E→E refines: an evidence-phase excess source is graph-legal (ticket 01) but SKIPPED at scoring, not miscounted into either bucket", () => {
+  test("flow-relations spec.md migration item 6 — carry-over pin: E→E extends (a legacy same-phase `refines` row the blanket rename left as `extends`, no longer writable fresh under the six-row law) is graph-legal to carry but its evidence-phase excess source is still SKIPPED at scoring, not miscounted into either bucket", () => {
     const target = addTurn(1, { type: ["research"] });
     const baseline = addTurn(2, { type: ["research"] });
     const evidenceLeapfrog = addTurn(3, { type: ["measure"] });
-    edge(baseline, target, "refines", 1000); // baseline, excluded regardless of phase
-    edge(evidenceLeapfrog, target, "refines", 2000); // excess, but evidence-only source
+    edge(baseline, target, "extends", 1000); // baseline, excluded regardless of phase
+    edge(evidenceLeapfrog, target, "extends", 2000); // excess, but evidence-only source
 
     const signal = getTurnEdgeSignalsForTurn(db, target);
     expect(signal.refinesExcess).toEqual({ decision: 0, delivery: 0 });
     expect(signal.overridden).toBe(false);
     expect(signal.encodesCount).toBe(0);
 
-    // The edge is still fully present in the graph — scoring invisibility is a
-    // read-time skip (`primaryPhaseBucket` returns null, nothing increments),
-    // not a write-time rejection or a hidden/deleted row.
+    // The edge is still fully present in the graph, under the CURRENT key
+    // (`extends`, migration item 1's blanket rename of the retired `refines`
+    // word) — scoring invisibility is a read-time skip (`primaryPhaseBucket`
+    // returns null, nothing increments), not a write-time rejection or a
+    // hidden/deleted row. This is the evidence-source skip carrying over
+    // UNCHANGED through the interim rename (spec.md migration item 6).
     const stored = db
       .query<{ count: number }, [number, number]>(
         `SELECT COUNT(*) AS count FROM memory_edges
-         WHERE relation = 'refines' AND citing_id = ? AND cited_id = ?`,
+         WHERE relation = 'extends' AND citing_id = ? AND cited_id = ?`,
       )
       .get(evidenceLeapfrog, target)!.count;
     expect(stored).toBe(1);
@@ -230,6 +235,41 @@ describe("edge scoring signals", () => {
     expect(signals.get(decisionA)!.encodesCount).toBe(2);
     // decisionB has 2 incoming encodes edges but one source is rolled back.
     expect(signals.get(decisionB)!.encodesCount).toBe(1);
+  });
+
+  // Flow-relations spec, ticket 05 (`.scratch/flow-relations/spec.md`,
+  // migration item 6, "Election interim"): ticket 02's rename merges the
+  // retired `grounded-on` word into `grounds` (which the encodes key now
+  // reads). ADR-0010 locked `grounded-on` to a decision-phase SOURCE citing
+  // an evidence- or delivery-phase target ("decision speaks footing") — a
+  // shape RELATION_IS_SCORED never scored under the old seven-word keys
+  // (`grounded-on: false`, git show 598f0ee~1). PINNED interim distortion,
+  // named in spec.md itself: this exact shape, now stored as `grounds`,
+  // begins crediting encodesCount. Not a redesign — the scoring pass decides
+  // whether grounded-on-shaped grounds edges should keep crediting.
+  test("flow-relations spec.md migration item 6 — interim distortion (a): a grounds edge BORN grounded-on-shaped (decision-phase source citing delivery-phase footing, previously unscored) now credits its target's encodesCount", () => {
+    const target = addTurn(1, { type: ["implement"] }); // delivery phase — grounded-on's old decision->delivery cell
+    const decisionFooting = addTurn(2, { type: ["design"] }); // decision-phase source — grounded-on's source lock
+    edge(decisionFooting, target, "grounds", 1000);
+
+    const signal = getTurnEdgeSignalsForTurn(db, target);
+    expect(signal.encodesCount).toBe(1);
+    expect(signal.overridden).toBe(false);
+    expect(signal.refinesExcess).toEqual({ decision: 0, delivery: 0 });
+  });
+
+  // Flow-relations spec, ticket 05, migration item 6: `narrows` starts empty
+  // (migration item 2) and RELATION_IS_SCORED.narrows is false — the
+  // refinesExcess query only matches relation = 'extends', so a `narrows`
+  // edge is invisible to every signal computed here. PINNED interim
+  // distortion, spec.md's own wording: "narrows scores nothing until ruled".
+  test("flow-relations spec.md migration item 6 — interim distortion (b): a narrows edge moves neither refinesExcess bucket, and no other signal", () => {
+    const target = addTurn(1, { type: ["design"] });
+    const narrower = addTurn(2, { type: ["design"] });
+    edge(narrower, target, "narrows", 1000);
+
+    const signal = getTurnEdgeSignalsForTurn(db, target);
+    expect(signal).toEqual(ZERO);
   });
 
   // Relation-matrix spec, "自引用" (ticket 05, user ruling T1180): a self edge

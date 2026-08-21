@@ -96,3 +96,12 @@ immediately rather than waiting on the trio. Everything else in this file
 scoring-trio ruling still has to decide. This file records the five
 `what` decisions already made; it makes no claim about magnitude, ranking,
 or the evidence bucket's weight.
+
+**Interim pin (2026-08-22):** the flow-relations spec's migration item 6
+("Election interim", `.scratch/flow-relations/spec.md`) PINS the keys above
+onto the renamed eight-word vocabulary as facts, not fixes — the refines key
+now reads `extends`, the encodes key now reads `grounds` — carrying two
+accepted interim distortions (grounded-on-shaped `grounds` edges begin
+crediting; `narrows` scores nothing) that this file's still-open scoring-trio
+question inherits unchanged; see `tests/db/edge-signals.test.ts` for the
+pinned tests.
