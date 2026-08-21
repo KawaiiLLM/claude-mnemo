@@ -40,46 +40,44 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   });
 
   test("the rubric's own sections are present verbatim (ticket's own normative text)", () => {
-    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v5");
+    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v6");
     expect(MEMORY_RUBRIC_TEXT).toContain("## Fields");
-    // Ticket 03's four-section regroup: `## type`/`## tags` fold into
-    // `## Fields` as unheaded sub-blocks (no more standalone `## type`/
-    // `## tags` H2s), and `## 归属`/`## 建段` merge into one `## 段` section.
-    expect(MEMORY_RUBRIC_TEXT).toContain("type — 词表,每词一义:");
-    expect(MEMORY_RUBRIC_TEXT).toContain("tags — 名词,命名物");
-    expect(MEMORY_RUBRIC_TEXT).toContain("## 关系(turn→turn;从引用方记向被引方)");
-    expect(MEMORY_RUBRIC_TEXT).toContain("## 段(归属与新建)");
-    expect(MEMORY_RUBRIC_TEXT).toContain("## Policy(何时去读)");
-    // The six discriminator sub-questions the note tool's own description
+    // Ticket 03's four-section regroup survives translation: type/tags stay
+    // unheaded sub-blocks of `## Fields`, and the four H2s carry the v6
+    // English titles (relation-matrix spec, full-English ruling).
+    expect(MEMORY_RUBRIC_TEXT).toContain("type — a closed vocabulary, one meaning per word:");
+    expect(MEMORY_RUBRIC_TEXT).toContain("tags — nouns, naming things");
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "## Relations (turn→turn; recorded from the citing turn toward the cited)",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain("## Segments (membership and creation)");
+    expect(MEMORY_RUBRIC_TEXT).toContain("## Policy (when to read)");
+    // The discriminator vocabulary the note tool's own description
     // used to inline (ticket 11 migration).
     expect(MEMORY_RUBRIC_TEXT).toContain("evidence-for / evidence-against");
     expect(MEMORY_RUBRIC_TEXT).toContain("grounded-on");
     expect(MEMORY_RUBRIC_TEXT).toContain("override");
-    expect(MEMORY_RUBRIC_TEXT).toContain("只点名可推出最终结论的最小集");
+    expect(MEMORY_RUBRIC_TEXT).toContain("the minimal set worth exhibiting");
     expect(MEMORY_RUBRIC_TEXT).toContain("depends-on");
   });
 
-  // Ticket 03 (edge-mechanism-revision spec "03 — Rubric v5 定稿入库,Policy
-  // 并入"): the old `## 建段` H2 (ticket 13's own three ruled lines) merges
-  // into the new `## 段(归属与新建)` section alongside `## 归属`. The first
-  // of the three lines drops its now-redundant ";无归属是合法状态" suffix
-  // (already stated by the 归属 bullet immediately above it in the same
-  // section — v4→v5 changelog item 4); the other two lines carry over
-  // verbatim.
-  test("v5 carries the 段 section's 建段 sub-part, verbatim, ticket 13's ruled lines (minus the v5-deduped suffix)", () => {
-    expect(MEMORY_RUBRIC_VERSION).toBe("v5");
-    expect(MEMORY_RUBRIC_TEXT).toContain("## 段(归属与新建)");
+  // v6 (relation-matrix spec, full-English ruling): ticket 13's three ruled
+  // segment-creation lines survive translation inside `## Segments
+  // (membership and creation)` — pinned at the English renderings approved
+  // through the three-round peer review of the v6 draft.
+  test("v6 carries the Segments creation lines, per the approved translation", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v6");
+    expect(MEMORY_RUBRIC_TEXT).toContain("## Segments (membership and creation)");
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "琐碎、短时闲聊等组不成可命名工作流的 turn 无须建段",
-    );
-    expect(MEMORY_RUBRIC_TEXT).not.toContain(
-      "无须建段;无归属是合法状态",
+      "Trivia and short chatter that form no nameable workflow need no segment.",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "需要建段时,先查 roster 有无合适的已有段——挂靠优先于新建",
+      "check the roster first — attach to a fitting\n" +
+        "  existing segment before creating a new one.",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "无合适段才新建;以任务实际形状命名,开场臆测的名字会锚定错误",
+      "name it after the task's actual shape — an\n" +
+        "  opening guess anchors the segment to the wrong shape.",
     );
   });
 
@@ -91,16 +89,17 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // reach for it — this pins both the sentence and its position, since a line
   // that drifted out of the 关系 section would stop governing the decision it
   // is about.
-  test("v5 carries the approved 撤边 line, last in the 关系 section", () => {
-    expect(MEMORY_RUBRIC_VERSION).toBe("v5");
+  test("v6 carries the retraction line, last in the Relations section", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v6");
     const retraction =
-      "- 撤边:发现边为伪时撤除,按需改写——撤除与改判同为判断行为,不为整洁而撤。";
+      "- Retraction: delete an edge found false, rewrite as needed — retraction and\n" +
+      "  re-judgment are acts of judgment; never retract merely to tidy.";
     expect(MEMORY_RUBRIC_TEXT).toContain(retraction);
-    expect(MEMORY_RUBRIC_TEXT.indexOf("- 发布仪式:")).toBeLessThan(
+    expect(MEMORY_RUBRIC_TEXT.indexOf("- The release ritual:")).toBeLessThan(
       MEMORY_RUBRIC_TEXT.indexOf(retraction),
     );
     expect(MEMORY_RUBRIC_TEXT.indexOf(retraction)).toBeLessThan(
-      MEMORY_RUBRIC_TEXT.indexOf("## 段(归属与新建)"),
+      MEMORY_RUBRIC_TEXT.indexOf("## Segments (membership and creation)"),
     );
   });
 
@@ -146,10 +145,13 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       "- next_steps  — what is waiting to be done.\n" +
       "- reference   — durable pointers: source locations, specs, PRs, URLs. Not plans.\n" +
       "\n" +
+      // v6 compressed the Summary-layer content note for the 9500-char block
+      // cap (meaning preserved; the two-sentence focus contrast became a
+      // parenthetical) — this pin follows the spliced text, not ticket 02's
+      // original wording.
       "Segment, Summary layer — what an outsider browsing the task reads:\n" +
-      "- content — the impression this arc leaves: what it is about and how it went.\n" +
-      "            A turn's content is an impression too; the difference is focus —\n" +
-      "            a turn's is its concrete conclusions, a segment's is not.\n" +
+      "- content — the impression this arc leaves: what it is about and how it went\n" +
+      "            (focus on the arc, not per-turn conclusions).\n" +
       "- insight — reusable experience this task has settled.\n" +
       "\n" +
       "A segment's title is set at creation. Its type and tags are DERIVED from its\n" +
@@ -186,12 +188,12 @@ describe("renderRubricBlock — its own block, no shared budget (ticket 14 roste
   // consumer distinction to police here.
   test("Policy is the rubric's own section — no more sibling policy block or tag", () => {
     const block = renderRubricBlock();
-    expect(block).toContain("## Policy(何时去读)");
-    expect(block).toContain("注入块只是索引,不是记忆本身");
-    expect(block).toContain("先 recall/replay 原回合再落笔");
+    expect(block).toContain("## Policy (when to read)");
+    expect(block).toContain("Injected blocks are an index, not the memory itself");
+    expect(block).toContain("recall or replay the original turn before writing");
     // The shared constant both consumers render now carries Policy directly.
-    expect(MEMORY_RUBRIC_TEXT).toContain("## Policy(何时去读)");
-    expect(MEMORY_RUBRIC_TEXT).toContain("recall/replay");
+    expect(MEMORY_RUBRIC_TEXT).toContain("## Policy (when to read)");
+    expect(MEMORY_RUBRIC_TEXT).toContain("recall or replay");
     // The retired sibling block's own tag must never appear anywhere in the
     // injected output.
     expect(block).not.toContain("<mnemo-memory-policy");
@@ -207,7 +209,7 @@ describe("renderRubricBlock — its own block, no shared budget (ticket 14 roste
   // identity, which is exactly the drift the tiering accepts.
   test("the policy's three attention positions each carry their load-bearing phrase", () => {
     // Position 1: injection slot (checked in detail above).
-    expect(renderRubricBlock()).toContain("物化时刻");
+    expect(renderRubricBlock()).toContain("Materialization moments");
     // Position 2: the recall tool description's short form.
     expect(MNEMO_TOOL_DESCRIPTIONS.recall).toContain(
       "an index, not the memory",
