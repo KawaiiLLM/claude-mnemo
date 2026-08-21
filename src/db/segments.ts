@@ -801,6 +801,21 @@ export function getSegmentsForTurn(db: Database, turnId: number): SegmentRecord[
     .filter((segment): segment is SegmentRecord => segment !== null);
 }
 
+/**
+ * The turn's OWNING segment id, or `null` when homeless (T1191, relation-
+ * matrix spec's segment-crossing warning). Single ownership — a turn
+ * belongs to at most one segment under the redesign, enforced by the WRITE
+ * path (`reassignSegmentMembers`'s own doc comment) rather than a retroactive
+ * constraint — is exactly what lets this collapse `getSegmentsForTurn`'s
+ * array to one id instead of asking every caller to decide which of several
+ * to use. A pre-redesign legacy turn that still carries more than one
+ * membership row reads as its FIRST (lowest id) segment, the same tie-break
+ * `getSegmentsForTurn`'s own `ORDER BY s.id ASC` already applies.
+ */
+export function getOwningSegmentId(db: Database, turnId: number): number | null {
+  return getSegmentsForTurn(db, turnId)[0]?.id ?? null;
+}
+
 export interface SegmentWrite {
   segmentId: number;
   /** The revision the caller read before composing this body. */

@@ -5,7 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { getNoteDebt, listOwedNoteTurns } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
-import { createSegment } from "../../src/db/segments";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
@@ -1992,6 +1992,112 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain("segment address");
     expect(resultText(result)).toContain("turn-only");
+  });
+
+  // T1191 (relation-matrix spec, "同流约束只压立场对"): override/refines
+  // each claim ONE workflow between their two turns; segments are the
+  // project's one reified workflow unit, so a stance edge whose two ends own
+  // DIFFERENT segments is worth a receipt warning — never a rejection, and
+  // never for depends-on or a cross-phase relation, which carry no such claim.
+  describe("segment-crossing warning on the stance pair (T1191)", () => {
+    test("a cross-segment override warns, naming both segments", () => {
+      setType(earlierTurnId, ["design"]);
+      setType(targetTurnId, ["correction"]);
+      const citingSegment = createSegment(db, { title: "Citing segment", nowEpoch: 200 });
+      const citedSegment = createSegment(db, { title: "Cited segment", nowEpoch: 200 });
+      addSegmentMembers(db, citingSegment.id, [targetTurnId], 200);
+      addSegmentMembers(db, citedSegment.id, [earlierTurnId], 200);
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain(
+        `warning: override toward S${sessionId}/T1 crosses segments ` +
+          `(E${citingSegment.id} -> E${citedSegment.id}) — the stance pair claims one workflow;` +
+          " re-judge or downgrade to depends-on.",
+      );
+    });
+
+    test("a cross-segment refines warns, naming both segments", () => {
+      setType(earlierTurnId, ["design"]);
+      setType(targetTurnId, ["design"]);
+      const citingSegment = createSegment(db, { title: "Citing segment", nowEpoch: 200 });
+      const citedSegment = createSegment(db, { title: "Cited segment", nowEpoch: 200 });
+      addSegmentMembers(db, citingSegment.id, [targetTurnId], 200);
+      addSegmentMembers(db, citedSegment.id, [earlierTurnId], 200);
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, refines: [`S${sessionId}/T1`] },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain(
+        `warning: refines toward S${sessionId}/T1 crosses segments ` +
+          `(E${citingSegment.id} -> E${citedSegment.id})`,
+      );
+    });
+
+    test("both ends of the same segment stay silent", () => {
+      setType(earlierTurnId, ["design"]);
+      setType(targetTurnId, ["correction"]);
+      const segment = createSegment(db, { title: "Shared segment", nowEpoch: 200 });
+      addSegmentMembers(db, segment.id, [targetTurnId, earlierTurnId], 200);
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain("Attached 1 relation(s).");
+      expect(resultText(result)).not.toContain("warning:");
+      expect(resultText(result)).not.toContain("crosses segments");
+    });
+
+    test("one homeless end stays silent — nothing to compare", () => {
+      setType(earlierTurnId, ["design"]);
+      setType(targetTurnId, ["correction"]);
+      // Only the citing turn has a segment; earlierTurnId (cited) is homeless.
+      const citingSegment = createSegment(db, { title: "Citing segment only", nowEpoch: 200 });
+      addSegmentMembers(db, citingSegment.id, [targetTurnId], 200);
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).not.toContain("warning:");
+      expect(resultText(result)).not.toContain("crosses segments");
+    });
+
+    test("a cross-segment depends-on stays silent — the constraint binds only the stance pair", () => {
+      setType(earlierTurnId, ["implement"]);
+      setType(targetTurnId, ["implement"]);
+      const citingSegment = createSegment(db, { title: "Citing segment", nowEpoch: 200 });
+      const citedSegment = createSegment(db, { title: "Cited segment", nowEpoch: 200 });
+      addSegmentMembers(db, citingSegment.id, [targetTurnId], 200);
+      addSegmentMembers(db, citedSegment.id, [earlierTurnId], 200);
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, dependsOn: [`S${sessionId}/T1`] },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain("Attached 1 relation(s).");
+      expect(resultText(result)).not.toContain("warning:");
+      expect(resultText(result)).not.toContain("crosses segments");
+    });
   });
 });
 

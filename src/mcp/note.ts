@@ -13,6 +13,7 @@ import {
   type TurnRelationRejectionReason,
 } from "../db/citations";
 import { runWriteTransaction } from "../db/database";
+import type { MemoryEdge } from "../db/memory-edges";
 import {
   closeNoteDebtAsDeclined,
   closeNoteDebtAsNoted,
@@ -20,6 +21,7 @@ import {
   recordDeclinedNoteDebt,
 } from "../db/note-debt";
 import { parseBareAddressReference } from "../db/references";
+import { getOwningSegmentId } from "../db/segments";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import {
   getTurn,
@@ -29,6 +31,10 @@ import {
   type TurnRecord,
 } from "../db/turns";
 import { checkFieldGate, sessionWriterId, stampField } from "../db/write-gate";
+import {
+  formatSegmentCrossingWarnings,
+  type SegmentCrossingCandidate,
+} from "../shared/segment-crossing-warning";
 import {
   decodeHtmlEntities,
   FieldModeError,
@@ -605,6 +611,46 @@ export function formatRetractionReceipt(counts: {
       ? `, ${counts.restored} bare citation(s) restored (the prose still names them).`
       : ".")
   );
+}
+
+/**
+ * T1191 (relation-matrix spec, "同流约束只压立场对"): the segment-crossing
+ * warning's DB-facing half — resolve each override/refines edge's two ends to
+ * their owning segment, then hand the resolved candidates to
+ * `formatSegmentCrossingWarnings` (shared/segment-crossing-warning.ts), which
+ * decides and renders. `attachTurnRelations` guarantees `cited.kind ===
+ * "turn"` for every diagonal relation (`validateRelationTarget` refuses a
+ * segment target outright before an edge is ever written), so every entry
+ * here resolves without a defensive branch — a bad `edges` list is a caller
+ * bug, not a state this function has to tolerate.
+ *
+ * The one shared composer both write surfaces use: `mcp/note.ts` calls it
+ * directly for its own written+restated edges, and
+ * `worker/note-settlement-turn-facade.ts` imports this same function for its
+ * own — same trigger condition and wording on both, by construction rather
+ * than by discipline.
+ */
+export function collectSegmentCrossingWarnings(
+  db: Database,
+  edges: readonly MemoryEdge[],
+): string[] {
+  const candidates: SegmentCrossingCandidate[] = [];
+  for (const edge of edges) {
+    if (edge.relation !== "override" && edge.relation !== "refines") {
+      continue;
+    }
+    const citedTurn = getTurnById(db, edge.cited.id);
+    if (!citedTurn) {
+      continue;
+    }
+    candidates.push({
+      relation: edge.relation,
+      targetRef: `S${citedTurn.sessionId}/T${citedTurn.promptNumber}`,
+      citingSegmentId: getOwningSegmentId(db, edge.citing.id),
+      citedSegmentId: getOwningSegmentId(db, edge.cited.id),
+    });
+  }
+  return formatSegmentCrossingWarnings(candidates);
 }
 
 /**
@@ -1410,6 +1456,15 @@ function handleTurnWrite(
       );
     } else if (restated > 0) {
       parts.push(`${restated} relation(s) already present, nothing added.`);
+    }
+    // T1191: same-workflow constraint on the stance pair (override/refines) —
+    // fires only when this call's own written+restated edges actually cross
+    // segments; silent otherwise (echo-on-divergence).
+    for (const warning of collectSegmentCrossingWarnings(db, [
+      ...result.relations.written,
+      ...result.relations.restated,
+    ])) {
+      parts.push(warning);
     }
   }
 

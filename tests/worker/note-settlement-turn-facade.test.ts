@@ -9,6 +9,7 @@ import {
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
@@ -928,6 +929,130 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
     expect(resultText(result)).toContain("Parameter error");
     expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T1191 (relation-matrix spec, "同流约束只压立场对"): the segment-crossing
+// warning on the stance pair (override/refines). The SAME
+// `collectSegmentCrossingWarnings` (mcp/note.ts) the main agent's own `note`
+// surface calls — exercised here through settlement's own write path so the
+// two writers cannot silently disagree about when it fires.
+// ---------------------------------------------------------------------------
+
+describe("segment-crossing warning on the stance pair (T1191)", () => {
+  test("a cross-segment override warns, naming both segments", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["design"] });
+    updateTurnById(db, t2, { type: ["correction"] });
+    const citingSegment = createSegment(db, { title: "Citing segment", nowEpoch: NOW });
+    const citedSegment = createSegment(db, { title: "Cited segment", nowEpoch: NOW });
+    addSegmentMembers(db, citingSegment.id, [t2], NOW);
+    addSegmentMembers(db, citedSegment.id, [t1], NOW);
+    const job = claimWindow(sessionDbId, 1, 2);
+
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
+      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+
+    expect(resultText(result)).toContain(
+      `warning: override toward S${sessionDbId}/T1 crosses segments ` +
+        `(E${citingSegment.id} -> E${citedSegment.id}) — the stance pair claims one workflow;` +
+        " re-judge or downgrade to depends-on.",
+    );
+  });
+
+  test("a cross-segment refines warns, naming both segments", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["design"] });
+    updateTurnById(db, t2, { type: ["design"] });
+    const citingSegment = createSegment(db, { title: "Citing segment", nowEpoch: NOW });
+    const citedSegment = createSegment(db, { title: "Cited segment", nowEpoch: NOW });
+    addSegmentMembers(db, citingSegment.id, [t2], NOW);
+    addSegmentMembers(db, citedSegment.id, [t1], NOW);
+    const job = claimWindow(sessionDbId, 1, 2);
+
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
+      { turn: `S${sessionDbId}/T2`, refines: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+
+    expect(resultText(result)).toContain(
+      `warning: refines toward S${sessionDbId}/T1 crosses segments ` +
+        `(E${citingSegment.id} -> E${citedSegment.id})`,
+    );
+  });
+
+  test("both ends of the same segment stay silent", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["design"] });
+    updateTurnById(db, t2, { type: ["correction"] });
+    const segment = createSegment(db, { title: "Shared segment", nowEpoch: NOW });
+    addSegmentMembers(db, segment.id, [t1, t2], NOW);
+    const job = claimWindow(sessionDbId, 1, 2);
+
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
+      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+
+    expect(resultText(result)).toContain("1 relation");
+    expect(resultText(result)).not.toContain("warning:");
+    expect(resultText(result)).not.toContain("crosses segments");
+  });
+
+  test("one homeless end stays silent — nothing to compare", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["design"] });
+    updateTurnById(db, t2, { type: ["correction"] });
+    // Only the citing turn (t2) has a segment; t1 (cited) stays homeless.
+    const citingSegment = createSegment(db, { title: "Citing segment only", nowEpoch: NOW });
+    addSegmentMembers(db, citingSegment.id, [t2], NOW);
+    const job = claimWindow(sessionDbId, 1, 2);
+
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
+      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+
+    expect(resultText(result)).not.toContain("warning:");
+    expect(resultText(result)).not.toContain("crosses segments");
+  });
+
+  test("a cross-segment depends-on stays silent — the constraint binds only the stance pair", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["implement"] });
+    updateTurnById(db, t2, { type: ["implement"] });
+    const citingSegment = createSegment(db, { title: "Citing segment", nowEpoch: NOW });
+    const citedSegment = createSegment(db, { title: "Cited segment", nowEpoch: NOW });
+    addSegmentMembers(db, citingSegment.id, [t2], NOW);
+    addSegmentMembers(db, citedSegment.id, [t1], NOW);
+    const job = claimWindow(sessionDbId, 1, 2);
+
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set([t2]) }),
+      { turn: `S${sessionDbId}/T2`, dependsOn: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+
+    expect(resultText(result)).toContain("1 relation");
+    expect(resultText(result)).not.toContain("warning:");
+    expect(resultText(result)).not.toContain("crosses segments");
   });
 });
 

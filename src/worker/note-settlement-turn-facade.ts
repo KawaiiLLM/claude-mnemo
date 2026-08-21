@@ -33,6 +33,7 @@ import {
 } from "../mcp/field-mode";
 import {
   bracketBareTurnReferences,
+  collectSegmentCrossingWarnings,
   completeReadRemedyForTurnField,
   formatRelationRejections,
   formatRetractionReceipt,
@@ -355,6 +356,14 @@ export interface RelationOutcome {
    * and the receipt has to be able to say so without a follow-up query.
    */
   restored: number;
+  /**
+   * T1191 (relation-matrix spec): one line per written/restated override or
+   * refines edge whose two ends own different segments — the SAME
+   * `collectSegmentCrossingWarnings` (mcp/note.ts) the main agent's own
+   * surface calls, so the trigger condition and wording cannot drift between
+   * the two writers. Empty, never omitted, when nothing crosses.
+   */
+  segmentWarnings: string[];
 }
 
 /**
@@ -1095,9 +1104,13 @@ export function evaluateSettlementTurnWrite(
       restated: attached.restated.length,
       retracted,
       restored,
+      segmentWarnings: collectSegmentCrossingWarnings(db, [
+        ...attached.written,
+        ...attached.restated,
+      ]),
     };
   } else if (retracted > 0) {
-    relations = { written: 0, restated: 0, retracted, restored };
+    relations = { written: 0, restated: 0, retracted, restored, segmentWarnings: [] };
   }
 
   return {
@@ -1207,6 +1220,11 @@ export function renderSettlementTurnWriteReceipt(
       );
     } else if (outcome.relations.restated > 0) {
       parts.push(`${outcome.relations.restated} relation(s) already present, nothing added.`);
+    }
+    // T1191: same shared warning `mcp/note.ts` prints, computed once at
+    // write time (`evaluateSettlementTurnWrite`) and carried on the outcome.
+    for (const warning of outcome.relations.segmentWarnings) {
+      parts.push(warning);
     }
   }
   if (outcome.session) {
