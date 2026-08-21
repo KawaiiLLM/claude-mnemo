@@ -4,6 +4,17 @@
 T93–T112 holds the per-round derivations) · spec: `.scratch/flow-relations/spec.md`
 (also carries the measured evidence)
 
+**Superseded in part** (ADR-0012, 2026-08-22, [S15069/T1228]–[T1241],
+`.scratch/indexes-rescope/spec.md`): `collects` is renamed `indexes` and
+widened to same-phase aggregation on BOTH layers, so read every `collects`
+below as `indexes` with its terminus + own-branch conditions dropped —
+including decision 1's table row, decision 2's dead-branch sentence, and P3's
+transparency clause, which renames with the word and keeps its scope. Two
+rulings are overturned outright and marked at their own sections: decision 4
+(the release ritual) and P1's "exactly one graph fact" clause. Everything
+else — both axes, the eight words, the three stances, flow/settlement
+derivation, and `grounds` as cross-phase-only — stands.
+
 ## Context
 
 ADR-0010 keyed every relation word off one axis — phase alone (evidence /
@@ -101,6 +112,17 @@ judgment. Nothing else self-cites.
 
 ### 4. The release ritual: consume + grounds, no collect in v1
 
+> _Superseded (ADR-0012, 2026-08-22):_ ritual v3 replaces this whole section.
+> A release now `indexes` the artifacts it ships and writes NO `grounds` to
+> decision settlements — the decision linkage is reached transitively through
+> the artifacts, measured on T998 (5 of 8 grounds already derivable in ≤3
+> hops; two of the three gaps dissolve, one was a genuine artifact-side
+> missing edge). The release chain stays `consume`. The curation split below
+> half-reverses: release-chooses-WHICH dies, settlement-chooses-WHAT survives
+> as `indexes`. The premise that a delivery turn "holds no flow of its own to
+> collect within" is what the widened word retires — aggregation is a
+> same-phase act, not a flow-membership one.
+
 A release turn `consume`s the work it ships and `grounds` on the settlements
 it fixes in place, citing the previous release; the first release is the
 chain's legal root. **A release does not collect in v1** [S15069/T1204]:
@@ -124,6 +146,13 @@ not a v1 exception.
   still stores, and the receipt names the settlement to use instead; edges
   are valid as of write time, and hindsight settlement re-points the warning
   at current termini as flows grow.
+  _Superseded in part (ADR-0012, 2026-08-22):_ the "exactly one graph fact"
+  clause now names a DIFFERENT fact. `collects`'/`indexes`' own-branch
+  membership check retires [S15069/T1232] — `indexes` is checked for
+  same-phase and nothing else — and the self-`grounds` settlement+implementer
+  condition (decision 3) becomes the vocabulary's one graph-state rejection.
+  The rest of P1 is unchanged: legality stays write-time, everything else
+  warns, and edges stay valid as of write time.
 - **P2 — v1 builds the decision layer only.** Delivery-layer tag flows are
   deferred whole (§Alternatives); the release ritual (decision 4) is the
   decision layer's only delivery-facing mechanism in v1.

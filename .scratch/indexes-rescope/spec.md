@@ -146,7 +146,10 @@ review and the graph page.
 
 ## Migration (small; stored rows all post-era)
 
-1. Mechanical: 14 `collects` rows → `indexes`; CHECK word swap (rebuild-and-
+1. Mechanical: 18 `collects` rows → `indexes` (the count kept moving while
+   this spec was drafted — the amendment session wrote four more; the
+   rehearsal measured 18→18 and ADR-0012 records that figure); CHECK word
+   swap (rebuild-and-
    copy precedent, rehearse on a /tmp production copy — the 0.13.0 incident
    rules are in force for any data-UPDATE migration); note params
    `collects`/`retractCollects` → `indexes`/`retractIndexes`; validator

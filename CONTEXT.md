@@ -3,8 +3,8 @@
 Persistent memory for Claude Code sessions: an episodic layer of recorded turns and
 a semantic layer of task containers, maintained by the agents that do the work.
 Vocabulary pinned by the 2026-08-17 segment redesign, the 2026-08-19
-edge-ownership redesign and the 2026-08-20 edge-mechanism revision
-(ADR-0001…0009).
+edge-ownership redesign, the 2026-08-20 edge-mechanism revision and the
+2026-08-21/22 flow-relations and indexes amendments (ADR-0001…0012).
 
 ## Language
 
@@ -106,32 +106,42 @@ exception.
 Eight relation words, checked by phase (evidence/decision/delivery, as
 above) and — for override alone — unrestricted across flow and layer.
 Three stances group them by what they ask of the cited turn: JUDGING
-(override, narrows, extends, collects) — after reading me, must the cited
+(override, narrows, extends, indexes) — after reading me, must the cited
 still be read? DEPENDING (grounds, consume) — if the cited were false, what
 happens to me? TESTING (verifies, refutes) — did I test the claim, for or
 against? override replaces a wrong conclusion (same phase; not limited to
 one flow or layer) and terminates the cited branch — the overrider holds
 its own flow. narrows and extends hold within one decision-phase flow (both
 ends decision-phase, definitional) — a piece is cut / a piece is added,
-never strung together by time order alone. collects names a flow's own
-minimal set: the citing turn must itself be the point in its branch nothing
-further narrows or extends, and every target must be a member of that same
-branch — never inherited from elsewhere (the one condition checked against
-graph state, not just field facts). grounds is cross-phase ONLY — within
-one phase, dependency is continuation (narrows/extends) or usage (consume),
-never grounds; it absorbed the old encodes. consume is same-phase,
-cross-flow: I used its product, no liability if it falls. verifies and
-refutes require the citing turn to carry an evidence phase and the cited a
-decision or delivery phase — never evidence: a verdict's object is a claim,
-and evidence's own object is the world (two measurements that agree are the
-same fact twice; one that disagrees is override). Every same-phase word is
-strictly same-phase, every cross-phase word strictly cross-phase — no word
-straddles the two scopes.
-_Avoid_: nine-cell grammar, per-word phase table, refines/encodes/
+never strung together by time order alone. indexes is same-phase
+aggregation on either layer: this node gathers and represents the
+same-phase nodes carrying its effective content, and readers reach them
+through it — a decision settlement indexes its branch's carrying members, a
+release indexes the artifacts it ships. It is checked for same phase and
+nothing else; an indexed target is never also consumed (indexes subsumes
+consume on that pair, as extends already does). grounds is cross-phase ONLY
+— within one phase, dependency is continuation (narrows/extends) or usage
+(consume), never grounds; it absorbed the old encodes. Where a lane has an
+independent delivery-phase spec turn, THE spec carries the grounds and the
+implementation artifacts reach the decision through it (artifact —consume→
+spec —grounds→ decision); where design and spec-writing merged into one
+turn, artifacts ground directly — re-routing there would be phase-illegal.
+consume is same-phase, cross-flow: I used its product, no liability if it
+falls. verifies and refutes require the citing turn to carry an evidence
+phase and the cited a decision or delivery phase — never evidence: a
+verdict's object is a claim, and evidence's own object is the world (two
+measurements that agree are the same fact twice; one that disagrees is
+override). Every same-phase word is strictly same-phase, every cross-phase
+word strictly cross-phase — no word straddles the two scopes. Only ONE
+condition in the whole vocabulary is checked against graph state rather
+than field facts, and it belongs to grounds (see Self-citation); every
+other graph-derived condition warns, or is left to settlement review.
+_Avoid_: nine-cell grammar, per-word phase table, refines/encodes/collects/
 depends-on/grounded-on/evidence-for/evidence-against (retired — refines
-split into narrows+extends, depends-on split into consume+collects, encodes
-merged into grounds, evidence-for/-against renamed verifies/refutes,
-grounded-on renamed grounds)
+split into narrows+extends, depends-on split into consume+indexes, collects
+renamed indexes and widened from a decision flow's own terminus to
+aggregation on either layer, encodes merged into grounds, evidence-for/
+-against renamed verifies/refutes, grounded-on renamed grounds)
 
 **Flow**:
 A branch of decisions joined by narrows/extends edges — not a connected
@@ -140,15 +150,27 @@ by any retraction. A flow's settlement is the branch node nothing further
 narrows or extends (a different sense of "settlement" than the asynchronous
 Judging pass above). override terminates a branch — the overrider holds its
 own flow rather than joining the branch it killed; a dead branch has no
-terminus, so nothing may collect it, though a surviving mid-branch
-conclusion is still reachable directly, by grounds. Delivery and evidence
-turns hold no flow of their own — they inherit through the grounds/consume
-edges they write. Segments never enter the graph as relation nodes: a flow
+terminus, and no write-time gate enforces that any more — whether a dead
+branch's members may still be indexed is a judgment settlement review owns,
+and a surviving mid-branch conclusion stays reachable directly, by grounds.
+Delivery and evidence turns hold no flow of their own — they inherit
+through the grounds/consume/indexes edges they write, which is how a
+release reaches the lanes it ships. Segments never enter the graph as relation nodes: a flow
 is the emergent subgraph a segment's member turns carve among themselves,
 the segment stays their container.
 _Avoid_: workflow as a stored or explicitly named object, connected
 components as the flow definition (retired — a flow is branch topology via
 narrows/extends, not graph connectivity)
+
+**Live turn (deleted / dormant)**:
+Which turns are graph nodes at all, under one shared predicate every read
+side consumes. A rewound turn (`was_rolled_back`) is DELETED — permanently
+never a node, never an edge endpoint, never in a signal or the
+visualization. A `status='skipped'` turn is DORMANT, not deleted: skipping
+is a reversible lifecycle floor, so the turn is absent while skipped and
+restored WHOLE — its stored edges included, no re-judgment — the moment a
+late note promotes it back. Everything else is live.
+_Avoid_: treating skipped as deletion, per-read-side liveness filters
 
 **Multi-phase turn**:
 A turn whose type set spans more than one phase. Each phase judges its own
@@ -173,18 +195,20 @@ the prose that names it; relation rows never do.
 _Avoid_: upgrading (the retired path from bare pair to relation)
 
 **Release chain (发布链)**:
-The ritual every release turn performs: consume the work it ships, ground
-on the settlements it fixes in place, and cite the previous release when
-one exists — the first release is the chain's legal root. A release does
-not collect: collects belongs to a flow's own settlement, and a delivery
-turn holds no flow of its own to collect within. Curation splits in two
-instead — the release chooses WHICH settlements (grounds), each settlement
-chooses WHAT within its own flow (collects) — reached transparently in the
-one hop grounds already crosses. A delivery turn attempting collects fails
-the membership check naturally, with no flow to belong to.
-_Avoid_: depends-on/encodes (retired — a release ships via consume, fixes
-rulings in place via grounds), a release collecting (rejected for v1 — a
-delivery turn has no flow to collect within)
+The ritual every release turn performs: index the delivery artifacts it
+ships, and consume the previous release when one exists — the first release
+is the chain's legal root. Lineage is usage, not representation, which is
+why the chain itself stays consume. A release writes NO grounds to decision
+settlements: the decision linkage is transitive through the artifacts,
+which already ground on the rulings they carry, so a gap there is a missing
+artifact-side edge to repair rather than something for the release to
+re-derive. Curation is no longer split: the release chooses nothing about
+which settlements matter, each settlement chooses WHAT within its own flow
+(indexes), and the release's own choice is only which artifacts shipped.
+_Avoid_: depends-on/encodes (retired — a release ships via indexes and
+chains via consume), a release grounding on the settlements it fixes
+(retired — release-time re-derivation of what the artifact layer already
+recorded)
 
 ### Write gate
 
