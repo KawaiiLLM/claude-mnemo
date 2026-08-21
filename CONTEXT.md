@@ -97,9 +97,54 @@ A semantics boundary in stored data; reads never mix the two sides.
 **Edge (关系边)**:
 A standalone turn→turn relation declaration, decoupled from note prose. A pair
 may carry several relations when each states a fact the others cannot derive
-(the deletion test); self-edges are illegal; either writer may hard-delete a
-wrong one. Written under the citing turn's write authority — the cited turn
-need not have been read.
+(the deletion test); either writer may hard-delete a wrong one. Written under
+the citing turn's write authority — the cited turn need not have been read.
+Self-edges are illegal by default; see Self-citation for the one narrow
+exception.
+
+**Relation grammar (nine-cell)**:
+The two reading rules that pick a relation word for any turn→turn edge, keyed
+by phase — evidence (research/measure), decision (design/discuss/correction),
+delivery (everything else; a multi-type turn's phase is the SET of its types'
+phases). Same phase (the diagonal) — a guarantee ladder, strongest to weakest:
+override (the cited conclusion is wrong; this node replaces it), refines (the
+cited conclusion is right; this node improves, supplements or extends it
+without replacing it — refinement chains fork, one direction per origin,
+never strung together by time order), depends-on (guarantees only logical
+dependency: this node builds on the cited node's completion, no workflow or
+correctness claim). Cross phase — the word is fixed by the SOURCE turn's
+phase, never the target's: an evidence source speaks
+evidence-for/evidence-against (a verdict — this node tested that claim), a
+decision source speaks grounded-on (footing — if the cited decision were
+false, this node falls), a delivery source speaks encodes (this delivery
+carries the cited node; naming is curation, the minimal set worth
+exhibiting).
+_Avoid_: per-word phase table (retired — one grammar picks the word for every
+cell, not a hand-carved exception list per word)
+
+**Workflow (工作流)**:
+A separable, nameable subtask chain. Scopes the override/refines stance pair
+alone: both ends of such an edge must serve the same workflow, or the edge
+downgrades to depends-on. depends-on and the cross-phase words are
+indifferent to workflow.
+
+**Multi-phase turn**:
+A turn whose type set spans more than one phase. Each phase judges its own
+edge toward a target independently; when two of a turn's phases each
+legitimately earn an edge toward the same target, both are written — two true
+statements from two different halves of one turn, not an ambiguity to
+resolve.
+
+**Self-citation**:
+A turn citing itself with a cross-phase word — legal only when the turn's own
+phase set contains both the word's source phase and a legal target phase for
+it, and only when that half carries the other half's core ruling or key
+verification as an independently exhibitable artifact (restating is not
+carrying). A single-phase turn can never self-cite; the diagonal words
+(override/refines/depends-on) never self-cite for anyone — same phase against
+yourself states nothing.
+_Avoid_: self-loop ban (retired as a blanket rule — narrowed to single-phase
+turns and the diagonal words)
 
 **text-ref**:
 Best-effort extraction of turn addresses from prose — a display hint only, never
@@ -108,9 +153,9 @@ the prose that names it; relation rows never do.
 _Avoid_: upgrading (the retired path from bare pair to relation)
 
 **Release chain (发布链)**:
-The ritual every release turn performs: depends-on the landings it ships, encodes
-the rulings it solidifies, and a citation of the previous release. The first
-release is the chain's legal root.
+The ritual every release turn performs: depends-on the work it ships, encodes
+the rulings and key verifications it fixes in place, and cites the previous
+release when one exists. The first release is the chain's legal root.
 
 ### Write gate
 

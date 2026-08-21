@@ -194,3 +194,5 @@ Recorded rather than papered over:
   touches `edge-signals`' scoring logic.
 - Vocabulary gaps left open from the rebuild report's A-series: A2 (`responds-to` missing),
   A3 (`grounded-on` source lock), A7 (pre-registration). A5/A10/A11 are dissolved or accepted.
+  _Superseded (2026-08-21):_ A2 and A3 are both closed by ADR-0010's nine-cell grammar —
+  A3 by the grammar itself, A2 by phase-spanning self-citation. A7 remains open.
