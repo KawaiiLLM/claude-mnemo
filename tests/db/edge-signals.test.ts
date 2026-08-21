@@ -289,6 +289,61 @@ describe("edge scoring signals", () => {
     expect(signal.encodesCount).toBe(2);
   });
 
+  // Indexes-rescope spec ticket 02 (ruled S15069/T1240): "aggregation
+  // credits its TARGETS, the encodes-curation lineage" — an indexed turn
+  // (a settlement's carried member, a release's shipped artifact) now gains
+  // the identical curation signal a grounds target already did.
+  describe("indexes joins the curation key (indexes-rescope ticket 02, S15069/T1240)", () => {
+    test("a turn cited ONLY by indexes (no grounds edge at all) carries the signal", () => {
+      const target = addTurn(1, { type: ["design"] });
+      const indexer = addTurn(2, { type: ["design"] }); // e.g. a settlement indexing a carried branch member
+      edge(indexer, target, "indexes", 1000);
+
+      const signal = getTurnEdgeSignalsForTurn(db, target);
+      expect(signal.encodesCount).toBe(1);
+      expect(signal.overridden).toBe(false);
+      expect(signal.refinesExcess).toEqual({ decision: 0, delivery: 0 });
+    });
+
+    test("grounds in-degree and indexes in-degree from distinct sources SUM in encodesCount", () => {
+      const target = addTurn(1, { type: ["design"] });
+      const grounder = addTurn(2, { type: ["implement"] });
+      const indexer = addTurn(3, { type: ["design"] });
+      edge(grounder, target, "grounds", 1000);
+      edge(indexer, target, "indexes", 1000);
+
+      const signal = getTurnEdgeSignalsForTurn(db, target);
+      expect(signal.encodesCount).toBe(2);
+    });
+
+    // The load-bearing case: one citing turn holding BOTH a grounds edge and
+    // a separate indexes edge to the same target is two real stored rows
+    // (memory-edges.ts identity: UNIQUE(citing, cited, relation), one row per
+    // relation on a pair) — the count must land on 2, neither collapsed to 1
+    // (an accidental DISTINCT-on-pair dedup) nor inflated past 2 (a join
+    // fanning one edge into several counted rows).
+    test("a turn cited by BOTH grounds and indexes from the SAME source counts exactly the two real edges, no double-count and no dedup", () => {
+      const target = addTurn(1, { type: ["design"] });
+      const source = addTurn(2, { type: ["implement"] });
+      edge(source, target, "grounds", 1000);
+      edge(source, target, "indexes", 1000);
+
+      const signal = getTurnEdgeSignalsForTurn(db, target);
+      expect(signal.encodesCount).toBe(2);
+    });
+
+    test("an indexes edge from a dormant (skipped) or rolled-back source does not count, same live-source rule as grounds", () => {
+      const target = addTurn(1, { type: ["design"] });
+      const rolledBackIndexer = addTurn(2, { type: ["design"], wasRolledBack: true });
+      const skippedIndexer = addTurn(3, { type: ["design"] });
+      edge(rolledBackIndexer, target, "indexes", 1000);
+      edge(skippedIndexer, target, "indexes", 1000);
+      db.query("UPDATE turns SET status = 'skipped' WHERE id = ?").run(skippedIndexer);
+
+      expect(getTurnEdgeSignalsForTurn(db, target).encodesCount).toBe(0);
+    });
+  });
+
   test("unscored relations (grounded-on, evidence-for/against, depends-on, legacy supersedes) contribute nothing", () => {
     const target = addTurn(1, { type: ["design"] });
     const groundedOnSource = addTurn(2, { type: ["design"] });
@@ -309,12 +364,12 @@ describe("edge scoring signals", () => {
     expect(signals.get(dependsOnTarget)).toEqual(ZERO);
   });
 
-  test("guard: RELATION_IS_SCORED classifies exactly override/extends/grounds as scored (spec.md's election-interim 1:1 rename), everything else in the eight-word closed set as not — compile-time exhaustive over EDGE_RELATIONS", () => {
+  test("guard: RELATION_IS_SCORED classifies exactly override/extends/grounds/indexes as scored (indexes-rescope ticket 02, ruled S15069/T1240 — indexes joins the curation key), everything else in the eight-word closed set as not — compile-time exhaustive over EDGE_RELATIONS", () => {
     expect(RELATION_IS_SCORED).toEqual({
       override: true,
       narrows: false,
       extends: true,
-      indexes: false,
+      indexes: true,
       consume: false,
       grounds: true,
       verifies: false,

@@ -42,7 +42,14 @@ export interface TurnEdgeSignals {
    * edge counts as "baseline" and how a dual-phase source is bucketed once.
    */
   refinesExcess: RefinesExcessByPhase;
-  /** Raw in-degree of LIVE `encodes` edges (both endpoints live — `turn-liveness.ts`). */
+  /**
+   * Raw in-degree of LIVE `grounds` edges PLUS LIVE `indexes` edges (both
+   * endpoints live — `turn-liveness.ts`), the curation signal (indexes-
+   * rescope spec ticket 02, ruled S15069/T1240). A target cited by both a
+   * `grounds` edge and a separate `indexes` edge from the SAME source counts
+   * both — they are two distinct stored rows (`memory-edges.ts`: identity is
+   * (pair, relation), one row per relation on a pair), not one deduplicated.
+   */
   encodesCount: number;
 }
 
@@ -55,22 +62,25 @@ function zeroSignals(): TurnEdgeSignals {
  * seven-word set. Flow-relations spec, ticket 02's interim ruling
  * (`.scratch/flow-relations/spec.md`, migration item 6, "Election interim"):
  * "keys re-map 1:1 by rename — the refines key reads extends, the encodes
- * key reads grounds", override unchanged. This is a MINIMAL, ticket-02-
- * authorized word swap only, forced by `shared/turn-phase.ts`'s
- * `TurnEdgeRelation` type changing under this exhaustive `Record` — it does
- * NOT redesign scoring for the new words `narrows`/`collects` (both left
- * `false`, "scores nothing until ruled", the same interim distortion spec.md
- * names) or reconsider whether `extends`'s excess-baseline signal still means
- * the same thing once `narrows` exists as a separate word. Ticket 05 owns
- * that redesign; this file's query literals below are updated only so far as
- * needed to not silently read zero rows post-migration (`encodes`/`refines`
- * no longer appear in storage at all after this ticket's rename).
+ * key reads grounds", override unchanged; `narrows`/`collects` (now
+ * `indexes`) both left `false`, "scores nothing until ruled".
+ *
+ * Indexes-rescope spec ticket 02 (`.scratch/indexes-rescope/spec.md`,
+ * migration item 1; ruled S15069/T1240 — "aggregation credits its TARGETS,
+ * the encodes-curation lineage") admits `indexes` as the curation key's
+ * SECOND scored relation: an indexed target (a settlement's carried member,
+ * a release's shipped artifact) now gains the identical `encodesCount`
+ * signal a `grounds` target already did (see the query below). This does
+ * NOT redesign scoring otherwise — `narrows`/`consume`/`verifies`/`refutes`
+ * stay `false`, and `extends`'s excess-baseline signal, override's
+ * all-or-nothing zeroing, and every weight/combination question remain the
+ * future scoring pass's decision (spec's Out of scope).
  */
 export const RELATION_IS_SCORED: Record<TurnEdgeRelation, boolean> = {
   override: true,
   narrows: false,
   extends: true,
-  indexes: false,
+  indexes: true,
   consume: false,
   grounds: true,
   verifies: false,
@@ -188,6 +198,15 @@ export function getTurnEdgeSignals(
     result.get(row.targetId)!.overridden = true;
   }
 
+  // Curation key = grounds in-degree + indexes in-degree (indexes-rescope
+  // spec ticket 02, ruled S15069/T1240: aggregation credits its targets, the
+  // same encodes-curation lineage `grounds` already carries). The `citing`/
+  // `cited` joins here are 1:1 on `turns.id`, so widening the relation
+  // filter cannot fan a single edge row into more than one counted row; a
+  // pair holding BOTH a `grounds` and an `indexes` edge is two real rows
+  // (memory-edges.ts: identity is (pair, relation)) and COUNT(*) correctly
+  // reports 2, not artificially deduped to 1 nor doubled beyond the two real
+  // edges.
   const encodesRows = db
     .query<EncodesRow, number[]>(
       `SELECT e.cited_id AS targetId, COUNT(*) AS count
@@ -195,7 +214,7 @@ export function getTurnEdgeSignals(
        JOIN turns citing ON citing.id = e.citing_id
        JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'grounds'
+         AND e.relation IN ('grounds', 'indexes')
          AND ${liveTurnSql("citing")}
          AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})
