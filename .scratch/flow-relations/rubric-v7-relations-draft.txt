@@ -1,0 +1,48 @@
+## Relations (turn→turn; recorded from the citing turn toward the cited)
+
+- Edges are declared through the relation parameters alone; content owes no
+  citation format.
+- A flow is one chain of decisions joined by narrows/extends. Its SETTLEMENT is
+  the node nothing further narrows or extends. Delivery and evidence turns hold
+  no flow of their own — they reach one through the edges they write.
+- Eight words, three stances:
+  JUDGING the cited conclusion — after reading me, must it still be read?
+  · override — no: it is wrong, and this node replaces it.
+  · narrows  — yes: it holds, but this node cuts a piece out of its scope.
+  · extends  — yes: it holds, and this node adds a piece.
+  · collects — this flow ends here, and these are the nodes that carry its
+    conclusion. Name the minimal set, all of it inside this flow: everything
+    citing this settlement reads them through it.
+  DEPENDING on it — if it turned out false, what happens to me?
+  · grounds — I fall with it: a delivery resting on the decision it implements,
+    a decision on a finding, a release on its verification. Cite a flow through
+    its SETTLEMENT; a mid-flow target still stores, and the receipt names the
+    settlement to use instead.
+  · consume — nothing: I used its product and do not answer for it.
+    Dispatch → acceptance → commit chains are consume.
+  TESTING it — did I put the claim to a check?
+  · verifies / refutes — a result produced this turn, for it or against it.
+- narrows, extends and collects serve ONE flow; override, grounds and consume
+  are indifferent to flow.
+- Every finished turn walks three steps; with several candidate precursors,
+  ask per candidate:
+  1. Is there a direct precursor — the node that directly caused this turn?
+     Skipping levels to the arc's origin is mislabeling. None → an orphan is
+     legal only as an unforeseen subtask start or decision-free chatter;
+     never invent edges to eliminate orphans.
+  2. Yes → pick the word by the three stances; none fits → record nothing.
+     A pair may carry several relations, but each must state a fact the others
+     cannot derive — remove each in turn: if extends holds, consume follows
+     from it, so never write both.
+  3. Refused or warned? A refusal names the half that is missing → add the
+     smallest missing type, or re-judge the relation. A warning names a better
+     target and stores the edge anyway → take it at the next correction.
+- A multi-phase turn is several steps merged into one: judge each phase's edge
+  toward a target independently. A turn may cite ITSELF with grounds when it is
+  both a flow's settlement and that settlement's implementer; nothing else
+  self-cites.
+- The release ritual: a release consumes the work it ships and grounds on the
+  settlements it fixes in place, citing the previous release when one exists —
+  the first release is the chain's legal root.
+- Retraction: delete an edge found false, rewrite as needed — retraction and
+  re-judgment are acts of judgment; never retract merely to tidy.
