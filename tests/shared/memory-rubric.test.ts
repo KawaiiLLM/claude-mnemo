@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 
-import { renderRubricBlock } from "../../src/hooks/session-composition";
+import {
+  MAX_INJECTED_BLOCK_CHARS,
+  renderRubricBlock,
+} from "../../src/hooks/session-composition";
 import { MNEMO_TOOL_DESCRIPTIONS, noteInputShape } from "../../src/mcp/definitions";
 import {
   MEMORY_RUBRIC_HASH,
@@ -40,7 +43,7 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   });
 
   test("the rubric's own sections are present verbatim (ticket's own normative text)", () => {
-    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v7");
+    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v8");
     expect(MEMORY_RUBRIC_TEXT).toContain("## Fields");
     // Ticket 03's four-section regroup survives translation: type/tags stay
     // unheaded sub-blocks of `## Fields`, and the four H2s carry the v6
@@ -62,8 +65,17 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // eight words in three stances. Pinned line-for-line against the spliced
   // draft (rubric-v7-relations-draft.txt) — including the alignment spaces in
   // `narrows  —` / `extends  —`, which are part of the ruled bytes.
-  test("v7 carries the eight relation words in their three stances, verbatim", () => {
-    expect(MEMORY_RUBRIC_VERSION).toBe("v7");
+  //
+  // v8 (indexes-rescope spec, ticket 04) keeps the stance frame and seven of
+  // the eight bullets byte-for-byte; `collects` becomes `indexes` and its
+  // bullet states SAME-PHASE AGGREGATION instead of the retired "this flow
+  // ends here" terminus reading — the one bullet that has to answer the
+  // JUDGING question for BOTH aggregation points (a settlement over its
+  // branch's members, a release over its shipped artifacts) without
+  // legislating either case. Its own alignment space (`indexes  —`, seven
+  // letters padded to override/collects' eight) is part of the bytes too.
+  test("v8 carries the eight relation words in their three stances, verbatim", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v8");
     expect(MEMORY_RUBRIC_TEXT).toContain("- Eight words, three stances:");
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "  JUDGING the cited conclusion — after reading me, must it still be read?",
@@ -78,9 +90,9 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       "  · extends  — yes: it holds, and this node adds a piece.",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "  · collects — this flow ends here, and these are the nodes that carry its\n" +
-        "    conclusion. Name the minimal set, all of it inside this flow: everything\n" +
-        "    citing this settlement reads them through it.",
+      "  · indexes  — through me: I gather these same-phase nodes and stand for them,\n" +
+        "    so readers reach them here. A settlement indexes the members carrying its\n" +
+        "    branch's conclusion; a release, the artifacts it ships.",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "  DEPENDING on it — if it turned out false, what happens to me?",
@@ -101,17 +113,62 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       "- A flow is one chain of decisions joined by narrows/extends. Its SETTLEMENT is\n" +
         "  the node nothing further narrows or extends.",
     );
+    // v8: the flow-scope line loses `collects` with law 2 — `indexes` carries
+    // no flow (or any other graph-state) condition, so only the two words that
+    // BUILD a flow are still scoped to one.
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "- narrows, extends and collects serve ONE flow; override, grounds and consume\n" +
-        "  are indifferent to flow.",
+      "- narrows and extends serve ONE flow; every other word is indifferent to it.",
     );
   });
 
-  // The retired v6 vocabulary, as a residue guard: every one of these words
-  // was load-bearing in v6's §Relations and none may survive anywhere in the
-  // document — a leftover would teach a word the write gate no longer
-  // accepts.
-  test("no v6 relation word survives anywhere in the rubric", () => {
+  // v8's three remaining teaching deltas, each pinned where a writer reads it.
+  // The canonical route (spec law 7) lives INSIDE the grounds bullet — it
+  // decides which node writes the edge at all, so it must be found when
+  // `grounds` is looked up, not in a distant paragraph. The dedup (law 3)
+  // rides the existing per-pair deletion-test sentence rather than a new line:
+  // indexes subsumes consume exactly as extends already did.
+  test("v8 teaches the canonical grounds route and the indexes/consume dedup", () => {
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "    settlement to use instead. One route to the decision: when the work has a\n" +
+        "    spec turn of its own, THAT turn carries the grounds and the other artifacts\n" +
+        "    consume it instead; when design and spec landed in one turn, each artifact\n" +
+        "    grounds directly.",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "     cannot derive — remove each in turn: if extends or indexes holds, consume\n" +
+        "     follows from it, so never write both.",
+    );
+  });
+
+  // The v1 division of labor ruled at [S15069/T1238]: the amendment's three
+  // GRAPH INVARIANTS (reachability, component emergence, navigation
+  // minimality) and their review lints are manual tooling for the backfill
+  // pass and the graph page — never judgment injected into every writer's
+  // context. A future edit that "helpfully" teaches them here would spend the
+  // block's remaining headroom on rules no writer can act on at write time.
+  test("the graph invariants and their lints stay OUT of the rubric", () => {
+    for (const reviewOnly of [
+      "Reachability",
+      "unreachable",
+      "connected component",
+      "lint",
+      "invariant",
+    ]) {
+      expect(
+        MEMORY_RUBRIC_TEXT,
+        `review-time tooling must not be taught in the rubric: ${reviewOnly}`,
+      ).not.toContain(reviewOnly);
+    }
+  });
+
+  // The retired vocabulary, as a residue guard: every one of these words was
+  // load-bearing in some earlier §Relations and none may survive anywhere in
+  // the document — a leftover would teach a word the write gate no longer
+  // accepts. The first six are v6's; `collects` joins them at v8, where it
+  // renamed to `indexes` (indexes-rescope spec) — the note parameter of that
+  // name is gone from the schema, so a rubric still naming it would teach a
+  // call that cannot parse.
+  test("no retired relation word survives anywhere in the rubric", () => {
     for (const retired of [
       "refines",
       "encodes",
@@ -119,6 +176,7 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       "grounded-on",
       "evidence-for",
       "evidence-against",
+      "collects",
     ]) {
       expect(
         MEMORY_RUBRIC_TEXT,
@@ -131,8 +189,8 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // segment-creation lines survive translation inside `## Segments
   // (membership and creation)` — pinned at the English renderings approved
   // through the three-round peer review of the v6 draft.
-  test("v7 still carries the Segments creation lines, per the approved translation", () => {
-    expect(MEMORY_RUBRIC_VERSION).toBe("v7");
+  test("v8 still carries the Segments creation lines, per the approved translation", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v8");
     expect(MEMORY_RUBRIC_TEXT).toContain("## Segments (membership and creation)");
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "Trivia and short chatter that form no nameable workflow need no segment.",
@@ -162,12 +220,21 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // ritual above it CHANGED words with the vocabulary flip: the release now
   // consumes what it ships and grounds on what it fixes in place (v6 said
   // depends-on + encodes).
-  test("v7 carries the release ritual, the retraction line and the pre-registration bullet, in that order", () => {
-    expect(MEMORY_RUBRIC_VERSION).toBe("v7");
+  //
+  // v8 (indexes-rescope spec law 4) rewrites that ritual again, and this time
+  // by SUBTRACTION as much as by word: a release indexes what it ships,
+  // consumes the previous release, and writes NO grounds to the settlements it
+  // fixes — that linkage is already transitive through the artifacts' own
+  // grounds. The explicit negative is deliberate teaching, not padding: v7
+  // taught the opposite, so a writer carrying the old habit needs the
+  // retirement stated, not merely omitted.
+  test("v8 carries the release ritual, the retraction line and the pre-registration bullet, in that order", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v8");
     const releaseRitual =
-      "- The release ritual: a release consumes the work it ships and grounds on the\n" +
-      "  settlements it fixes in place, citing the previous release when one exists —\n" +
-      "  the first release is the chain's legal root.";
+      "- The release ritual: a release indexes the artifacts it ships and consumes the\n" +
+      "  previous release when one exists — the first release is the chain's legal\n" +
+      "  root. No grounds to the settlements it fixes: they are already reached\n" +
+      "  through the artifacts.";
     const retraction =
       "- Retraction: delete an edge found false, rewrite as needed — retraction and\n" +
       "  re-judgment are acts of judgment; never retract merely to tidy.";
@@ -262,6 +329,23 @@ describe("renderRubricBlock — its own block, no shared budget (ticket 14 roste
     expect(block).toContain(MEMORY_RUBRIC_TEXT);
     expect(block).not.toContain("## Segment roster");
     expect(block).not.toContain("INCOMPLETE");
+  });
+
+  // The rubric has no demote ladder of its own — it renders whole (above) and
+  // then meets `enforceHardCharLimit`, a SILENT governor: one character over
+  // the cap and the block is sliced with a marker appended, so the tail
+  // (Policy first, then §Segments, then §Relations' own last bullets) simply
+  // stops reaching either consumer while every verbatim assertion above still
+  // passes against the untruncated CONSTANT. Nothing else in the suite fails
+  // on that. v6 compressed prose to stay under this line and v8 spent 62% of
+  // what v6 left (443 → 167 chars of headroom), so the version that finally
+  // crosses it is not hypothetical — this makes it fail loudly instead.
+  test("the rendered block fits the injection cap untruncated", () => {
+    const block = renderRubricBlock();
+    expect(block.length).toBeLessThan(MAX_INJECTED_BLOCK_CHARS);
+    // The governor never had to touch it: injected bytes === rendered bytes.
+    expect(block).toBe(renderMemoryRubricBlock());
+    expect(block).not.toContain("block truncated");
   });
 
   // Ticket 03 (edge-mechanism-revision spec "03 — Rubric v5 定稿入库,Policy

@@ -11,6 +11,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { attachSegmentToSession, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { claimWriterId } from "../../src/db/write-gate";
+import { MEMORY_RUBRIC_TEXT } from "../../src/shared/memory-rubric";
 import { formatTurnCompact } from "../../src/mcp/format";
 import { buildCollapsedTurnsForSession } from "../../src/mcp/recall";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
@@ -465,6 +466,50 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
     expect(prompt).toContain("retractRefutes");
     expect(prompt).toContain('`action="create"`');
     expect(prompt).toContain("joining an existing segment beats opening");
+  });
+
+  // Indexes-rescope ticket 04: the edge vocabulary this prompt states is
+  // DERIVED from `EDGE_RELATIONS`/`RELATION_FIELD_NAME`, so the rename reached
+  // it for free — but the rejection examples beside it were hand-written prose
+  // and named a check that law 2 retired (an out-of-branch collects target no
+  // longer fails anything). Both halves are pinned here: the derived word must
+  // appear, and no retired word or retired rejection may survive in the prose
+  // around it, where it would teach settlement to avoid legal calls.
+  test("the prompt speaks indexes through the shared constants and states no retired rejection", () => {
+    const prompt = renderPrompt();
+
+    expect(prompt).toContain("indexes");
+    expect(prompt).toContain("retractIndexes");
+    expect(prompt).not.toContain("collects");
+    expect(prompt).not.toContain("out-of-branch");
+  });
+
+  // The prompt sends settlement to the rubric BY SECTION NAME, and those names
+  // are prose on this side and a heading on the other — nothing linked them.
+  // The v6 full-English ruling renamed the headings while this prompt kept
+  // pointing at 关系/归属, so for three releases it named sections the rubric no
+  // longer had: a reader following the pointer finds nothing and falls back to
+  // instinct, which is the silent half of a teaching bug. Every section this
+  // prompt names must exist as a real heading.
+  test("every rubric section the prompt points at is a real heading in the rubric", () => {
+    const prompt = renderPrompt();
+    const headings = [...MEMORY_RUBRIC_TEXT.matchAll(/^## (\S+)/gm)].map(
+      (match) => match[1],
+    );
+    expect(headings.length).toBeGreaterThan(0);
+
+    // Only the two pointer FORMS the prompt uses to send a reader to a
+    // heading — "the Rubric's <X> section" / "the Rubric's own <X> checklist".
+    // Prose that merely names the rubric ("shared with the main agent's…") is
+    // not a pointer and must not be swept in.
+    const referenced = [
+      ...prompt.matchAll(/Memory Rubric'?s(?: own)? (\S+) (?:section|checklist)/g),
+    ].map((match) => match[1]);
+    expect(referenced.length).toBeGreaterThan(0);
+
+    for (const name of referenced) {
+      expect(headings).toContain(name);
+    }
   });
 });
 

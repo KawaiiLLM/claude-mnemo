@@ -423,26 +423,58 @@ describe("tool surface", () => {
   // and their describe()s are the only place a caller learns the mechanism
   // exists at all before hitting a rejection or a receipt warning.
   //
-  // Indexes-rescope spec (ticket 01): `collects` renamed to `indexes`
-  // (`shape.indexes` below) but its describe() PROSE is untouched by this
-  // ticket — ticket 01's ownership fence is param names/wiring only, prose
-  // describes belong to ticket 04 (`.scratch/indexes-rescope/issues/
-  // 04-rubric-v8-teaching.md`). So this still asserts the OLD collects-era
-  // branch-membership wording under the NEW key — expected to be REWRITTEN
-  // by ticket 04 to the new same-phase-aggregation reading, at which point
-  // these specific string assertions become stale and must update with it.
-  it("indexes (renamed from collects) still carries its pre-rescope describe() text; grounds states its no-restriction reach and self-citation gate", () => {
+  // Indexes-rescope spec ticket 04 rewrites both readings. `indexes` (ticket
+  // 01's rename of `collects`) states SAME-PHASE AGGREGATION and, just as
+  // importantly, states the retirement: its old own-branch/terminus check is
+  // gone from the write path (law 2), so a describe still promising a
+  // rejection that no longer fires would teach a caller to avoid legal calls.
+  // `grounds` gains the canonical route (law 7) — the one place a caller
+  // writing an implementation note learns the edge may not be theirs to write
+  // at all.
+  it("indexes states same-phase aggregation with no graph-state check; grounds states its reach, the canonical route and the self-citation gate", () => {
     const shape = noteInputSchema.shape;
-    expect(shape.indexes.description).toContain("branch's settlement");
-    expect(shape.indexes.description).toContain("already belongs to that same branch");
+    expect(shape.indexes.description).toContain("same-phase nodes this turn gathers");
+    expect(shape.indexes.description).toContain("a release's shipped artifacts");
+    expect(shape.indexes.description).toContain(
+      "Same phase is the whole check: no flow, membership or terminus condition",
+    );
+    expect(shape.indexes.description).toContain("An indexed target is not also consumed");
+    // The retired collects-era promises must be gone from the surface, not
+    // merely reworded around.
+    expect(shape.indexes.description).not.toContain("branch's settlement");
+    expect(shape.indexes.description).not.toContain("already belongs to that same branch");
+    // consume carries the other half of the same dedup, beside extends.
+    expect(shape.consume.description).toContain(
+      "never written beside an extends or indexes on the same pair",
+    );
 
     expect(shape.grounds.description).toContain("cross-phase only");
     expect(shape.grounds.description).toContain("mid-flow target still stores");
     expect(shape.grounds.description).toContain("absorbs the retired grounded-on/encodes");
     expect(shape.grounds.description).toContain("if it were false");
     expect(shape.grounds.description).toContain(
+      "One route to the decision: when the work has its own spec turn, THAT turn carries the grounds",
+    );
+    expect(shape.grounds.description).toContain(
+      "with design and spec in one turn, each artifact grounds directly",
+    );
+    expect(shape.grounds.description).toContain(
       "may cite the citing turn itself only when this turn is both a flow's settlement",
     );
+  });
+
+  // The note tool's own description names the eight-word vocabulary and the
+  // mechanical checks the call actually makes. Ticket 04: `collects` is gone
+  // from that list, and so is the flow-membership check it advertised — the
+  // self-citation gate is now the only graph-state rejection left to name.
+  it("the note description names indexes, not collects, and advertises no retired flow-membership check", () => {
+    const note = MNEMO_TOOL_DESCRIPTIONS.note;
+    expect(note).toContain(
+      "override/narrows/extends/indexes/consume/grounds/verifies/refutes",
+    );
+    expect(note).not.toContain("collects");
+    expect(note).not.toContain("flow-membership check");
+    expect(note).toContain("phase legality (the self-citation gate included)");
   });
 
   it("verifies/refutes require an evidence-phase source only — no target restriction restated", () => {

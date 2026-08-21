@@ -121,10 +121,34 @@ import { createHash } from "node:crypto";
  * terminus warning's effect without enumerating the validator's checks.
  * Every section outside §Relations is untouched, so their v5/v6 guard pins
  * (tests/shared/memory-rubric.test.ts) still hold verbatim.
+ *
+ * v7→v8 (indexes-rescope spec, .scratch/indexes-rescope/, ticket 04; ruled
+ * [S15069/T1228]–[T1241]): §Relations only, five surgical changes — the word
+ * `collects` becomes `indexes` and its semantic widens from "this flow ends
+ * here" to SAME-PHASE AGGREGATION (this node gathers and stands for the
+ * same-phase nodes carrying its content; readers reach them through it), so
+ * one word now serves a decision settlement gathering its branch's carrying
+ * members AND a release gathering its shipped artifacts, with no scenario
+ * rules attached (user [T1231]: behaviour emerges from a clean semantic, it
+ * is not legislated per node type). Consequences: the flow-scope line drops
+ * the word (collects' own-branch/terminus conditions retire with law 2 —
+ * they were write-gate checks, never rubric prose, so nothing else here had
+ * to go); the release ritual stops writing `grounds` to the settlements it
+ * fixes (law 4 — that linkage is transitive through the artifacts) and
+ * indexes what it ships; `grounds` gains the canonical-route sentence (law
+ * 7 — one route across the decision→delivery seam: the lane's own spec turn
+ * carries the grounds, the other artifacts consume the spec; merged
+ * design+spec turns keep direct grounds, where a re-route would be
+ * phase-illegal); and the per-pair dedup sentence adds indexes beside
+ * extends (law 3 — an indexed target is never also consumed). The three
+ * GRAPH INVARIANTS and their lints stay OUT of this file by the v1 division
+ * of labor ruled at T1238: they are review-time tooling for the backfill
+ * pass and the graph page, not judgment every writer must carry. Version
+ * bumped v7 → v8; every section outside §Relations is untouched.
  */
-export const MEMORY_RUBRIC_VERSION = "v7";
+export const MEMORY_RUBRIC_VERSION = "v8";
 
-export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v7
+export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v8
 
 ## Fields
 
@@ -209,20 +233,22 @@ member turns and recomputed when membership changes — never written by hand.
   · override — no: it is wrong, and this node replaces it.
   · narrows  — yes: it holds, but this node cuts a piece out of its scope.
   · extends  — yes: it holds, and this node adds a piece.
-  · collects — this flow ends here, and these are the nodes that carry its
-    conclusion. Name the minimal set, all of it inside this flow: everything
-    citing this settlement reads them through it.
+  · indexes  — through me: I gather these same-phase nodes and stand for them,
+    so readers reach them here. A settlement indexes the members carrying its
+    branch's conclusion; a release, the artifacts it ships.
   DEPENDING on it — if it turned out false, what happens to me?
   · grounds — I fall with it: a delivery resting on the decision it implements,
     a decision on a finding, a release on its verification. Cite a flow through
     its SETTLEMENT; a mid-flow target still stores, and the receipt names the
-    settlement to use instead.
+    settlement to use instead. One route to the decision: when the work has a
+    spec turn of its own, THAT turn carries the grounds and the other artifacts
+    consume it instead; when design and spec landed in one turn, each artifact
+    grounds directly.
   · consume — nothing: I used its product and do not answer for it.
     Dispatch → acceptance → commit chains are consume.
   TESTING it — did I put the claim to a check?
   · verifies / refutes — a result produced this turn, for it or against it.
-- narrows, extends and collects serve ONE flow; override, grounds and consume
-  are indifferent to flow.
+- narrows and extends serve ONE flow; every other word is indifferent to it.
 - Every finished turn walks three steps; with several candidate precursors,
   ask per candidate:
   1. Is there a direct precursor — the node that directly caused this turn?
@@ -231,8 +257,8 @@ member turns and recomputed when membership changes — never written by hand.
      never invent edges to eliminate orphans.
   2. Yes → pick the word by the three stances; none fits → record nothing.
      A pair may carry several relations, but each must state a fact the others
-     cannot derive — remove each in turn: if extends holds, consume follows
-     from it, so never write both.
+     cannot derive — remove each in turn: if extends or indexes holds, consume
+     follows from it, so never write both.
   3. Refused or warned? A refusal names the half that is missing → add the
      smallest missing type, or re-judge the relation. A warning names a better
      target and stores the edge anyway → take it at the next correction.
@@ -240,9 +266,10 @@ member turns and recomputed when membership changes — never written by hand.
   toward a target independently. A turn may cite ITSELF with grounds when it is
   both a flow's settlement and that settlement's implementer; nothing else
   self-cites.
-- The release ritual: a release consumes the work it ships and grounds on the
-  settlements it fixes in place, citing the previous release when one exists —
-  the first release is the chain's legal root.
+- The release ritual: a release indexes the artifacts it ships and consumes the
+  previous release when one exists — the first release is the chain's legal
+  root. No grounds to the settlements it fixes: they are already reached
+  through the artifacts.
 - Retraction: delete an edge found false, rewrite as needed — retraction and
   re-judgment are acts of judgment; never retract merely to tidy.
 - Pre-registration is not an edge: a prediction made before its test lives

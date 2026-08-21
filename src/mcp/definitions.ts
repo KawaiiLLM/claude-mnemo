@@ -117,7 +117,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
     "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written — never just to write one turn's note early.\n" +
     "skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\n" +
     "Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\n" +
-    "Relations — override/narrows/extends/collects/consume/grounds/verifies/refutes: turn-only address lists, declared independently of the prose (the body need not name the target, and a call carrying nothing but relations is valid). A pair may hold several relations at once; each `retract<Relation>` mirror deletes one. Which relation, if any — the judgment — lives in the Memory Rubric (SessionStart injection); this call only enforces address shape, phase legality, the collects flow-membership check, and your own read grant on the turn being written.\n" +
+    "Relations — override/narrows/extends/indexes/consume/grounds/verifies/refutes: turn-only address lists, declared independently of the prose (the body need not name the target, and a call carrying nothing but relations is valid). A pair may hold several relations at once; each `retract<Relation>` mirror deletes one. Which relation, if any — the judgment — lives in the Memory Rubric (SessionStart injection); this call only enforces address shape, phase legality (the self-citation gate included), and your own read grant on the turn being written.\n" +
     "Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
@@ -409,19 +409,19 @@ export const noteInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Addresses the minimal set carrying this flow's conclusion — legal only when this turn is ITSELF the branch's settlement (nothing further narrows/extends it) and every address already belongs to that same branch; an out-of-branch target rejects the whole call, naming the flow. Judgment lives in the Memory Rubric.",
+      "Addresses the same-phase nodes this turn gathers and stands for — they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). Same phase is the whole check: no flow, membership or terminus condition. An indexed target is not also consumed. Judgment lives in the Memory Rubric.",
     ),
   consume: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow — a same-flow consume is normally subsumed by extends under the deletion test. Judgment lives in the Memory Rubric.",
+      "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow — never written beside an extends or indexes on the same pair, which already imply it under the deletion test. Judgment lives in the Memory Rubric.",
     ),
   grounds: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false — cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. A mid-flow target still stores; the receipt then names the branch's settlement to cite instead. Turn-only; may cite the citing turn itself only when this turn is both a flow's settlement and that settlement's implementer — every other relation refuses a self target outright. Judgment lives in the Memory Rubric.",
+      "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false — cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. A mid-flow target still stores; the receipt then names the branch's settlement to cite instead. One route to the decision: when the work has its own spec turn, THAT turn carries the grounds and the other artifacts consume it instead; with design and spec in one turn, each artifact grounds directly. Turn-only; may cite the citing turn itself only when this turn is both a flow's settlement and that settlement's implementer — every other relation refuses a self target outright. Judgment lives in the Memory Rubric.",
     ),
   verifies: z
     .array(z.string())
@@ -467,7 +467,7 @@ export const noteInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Addresses whose collects edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+      "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
     ),
   retractConsume: z
     .array(z.string())
