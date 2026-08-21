@@ -117,19 +117,19 @@ describe("EDGE_RELATIONS — the eight-word closed set (flow-relations spec)", (
 // ---------------------------------------------------------------------------
 const SIX_ROW_LEGAL_WORDS: Record<TurnPhase, Record<TurnPhase, readonly TurnEdgeRelation[]>> = {
   evidence: {
-    evidence: ["override", "collects", "consume", "grounds", "verifies", "refutes"],
+    evidence: ["override", "collects", "consume", "verifies", "refutes"],
     decision: ["grounds", "verifies", "refutes"],
     delivery: ["grounds", "verifies", "refutes"],
   },
   decision: {
     evidence: ["grounds"],
-    decision: ["override", "narrows", "extends", "collects", "consume", "grounds"],
+    decision: ["override", "narrows", "extends", "collects", "consume"],
     delivery: ["grounds"],
   },
   delivery: {
     evidence: ["grounds"],
     decision: ["grounds"],
-    delivery: ["override", "collects", "consume", "grounds"],
+    delivery: ["override", "collects", "consume"],
   },
 };
 
@@ -165,16 +165,22 @@ describe("the six-row law — all nine (source, target) phase pairs x all eight 
     }
   }
 
-  // `grounds` is the one row with NO illegal cell at all — pinned separately
-  // since the loop above only ever exercises its (always-true) legal branch.
-  test("grounds is legal in every one of the nine cells — even both phase sets empty (an untyped turn)", () => {
-    for (const source of [...TURN_PHASES, undefined]) {
-      for (const target of [...TURN_PHASES, undefined]) {
-        const citingPhases = source ? new Set([source]) : new Set<TurnPhase>();
-        const citedPhases = target ? new Set([target]) : new Set<TurnPhase>();
-        expect(isRelationLegalForPhases("grounds", citingPhases, citedPhases)).toBe(true);
+  // User retightening [S15069/T1209]: grounds is CROSS-phase only — the six
+  // off-diagonal cells legal, the diagonal rejected, and an EMPTY phase set
+  // on either side rejected (grounds regained a rejection channel; its old
+  // always-legal short-circuit meant a warning was the only feedback on the
+  // whole path, the ledger note the peer flagged).
+  test("grounds is cross-phase only: six cross cells legal, diagonal and empty phase sets reject", () => {
+    for (const source of TURN_PHASES) {
+      for (const target of TURN_PHASES) {
+        expect(
+          isRelationLegalForPhases("grounds", new Set([source]), new Set([target])),
+          `grounds at ${source}->${target}`,
+        ).toBe(source !== target);
       }
     }
+    expect(isRelationLegalForPhases("grounds", new Set<TurnPhase>(), new Set(["decision"]))).toBe(false);
+    expect(isRelationLegalForPhases("grounds", new Set(["delivery"]), new Set<TurnPhase>())).toBe(false);
   });
 });
 
@@ -260,8 +266,18 @@ describe("RELATION_PHASE_REQUIREMENT — table shape (flow-relations spec: three
     }
   });
 
-  test("grounds carries an empty pairs array — never consulted, since isRelationLegalForPhases short-circuits it to always-legal", () => {
-    expect(RELATION_PHASE_REQUIREMENT.grounds).toEqual([]);
+  test("grounds carries exactly the six cross-phase pairs — the T1209 retightening reads the same table as every other word", () => {
+    const pairs = RELATION_PHASE_REQUIREMENT.grounds.map((pair) => `${pair.source}->${pair.target}`).sort();
+    expect(pairs).toEqual(
+      [
+        "decision->delivery",
+        "decision->evidence",
+        "delivery->decision",
+        "delivery->evidence",
+        "evidence->decision",
+        "evidence->delivery",
+      ].sort(),
+    );
   });
 });
 

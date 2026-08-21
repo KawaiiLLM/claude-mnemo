@@ -43,7 +43,13 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  *                       derivation; see `db/flows.ts`)
  *   consume             same phase; cross-flow (descriptive, not a write-time
  *                       check — P1: only `collects` gets a graph-fact reject)
- *   grounds              no restriction
+ *   grounds              cross-phase ONLY — some (source, target) pairing
+ *                       with source ≠ target (user retightening
+ *                       [S15069/T1209]; within a phase, dependency is
+ *                       continuation or usage — the stance words and
+ *                       `consume` own it. The self case is cross-phase by
+ *                       construction: settlement + implementer entails both
+ *                       a decision and a delivery half)
  *   verifies / refutes  source must carry an evidence phase; target
  *                       unrestricted
  *
@@ -150,13 +156,13 @@ const DECISION_ONLY_RELATIONS: readonly TurnEdgeRelation[] = ["narrows", "extend
 const EVIDENCE_SOURCE_RELATIONS: readonly TurnEdgeRelation[] = ["verifies", "refutes"];
 
 /**
- * `grounds` is handled OUTSIDE this table entirely (see
- * `isRelationLegalForPhases` below) — "no restriction" means legal even when
- * one or both phase sets are EMPTY (an untyped or legacy-typed turn), which a
- * pairs-based OR-list can never express (every pair requires SOME phase to be
- * present on each side). `RELATION_PHASE_REQUIREMENT.grounds` is therefore an
- * empty array, present only so the `Record<TurnEdgeRelation, …>` below stays
- * exhaustive at compile time — it is never consulted.
+ * `grounds`: every CROSS-phase pair (source ≠ target) — six pairs, generated
+ * below like every other row. Retightened from "no restriction" by user
+ * ruling [S15069/T1209]: within a phase, dependency reads as continuation or
+ * usage (stance words / `consume`), so cross-kind footing is what `grounds`
+ * alone asserts. A turn with an EMPTY phase set (untyped or legacy-typed)
+ * admits no pair and is rejected — grounds regained a rejection channel,
+ * dissolving the "never refused, warning is its only feedback" ledger note.
  */
 function buildRelationPhaseRequirement(): Record<TurnEdgeRelation, RelationPhasePair[]> {
   const table = Object.fromEntries(
@@ -166,6 +172,13 @@ function buildRelationPhaseRequirement(): Record<TurnEdgeRelation, RelationPhase
   for (const phase of TURN_PHASES) {
     for (const relation of SAME_PHASE_RELATIONS) {
       table[relation].push({ source: phase, target: phase });
+    }
+  }
+  for (const source of TURN_PHASES) {
+    for (const target of TURN_PHASES) {
+      if (source !== target) {
+        table.grounds.push({ source, target });
+      }
     }
   }
   for (const relation of DECISION_ONLY_RELATIONS) {
@@ -187,19 +200,15 @@ export const RELATION_PHASE_REQUIREMENT: Record<
 /**
  * A relation is legal iff SOME (source phase, target phase) pair it admits
  * has its source in the citing turn's phase set and its target in the cited
- * turn's phase set — the exists-rule a multi-type turn gets for free. `grounds`
- * short-circuits to always-legal ("no restriction", spec's own wording) —
- * the one relation whose legality this function never needs the pairs table
- * for at all.
+ * turn's phase set — the exists-rule a multi-type turn gets for free.
+ * `grounds` reads the same table as everyone else since [S15069/T1209]
+ * (cross-phase pairs only — its old always-legal short-circuit is gone).
  */
 export function isRelationLegalForPhases(
   relation: TurnEdgeRelation,
   citingPhases: ReadonlySet<TurnPhase>,
   citedPhases: ReadonlySet<TurnPhase>,
 ): boolean {
-  if (relation === "grounds") {
-    return true;
-  }
   return RELATION_PHASE_REQUIREMENT[relation].some(
     (pair) => citingPhases.has(pair.source) && citedPhases.has(pair.target),
   );
@@ -219,8 +228,9 @@ function phaseRequirementClause(
 /**
  * The rejection detail naming which HALF is missing (worked example: "verifies
  * needs the citing turn to carry an evidence-phase type, add research").
- * `grounds` never reaches here — `isRelationLegalForPhases` never says no to
- * it — so every call is against one of the other seven words.
+ * Since [S15069/T1209] `grounds` reaches here too: a same-phase grounds
+ * reports the cited side's missing cross phases, and an untyped citing turn
+ * reports its own.
  *
  * Reports the CITING side first: if no listed pair's source phase is present
  * at all, that is reported (the writer's own type is the more direct lever);

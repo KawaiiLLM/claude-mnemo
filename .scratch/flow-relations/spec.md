@@ -31,7 +31,7 @@ Machine-checkable legality — six rows:
 | `narrows` / `extends` | both ends decision-phase; same flow (definitional) | it holds; this node cuts a piece / adds a piece |
 | `collects` | same phase; the citing turn must itself be the branch's terminus and every target a member of that branch — OWN structural membership, never inherited (**the one graph-state rejection**, sharpened S15069/T1206) | this flow ends here; the minimal set carrying its conclusion |
 | `consume` | same phase; cross-flow | I used its product, no liability |
-| `grounds` | **no restriction** | I fall with it (liability); absorbs old `encodes` |
+| `grounds` | **cross-phase only** — some (source, target) pairing with source ≠ target (user retightening S15069/T1209; within a phase, dependency is continuation or usage — stance words / consume own it; empty phase sets reject, so grounds regained a rejection channel; zero stored rows affected — both merge sources were cross-phase) | I fall with it (liability); absorbs old `encodes` |
 | `verifies` / `refutes` | source must carry an evidence phase | I tested the claim, for / against |
 
 Stances (the rubric's teaching axis, not the machine's): JUDGING (override /
@@ -150,9 +150,10 @@ correction and T928→T925 L→L were real, previously inexpressible).
 ## Rubric v7
 
 §Relations replaces wholesale with the peer's aligned draft —
-`rubric-v7-relations-draft.txt` in this directory, 3090 bytes, −484 vs v6's
-section, projected full-document ≈8725 chars (headroom ≈700 under the 9500
-block cap). Phase requirements, the terminus warning and the self-citation
+`rubric-v7-relations-draft.txt` in this directory, 3090 bytes. Landed
+(ticket 04): full document 8980 chars, rendered block 9057, headroom 443
+under the 9500 cap — the earlier ≈700 projection had omitted the pinned
+pre-registration bullet. Phase requirements, the terminus warning and the self-citation
 condition live ONLY in validator messages (ADR-0009's three-way split:
 rubric teaches judgment, receipts teach mechanism) — the rubric does not
 enumerate which conditions reject vs warn. Old-word residue check: zero

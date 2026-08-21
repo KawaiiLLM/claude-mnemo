@@ -1770,7 +1770,7 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
   // test proves breadth instead: an evidence-phase decision-phase and
   // delivery-phase target are ALL legal from the same decision-phase source,
   // absorbing the retired grounded-on's OR and encodes' reach at once.
-  test("grounds: no phase restriction — legal toward evidence, decision or delivery targets alike", () => {
+  test("grounds: cross-phase only (T1209) — legal toward evidence and delivery from a decision source, refused toward a same-phase decision target", () => {
     setType(earlierTurnId, ["research"]);
     setType(anotherEarlierTurnId, ["implement"]);
     setType(targetTurnId, ["design"]);
@@ -1793,14 +1793,18 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
       `INSERT INTO turns (session_id, prompt_number, status, user_prompt, type, created_at_epoch)
        VALUES (?, 4, 'extracted', 'A decision-only turn', ?, 118)`,
     ).run(sessionId, JSON.stringify(["discuss"]));
+    // T1209 retightening: a decision-source grounds toward a decision-only
+    // target is SAME-phase — refused, naming the cited side's missing cross
+    // phases (within a phase, dependency is the stance words' or consume's).
     const towardDecision = noteTool(
       db,
       { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T4`] },
       { now: () => 920, env: {}, eraCutoffEpoch: 1 },
     );
-    expect(resultText(towardDecision)).toContain("Attached 1 relation(s).");
+    expect(resultText(towardDecision)).toContain("cited turn");
+    expect(resultText(towardDecision)).not.toContain("Attached 1 relation(s).");
     const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
-    expect(edges.filter((edge) => edge.relation === "grounds")).toHaveLength(3);
+    expect(edges.filter((edge) => edge.relation === "grounds")).toHaveLength(2);
   });
 
   test("verifies/refutes: require an evidence-phase source; the target is unrestricted", () => {
