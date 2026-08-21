@@ -52,7 +52,7 @@ timeline(id="E47", view="milestones")      # the same segment, milestone-selecte
 Views:
 
 - `turns` - every candidate turn, time-ordered, in the same row form `recall` renders, plus a `metadata` line per row.
-- `milestones` - key-turn digest. Selection is a fixed lexicographic order over edge signals, not a score: any turn with a live `override` edge against it is excluded outright, then turns rank by how many delivery-phase turns `encodes` them (descending), then by excess `refines` in-degree — decision-phase excess ranked before delivery-phase excess — then by recency; admission fills `pageSize` in that order. A session or segment with no edges at all degrades safely to a flat chronological list. Turns from before the segment-era cutoff never enter milestone rendering.
+- `milestones` - key-turn digest. Selection is a fixed lexicographic order over edge signals, not a score: any turn with a live `override` edge against it is excluded outright, then turns rank by how many other turns `grounds` them (descending), then by excess `extends` in-degree — decision-phase excess ranked before delivery-phase excess — then by recency; admission fills `pageSize` in that order. A session or segment with no edges at all degrades safely to a flat chronological list. Turns from before the segment-era cutoff never enter milestone rendering.
 
 ### Range syntax
 

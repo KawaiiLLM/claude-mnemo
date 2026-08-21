@@ -102,53 +102,65 @@ the citing turn's write authority — the cited turn need not have been read.
 Self-edges are illegal by default; see Self-citation for the one narrow
 exception.
 
-**Relation grammar (nine-cell)**:
-The two reading rules that pick a relation word for any turn→turn edge, keyed
-by phase — evidence (research/measure), decision (design/discuss/correction),
-delivery (everything else; a multi-type turn's phase is the SET of its types'
-phases). Same phase (the diagonal) — a guarantee ladder, strongest to weakest:
-override (the cited conclusion is wrong; this node replaces it), refines (the
-cited conclusion is right; this node improves, supplements or extends it
-without replacing it — refinement chains fork, one direction per origin,
-never strung together by time order), depends-on (guarantees only logical
-dependency: this node builds on the cited node's completion, no workflow or
-correctness claim). Cross phase — the word is fixed by the SOURCE turn's
-phase, never the target's: an evidence source speaks
-evidence-for/evidence-against (a verdict — this node tested that claim), a
-decision source speaks grounded-on (footing — if the cited decision were
-false, this node falls), a delivery source speaks encodes (this delivery
-carries the cited node; naming is curation, the minimal set worth
-exhibiting).
-_Avoid_: per-word phase table (retired — one grammar picks the word for every
-cell, not a hand-carved exception list per word)
+**Relation vocabulary (eight words, three stances)**:
+Eight relation words, checked by phase (evidence/decision/delivery, as
+above) and — for override alone — unrestricted across flow and layer.
+Three stances group them by what they ask of the cited turn: JUDGING
+(override, narrows, extends, collects) — after reading me, must the cited
+still be read? DEPENDING (grounds, consume) — if the cited were false, what
+happens to me? TESTING (verifies, refutes) — did I test the claim, for or
+against? override replaces a wrong conclusion (same phase; not limited to
+one flow or layer) and terminates the cited branch — the overrider holds
+its own flow. narrows and extends hold within one decision-phase flow (both
+ends decision-phase, definitional) — a piece is cut / a piece is added,
+never strung together by time order alone. collects names a flow's own
+minimal set: the citing turn must itself be the point in its branch nothing
+further narrows or extends, and every target must be a member of that same
+branch — never inherited from elsewhere (the one condition checked against
+graph state, not just field facts). grounds is cross-phase ONLY — within
+one phase, dependency is continuation (narrows/extends) or usage (consume),
+never grounds; it absorbed the old encodes. consume is same-phase,
+cross-flow: I used its product, no liability if it falls. verifies and
+refutes require the citing turn to carry an evidence phase — I tested the
+claim, for or against.
+_Avoid_: nine-cell grammar, per-word phase table, refines/encodes/
+depends-on/grounded-on/evidence-for/evidence-against (retired — refines
+split into narrows+extends, depends-on split into consume+collects, encodes
+merged into grounds, evidence-for/-against renamed verifies/refutes,
+grounded-on renamed grounds)
 
-**Workflow (工作流)**:
-A separable, nameable subtask chain. Scopes the override/refines stance pair
-alone: both ends of such an edge must serve the same workflow, or the edge
-downgrades to depends-on. depends-on and the cross-phase words are
-indifferent to workflow. Workflows are emergent — subgraphs the relation
-edges carve out among a segment's member turns, never stored objects. The
-segment is the whole task's memory; the relation graph is its interior
-structure. Segments never enter the graph as relation nodes.
-_Avoid_: reifying workflows; segment-level relation edges
+**Flow**:
+A branch of decisions joined by narrows/extends edges — not a connected
+component, and not stored: a derived view, recomputed on read, invalidated
+by any retraction. A flow's settlement is the branch node nothing further
+narrows or extends (a different sense of "settlement" than the asynchronous
+Judging pass above). override terminates a branch — the overrider holds its
+own flow rather than joining the branch it killed; a dead branch has no
+terminus, so nothing may collect it, though a surviving mid-branch
+conclusion is still reachable directly, by grounds. Delivery and evidence
+turns hold no flow of their own — they inherit through the grounds/consume
+edges they write. Segments never enter the graph as relation nodes: a flow
+is the emergent subgraph a segment's member turns carve among themselves,
+the segment stays their container.
+_Avoid_: workflow as a stored or explicitly named object, connected
+components as the flow definition (retired — a flow is branch topology via
+narrows/extends, not graph connectivity)
 
 **Multi-phase turn**:
 A turn whose type set spans more than one phase. Each phase judges its own
-edge toward a target independently; when two of a turn's phases each
-legitimately earn an edge toward the same target, both are written — two true
-statements from two different halves of one turn, not an ambiguity to
-resolve.
+edge toward a target independently, under that phase's own row in the
+relation vocabulary; when two of a turn's phases each legitimately earn an
+edge toward the same target, both are written — two true statements from
+two different halves of one turn, not an ambiguity to resolve.
 
 **Self-citation**:
-A turn citing itself with a cross-phase word — legal only when the turn's own
-phase set contains both the word's source phase and a legal target phase for
-it, and only when that half carries the other half's core ruling or key
-verification as an independently exhibitable artifact (restating is not
-carrying). A single-phase turn can never self-cite; the diagonal words
-(override/refines/depends-on) never self-cite for anyone — same phase against
-yourself states nothing.
-_Avoid_: self-loop ban (retired as a blanket rule — narrowed to single-phase
-turns and the diagonal words)
+A turn citing itself — grounds only, legal iff the turn is both a flow's
+settlement (the point nothing further narrows or extends it) and that
+settlement's own implementer. Fully machine-checkable: two structural
+facts, no content judgment call. Nothing else self-cites.
+_Avoid_: cross-phase self-citation gated by an "independently exhibitable
+artifact" (retired — self-citation narrows to grounds at settlement plus
+implementer, checked structurally instead of by content)
 
 **text-ref**:
 Best-effort extraction of turn addresses from prose — a display hint only, never
@@ -157,9 +169,18 @@ the prose that names it; relation rows never do.
 _Avoid_: upgrading (the retired path from bare pair to relation)
 
 **Release chain (发布链)**:
-The ritual every release turn performs: depends-on the work it ships, encodes
-the rulings and key verifications it fixes in place, and cites the previous
-release when one exists. The first release is the chain's legal root.
+The ritual every release turn performs: consume the work it ships, ground
+on the settlements it fixes in place, and cite the previous release when
+one exists — the first release is the chain's legal root. A release does
+not collect: collects belongs to a flow's own settlement, and a delivery
+turn holds no flow of its own to collect within. Curation splits in two
+instead — the release chooses WHICH settlements (grounds), each settlement
+chooses WHAT within its own flow (collects) — reached transparently in the
+one hop grounds already crosses. A delivery turn attempting collects fails
+the membership check naturally, with no flow to belong to.
+_Avoid_: depends-on/encodes (retired — a release ships via consume, fixes
+rulings in place via grounds), a release collecting (rejected for v1 — a
+delivery turn has no flow to collect within)
 
 ### Write gate
 

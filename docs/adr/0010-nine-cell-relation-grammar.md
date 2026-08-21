@@ -167,6 +167,13 @@ pairs.
 
 ## Open items
 
+- _Superseded (2026-08-21):_ Decision 1's word-choice law — the nine-cell
+  grammar that picks a relation word from phase alone — is replaced by
+  ADR-0011's two-axis (phase + layer), eight-word, three-stance vocabulary.
+  This ADR's other rulings are untouched: the phase system itself
+  (evidence/decision/delivery), standalone edges (ADR-0009), and the
+  non-contagion ruling (`override` does not cascade to a `refines`
+  descendant).
 - **The scoring-trio redesign is still pending** on the backfilled graph: an
   evidence-phase scoring bucket for `refines`, the override victim's
   downstream treatment (does zeroing a node cascade to its `refines`
