@@ -6965,7 +6965,7 @@ function writeMemoryEdges(db, edges, nowEpoch) {
       rejected.push({ input: edge, reason: "invalid-node" });
       continue;
     }
-    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
+    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id && edge.relation === null) {
       rejected.push({ input: edge, reason: "self-loop" });
       continue;
     }
@@ -7413,8 +7413,8 @@ function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "a
         rejected.push({ relation: field.relation, raw, reason: node });
         continue;
       }
-      if (node.kind === "turn" && node.id === citingTurnId) {
-        rejected.push({ relation: field.relation, raw, reason: "self-loop" });
+      if (node.kind === "turn" && node.id === citingTurnId && field.relation !== "grounds") {
+        rejected.push({ relation: field.relation, raw, reason: "self-not-grounds" });
         continue;
       }
       const key = relationRowKey(citing, node, field.relation);
@@ -7598,14 +7598,15 @@ var init_citations = __esm({
     init_memory_edges();
     init_references();
     CITATION_RELATIONS = [
-      "evidence-for",
-      "evidence-against",
-      "supersedes",
-      "depends-on",
-      "refines",
       "override",
-      "encodes",
-      "grounded-on"
+      "narrows",
+      "extends",
+      "collects",
+      "consume",
+      "grounds",
+      "verifies",
+      "refutes",
+      "supersedes"
     ];
     INLINE_RANGE_EXPANSION_CAP = 8;
     RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
@@ -9189,7 +9190,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.13.0-mt1xbkav" : "dev";
+    BUILD_ID = true ? "0.14.0-mt38ehll" : "dev";
   }
 });
 
@@ -9238,7 +9239,8 @@ __export(schema_exports, {
   migrateTurnCitationsToEdges: () => migrateTurnCitationsToEdges,
   retireLegacyPendingNoteDebts: () => retireLegacyPendingNoteDebts
 });
-function memoryEdgesTableDdl(tableName) {
+function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELATION_WORDS) {
+  const relationList = relationWords.map((word) => `'${word}'`).join(", ");
   return `
   CREATE TABLE IF NOT EXISTS ${tableName} (
     citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
@@ -9247,16 +9249,19 @@ function memoryEdgesTableDdl(tableName) {
     cited_id INTEGER NOT NULL,
     relation TEXT CHECK (
       relation IS NULL OR
-      relation IN (
-        'evidence-for', 'evidence-against', 'supersedes', 'depends-on',
-        'refines', 'override', 'encodes', 'grounded-on'
-      )
+      relation IN (${relationList})
     ),
     provenance TEXT NOT NULL CHECK (
       provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
     ),
     created_at_epoch INTEGER NOT NULL,
-    CHECK (citing_kind <> cited_kind OR citing_id <> cited_id),
+    -- Relation-matrix spec ticket 05 ("\u81EA\u5F15\u7528"): the trailing OR relation IS
+    -- NOT NULL arm is the whole widening \u2014 a BARE self row (no arm holds)
+    -- still fails the CHECK exactly as before; a RELATION-carrying self row
+    -- now satisfies the third arm regardless of the other two. Which relations
+    -- may legally self-cite is a phase question this CHECK cannot ask; that
+    -- lives in the validator only (see the comment above this function).
+    CHECK (citing_kind <> cited_kind OR citing_id <> cited_id OR relation IS NOT NULL),
     UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation)
   );
 `;
@@ -9268,10 +9273,16 @@ function hasTable(db, table) {
 }
 function remapLegacyRelation(relation) {
   if (relation === "implements") {
-    return "depends-on";
+    return "consume";
   }
   if (relation === "builds-on") {
     return null;
+  }
+  if (relation === "evidence-for") {
+    return "verifies";
+  }
+  if (relation === "supersedes") {
+    return "supersedes";
   }
   return isCitationRelation(relation) ? relation : null;
 }
@@ -9310,11 +9321,17 @@ function memoryEdgesSchemaIsStale(db) {
   const storedDdl = db.query(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
   ).get()?.sql ?? null;
-  return storedDdl !== null && !storedDdl.includes("'depends-on'");
+  if (storedDdl === null) {
+    return false;
+  }
+  if (storedDdl.includes("citing_kind <> cited_kind")) {
+    return false;
+  }
+  return !storedDdl.includes("'depends-on'");
 }
 function collapseAndRebuildMemoryEdges(db) {
   db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_pair_identity");
-  db.exec(MEMORY_EDGES_DDL);
+  db.exec(MEMORY_EDGES_UNION_DDL);
   const legacyRows = db.query(
     `SELECT
          citing_kind AS citingKind, citing_id AS citingId,
@@ -9372,7 +9389,13 @@ function memoryEdgesRelationVocabularyIsStale(db) {
   const storedDdl = db.query(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
   ).get()?.sql ?? null;
-  return storedDdl !== null && !storedDdl.includes("'grounded-on'");
+  if (storedDdl === null) {
+    return false;
+  }
+  if (storedDdl.includes("citing_kind <> cited_kind")) {
+    return false;
+  }
+  return !storedDdl.includes("'grounded-on'");
 }
 function ensureMemoryEdgesRelationVocabulary(db) {
   if (!memoryEdgesRelationVocabularyIsStale(db)) {
@@ -9385,7 +9408,7 @@ function ensureMemoryEdgesRelationVocabulary(db) {
     db.exec(
       "ALTER TABLE memory_edges RENAME TO memory_edges_pre_relation_vocabulary"
     );
-    db.exec(MEMORY_EDGES_DDL);
+    db.exec(MEMORY_EDGES_UNION_DDL);
     db.exec(
       `INSERT INTO memory_edges (
          citing_kind, citing_id, cited_kind, cited_id,
@@ -9445,12 +9468,177 @@ function ensureMemoryEdgesMultiRelation(db) {
     db.exec("PRAGMA foreign_keys = ON;");
   }
 }
+function memoryEdgesSelfReferenceCheckIsStale(db) {
+  const storedDdl = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("relation IS NOT NULL");
+}
+function ensureMemoryEdgesSelfReferenceCheck(db) {
+  if (!memoryEdgesSelfReferenceCheckIsStale(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesSelfReferenceCheckIsStale(db)) {
+        return;
+      }
+      db.exec(memoryEdgesTableDdl("memory_edges_self_reference_rebuild"));
+      db.exec(
+        `INSERT INTO memory_edges_self_reference_rebuild (
+           citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, created_at_epoch
+         )
+         SELECT
+           citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, created_at_epoch
+         FROM memory_edges`
+      );
+      db.exec("DROP TABLE memory_edges");
+      db.exec(
+        "ALTER TABLE memory_edges_self_reference_rebuild RENAME TO memory_edges"
+      );
+      db.exec(MEMORY_EDGES_INDEXES_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while widening the self-loop CHECK: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+function remapVocabularyFlipRelation(relation) {
+  if (relation === null) {
+    return null;
+  }
+  return VOCABULARY_FLIP_RENAME[relation] ?? relation;
+}
+function pickWinningVocabularyFlipRow(candidates) {
+  const winner = [...candidates].sort((left, right) => {
+    const rankDiff = rankEdgeProvenance(right.provenance) - rankEdgeProvenance(left.provenance);
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+    return left.createdAtEpoch - right.createdAtEpoch;
+  })[0];
+  return {
+    provenance: winner.provenance,
+    createdAtEpoch: Math.min(...candidates.map((candidate) => candidate.createdAtEpoch))
+  };
+}
+function memoryEdgesVocabularyFlipIsStale(db) {
+  const storedDdl = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'narrows'");
+}
+function collapseAndRebuildVocabularyFlip(db, relationWords) {
+  db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_vocabulary_flip");
+  db.exec(memoryEdgesTableDdl("memory_edges", relationWords));
+  const legacyRows = db.query(
+    `SELECT
+         citing_kind AS citingKind, citing_id AS citingId,
+         cited_kind AS citedKind, cited_id AS citedId,
+         relation, provenance, created_at_epoch AS createdAtEpoch
+       FROM memory_edges_pre_vocabulary_flip`
+  ).all();
+  const groups = /* @__PURE__ */ new Map();
+  for (const row of legacyRows) {
+    const newRelation = remapVocabularyFlipRelation(row.relation);
+    const key = `${row.citingKind} ${row.citingId} ${row.citedKind} ${row.citedId} ${newRelation ?? ""}`;
+    const bucket = groups.get(key);
+    if (bucket) {
+      bucket.push(row);
+    } else {
+      groups.set(key, [row]);
+    }
+  }
+  const insert = db.query(
+    `INSERT INTO memory_edges (
+       citing_kind, citing_id, cited_kind, cited_id,
+       relation, provenance, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  for (const bucket of groups.values()) {
+    const sample = bucket[0];
+    const newRelation = remapVocabularyFlipRelation(sample.relation);
+    const winner = pickWinningVocabularyFlipRow(bucket);
+    insert.run(
+      sample.citingKind,
+      sample.citingId,
+      sample.citedKind,
+      sample.citedId,
+      newRelation,
+      winner.provenance,
+      winner.createdAtEpoch
+    );
+  }
+  db.exec("DROP TABLE memory_edges_pre_vocabulary_flip");
+  db.exec(MEMORY_EDGES_INDEXES_DDL);
+}
+function ensureMemoryEdgesVocabularyFlip(db) {
+  if (!memoryEdgesVocabularyFlipIsStale(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesVocabularyFlipIsStale(db)) {
+        return;
+      }
+      collapseAndRebuildVocabularyFlip(db, MEMORY_EDGES_UNION_RELATION_WORDS);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while flipping the relation vocabulary: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+function memoryEdgesRelationContractIsStale(db) {
+  const storedDdl = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
+  ).get()?.sql ?? null;
+  return storedDdl !== null && storedDdl.includes("'depends-on'");
+}
+function ensureMemoryEdgesRelationContract(db) {
+  if (!memoryEdgesRelationContractIsStale(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesRelationContractIsStale(db)) {
+        return;
+      }
+      collapseAndRebuildVocabularyFlip(db, MEMORY_EDGES_CONTRACT_RELATION_WORDS);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while narrowing the relation contract: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
 function ensureMemoryEdgesSchema(db) {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
     ensureMemoryEdgesPairIdentity(db);
     ensureMemoryEdgesRelationVocabulary(db);
     ensureMemoryEdgesMultiRelation(db);
+    ensureMemoryEdgesSelfReferenceCheck(db);
+    ensureMemoryEdgesVocabularyFlip(db);
+    ensureMemoryEdgesRelationContract(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
@@ -10697,7 +10885,7 @@ function initializeDatabase(db) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
+var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_UNION_RELATION_WORDS, MEMORY_EDGES_CONTRACT_RELATION_WORDS, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_UNION_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, VOCABULARY_FLIP_RENAME, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -11765,6 +11953,34 @@ var init_schema = __esm({
 
   ${MEMORY_FTS_DDL}
 `;
+    MEMORY_EDGES_UNION_RELATION_WORDS = [
+      "evidence-for",
+      "evidence-against",
+      "supersedes",
+      "depends-on",
+      "refines",
+      "override",
+      "encodes",
+      "grounded-on",
+      "narrows",
+      "extends",
+      "collects",
+      "consume",
+      "grounds",
+      "verifies",
+      "refutes"
+    ];
+    MEMORY_EDGES_CONTRACT_RELATION_WORDS = [
+      "override",
+      "narrows",
+      "extends",
+      "collects",
+      "consume",
+      "grounds",
+      "verifies",
+      "refutes",
+      "supersedes"
+    ];
     MEMORY_EDGES_INDEXES_DDL = `
   CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
     ON memory_edges(cited_kind, cited_id, relation);
@@ -11773,7 +11989,8 @@ var init_schema = __esm({
     ON memory_edges(citing_kind, citing_id, cited_kind, cited_id)
     WHERE relation IS NULL;
 `;
-    MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges")}${MEMORY_EDGES_INDEXES_DDL}`;
+    MEMORY_EDGES_UNION_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_UNION_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
+    MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_CONTRACT_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
     MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
     AFTER DELETE ON turns
@@ -11813,6 +12030,14 @@ var init_schema = __esm({
       WHERE id IN (SELECT segment_id FROM segment_members WHERE turn_id = NEW.id);
     END;
 `;
+    VOCABULARY_FLIP_RENAME = {
+      "depends-on": "consume",
+      "evidence-for": "verifies",
+      "evidence-against": "refutes",
+      "grounded-on": "grounds",
+      refines: "extends",
+      encodes: "grounds"
+    };
     NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE = "superseded by the settlement transition watermark (edge-mechanism-revision ticket 05, spec D8) \u2014 resettle via manual backfill";
     segmentsStatusVocabularyRebuildDdl = (tableName) => `
   CREATE TABLE ${tableName} (
@@ -35475,8 +35700,7 @@ function formatBudgetWarning(fields) {
   if (over.length === 0) {
     return null;
   }
-  const verb = over.length > 1 ? "are" : "is";
-  return `${over.join(", ")} ${verb} over ${BUDGET_WARNING_MULTIPLE}\xD7 budget \u2014 an occasional overage is fine, a standing pattern of it is not.`;
+  return `${over.join(", ")} over ${BUDGET_WARNING_MULTIPLE}\xD7 \u2014 occasional is fine, a standing pattern is not.`;
 }
 
 // src/shared/segment-fields.ts
@@ -35570,7 +35794,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // those, "an uncited target rejects the call", with its retirement) — the
   // single-home grep guard (tests/shared/memory-rubric.test.ts) asserts the
   // judgment prose itself appears nowhere on this surface.
-  note: "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief \u2014 never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\nRelations \u2014 evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn: turn-only address lists, declared independently of the prose (the body need not name the target, and a call carrying nothing but relations is valid). A pair may hold several relations at once; each `retract<Relation>` mirror deletes one. Which relation, if any \u2014 the judgment \u2014 lives in the Memory Rubric (SessionStart injection); this call only enforces address shape, phase legality, and your own read grant on the turn being written.\nTool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
+  note: "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief \u2014 never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\nRelations \u2014 override/narrows/extends/collects/consume/grounds/verifies/refutes: turn-only address lists, declared independently of the prose (the body need not name the target, and a call carrying nothing but relations is valid). A pair may hold several relations at once; each `retract<Relation>` mirror deletes one. Which relation, if any \u2014 the judgment \u2014 lives in the Memory Rubric (SessionStart injection); this call only enforces address shape, phase legality, the collects flow-membership check, and your own read grant on the turn being written.\nTool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
   // per-turn). Revives the retired 0.x tool name, now scoped to segments only.
@@ -35700,106 +35924,89 @@ var noteInputShape = {
   crossSession: external_exports3.boolean().optional().describe(
     "true to confirm a write addressed at a turn outside the caller's own session; required whenever the address's session differs from the caller's, refused otherwise."
   ),
-  // ticket 07 (spec C1): one named field per relation, not a generic
-  // `{turn, relation}` list — an illegal relation is structurally
-  // unrepresentable. Targets are address tokens, `S<session>/T<prompt>` or
-  // `E<segment>` (brackets optional). No `mode`: unlike title/tags/type there
-  // is no PRIOR value at this layer to write over or edit — a relation write
-  // only ever ADDS a row (edge-mechanism-revision D2), and removing one is a
+  // Flow-relations spec (ticket 02, "六行律" — the six-row law): the eight-
+  // word vocabulary that replaces ADR-0010's nine-cell grammar outright.
+  // Targets are address tokens, `S<session>/T<prompt>` (brackets optional) —
+  // segment targets are refused (relations are turn-only). No `mode`: unlike
+  // title/tags/type there is no PRIOR value at this layer to write over or
+  // edit — a relation write only ever ADDS a row, and removing one is a
   // retraction, not a mode.
   //
-  // ticket 02 (edge-mechanism-revision D1): the co-occurrence requirement
-  // these describes used to carry — "each target MUST already be named by
-  // this same call's title/content/insight post-state" — is deleted, along
-  // with the check. Each describe now states only the phase pair it needs
-  // and where the judgment lives; nothing on this surface asks the prose for
-  // permission any more.
-  evidenceFor: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses whose claim this turn tests FOR. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target."
-  ),
-  evidenceAgainst: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses whose claim this turn tests AGAINST. Turn-only; requires an evidence-phase (research/measure) source and a decision-phase (design/discuss/correction) target."
-  ),
-  // ticket 01 (turn-edge-mechanism spec, [S15069/T935] mid-flight amendment):
-  // `groundedOn` — a decision rests on an earlier finding, evidence-phase OR
-  // delivery-phase (a review/audit finding grounds a decision the same as a
-  // research finding). Recorded but excluded from every scoring surface —
-  // see `shared/turn-phase.ts`'s `UNSCORED_RELATIONS`.
-  groundedOn: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses the earlier finding this turn's decision rests on \u2014 counterfactual: if that finding were false, this decision would fall. Decision-phase (design/discuss/correction) source; evidence-phase (research/measure) OR delivery-phase (implement/refactor/fix/delegate/review/ops) target. Recorded, never scored."
-  ),
-  // ticket 01 (turn-edge-mechanism spec): `refines`/`override` replace the
-  // retired `supersedes` — a decision-phase turn's relation to a
-  // decision-phase predecessor, split by whether the predecessor's
-  // conclusion survives IN PART (`refines`) or not AT ALL (`override`).
-  // `supersedes` itself is REMOVED from this shape outright: a caller still
-  // sending it gets `.strict()`'s parse error, naming the unrecognised key —
-  // existing `supersedes` EDGES stay frozen-readable (db/citations.ts), only
-  // the write parameter is gone.
-  // ticket 11 (edge-ownership-impl): `refines`/`override`'s own discriminator
-  // — "if the predecessor's any sub-conclusion still holds, use refines" —
-  // moved to the Memory Rubric's 关系 section (single home for judgment;
-  // [S15069/T933]/[T939]). What stays here is FORMAT only: the phase pair
-  // both ends require, and a pointer to where the choice between the two is
-  // actually made.
-  refines: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses a predecessor decision this turn continues or partially revises \u2014 decision-phase turns only (design/discuss/correction) on both ends; the predecessor is not wholly wrong. Judgment (refines vs. override) lives in the Memory Rubric."
-  ),
+  // ADR-0009's three-way split (FORMAT on each `.describe()`, TIMING on the
+  // tool description, JUDGMENT in the Memory Rubric alone) narrows further
+  // here: the mechanical phase requirement itself moved OFF this surface and
+  // into the validator's own rejection message (`shared/turn-phase.ts`) — a
+  // call that gets the phase wrong is told so, by name, at the point it
+  // fails, rather than reading it here first. What each describe below keeps
+  // is the one-line READING (which stance this word states) and a pointer to
+  // the Memory Rubric for the judgment of WHICH word to use.
   override: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses a predecessor decision this turn overturns WHOLE \u2014 decision-phase turns only (design/discuss/correction) on both ends. Judgment (refines vs. override) lives in the Memory Rubric."
+    "Addresses a predecessor whose conclusion this turn holds is WRONG and replaces \u2014 same phase, no flow or layer limit. Judgment lives in the Memory Rubric."
   ),
-  // ticket 01: `encodes` — a delivery-phase turn (spec/ADR/ticket/commit/
-  // release) naming the decision(s) it carries. Ticket 11: the minimal-set
-  // discriminator moved to the Memory Rubric (关系, question ④) — this
-  // describe keeps the format fact (self-asserted, not mechanically checked)
-  // and a pointer, not the rule itself.
-  encodes: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses the decision(s) this turn's artifact (spec/ADR/ticket/commit/release) carries \u2014 a delivery-phase turn (implement/refactor/fix/delegate/review/ops) citing a decision-phase (design/discuss/correction) target. Self-asserted, not mechanically checked; which decisions to name (the minimal set) is judgment \u2014 see the Memory Rubric."
+  narrows: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses a decision this turn still holds but cuts a piece OUT of \u2014 same flow, decision-phase both ends. Judgment lives in the Memory Rubric."
   ),
-  dependsOn: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses this turn's own conclusion depends on. Turn-only; requires a delivery-phase (implement/refactor/fix/delegate/review/ops) source and target."
+  extends: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses a decision this turn still holds and adds a piece TO \u2014 same flow, decision-phase both ends. Judgment lives in the Memory Rubric."
   ),
-  // ticket 02 (edge-mechanism-revision D3): the seven retraction mirrors. A
-  // relation is never overwritten (D2 makes a relation write purely
-  // additive), so correcting a wrong one is two auditable acts — retract,
-  // then write the right relation — and BOTH writers hold the same power
-  // over either's edges ([S15069/T1124]: a false assertion must not outlive
-  // its refutation on account of who filed it). The spelling is mechanical
-  // (`retract` + the relation parameter's own name), pinned against
-  // `mcp/note.ts`'s derived `RETRACTION_FIELD_ENTRIES` by a guard test, so
-  // the two halves of the vocabulary cannot drift apart.
-  retractEvidenceFor: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses whose evidence-for edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  collects: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses the minimal set carrying this flow's conclusion \u2014 legal only when this turn is ITSELF the branch's settlement (nothing further narrows/extends it) and every address already belongs to that same branch; an out-of-branch target rejects the whole call, naming the flow. Judgment lives in the Memory Rubric."
   ),
-  retractEvidenceAgainst: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses whose evidence-against edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  consume: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow \u2014 a same-flow consume is normally subsumed by extends under the deletion test. Judgment lives in the Memory Rubric."
   ),
-  retractGroundedOn: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses whose grounded-on edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  grounds: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false \u2014 cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. A mid-flow target still stores; the receipt then names the branch's settlement to cite instead. Turn-only; may cite the citing turn itself only when this turn is both a flow's settlement and that settlement's implementer \u2014 every other relation refuses a self target outright. Judgment lives in the Memory Rubric."
   ),
-  retractRefines: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses whose refines edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  verifies: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses the claim this turn tested FOR. Requires an evidence-phase source. Judgment lives in the Memory Rubric."
   ),
+  refutes: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses the claim this turn tested AGAINST. Requires an evidence-phase source. Judgment lives in the Memory Rubric."
+  ),
+  // Flow-relations spec (ticket 02): the eight retraction mirrors. A relation
+  // is never overwritten (a relation write is purely additive), so correcting
+  // a wrong one is two auditable acts — retract, then write the right
+  // relation — and BOTH writers hold the same power over either's edges
+  // ([S15069/T1124]: a false assertion must not outlive its refutation on
+  // account of who filed it). The spelling is mechanical (`retract` + the
+  // relation parameter's own name), pinned against `mcp/note.ts`'s derived
+  // `RETRACTION_FIELD_ENTRIES` by a guard test, so the two halves of the
+  // vocabulary cannot drift apart.
   retractOverride: external_exports3.array(external_exports3.string()).optional().describe(
     "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
   ),
-  retractEncodes: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses whose encodes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  retractNarrows: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
   ),
-  retractDependsOn: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses whose depends-on edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  retractExtends: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
   ),
-  // ticket 01 (turn-edge-mechanism spec): `supersedes` retired from the NOTE
-  // TOOL's own surface — `noteInputSchema` below `.omit()`s this key, so a
-  // caller sending it gets `.strict()`'s parse error naming the unrecognised
-  // key, same as any other retired field. Ticket 08 (edge-ownership-impl)
-  // retired settlement's own write of it too — `settlementNoteInputShape` no
-  // longer reuses this field object, so it now has NO reuser at all. It stays
-  // declared, unexported from the schema, purely as frozen documentation of
-  // the word this project once wrote and no longer does; `db/citations.ts`'s
-  // `CITATION_RELATIONS` is where the READ-side legacy value actually lives.
+  retractCollects: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses whose collects edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  ),
+  retractConsume: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  ),
+  retractGrounds: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  ),
+  retractVerifies: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  ),
+  retractRefutes: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses whose refutes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  ),
+  // Frozen legacy: `supersedes` retired from the NOTE TOOL's own surface —
+  // `noteInputSchema` below `.omit()`s this key, so a caller sending it gets
+  // `.strict()`'s parse error naming the unrecognised key, same as any other
+  // retired field. No reuser (settlement's own shape does not reuse this
+  // field object either); it stays declared, unexported from the schema,
+  // purely as frozen documentation of the word this project once wrote and
+  // no longer does; `db/citations.ts`'s `CITATION_RELATIONS` is where the
+  // READ-side legacy value actually lives.
   supersedes: external_exports3.array(external_exports3.string()).optional().describe(
-    "Retired on the note tool (ticket 01) \u2014 use refines/override instead. Present here only for settlement's own surface."
+    "Retired on the note tool \u2014 use extends/override instead. Present here only as frozen documentation."
   ),
   mode: noteModeShape
 };
@@ -35880,20 +36087,22 @@ var settlementNoteInputShape = {
   mode: noteInputShape.mode,
   type: noteInputShape.type,
   tags: noteInputShape.tags,
-  evidenceFor: noteInputShape.evidenceFor,
-  evidenceAgainst: noteInputShape.evidenceAgainst,
-  groundedOn: noteInputShape.groundedOn,
-  refines: noteInputShape.refines,
   override: noteInputShape.override,
-  encodes: noteInputShape.encodes,
-  dependsOn: noteInputShape.dependsOn,
-  retractEvidenceFor: noteInputShape.retractEvidenceFor,
-  retractEvidenceAgainst: noteInputShape.retractEvidenceAgainst,
-  retractGroundedOn: noteInputShape.retractGroundedOn,
-  retractRefines: noteInputShape.retractRefines,
+  narrows: noteInputShape.narrows,
+  extends: noteInputShape.extends,
+  collects: noteInputShape.collects,
+  consume: noteInputShape.consume,
+  grounds: noteInputShape.grounds,
+  verifies: noteInputShape.verifies,
+  refutes: noteInputShape.refutes,
   retractOverride: noteInputShape.retractOverride,
-  retractEncodes: noteInputShape.retractEncodes,
-  retractDependsOn: noteInputShape.retractDependsOn
+  retractNarrows: noteInputShape.retractNarrows,
+  retractExtends: noteInputShape.retractExtends,
+  retractCollects: noteInputShape.retractCollects,
+  retractConsume: noteInputShape.retractConsume,
+  retractGrounds: noteInputShape.retractGrounds,
+  retractVerifies: noteInputShape.retractVerifies,
+  retractRefutes: noteInputShape.retractRefutes
 };
 var recallInputSchema = external_exports3.object(recallInputShape).strict().superRefine((data, ctx) => {
   if (data.truncate !== void 0) {
@@ -35960,6 +36169,315 @@ var rememberInputSchema = external_exports3.object(rememberInputShape).strict().
 // src/mcp/note.ts
 init_citations();
 init_database();
+
+// src/shared/turn-phase.ts
+init_type_vocabulary();
+var TURN_PHASES = ["evidence", "decision", "delivery"];
+var TYPE_PHASE = {
+  research: "evidence",
+  measure: "evidence",
+  design: "decision",
+  discuss: "decision",
+  correction: "decision",
+  implement: "delivery",
+  refactor: "delivery",
+  fix: "delivery",
+  delegate: "delivery",
+  review: "delivery",
+  ops: "delivery"
+};
+var PHASE_CANONICAL_TYPE = {
+  evidence: "research",
+  decision: "design",
+  delivery: "implement"
+};
+function phasesForTypes(types) {
+  const phases = /* @__PURE__ */ new Set();
+  for (const raw of types) {
+    const phase = TYPE_PHASE[raw];
+    if (phase !== void 0) {
+      phases.add(phase);
+    }
+  }
+  return phases;
+}
+var EDGE_RELATIONS = [
+  "override",
+  "narrows",
+  "extends",
+  "collects",
+  "consume",
+  "grounds",
+  "verifies",
+  "refutes"
+];
+function isTurnEdgeRelation(value) {
+  return typeof value === "string" && EDGE_RELATIONS.includes(value);
+}
+var SAME_PHASE_RELATIONS = ["override", "collects", "consume"];
+var DECISION_ONLY_RELATIONS = ["narrows", "extends"];
+var EVIDENCE_SOURCE_RELATIONS = ["verifies", "refutes"];
+function buildRelationPhaseRequirement() {
+  const table = Object.fromEntries(
+    EDGE_RELATIONS.map((relation) => [relation, []])
+  );
+  for (const phase of TURN_PHASES) {
+    for (const relation of SAME_PHASE_RELATIONS) {
+      table[relation].push({ source: phase, target: phase });
+    }
+  }
+  for (const source of TURN_PHASES) {
+    for (const target of TURN_PHASES) {
+      if (source !== target) {
+        table.grounds.push({ source, target });
+      }
+    }
+  }
+  for (const relation of DECISION_ONLY_RELATIONS) {
+    table[relation].push({ source: "decision", target: "decision" });
+  }
+  for (const relation of EVIDENCE_SOURCE_RELATIONS) {
+    for (const phase of TURN_PHASES) {
+      if (phase === "evidence") {
+        continue;
+      }
+      table[relation].push({ source: "evidence", target: phase });
+    }
+  }
+  return table;
+}
+var RELATION_PHASE_REQUIREMENT = buildRelationPhaseRequirement();
+function isRelationLegalForPhases(relation, citingPhases, citedPhases) {
+  return RELATION_PHASE_REQUIREMENT[relation].some(
+    (pair) => citingPhases.has(pair.source) && citedPhases.has(pair.target)
+  );
+}
+function phaseRequirementClause(side, phases) {
+  const options = phases.map(
+    (phase) => `a ${phase}-phase type (e.g. \`${PHASE_CANONICAL_TYPE[phase]}\`)`
+  );
+  const subject = side === "self" ? "this turn's own type list" : `the ${side} turn`;
+  return `${subject} to carry ${options.join(" or ")}`;
+}
+function explainRelationPhaseRejection(relation, citingPhases, citedPhases) {
+  const pairs = RELATION_PHASE_REQUIREMENT[relation];
+  const sourceSatisfiedPairs = pairs.filter((pair) => citingPhases.has(pair.source));
+  if (sourceSatisfiedPairs.length === 0) {
+    const sourcePhases = [...new Set(pairs.map((pair) => pair.source))];
+    return `needs ${phaseRequirementClause("citing", sourcePhases)}`;
+  }
+  const targetPhases = [...new Set(sourceSatisfiedPairs.map((pair) => pair.target))];
+  return `needs ${phaseRequirementClause("cited", targetPhases)}`;
+}
+var SELF_NOT_GROUNDS_DETAIL = "is this turn's own address, and only `grounds` may ever cite the citing turn itself \u2014 every other relation compares two DIFFERENT turns, so citing itself with one of them is a tautology, not a claim";
+var SELF_NOT_IMPLEMENTER_DETAIL = "is this turn's own address; a self-`grounds` needs this turn's own type list to carry a delivery-phase type (e.g. `implement`) IN ADDITION to its decision-phase half \u2014 only a turn that is both the settlement and its own implementer may self-cite";
+var SELF_NOT_SETTLEMENT_DETAIL = "is this turn's own address; a self-`grounds` needs this turn to itself be a flow's settlement \u2014 the branch node nothing further narrows/extends \u2014 which it currently is not (mid-flow, overridden, or homeless)";
+var SEGMENT_TARGET_DETAIL = "is a segment address \u2014 relation targets are turn-only; a segment tie goes through ownership (e.g. remember's assign/attach) or a bare cites reference, never a relation";
+function validateRelationTarget(input) {
+  if (input.targetKind === "segment") {
+    return { ok: false, reason: "segment-target", detail: SEGMENT_TARGET_DETAIL };
+  }
+  if (input.isSelfReference) {
+    if (input.relation !== "grounds") {
+      return { ok: false, reason: "self-not-grounds", detail: SELF_NOT_GROUNDS_DETAIL };
+    }
+    const isImplementer = input.citingPhases.has("decision") && input.citingPhases.has("delivery");
+    if (!isImplementer) {
+      return {
+        ok: false,
+        reason: "self-not-implementer",
+        detail: SELF_NOT_IMPLEMENTER_DETAIL
+      };
+    }
+    if (!input.isSettlement) {
+      return {
+        ok: false,
+        reason: "self-not-settlement",
+        detail: SELF_NOT_SETTLEMENT_DETAIL
+      };
+    }
+    return { ok: true };
+  }
+  if (isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: "phase-illegal",
+    detail: explainRelationPhaseRejection(input.relation, input.citingPhases, input.citedPhases)
+  };
+}
+var RELATION_FIELD_NAME = {
+  override: "override",
+  narrows: "narrows",
+  extends: "extends",
+  collects: "collects",
+  consume: "consume",
+  grounds: "grounds",
+  verifies: "verifies",
+  refutes: "refutes"
+};
+
+// src/shared/flows.ts
+var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
+var TERMINATING_RELATION = "override";
+var INHERITING_RELATIONS = /* @__PURE__ */ new Set(["grounds", "consume"]);
+function isFlowSettlement(derivation, turnId) {
+  return derivation.flowById.get(turnId)?.settlement === turnId;
+}
+function isOwnFlowMember(derivation, terminusId, turnId) {
+  return derivation.flowById.get(terminusId)?.members.includes(turnId) ?? false;
+}
+function settlementsOfTurn(derivation, turnId) {
+  const settlements = /* @__PURE__ */ new Set();
+  for (const flowId of derivation.flowsByTurn.get(turnId) ?? []) {
+    const settlement = derivation.flowById.get(flowId)?.settlement;
+    if (settlement !== null && settlement !== void 0) {
+      settlements.add(settlement);
+    }
+  }
+  return [...settlements].sort((a, b) => a - b);
+}
+function pushInto(index, key, value) {
+  const bucket = index.get(key);
+  if (bucket === void 0) {
+    index.set(key, [value]);
+    return;
+  }
+  bucket.push(value);
+}
+function deriveFlows(turns, edges) {
+  const isDecision = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    isDecision.set(turn.id, phasesForTypes(turn.type).has("decision"));
+  }
+  const advance = /* @__PURE__ */ new Map();
+  const retreat = /* @__PURE__ */ new Map();
+  const overridden = /* @__PURE__ */ new Set();
+  const inheritedFrom = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    const citingKnown = isDecision.has(edge.citingId);
+    const citedKnown = isDecision.has(edge.citedId);
+    if (!citingKnown || !citedKnown) continue;
+    if (STANCE_RELATIONS.has(edge.relation)) {
+      if (!isDecision.get(edge.citingId) || !isDecision.get(edge.citedId)) continue;
+      if (edge.citingId === edge.citedId) continue;
+      pushInto(advance, edge.citedId, edge.citingId);
+      pushInto(retreat, edge.citingId, edge.citedId);
+    } else if (edge.relation === TERMINATING_RELATION) {
+      overridden.add(edge.citedId);
+    } else if (INHERITING_RELATIONS.has(edge.relation)) {
+      if (edge.citingId === edge.citedId) continue;
+      pushInto(inheritedFrom, edge.citedId, edge.citingId);
+    }
+  }
+  const termini = [];
+  for (const turn of turns) {
+    if (!isDecision.get(turn.id)) continue;
+    if ((advance.get(turn.id) ?? []).length === 0) termini.push(turn.id);
+  }
+  termini.sort((a, b) => a - b);
+  const flows = [];
+  const flowById = /* @__PURE__ */ new Map();
+  const flowsByTurn = /* @__PURE__ */ new Map();
+  for (const terminus of termini) {
+    const members = /* @__PURE__ */ new Set([terminus]);
+    const stack = [terminus];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      for (const previous of retreat.get(node) ?? []) {
+        if (members.has(previous)) continue;
+        members.add(previous);
+        stack.push(previous);
+      }
+    }
+    const flow = {
+      id: terminus,
+      members: [...members].sort((a, b) => a - b),
+      settlement: overridden.has(terminus) ? null : terminus
+    };
+    flows.push(flow);
+    flowById.set(terminus, flow);
+    for (const member of flow.members) {
+      const memberships = flowsByTurn.get(member) ?? /* @__PURE__ */ new Set();
+      memberships.add(terminus);
+      flowsByTurn.set(member, memberships);
+    }
+  }
+  const queue = [...flowsByTurn.keys()];
+  while (queue.length > 0) {
+    const cited = queue.pop();
+    const source = flowsByTurn.get(cited);
+    if (source === void 0) continue;
+    for (const citing of inheritedFrom.get(cited) ?? []) {
+      const target = flowsByTurn.get(citing) ?? /* @__PURE__ */ new Set();
+      let grew = false;
+      for (const flowId of source) {
+        if (!target.has(flowId)) {
+          target.add(flowId);
+          grew = true;
+        }
+      }
+      if (grew) {
+        flowsByTurn.set(citing, target);
+        queue.push(citing);
+      }
+    }
+  }
+  const membership = /* @__PURE__ */ new Map();
+  for (const [turnId, flowIds] of flowsByTurn) {
+    membership.set(turnId, [...flowIds].sort((a, b) => a - b));
+  }
+  const homeless = turns.filter((turn) => !membership.has(turn.id)).map((turn) => turn.id).sort((a, b) => a - b);
+  return { flows, flowById, flowsByTurn: membership, homeless };
+}
+
+// src/db/flows.ts
+function deriveFlowsForSessions(db, sessionIds) {
+  const uniqueSessionIds = [...new Set(sessionIds)].filter(
+    (id) => Number.isSafeInteger(id) && id > 0
+  );
+  if (uniqueSessionIds.length === 0) {
+    return deriveFlows([], []);
+  }
+  const sessionPlaceholders = uniqueSessionIds.map(() => "?").join(",");
+  const turnRows = db.query(
+    `SELECT id, type FROM turns WHERE session_id IN (${sessionPlaceholders})`
+  ).all(...uniqueSessionIds);
+  const turns = turnRows.map((row) => ({
+    id: row.id,
+    type: parseTurnTypeArray(row.type)
+  }));
+  const turnIds = turns.map((turn) => turn.id);
+  if (turnIds.length === 0) {
+    return deriveFlows([], []);
+  }
+  const turnPlaceholders = turnIds.map(() => "?").join(",");
+  const edgeRows = db.query(
+    `SELECT citing_id AS citingId, cited_id AS citedId, relation
+       FROM memory_edges
+       WHERE citing_kind = 'turn' AND cited_kind = 'turn'
+         AND relation IN ('narrows', 'extends', 'override', 'grounds', 'consume')
+         AND (citing_id IN (${turnPlaceholders}) OR cited_id IN (${turnPlaceholders}))`
+  ).all(...turnIds, ...turnIds);
+  const edges = edgeRows.map((row) => ({
+    citingId: row.citingId,
+    citedId: row.citedId,
+    relation: row.relation
+  }));
+  return deriveFlows(turns, edges);
+}
+function parseTurnTypeArray(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
 // src/db/note-debt.ts
 var NOTE_DEBT_COLUMNS = `
@@ -36474,6 +36992,23 @@ function checkFieldGate(db, writer, entityType, entityId, field, address, option
   return { ok: true };
 }
 
+// src/shared/grounds-warning.ts
+function formatGroundsMidFlowWarnings(candidates) {
+  const warnings = [];
+  for (const candidate of candidates) {
+    if (candidate.settlementRefs.length === 0) {
+      continue;
+    }
+    if (candidate.settlementRefs.length === 1 && candidate.settlementRefs[0] === candidate.targetRef) {
+      continue;
+    }
+    warnings.push(
+      `warning: grounds toward ${candidate.targetRef} is mid-flow \u2014 this flow settles at ${candidate.settlementRefs.join(", ")}; cite that instead.`
+    );
+  }
+  return warnings;
+}
+
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
 function stripTag(text, tagName) {
@@ -36653,107 +37188,6 @@ function resolveClear(field, existing, mode) {
 // src/mcp/note.ts
 init_segment_era();
 init_type_vocabulary();
-
-// src/shared/turn-phase.ts
-init_type_vocabulary();
-var TYPE_PHASE = {
-  research: "evidence",
-  measure: "evidence",
-  design: "decision",
-  discuss: "decision",
-  correction: "decision",
-  implement: "delivery",
-  refactor: "delivery",
-  fix: "delivery",
-  delegate: "delivery",
-  review: "delivery",
-  ops: "delivery"
-};
-var PHASE_CANONICAL_TYPE = {
-  evidence: "research",
-  decision: "design",
-  delivery: "implement"
-};
-function phasesForTypes(types) {
-  const phases = /* @__PURE__ */ new Set();
-  for (const raw of types) {
-    const phase = TYPE_PHASE[raw];
-    if (phase !== void 0) {
-      phases.add(phase);
-    }
-  }
-  return phases;
-}
-var EDGE_RELATIONS = [
-  "evidence-for",
-  "evidence-against",
-  "grounded-on",
-  "refines",
-  "override",
-  "encodes",
-  "depends-on"
-];
-function isTurnEdgeRelation(value) {
-  return typeof value === "string" && EDGE_RELATIONS.includes(value);
-}
-var RELATION_PHASE_REQUIREMENT = {
-  "evidence-for": [{ source: "evidence", target: "decision" }],
-  "evidence-against": [{ source: "evidence", target: "decision" }],
-  "grounded-on": [
-    { source: "decision", target: "evidence" },
-    { source: "decision", target: "delivery" }
-  ],
-  refines: [{ source: "decision", target: "decision" }],
-  override: [{ source: "decision", target: "decision" }],
-  encodes: [{ source: "delivery", target: "decision" }],
-  "depends-on": [{ source: "delivery", target: "delivery" }]
-};
-function isRelationLegalForPhases(relation, citingPhases, citedPhases) {
-  return RELATION_PHASE_REQUIREMENT[relation].some(
-    (pair) => citingPhases.has(pair.source) && citedPhases.has(pair.target)
-  );
-}
-function phaseRequirementClause(side, phases) {
-  const options = phases.map(
-    (phase) => `a ${phase}-phase type (e.g. \`${PHASE_CANONICAL_TYPE[phase]}\`)`
-  );
-  return `the ${side} turn to carry ${options.join(" or ")}`;
-}
-function explainRelationPhaseRejection(relation, citingPhases, citedPhases) {
-  const pairs = RELATION_PHASE_REQUIREMENT[relation];
-  const sourceSatisfiedPairs = pairs.filter((pair) => citingPhases.has(pair.source));
-  if (sourceSatisfiedPairs.length === 0) {
-    const sourcePhases = [...new Set(pairs.map((pair) => pair.source))];
-    return `needs ${phaseRequirementClause("citing", sourcePhases)}`;
-  }
-  const targetPhases = [...new Set(sourceSatisfiedPairs.map((pair) => pair.target))];
-  return `needs ${phaseRequirementClause("cited", targetPhases)}`;
-}
-var SEGMENT_TARGET_DETAIL = "is a segment address \u2014 relation targets are turn-only; a segment tie goes through ownership (e.g. remember's assign/attach) or a bare cites reference, never a relation";
-function validateRelationTarget(input) {
-  if (input.targetKind === "segment") {
-    return { ok: false, reason: "segment-target", detail: SEGMENT_TARGET_DETAIL };
-  }
-  if (isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
-    return { ok: true };
-  }
-  return {
-    ok: false,
-    reason: "phase-illegal",
-    detail: explainRelationPhaseRejection(input.relation, input.citingPhases, input.citedPhases)
-  };
-}
-var RELATION_FIELD_NAME = {
-  "evidence-for": "evidenceFor",
-  "evidence-against": "evidenceAgainst",
-  "grounded-on": "groundedOn",
-  refines: "refines",
-  override: "override",
-  encodes: "encodes",
-  "depends-on": "dependsOn"
-};
-
-// src/mcp/note.ts
 var TURN_MODE_FIELDS = ["title", "content", "insight", "type", "tags"];
 var EDGE_WRITE_GATE_FIELD = "type";
 function hasText(value) {
@@ -36905,7 +37339,13 @@ var RETRACTION_FIELD_ENTRIES = RELATION_FIELD_ENTRIES.map(
 var RELATION_REJECTION_TEXT = {
   malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
   unresolved: "does not resolve to a turn or segment",
-  "self-loop": "is this turn's own address \u2014 a turn cannot cite itself, whatever the relation",
+  // Flow-relations spec (ticket 02): narrowed to exactly one exception — only
+  // `grounds` may ever cite the citing turn itself, and even then only under
+  // the settlement+implementer gate `checkRelationTargetPhase`'s pre-check
+  // below catches first, with a dynamic message. This reason therefore only
+  // ever fires for any OTHER relation, which can never legally cite itself,
+  // whatever the phase.
+  "self-not-grounds": "is this turn's own address, and only grounds may ever cite the citing turn itself \u2014 every other relation compares two DIFFERENT turns, whatever the phase",
   "no-such-edge": "is not a relation this turn currently carries \u2014 nothing was retracted; read the turn to see what it does carry"
 };
 function formatRelationRejections(rejections, surface) {
@@ -36919,6 +37359,27 @@ function formatRetractionReceipt(counts) {
     return null;
   }
   return `Retracted ${counts.retracted} relation(s)` + (counts.restored > 0 ? `, ${counts.restored} bare citation(s) restored (the prose still names them).` : ".");
+}
+function collectGroundsMidFlowWarnings(db, flows, edges) {
+  if (!flows) {
+    return [];
+  }
+  const candidates = [];
+  for (const edge of edges) {
+    if (edge.relation !== "grounds") {
+      continue;
+    }
+    const citedTurn = getTurnById(db, edge.cited.id);
+    if (!citedTurn) {
+      continue;
+    }
+    const settlementRefs = settlementsOfTurn(flows, edge.cited.id).map((settlementId) => getTurnById(db, settlementId)).filter((turn) => turn !== null).map((turn) => `S${turn.sessionId}/T${turn.promptNumber}`);
+    candidates.push({
+      targetRef: `S${citedTurn.sessionId}/T${citedTurn.promptNumber}`,
+      settlementRefs
+    });
+  }
+  return formatGroundsMidFlowWarnings(candidates);
 }
 function collectRelationFields(entries, input) {
   const fields = [];
@@ -36941,7 +37402,7 @@ function touchesEdgeFields(input) {
     ([key]) => input[key] !== void 0
   );
 }
-function checkRelationTargetPhase(db, relation, raw, citingPhases) {
+function checkRelationTargetPhase(db, relation, raw, citingTurnId, citingRef, citingPhases, flows) {
   if (!isTurnEdgeRelation(relation)) {
     return null;
   }
@@ -36962,24 +37423,65 @@ function checkRelationTargetPhase(db, relation, raw, citingPhases) {
   if (!cited) {
     return null;
   }
+  const isSelf = cited.id === citingTurnId;
   const result = validateRelationTarget({
     relation,
     citingPhases,
     targetKind: "turn",
-    citedPhases: phasesForTypes(cited.type)
+    citedPhases: phasesForTypes(cited.type),
+    isSelfReference: isSelf,
+    isSettlement: isSelf && flows !== null ? isFlowSettlement(flows, citingTurnId) : false
   });
-  return result.ok ? null : `${relation} "${raw}" ${result.detail}`;
+  if (!result.ok) {
+    return `${relation} "${raw}" ${result.detail}`;
+  }
+  if (relation === "collects" && flows !== null) {
+    if (!isFlowSettlement(flows, citingTurnId)) {
+      return `collects "${raw}" requires the citing turn to itself be a flow's live settlement (nothing further narrows/extends it, and no override killed its branch) \u2014 ${citingRef} is mid-flow, overridden, or belongs to no decision flow at all`;
+    }
+    if (!isOwnFlowMember(flows, citingTurnId, cited.id)) {
+      return `collects "${raw}" is not a member of the flow terminating at ${citingRef} \u2014 collects only names turns already inside this branch`;
+    }
+  }
+  return null;
 }
-function resolveRelationFields(db, citingTurnId, citingTurnType, input, nowEpoch) {
+function resolveRelationFields(db, citingTurnId, citingSessionId, citingRef, citingTurnType, input, nowEpoch) {
   const fields = collectRelationFields(RELATION_FIELD_ENTRIES, input);
   if (fields.length === 0) {
     return null;
   }
   const citingPhases = phasesForTypes(citingTurnType);
+  const needsFlows = fields.some(
+    (field) => field.relation === "collects" || field.relation === "grounds"
+  );
+  let flows = null;
+  if (needsFlows) {
+    const sessionIds = /* @__PURE__ */ new Set([citingSessionId]);
+    for (const field of fields) {
+      if (field.relation !== "collects" && field.relation !== "grounds") {
+        continue;
+      }
+      for (const raw of field.targets) {
+        const reference = parseBareAddressReference(raw);
+        if (reference && reference.kind === "turn") {
+          sessionIds.add(reference.sessionId);
+        }
+      }
+    }
+    flows = deriveFlowsForSessions(db, [...sessionIds]);
+  }
   const phaseIssues = [];
   for (const field of fields) {
     for (const raw of field.targets) {
-      const issue2 = checkRelationTargetPhase(db, field.relation, raw, citingPhases);
+      const issue2 = checkRelationTargetPhase(
+        db,
+        field.relation,
+        raw,
+        citingTurnId,
+        citingRef,
+        citingPhases,
+        flows
+      );
       if (issue2) {
         phaseIssues.push(issue2);
       }
@@ -36988,11 +37490,11 @@ function resolveRelationFields(db, citingTurnId, citingTurnType, input, nowEpoch
   if (phaseIssues.length > 0) {
     fail2(`relation field rejected: ${phaseIssues.join("; ")}.`);
   }
-  const result = attachTurnRelations(db, citingTurnId, fields, nowEpoch);
-  if (result.rejected.length > 0) {
-    fail2(formatRelationRejections(result.rejected, "relation"));
+  const attach = attachTurnRelations(db, citingTurnId, fields, nowEpoch);
+  if (attach.rejected.length > 0) {
+    fail2(formatRelationRejections(attach.rejected, "relation"));
   }
-  return result;
+  return { attach, flows };
 }
 function resolveRetractionFields(db, citingTurnId, input, nowEpoch) {
   const fields = collectRelationFields(RETRACTION_FIELD_ENTRIES, input);
@@ -37100,7 +37602,7 @@ function handleTurnWrite(db, address, input, options) {
   const touchesEdges = touchesEdgeFields(input);
   if (providedFields.length === 0 && !touchesEdges) {
     return parameterError(
-      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (evidenceFor/evidenceAgainst/groundedOn/refines/override/encodes/dependsOn) or one of their retract\u2026 mirrors is required.`
+      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (override/narrows/extends/collects/consume/grounds/verifies/refutes) or one of their retract\u2026 mirrors is required.`
     );
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
@@ -37260,13 +37762,17 @@ function handleTurnWrite(db, address, input, options) {
         );
       }
       const retractions = resolveRetractionFields(db, turn.id, input, nowEpoch);
-      const relations = resolveRelationFields(
+      const relationsResolution = resolveRelationFields(
         db,
         turn.id,
+        turn.sessionId,
+        addressLabel,
         updatedTurn.type,
         input,
         nowEpoch
       );
+      const relations = relationsResolution?.attach ?? null;
+      const relationFlows = relationsResolution?.flows ?? null;
       if ((touchedProse || wantsFieldsWrite) && writer) {
         if (titleResolution !== void 0) {
           stampField(db, "turn", turn.id, "title", writer, nowEpoch);
@@ -37291,6 +37797,7 @@ function handleTurnWrite(db, address, input, options) {
         finalTags: tagsResolution?.value,
         citations,
         relations,
+        relationFlows,
         retractions,
         stripped
       };
@@ -37316,20 +37823,24 @@ function handleTurnWrite(db, address, input, options) {
     if (budgetWarning) {
       parts.push(budgetWarning);
     }
-    parts.push(
-      rideTurnId === null ? "ride_turn: unknown." : `ride_turn: S${turn.sessionId}/T${getRidePromptNumber(db, rideTurnId) ?? turn.promptNumber}.`
-    );
-    parts.push(
-      writerModel === null ? "writer_model: not recorded \u2014 this environment does not expose the model to the MCP server." : `writer_model: ${writerModel}.`
-    );
+    if (rideTurnId === null) {
+      parts.push("ride_turn: unknown.");
+    } else if (rideTurnId !== turn.id) {
+      parts.push(
+        `ride_turn: S${turn.sessionId}/T${getRidePromptNumber(db, rideTurnId) ?? turn.promptNumber}.`
+      );
+    }
+    if (writerModel !== null) {
+      parts.push(`writer_model: ${writerModel}.`);
+    }
     if (result.stripped) {
       parts.push("Private-tagged content was removed before storing.");
     }
   }
-  if (result.finalType !== void 0) {
+  if (result.finalType !== void 0 && !typeListsEqual(result.finalType, input.type)) {
     parts.push(`type: ${result.finalType.length > 0 ? result.finalType.join(", ") : "(none)"}.`);
   }
-  if (result.finalTags !== void 0) {
+  if (result.finalTags !== void 0 && !typeListsEqual(result.finalTags, input.tags)) {
     parts.push(`tags: ${result.finalTags.length > 0 ? result.finalTags.join(", ") : "(none)"}.`);
   }
   if (result.citations) {
@@ -37365,6 +37876,12 @@ function handleTurnWrite(db, address, input, options) {
       );
     } else if (restated > 0) {
       parts.push(`${restated} relation(s) already present, nothing added.`);
+    }
+    for (const warning of collectGroundsMidFlowWarnings(db, result.relationFlows, [
+      ...result.relations.written,
+      ...result.relations.restated
+    ])) {
+      parts.push(warning);
     }
   }
   return textResult(parts.join(" "));
@@ -38142,7 +38659,7 @@ function projectToolCall(toolName, toolInput, toolResult) {
 var FIELD_TRUNCATION_SUFFIX = "\u2026";
 var DEFAULT_PREVIEW_COUNT = 5;
 var DEFAULT_TURN_TOKEN_BUDGET = 150;
-var TURN_BUDGET_TRUNCATION_MARKER = "  \u2026 truncated to fit the per-item token budget";
+var TURN_BUDGET_TRUNCATION_MARKER = "  \u2026";
 var RENDER_INDENT_STEP = "    ";
 var REWIND_MARKER = " [rewind]";
 function createTruncationSignal() {
@@ -39365,7 +39882,10 @@ function renderTurnScope(db, turns, fields, includeDbTurnIds, eraCutoffEpoch = n
       continue;
     }
     lines.push(
-      renderNode({ type: "session", value: view }, { turnBudget, signal })
+      renderNode(
+        { type: "session", value: { ...view, content: null } },
+        { turnBudget, signal }
+      )
     );
     const sessionTurns = grouped.get(session.id) ?? [];
     for (const item of sessionTurns) {
@@ -39792,7 +40312,10 @@ function renderGroupedSearchResults(db, results, fields, turnBudget, includeDbTu
       );
     }
     const sessionView = withBasicSearchSnippet(
-      buildSessionSummary(db, session.id, eraCutoffEpoch) ?? buildSessionView(db, session, eraCutoffEpoch),
+      {
+        ...buildSessionSummary(db, session.id, eraCutoffEpoch) ?? buildSessionView(db, session, eraCutoffEpoch),
+        content: null
+      },
       terms,
       snippetWindow,
       signal
@@ -41168,7 +41691,7 @@ function getTurnEdgeSignals(db, turnIds) {
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'encodes'
+         AND e.relation = 'grounds'
          AND citing.was_rolled_back = 0
          AND e.cited_id IN (${placeholders})
        GROUP BY e.cited_id`
@@ -41181,7 +41704,7 @@ function getTurnEdgeSignals(db, turnIds) {
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'refines'
+         AND e.relation = 'extends'
          AND citing.was_rolled_back = 0
          AND e.cited_id IN (${placeholders})
        ORDER BY e.cited_id ASC, e.created_at_epoch ASC, e.citing_id ASC`
@@ -43632,7 +44155,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.13.0" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.14.0" : "0.0.0-test";
 function resolveCallerSessionIdFromEnv(db, env = process.env) {
   for (const identityKey of deriveProcessIdentityKeys(env)) {
     const sessionId = getMnemoSessionIdForProcessSession(db, identityKey);
