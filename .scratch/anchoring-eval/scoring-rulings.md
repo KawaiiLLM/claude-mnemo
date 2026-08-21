@@ -56,6 +56,37 @@ was confirmed as an explicit, tested skip (not an accidental omission) at
 landed f09dc3a). `override` zeroing and `encodes` crediting needed no such
 boundary — both were already all-phase in the live implementation.
 
+## Peer design-review inputs (S15069/T1190, ruled out-of-scope for the
+## infrastructure phase at T1192 — tune WITH these on the built graph)
+
+1. Self-encodes incentive: in-degree stops being pure third-party testimony
+   once judge and beneficiary coincide; multiplies with the ruling-supplement
+   rule (ruling-carrying reviews are forced dual-phase). Measured: 24/98
+   dual-phase turns in the rebuilt window vs an encodes in-degree
+   distribution topping out at 3. Self rows stay separable forever
+   (citing_id = cited_id). User held T1180 as ruled: curation discipline
+   governs, no separate counter.
+2. Override zeroing is live in all nine cells while new-cell refines
+   crediting waits — an asymmetry from implementation happenstance, not
+   ruling. Candidate: scope zeroing to pre-matrix cells until the trio rules
+   both sides together.
+3. The anchoring eval's pre-registered differential assumed evidence turns
+   score nothing under the current keys; L→E encodes now credits them, so
+   the control arm must be re-defined (baseline excluding L→E encodes)
+   when the eval runs — else the fourth-key question fails as
+   looks-like-success.
+4. Fork topology piles refines in-degree on origins (measured: T900←3 is
+   the only >1; the converging T913 sits at 0). User ruling at T1192-era:
+   origins and termini do not conflict — the TERMINUS scores through
+   encodes in-degree; no terminus key needed.
+5. Weak L→D ties (caused-by, not carrying) have only encodes, which
+   credits — honest writers stay silent, and silence is indistinguishable
+   from no-relation. Live examples: T902→T900 (the inventory a spec caused;
+   legal only because the peer retyped T900 +ops to unlock depends-on) and
+   T918→T916 (still edgeless today). Candidate: credit encodes from
+   ops-typed sources only — touches the T1171 all-encodes-credit ruling,
+   trio's call.
+
 ## Status
 
 Ruling 5 (self edges participate) is the one exception to the
