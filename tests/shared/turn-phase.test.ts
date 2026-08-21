@@ -370,4 +370,27 @@ describe("validateRelationTarget — the shared judgment, called directly (ticke
       expect(RELATION_FIELD_NAME[relation]).toBeTruthy();
     }
   });
+
+  // Ticket 05 mutation finding: this branch is pinned by NOTHING else — for a
+  // self-citation citedPhases IS citingPhases, so a diagonal word's same-phase
+  // pair trivially satisfies the ordinary check, and the writer-path pre-check
+  // in db/citations.ts duplicates the rule closely enough that every
+  // integration test stays green when the validator's own short-circuit is
+  // deleted. This unit test is the one that dies.
+  test("self-citation: the validator itself rejects diagonal words, though their trivial same-phase pair would pass the ordinary check", () => {
+    const phases = new Set<TurnPhase>(["evidence", "delivery"]);
+    for (const relation of ["refines", "override", "depends-on"] as const) {
+      const result = validateRelationTarget({
+        relation,
+        citingPhases: phases,
+        targetKind: "turn",
+        citedPhases: phases,
+        isSelfReference: true,
+      });
+      expect(result.ok, `${relation} must not self-cite`).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("self-diagonal");
+      }
+    }
+  });
 });

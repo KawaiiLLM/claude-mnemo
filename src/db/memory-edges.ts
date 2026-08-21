@@ -38,8 +38,15 @@ import {
  * stored" upsert. A relation write can only ADD a row now; a wrong relation is
  * corrected by RETRACTING it (`retractMemoryEdges`, D3) and writing the right
  * one, so a correction is two auditable acts rather than a silent overwrite.
- * Self-loops are refused twice over: at the write path (below, with a reported
- * reason) and by a table-level CHECK, so no SQL path can mint one.
+ * BARE self-loops are refused twice over: at the write path (below, with a
+ * reported reason) and by a table-level CHECK, so no SQL path can mint one.
+ * A RELATION-carrying self row is a different fact (relation-matrix spec,
+ * "自引用", ticket 05): storable here and at the table CHECK unconditionally
+ * — this primitive has no `type`/phase information to judge it by, so the
+ * phase-scoped legality (which relations, and only when the citing turn's own
+ * `type` list spans two phases) is entirely the CALLER's job (`db/citations.ts`,
+ * `mcp/note.ts`), the same trust model phase-pair legality for ordinary edges
+ * already has here.
  */
 
 export const EDGE_NODE_KINDS = ["turn", "segment"] as const;
@@ -285,10 +292,15 @@ export function pairKey(edge: Pick<WriteEdgeInput, "citing" | "cited">): string 
  * resolution, phase legality and write gate, and this function writes what it
  * is handed.
  *
- * Self-loops are rejected here with a reported reason, and again by the
- * table's own CHECK — a node confirming itself would inflate its own
- * in-degree, the one mechanical confirmation signal the ranking has, so no
- * write path (this one, a migration, a hand-written statement) may mint one.
+ * A BARE self-loop is rejected here with a reported reason, and again by the
+ * table's own CHECK — an unclassified node confirming itself would inflate
+ * its own in-degree with no claim behind it, so no write path (this one, a
+ * migration, a hand-written statement) may mint one. A RELATION-carrying self
+ * row is a narrower, DELIBERATE exception (ticket 05): the table CHECK admits
+ * it unconditionally, and so does this function — the phase-scoped question
+ * of WHICH relations may self-cite is answered one layer up, by callers that
+ * actually know the citing turn's `type`.
+ *
  * Existence of the endpoints is NOT checked here: callers that take
  * model-supplied ids validate through db/references.ts first, while
  * mechanical callers (rollback pairing, membership derivation) already hold
@@ -387,9 +399,14 @@ export function writeMemoryEdges(
       rejected.push({ input: edge, reason: "invalid-node" });
       continue;
     }
+    // Ticket 05: narrowed to the BARE case — a relation-carrying self row is
+    // now a legal storable fact (the table CHECK admits it too), and whether
+    // THIS relation may legally self-cite is a phase question this function
+    // cannot ask (no `type` in scope), so it is left entirely to the caller.
     if (
       edge.citing.kind === edge.cited.kind &&
-      edge.citing.id === edge.cited.id
+      edge.citing.id === edge.cited.id &&
+      edge.relation === null
     ) {
       rejected.push({ input: edge, reason: "self-loop" });
       continue;

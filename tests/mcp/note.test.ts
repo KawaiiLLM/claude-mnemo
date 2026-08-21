@@ -1556,6 +1556,72 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 
+  // Relation-matrix spec, "自引用" (ticket 05): the validator matrix pinned by
+  // the ticket — a multi-phase turn may self-cite with a CROSS-PHASE word
+  // when its own `type` list spans both halves; a single-phase turn never can
+  // (whatever the relation); a DIAGONAL word never can (whatever the phase).
+  test("a research+review turn self-encodes — its review half carries its research half", () => {
+    setType(targetTurnId, ["research", "review"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, encodes: [`S${sessionId}/T3`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.relation).toBe("encodes");
+    expect(edges[0]?.cited).toEqual({ kind: "turn", id: targetTurnId });
+  });
+
+  test("a research-ONLY turn cannot self-encodes — naming the single phase it lacks", () => {
+    setType(targetTurnId, ["research"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, encodes: [`S${sessionId}/T3`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain(`encodes "S${sessionId}/T3"`);
+    expect(resultText(result)).toContain("this turn's own type list");
+    expect(resultText(result)).toContain("delivery-phase");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  test("a research+review turn cannot self-refines — a diagonal word never self-cites", () => {
+    setType(targetTurnId, ["research", "review"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, refines: [`S${sessionId}/T3`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain(`refines "S${sessionId}/T3"`);
+    expect(resultText(result)).toContain("cannot cite itself");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  test("a design-ONLY turn cannot self-grounded-on — its own type list lacks a second phase", () => {
+    setType(targetTurnId, ["design"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, groundedOn: [`S${sessionId}/T3`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain(`grounded-on "S${sessionId}/T3"`);
+    expect(resultText(result)).toContain("this turn's own type list");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
   test("a call carrying no field and no edge parameter still names what it needs", () => {
     const result = noteTool(
       db,

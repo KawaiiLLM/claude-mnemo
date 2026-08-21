@@ -1123,8 +1123,15 @@ const SCHEMA_SQL = `
 // the same existence fact.
 //
 // The self-loop CHECK is the storage-layer half of a rule the write path also
-// enforces (D2): a node citing itself would inflate its own in-degree, the one
-// mechanical confirmation signal the ranking has, so no SQL path may mint one.
+// enforces (D2): a BARE node citing itself would inflate its own in-degree
+// with no claim behind it, so no SQL path may mint one. Relation-matrix spec
+// ticket 05 ("自引用") narrows this from a blanket ban to bare rows only — a
+// RELATION-carrying self row (`relation IS NOT NULL`) is now storable, since
+// a multi-phase turn may legitimately cite itself with a cross-phase word
+// (its later-phase half carrying its earlier-phase half). WHICH relations may
+// self-cite, and under which phase set, is a judgment this CHECK cannot make
+// (SQL cannot see a turn's `type`) — that gate lives entirely in the
+// validator (`shared/turn-phase.ts`'s `validateRelationTarget`), one layer up.
 //
 // `provenance` stays outside the key — the audit layer telling you how the
 // edge was learned, spanning five sources (spec C12: it must tell apart the
@@ -1178,7 +1185,13 @@ function memoryEdgesTableDdl(tableName: string): string {
       provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
     ),
     created_at_epoch INTEGER NOT NULL,
-    CHECK (citing_kind <> cited_kind OR citing_id <> cited_id),
+    -- Relation-matrix spec ticket 05 ("自引用"): the trailing OR relation IS
+    -- NOT NULL arm is the whole widening — a BARE self row (no arm holds)
+    -- still fails the CHECK exactly as before; a RELATION-carrying self row
+    -- now satisfies the third arm regardless of the other two. Which relations
+    -- may legally self-cite is a phase question this CHECK cannot ask; that
+    -- lives in the validator only (see the comment above this function).
+    CHECK (citing_kind <> cited_kind OR citing_id <> cited_id OR relation IS NOT NULL),
     UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation)
   );
 `;
@@ -1638,12 +1651,96 @@ function ensureMemoryEdgesMultiRelation(db: Database): void {
   }
 }
 
+/**
+ * Relation-matrix spec ticket 05 ("自引用"): the self-loop CHECK widens once
+ * more — a BARE self row (`relation IS NULL`) stays banned, a RELATION-
+ * carrying one becomes storable. A CHECK constraint cannot be ALTERed, so an
+ * installation still carrying the pre-ticket-05 CHECK needs the same
+ * rebuild-and-swap idiom `ensureMemoryEdgesMultiRelation` above uses.
+ *
+ * Detection reads the stored DDL for the new CHECK's own arm
+ * (`relation IS NOT NULL`) — absent on every pre-ticket-05 database (the OLD
+ * self-loop CHECK bans a self row outright, relation or not — its own text is
+ * `relation IS NULL OR relation IN (...)`, never the phrase `IS NOT NULL`) and
+ * present once this migration has run, so a fresh database (born from
+ * `memoryEdgesTableDdl`, already in the new shape) and an already-migrated
+ * one both skip on one probe.
+ */
+function memoryEdgesSelfReferenceCheckIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("relation IS NOT NULL");
+}
+
+/**
+ * Same rebuild-under-a-temporary-name-then-swap shape as
+ * `ensureMemoryEdgesMultiRelation`: build the new table, copy, drop the old
+ * one, rename the replacement into place — never rename the original away
+ * (the three endpoint prune triggers name `memory_edges` in their bodies).
+ *
+ * Unlike every earlier `memory_edges` rebuild, this copy is UNFILTERED — a
+ * straight `SELECT *`, no `WHERE` clause at all. The new CHECK is strictly
+ * WIDER than the old one (bare self stays banned; everything the old CHECK
+ * already accepted, it still accepts), so every row already stored — self or
+ * not — already satisfies it; there is nothing left to drop. That is what
+ * makes this migration byte-lossless, the one property the spec calls out by
+ * name ("自引用的 CHECK 重建...数据无损").
+ */
+function ensureMemoryEdgesSelfReferenceCheck(db: Database): void {
+  if (!memoryEdgesSelfReferenceCheckIsStale(db)) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesSelfReferenceCheckIsStale(db)) {
+        return;
+      }
+
+      db.exec(memoryEdgesTableDdl("memory_edges_self_reference_rebuild"));
+      db.exec(
+        `INSERT INTO memory_edges_self_reference_rebuild (
+           citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, created_at_epoch
+         )
+         SELECT
+           citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, created_at_epoch
+         FROM memory_edges`,
+      );
+      db.exec("DROP TABLE memory_edges");
+      db.exec(
+        "ALTER TABLE memory_edges_self_reference_rebuild RENAME TO memory_edges",
+      );
+      // The indexes belonged to the dropped table and died with it.
+      db.exec(MEMORY_EDGES_INDEXES_DDL);
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while widening the self-loop CHECK: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 function ensureMemoryEdgesSchema(db: Database): void {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
     ensureMemoryEdgesPairIdentity(db);
     ensureMemoryEdgesRelationVocabulary(db);
     ensureMemoryEdgesMultiRelation(db);
+    ensureMemoryEdgesSelfReferenceCheck(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   // 2026-08-21 incident crutch removal ([S15069/T1136]): a review rehearsal ran

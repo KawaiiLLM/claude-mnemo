@@ -19,6 +19,7 @@ import {
   validateReferences,
   type RejectedReference,
 } from "./references";
+import { DIAGONAL_RELATIONS, type TurnEdgeRelation } from "../shared/turn-phase";
 import type { TurnRecord } from "./turns";
 
 /**
@@ -354,15 +355,23 @@ export function recomputeTurnCitedPairs(
  *     relation)), and a landing turn genuinely both `depends-on` a plan and
  *     `encodes` a ruling about the same target.
  *
- * `self-loop` is the pre-check for the primitive's own refusal, raised here so
- * the caller can name the address instead of reporting a silent drop.
- * `no-such-edge` is RETRACTION-only: an address that resolved but carries no
- * such relation on this turn.
+ * `self-diagonal` (relation-matrix spec, "自引用", ticket 05 — renamed from
+ * the old blanket `self-loop`): a DIAGONAL relation (refines/override/
+ * depends-on) can never legally cite the citing turn itself, whatever its
+ * phase, so this remains a hard, phase-blind refusal raised here rather than
+ * left to the table CHECK (which now admits it) or to a silent drop. A
+ * CROSS-PHASE relation's self-legality is a genuine phase question this
+ * function cannot answer on its own (no `type` in scope) — that check runs
+ * one layer up, in `mcp/note.ts`'s `checkRelationTargetPhase` /
+ * `shared/turn-phase.ts`'s `validateRelationTarget`, BEFORE this function is
+ * ever called, so a phase-illegal cross-phase self target never reaches here
+ * at all through that caller. `no-such-edge` is RETRACTION-only: an address
+ * that resolved but carries no such relation on this turn.
  */
 export type TurnRelationRejectionReason =
   | "malformed"
   | "unresolved"
-  | "self-loop"
+  | "self-diagonal"
   | "no-such-edge";
 
 export interface TurnRelationRejection {
@@ -481,12 +490,20 @@ export function attachTurnRelations(
         rejected.push({ relation: field.relation, raw, reason: node });
         continue;
       }
-      // Pre-check of `writeMemoryEdges`' own refusal, so the message can name
-      // the address the caller sent — the primitive's `rejected` entry knows
-      // only nodes, and a turn confirming itself would inflate the one
-      // mechanical confirmation signal the ranking has.
-      if (node.kind === "turn" && node.id === citingTurnId) {
-        rejected.push({ relation: field.relation, raw, reason: "self-loop" });
+      // Ticket 05: narrowed to DIAGONAL relations, phase-blind — a same-phase
+      // word can never legally cite the citing turn itself (see
+      // `TurnRelationRejectionReason`'s doc comment above). A CROSS-PHASE
+      // relation's self target is NOT refused here: `writeMemoryEdges` (the
+      // primitive `attachTurnRelations` calls below) now admits a relation-
+      // carrying self row unconditionally, trusting the caller for phase
+      // legality — the same trust model ordinary (non-self) phase-pair
+      // legality already has at this layer.
+      if (
+        node.kind === "turn" &&
+        node.id === citingTurnId &&
+        DIAGONAL_RELATIONS.includes(field.relation as TurnEdgeRelation)
+      ) {
+        rejected.push({ relation: field.relation, raw, reason: "self-diagonal" });
         continue;
       }
       const key = relationRowKey(citing, node, field.relation);
@@ -808,8 +825,9 @@ function dedupeCitedIds(edges: readonly TurnCitationEdge[]): number[] {
  *
  * This is the layer that RESOLVES ids: the parser is deliberately DB-blind and
  * keeps returning raw ids, but a citation that names no turn is not a citation,
- * so dangling ids (and a self-citation, which the write path already refuses)
- * are dropped here. Cross-session edges survive as provenance —
+ * so dangling ids (and a bare self-citation, which the write path already
+ * refuses regardless of ticket 05's narrower relation-carrying exception) are
+ * dropped here. Cross-session edges survive as provenance —
  * `getSessionEffectiveCitations` is the session-local view that drops them.
  */
 export function getEffectiveCitations(

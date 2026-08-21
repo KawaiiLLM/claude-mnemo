@@ -530,7 +530,12 @@ describe("universal memory edges", () => {
     });
   });
 
-  test("rejects self-loops and malformed nodes without writing them", () => {
+  // Ticket 05 (relation-matrix spec, "自引用") narrowed this refusal to BARE
+  // self rows only — a relation-carrying self edge is a phase question this
+  // primitive cannot ask (no `type` in scope) and is left to the caller
+  // (db/citations.ts, mcp/note.ts); see the dedicated test below for the
+  // relation-carrying case this test used to (wrongly, post-ticket-05) reject.
+  test("rejects a BARE self-loop and malformed nodes without writing them", () => {
     const turnId = addTurn(1);
 
     const result = writeMemoryEdges(
@@ -539,7 +544,7 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: turnId },
           cited: { kind: "turn", id: turnId },
-          relation: "depends-on",
+          relation: null,
           provenance: "text-ref",
         },
         {
@@ -567,12 +572,44 @@ describe("universal memory edges", () => {
     expect(countMemoryEdges(db)).toBe(0);
   });
 
-  test("the table itself refuses a self-loop, so no SQL path can mint one (D2)", () => {
+  // Ticket 05: the storage-layer half of "自引用" — a multi-phase turn may
+  // legitimately cite itself with a cross-phase relation (its later-phase
+  // half carrying its earlier-phase half). This primitive has no `type` to
+  // judge that by, so it admits every relation-carrying self edge
+  // unconditionally, trusting the caller for phase legality — the same trust
+  // model ordinary (non-self) phase-pair legality already has here.
+  test("admits a relation-carrying self edge, refusing only the bare one (ticket 05)", () => {
+    const turnId = addTurn(1);
+
+    const result = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: turnId },
+          cited: { kind: "turn", id: turnId },
+          relation: "encodes",
+          provenance: "asserted",
+        },
+      ],
+      300,
+    );
+
+    expect(result.rejected).toEqual([]);
+    expect(result.written).toHaveLength(1);
+    expect(result.written[0]?.relation).toBe("encodes");
+    expect(result.written[0]?.citing).toEqual({ kind: "turn", id: turnId });
+    expect(result.written[0]?.cited).toEqual({ kind: "turn", id: turnId });
+    expect(countMemoryEdges(db)).toBe(1);
+  });
+
+  test("the table itself refuses a BARE self-loop, so no SQL path can mint one; a relation-carrying one is now legal storage (D2, ticket 05)", () => {
     const turnId = addTurn(1);
     const other = addTurn(2);
 
     // Not the write path this time — a raw statement, the shape a migration or
-    // a hand-written repair takes. Both relation-bearing and bare.
+    // a hand-written repair takes. A relation-carrying self row is now legal
+    // at the storage layer (ticket 05) — the phase question is the
+    // validator's, not the CHECK's, which cannot see a turn's `type`.
     expect(() =>
       db
         .query(
@@ -581,7 +618,8 @@ describe("universal memory edges", () => {
            VALUES ('turn', ?, 'turn', ?, 'depends-on', 'asserted', 300)`,
         )
         .run(turnId, turnId),
-    ).toThrow();
+    ).not.toThrow();
+    // The BARE row stays banned regardless of kind.
     expect(() =>
       db
         .query(
@@ -602,7 +640,9 @@ describe("universal memory edges", () => {
         )
         .run(turnId, turnId),
     ).not.toThrow();
-    expect(countMemoryEdges(db)).toBe(1);
+    // 2, not 1: the relation-carrying turn-self row from this same test's
+    // earlier assertion (ticket 05) is now ALSO stored, alongside this one.
+    expect(countMemoryEdges(db)).toBe(2);
     expect(other).toBeGreaterThan(0);
   });
 

@@ -539,8 +539,16 @@ export const RETRACTION_FIELD_ENTRIES: ReadonlyArray<
 const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
   malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
   unresolved: "does not resolve to a turn or segment",
-  "self-loop":
-    "is this turn's own address — a turn cannot cite itself, whatever the relation",
+  // Ticket 05 (relation-matrix spec, "自引用"): narrowed from a blanket ban —
+  // a turn CAN now cite itself with a CROSS-PHASE relation (evidence-for/
+  // evidence-against/grounded-on/encodes) when its own multi-phase `type`
+  // list spans both halves; that case is caught earlier, with a dynamic
+  // message, by `checkRelationTargetPhase`'s phase pre-check below, so this
+  // reason only ever fires for a DIAGONAL relation (refines/override/
+  // depends-on), which can never legally cite itself, whatever the phase.
+  "self-diagonal":
+    "is this turn's own address, and this relation only ever compares two DIFFERENT turns in " +
+    "the same phase — it cannot cite itself, whatever the phase",
   "no-such-edge":
     "is not a relation this turn currently carries — nothing was retracted; read the turn to see what it does carry",
 };
@@ -653,11 +661,22 @@ function touchesEdgeFields(input: NoteToolInput): boolean {
  * Returns `null` (legal) or the rejection message; a malformed or unresolved
  * address is left for `attachTurnRelations`' own pass to report — this
  * function only has an opinion once an address actually resolves to a node.
+ *
+ * Ticket 05 (relation-matrix spec, "自引用"): also the self-reference gate —
+ * when the resolved turn IS the citing turn, `validateRelationTarget` takes
+ * the SAME set for both sides (the address names one row) and additionally
+ * excludes diagonal relations outright, so a self target gets the dynamic
+ * "missing-half" message here for the cross-phase case (`self-single-phase`)
+ * and the phase-blind diagonal refusal (`self-diagonal`) surfaces from the
+ * SAME `fail()` this whole loop already routes through — `attachTurnRelations`'
+ * own self+diagonal check further down is unreachable via this caller and
+ * exists only for a caller that skips this pre-check.
  */
 function checkRelationTargetPhase(
   db: Database,
   relation: string,
   raw: string,
+  citingTurnId: number,
   citingPhases: ReadonlySet<TurnPhase>,
 ): string | null {
   if (!isTurnEdgeRelation(relation)) {
@@ -685,6 +704,7 @@ function checkRelationTargetPhase(
     citingPhases,
     targetKind: "turn",
     citedPhases: phasesForTypes(cited.type),
+    isSelfReference: cited.id === citingTurnId,
   });
   return result.ok ? null : `${relation} "${raw}" ${result.detail}`;
 }
@@ -700,7 +720,9 @@ function checkRelationTargetPhase(
  * What is left is what a claim cannot be right about by construction, and it
  * still fails the WHOLE write rather than silently dropping the relation (a
  * relation field is structured input, not prose a model might hallucinate a
- * bracket into): phase legality, address resolution, and self-reference.
+ * bracket into): phase legality (self-reference included, ticket 05 —
+ * `checkRelationTargetPhase` is now the self-reference gate too, not a
+ * separate check) and address resolution.
  */
 function resolveRelationFields(
   db: Database,
@@ -723,7 +745,7 @@ function resolveRelationFields(
   const phaseIssues: string[] = [];
   for (const field of fields) {
     for (const raw of field.targets) {
-      const issue = checkRelationTargetPhase(db, field.relation, raw, citingPhases);
+      const issue = checkRelationTargetPhase(db, field.relation, raw, citingTurnId, citingPhases);
       if (issue) {
         phaseIssues.push(issue);
       }

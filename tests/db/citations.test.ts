@@ -770,7 +770,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     expect(second.restated[0]?.createdAtEpoch).toBe(500);
   });
 
-  test("rejects a relation naming the citing turn itself, before anything is written", () => {
+  test("rejects a DIAGONAL relation naming the citing turn itself, before anything is written", () => {
     const result = attachTurnRelations(
       db,
       turns[2]!,
@@ -780,9 +780,28 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
 
     expect(result.written).toEqual([]);
     expect(result.rejected).toEqual([
-      { relation: "depends-on", raw: `S${sessionId}/T3`, reason: "self-loop" },
+      { relation: "depends-on", raw: `S${sessionId}/T3`, reason: "self-diagonal" },
     ]);
     expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
+  });
+
+  // Ticket 05 (relation-matrix spec, "自引用"): this primitive is phase-blind
+  // (no `type` in scope), so it only refuses a self target when the relation
+  // is DIAGONAL — a CROSS-PHASE relation's self-legality is a phase question
+  // left entirely to the caller (mcp/note.ts's phase pre-check).
+  test("accepts a CROSS-PHASE relation naming the citing turn itself (ticket 05)", () => {
+    const result = attachTurnRelations(
+      db,
+      turns[2]!,
+      [{ relation: "encodes", targets: [`S${sessionId}/T3`] }],
+      500,
+    );
+
+    expect(result.rejected).toEqual([]);
+    expect(result.written).toHaveLength(1);
+    expect(result.written[0]?.relation).toBe("encodes");
+    expect(result.written[0]?.cited).toEqual({ kind: "turn", id: turns[2]! });
+    expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toHaveLength(1);
   });
 
   test("rejects a malformed address and an unresolved one, distinctly", () => {

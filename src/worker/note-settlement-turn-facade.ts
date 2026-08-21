@@ -952,17 +952,16 @@ export function evaluateSettlementTurnWrite(
           rejections.push(`${key} "${raw}" does not resolve to a turn or segment`);
           continue;
         }
-        if (node.kind === "turn" && node.id === turn.id) {
-          rejections.push(
-            `${key} "${raw}" is this turn's own address — a turn cannot cite itself,` +
-              " whatever the relation",
-          );
-          continue;
-        }
         // Ticket 08 (one validator, both write paths): the SAME
         // `validateRelationTarget` the main agent's `note` calls — segment
         // targets refused, phase-pair legality checked, the rejection naming
-        // which half is missing.
+        // which half is missing. Ticket 05 (relation-matrix spec, "自引用")
+        // folded the self-reference gate into this SAME call rather than a
+        // blanket pre-check here: a self target is no longer refused on
+        // sight — `isSelfReference` routes it through `validateRelationTarget`'s
+        // self branch, which still excludes diagonal relations outright but
+        // now admits a cross-phase one when this turn's own `type` list spans
+        // both halves.
         const citedPhases =
           node.kind === "turn"
             ? phasesForTypes(getTurnById(db, node.id)?.type ?? [])
@@ -972,6 +971,7 @@ export function evaluateSettlementTurnWrite(
           citingPhases: phases,
           targetKind: node.kind,
           citedPhases,
+          isSelfReference: node.kind === "turn" && node.id === turn.id,
         });
         if (!legality.ok) {
           rejections.push(`${key} "${raw}" ${legality.detail}`);

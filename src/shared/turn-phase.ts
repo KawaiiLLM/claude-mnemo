@@ -136,7 +136,16 @@ export interface RelationPhasePair {
  * relation — `isRelationLegalForPhases`'s contract, and the shape of this
  * exported table, are unchanged by the rewrite.
  */
-const DIAGONAL_RELATIONS: readonly TurnEdgeRelation[] = ["refines", "override", "depends-on"];
+/**
+ * Exported (relation-matrix spec, "自引用", ticket 05): a diagonal word
+ * compares a turn against a DIFFERENT turn in the same phase by construction
+ * — override/refines/depends-on always relate two distinct in-phase turns —
+ * so a diagonal relation can never legally cite the citing turn itself,
+ * whatever its phase set. `validateRelationTarget`'s self branch below reads
+ * this list directly rather than re-deriving "which relations are diagonal"
+ * from `RELATION_PHASE_REQUIREMENT`.
+ */
+export const DIAGONAL_RELATIONS: readonly TurnEdgeRelation[] = ["refines", "override", "depends-on"];
 
 /** Rule 2's table: source phase -> the relation word(s) it speaks, and the two other phases each may target. */
 const CROSS_PHASE_SOURCE: Record<
@@ -199,13 +208,14 @@ export function isRelationLegalForPhases(
 }
 
 function phaseRequirementClause(
-  side: "citing" | "cited",
+  side: "citing" | "cited" | "self",
   phases: readonly TurnPhase[],
 ): string {
   const options = phases.map(
     (phase) => `a ${phase}-phase type (e.g. \`${PHASE_CANONICAL_TYPE[phase]}\`)`,
   );
-  return `the ${side} turn to carry ${options.join(" or ")}`;
+  const subject = side === "self" ? "this turn's own type list" : `the ${side} turn`;
+  return `${subject} to carry ${options.join(" or ")}`;
 }
 
 /**
@@ -245,6 +255,43 @@ export function explainRelationPhaseRejection(
 }
 
 /**
+ * Same "missing-half" shape as `explainRelationPhaseRejection`, pointed at
+ * the one type list a self-citation can actually fix — its OWN (relation-
+ * matrix spec, "自引用", ticket 05). A self pair's cited phases are, by
+ * definition, the citing turn's own phases (the address names the same row),
+ * so this takes a single phase set rather than two, and the CITED-side clause
+ * always reads "this turn's own type list" rather than "the cited turn" — the
+ * latter would send a writer looking for a different target to cite instead
+ * of telling it to widen its own `type` list, which is the only real fix.
+ *
+ * Only ever called for a relation `isRelationLegalForPhases` has already said
+ * no to, evaluated with the SAME set on both sides (see the self branch of
+ * `validateRelationTarget` below) — never for a diagonal relation, which is
+ * rejected on sight regardless of phase.
+ */
+function explainSelfReferenceRejection(
+  relation: TurnEdgeRelation,
+  phases: ReadonlySet<TurnPhase>,
+): string {
+  const pairs = RELATION_PHASE_REQUIREMENT[relation];
+  const sourceSatisfiedPairs = pairs.filter((pair) => phases.has(pair.source));
+  if (sourceSatisfiedPairs.length === 0) {
+    const sourcePhases = [...new Set(pairs.map((pair) => pair.source))];
+    return `needs ${phaseRequirementClause("self", sourcePhases)}`;
+  }
+  const targetPhases = [...new Set(sourceSatisfiedPairs.map((pair) => pair.target))];
+  return (
+    `needs ${phaseRequirementClause("self", targetPhases)} IN ADDITION to what it already ` +
+    "carries — a single-phase turn can never self-cite, only a turn whose own type list spans two phases"
+  );
+}
+
+const SELF_DIAGONAL_DETAIL =
+  "is a same-phase (diagonal) relation and cannot cite itself, whatever the phase — " +
+  "refines/override/depends-on only ever compare two DIFFERENT turns in the same phase, " +
+  "so citing itself with one of them is a tautology, not a claim";
+
+/**
  * A relation target's node kind, as `db/references.ts`'s address parser
  * already distinguishes it — re-declared here rather than imported so this
  * module stays free of any DB-layer dependency (a future settlement
@@ -257,11 +304,25 @@ export interface RelationTargetValidationInput {
   relation: TurnEdgeRelation;
   citingPhases: ReadonlySet<TurnPhase>;
   targetKind: RelationTargetKind;
-  /** Ignored when `targetKind` is `"segment"`. */
+  /** Ignored when `targetKind` is `"segment"`, or when `isSelfReference` is true. */
   citedPhases: ReadonlySet<TurnPhase>;
+  /**
+   * True when the resolved target IS the citing turn (relation-matrix spec,
+   * "自引用", ticket 05: a multi-phase turn may cite itself with a CROSS-PHASE
+   * word — its own phase set has to span both the word's source phase and a
+   * distinct legal target phase — never with a diagonal one). The address
+   * names the SAME row in this case, so `citedPhases` is ignored in favour of
+   * `citingPhases` on both sides; callers may pass an empty set for it.
+   * Defaults to `false` — every caller predating ticket 05 is unaffected.
+   */
+  isSelfReference?: boolean;
 }
 
-export type RelationTargetRejectionReason = "segment-target" | "phase-illegal";
+export type RelationTargetRejectionReason =
+  | "segment-target"
+  | "phase-illegal"
+  | "self-diagonal"
+  | "self-single-phase";
 
 export type RelationTargetValidationResult =
   | { ok: true }
@@ -285,12 +346,34 @@ const SEGMENT_TARGET_DETAIL =
  * `detail` never carries a leading relation/address label or a trailing
  * period — callers compose those around it however their own message format
  * wants (`mcp/note.ts` prefixes `relation "raw"`; a future caller may not).
+ *
+ * Ticket 05's self branch runs BEFORE the ordinary phase-pair check, not
+ * after it: feeding `citingPhases` in twice into the ordinary rule would get
+ * the CROSS-PHASE case right on its own (a self pair's cited phases equal its
+ * citing phases by definition), but would also wrongly ADMIT a diagonal
+ * relation — same-phase-vs-itself trivially satisfies "same phase" — which is
+ * exactly the tautology diagonal words must never express. The dedicated
+ * branch excludes diagonal relations outright and only then falls back to the
+ * ordinary phase machinery (with the same set on both sides) for the rest.
  */
 export function validateRelationTarget(
   input: RelationTargetValidationInput,
 ): RelationTargetValidationResult {
   if (input.targetKind === "segment") {
     return { ok: false, reason: "segment-target", detail: SEGMENT_TARGET_DETAIL };
+  }
+  if (input.isSelfReference) {
+    if (DIAGONAL_RELATIONS.includes(input.relation)) {
+      return { ok: false, reason: "self-diagonal", detail: SELF_DIAGONAL_DETAIL };
+    }
+    if (isRelationLegalForPhases(input.relation, input.citingPhases, input.citingPhases)) {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      reason: "self-single-phase",
+      detail: explainSelfReferenceRejection(input.relation, input.citingPhases),
+    };
   }
   if (isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
     return { ok: true };

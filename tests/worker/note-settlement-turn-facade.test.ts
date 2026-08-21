@@ -842,6 +842,29 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
   });
 
+  // Relation-matrix spec, "自引用" (ticket 05): the settlement write path
+  // shares the SAME `validateRelationTarget` self branch as the main agent's
+  // `note` — a multi-phase turn may self-cite with a CROSS-PHASE relation.
+  test("a cross-phase self target is accepted through the settlement path (ticket 05)", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    updateTurnById(db, t1, { type: ["research", "review"] });
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, encodes: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+
+    expect(resultText(result)).toContain("1 relation");
+    const edges = getOutgoingEdges(db, { kind: "turn", id: t1 });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.relation).toBe("encodes");
+    expect(edges[0]?.cited).toEqual({ kind: "turn", id: t1 });
+  });
+
   test("an edge write is gated on the CITING turn's `type` — checked, never stamped", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);

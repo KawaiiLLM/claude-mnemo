@@ -232,6 +232,22 @@ describe("edge scoring signals", () => {
     expect(signals.get(decisionB)!.encodesCount).toBe(1);
   });
 
+  // Relation-matrix spec, "自引用" (ticket 05, user ruling T1180): a self edge
+  // PARTICIPATES in scoring, no exclusion. This query joins `citing` on
+  // `citing_id` and filters only on `citing.was_rolled_back` — a self row
+  // (citing_id = cited_id) satisfies that join and the WHERE the same as any
+  // other row, so no code change was needed here; this pins that the query
+  // shape does NOT accidentally exclude it.
+  test("a self-encodes counts toward the turn's own encodesCount (ticket 05)", () => {
+    const selfEncoder = addTurn(1, { type: ["research", "review"] });
+    const otherSource = addTurn(2, { type: ["implement"] });
+    edge(selfEncoder, selfEncoder, "encodes", 1000);
+    edge(otherSource, selfEncoder, "encodes", 1000);
+
+    const signal = getTurnEdgeSignalsForTurn(db, selfEncoder);
+    expect(signal.encodesCount).toBe(2);
+  });
+
   test("unscored relations (grounded-on, evidence-for/against, depends-on, legacy supersedes) contribute nothing", () => {
     const target = addTurn(1, { type: ["design"] });
     const groundedOnSource = addTurn(2, { type: ["design"] });

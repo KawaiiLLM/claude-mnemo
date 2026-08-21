@@ -3619,6 +3619,61 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
 });
 
 /**
+ * Relation-matrix spec, "自引用" (ticket 05): a self edge is now a legal
+ * storable fact, and the ticket's own render-safety requirement is that a
+ * turn carrying one renders without error or loop — it may show itself on
+ * the antecedent line, but it must not recurse.
+ */
+describe("self-edged turn renders safely (ticket 05)", () => {
+  it("a legal self-encodes turn renders without throwing, and the self edge does not create a self ↳ loop", () => {
+    const db = createDatabase(":memory:");
+    const epoch = Math.floor(Date.UTC(2026, 7, 18, 9, 0) / 1000);
+    const session = seedTimelineSession(
+      db,
+      [
+        turn({
+          promptNumber: 1,
+          // Multi-phase (research=evidence, review=delivery): legal to self-encodes.
+          type: ["research", "review"],
+          title: "self-encoding turn",
+          createdAtEpoch: epoch,
+        }),
+      ],
+      { title: "title" },
+    );
+    const turnId = getTurn(db, session.id, 1)!.id;
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: turnId },
+          cited: { kind: "turn", id: turnId },
+          relation: "encodes",
+          provenance: "asserted",
+        },
+      ],
+      epoch,
+    );
+
+    let output = "";
+    expect(() => {
+      output = renderTimeline(buildTimelineView(db, { id: `S${session.id}/T1..` }));
+    }).not.toThrow();
+    // Ticket 05's own words: "the antecedent line may show the turn itself;
+    // it must not recurse". This plain `S<n>` turns view resolves `↳`
+    // addresses through `resolveTurnRowLinks`, a DIRECT `memory_edges` reader
+    // with no self-exclusion (unlike `db/citations.ts`'s
+    // `getSessionEffectiveCitations`, the milestone pull-through's own
+    // source, which DOES filter `citedTurnId === citingTurnId` — the two
+    // antecedent mechanisms disagree on this by design/oversight, and ticket
+    // 05 permits either outcome as long as it does not recurse). The flat,
+    // single occurrence below is exactly that: one line, no loop.
+    expect(output).toContain("↳ T1");
+    expect(output.match(/↳ T1/g)).toHaveLength(1);
+  });
+});
+
+/**
  * Ticket 10 (edge-mechanism-revision, peer 终审必改 4). D2 gave one pair one
  * row PER RELATION, and the `↳` aggregation pushed a row at a time, so a citer
  * that declared two relations about the same antecedent rendered its address

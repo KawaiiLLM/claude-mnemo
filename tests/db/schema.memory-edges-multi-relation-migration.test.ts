@@ -168,7 +168,7 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     ).toThrow();
   });
 
-  test("after the rebuild the bare row is unique per pair and self-loops are unstorable", () => {
+  test("after the rebuild the bare row is unique per pair and BARE self-loops are unstorable", () => {
     initializeSchema(db);
 
     // The migrated bare row is already there (turn → segment), so a second one
@@ -182,9 +182,13 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
       insertEdge("turn", turnIds[1]!, "segment", segmentIds[0]!, null, "retrieval", 160),
     ).not.toThrow();
 
+    // `initializeSchema` runs the FULL migration chain, relation-matrix spec
+    // ticket 05 included — a RELATION-carrying self row is legal storage as
+    // of that ticket (the validator, not the CHECK, judges which relations
+    // may self-cite); only the BARE self row stays banned at this layer.
     expect(() =>
       insertEdge("turn", turnIds[0]!, "turn", turnIds[0]!, "depends-on", "asserted", 160),
-    ).toThrow();
+    ).not.toThrow();
     expect(() =>
       insertEdge("segment", segmentIds[0]!, "segment", segmentIds[0]!, null, "text-ref", 160),
     ).toThrow();
@@ -300,9 +304,17 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     fresh.exec(
       `INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'depends-on', 'asserted', 100)`,
     );
+    // A fresh database is born in the FINAL shape, self-reference migration
+    // (ticket 05) included: a RELATION-carrying self row is legal storage...
     expect(() =>
       fresh.exec(
         `INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 1, 'depends-on', 'asserted', 100)`,
+      ),
+    ).not.toThrow();
+    // ...only the BARE self row stays banned.
+    expect(() =>
+      fresh.exec(
+        `INSERT INTO memory_edges VALUES ('turn', 3, 'turn', 3, NULL, 'text-ref', 100)`,
       ),
     ).toThrow();
     fresh.close();
