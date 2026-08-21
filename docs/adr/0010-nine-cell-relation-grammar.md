@@ -178,3 +178,10 @@ pairs.
   `override` as two words with different provenance — a note's
   machine-judged supersession is not the same claim as a writer judging a
   conclusion wrong [S15069/T1163, S15069/T1169].
+- **Relation words stay turn→turn — segments never become graph nodes**
+  (ruled [S15069/T1195], pre-empting the post-review proposal to open the
+  vocabulary to segment endpoints): a segment is the memory of a whole task,
+  and the relation graph exists to carve emergent sub-workflows among that
+  segment's member turns — making the container a node inside its own
+  interior structure inverts ends and means. The machine bare layer's
+  segment/session citing kinds are unaffected.

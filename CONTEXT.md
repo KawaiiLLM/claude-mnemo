@@ -126,7 +126,11 @@ cell, not a hand-carved exception list per word)
 A separable, nameable subtask chain. Scopes the override/refines stance pair
 alone: both ends of such an edge must serve the same workflow, or the edge
 downgrades to depends-on. depends-on and the cross-phase words are
-indifferent to workflow.
+indifferent to workflow. Workflows are emergent — subgraphs the relation
+edges carve out among a segment's member turns, never stored objects. The
+segment is the whole task's memory; the relation graph is its interior
+structure. Segments never enter the graph as relation nodes.
+_Avoid_: reifying workflows; segment-level relation edges
 
 **Multi-phase turn**:
 A turn whose type set spans more than one phase. Each phase judges its own

@@ -61,6 +61,10 @@ Reading rule 2 — **cross phase: the word is determined by the SOURCE row**
 - **迁移**:九格开放是纯放宽零迁移(五处放宽、零收紧,现存边类逐类核对为新格
   子集);自引用的 CHECK 重建(票 05)是唯一真迁移,数据无损、可演练。
 - **存量 24 条 refines 的分叉合规**并入 /settle 回填顺路纠,不开专门 pass。
+- **段不进关系图**(T1195 明裁,回应 peer 评审 7b):段是一个整体任务的记忆,
+  关系图的目的正是给段内 turn 划分**涌现**的子工作流——把段做成图节点是
+  本末倒置。关系词永久 turn→turn;机器裸边既有的 segment/session citing
+  kinds 不受影响。7b 的时间窗口问题就此关闭。
 - ~~A2 出范围~~ → **A2 由自引用溶解**(见上节)。
 
 ## Tickets
