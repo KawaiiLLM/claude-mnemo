@@ -103,10 +103,28 @@ import { createHash } from "node:crypto";
  * never hand retyping. The Summary-layer content note was compressed for the
  * 9500-char injection block cap (MAX_INJECTED_BLOCK_CHARS) — the one
  * deliberate wording deviation from the ruled ticket-02 text.
+ *
+ * v6→v7 (flow-relations spec, .scratch/flow-relations/, ticket 04; ruled
+ * [S15069/T1198]–[T1206]): §Relations replaces WHOLESALE — the nine-cell
+ * phase grid retires as the word-choice law and the eight-word, three-stance
+ * vocabulary takes its place (JUDGING: override/narrows/extends/collects ·
+ * DEPENDING: grounds/consume · TESTING: verifies/refutes), organised around
+ * the FLOW — a branch of decisions joined by narrows/extends, whose
+ * settlement is the node nothing further narrows or extends. Splice source:
+ * .scratch/flow-relations/rubric-v7-relations-draft.txt (3090 bytes,
+ * peer-aligned), spliced by /tmp-scripted byte copy on the v6 precedent —
+ * never hand retyping. One pinned bullet rides along after the retraction
+ * line (T1190 ⑦a): a pre-registered prediction is insight, not an edge.
+ * No other section changes. Which conditions REJECT and which merely WARN
+ * stays off this file entirely (ADR-0009's split: the rubric teaches
+ * judgment, the receipts teach mechanism) — hence the section names the
+ * terminus warning's effect without enumerating the validator's checks.
+ * Every section outside §Relations is untouched, so their v5/v6 guard pins
+ * (tests/shared/memory-rubric.test.ts) still hold verbatim.
  */
-export const MEMORY_RUBRIC_VERSION = "v6";
+export const MEMORY_RUBRIC_VERSION = "v7";
 
-export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v6
+export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v7
 
 ## Fields
 
@@ -183,58 +201,52 @@ member turns and recomputed when membership changes — never written by hand.
 
 - Edges are declared through the relation parameters alone; content owes no
   citation format.
-- The source–target phase pair picks the cell; two reading rules:
-  Same phase (source and target both evidence / decision / delivery) — pick
-  by strength of guarantee:
-  · override — the cited conclusion is wrong; this node replaces it.
-  · refines — the cited conclusion is right; this node improves, supplements
-    or extends it without replacing it. Being refined raises the cited node's
-    score. Refinement chains FORK: each chain is one direction out of its
-    origin — point at the node you actually build on, never string different
-    directions together by time order.
-  · depends-on — guarantees only logical dependency: this node builds on the
-    cited node's COMPLETION. No workflow claim, no correctness liability.
-    Procedural chains (dispatch → acceptance → commit) are legal.
-  Cross phase — the word is fixed by the SOURCE phase:
-  · evidence source → evidence-for / evidence-against: a verdict — I tested
-    that claim.
-  · decision source → grounded-on: footing — if that were false, this
-    decision falls.
-  · delivery source → encodes: this delivery carries it. Named nodes gain
-    score, so name only the core decisions and key verifications this
-    delivery carries — the minimal set worth exhibiting.
-- A multi-phase turn is several steps merged into one: judge each phase's
-  edge toward a target independently; write both only when each holds on its
-  own and survives the deletion test with a fact of its own. A cross-phase
-  half that processes the turn's OTHER half may cite the turn itself — the
-  processed half counts as the direct precursor; diagonal words never
-  self-cite. Self-citation is not automatic when phases merely coexist:
-  write it only when the half carries the other half's core ruling or key
-  verification as an independently exhibitable ARTIFACT — restating is not
-  carrying.
-- The same-workflow constraint binds override/refines only: both ends must
-  serve one workflow — a separable, nameable subtask chain. In doubt about
-  the workflow, downgrade to depends-on.
+- A flow is one chain of decisions joined by narrows/extends. Its SETTLEMENT is
+  the node nothing further narrows or extends. Delivery and evidence turns hold
+  no flow of their own — they reach one through the edges they write.
+- Eight words, three stances:
+  JUDGING the cited conclusion — after reading me, must it still be read?
+  · override — no: it is wrong, and this node replaces it.
+  · narrows  — yes: it holds, but this node cuts a piece out of its scope.
+  · extends  — yes: it holds, and this node adds a piece.
+  · collects — this flow ends here, and these are the nodes that carry its
+    conclusion. Name the minimal set, all of it inside this flow: everything
+    citing this settlement reads them through it.
+  DEPENDING on it — if it turned out false, what happens to me?
+  · grounds — I fall with it: a delivery resting on the decision it implements,
+    a decision on a finding, a release on its verification. Cite a flow through
+    its SETTLEMENT; a mid-flow target still stores, and the receipt names the
+    settlement to use instead.
+  · consume — nothing: I used its product and do not answer for it.
+    Dispatch → acceptance → commit chains are consume.
+  TESTING it — did I put the claim to a check?
+  · verifies / refutes — a result produced this turn, for it or against it.
+- narrows, extends and collects serve ONE flow; override, grounds and consume
+  are indifferent to flow.
 - Every finished turn walks three steps; with several candidate precursors,
   ask per candidate:
   1. Is there a direct precursor — the node that directly caused this turn?
      Skipping levels to the arc's origin is mislabeling. None → an orphan is
      legal only as an unforeseen subtask start or decision-free chatter;
      never invent edges to eliminate orphans.
-  2. Yes → pick the word by the two reading rules; no word fits → record
-     nothing. A pair may carry several relations, but each must state a fact
-     the others cannot derive — remove each in turn: if refines holds,
-     depends-on follows from it, so never write both.
-  3. Rejected? Legality is machine-checked; the rejection names the missing
-     half → add the smallest missing type, or re-judge the relation.
-- override and encodes are soft assertions: for a same-phase pair, unsure
-  about override → use refines; unsure about encodes → don't name it.
-- The release ritual: a release turn gathers the work it ships (depends-on)
-  and the rulings and key verifications it fixes in place (encodes); it
-  cites the previous release when one exists — the first release is the
-  chain's legal root.
+  2. Yes → pick the word by the three stances; none fits → record nothing.
+     A pair may carry several relations, but each must state a fact the others
+     cannot derive — remove each in turn: if extends holds, consume follows
+     from it, so never write both.
+  3. Refused or warned? A refusal names the half that is missing → add the
+     smallest missing type, or re-judge the relation. A warning names a better
+     target and stores the edge anyway → take it at the next correction.
+- A multi-phase turn is several steps merged into one: judge each phase's edge
+  toward a target independently. A turn may cite ITSELF with grounds when it is
+  both a flow's settlement and that settlement's implementer; nothing else
+  self-cites.
+- The release ritual: a release consumes the work it ships and grounds on the
+  settlements it fixes in place, citing the previous release when one exists —
+  the first release is the chain's legal root.
 - Retraction: delete an edge found false, rewrite as needed — retraction and
   re-judgment are acts of judgment; never retract merely to tidy.
+- Pre-registration is not an edge: a prediction made before its test lives
+  in insight, not in the graph.
 
 ## Segments (membership and creation)
 

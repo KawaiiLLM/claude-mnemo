@@ -40,11 +40,13 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   });
 
   test("the rubric's own sections are present verbatim (ticket's own normative text)", () => {
-    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v6");
+    expect(MEMORY_RUBRIC_TEXT).toContain("# Memory Rubric v7");
     expect(MEMORY_RUBRIC_TEXT).toContain("## Fields");
     // Ticket 03's four-section regroup survives translation: type/tags stay
     // unheaded sub-blocks of `## Fields`, and the four H2s carry the v6
-    // English titles (relation-matrix spec, full-English ruling).
+    // English titles (relation-matrix spec, full-English ruling). v7 replaces
+    // §Relations' BODY wholesale; all four headings, this one included, are
+    // untouched.
     expect(MEMORY_RUBRIC_TEXT).toContain("type — a closed vocabulary, one meaning per word:");
     expect(MEMORY_RUBRIC_TEXT).toContain("tags — nouns, naming things");
     expect(MEMORY_RUBRIC_TEXT).toContain(
@@ -52,21 +54,85 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     );
     expect(MEMORY_RUBRIC_TEXT).toContain("## Segments (membership and creation)");
     expect(MEMORY_RUBRIC_TEXT).toContain("## Policy (when to read)");
-    // The discriminator vocabulary the note tool's own description
-    // used to inline (ticket 11 migration).
-    expect(MEMORY_RUBRIC_TEXT).toContain("evidence-for / evidence-against");
-    expect(MEMORY_RUBRIC_TEXT).toContain("grounded-on");
-    expect(MEMORY_RUBRIC_TEXT).toContain("override");
-    expect(MEMORY_RUBRIC_TEXT).toContain("the minimal set worth exhibiting");
-    expect(MEMORY_RUBRIC_TEXT).toContain("depends-on");
+  });
+
+  // v7 (flow-relations spec, .scratch/flow-relations/, ticket 04): the
+  // discriminator vocabulary the note tool's own description used to inline
+  // (ticket 11 migration), re-anchored off v6's nine-cell phase grid onto the
+  // eight words in three stances. Pinned line-for-line against the spliced
+  // draft (rubric-v7-relations-draft.txt) — including the alignment spaces in
+  // `narrows  —` / `extends  —`, which are part of the ruled bytes.
+  test("v7 carries the eight relation words in their three stances, verbatim", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v7");
+    expect(MEMORY_RUBRIC_TEXT).toContain("- Eight words, three stances:");
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "  JUDGING the cited conclusion — after reading me, must it still be read?",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "  · override — no: it is wrong, and this node replaces it.",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "  · narrows  — yes: it holds, but this node cuts a piece out of its scope.",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "  · extends  — yes: it holds, and this node adds a piece.",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "  · collects — this flow ends here, and these are the nodes that carry its\n" +
+        "    conclusion. Name the minimal set, all of it inside this flow: everything\n" +
+        "    citing this settlement reads them through it.",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "  DEPENDING on it — if it turned out false, what happens to me?",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "  · grounds — I fall with it: a delivery resting on the decision it implements,",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "  · consume — nothing: I used its product and do not answer for it.",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain("  TESTING it — did I put the claim to a check?");
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "  · verifies / refutes — a result produced this turn, for it or against it.",
+    );
+    // The flow definition the eight words hang off, and the flow-scope rule
+    // that separates the stance words from the citation words.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "- A flow is one chain of decisions joined by narrows/extends. Its SETTLEMENT is\n" +
+        "  the node nothing further narrows or extends.",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "- narrows, extends and collects serve ONE flow; override, grounds and consume\n" +
+        "  are indifferent to flow.",
+    );
+  });
+
+  // The retired v6 vocabulary, as a residue guard: every one of these words
+  // was load-bearing in v6's §Relations and none may survive anywhere in the
+  // document — a leftover would teach a word the write gate no longer
+  // accepts.
+  test("no v6 relation word survives anywhere in the rubric", () => {
+    for (const retired of [
+      "refines",
+      "encodes",
+      "depends-on",
+      "grounded-on",
+      "evidence-for",
+      "evidence-against",
+    ]) {
+      expect(
+        MEMORY_RUBRIC_TEXT,
+        `retired v6 relation word must not survive: ${retired}`,
+      ).not.toContain(retired);
+    }
   });
 
   // v6 (relation-matrix spec, full-English ruling): ticket 13's three ruled
   // segment-creation lines survive translation inside `## Segments
   // (membership and creation)` — pinned at the English renderings approved
   // through the three-round peer review of the v6 draft.
-  test("v6 carries the Segments creation lines, per the approved translation", () => {
-    expect(MEMORY_RUBRIC_VERSION).toBe("v6");
+  test("v7 still carries the Segments creation lines, per the approved translation", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v7");
     expect(MEMORY_RUBRIC_TEXT).toContain("## Segments (membership and creation)");
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "Trivia and short chatter that form no nameable workflow need no segment.",
@@ -89,16 +155,35 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // reach for it — this pins both the sentence and its position, since a line
   // that drifted out of the 关系 section would stop governing the decision it
   // is about.
-  test("v6 carries the retraction line, last in the Relations section", () => {
-    expect(MEMORY_RUBRIC_VERSION).toBe("v6");
+  // v7 (flow-relations ticket 04) keeps the retraction line byte-for-byte —
+  // the wholesale §Relations replacement carried it through unchanged — but
+  // it is no longer LAST: the pre-registration bullet (T1190 ⑦a, deferred to
+  // this touch) is appended after it, still inside §Relations. The release
+  // ritual above it CHANGED words with the vocabulary flip: the release now
+  // consumes what it ships and grounds on what it fixes in place (v6 said
+  // depends-on + encodes).
+  test("v7 carries the release ritual, the retraction line and the pre-registration bullet, in that order", () => {
+    expect(MEMORY_RUBRIC_VERSION).toBe("v7");
+    const releaseRitual =
+      "- The release ritual: a release consumes the work it ships and grounds on the\n" +
+      "  settlements it fixes in place, citing the previous release when one exists —\n" +
+      "  the first release is the chain's legal root.";
     const retraction =
       "- Retraction: delete an edge found false, rewrite as needed — retraction and\n" +
       "  re-judgment are acts of judgment; never retract merely to tidy.";
+    const preRegistration =
+      "- Pre-registration is not an edge: a prediction made before its test lives\n" +
+      "  in insight, not in the graph.";
+    expect(MEMORY_RUBRIC_TEXT).toContain(releaseRitual);
     expect(MEMORY_RUBRIC_TEXT).toContain(retraction);
-    expect(MEMORY_RUBRIC_TEXT.indexOf("- The release ritual:")).toBeLessThan(
+    expect(MEMORY_RUBRIC_TEXT).toContain(preRegistration);
+    expect(MEMORY_RUBRIC_TEXT.indexOf(releaseRitual)).toBeLessThan(
       MEMORY_RUBRIC_TEXT.indexOf(retraction),
     );
     expect(MEMORY_RUBRIC_TEXT.indexOf(retraction)).toBeLessThan(
+      MEMORY_RUBRIC_TEXT.indexOf(preRegistration),
+    );
+    expect(MEMORY_RUBRIC_TEXT.indexOf(preRegistration)).toBeLessThan(
       MEMORY_RUBRIC_TEXT.indexOf("## Segments (membership and creation)"),
     );
   });
