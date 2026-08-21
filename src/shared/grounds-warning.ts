@@ -9,8 +9,9 @@
  * fed already-resolved candidates by each write surface's own orchestration
  * (`mcp/note.ts`, `worker/note-settlement-turn-facade.ts`).
  *
- * `grounds` has NO phase or graph-state REJECTION (spec's six-row law: "no
- * restriction") — citing a mid-flow member instead of its branch's
+ * `grounds` has NO graph-state REJECTION (its phase law — cross-phase only
+ * since [S15069/T1209] — is the ordinary validator's job, upstream of this
+ * module) — citing a mid-flow member instead of its branch's
  * settlement still stores. What this module adds is the one thing P1 asks
  * for in its place: a receipt line naming the settlement to cite instead,
  * addenda-scoped precisely — "fires only when the target's branch HAS a

@@ -30,7 +30,7 @@ Machine-checkable legality — six rows:
 | `override` | same phase; flow- and layer-unlimited | cited conclusion wrong; this node replaces it |
 | `narrows` / `extends` | both ends decision-phase; same flow (definitional) | it holds; this node cuts a piece / adds a piece |
 | `collects` | same phase; the citing turn must itself be the branch's terminus and every target a member of that branch — OWN structural membership, never inherited (**the one graph-state rejection**, sharpened S15069/T1206) | this flow ends here; the minimal set carrying its conclusion |
-| `consume` | same phase; cross-flow | I used its product, no liability |
+| `consume` | same phase; flow-INDIFFERENT (aligned to rubric v7 at the peer's final audit, S15069/T1217 — cross-flow is the typical shape, and a same-flow consume is normally subsumed by extends under the deletion test; no flow machinery checks or warns on it) | I used its product, no liability |
 | `grounds` | **cross-phase only** — some (source, target) pairing with source ≠ target (user retightening S15069/T1209; within a phase, dependency is continuation or usage — stance words / consume own it; empty phase sets reject, so grounds regained a rejection channel; zero stored rows affected — both merge sources were cross-phase) | I fall with it (liability); absorbs old `encodes` |
 | `verifies` / `refutes` | source must carry an evidence phase; target decision or delivery — never evidence (user ruling S15069/T1215: evidence's object is the WORLD, not another turn's claim; agreement = the same fact measured twice, disagreement = override; overruled the T1213 keep recommendation. Scope purity holds vocabulary-wide: five same-phase words, three cross-phase words, no word straddles) | I tested the claim, for / against |
 
@@ -132,8 +132,11 @@ correction and T928→T925 L→L were real, previously inexpressible).
    CHECK's word list rebuilds to the eight words + supersedes AFTER the
    renames, on the 0.13.0 temp-name precedent, **with a full rehearsal on a
    /tmp production copy before release** (this migration UPDATEs data; the
-   0.13.0 incident rules are in force — any write-opening script asserts
-   its resolved path starts with /tmp/).
+   0.13.0 incident rules are in force). Rehearsal path assertions, hardened
+   at the peer's final audit (S15069/T1217): canonicalize BOTH the
+   hardcoded trust root and the target via realpath, require containment,
+   and refuse a symlinked final target — a lexical startsWith("/tmp/") is
+   symlink-bypassable and never sufficient.
 4. The 9 mid-flow-target edges are neither deleted nor re-pointed (P1:
    valid as of write time); they surface through warnings and the
    settlement pass.

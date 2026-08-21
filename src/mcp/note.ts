@@ -772,10 +772,16 @@ function checkRelationTargetPhase(
   // `deriveFlows`, never inherited. The citing turn must itself be a flow's
   // terminus; every target must be a member of THAT SAME branch.
   if (relation === "collects" && flows !== null) {
-    if (flows.flowById.get(citingTurnId) === undefined) {
+    // Peer final-audit finding 2 (S15069/T1217): `flowById.has` alone let a
+    // DEAD branch's terminus collect — the flow object survives an override
+    // with `settlement: null`, and ADR-0011 rules a dead branch has no
+    // terminus and cannot be collected. `isFlowSettlement` checks the real
+    // fact (this turn IS its branch's live settlement).
+    if (!isFlowSettlement(flows, citingTurnId)) {
       return (
-        `collects "${raw}" requires the citing turn to itself be a flow's terminus ` +
-        `(nothing further narrows/extends it) — ${citingRef} is mid-flow, or belongs to no decision flow at all`
+        `collects "${raw}" requires the citing turn to itself be a flow's live settlement ` +
+        `(nothing further narrows/extends it, and no override killed its branch) — ` +
+        `${citingRef} is mid-flow, overridden, or belongs to no decision flow at all`
       );
     }
     if (!isOwnFlowMember(flows, citingTurnId, cited.id)) {

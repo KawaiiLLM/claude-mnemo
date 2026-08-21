@@ -1021,10 +1021,14 @@ export function evaluateSettlementTurnWrite(
         // the citing turn must itself be a flow's terminus; every target an
         // OWN structural member of that SAME branch.
         if (field.relation === "collects" && relationFlows !== null) {
-          if (relationFlows.flowById.get(turn.id) === undefined) {
+          // Peer final-audit finding 2 (S15069/T1217): same fix as note.ts —
+          // a dead branch's flow object survives with settlement null, so
+          // the gate must check live settlement-hood, not flow existence.
+          if (!isFlowSettlement(relationFlows, turn.id)) {
             rejections.push(
-              `${key} "${raw}" requires the citing turn to itself be a flow's terminus ` +
-                `(nothing further narrows/extends it) — ${ref} is mid-flow, or belongs to no decision flow at all`,
+              `${key} "${raw}" requires the citing turn to itself be a flow's live settlement ` +
+                `(nothing further narrows/extends it, and no override killed its branch) — ` +
+                `${ref} is mid-flow, overridden, or belongs to no decision flow at all`,
             );
             continue;
           }

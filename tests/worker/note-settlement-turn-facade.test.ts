@@ -769,6 +769,69 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     expect(relations).toEqual(["extends", "grounds"]);
   });
 
+  // Peer final-audit finding 2 (S15069/T1217): the facade shares note.ts's
+  // collects gate but had ZERO collects coverage of its own — these two pins
+  // close that hole, including the dead-branch case the audit's repro proved
+  // bypassable under the old flowById.has check.
+  test("collects through the facade: a live settlement collects its member", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t3 = seedTurn(sessionDbId, 3);
+    updateTurnById(db, t1, { type: ["design"] });
+    updateTurnById(db, t3, { type: ["correction"] });
+    const job = claimWindow(sessionDbId, 1, 3);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t3]) });
+
+    write(context, { turn: `S${sessionDbId}/T3`, extends: [`S${sessionDbId}/T1`] }, NOW);
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T3`, collects: [`S${sessionDbId}/T1`] },
+      NOW + 1,
+    );
+
+    expect(resultText(result)).toContain("1 relation");
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: t3 }).some(
+        (edge) => edge.relation === "collects",
+      ),
+    ).toBe(true);
+  });
+
+  test("collects through the facade: an overridden settlement (dead branch) is refused", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t3 = seedTurn(sessionDbId, 3);
+    const t4 = seedTurn(sessionDbId, 4);
+    updateTurnById(db, t1, { type: ["design"] });
+    updateTurnById(db, t3, { type: ["correction"] });
+    updateTurnById(db, t4, { type: ["design"] });
+    const job = claimWindow(sessionDbId, 1, 4);
+
+    write(
+      baseContext(job, { reviewableTurnIds: new Set([t3]) }),
+      { turn: `S${sessionDbId}/T3`, extends: [`S${sessionDbId}/T1`] },
+      NOW,
+    );
+    write(
+      baseContext(job, { reviewableTurnIds: new Set([t4]) }),
+      { turn: `S${sessionDbId}/T4`, override: [`S${sessionDbId}/T3`] },
+      NOW + 1,
+    );
+    const result = write(
+      baseContext(job, { reviewableTurnIds: new Set([t3]) }),
+      { turn: `S${sessionDbId}/T3`, collects: [`S${sessionDbId}/T1`] },
+      NOW + 2,
+    );
+
+    expect(resultText(result)).toContain("live settlement");
+    expect(resultText(result)).toContain("overridden");
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: t3 }).some(
+        (edge) => edge.relation === "collects",
+      ),
+    ).toBe(false);
+  });
+
   test("re-asserting a stored relation is a no-op the receipt names, not new work", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);

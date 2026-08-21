@@ -1385,8 +1385,8 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
   // Requirement 1: named fields, one per relation — two different fields
   // naming two different targets in the SAME call land two distinct
   // relations, not a shared guess. The citing turn is DUAL-typed
-  // (evidence + delivery): `refutes` needs only an evidence-phase source
-  // (its target is unrestricted), and `consume` needs a phase the citing
+  // (evidence + delivery): `refutes` needs an evidence-phase source and a
+  // decision/delivery target (T1215 — design here), and `consume` needs a phase the citing
   // turn shares with its own target — both hold in the one call, the
   // exists-rule.
   test("distinct fields for distinct targets land distinct relations in one call", () => {
@@ -1807,7 +1807,7 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     expect(edges.filter((edge) => edge.relation === "grounds")).toHaveLength(2);
   });
 
-  test("verifies/refutes: require an evidence-phase source; the target is unrestricted", () => {
+  test("verifies/refutes: require an evidence-phase source and a decision/delivery target (T1215)", () => {
     setType(earlierTurnId, ["design"]); // decision-phase target
     setType(targetTurnId, ["research"]); // evidence-phase source
 
@@ -2057,6 +2057,40 @@ describe("note tool collects (flow-relations spec, ticket 02: P1's one graph-sta
     ).toBe(true);
   });
 
+  // Peer final-audit finding 2 (S15069/T1217): a dead branch's flow object
+  // survives its override with `settlement: null`, and the old
+  // `flowById.has` gate let its terminus keep collecting — ADR-0011 rules a
+  // dead branch has no terminus and cannot be collected.
+  test("an overridden settlement (dead branch) can no longer collect", () => {
+    const overriderId = db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
+      )
+      .get(sessionId, 4, "The overrider", 115)!.id;
+    setType(overriderId, ["design"]);
+    const overrode = noteTool(
+      db,
+      { turn: `S${sessionId}/T4`, override: [`S${sessionId}/T3`] },
+      { now: () => 895, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(isNoteSuccess(overrode)).toBe(true);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, collects: [`S${sessionId}/T1`] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("live settlement");
+    expect(resultText(result)).toContain("overridden");
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).some(
+        (edge) => edge.relation === "collects",
+      ),
+    ).toBe(false);
+  });
+
   test("the settlement collecting an out-of-branch turn is rejected, naming the flow", () => {
     const result = noteTool(
       db,
@@ -2086,7 +2120,7 @@ describe("note tool collects (flow-relations spec, ticket 02: P1's one graph-sta
 
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain(
-      "requires the citing turn to itself be a flow's terminus",
+      "requires the citing turn to itself be a flow's live settlement",
     );
     expect(getOutgoingEdges(db, { kind: "turn", id: earlierTurnId })).toEqual([]);
   });
@@ -2113,7 +2147,7 @@ describe("note tool collects (flow-relations spec, ticket 02: P1's one graph-sta
 
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain(
-      "requires the citing turn to itself be a flow's terminus",
+      "requires the citing turn to itself be a flow's live settlement",
     );
   });
 });

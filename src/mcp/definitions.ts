@@ -415,13 +415,13 @@ export const noteInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Addresses work this turn used, with no liability if it turns out wrong — cross-flow. Judgment lives in the Memory Rubric.",
+      "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow — a same-flow consume is normally subsumed by extends under the deletion test. Judgment lives in the Memory Rubric.",
     ),
   grounds: z
     .array(z.string())
     .optional()
     .describe(
-      "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false — no phase restriction, absorbs the retired grounded-on/encodes. A mid-flow target still stores; the receipt then names the branch's settlement to cite instead. Turn-only; may cite the citing turn itself only when this turn is both a flow's settlement and that settlement's implementer — every other relation refuses a self target outright. Judgment lives in the Memory Rubric.",
+      "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false — cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. A mid-flow target still stores; the receipt then names the branch's settlement to cite instead. Turn-only; may cite the citing turn itself only when this turn is both a flow's settlement and that settlement's implementer — every other relation refuses a self target outright. Judgment lives in the Memory Rubric.",
     ),
   verifies: z
     .array(z.string())

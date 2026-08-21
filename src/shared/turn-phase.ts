@@ -158,7 +158,7 @@ const SAME_PHASE_RELATIONS: readonly TurnEdgeRelation[] = ["override", "collects
 /** `narrows`/`extends`: legal ONLY decision-decision — narrower than the same-phase group above, definitional to a branch. */
 const DECISION_ONLY_RELATIONS: readonly TurnEdgeRelation[] = ["narrows", "extends"];
 
-/** `verifies`/`refutes`: the SOURCE must be evidence-phase; the target is unrestricted (all three phases, evidence included). */
+/** `verifies`/`refutes`: the SOURCE must be evidence-phase; the target decision- or delivery-phase — never evidence ([S15069/T1215]). */
 const EVIDENCE_SOURCE_RELATIONS: readonly TurnEdgeRelation[] = ["verifies", "refutes"];
 
 /**

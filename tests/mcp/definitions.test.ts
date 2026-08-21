@@ -426,7 +426,7 @@ describe("tool surface", () => {
     expect(shape.collects.description).toContain("branch's settlement");
     expect(shape.collects.description).toContain("already belongs to that same branch");
 
-    expect(shape.grounds.description).toContain("no phase restriction");
+    expect(shape.grounds.description).toContain("cross-phase only");
     expect(shape.grounds.description).toContain("mid-flow target still stores");
     expect(shape.grounds.description).toContain("absorbs the retired grounded-on/encodes");
     expect(shape.grounds.description).toContain("if it were false");
