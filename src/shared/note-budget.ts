@@ -119,9 +119,8 @@ export function formatBudgetWarning(fields: NoteBudgetFields): string | null {
   if (over.length === 0) {
     return null;
   }
-  const verb = over.length > 1 ? "are" : "is";
-  return (
-    `${over.join(", ")} ${verb} over ${BUDGET_WARNING_MULTIPLE}× budget — an occasional ` +
-    "overage is fine, a standing pattern of it is not."
-  );
+  // render-boilerplate-trim ticket 02: the sentence compresses — field names
+  // (as before) plus the fixed threshold, nothing else. Still fires on EVERY
+  // over-1.5× call (protected ruling above), only its wording shrank.
+  return `${over.join(", ")} over ${BUDGET_WARNING_MULTIPLE}× — occasional is fine, a standing pattern is not.`;
 }

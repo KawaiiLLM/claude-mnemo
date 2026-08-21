@@ -121,7 +121,7 @@ describe("note budget warning (1.5×, ticket 01)", () => {
       content: "c".repeat(604), // 151 tok, one over 1.5x of the 100 tok budget
     });
     expect(warning).toBe(
-      "content is over 1.5× budget — an occasional overage is fine, a standing pattern of it is not.",
+      "content over 1.5× — occasional is fine, a standing pattern is not.",
     );
   });
 
@@ -131,7 +131,7 @@ describe("note budget warning (1.5×, ticket 01)", () => {
       content: "c".repeat(604), // 151 tok, over 1.5x of the 100 tok budget
     });
     expect(warning).toBe(
-      "title, content are over 1.5× budget — an occasional overage is fine, a standing pattern of it is not.",
+      "title, content over 1.5× — occasional is fine, a standing pattern is not.",
     );
   });
 
@@ -145,7 +145,7 @@ describe("note budget warning (1.5×, ticket 01)", () => {
     expect(
       formatBudgetWarning({ title: "t", content: "c", insight: "i".repeat(364) }), // 91 tok, over 1.5x of the 60 tok budget
     ).toBe(
-      "insight is over 1.5× budget — an occasional overage is fine, a standing pattern of it is not.",
+      "insight over 1.5× — occasional is fine, a standing pattern is not.",
     );
   });
 

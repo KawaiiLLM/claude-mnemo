@@ -121,7 +121,7 @@ describe("note tool", () => {
     });
   });
 
-  test("records writer_model and ride_turn mechanically, and says so when the model is unavailable", () => {
+  test("records writer_model and ride_turn mechanically; ride_turn prints on divergence, writer_model stays silent when unrecorded", () => {
     const result = noteTool(
       db,
       {
@@ -169,8 +169,99 @@ describe("note tool", () => {
     ]);
     expect(note.rideTurnId).toBe(rideTurnId);
     expect(note.writerModel).toBeNull();
+    // ride_turn: S334 diverges from the written turn (T332) — diagnostic,
+    // so it prints (ticket 02, render-boilerplate-trim).
     expect(resultText(result)).toContain(`ride_turn: S${sessionId}/T334`);
-    expect(resultText(result)).toContain("writer_model: not recorded");
+    // writer_model was not recorded — the former "not recorded — this
+    // environment does not expose..." apology told the caller nothing new on
+    // every single call, so the segment now stays silent entirely.
+    expect(resultText(result)).not.toContain("writer_model");
+  });
+
+  // render-boilerplate-trim ticket 02: a receipt segment prints only when it
+  // tells the caller something it does not already know. These pin the four
+  // cuts' diagnostic/silent split directly (writer_model, ride_turn, the
+  // type/tags echo) and the minimal shape a fully-ordinary write collapses to.
+  describe("receipt trim: segments print only on divergence", () => {
+    test("a same-turn, in-budget, no-divergence write's receipt is exactly the minimal shape", () => {
+      // T334 is the session's own current turn (highest prompt_number,
+      // seeded in beforeEach) — writing directly to it makes ride_turn equal
+      // the written turn, the silent case. No writer_model env, no type/tags,
+      // no relations: nothing beyond "Noted … budget: …" should fire.
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T334`, title: "t", content: "c" },
+        { now: () => 900, env: {} },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toBe(
+        `Noted S${sessionId}/T334. budget: title 1/20 · content 1/100 → 2/120 (<0.1×).`,
+      );
+    });
+
+    test("ride_turn: unknown when the session has no non-undone turn to compare against", () => {
+      const soloSessionId = upsertSession(db, {
+        contentSessionId: "note-session-solo-undone",
+        project: "claude-mnemo",
+        title: "Solo undone session",
+        content: "x",
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 110,
+        completedAtEpoch: null,
+      }).id;
+      // The only turn in this session is itself 'undone', so
+      // getSessionCurrentTurn's own `status != 'undone'` filter excludes it
+      // too — there is no current turn at all, the genuinely-unknown case.
+      db.query<unknown, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, ?, 'undone', ?, ?)`,
+      ).run(soloSessionId, 1, "The only turn, and it is undone", 120);
+
+      const result = noteTool(
+        db,
+        { turn: `S${soloSessionId}/T1`, title: "t", content: "c" },
+        { now: () => 900, env: {} },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain("ride_turn: unknown.");
+    });
+
+    test("type echo prints only when normalization changes the submitted value", () => {
+      const divergent = noteTool(
+        db,
+        { turn: `S${sessionId}/T332`, type: ["fix", "fix", " design "] },
+        { now: () => 900, env: {} },
+      );
+      // Deduped and trimmed to two values — stored differs from submitted.
+      expect(resultText(divergent)).toContain("type: fix, design.");
+
+      const identical = noteTool(
+        db,
+        { turn: `S${sessionId}/T333`, type: ["fix"] },
+        { now: () => 900, env: {} },
+      );
+      // Already exactly the normalized form — nothing new to report.
+      expect(resultText(identical)).not.toContain("type:");
+    });
+
+    test("tags echo prints only when HTML-entity decoding changes the submitted value", () => {
+      const divergent = noteTool(
+        db,
+        { turn: `S${sessionId}/T332`, tags: ["fix &amp; polish"] },
+        { now: () => 900, env: {} },
+      );
+      expect(resultText(divergent)).toContain("tags: fix & polish.");
+
+      const identical = noteTool(
+        db,
+        { turn: `S${sessionId}/T333`, tags: ["auth"] },
+        { now: () => 900, env: {} },
+      );
+      expect(resultText(identical)).not.toContain("tags:");
+    });
   });
 
   test("rejects a repeat write that does not declare a mode (spec D5/D5a)", () => {
@@ -283,7 +374,7 @@ describe("note tool", () => {
       expect(isNoteSuccess(result)).toBe(true);
       expect(resultText(result)).toContain("title 41/20");
       expect(resultText(result)).toContain(
-        "title is over 1.5× budget — an occasional overage is fine, a standing pattern of it is not.",
+        "title over 1.5× — occasional is fine, a standing pattern is not.",
       );
       expect(getShadowNote(db, targetTurnId)?.title).toBe("x".repeat(164));
     });
@@ -306,7 +397,7 @@ describe("note tool", () => {
       );
 
       expect(isNoteSuccess(result)).toBe(true);
-      expect(resultText(result)).toContain("content is over 1.5× budget");
+      expect(resultText(result)).toContain("content over 1.5×");
       // The rewrite actually landed — the prior content is gone, replaced.
       expect(getShadowNote(db, targetTurnId)?.content).toBe("x".repeat(804));
     });
@@ -324,7 +415,7 @@ describe("note tool", () => {
       );
 
       expect(isNoteSuccess(result)).toBe(true);
-      expect(resultText(result)).toContain("insight is over 1.5× budget");
+      expect(resultText(result)).toContain("insight over 1.5×");
       expect(getShadowNote(db, targetTurnId)?.insight).toBe("x".repeat(484));
       // title/content in the same call landed too — nothing rolled back.
       expect(getShadowNote(db, targetTurnId)?.title).toBe("t");
@@ -359,7 +450,7 @@ describe("note tool", () => {
           },
           { now: () => 1000 + i, env: {} },
         );
-        expect(resultText(result)).toContain("content is over 1.5× budget");
+        expect(resultText(result)).toContain("content over 1.5×");
       }
     });
   });

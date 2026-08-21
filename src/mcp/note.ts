@@ -51,7 +51,11 @@ import {
   containsToolCallSyntax,
   toolCallSyntaxMessage,
 } from "../shared/tool-call-syntax";
-import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
+import {
+  MEMORY_TYPES,
+  normalizeTypeValues,
+  typeListsEqual,
+} from "../shared/type-vocabulary";
 import {
   EDGE_RELATIONS,
   isTurnEdgeRelation,
@@ -1296,27 +1300,46 @@ function handleTurnWrite(
     if (budgetWarning) {
       parts.push(budgetWarning);
     }
-    parts.push(
-      rideTurnId === null
-        ? "ride_turn: unknown."
-        : `ride_turn: S${turn.sessionId}/T${
-            getRidePromptNumber(db, rideTurnId) ?? turn.promptNumber
-          }.`,
-    );
-    parts.push(
-      writerModel === null
-        ? "writer_model: not recorded — this environment does not expose the model to the MCP server."
-        : `writer_model: ${writerModel}.`,
-    );
+    // ride_turn is diagnostic-only (ticket 02, render-boilerplate-trim): the
+    // common case is that the ride turn IS the turn just written, and saying
+    // so on every call told the caller nothing it didn't already know. Print
+    // only when it is unknown or points somewhere else.
+    if (rideTurnId === null) {
+      parts.push("ride_turn: unknown.");
+    } else if (rideTurnId !== turn.id) {
+      parts.push(
+        `ride_turn: S${turn.sessionId}/T${
+          getRidePromptNumber(db, rideTurnId) ?? turn.promptNumber
+        }.`,
+      );
+    }
+    // writer_model: printed only when one was actually recorded. The
+    // "not recorded" case used to print an apology on every call — this
+    // environment (the MCP server process) has no channel to learn which
+    // model is calling it, so that line was an environment constant, zero
+    // information per call, not a per-write diagnostic.
+    if (writerModel !== null) {
+      parts.push(`writer_model: ${writerModel}.`);
+    }
     if (result.stripped) {
       parts.push("Private-tagged content was removed before storing.");
     }
   }
 
-  if (result.finalType !== undefined) {
+  // type/tags echo: printed only when the STORED form diverges from what was
+  // submitted (normalization dedupes/trims `type`, HTML-entity decoding can
+  // change `tags`) — identical stays silent, since restating exactly what
+  // the caller just sent tells it nothing new.
+  if (
+    result.finalType !== undefined &&
+    !typeListsEqual(result.finalType, input.type as string[])
+  ) {
     parts.push(`type: ${result.finalType.length > 0 ? result.finalType.join(", ") : "(none)"}.`);
   }
-  if (result.finalTags !== undefined) {
+  if (
+    result.finalTags !== undefined &&
+    !typeListsEqual(result.finalTags, input.tags as string[])
+  ) {
     parts.push(`tags: ${result.finalTags.length > 0 ? result.finalTags.join(", ") : "(none)"}.`);
   }
 
