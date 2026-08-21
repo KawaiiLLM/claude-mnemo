@@ -150,6 +150,30 @@ describe("edge scoring signals", () => {
     expect(signal.encodesCount).toBe(0);
   });
 
+  test("relation-matrix ticket 03 — E→E refines: an evidence-phase excess source is graph-legal (ticket 01) but SKIPPED at scoring, not miscounted into either bucket", () => {
+    const target = addTurn(1, { type: ["research"] });
+    const baseline = addTurn(2, { type: ["research"] });
+    const evidenceLeapfrog = addTurn(3, { type: ["measure"] });
+    edge(baseline, target, "refines", 1000); // baseline, excluded regardless of phase
+    edge(evidenceLeapfrog, target, "refines", 2000); // excess, but evidence-only source
+
+    const signal = getTurnEdgeSignalsForTurn(db, target);
+    expect(signal.refinesExcess).toEqual({ decision: 0, delivery: 0 });
+    expect(signal.overridden).toBe(false);
+    expect(signal.encodesCount).toBe(0);
+
+    // The edge is still fully present in the graph — scoring invisibility is a
+    // read-time skip (`primaryPhaseBucket` returns null, nothing increments),
+    // not a write-time rejection or a hidden/deleted row.
+    const stored = db
+      .query<{ count: number }, [number, number]>(
+        `SELECT COUNT(*) AS count FROM memory_edges
+         WHERE relation = 'refines' AND citing_id = ? AND cited_id = ?`,
+      )
+      .get(evidenceLeapfrog, target)!.count;
+    expect(stored).toBe(1);
+  });
+
   test("override victim: overridden is true only from a LIVE override source", () => {
     const victim = addTurn(1, { type: ["design"] });
     const liveAttacker = addTurn(2, { type: ["design"] });
@@ -163,6 +187,31 @@ describe("edge scoring signals", () => {
     expect(signals.get(victim)!.overridden).toBe(true);
     // A rolled-back source's override does not count — the target reads clean.
     expect(signals.get(rolledBackVictim)!.overridden).toBe(false);
+  });
+
+  test("relation-matrix ticket 03 — E→E override: all-phase zeroing pinned, an evidence-phase override still zeroes its evidence-phase target out of milestone selection", () => {
+    const victim = addTurn(1, { type: ["research"] });
+    const attacker = addTurn(2, { type: ["measure"] });
+    edge(attacker, victim, "override", 1000);
+
+    const signal = getTurnEdgeSignalsForTurn(db, victim);
+    // `overridden: true` is the exact bit `mcp/timeline.ts`'s milestone
+    // candidate filter (`!signals.get(id)!.overridden`) excludes on — this IS
+    // "zeroed out of milestone selection", not merely a step toward it.
+    expect(signal.overridden).toBe(true);
+    expect(signal.refinesExcess).toEqual({ decision: 0, delivery: 0 });
+    expect(signal.encodesCount).toBe(0);
+  });
+
+  test("relation-matrix ticket 03 — L→E encodes: all-phase crediting pinned, a delivery-phase source still credits an evidence-phase target's encodesCount", () => {
+    const target = addTurn(1, { type: ["research"] });
+    const deliverySource = addTurn(2, { type: ["implement"] });
+    edge(deliverySource, target, "encodes", 1000);
+
+    const signal = getTurnEdgeSignalsForTurn(db, target);
+    expect(signal.encodesCount).toBe(1);
+    expect(signal.overridden).toBe(false);
+    expect(signal.refinesExcess).toEqual({ decision: 0, delivery: 0 });
   });
 
   test("encodes count: raw in-degree, live sources only", () => {
