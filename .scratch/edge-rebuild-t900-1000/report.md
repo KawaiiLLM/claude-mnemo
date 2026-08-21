@@ -408,3 +408,109 @@ selection power.
 - No note was written for skipped T943 (see "Type additions").
 - A11 (a retrospective reconstruction and a first-hand citation both land as
   `asserted`) is recorded as an accepted cost, not a defect to fix.
+
+---
+
+# Pass 2 — 2026-08-21, on 0.13.0 (standalone edges)
+
+**Writer:** `session:21460` · both blockers from pass 1 are gone: relations are declared
+independently of `content`, and a pair may hold several of them.
+
+## Outcome
+
+**75 relations added, 0 retracted, 0 rejected, 0 bytes of `content` changed.** The window
+went from 39 relation edges to 114. A1 is dissolved, not worked around — every one of the
+54 over-budget notes that could not carry an edge in pass 1 was writable with a bare
+relation call.
+
+| relation | pass 1 | now |
+|---|---|---|
+| depends-on | 13 | 52 |
+| encodes | 6 | 27 |
+| refines | 15 | 24 |
+| grounded-on | 2 | 8 |
+| override | 1 | 1 |
+| evidence-against | 1 | 1 |
+| **total** | **39** | **114** |
+
+## The release ritual
+
+`T998` (0.12.0) carries **26 edges**, the write that was three tokens too large in pass 1:
+
+- **18 `depends-on`** — every landing turn the release shipped: T911, T936, T942, T945,
+  T946, T949, T970, T971, T972, T974, T976, T982, T984, T985, T989, T992, T996, plus
+  **T798** (0.11.2, `4add5a9`) as the previous release. T998 is therefore not the chain
+  root; the chain runs T798 → T998 → T1001.
+- **8 `encodes`** — the rulings it fixes: T900 (ownership spec), T935 (seven-word relation
+  vocabulary), T959 (read-write-contract spec), T964 (settlement window retarget), T973
+  (truncate retirement), T978 (cadence + roster rebuild), T981 (topic retires into tags),
+  T990 (one hook slot, one block).
+
+T990 is deliberately **not** in the `depends-on` list although it is a landing: the release
+both ships the commit and fixes the ruling, and under the deletion test `encodes` is the
+more specific of two statements of one fact.
+
+`T1001` (0.12.1) needed nothing added. Its `depends-on` set was already complete, and it has
+**no legal `encodes` target** — the three fixes it shipped were ruled inside T1001 itself,
+and its two predecessors are typed `review`+`measure` and `delegate`, neither a decision
+phase. A2 survives 0.13.0 intact for patch releases.
+
+## Drainage: 17 / 21, up from 1 / 21
+
+Reachability from a release turn following outgoing edges.
+
+| workflow outcome | count |
+|---|---|
+| collected by T998 or T1001 | **17** |
+| not collected | 4 |
+
+The four are not failures of the mechanism:
+
+| # | workflow | why it does not drain |
+|---|---|---|
+| W4 | rewind-marking diagnosis (T914→T915) | its two view-spec contracts went into a later spec; nothing in 0.12.0 provably carries them, and I declined to guess a target |
+| W7 | annotation-worker operations (T925→T928) | pure worker operations, no shipped artifact |
+| W10 | stale-plugin title-prefix correction (T934) | its output is an auto-memory entry, not a release artifact |
+| W20 | milestone anchoring (T994→T995) | the anchoring eval was **explicitly sequenced behind the release** at T995 |
+
+## Type additions
+
+Two, both under the rubric's own step 3 ("补足最小缺失的 type"), each unblocking a true edge
+that was otherwise illegal. Reported rather than silent because both edit history.
+
+| turn | added | why | unblocked |
+|---|---|---|---|
+| T900 | `ops` | it wrote the merged ownership spec — "纯转写 spec = ops,兼有新裁决 = design+ops" | `T902 depends-on T900`, and W1's whole triage chain behind it |
+| T989 | `design` | it accepted two design calls (rubric+roster on one hook slot, multi-select scoped to recall); v5's 裁决并列补相 makes that a mandatory second phase | `T990 refines T989` — the correction edge pass 1 left unwritten rather than store an inverted `grounded-on` (A4) |
+
+## Retractions: none
+
+All 36 pass-1 edges survive the deletion test. No pair holds two relations that restate one
+fact, and the one inversion pass 1 flagged (`T915 grounded-on T914`) had already been
+repaired to `refines` by another writer. Two edges are thin but not false, and are recorded
+rather than retracted, per "不为整洁而撤":
+
+- `T923 encodes T922` — the dispatch brief is an action executing T922's peer-review-first
+  deferral more than an artifact carrying it. `depends-on` would be truer and is illegal
+  (T922 is `discuss`).
+- `T929 refines T927` — chronological continuation inside one design arc; T929's ten-ticket
+  decomposition does not actually revise T927's ops-word gloss.
+
+## What 0.13.0 did not fix
+
+A1 and A5 are dissolved. A2, A3, A4 and A6 all recurred, and A3 is now the binding
+constraint — it is the sole reason for every remaining orphan that is not an arc root:
+
+| orphan | wanted edge | blocked because |
+|---|---|---|
+| T918 | → T916 | `review` → `measure`: `depends-on` needs two delivery ends, `grounded-on` needs a decision source |
+| T977 | → T969 | `research` → `research`, same shape |
+| T987 | → T986 | `review`+`research` → `research`, same shape |
+| T998 | → T997 | the release's own budget research; `ops` → `research`, same shape |
+
+A2 (no delivery→decision word that means "caused by, not carrying") now shows up only at
+T1001, where it costs the patch release its entire `encodes` half.
+
+The remaining no-edge turns are legitimate: T900/T909/T914/T916/T925/T950/T963/T969/T986/T997
+are arc roots, T934/T968/T975/T988 are standalone, T956 is rewound, and
+T908/T917/T943/T967/T980 have no note.
