@@ -3,13 +3,14 @@ import type { Database } from "bun:sqlite";
 
 import {
   attachTurnRelations,
+  normalizeRelationTargetEntry,
   recomputeTurnCitedPairs,
   retractTurnRelations,
+  type RelationTargetEntry,
   type TurnRelationFieldInput,
 } from "../db/citations";
 import { resolveEraCutoff } from "../db/era";
-import { deriveFlowsForSessions } from "../db/flows";
-import type { EdgeNode } from "../db/memory-edges";
+import { getOutgoingEdges, type EdgeNode } from "../db/memory-edges";
 import { closeNoteDebtAsNoted } from "../db/note-debt";
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import { getSession, updateSessionFields } from "../db/sessions";
@@ -34,7 +35,6 @@ import {
 } from "../mcp/field-mode";
 import {
   bracketBareTurnReferences,
-  collectGroundsMidFlowWarnings,
   completeReadRemedyForTurnField,
   formatRelationRejections,
   formatRetractionReceipt,
@@ -51,7 +51,6 @@ import {
   SESSION_SUMMARY_FIELDS,
 } from "../mcp/session-summary";
 import { isSegmentEra } from "../segment-era";
-import { isFlowSettlement, type FlowDerivation } from "../shared/flows";
 import { formatBudgetWarning, formatNoteBudget } from "../shared/note-budget";
 import {
   findRetiredTopicTag,
@@ -60,6 +59,7 @@ import {
 } from "../shared/tag-stripping";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
 import {
+  checkSelfGroundsTerminus,
   phasesForTypes,
   validateRelationTarget,
   type TurnEdgeRelation,
@@ -296,7 +296,8 @@ type ProseField = (typeof PROSE_FIELDS)[number];
 /**
  * The eight relation (or eight retraction) parameters this call carries, in
  * the `{relation, targets}` shape both `db/citations.ts` primitives take. The
- * zod shape has already proved each value is a `string[]`, so unlike
+ * zod shape has already proved each entry is a bare address or `{turn, tags}`
+ * (rubric-v10 ticket 02's `RelationTargetEntry` union), so unlike
  * `mcp/note.ts`'s own collector this one has no type-check to fail.
  */
 function collectRelationFields(
@@ -306,7 +307,7 @@ function collectRelationFields(
   const fields: TurnRelationFieldInput[] = [];
   for (const [key, relation] of entries) {
     const provided = (rawInput as Record<string, unknown>)[key] as
-      | string[]
+      | RelationTargetEntry[]
       | undefined;
     if (provided !== undefined && provided.length > 0) {
       fields.push({ relation: relation as TurnRelationFieldInput["relation"], targets: provided });
@@ -358,14 +359,6 @@ export interface RelationOutcome {
    * and the receipt has to be able to say so without a follow-up query.
    */
   restored: number;
-  /**
-   * Flow-relations spec (ticket 02, P1): one line per written/restated
-   * `grounds` edge whose target is mid-flow with a settlement to name — the
-   * SAME `collectGroundsMidFlowWarnings` (mcp/note.ts) the main agent's own
-   * surface calls, so the trigger condition and wording cannot drift between
-   * the two writers. Empty, never omitted, when nothing fires.
-   */
-  groundsWarnings: string[];
 }
 
 /**
@@ -931,7 +924,12 @@ export function evaluateSettlementTurnWrite(
     };
   }
 
-  // ---- Relations (D1): address, self-reference, phase — and nothing else --
+  // ---- Relations (D1): address, self-reference, phase, tags — and nothing
+  // else. rubric-v10 ticket 02 retires the flow derivation this block used
+  // to build for `grounds` calls (`db/flows.ts`'s `deriveFlowsForSessions`)
+  // — the lane model derives no flow at write time; self-`grounds` legality
+  // (Gate C) is a graph fact read straight off `memory_edges` AFTER the
+  // write lands, not a flow structure computed beforehand.
   const citingPhases = (): ReadonlySet<TurnPhase> => {
     // Ticket 08: the citing turn's phase set reflects THIS SAME call's own
     // type correction when present — mirrors `mcp/note.ts`'s
@@ -943,40 +941,29 @@ export function evaluateSettlementTurnWrite(
     return phasesForTypes(typeCorrectionLands ? normalizedType ?? turn.type : turn.type);
   };
 
-  // Flow-relations spec (ticket 02): a derivation is only needed when this
-  // call touches `grounds` (the self-citation settlement gate, plus the
-  // post-write mid-flow warning) — scoped the SAME way `mcp/note.ts`'s
-  // `resolveRelationFields` scopes it, citing turn's own session plus every
-  // resolved target's own session. `indexes` (the retired `collects`) needs
-  // no derivation any more — indexes-rescope spec law 2 retires its
-  // graph-state check. Declared here (outside the `if` below) so the receipt
-  // section further down can reuse it for `collectGroundsMidFlowWarnings`
-  // without a second derivation.
-  let relationFlows: FlowDerivation | null = null;
+  // rubric-v10 ticket 02 (Gate B): the citing turn's own tags, reflecting
+  // THIS SAME call's own tag correction when it landed — the tag-half mirror
+  // of `citingPhases` above, same "yielded means the proposed value never
+  // reached the database" rule.
+  const citingTurnTags = (): ReadonlySet<string> => {
+    const tagsCorrectionLands = review?.tags === undefined || review.tags.landed;
+    return new Set(tagsCorrectionLands ? (landedUpdate.tags ?? turn.tags) : turn.tags);
+  };
+
+  // rubric-v10 ticket 02 (Gate C): every self-`grounds` address token this
+  // call carried, checked against the post-write graph AFTER the relation
+  // attach below has landed (see the "Apply" section further down).
+  const selfGroundsRaws: string[] = [];
 
   if (relationFields.length > 0) {
     const phases = citingPhases();
-    const needsFlows = relationFields.some((field) => field.relation === "grounds");
-    if (needsFlows) {
-      const sessionIds = new Set<number>([context.sessionId]);
-      for (const field of relationFields) {
-        if (field.relation !== "grounds") {
-          continue;
-        }
-        for (const raw of field.targets) {
-          const reference = parseBareAddressReference(raw);
-          if (reference && reference.kind === "turn") {
-            sessionIds.add(reference.sessionId);
-          }
-        }
-      }
-      relationFlows = deriveFlowsForSessions(db, [...sessionIds]);
-    }
+    const citingTags = citingTurnTags();
 
     const rejections: string[] = [];
     for (const field of relationFields) {
       const key = RELATION_FIELD_ENTRIES.find(([, relation]) => relation === field.relation)![0];
-      for (const raw of field.targets) {
+      for (const entry of field.targets) {
+        const { raw, tags } = normalizeRelationTargetEntry(entry);
         const reference = parseBareAddressReference(raw);
         if (!reference) {
           rejections.push(`${key} "${raw}" is not a valid address`);
@@ -993,27 +980,32 @@ export function evaluateSettlementTurnWrite(
         }
         // One validator, both write paths: the SAME `validateRelationTarget`
         // the main agent's `note` calls — segment targets refused, phase-pair
-        // legality checked, the rejection naming which half is missing.
-        // Flow-relations spec (ticket 02): the self-citation gate is now
-        // graph-dependent for `grounds` — `isSettlement` is a caller-supplied
-        // fact (`isFlowSettlement` against `relationFlows`), mirroring
-        // `mcp/note.ts`'s own `checkRelationTargetPhase`.
+        // legality checked, tag legality (Gate B) checked, the rejection
+        // naming which half or which tag is missing. Self-`grounds`' actual
+        // terminus legality (Gate C) is checked post-transaction, below.
         const isSelf = node.kind === "turn" && node.id === turn.id;
+        const citedTurn = node.kind === "turn" ? getTurnById(db, node.id) : null;
         const citedPhases =
           node.kind === "turn"
-            ? phasesForTypes(getTurnById(db, node.id)?.type ?? [])
+            ? phasesForTypes(citedTurn?.type ?? [])
             : (new Set<TurnPhase>() as ReadonlySet<TurnPhase>);
+        const citedTags = node.kind === "turn" ? new Set(citedTurn?.tags ?? []) : new Set<string>();
         const legality = validateRelationTarget({
           relation: field.relation as TurnEdgeRelation,
           citingPhases: phases,
           targetKind: node.kind,
           citedPhases,
           isSelfReference: isSelf,
-          isSettlement: isSelf && relationFlows !== null ? isFlowSettlement(relationFlows, turn.id) : false,
+          tags,
+          citingTurnTags: citingTags,
+          citedTurnTags: citedTags,
         });
         if (!legality.ok) {
           rejections.push(`${key} "${raw}" ${legality.detail}`);
           continue;
+        }
+        if (isSelf && field.relation === "grounds") {
+          selfGroundsRaws.push(raw);
         }
       }
     }
@@ -1128,18 +1120,34 @@ export function evaluateSettlementTurnWrite(
       // be the one failure mode neither layer reports.
       return { ok: false, message: formatRelationRejections(attached.rejected, "relation") };
     }
+    // rubric-v10 ticket 02 (Gate C, post-transaction): checked only when this
+    // call actually carried a self-`grounds` target, AFTER every edge this
+    // call writes (retraction, then this attach) has landed — a tagged-
+    // indexes declaration written earlier in the SAME attach counts too,
+    // since `getOutgoingEdges` re-reads the live table. The caller
+    // (`note-settlement-direct-write.ts`'s `writeNote`) wraps this whole
+    // evaluation in one transaction and throws on `ok: false`, so this
+    // rejection rolls back the attach (and the retraction, and the prose/
+    // review writes) it comes after — the same all-or-nothing shape a
+    // pre-write rejection already gets.
+    if (selfGroundsRaws.length > 0) {
+      const postEdges = getOutgoingEdges(db, { kind: "turn", id: turn.id });
+      const terminus = checkSelfGroundsTerminus(postEdges);
+      if (!terminus.ok) {
+        const message = selfGroundsRaws
+          .map((raw) => `grounds "${raw}" ${terminus.detail}`)
+          .join("; ");
+        return { ok: false, message: `relation field rejected: ${message}.` };
+      }
+    }
     relations = {
       written: attached.written.length,
       restated: attached.restated.length,
       retracted,
       restored,
-      groundsWarnings: collectGroundsMidFlowWarnings(db, relationFlows, [
-        ...attached.written,
-        ...attached.restated,
-      ]),
     };
   } else if (retracted > 0) {
-    relations = { written: 0, restated: 0, retracted, restored, groundsWarnings: [] };
+    relations = { written: 0, restated: 0, retracted, restored };
   }
 
   return {
@@ -1249,12 +1257,6 @@ export function renderSettlementTurnWriteReceipt(
       );
     } else if (outcome.relations.restated > 0) {
       parts.push(`${outcome.relations.restated} relation(s) already present, nothing added.`);
-    }
-    // Flow-relations spec: same shared grounds mid-flow warning `mcp/note.ts`
-    // prints, computed once at write time (`evaluateSettlementTurnWrite`) and
-    // carried on the outcome.
-    for (const warning of outcome.relations.groundsWarnings) {
-      parts.push(warning);
     }
   }
   if (outcome.session) {

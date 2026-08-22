@@ -73,18 +73,41 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * frozen-readable storage only (`db/citations.ts`'s `CITATION_RELATIONS`),
  * never a member of this module's write vocabulary.
  *
- * ## Self-citation
+ * ## Self-citation (rubric-v10 ticket 02: post-transaction, not flow-derived)
  *
  * The old phase-spanning self rule (a multi-phase turn could self-cite with
  * any CROSS-PHASE word) retires with the vocabulary it was built for. Exactly
- * one relation may ever cite the citing turn itself: `grounds`, and only when
- * that turn is BOTH a flow's settlement (a graph fact — its own branch's
- * terminus, unoverridden) AND that settlement's implementer (a local fact —
- * its own `type` list carries a delivery phase alongside the settled decision
- * half). Every other relation refuses a self target outright, whatever the
- * phase — this module cannot decide the settlement half on its own (no DB
- * access), so `validateRelationTarget`'s self branch below takes it as a
- * caller-supplied fact (`isSettlement`) rather than deriving it.
+ * one relation may ever cite the citing turn itself: `grounds`. Its actual
+ * legality is no longer decided by a flow derivation (settlement +
+ * implementer) — the lane model retires that concept from the write path —
+ * it is decided against the POST-TRANSACTION graph: a self-`grounds` is legal
+ * iff, after every edge THIS SAME CALL writes has landed, the citing turn
+ * carries at least one TAGGED `indexes` edge of its own (declared in this
+ * same call, in either order relative to the `grounds` field, or already
+ * stored from an earlier call). `validateRelationTarget` below therefore
+ * treats a self-`grounds` as phase-legal unconditionally (the ordinary
+ * same/cross-phase pairing does not apply to a self target anyway) — the
+ * terminus question is answered by `checkSelfGroundsTerminus`, a SEPARATE
+ * function callers invoke only after their write has landed, because this
+ * module has no DB access to check it inline and the fact does not exist
+ * until the write does.
+ *
+ * Every other relation refuses a self target outright, whatever the phase.
+ *
+ * ## Lane tags (rubric-v10 ticket 02: Gate B, the subset invariant)
+ *
+ * The five SAME-PHASE words (override/narrows/extends/consume/indexes) MAY
+ * carry a lane-tag set; the three CROSS-PHASE words (grounds/verifies/
+ * refutes) never do — lanes are phase-local, so a cross-phase word tagging
+ * one would assert lane membership across a phase boundary the model does not
+ * define. A non-empty tag set is legal only when EVERY tag it carries already
+ * exists on BOTH endpoint turns' own stored `tags` (the subset invariant) —
+ * violation is rejected here, naming which tag and which endpoint is missing
+ * it. This module does not canonicalize the tag set itself (no DB-layer
+ * dependency, same reasoning `db/memory-edges.ts`'s own doc comment gives for
+ * leaving canonicalization to the write primitive) — callers pass an
+ * already-canonical set, the same "caller pre-computes, this module only
+ * judges" contract `citingPhases`/`citedPhases` already have.
  */
 
 export const TURN_PHASES = ["evidence", "decision", "delivery"] as const;
@@ -159,11 +182,46 @@ export interface RelationPhasePair {
   target: TurnPhase;
 }
 
-/** `override`/`indexes`/`consume`: legal in every SAME-phase pair — evidence-evidence, decision-decision, delivery-delivery alike. */
-const SAME_PHASE_RELATIONS: readonly TurnEdgeRelation[] = ["override", "indexes", "consume"];
+/**
+ * `override`/`narrows`/`extends`/`indexes`/`consume`: legal in every SAME-phase
+ * pair — evidence-evidence, decision-decision, delivery-delivery alike.
+ *
+ * rubric-v10 ticket 02 (spec "Vocabulary and validator"): `narrows`/`extends`
+ * WIDEN into this group from their old decision-only cage — that cage was
+ * built for the flow model's branch derivation (narrows/extends "bind to one
+ * flow" definitionally), and the lane model retires flow identification from
+ * the write path entirely (lanes are tag-derived, `checker`-side, ticket 05).
+ * With no flow left to define, the narrower pair had nothing left protecting
+ * it — same-phase is now the whole domain test for all five, and this same
+ * list doubles as `TAGGABLE_RELATIONS` below (Gate B): the five words a lane
+ * tag may ever attach to are exactly the five same-phase words, because a
+ * lane is a phase-local concept.
+ */
+const SAME_PHASE_RELATIONS: readonly TurnEdgeRelation[] = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume",
+];
 
-/** `narrows`/`extends`: legal ONLY decision-decision — narrower than the same-phase group above, definitional to a branch. */
-const DECISION_ONLY_RELATIONS: readonly TurnEdgeRelation[] = ["narrows", "extends"];
+/**
+ * rubric-v10 ticket 02 (Gate B): the words a lane tag may ever attach to —
+ * identical to `SAME_PHASE_RELATIONS` because lanes are phase-local by
+ * definition (draft-lane-model.md's 统一解读原则), not a coincidence two
+ * separate lists could drift out of. A distinct exported name rather than a
+ * bare re-export of `SAME_PHASE_RELATIONS` because the two questions ("what
+ * phase domain does this word have" vs "may this word carry a lane tag") are
+ * conceptually independent even though today's answer set is the same one —
+ * a reader of Gate B's call site should not have to know that fact holds.
+ */
+export const TAGGABLE_RELATIONS: ReadonlySet<TurnEdgeRelation> = new Set(
+  SAME_PHASE_RELATIONS,
+);
+
+export function isTaggableRelation(relation: TurnEdgeRelation): boolean {
+  return TAGGABLE_RELATIONS.has(relation);
+}
 
 /** `verifies`/`refutes`: the SOURCE must be evidence-phase; the target decision- or delivery-phase — never evidence ([S15069/T1215]). */
 const EVIDENCE_SOURCE_RELATIONS: readonly TurnEdgeRelation[] = ["verifies", "refutes"];
@@ -193,9 +251,6 @@ function buildRelationPhaseRequirement(): Record<TurnEdgeRelation, RelationPhase
         table.grounds.push({ source, target });
       }
     }
-  }
-  for (const relation of DECISION_ONLY_RELATIONS) {
-    table[relation].push({ source: "decision", target: "decision" });
   }
   for (const relation of EVIDENCE_SOURCE_RELATIONS) {
     // T1215: the verdict pair is strictly cross-phase — evidence never
@@ -275,13 +330,34 @@ const SELF_NOT_GROUNDS_DETAIL =
   "is this turn's own address, and only `grounds` may ever cite the citing turn itself — " +
   "every other relation compares two DIFFERENT turns, so citing itself with one of them is a tautology, not a claim";
 
-const SELF_NOT_IMPLEMENTER_DETAIL =
-  "is this turn's own address; a self-`grounds` needs this turn's own type list to carry a delivery-phase type " +
-  "(e.g. `implement`) IN ADDITION to its decision-phase half — only a turn that is both the settlement and its own implementer may self-cite";
+/**
+ * rubric-v10 ticket 02 (Gate C, post-transaction): the detail both
+ * `checkSelfGroundsTerminus` below (a rejection AFTER the write) and a
+ * caller's own pre-write message (if it chooses to explain the requirement
+ * before attempting the write) can share verbatim.
+ */
+export const SELF_GROUNDS_NO_TERMINUS_DETAIL =
+  "is this turn's own address; a self-`grounds` is legal only when, after every edge this call " +
+  "writes has landed, this turn carries at least one TAGGED `indexes` edge of its own — declared " +
+  "in this same call (either order relative to grounds) or already stored from an earlier one";
 
-const SELF_NOT_SETTLEMENT_DETAIL =
-  "is this turn's own address; a self-`grounds` needs this turn to itself be a flow's settlement — " +
-  "the branch node nothing further narrows/extends — which it currently is not (mid-flow, overridden, or homeless)";
+const TAG_NOT_TAGGABLE_DETAIL =
+  "carries no lane tags — only override/narrows/extends/consume/indexes (same-phase words) may";
+
+/**
+ * rubric-v10 ticket 02 (Gate B): builds the "tag X missing from the Y turn's
+ * tags" clause, one entry per (tag, endpoint) that fails the subset
+ * invariant — both endpoints are checked for every tag, so a tag missing
+ * from both is named twice, once per endpoint, rather than only the first
+ * failure found (a caller fixing one endpoint and re-submitting should not
+ * discover the second gap only on a second rejection).
+ */
+function tagMissingDetail(missing: readonly { tag: string; endpoint: "citing" | "cited" }[]): string {
+  const clauses = missing.map(
+    (entry) => `"${entry.tag}" is missing from the ${entry.endpoint} turn's tags`,
+  );
+  return `carries a tag that fails the subset invariant — ${clauses.join("; ")}`;
+}
 
 /**
  * A relation target's node kind, as `db/references.ts`'s address parser
@@ -299,28 +375,32 @@ export interface RelationTargetValidationInput {
   /**
    * True when the resolved target IS the citing turn. Only `grounds` may ever
    * legally self-cite (see this module's header) — every other relation is
-   * refused outright, whatever the phase.
+   * refused outright, whatever the phase. A self-`grounds` is admitted here
+   * unconditionally (Gate C, the terminus-declaration requirement, is a
+   * SEPARATE post-transaction check — `checkSelfGroundsTerminus` below).
    */
   isSelfReference?: boolean;
   /**
-   * Only consulted when `isSelfReference` is true and `relation` is
-   * `"grounds"`: is the citing turn itself a flow's settlement (its own
-   * branch's terminus, unoverridden)? A GRAPH fact this module cannot derive
-   * on its own — the caller supplies it from a flow derivation
-   * (`db/flows.ts`'s `deriveFlowsForSessions`, `shared/flows.ts`'s
-   * `isFlowSettlement`). Defaults to `false`, so a caller that never computed
-   * a derivation (no `grounds` field in the call) correctly refuses rather
-   * than silently admitting.
+   * rubric-v10 ticket 02 (Gate B): this edge's own lane-tag set, already
+   * canonicalized by the caller. Omitted or empty means untagged, which is
+   * always legal regardless of `relation`'s taggability — Gate B has nothing
+   * to check when there is no tag to check.
    */
-  isSettlement?: boolean;
+  tags?: readonly string[];
+  /** rubric-v10 ticket 02 (Gate B): the citing turn's own stored `tags`, canonicalized. Required only when `tags` is non-empty. */
+  citingTurnTags?: ReadonlySet<string>;
+  /** rubric-v10 ticket 02 (Gate B): the cited turn's own stored `tags`, canonicalized. Ignored for a segment target or a self-reference (both endpoints are the same turn there). */
+  citedTurnTags?: ReadonlySet<string>;
 }
 
 export type RelationTargetRejectionReason =
   | "segment-target"
   | "phase-illegal"
   | "self-not-grounds"
-  | "self-not-implementer"
-  | "self-not-settlement";
+  | "tag-not-taggable"
+  | "tag-missing"
+  /** rubric-v10 ticket 02 (Gate C): only `checkSelfGroundsTerminus` ever returns this — a self-`grounds` with no tagged-indexes terminus in the post-transaction graph. */
+  | "self-not-terminus";
 
 export type RelationTargetValidationResult =
   | { ok: true }
@@ -329,6 +409,38 @@ export type RelationTargetValidationResult =
 const SEGMENT_TARGET_DETAIL =
   "is a segment address — relation targets are turn-only; a segment tie goes through " +
   "ownership (e.g. remember's assign/attach) or a bare cites reference, never a relation";
+
+/**
+ * rubric-v10 ticket 02 (Gate B): the tag-legality half of `validateRelationTarget`,
+ * factored out because it runs identically whether the phase side took the
+ * self-reference branch or the ordinary phase-pair branch (a self-`grounds`
+ * carrying tags is exactly as illegal as an ordinary `grounds` carrying them
+ * — `grounds` is never taggable either way).
+ */
+function checkTagLegality(input: RelationTargetValidationInput): RelationTargetValidationResult {
+  const tags = input.tags ?? [];
+  if (tags.length === 0) {
+    return { ok: true };
+  }
+  if (!isTaggableRelation(input.relation)) {
+    return { ok: false, reason: "tag-not-taggable", detail: TAG_NOT_TAGGABLE_DETAIL };
+  }
+  const citingTags = input.citingTurnTags ?? new Set<string>();
+  const citedTags = input.citedTurnTags ?? new Set<string>();
+  const missing: { tag: string; endpoint: "citing" | "cited" }[] = [];
+  for (const tag of tags) {
+    if (!citingTags.has(tag)) {
+      missing.push({ tag, endpoint: "citing" });
+    }
+    if (!citedTags.has(tag)) {
+      missing.push({ tag, endpoint: "cited" });
+    }
+  }
+  if (missing.length > 0) {
+    return { ok: false, reason: "tag-missing", detail: tagMissingDetail(missing) };
+  }
+  return { ok: true };
+}
 
 /**
  * THE shared judgment: every caller that may attach a relation asks this ONE
@@ -340,12 +452,13 @@ const SEGMENT_TARGET_DETAIL =
  * period — callers compose those around it however their own message format
  * wants.
  *
- * The self branch runs BEFORE the ordinary phase-pair check: a self target
- * for anything but `grounds` is refused on sight (whatever the phase), and a
- * self-`grounds` needs two conditions this function takes as caller-supplied
- * facts (`isSettlement`) or derives locally (`isImplementer`, from
- * `citingPhases` itself — a self pair's cited phases equal its citing phases
- * by definition, so there is nothing to compute from `citedPhases` here).
+ * Three gates in order, each short-circuiting the next: segment-target,
+ * then phase legality (self-reference short-circuits this to always-legal —
+ * a self target for anything but `grounds` is refused on sight, whatever the
+ * phase; self-`grounds`' actual terminus condition is Gate C, checked
+ * post-transaction, not here), then Gate B tag legality — run LAST and
+ * regardless of which phase branch was taken, since a phase-legal edge can
+ * still carry an illegal tag.
  */
 export function validateRelationTarget(
   input: RelationTargetValidationInput,
@@ -357,31 +470,47 @@ export function validateRelationTarget(
     if (input.relation !== "grounds") {
       return { ok: false, reason: "self-not-grounds", detail: SELF_NOT_GROUNDS_DETAIL };
     }
-    const isImplementer =
-      input.citingPhases.has("decision") && input.citingPhases.has("delivery");
-    if (!isImplementer) {
-      return {
-        ok: false,
-        reason: "self-not-implementer",
-        detail: SELF_NOT_IMPLEMENTER_DETAIL,
-      };
-    }
-    if (!input.isSettlement) {
-      return {
-        ok: false,
-        reason: "self-not-settlement",
-        detail: SELF_NOT_SETTLEMENT_DETAIL,
-      };
-    }
-    return { ok: true };
+  } else if (!isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
+    return {
+      ok: false,
+      reason: "phase-illegal",
+      detail: explainRelationPhaseRejection(input.relation, input.citingPhases, input.citedPhases),
+    };
   }
-  if (isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
+  return checkTagLegality(input);
+}
+
+/**
+ * rubric-v10 ticket 02 (Gate C): the self-`grounds` terminus check, run by the
+ * caller AFTER every edge this call writes has landed (retractions and
+ * attaches alike) — see this module's header for why the check cannot live
+ * inside `validateRelationTarget` itself. `edges` is the citing turn's own
+ * outgoing edges at that post-write moment, in the minimal shape this
+ * DB-free module needs (structurally compatible with `db/memory-edges.ts`'s
+ * `MemoryEdge`, so a caller can pass `getOutgoingEdges`' result straight
+ * through with no mapping).
+ */
+export interface RelationEdgeFact {
+  relation: string | null;
+  tags: readonly string[];
+}
+
+export function hasTaggedTerminusDeclaration(
+  edges: readonly RelationEdgeFact[],
+): boolean {
+  return edges.some((edge) => edge.relation === "indexes" && edge.tags.length > 0);
+}
+
+export function checkSelfGroundsTerminus(
+  edges: readonly RelationEdgeFact[],
+): RelationTargetValidationResult {
+  if (hasTaggedTerminusDeclaration(edges)) {
     return { ok: true };
   }
   return {
     ok: false,
-    reason: "phase-illegal",
-    detail: explainRelationPhaseRejection(input.relation, input.citingPhases, input.citedPhases),
+    reason: "self-not-terminus",
+    detail: SELF_GROUNDS_NO_TERMINUS_DETAIL,
   };
 }
 

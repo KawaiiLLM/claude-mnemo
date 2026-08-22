@@ -1326,6 +1326,16 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     );
   }
 
+  // rubric-v10 ticket 02: Gate B's subset invariant reads a turn's OWN
+  // `tags` column directly (not through the note write path, so a fixture
+  // can set them without going through the write gate).
+  function setTags(turnId: number, tags: readonly string[]): void {
+    db.query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?").run(
+      JSON.stringify(tags),
+      turnId,
+    );
+  }
+
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
@@ -1562,29 +1572,47 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 
-  // Flow-relations spec (ticket 02, "自引用"): only `grounds` may ever self-
-  // cite, and only when the citing turn is BOTH a flow's settlement (a
-  // one-node flow here: decision-phase, nothing narrows/extends it) AND that
-  // settlement's implementer (its own type list also carries a delivery
-  // phase). The old phase-spanning self rule (any cross-phase word, any
-  // multi-phase turn) retires with the vocabulary.
-  test("a design+implement turn self-grounds — settlement and implementer at once", () => {
-    setType(targetTurnId, ["design", "implement"]);
+  // rubric-v10 ticket 02 ("自引用", Gate C): only `grounds` may ever self-
+  // cite, and its actual legality is decided against the POST-TRANSACTION
+  // graph — legal iff, after every edge this call writes has landed, the
+  // citing turn carries at least one TAGGED `indexes` edge of its own
+  // (declared in this same call, or already stored). The old phase-spanning
+  // self rule and the flow-derived settlement+implementer gate both retire
+  // with the vocabulary they were built for.
+  test("a single call carrying a tagged-indexes declaration plus self-grounds passes, in one atomic write", () => {
+    setType(targetTurnId, ["design"]);
+    setType(earlierTurnId, ["design"]);
+    setTags(targetTurnId, ["lane-a"]);
+    setTags(earlierTurnId, ["lane-a"]);
 
     const result = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T3`] },
+      {
+        turn: `S${sessionId}/T3`,
+        indexes: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }],
+        grounds: [`S${sessionId}/T3`],
+      },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
     expect(isNoteSuccess(result)).toBe(true);
     const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
-    expect(edges).toHaveLength(1);
-    expect(edges[0]?.relation).toBe("grounds");
-    expect(edges[0]?.cited).toEqual({ kind: "turn", id: targetTurnId });
+    expect(edges.some((edge) => edge.relation === "grounds" && edge.cited.id === targetTurnId)).toBe(
+      true,
+    );
+    expect(
+      edges.some(
+        (edge) =>
+          edge.relation === "indexes" && edge.cited.id === earlierTurnId && edge.tags.includes("lane-a"),
+      ),
+    ).toBe(true);
   });
 
-  test("a design-ONLY turn cannot self-ground — lacks the delivery half (not its own implementer)", () => {
+  // Mutation-critical (ticket's own acceptance criterion): with the
+  // terminus-declaring edge absent, the SAME self-grounds still rejects — if
+  // Gate C were disabled (admitted unconditionally) this test would flip to
+  // a false pass.
+  test("the same self-grounds WITHOUT any terminus-declaring edge in the post-transaction graph still rejects", () => {
     setType(targetTurnId, ["design"]);
 
     const result = noteTool(
@@ -1595,46 +1623,59 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
 
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain(`grounds "S${sessionId}/T3"`);
-    expect(resultText(result)).toContain("this turn's own type list");
-    expect(resultText(result)).toContain("delivery-phase");
+    expect(resultText(result)).toContain("TAGGED");
+    expect(resultText(result)).toContain("indexes");
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 
-  test("a design+implement turn that is NOT its own flow's terminus cannot self-ground", () => {
-    setType(targetTurnId, ["design", "implement"]);
-    // `extends` from a later decision turn makes targetTurnId mid-flow — no
-    // longer its own branch's settlement. Pure relation calls — no prose is
-    // needed to establish the flow shape.
+  test("self-grounds passes when the tagged-indexes terminus was already stored from an EARLIER call", () => {
+    setType(targetTurnId, ["design"]);
     setType(earlierTurnId, ["design"]);
+    setTags(targetTurnId, ["lane-a"]);
+    setTags(earlierTurnId, ["lane-a"]);
+
     noteTool(
       db,
-      { turn: `S${sessionId}/T3`, extends: [`S${sessionId}/T1`] },
+      { turn: `S${sessionId}/T3`, indexes: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-    );
-    db.query<unknown, [number, string]>(
-      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, type, created_at_epoch)
-       VALUES (?, 4, 'extracted', 'A later decision', ?, 130)`,
-    ).run(sessionId, JSON.stringify(["design"]));
-    noteTool(
-      db,
-      { turn: `S${sessionId}/T4`, extends: [`S${sessionId}/T3`] },
-      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
     );
 
     const result = noteTool(
       db,
       { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T3`] },
-      { now: () => 920, env: {}, eraCutoffEpoch: 1 },
+      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).some(
+        (edge) => edge.relation === "grounds" && edge.cited.id === targetTurnId,
+      ),
+    ).toBe(true);
+  });
+
+  // An UNTAGGED indexes edge is free aggregation, never a terminus
+  // declaration (draft-lane-model.md's 统一解读原则) — it must not satisfy
+  // Gate C.
+  test("an untagged indexes edge does not satisfy Gate C — self-grounds still rejects", () => {
+    setType(targetTurnId, ["design"]);
+    setType(earlierTurnId, ["design"]);
+
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        indexes: [`S${sessionId}/T1`],
+        grounds: [`S${sessionId}/T3`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain(`grounds "S${sessionId}/T3"`);
-    expect(resultText(result)).toContain("flow's settlement");
-    expect(
-      getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).some(
-        (edge) => edge.cited.id === targetTurnId,
-      ),
-    ).toBe(false);
+    // Atomic: the whole call rolls back, so the untagged indexes edge that
+    // WOULD have been legal on its own does not survive either.
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 
   test("a call carrying no field and no edge parameter still names what it needs", () => {
@@ -1707,43 +1748,65 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(2);
   });
 
-  test("narrows: decision-phase both ends; illegal when the citing turn is delivery-only", () => {
-    setType(earlierTurnId, ["design"]);
-    setType(targetTurnId, ["discuss"]);
+  // rubric-v10 ticket 02: narrows widens from decision-only to same-phase
+  // (the decision cage retires with the flow model) — legal on evidence-
+  // evidence AND delivery-delivery now too, same breadth override already
+  // had (mirrors override's own test above, turn for turn).
+  test("narrows: same phase on either end (widened off decision-only); illegal when the phases mismatch", () => {
+    setType(earlierTurnId, ["research"]);
+    setType(anotherEarlierTurnId, ["implement"]);
+    setType(targetTurnId, ["measure"]);
 
-    const legal = noteTool(
+    const evidenceLegal = noteTool(
       db,
       { turn: `S${sessionId}/T3`, narrows: [`S${sessionId}/T1`] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
-    expect(resultText(legal)).toContain("Attached 1 relation(s).");
+    expect(resultText(evidenceLegal)).toContain("Attached 1 relation(s).");
 
-    setType(targetTurnId, ["implement"]);
-    const illegal = noteTool(
+    setType(targetTurnId, ["ops"]);
+    const deliveryLegal = noteTool(
       db,
       { turn: `S${sessionId}/T3`, narrows: [`S${sessionId}/T2`] },
       { now: () => 910, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(deliveryLegal)).toContain("Attached 1 relation(s).");
+
+    setType(targetTurnId, ["design"]);
+    const illegal = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, narrows: [`S${sessionId}/T1`] },
+      { now: () => 920, env: {}, eraCutoffEpoch: 1 },
     );
     expect(resultText(illegal)).toStartWith("Parameter error:");
     expect(resultText(illegal)).toContain("decision-phase");
   });
 
-  test("extends: decision-phase both ends; illegal when the citing turn is delivery-only", () => {
-    setType(earlierTurnId, ["design"]);
-    setType(targetTurnId, ["correction"]);
+  test("extends: same phase on either end (widened off decision-only); illegal when the phases mismatch", () => {
+    setType(earlierTurnId, ["research"]);
+    setType(anotherEarlierTurnId, ["implement"]);
+    setType(targetTurnId, ["measure"]);
 
-    const legal = noteTool(
+    const evidenceLegal = noteTool(
       db,
       { turn: `S${sessionId}/T3`, extends: [`S${sessionId}/T1`] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
-    expect(resultText(legal)).toContain("Attached 1 relation(s).");
+    expect(resultText(evidenceLegal)).toContain("Attached 1 relation(s).");
 
-    setType(targetTurnId, ["implement"]);
-    const illegal = noteTool(
+    setType(targetTurnId, ["ops"]);
+    const deliveryLegal = noteTool(
       db,
       { turn: `S${sessionId}/T3`, extends: [`S${sessionId}/T2`] },
       { now: () => 910, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(deliveryLegal)).toContain("Attached 1 relation(s).");
+
+    setType(targetTurnId, ["design"]);
+    const illegal = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, extends: [`S${sessionId}/T1`] },
+      { now: () => 920, env: {}, eraCutoffEpoch: 1 },
     );
     expect(resultText(illegal)).toStartWith("Parameter error:");
     expect(resultText(illegal)).toContain("decision-phase");
@@ -1915,18 +1978,18 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     expect(resultText(result)).toContain("turn-only");
   });
 
-  // Flow-relations spec (ticket 02, P1): the `grounds` mid-flow warning,
-  // exercised through the real `noteTool` call path. Replaces the retired
-  // segment-crossing warning (T1191, dcd17fe) along with the vocabulary it
-  // was built for.
-  describe("grounds mid-flow warning (flow-relations spec, P1)", () => {
-    test("a grounds toward a mid-flow member warns, naming the branch's settlement", () => {
+  // rubric-v10 ticket 02 (spec "Checks, layered"): the flow-relations era's
+  // `grounds` mid-flow warning retires ENTIRELY — no flow derivation runs on
+  // the write path any more, and the receipt never carries a "mid-flow ...
+  // cite that instead" line, whatever shape the graph is in. Same scenario
+  // the retired describe block above exercised (a chain of `extends`, then a
+  // `grounds` toward the mid-chain member) — legal, and silent.
+  describe("grounds mid-flow warning retirement (rubric-v10 ticket 02)", () => {
+    test("a grounds toward an earlier member of an extends chain stores with no warning at all", () => {
       setType(earlierTurnId, ["design"]);
       setType(anotherEarlierTurnId, ["design"]);
       setType(targetTurnId, ["implement"]);
 
-      // anotherEarlierTurnId extends earlierTurnId — anotherEarlierTurnId
-      // becomes the branch's settlement, earlierTurnId is mid-flow.
       noteTool(
         db,
         { turn: `S${sessionId}/T2`, extends: [`S${sessionId}/T1`] },
@@ -1940,35 +2003,13 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
       );
 
       expect(isNoteSuccess(result)).toBe(true);
-      expect(resultText(result)).toContain(
-        `warning: grounds toward S${sessionId}/T1 is mid-flow — this flow settles at ` +
-          `S${sessionId}/T2; cite that instead.`,
-      );
-    });
-
-    test("a grounds directly at the settlement stays silent", () => {
-      setType(earlierTurnId, ["design"]);
-      setType(anotherEarlierTurnId, ["design"]);
-      setType(targetTurnId, ["implement"]);
-
-      noteTool(
-        db,
-        { turn: `S${sessionId}/T2`, extends: [`S${sessionId}/T1`] },
-        { now: () => 890, env: {}, eraCutoffEpoch: 1 },
-      );
-
-      const result = noteTool(
-        db,
-        { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T2`] },
-        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-      );
-
-      expect(isNoteSuccess(result)).toBe(true);
       expect(resultText(result)).toContain("Attached 1 relation(s).");
       expect(resultText(result)).not.toContain("warning:");
+      expect(resultText(result)).not.toContain("mid-flow");
+      expect(resultText(result)).not.toContain("settles at");
     });
 
-    test("a grounds toward a dead (overridden) branch warns nothing — nothing settles there", () => {
+    test("a grounds toward a target overridden by a later turn stores with no warning either", () => {
       setType(earlierTurnId, ["design"]);
       setType(anotherEarlierTurnId, ["design"]);
       setType(targetTurnId, ["implement"]);
@@ -1989,28 +2030,196 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
       expect(resultText(result)).toContain("Attached 1 relation(s).");
       expect(resultText(result)).not.toContain("warning:");
     });
+  });
+});
 
-    test("a consume toward a mid-flow member stays silent — the warning binds grounds only", () => {
-      setType(earlierTurnId, ["design"]);
-      setType(anotherEarlierTurnId, ["design"]);
-      setType(targetTurnId, ["design"]);
+// rubric-v10 ticket 02: the tagged relation entry form ({turn, tags}) end to
+// end — Gate A (widened same-phase domains), Gate B (taggability + the
+// subset invariant), and both forms coexisting on one pair/relation.
+describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
+  let db: Database;
+  let sessionId: number;
+  let earlierTurnId: number;
+  let targetTurnId: number;
 
-      noteTool(
-        db,
-        { turn: `S${sessionId}/T2`, extends: [`S${sessionId}/T1`] },
-        { now: () => 890, env: {}, eraCutoffEpoch: 1 },
-      );
+  function setType(turnId: number, types: readonly string[]): void {
+    db.query<unknown, [string, number]>("UPDATE turns SET type = ? WHERE id = ?").run(
+      JSON.stringify(types),
+      turnId,
+    );
+  }
+  function setTags(turnId: number, tags: readonly string[]): void {
+    db.query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?").run(
+      JSON.stringify(tags),
+      turnId,
+    );
+  }
 
-      const result = noteTool(
-        db,
-        { turn: `S${sessionId}/T3`, consume: [`S${sessionId}/T1`] },
-        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-      );
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
 
-      expect(isNoteSuccess(result)).toBe(true);
-      expect(resultText(result)).toContain("Attached 1 relation(s).");
-      expect(resultText(result)).not.toContain("warning:");
-    });
+    sessionId = upsertSession(db, {
+      contentSessionId: "note-tagged-relations-session",
+      project: "claude-mnemo",
+      title: "Note tagged relations",
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 110,
+      completedAtEpoch: null,
+    }).id;
+
+    const insertTurn = db.query<{ id: number }, [number, number, string, number]>(
+      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
+    );
+    earlierTurnId = insertTurn.get(sessionId, 1, "First earlier turn", 100)!.id;
+    targetTurnId = insertTurn.get(sessionId, 3, "The turn being noted", 110)!.id;
+    setType(earlierTurnId, ["design"]);
+    setType(targetTurnId, ["correction"]);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("a tagged entry stores a tagged assertion when every tag is on both endpoints' tags", () => {
+    setTags(earlierTurnId, ["lane-a"]);
+    setTags(targetTurnId, ["lane-a"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, override: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.tags).toEqual(["lane-a"]);
+  });
+
+  test("both forms coexist on one pair/relation — the untagged and tagged rows are independent facts", () => {
+    setTags(earlierTurnId, ["lane-a"]);
+    setTags(targetTurnId, ["lane-a"]);
+
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        override: [`S${sessionId}/T1`, { turn: `S${sessionId}/T1`, tags: ["lane-a"] }],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(resultText(result)).toContain("Attached 2 relation(s).");
+    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    expect(edges.map((edge) => edge.tags).sort()).toEqual([[], ["lane-a"]]);
+  });
+
+  // Gate B, part 1: word taggability — only the five same-phase words may
+  // ever carry a tag; a cross-phase word (grounds/verifies/refutes) rejects
+  // one outright, whatever the endpoints' own tags say.
+  test("a tag on a cross-phase word (grounds) rejects, even when both endpoints already carry it", () => {
+    setType(earlierTurnId, ["research"]);
+    setTags(earlierTurnId, ["lane-a"]);
+    setTags(targetTurnId, ["lane-a"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, grounds: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain(`grounds "S${sessionId}/T1"`);
+    expect(resultText(result)).toContain("no lane tags");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  // Gate B, part 2: the subset invariant — every edge tag must already be on
+  // BOTH endpoint turns' own tags, rejection names the tag and the endpoint.
+  test("a tag missing from the CITING turn's own tags rejects, naming the tag and the citing endpoint", () => {
+    setTags(earlierTurnId, ["lane-a"]);
+    // targetTurnId (citing) carries no tags at all.
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain(`extends "S${sessionId}/T1"`);
+    expect(resultText(result)).toContain("lane-a");
+    expect(resultText(result)).toContain("citing turn");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  test("a tag missing from the CITED turn's own tags rejects, naming the tag and the cited endpoint", () => {
+    setTags(targetTurnId, ["lane-a"]);
+    // earlierTurnId (cited) carries no tags at all.
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, consume: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain(`consume "S${sessionId}/T1"`);
+    expect(resultText(result)).toContain("lane-a");
+    expect(resultText(result)).toContain("cited turn");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  // Mutation-critical (ticket's own acceptance criterion): with the gap
+  // present, the write still rejects — if the subset invariant were
+  // disabled, this call would silently attach the illegally-tagged edge.
+  test("mutation check: the subset invariant still rejects when the gap is real, no silent admission", () => {
+    setTags(earlierTurnId, []);
+    setTags(targetTurnId, []);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, indexes: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  test("retraction gains the same {turn, tags} form: untagged retracts the bare row, tagged retracts the exact-set row", () => {
+    setTags(earlierTurnId, ["lane-a"]);
+    setTags(targetTurnId, ["lane-a"]);
+
+    noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        override: [`S${sessionId}/T1`, { turn: `S${sessionId}/T1`, tags: ["lane-a"] }],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(2);
+
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        retractOverride: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }],
+      },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(resultText(result)).toContain("Retracted 1 relation(s).");
+    const remaining = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]?.tags).toEqual([]);
   });
 });
 

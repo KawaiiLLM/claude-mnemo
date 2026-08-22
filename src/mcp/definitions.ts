@@ -311,6 +311,50 @@ const TYPE_VOCABULARY_LIST = MEMORY_TYPES.join("/");
 // writer for a caller that bypasses the schema (the same belt-and-braces
 // pattern `current`/`RETIRED_SESSION_FIELD` used before this ticket retired
 // that check along with the rest of the session address).
+// rubric-v10 ticket 02 ("边上的 lane tag", "统一解读原则"): one relation
+// TARGET is either a bare address (untagged) or `{turn, tags}` (a tagged
+// assertion) — the note surface's own mirror of `db/citations.ts`'s
+// `RelationTargetEntry` union, declared once here so every relation AND
+// retraction field below shares the identical zod shape rather than eight
+// (or sixteen) independently hand-kept copies. `tags` is a plain string
+// array at this layer — canonicalization (sort/dedup) happens at the write
+// primitive (`db/memory-edges.ts`'s `canonicalizeTagSet`), the same split
+// title/content's own field objects already have between "what the schema
+// accepts" and "what the write path normalizes".
+const relationTargetEntryShape = z.union([
+  z.string(),
+  z
+    .object({
+      turn: z.string().min(1),
+      tags: z.array(z.string()),
+    })
+    .strict(),
+]);
+
+// The interpretation principle (draft-lane-model.md's 统一解读原则), stated
+// once and appended to every SAME-PHASE (taggable) word's own describe: a
+// tagged entry acts on the named LANE, an untagged one acts on the cited
+// TURN itself. The subset invariant is format, not judgment — WHICH tag to
+// use is the Memory Rubric's business, but "every tag must already be on
+// both turns" is a mechanical admission test, the same register `noteInputShape`'s
+// other field contracts already state in their own `.describe()`.
+const RELATION_TAG_FORM_LINE =
+  "Each entry is a bare address (untagged — acts on the cited turn itself) or " +
+  "`{turn, tags}` (acts on that lane instead); every tag must already be on " +
+  "both this turn's and the target's own tags, or the call rejects naming the gap.";
+
+// The three CROSS-PHASE words never carry a lane tag (lanes are phase-local)
+// — stated so a caller does not have to discover the rejection by trying.
+const RELATION_NO_TAG_FORM_LINE =
+  "Entries are bare addresses only — cross-phase words never carry lane tags.";
+
+// rubric-v10 ticket 02: the retraction mirrors' own one-sentence note —
+// identical across all eight, since the form is uniform regardless of which
+// word it retracts.
+const RETRACTION_TAG_FORM_LINE =
+  "Same bare-address-or-`{turn, tags}` form as the relation field: an untagged " +
+  "entry retracts the bare row, a tagged one retracts that exact tag-set row.";
+
 export const noteInputShape = {
   turn: z
     .string()
@@ -388,52 +432,62 @@ export const noteInputShape = {
   // is the one-line READING (which stance this word states) and a pointer to
   // the Memory Rubric for the judgment of WHICH word to use.
   override: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses a predecessor whose conclusion this turn holds is WRONG and replaces — same phase, no flow or layer limit. Judgment lives in the Memory Rubric.",
+      "Addresses a predecessor whose conclusion this turn holds is WRONG and replaces — same phase, no flow or layer limit. " +
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
   narrows: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses a decision this turn still holds but cuts a piece OUT of — same flow, decision-phase both ends. Judgment lives in the Memory Rubric.",
+      "Addresses a decision this turn still holds but cuts a piece OUT of — same phase. " +
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
   extends: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses a decision this turn still holds and adds a piece TO — same flow, decision-phase both ends. Judgment lives in the Memory Rubric.",
+      "Addresses a decision this turn still holds and adds a piece TO — same phase. " +
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
   indexes: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses the same-phase nodes this turn gathers and stands for — they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). Same phase is the whole check: no flow, membership or terminus condition. An indexed target is not also consumed. Judgment lives in the Memory Rubric.",
+      "Addresses the same-phase nodes this turn gathers and stands for — they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). Same phase is the whole check: no flow, membership or terminus condition. An indexed target is not also consumed. " +
+        RELATION_TAG_FORM_LINE +
+        " A tagged entry additionally DECLARES that lane's convergence (its terminus) — see grounds' own self-citation reading below. Judgment lives in the Memory Rubric.",
     ),
   consume: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow — never written beside an extends or indexes on the same pair, which already imply it under the deletion test. Judgment lives in the Memory Rubric.",
+      "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow — never written beside an extends or indexes on the same pair, which already imply it under the deletion test. " +
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
   grounds: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false — cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. A mid-flow target still stores; the receipt then names the branch's settlement to cite instead. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; may cite the citing turn itself only when this turn is both a flow's settlement and that settlement's implementer — every other relation refuses a self target outright. Judgment lives in the Memory Rubric.",
+      "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false — cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; may cite the citing turn itself only when, after this call's edges land, this turn carries a TAGGED indexes edge of its own (declared in this same call, either order, or already stored) — every other relation refuses a self target outright. " +
+        RELATION_NO_TAG_FORM_LINE +
+        " Judgment lives in the Memory Rubric.",
     ),
   verifies: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses the claim this turn tested FOR. Requires an evidence-phase source. Judgment lives in the Memory Rubric.",
+      "Addresses the claim this turn tested FOR. Requires an evidence-phase source. " +
+        RELATION_NO_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
   refutes: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses the claim this turn tested AGAINST. Requires an evidence-phase source. Judgment lives in the Memory Rubric.",
+      "Addresses the claim this turn tested AGAINST. Requires an evidence-phase source. " +
+        RELATION_NO_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
 
   // Flow-relations spec (ticket 02): the eight retraction mirrors. A relation
@@ -445,53 +499,66 @@ export const noteInputShape = {
   // relation parameter's own name), pinned against `mcp/note.ts`'s derived
   // `RETRACTION_FIELD_ENTRIES` by a guard test, so the two halves of the
   // vocabulary cannot drift apart.
+  //
+  // rubric-v10 ticket 02: each retraction entry takes the SAME
+  // bare-address-or-`{turn, tags}` form as its relation field — an untagged
+  // entry retracts the bare `[]` row, a tagged one retracts that exact
+  // tag-set row (`RETRACTION_TAG_FORM_LINE`).
   retractOverride: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+      "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
     ),
   retractNarrows: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+      "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
     ),
   retractExtends: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+      "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
     ),
   retractIndexes: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+      "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
     ),
   retractConsume: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+      "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
     ),
   retractGrounds: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+      "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
     ),
   retractVerifies: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+      "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
     ),
   retractRefutes: z
-    .array(z.string())
+    .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses whose refutes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it.",
+      "Addresses whose refutes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
     ),
   // Frozen legacy: `supersedes` retired from the NOTE TOOL's own surface —
   // `noteInputSchema` below `.omit()`s this key, so a caller sending it gets

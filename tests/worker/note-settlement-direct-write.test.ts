@@ -20,7 +20,7 @@ import {
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { createSettlementDirectWriteEngine } from "../../src/worker/note-settlement-direct-write";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
@@ -283,6 +283,34 @@ describe("a rejected direct write leaves no partial state (one transaction per c
       .query("SELECT writer FROM write_gate_stamps WHERE entity_type = 'turn' AND entity_id = ? AND field = 'type'")
       .get(t2);
     expect(stamp).toBeNull();
+  });
+
+  // rubric-v10 ticket 02 (Gate C, mutation-critical): UNLIKE the type/extends
+  // case above, this rejection fires AFTER a real mutation — the self-
+  // `grounds` edge itself is written by `attachTurnRelations` before
+  // `evaluateSettlementTurnWrite` re-reads the graph and finds no tagged
+  // terminus. This is therefore a genuine exercise of the per-call
+  // transaction wrapper's rollback, not a vacuous one: if the wrapper (or
+  // Gate C itself) were disabled, the self-`grounds` edge would survive.
+  test("a self-grounds with no tagged-indexes terminus rolls back the edge it already wrote", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    updateTurnById(db, t1, { type: ["design"] });
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+
+    const receipt = engine.writeNote({
+      turn: `S${sessionDbId}/T1`,
+      grounds: [`S${sessionDbId}/T1`],
+    });
+
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    expect(receipt.content[0]!.text).toContain("TAGGED");
+    expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
   });
 });
 

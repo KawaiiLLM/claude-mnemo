@@ -449,7 +449,11 @@ describe("tool surface", () => {
     );
 
     expect(shape.grounds.description).toContain("cross-phase only");
-    expect(shape.grounds.description).toContain("mid-flow target still stores");
+    // rubric-v10 ticket 02: the flow-relations era's mid-flow warning
+    // retires entirely — no flow derivation runs on the write path any
+    // more, so the describe must not promise a warning that no longer fires.
+    expect(shape.grounds.description).not.toContain("mid-flow target still stores");
+    expect(shape.grounds.description).not.toContain("flow's settlement");
     expect(shape.grounds.description).toContain("absorbs the retired grounded-on/encodes");
     expect(shape.grounds.description).toContain("if it were false");
     expect(shape.grounds.description).toContain(
@@ -458,8 +462,11 @@ describe("tool surface", () => {
     expect(shape.grounds.description).toContain(
       "with design and spec in one turn, each artifact grounds directly",
     );
+    // rubric-v10 ticket 02 (Gate C): self-citation is now a post-transaction
+    // tagged-indexes terminus declaration, not a flow-derived settlement+
+    // implementer condition.
     expect(shape.grounds.description).toContain(
-      "may cite the citing turn itself only when this turn is both a flow's settlement",
+      "may cite the citing turn itself only when, after this call's edges land, this turn carries a TAGGED indexes edge",
     );
   });
 

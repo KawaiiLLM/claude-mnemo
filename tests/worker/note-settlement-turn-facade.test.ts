@@ -906,16 +906,53 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
   });
 
-  // Flow-relations spec (ticket 02, "自引用"): the settlement write path
-  // shares the SAME `validateRelationTarget` self branch as the main agent's
-  // `note` — only `grounds` may ever self-cite, and only when the citing
-  // turn is both a flow's settlement (a one-node flow here: decision-phase,
-  // nothing narrows/extends it) and that settlement's implementer (its own
-  // type list also carries a delivery phase).
-  test("a self-grounds is accepted through the settlement path when the turn is both settlement and implementer", () => {
+  // rubric-v10 ticket 02 ("自引用", Gate C): the settlement write path shares
+  // the SAME `validateRelationTarget`/`checkSelfGroundsTerminus` gates as
+  // the main agent's `note` — only `grounds` may ever self-cite, legal iff
+  // after this call's edges land the citing turn carries a TAGGED `indexes`
+  // edge of its own. A tagged-indexes declaration plus the self-grounds in
+  // ONE call passes.
+  test("a self-grounds is accepted through the settlement path when the same call also declares a tagged-indexes terminus", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    updateTurnById(db, t1, { type: ["design", "implement"] });
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
+    updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
+
+    const result = write(
+      context,
+      {
+        turn: `S${sessionDbId}/T1`,
+        indexes: [{ turn: `S${sessionDbId}/T2`, tags: ["lane-a"] }],
+        grounds: [`S${sessionDbId}/T1`],
+      },
+      NOW,
+    );
+
+    expect(resultText(result)).toContain("2 relation");
+    const edges = getOutgoingEdges(db, { kind: "turn", id: t1 });
+    expect(edges.some((edge) => edge.relation === "grounds" && edge.cited.id === t1)).toBe(true);
+    expect(
+      edges.some((edge) => edge.relation === "indexes" && edge.tags.includes("lane-a")),
+    ).toBe(true);
+  });
+
+  // Mutation-critical: without the terminus-declaring edge, the identical
+  // self-grounds call rejects — the settlement facade's own Gate C, not
+  // borrowed pass-through behavior from `mcp/note.ts`. This test calls the
+  // EVALUATOR directly (this file's own `write()` helper, matching every
+  // other test here), so it checks the verdict only — whether that verdict
+  // actually rolls the mutation back is `note-settlement-direct-write.ts`'s
+  // own transaction wrapper's contract (see its doc comment: "a compound
+  // call whose LATER half rejects after an EARLIER half already applied —
+  // commits or vanishes as a UNIT" — a property of the wrapper, not of this
+  // function called bare), exercised by that module's own test suite.
+  test("the same self-grounds without any terminus-declaring edge still rejects through the settlement path", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    updateTurnById(db, t1, { type: ["design"] });
     const job = claimWindow(sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
 
@@ -925,11 +962,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       NOW,
     );
 
-    expect(resultText(result)).toContain("1 relation");
-    const edges = getOutgoingEdges(db, { kind: "turn", id: t1 });
-    expect(edges).toHaveLength(1);
-    expect(edges[0]?.relation).toBe("grounds");
-    expect(edges[0]?.cited).toEqual({ kind: "turn", id: t1 });
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("TAGGED");
   });
 
   test("an edge write is gated on the CITING turn's `type` — checked, never stamped", () => {
@@ -999,16 +1033,15 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 });
 
 // ---------------------------------------------------------------------------
-// Flow-relations spec (ticket 02, P1): the `grounds` mid-flow warning. The
-// SAME `collectGroundsMidFlowWarnings` (mcp/note.ts) the main agent's own
-// `note` surface calls — exercised here through settlement's own write path
-// so the two writers cannot silently disagree about when it fires. Replaces
-// the retired segment-crossing warning (T1191, dcd17fe) along with the
-// vocabulary it was built for.
+// rubric-v10 ticket 02 (spec "Checks, layered"): the flow-relations era's
+// `grounds` mid-flow warning retires ENTIRELY from the write path — no flow
+// derivation runs here any more, exercised through settlement's own write
+// path so the two writers cannot silently disagree about the retirement
+// either.
 // ---------------------------------------------------------------------------
 
-describe("grounds mid-flow warning (flow-relations spec, P1)", () => {
-  test("a grounds toward a mid-flow member warns, naming the branch's settlement", () => {
+describe("grounds mid-flow warning retirement (rubric-v10 ticket 02)", () => {
+  test("a grounds toward an earlier member of an extends chain lands with no warning at all", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
@@ -1019,7 +1052,6 @@ describe("grounds mid-flow warning (flow-relations spec, P1)", () => {
     const job = claimWindow(sessionDbId, 1, 3);
     const context = baseContext(job, { reviewableTurnIds: new Set([t2, t3]) });
 
-    // T2 extends T1 — T2 becomes the branch's settlement, T1 is mid-flow.
     write(context, { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] }, NOW);
 
     const result = write(
@@ -1028,36 +1060,13 @@ describe("grounds mid-flow warning (flow-relations spec, P1)", () => {
       NOW + 1,
     );
 
-    expect(resultText(result)).toContain(
-      `warning: grounds toward S${sessionDbId}/T1 is mid-flow — this flow settles at ` +
-        `S${sessionDbId}/T2; cite that instead.`,
-    );
-  });
-
-  test("a grounds directly at the settlement stays silent", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    const t3 = seedTurn(sessionDbId, 3);
-    updateTurnById(db, t1, { type: ["design"] });
-    updateTurnById(db, t2, { type: ["design"] });
-    updateTurnById(db, t3, { type: ["implement"] });
-    const job = claimWindow(sessionDbId, 1, 3);
-    const context = baseContext(job, { reviewableTurnIds: new Set([t2, t3]) });
-
-    write(context, { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] }, NOW);
-
-    const result = write(
-      context,
-      { turn: `S${sessionDbId}/T3`, grounds: [`S${sessionDbId}/T2`] },
-      NOW + 1,
-    );
-
     expect(resultText(result)).toContain("1 relation");
     expect(resultText(result)).not.toContain("warning:");
+    expect(resultText(result)).not.toContain("mid-flow");
+    expect(resultText(result)).not.toContain("settles at");
   });
 
-  test("a grounds toward a dead (overridden) branch warns nothing — nothing settles there", () => {
+  test("a grounds toward a target overridden by a later turn lands with no warning either", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const overrider = seedTurn(sessionDbId, 2);
@@ -1073,29 +1082,6 @@ describe("grounds mid-flow warning (flow-relations spec, P1)", () => {
     const result = write(
       context,
       { turn: `S${sessionDbId}/T3`, grounds: [`S${sessionDbId}/T1`] },
-      NOW + 1,
-    );
-
-    expect(resultText(result)).toContain("1 relation");
-    expect(resultText(result)).not.toContain("warning:");
-  });
-
-  test("a consume toward a mid-flow member stays silent — the warning binds grounds only", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    const t3 = seedTurn(sessionDbId, 3);
-    updateTurnById(db, t1, { type: ["design"] });
-    updateTurnById(db, t2, { type: ["design"] });
-    updateTurnById(db, t3, { type: ["design"] });
-    const job = claimWindow(sessionDbId, 1, 3);
-    const context = baseContext(job, { reviewableTurnIds: new Set([t2, t3]) });
-
-    write(context, { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] }, NOW);
-
-    const result = write(
-      context,
-      { turn: `S${sessionDbId}/T3`, consume: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
 

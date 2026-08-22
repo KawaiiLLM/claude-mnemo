@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import {
+  canonicalizeTagSet,
   getOutgoingEdges,
   pairKey,
   reconcileCitedPairs,
@@ -397,13 +398,51 @@ export interface TurnRelationRejection {
 }
 
 /**
- * One named relation field's raw targets — mcp/note.ts's `evidenceFor` etc.,
- * and (ticket 02) its `retractEvidenceFor` mirror, which addresses the same
+ * rubric-v10 ticket 02 ("边上的 lane tag"): one relation TARGET, either a bare
+ * address (untagged — the interpretation principle's "acts on the cited turn
+ * itself") or a tagged assertion (acts on that lane). `tags` is the raw,
+ * caller-supplied set — canonicalized by `normalizeRelationTargetEntry`
+ * below, the SAME canonicalization `writeMemoryEdges`/`retractMemoryEdges`
+ * apply, so two callers meaning the same lane serialize identically
+ * regardless of this module.
+ *
+ * This type is declared here — one layer below `mcp/note.ts`'s own zod
+ * shape — because BOTH write surfaces (the main agent's `note`, the
+ * settlement facade) hand entries of this exact shape to `attachTurnRelations`/
+ * `retractTurnRelations`, and a second, independently hand-kept copy of the
+ * union in each caller is exactly the drift risk `RELATION_FIELD_NAME` /
+ * `RELATION_FIELD_ENTRIES` already exist to prevent for the word list itself.
+ */
+export interface TaggedRelationTarget {
+  turn: string;
+  tags: readonly string[];
+}
+export type RelationTargetEntry = string | TaggedRelationTarget;
+
+/**
+ * One named relation field's raw targets — mcp/note.ts's `override` etc.,
+ * and (ticket 02) its `retractOverride` mirror, which addresses the same
  * (relation, addresses) shape at `retractTurnRelations` instead.
  */
 export interface TurnRelationFieldInput {
   relation: CitationRelation;
-  targets: readonly string[];
+  targets: readonly RelationTargetEntry[];
+}
+
+/**
+ * rubric-v10 ticket 02: bare string -> untagged (`raw`, `[]`); `{turn, tags}`
+ * -> `raw` plus the tag set canonicalized the same way the storage primitive
+ * canonicalizes it (`canonicalizeTagSet`, `db/memory-edges.ts`) — so the
+ * de-dup/restatement keys built from it (`relationRowKey` below) agree with
+ * what actually lands in `memory_edges.tags`.
+ */
+export function normalizeRelationTargetEntry(
+  entry: RelationTargetEntry,
+): { raw: string; tags: string[] } {
+  if (typeof entry === "string") {
+    return { raw: entry, tags: [] };
+  }
+  return { raw: entry.turn, tags: canonicalizeTagSet(entry.tags) };
 }
 
 export interface AttachTurnRelationsResult {
@@ -443,19 +482,27 @@ function resolveRelationTargetNode(
   return accepted[0]?.node ?? "unresolved";
 }
 
-/** `(pair, relation)` as one string — the identity D2 gave a stored row. */
+/**
+ * `(pair, relation, tag set)` as one string — the identity D2 gave a stored
+ * row, widened by rubric-v10 ticket 01/02: tags joins the row's identity, so
+ * an {A} row and a {B} row on the same (pair, relation) are two DIFFERENT
+ * keys, not one. `tags` defaults to `[]` (untagged) so every pre-ticket-02
+ * call site (which never had a tag set to pass) keeps addressing exactly the
+ * row it always did.
+ */
 function relationRowKey(
   citing: CitingNode,
   cited: EdgeNode,
   relation: CitationRelation | null,
+  tags: readonly string[] = [],
 ): string {
-  return `${pairKey({ citing, cited })}|${relation ?? ""}`;
+  return `${pairKey({ citing, cited })}|${relation ?? ""}|${JSON.stringify(canonicalizeTagSet(tags))}`;
 }
 
 function storedRelationRowKeys(db: Database, citing: CitingNode): Set<string> {
   return new Set(
     getOutgoingEdges(db, citing).map((edge) =>
-      relationRowKey(citing, edge.cited, edge.relation),
+      relationRowKey(citing, edge.cited, edge.relation, edge.tags),
     ),
   );
 }
@@ -499,7 +546,8 @@ export function attachTurnRelations(
   const claimed = new Set<string>();
 
   for (const field of fields) {
-    for (const raw of field.targets) {
+    for (const entry of field.targets) {
+      const { raw, tags } = normalizeRelationTargetEntry(entry);
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
         rejected.push({ relation: field.relation, raw, reason: node });
@@ -510,21 +558,26 @@ export function attachTurnRelations(
       // `TurnRelationRejectionReason`'s doc comment above). A self-`grounds`
       // target is NOT refused here: `writeMemoryEdges` (the primitive
       // `attachTurnRelations` calls below) admits a relation-carrying self
-      // row unconditionally, trusting the caller for the settlement+
-      // implementer legality that gate needs — the same trust model ordinary
-      // (non-self) phase-pair legality already has at this layer.
+      // row unconditionally, trusting the caller for the tagged-terminus
+      // legality that gate needs (rubric-v10 ticket 02's Gate C) — the same
+      // trust model ordinary (non-self) phase-pair legality already has at
+      // this layer.
       if (node.kind === "turn" && node.id === citingTurnId && field.relation !== "grounds") {
         rejected.push({ relation: field.relation, raw, reason: "self-not-grounds" });
         continue;
       }
-      const key = relationRowKey(citing, node, field.relation);
+      // rubric-v10 ticket 02: the tag set joins the de-dup key — the same
+      // (pair, relation) under two DIFFERENT tag sets is two independent
+      // claims (D2's own multi-row identity), not a repeat of one.
+      const key = relationRowKey(citing, node, field.relation, tags);
       // The same claim twice in one call is one claim. Two DIFFERENT relations
-      // on the same pair are two claims and both land (D2).
+      // (or two different tag sets on the same relation) on the same pair are
+      // two claims and both land (D2).
       if (claimed.has(key)) {
         continue;
       }
       claimed.add(key);
-      inputs.push({ citing, cited: node, relation: field.relation, provenance });
+      inputs.push({ citing, cited: node, relation: field.relation, provenance, tags });
     }
   }
 
@@ -538,7 +591,7 @@ export function attachTurnRelations(
   const added: MemoryEdge[] = [];
   const restated: MemoryEdge[] = [];
   for (const edge of written) {
-    const key = relationRowKey(citing, edge.cited, edge.relation);
+    const key = relationRowKey(citing, edge.cited, edge.relation, edge.tags);
     (alreadyStored.has(key) ? restated : added).push(edge);
   }
   return { written: added, restated, rejected: [] };
@@ -709,13 +762,18 @@ export function retractTurnRelations(
   const stored = storedRelationRowKeys(db, citing);
 
   for (const field of fields) {
-    for (const raw of field.targets) {
+    for (const entry of field.targets) {
+      const { raw, tags } = normalizeRelationTargetEntry(entry);
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
         rejected.push({ relation: field.relation, raw, reason: node });
         continue;
       }
-      const key = relationRowKey(citing, node, field.relation);
+      // rubric-v10 ticket 02: untagged addresses the `[]` row, tagged
+      // addresses that exact-set row — same (pair, relation, tag set) key
+      // `attachTurnRelations` writes under, so a retraction removes exactly
+      // the row a matching write would have restated.
+      const key = relationRowKey(citing, node, field.relation, tags);
       if (!stored.has(key)) {
         rejected.push({ relation: field.relation, raw, reason: "no-such-edge" });
         continue;
@@ -724,7 +782,7 @@ export function retractTurnRelations(
         continue;
       }
       addressed.add(key);
-      targets.push({ citing, cited: node, relation: field.relation });
+      targets.push({ citing, cited: node, relation: field.relation, tags });
     }
   }
 
