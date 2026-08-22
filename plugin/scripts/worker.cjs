@@ -51,7 +51,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.15.0-mt440r9q" : "dev";
+var BUILD_ID = true ? "0.16.0-mt4ti6m1" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1100,6 +1100,12 @@ function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, 
   );
   return { written, deleted, rejected };
 }
+function normalizeRelationTargetEntry(entry) {
+  if (typeof entry === "string") {
+    return { raw: entry, tags: [] };
+  }
+  return { raw: entry.turn, tags: canonicalizeTagSet(entry.tags) };
+}
 function resolveRelationTargetNode(db, raw) {
   const reference = parseBareAddressReference(raw);
   if (!reference) {
@@ -1108,13 +1114,13 @@ function resolveRelationTargetNode(db, raw) {
   const { accepted } = validateReferences(db, [reference]);
   return accepted[0]?.node ?? "unresolved";
 }
-function relationRowKey(citing, cited, relation) {
-  return `${pairKey({ citing, cited })}|${relation ?? ""}`;
+function relationRowKey(citing, cited, relation, tags = []) {
+  return `${pairKey({ citing, cited })}|${relation ?? ""}|${JSON.stringify(canonicalizeTagSet(tags))}`;
 }
 function storedRelationRowKeys(db, citing) {
   return new Set(
     getOutgoingEdges(db, citing).map(
-      (edge) => relationRowKey(citing, edge.cited, edge.relation)
+      (edge) => relationRowKey(citing, edge.cited, edge.relation, edge.tags)
     )
   );
 }
@@ -1124,7 +1130,8 @@ function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "a
   const inputs = [];
   const claimed = /* @__PURE__ */ new Set();
   for (const field of fields) {
-    for (const raw of field.targets) {
+    for (const entry of field.targets) {
+      const { raw, tags } = normalizeRelationTargetEntry(entry);
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
         rejected.push({ relation: field.relation, raw, reason: node });
@@ -1134,12 +1141,12 @@ function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "a
         rejected.push({ relation: field.relation, raw, reason: "self-not-grounds" });
         continue;
       }
-      const key = relationRowKey(citing, node, field.relation);
+      const key = relationRowKey(citing, node, field.relation, tags);
       if (claimed.has(key)) {
         continue;
       }
       claimed.add(key);
-      inputs.push({ citing, cited: node, relation: field.relation, provenance });
+      inputs.push({ citing, cited: node, relation: field.relation, provenance, tags });
     }
   }
   if (rejected.length > 0 || inputs.length === 0) {
@@ -1150,7 +1157,7 @@ function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "a
   const added = [];
   const restated = [];
   for (const edge of written) {
-    const key = relationRowKey(citing, edge.cited, edge.relation);
+    const key = relationRowKey(citing, edge.cited, edge.relation, edge.tags);
     (alreadyStored.has(key) ? restated : added).push(edge);
   }
   return { written: added, restated, rejected: [] };
@@ -1210,13 +1217,14 @@ function retractTurnRelations(db, citingTurnId, fields, nowEpoch = Math.floor(Da
   const addressed = /* @__PURE__ */ new Set();
   const stored = storedRelationRowKeys(db, citing);
   for (const field of fields) {
-    for (const raw of field.targets) {
+    for (const entry of field.targets) {
+      const { raw, tags } = normalizeRelationTargetEntry(entry);
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
         rejected.push({ relation: field.relation, raw, reason: node });
         continue;
       }
-      const key = relationRowKey(citing, node, field.relation);
+      const key = relationRowKey(citing, node, field.relation, tags);
       if (!stored.has(key)) {
         rejected.push({ relation: field.relation, raw, reason: "no-such-edge" });
         continue;
@@ -1225,7 +1233,7 @@ function retractTurnRelations(db, citingTurnId, fields, nowEpoch = Math.floor(Da
         continue;
       }
       addressed.add(key);
-      targets.push({ citing, cited: node, relation: field.relation });
+      targets.push({ citing, cited: node, relation: field.relation, tags });
     }
   }
   if (rejected.length > 0 || targets.length === 0) {
@@ -1320,6 +1328,21 @@ var EDGE_PROVENANCES = [
   "judged",
   "asserted"
 ];
+function canonicalizeTagSet(tags) {
+  if (!Array.isArray(tags)) {
+    return [];
+  }
+  const set2 = /* @__PURE__ */ new Set();
+  for (const tag of tags) {
+    if (typeof tag === "string" && tag.length > 0) {
+      set2.add(tag);
+    }
+  }
+  return [...set2].sort();
+}
+function parseTagSet(raw) {
+  return canonicalizeTagSet(JSON.parse(raw));
+}
 var PROVENANCE_RANK = {
   retrieval: 0,
   rollback: 1,
@@ -1340,19 +1363,23 @@ function isEdgeProvenance(value) {
   return typeof value === "string" && EDGE_PROVENANCES.includes(value);
 }
 var EDGE_COLUMNS = `
+  id,
   citing_kind AS citingKind,
   citing_id AS citingId,
   cited_kind AS citedKind,
   cited_id AS citedId,
   relation,
   provenance,
+  tags,
   created_at_epoch AS createdAtEpoch
 `;
 function mapEdgeRow(row) {
   return {
+    id: row.id,
     citing: { kind: row.citingKind, id: row.citingId },
     cited: { kind: row.citedKind, id: row.citedId },
     relation: row.relation,
+    tags: parseTagSet(row.tags),
     provenance: row.provenance,
     createdAtEpoch: row.createdAtEpoch
   };
@@ -1373,9 +1400,13 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     `
       INSERT INTO memory_edges (
         citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation)
+        relation, provenance, tags, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      -- rubric-v10 ticket 01: tags joins the conflict target \u2014 identity is
+      -- now (pair, relation, tag set), so a DIFFERENT canonical set on the
+      -- same (pair, relation) is a fresh INSERT (a second, independent row),
+      -- never a conflict against an existing differently-tagged row.
+      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation, tags)
         -- D2: a repeat of the same claim is a NO-OP, not a correction. The
         -- assignment is deliberately the stored value itself: SQLite only
         -- runs RETURNING on a row the statement touched, and this write's
@@ -1384,6 +1415,9 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         DO UPDATE SET relation = memory_edges.relation
       RETURNING ${EDGE_COLUMNS}
     `
+  );
+  const insertTagIndexRow = db.query(
+    `INSERT OR IGNORE INTO memory_edge_tags (edge_row_id, tag) VALUES (?, ?)`
   );
   const insertBarePairRow = db.query(
     `
@@ -1408,7 +1442,7 @@ function writeMemoryEdges(db, edges, nowEpoch) {
   const readPairRow = db.query(
     `SELECT ${EDGE_COLUMNS} FROM memory_edges
      WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
-     ORDER BY relation ASC
+     ORDER BY relation ASC, tags ASC
      LIMIT 1`
   );
   for (const edge of edges) {
@@ -1430,6 +1464,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     }
     const createdAtEpoch = edge.createdAtEpoch ?? nowEpoch;
     if (edge.relation !== null) {
+      const tags = canonicalizeTagSet(edge.tags);
+      const tagsJson = JSON.stringify(tags);
       const row2 = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -1437,6 +1473,7 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         edge.cited.id,
         edge.relation,
         edge.provenance,
+        tagsJson,
         createdAtEpoch
       );
       dropBarePairRow.run(
@@ -1447,6 +1484,9 @@ function writeMemoryEdges(db, edges, nowEpoch) {
       );
       if (row2) {
         written.push(mapEdgeRow(row2));
+        for (const tag of tags) {
+          insertTagIndexRow.run(row2.id, tag);
+        }
       }
       continue;
     }
@@ -1481,6 +1521,7 @@ function retractMemoryEdges(db, edges) {
     `DELETE FROM memory_edges
      WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
        AND relation IS ?
+       AND tags = ?
      RETURNING ${EDGE_COLUMNS}`
   );
   for (const edge of edges) {
@@ -1492,12 +1533,14 @@ function retractMemoryEdges(db, edges) {
       rejected.push({ input: edge, reason: "invalid-relation" });
       continue;
     }
+    const tagsJson = JSON.stringify(canonicalizeTagSet(edge.tags));
     const rows = del.all(
       edge.citing.kind,
       edge.citing.id,
       edge.cited.kind,
       edge.cited.id,
-      edge.relation
+      edge.relation,
+      tagsJson
     );
     if (rows.length === 0) {
       rejected.push({ input: edge, reason: "no-such-edge" });
@@ -1513,7 +1556,7 @@ function getOutgoingEdges(db, citing) {
   return db.query(
     `SELECT ${EDGE_COLUMNS} FROM memory_edges
        WHERE citing_kind = ? AND citing_id = ?
-       ORDER BY cited_kind ASC, cited_id ASC, relation ASC`
+       ORDER BY cited_kind ASC, cited_id ASC, relation ASC, tags ASC`
   ).all(citing.kind, citing.id).map(mapEdgeRow);
 }
 function reconcileCitedPairs(db, citing, citedNodes, nowEpoch, provenance) {
@@ -2664,6 +2707,19 @@ function parseMemberFacetArray(value) {
     return [];
   }
 }
+function normalizeSegmentTagValues(tags) {
+  const seen = /* @__PURE__ */ new Set();
+  const normalized = [];
+  for (const raw of tags) {
+    const trimmed = raw.trim();
+    if (trimmed === "" || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
 function mapSegmentRow(row) {
   return row ? {
     ...row,
@@ -2685,7 +2741,7 @@ function createSegment(db, input) {
       input.content ?? null,
       input.insight ?? null,
       JSON.stringify(type),
-      JSON.stringify(input.tags ?? []),
+      JSON.stringify(normalizeSegmentTagValues(input.tags ?? [])),
       input.status ?? "open",
       input.nowEpoch,
       input.nowEpoch
@@ -2740,37 +2796,75 @@ function compareDerivedTags(left, right) {
 }
 function recomputeSegmentFacets(db, segmentId) {
   const members = db.query(
-    `SELECT t.type AS type, t.tags AS tags
+    `SELECT t.type AS type
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
        WHERE sm.segment_id = ?`
   ).all(segmentId);
   const typeCounts = /* @__PURE__ */ new Map();
-  const tagCounts = /* @__PURE__ */ new Map();
   for (const member of members) {
     for (const word of new Set(parseMemberFacetArray(member.type))) {
       typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
-    }
-    for (const tag of new Set(parseMemberFacetArray(member.tags))) {
-      if (tag.includes(":") || tag.trim() === "") {
-        continue;
-      }
-      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
     }
   }
   const type = MEMORY_TYPES.filter((word) => typeCounts.has(word)).sort(
     (left, right) => (typeCounts.get(right) ?? 0) - (typeCounts.get(left) ?? 0) || MEMORY_TYPES.indexOf(left) - MEMORY_TYPES.indexOf(right)
   );
-  const tags = [...tagCounts.entries()].map(([tag, count]) => ({ tag, count })).sort(compareDerivedTags).map((entry) => entry.tag);
   const updated = mapSegmentRow(
     db.query(
       // `facets_stale = 0` in the same statement that stores the derivation:
       // the flag means "a derivation is owed", and this IS the derivation, so
       // whichever writer got here — membership, a member's own write, or the
-      // repair sweep — settles the debt by the act of paying it.
-      `UPDATE segments SET type = ?, tags = ?, facets_stale = 0 WHERE id = ?
+      // repair sweep — settles the debt by the act of paying it. `tags` is
+      // deliberately absent from this UPDATE (ticket 07) — that column is
+      // hand-curated identity now, untouched by any facet recomputation.
+      `UPDATE segments SET type = ?, facets_stale = 0 WHERE id = ?
          RETURNING ${SEGMENT_COLUMNS}`
-    ).get(JSON.stringify(type), JSON.stringify(tags), segmentId) ?? null
+    ).get(JSON.stringify(type), segmentId) ?? null
+  );
+  if (updated) {
+    indexSegment(db, updated);
+  }
+  return updated;
+}
+function checkSegmentMembershipTagGate(db, segmentId, turnIds) {
+  const segment = getSegment(db, segmentId);
+  const segmentTags = segment?.tags ?? [];
+  if (segmentTags.length === 0 || turnIds.length === 0) {
+    return { ok: true, segmentTags, violations: [] };
+  }
+  const placeholders = turnIds.map(() => "?").join(",");
+  const rows = db.query(
+    `SELECT id, session_id AS sessionId, prompt_number AS promptNumber, tags
+       FROM turns WHERE id IN (${placeholders})`
+  ).all(...turnIds);
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const violations = [];
+  for (const turnId of turnIds) {
+    const row = byId.get(turnId);
+    const turnTags = new Set(row ? parseMemberFacetArray(row.tags) : []);
+    const missingTags = segmentTags.filter((tag) => !turnTags.has(tag));
+    if (missingTags.length > 0) {
+      violations.push({
+        turnId,
+        turnAddress: row ? `S${row.sessionId}/T${row.promptNumber}` : `turn ${turnId}`,
+        missingTags
+      });
+    }
+  }
+  return { ok: violations.length === 0, segmentTags, violations };
+}
+function formatSegmentMembershipGateRejection(segmentId, violations) {
+  const lines = violations.map((v) => `${v.turnAddress} is missing: ${v.missingTags.join(", ")}`);
+  return `E${segmentId} requires every member to carry its tags \u2014 ${lines.join("; ")}. Nothing was assigned.`;
+}
+function setSegmentTags(db, segmentId, tags, nowEpoch) {
+  const normalized = normalizeSegmentTagValues(tags);
+  const updated = mapSegmentRow(
+    db.query(
+      `UPDATE segments SET tags = ?, updated_at_epoch = ? WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`
+    ).get(JSON.stringify(normalized), nowEpoch, segmentId) ?? null
   );
   if (updated) {
     indexSegment(db, updated);
@@ -2857,6 +2951,18 @@ function reassignSegmentMembers(db, turnIds, targetSegmentId, nowEpoch) {
     recomputeSegmentFacets(db, segmentId);
   }
   return { vacatedSegmentIds, addedTurnIds, targetSegmentId };
+}
+function getSegmentsForTurn(db, turnId) {
+  return db.query(
+    `SELECT ${JOINED_SEGMENT_COLUMNS}
+       FROM segments s
+       JOIN segment_members sm ON sm.segment_id = s.id
+       WHERE sm.turn_id = ?
+       ORDER BY s.id ASC`
+  ).all(turnId).map((row) => mapSegmentRow(row)).filter((segment) => segment !== null);
+}
+function getOwningSegmentId(db, turnId) {
+  return getSegmentsForTurn(db, turnId)[0]?.id ?? null;
 }
 function normalizeWorkingStateRow(text) {
   const trimmed = text.trim();
@@ -4611,6 +4717,11 @@ function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELAT
   const relationList = relationWords.map((word) => `'${word}'`).join(", ");
   return `
   CREATE TABLE IF NOT EXISTS ${tableName} (
+    -- rubric-v10 ticket 01 (lane model, "\u8FB9\u7684\u8EAB\u4EFD"): the surrogate row id \u2014
+    -- every edge assertion is now (citing, cited, relation, tag set) with its
+    -- own id, so a caller (retraction, the tag-index table) can address ONE
+    -- row precisely instead of a whole (pair, relation) group.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
     citing_id INTEGER NOT NULL,
     cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
@@ -4622,6 +4733,19 @@ function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELAT
     provenance TEXT NOT NULL CHECK (
       provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
     ),
+    -- rubric-v10 ticket 01 ("\u8FB9\u7684\u8EAB\u4EFD"): the row's IMMUTABLE canonical
+    -- lane-tag set \u2014 a JSON array, sorted and deduped at write time
+    -- (db/memory-edges.ts's canonicalizeTagSet), '[]' = untagged. Joins the
+    -- UNIQUE key below, so the SAME (pair, relation) may legally hold several
+    -- rows, one per distinct tag set: an untagged row, an {A} row and a {B}
+    -- row are three independent facts, and two singleton rows are NEVER the
+    -- merged-lane {A,B} row \u2014 only a write that explicitly names {A,B} gets
+    -- that row. This CHECK only refuses malformed JSON; it cannot enforce
+    -- "sorted, deduped" in SQL, so a canonicalization bug is a write-path
+    -- correctness property, guarded by a test, not by the schema.
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (
+      json_valid(tags) AND json_type(tags) = 'array'
+    ),
     created_at_epoch INTEGER NOT NULL,
     -- Relation-matrix spec ticket 05 ("\u81EA\u5F15\u7528"): the trailing OR relation IS
     -- NOT NULL arm is the whole widening \u2014 a BARE self row (no arm holds)
@@ -4630,7 +4754,13 @@ function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELAT
     -- may legally self-cite is a phase question this CHECK cannot ask; that
     -- lives in the validator only (see the comment above this function).
     CHECK (citing_kind <> cited_kind OR citing_id <> cited_id OR relation IS NOT NULL),
-    UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation)
+    -- rubric-v10 ticket 01: tags joins the identity key. relation's own
+    -- NULL-is-distinct behaviour under SQLite UNIQUE means this alone cannot
+    -- cap a pair's BARE rows at one -- idx_memory_edges_bare_pair below (a
+    -- partial index over the four pair columns only, ignoring relation/tags)
+    -- still carries that "existence record of last resort" invariant
+    -- unchanged; it predates this ticket and this ticket does not touch it.
+    UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags)
   );
 `;
 }
@@ -4644,6 +4774,16 @@ var MEMORY_EDGES_INDEXES_DDL = `
 `;
 var MEMORY_EDGES_UNION_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_UNION_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
 var MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
+var MEMORY_EDGE_TAGS_DDL = `
+  CREATE TABLE IF NOT EXISTS memory_edge_tags (
+    edge_row_id INTEGER NOT NULL REFERENCES memory_edges(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (edge_row_id, tag)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_memory_edge_tags_tag
+    ON memory_edge_tags(tag, edge_row_id);
+`;
 var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
     AFTER DELETE ON turns
@@ -5096,6 +5236,48 @@ function ensureMemoryEdgesIndexesRename(db) {
     db.exec("PRAGMA foreign_keys = ON;");
   }
 }
+function memoryEdgesTagSetIdentityIsStale(db) {
+  const storedDdl = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("tags TEXT NOT NULL");
+}
+function ensureMemoryEdgesTagSetIdentity(db) {
+  if (!memoryEdgesTagSetIdentityIsStale(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesTagSetIdentityIsStale(db)) {
+        return;
+      }
+      db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_tag_identity");
+      db.exec(
+        memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS)
+      );
+      db.exec(`
+        INSERT INTO memory_edges (
+          citing_kind, citing_id, cited_kind, cited_id,
+          relation, provenance, created_at_epoch
+        )
+        SELECT citing_kind, citing_id, cited_kind, cited_id,
+               relation, provenance, created_at_epoch
+        FROM memory_edges_pre_tag_identity;
+      `);
+      db.exec("DROP TABLE memory_edges_pre_tag_identity");
+      db.exec(MEMORY_EDGES_INDEXES_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while adding the tag-set identity: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
 function ensureMemoryEdgesSchema(db) {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
@@ -5106,10 +5288,12 @@ function ensureMemoryEdgesSchema(db) {
     ensureMemoryEdgesVocabularyFlip(db);
     ensureMemoryEdgesRelationContract(db);
     ensureMemoryEdgesIndexesRename(db);
+    ensureMemoryEdgesTagSetIdentity(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
   db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
+  db.exec(MEMORY_EDGE_TAGS_DDL);
   if (isFirstCreation) {
     migrateTurnCitationsToEdges(db);
   }
@@ -5732,7 +5916,12 @@ var SEGMENTS_TOPIC_RETIRED_INDEXES_DDL = `
     ON segments(status, updated_at_epoch);
 `;
 function normalizeTopicNameToTag(name) {
-  return name.normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  const cased = name.normalize("NFKC").trim().toLocaleLowerCase("en-US");
+  let withoutRetiredNamespace = cased;
+  while (withoutRetiredNamespace.startsWith("topic:")) {
+    withoutRetiredNamespace = withoutRetiredNamespace.slice("topic:".length);
+  }
+  return withoutRetiredNamespace.replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
 function safeParseTagArray(value) {
   if (!value) {
@@ -5770,15 +5959,14 @@ function foldTopicNamesIntoSegmentTags(db) {
     const memberTurnIds = db.query(
       "SELECT turn_id AS turnId FROM segment_members WHERE segment_id = ?"
     ).all(segment.id).map((row) => row.turnId);
-    if (memberTurnIds.length === 0) {
-      const currentTags = safeParseTagArray(segment.tags);
-      if (currentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
-        continue;
-      }
+    const currentSegmentTags = safeParseTagArray(segment.tags);
+    if (!currentSegmentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
       db.query("UPDATE segments SET tags = ? WHERE id = ?").run(
-        JSON.stringify([...currentTags, bareTag]),
+        JSON.stringify([...currentSegmentTags, bareTag]),
         segment.id
       );
+    }
+    if (memberTurnIds.length === 0) {
       continue;
     }
     let foldedAny = false;
@@ -8394,8 +8582,20 @@ var EDGE_RELATIONS = [
 function isTurnEdgeRelation(value) {
   return typeof value === "string" && EDGE_RELATIONS.includes(value);
 }
-var SAME_PHASE_RELATIONS = ["override", "indexes", "consume"];
-var DECISION_ONLY_RELATIONS = ["narrows", "extends"];
+var SAME_PHASE_RELATIONS = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume"
+];
+var TAGGABLE_RELATIONS = new Set(
+  SAME_PHASE_RELATIONS
+);
+function isTaggableRelation(relation) {
+  return TAGGABLE_RELATIONS.has(relation);
+}
+var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
 var EVIDENCE_SOURCE_RELATIONS = ["verifies", "refutes"];
 function buildRelationPhaseRequirement() {
   const table = Object.fromEntries(
@@ -8412,9 +8612,6 @@ function buildRelationPhaseRequirement() {
         table.grounds.push({ source, target });
       }
     }
-  }
-  for (const relation of DECISION_ONLY_RELATIONS) {
-    table[relation].push({ source: "decision", target: "decision" });
   }
   for (const relation of EVIDENCE_SOURCE_RELATIONS) {
     for (const phase of TURN_PHASES) {
@@ -8450,9 +8647,40 @@ function explainRelationPhaseRejection(relation, citingPhases, citedPhases) {
   return `needs ${phaseRequirementClause("cited", targetPhases)}`;
 }
 var SELF_NOT_GROUNDS_DETAIL = "is this turn's own address, and only `grounds` may ever cite the citing turn itself \u2014 every other relation compares two DIFFERENT turns, so citing itself with one of them is a tautology, not a claim";
-var SELF_NOT_IMPLEMENTER_DETAIL = "is this turn's own address; a self-`grounds` needs this turn's own type list to carry a delivery-phase type (e.g. `implement`) IN ADDITION to its decision-phase half \u2014 only a turn that is both the settlement and its own implementer may self-cite";
-var SELF_NOT_SETTLEMENT_DETAIL = "is this turn's own address; a self-`grounds` needs this turn to itself be a flow's settlement \u2014 the branch node nothing further narrows/extends \u2014 which it currently is not (mid-flow, overridden, or homeless)";
+var SELF_NOT_DELIVERY_DETAIL = "is this turn's own address; a self-`grounds` additionally needs this turn's own type to carry a delivery-phase word (e.g. `implement`) \u2014 the implementer half of settlement+implementer; a decision-only turn cannot self-ground";
+var SELF_GROUNDS_NO_TERMINUS_DETAIL = "is this turn's own address; a self-`grounds` is legal only when, after every edge this call writes has landed, this turn is CURRENTLY the terminus of a lane it declared via a TAGGED `indexes` edge of its own \u2014 declared in this same call (either order relative to grounds) or already stored from an earlier one, and NOT since reopened (a later tagged override) or repudiated (a later untagged override)";
+var TAG_NOT_TAGGABLE_DETAIL = "carries no lane tags \u2014 only override/narrows/extends/consume/indexes (same-phase words) may";
+function tagMissingDetail(missing) {
+  const clauses = missing.map(
+    (entry) => `"${entry.tag}" is missing from the ${entry.endpoint} turn's tags`
+  );
+  return `carries a tag that fails the subset invariant \u2014 ${clauses.join("; ")}`;
+}
 var SEGMENT_TARGET_DETAIL = "is a segment address \u2014 relation targets are turn-only; a segment tie goes through ownership (e.g. remember's assign/attach) or a bare cites reference, never a relation";
+function checkTagLegality(input) {
+  const tags = input.tags ?? [];
+  if (tags.length === 0) {
+    return { ok: true };
+  }
+  if (!isTaggableRelation(input.relation)) {
+    return { ok: false, reason: "tag-not-taggable", detail: TAG_NOT_TAGGABLE_DETAIL };
+  }
+  const citingTags = input.citingTurnTags ?? /* @__PURE__ */ new Set();
+  const citedTags = input.citedTurnTags ?? /* @__PURE__ */ new Set();
+  const missing = [];
+  for (const tag of tags) {
+    if (!citingTags.has(tag)) {
+      missing.push({ tag, endpoint: "citing" });
+    }
+    if (!citedTags.has(tag)) {
+      missing.push({ tag, endpoint: "cited" });
+    }
+  }
+  if (missing.length > 0) {
+    return { ok: false, reason: "tag-missing", detail: tagMissingDetail(missing) };
+  }
+  return { ok: true };
+}
 function validateRelationTarget(input) {
   if (input.targetKind === "segment") {
     return { ok: false, reason: "segment-target", detail: SEGMENT_TARGET_DETAIL };
@@ -8461,30 +8689,31 @@ function validateRelationTarget(input) {
     if (input.relation !== "grounds") {
       return { ok: false, reason: "self-not-grounds", detail: SELF_NOT_GROUNDS_DETAIL };
     }
-    const isImplementer = input.citingPhases.has("decision") && input.citingPhases.has("delivery");
-    if (!isImplementer) {
-      return {
-        ok: false,
-        reason: "self-not-implementer",
-        detail: SELF_NOT_IMPLEMENTER_DETAIL
-      };
+    if (!input.citingPhases.has("delivery")) {
+      return { ok: false, reason: "self-not-delivery", detail: SELF_NOT_DELIVERY_DETAIL };
     }
-    if (!input.isSettlement) {
-      return {
-        ok: false,
-        reason: "self-not-settlement",
-        detail: SELF_NOT_SETTLEMENT_DETAIL
-      };
-    }
-    return { ok: true };
+  } else if (!isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
+    return {
+      ok: false,
+      reason: "phase-illegal",
+      detail: explainRelationPhaseRejection(input.relation, input.citingPhases, input.citedPhases)
+    };
   }
-  if (isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
+  return checkTagLegality(input);
+}
+function hasTaggedTerminusDeclaration(edges) {
+  return edges.some(
+    (edge) => edge.relation === "indexes" && edge.tags.length > 0 && edge.isCurrentTerminus === true
+  );
+}
+function checkSelfGroundsTerminus(edges) {
+  if (hasTaggedTerminusDeclaration(edges)) {
     return { ok: true };
   }
   return {
     ok: false,
-    reason: "phase-illegal",
-    detail: explainRelationPhaseRejection(input.relation, input.citingPhases, input.citedPhases)
+    reason: "self-not-terminus",
+    detail: SELF_GROUNDS_NO_TERMINUS_DETAIL
   };
 }
 var RELATION_FIELD_NAME = {
@@ -14401,8 +14630,8 @@ function buildNoteSettlementContext(db, job, options) {
 
 // src/shared/memory-rubric.ts
 var import_node_crypto2 = require("node:crypto");
-var MEMORY_RUBRIC_VERSION = "v9";
-var MEMORY_RUBRIC_TEXT = `# Memory Rubric v9
+var MEMORY_RUBRIC_VERSION = "v10";
+var MEMORY_RUBRIC_TEXT = `# Memory Rubric v10
 
 ## Fields
 
@@ -14461,68 +14690,77 @@ discovering synonym drift, merge into the earlier word.
 
 ## Relations (turn\u2192turn; recorded from the citing turn toward the cited)
 
-A FLOW is one separable line of work inside a phase \u2014 a chain of subtasks,
-sometimes one subtask, sometimes one node; each is equally a flow. Every phase
-runs its own: EVIDENCE flows establish facts, DECISION flows join rulings with
-narrows/extends and SETTLE where nothing further narrows or extends, DELIVERY
-flows join steps with consume (dispatch \u2192 acceptance \u2192 commit). Only the
-decision flow has graph-derived identity; the other two are reading aids, not
-machine-derived.
+THE INTERPRETATION PRINCIPLE: a tagged edge acts on a LANE; an untagged edge
+acts on the cited turn itself. Every word shares this one reading \u2014 there are
+no special cases.
 
-Eight words, four jobs:
-  JUDGING the cited conclusion \u2014 after reading me, must it still be read?
-  \xB7 override \u2014 no: it is wrong, and this node replaces it.
-  \xB7 narrows  \u2014 yes, but this node cuts a piece out of its scope.
-  \xB7 extends  \u2014 yes, and this node adds a piece.
-  AGGREGATING \u2014 which nodes do I stand for?
-  \xB7 indexes  \u2014 these: the flow converges here and I stand for it. Cite me and
-    you have cited the flow, so everything outside reaches it through this one
-    node, never through its members.
-  DEPENDING on it \u2014 if it turned out false, what happens to me?
-  \xB7 grounds  \u2014 I fall with it: a delivery on the decision it implements, a
-    decision on a finding, a release on its verification.
-  \xB7 consume  \u2014 nothing: I used its product and do not answer for it.
-  TESTING it \u2014 did I put the claim to a check?
-  \xB7 verifies / refutes \u2014 a result produced this turn, for it or against it.
+A LANE is a separable line of work inside one phase, under a segment,
+identified by an exact SET of tags scoped to that segment. Lanes never cross
+phases; only cross-phase relations connect lanes of different phases.
+{P}\u2192{P,c1} forks and {A}+{B}\u2192{A,B} merges are nothing but tag composition \u2014
+the machine knows only exact sets; parenthood and merging are human readings.
+A lane's tag set is as SMALL as discrimination allows, and the segment's own
+tags never join it \u2014 they gate membership, not lanes. An isolated single-turn
+product needs no tag and joins no lane, and is still cited cross-phase as
+usual.
 
-Where each may reach:
-- ONE decision flow: narrows, extends.
-- Same phase, regardless of flow: override, indexes, consume.
-- Cross-phase only: grounds; verifies/refutes from an evidence source toward a
-  decision or delivery target.
-A multi-phase turn is several steps merged into one: judge each phase's edge
-independently. It may cite ITSELF with grounds when it is both a flow's
-settlement and that settlement's implementer; nothing else self-cites.
+Eight words. Same-phase words MAY carry lane tags, none must; cross-phase
+words never do \u2014 lanes are phase-local:
+\xB7 override \u2014 the cited's main result no longer applies; this node fully
+  replaces it. Tagged: an in-lane correction \u2014 the lane reopens until a
+  fresh declaration. Untagged: a global repudiation of the conclusion, and
+  every lane it currently closes loses its terminus.
+\xB7 narrows  \u2014 part of the cited's result no longer applies; this node
+  corrects it.
+\xB7 extends  \u2014 the cited's result still applies; this node expands or
+  supplements it.
+\xB7 consume  \u2014 this node used its product and does not answer for it.
+\xB7 indexes  \u2014 convergence, aggregation, indexing: this node stands as the
+  representative, and the outside reaches the indexed through it. Tagged:
+  declares that lane CONVERGED \u2014 this node is its terminus and indexes the
+  lane's core valid nodes. Untagged: free aggregation (a release indexing
+  the artifacts it ships). An indexed node is never also consumed.
+\xB7 grounds  \u2014 this node stands or falls with the cited. Where a separate
+  spec turn exists, THE SPEC carries the grounds and the other artifacts
+  consume that carrier; without one, each artifact grounds the decision
+  directly.
+\xB7 verifies / refutes \u2014 a check result produced this turn, for / against the
+  cited conclusion; the source must carry an evidence phase.
 
-Cite a flow through the node it converges on \u2014 for a decision flow, its
-SETTLEMENT. A mid-flow grounds still stores; the receipt names that node
-instead. One route across the phases: when a SEPARATE delivery turn wrote the
-spec, THAT turn grounds the decision and the other artifacts consume it; when
-design and spec landed in one turn, each artifact grounds directly.
+Convergence never happens by silence: when a lane converges, its terminus
+declares it with a TAGGED indexes. All lane events \u2014 declarations,
+overrides, continuations \u2014 reduce in turn order; the latest declaration
+wins, and continuing past one is normal life (the next declaration
+supersedes it). SUBSET INVARIANT: every tag on an edge must already exist
+on both endpoint turns' tags \u2014 written forward, a lane member's note
+carries its lane tag anyway; a violation is refused, naming the gap.
 
-Every finished turn makes two passes.
-1. PRECURSORS \u2014 for each node that directly caused this turn, pick its word by
-   the four jobs; none fits \u2192 record nothing. Skipping levels to the arc's
-   origin is mislabeling; an orphan is legal ONLY as an unforeseen subtask start
-   or decision-free chatter, and edges are never invented to remove one.
-2. AGGREGATION \u2014 then ask of this turn itself: does a flow CONVERGE here \u2014 a
-   decision closing on its settlement, a delivery on the release that ships
-   it? Then index the nodes carrying its result. Later work may extend the
-   flow past this turn; the edge stays true as the aggregation it was.
-A pair may carry several relations, each stating a fact the others cannot
-derive \u2014 extends and indexes both subsume consume, so never write both. A
-refusal names the missing half \u2192 add the smallest missing type, or re-judge.
-A warning names a better target and stores the edge anyway \u2192 take it next
-correction.
+Three principles \u2014 what your edges aspire to; the checker reports facts and
+never enforces:
+\xB7 Reachability \u2014 a lane's members hang together on the segment's whole
+  graph, and a valid lane's terminus is cited from other phases, relaying
+  to delivery.
+\xB7 Component emergence \u2014 distinct lanes come out as distinct components,
+  never entangled by accident.
+\xB7 Minimality \u2014 paths from start to terminus stay few, within the phase and
+  in the cross-phase merged view alike.
 
-The release ritual: a release indexes the artifacts it ships and consumes the
-previous release if any \u2014 the first release is the chain's legal root. No
-grounds to the settlements it fixes: the artifacts already reach them.
+Axiom: a release indexes the artifacts it ships (untagged free aggregation)
+and consumes the previous release; the first release is the chain's legal
+root. It writes no grounds to settlements \u2014 the artifacts already carry the
+decision linkage.
 
-Edges are declared through the relation parameters; content owes no citation
-format. Delete an edge found false and rewrite as needed \u2014 retraction and
-re-judgment are both acts of judgment, never tidying. Pre-registration is not
-an edge: a prediction made before its test lives in insight, not in the graph.
+A multi-phase turn's edge is legal when any pairing is. A self-citation is
+a formal edge serving connectivity alone \u2014 legal when one turn is both a
+lane's terminus and its implementer \u2014 with no substantive meaning, and it
+never counts as adoption evidence. Edges are declared through the relation
+parameters; content owes no citation format. Delete an edge found false and
+rewrite as needed \u2014 retraction and re-judgment are both acts of judgment,
+never tidying. A prediction made before its test lives in insight, not in
+the graph. A skipped or rewound turn is not a node; a globally-overridden
+turn is a dead node that stays in the graph carrying the correction's
+story. Whether a lane was ADOPTED is a living judgment \u2014 the strongest
+evidence is an EXTERNAL delivery citation of its terminus.
 
 ## Segments (membership and creation)
 
@@ -14530,6 +14768,8 @@ an edge: a prediction made before its test lives in insight, not in the graph.
   unrelated turn staying homeless is a legal state. When one turn serves
   several workflows, membership still goes to the primary task its content
   serves \u2014 the other ties are carried by relation edges.
+- A segment's tags are hand-curated identity: a member turn carries ALL of
+  them. Lane tags are separate and never include them.
 - (Settlement side) membership and creation authority equal the main agent's:
   segments may be created, turns reassigned across them; correct only OBVIOUS
   mismatches, leave doubt alone.
@@ -14640,7 +14880,10 @@ function renderNoteSettlementPrompt(context) {
     "that names the wrong activity, a turn homed in the wrong segment), and",
     "RETRACT what is false (an edge whose claim the later turns refute).",
     "Leave alone what you are merely unsure about \u2014 the rubric's own judgment",
-    "sections are the standard, not your taste.",
+    "sections are the standard, not your taste. After this first pass of",
+    "writes, you may call `lane_check` over this window's own scope and route",
+    "any findings it reports through this same supply/correct/propose",
+    "judgment, never a write obligation on its own.",
     "",
     "## Duties",
     "",
@@ -14819,7 +15062,9 @@ function createNoteSettlementDispatch(options) {
         claimGeneration: job.claimGeneration,
         sessionId: job.sessionId,
         reviewableTurnIds: context.reviewableTurnIds,
-        contextBuiltAtEpoch: context.builtAtEpoch
+        contextBuiltAtEpoch: context.builtAtEpoch,
+        windowStart: job.windowStart,
+        windowEnd: job.windowEnd
       });
     } catch (error49) {
       return {
@@ -14846,8 +15091,14 @@ function createNoteSettlementDispatch(options) {
       // operator, from the same `job.attempts` the claim already
       // incremented before this dispatch ran.
       attemptsExhausted: !committed && job.attempts >= maxAttempts,
-      commit: committed ? queryResult.commitMetrics : null
+      commit: committed ? queryResult.commitMetrics : null,
+      laneCheckCalled: queryResult.laneCheckCalled ?? false
     });
+    if (!(queryResult.laneCheckCalled ?? false)) {
+      logger.warn(
+        `${NOTE_SETTLEMENT_METRICS_PREFIX} reminder: job ${job.id} (S${job.sessionId} T${job.windowStart}-${job.windowEnd}) completed without ever calling lane_check`
+      );
+    }
     if (!committed) {
       return {
         ok: false,
@@ -49555,7 +49806,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // Per-verb parameter contracts live in `rememberInputShape`'s `.describe()`s
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
-  remember: `Maintain a segment \u2014 claude-mnemo's long-lived, per-task semantic container (\u8BB0\u4F4F; \`note\` is the per-turn episodic surface, \u8BB0\u5F55). Six verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's \u5EFA\u6BB5 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` \u2014 ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership \u2014 or clears ownership if \`id\` is omitted. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) \u2014 each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, \u2026) is rejected, nothing stored. Every field is written in English.
+  remember: `Maintain a segment \u2014 claude-mnemo's long-lived, per-task semantic container (\u8BB0\u4F4F; \`note\` is the per-turn episodic surface, \u8BB0\u5F55). Seven verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's \u5EFA\u6BB5 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` \u2014 ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership, gated by the target's own tags \u2014 or clears ownership if \`id\` is omitted; \`retag\` replaces a segment's hand-curated tags whole. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) \u2014 each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, \u2026) is rejected, nothing stored. Every field is written in English.
 Maintenance is advisory, never a gate: every write/edit reports turns since this segment was last touched.
 20-turn reminder: check membership, Working State, whether to create or attach \u2014 judgment lives in the Memory Rubric, not here.`
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -49647,6 +49898,16 @@ var RETIRED_NOTE_MODE_LITERAL_MESSAGE = {
 };
 var NOTE_SET_MODE_FIELDS = /* @__PURE__ */ new Set(["type", "tags"]);
 var TYPE_VOCABULARY_LIST = MEMORY_TYPES.join("/");
+var relationTargetEntryShape = external_exports.union([
+  external_exports.string(),
+  external_exports.object({
+    turn: external_exports.string().min(1),
+    tags: external_exports.array(external_exports.string())
+  }).strict()
+]);
+var RELATION_TAG_FORM_LINE = "Each entry is a bare address (untagged \u2014 acts on the cited turn itself) or `{turn, tags}` (acts on that lane instead); every tag must already be on both this turn's and the target's own tags, or the call rejects naming the gap.";
+var RELATION_NO_TAG_FORM_LINE = "Entries are bare addresses only \u2014 cross-phase words never carry lane tags.";
+var RETRACTION_TAG_FORM_LINE = "Same bare-address-or-`{turn, tags}` form as the relation field: an untagged entry retracts the bare row, a tagged one retracts that exact tag-set row.";
 var noteInputShape = {
   turn: external_exports.string().min(1).describe(
     "Address of a finished turn: `S<session>/T<prompt>`, from the current-turn line or backlog relief \u2014 never recalled or invented (see the tool description)."
@@ -49678,6 +49939,14 @@ var noteInputShape = {
   crossSession: external_exports.boolean().optional().describe(
     "true to confirm a write addressed at a turn outside the caller's own session; required whenever the address's session differs from the caller's, refused otherwise."
   ),
+  // rubric-v10 ticket 07 ("Segment tags and note-time membership"): the
+  // note-time membership path — assigns THIS turn to one segment the calling
+  // session has ATTACHED, gated by the segment's own hand-curated tags.
+  // `remember`'s `assign` verb stays the batch/reassignment/clearing surface;
+  // this parameter only ever targets the turn this same call is writing.
+  segment: external_exports.string().min(1).optional().describe(
+    "Assign this turn's own membership to one segment this session has ATTACHED (\"E<n>\"). An unattached or nonexistent segment rejects, naming the attachment requirement (\"remember(attach, id=...)\" first). The segment's hand-curated tags gate the assignment \u2014 this turn's tags (after this same call's own `tags`, if given) must carry every one of them, or the call rejects naming the gap; an untagged segment gates nothing. `remember`'s `assign` verb is the batch/reassignment/clearing surface instead."
+  ),
   // Flow-relations spec (ticket 02, "六行律" — the six-row law): the eight-
   // word vocabulary that replaces ADR-0010's nine-cell grammar outright.
   // Targets are address tokens, `S<session>/T<prompt>` (brackets optional) —
@@ -49694,29 +49963,29 @@ var noteInputShape = {
   // fails, rather than reading it here first. What each describe below keeps
   // is the one-line READING (which stance this word states) and a pointer to
   // the Memory Rubric for the judgment of WHICH word to use.
-  override: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses a predecessor whose conclusion this turn holds is WRONG and replaces \u2014 same phase, no flow or layer limit. Judgment lives in the Memory Rubric."
+  override: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses a predecessor whose conclusion this turn holds is WRONG and replaces \u2014 same phase, no flow or layer limit. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  narrows: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses a decision this turn still holds but cuts a piece OUT of \u2014 same flow, decision-phase both ends. Judgment lives in the Memory Rubric."
+  narrows: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses a decision this turn still holds but cuts a piece OUT of \u2014 same phase. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  extends: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses a decision this turn still holds and adds a piece TO \u2014 same flow, decision-phase both ends. Judgment lives in the Memory Rubric."
+  extends: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses a decision this turn still holds and adds a piece TO \u2014 same phase. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  indexes: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses the same-phase nodes this turn gathers and stands for \u2014 they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). Same phase is the whole check: no flow, membership or terminus condition. An indexed target is not also consumed. Judgment lives in the Memory Rubric."
+  indexes: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses the same-phase nodes this turn gathers and stands for \u2014 they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). Same phase is the whole check: no flow, membership or terminus condition. An indexed target is not also consumed. " + RELATION_TAG_FORM_LINE + " A tagged entry additionally DECLARES that lane's convergence (its terminus) \u2014 see grounds' own self-citation reading below. Judgment lives in the Memory Rubric."
   ),
-  consume: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow \u2014 never written beside an extends or indexes on the same pair, which already imply it under the deletion test. Judgment lives in the Memory Rubric."
+  consume: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow \u2014 never written beside an extends or indexes on the same pair, which already imply it under the deletion test. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  grounds: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false \u2014 cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. A mid-flow target still stores; the receipt then names the branch's settlement to cite instead. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; may cite the citing turn itself only when this turn is both a flow's settlement and that settlement's implementer \u2014 every other relation refuses a self target outright. Judgment lives in the Memory Rubric."
+  grounds: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false \u2014 cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; may cite the citing turn itself only when this turn's own type carries a delivery-phase word (the implementer half \u2014 a decision-only turn cannot self-ground) AND, after this call's edges land, this turn is the CURRENT terminus of a lane it declared via a TAGGED indexes edge of its own (declared in this same call, either order, or already stored \u2014 a later override that reopens or repudiates that declaration means it no longer qualifies) \u2014 every other relation refuses a self target outright. " + RELATION_NO_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  verifies: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses the claim this turn tested FOR. Requires an evidence-phase source. Judgment lives in the Memory Rubric."
+  verifies: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses the claim this turn tested FOR. Requires an evidence-phase source. " + RELATION_NO_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  refutes: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses the claim this turn tested AGAINST. Requires an evidence-phase source. Judgment lives in the Memory Rubric."
+  refutes: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses the claim this turn tested AGAINST. Requires an evidence-phase source. " + RELATION_NO_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
   // Flow-relations spec (ticket 02): the eight retraction mirrors. A relation
   // is never overwritten (a relation write is purely additive), so correcting
@@ -49727,29 +49996,34 @@ var noteInputShape = {
   // relation parameter's own name), pinned against `mcp/note.ts`'s derived
   // `RETRACTION_FIELD_ENTRIES` by a guard test, so the two halves of the
   // vocabulary cannot drift apart.
-  retractOverride: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  //
+  // rubric-v10 ticket 02: each retraction entry takes the SAME
+  // bare-address-or-`{turn, tags}` form as its relation field — an untagged
+  // entry retracts the bare `[]` row, a tagged one retracts that exact
+  // tag-set row (`RETRACTION_TAG_FORM_LINE`).
+  retractOverride: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
-  retractNarrows: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  retractNarrows: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
-  retractExtends: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  retractExtends: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
-  retractIndexes: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  retractIndexes: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
-  retractConsume: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  retractConsume: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
-  retractGrounds: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  retractGrounds: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
-  retractVerifies: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  retractVerifies: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
-  retractRefutes: external_exports.array(external_exports.string()).optional().describe(
-    "Addresses whose refutes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  retractRefutes: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose refutes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
   // Frozen legacy: `supersedes` retired from the NOTE TOOL's own surface —
   // `noteInputSchema` below `.omit()`s this key, so a caller sending it gets
@@ -49765,18 +50039,27 @@ var noteInputShape = {
   mode: noteModeShape
 };
 var rememberInputShape = {
-  verb: external_exports.enum(["create", "attach", "write", "edit", "close", "assign", "append", "replace"]).describe(
-    'create: mint a new segment. attach: bind the current session to one. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). assign: place turns into a segment (id set) or clear their ownership (id omitted).'
+  verb: external_exports.enum([
+    "create",
+    "attach",
+    "write",
+    "edit",
+    "close",
+    "assign",
+    "retag",
+    "append",
+    "replace"
+  ]).describe(
+    "create: mint a new segment. attach: bind the current session to one. write: replace one field's value whole (`value`; null or \"\" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). assign: place turns into a segment (id set) or clear their ownership (id omitted) \u2014 the target segment's own tags gate the write, rejecting a turn whose tags don't carry all of them. retag: replace a segment's hand-curated tags whole (`tags`; the full replacement set \u2014 never derived, never merged)."
   ),
   id: external_exports.string().min(1).optional().describe(
     'attach/write/edit/close: the target segment \u2014 an "E<n>" address only. assign: the same, but OPTIONAL \u2014 omit entirely to clear ownership on `turns` instead of placing them. Not used by create.'
   ),
   title: external_exports.string().min(1).optional().describe(
-    // The derivation rule lived ONLY in the rubric's segment block; it lands
-    // here because this is the one place a caller names a segment's own
-    // identity fields, and `type`/`tags` are conspicuously absent from this
-    // shape — the describe now says why.
-    "create only (required): the segment's title, written in English \u2014 set once, here. A segment's type and tags are never written by hand: they are DERIVED from its member turns and recomputed whenever membership changes."
+    // ticket 07 (rubric-v10) split this describe's old claim in two: type
+    // stays derived (never a caller input, absent from this shape), tags
+    // no longer is — see the `tags` field just below for its own contract.
+    "create only (required): the segment's title, written in English \u2014 set once, here. A segment's type is never written by hand: it is DERIVED from its member turns and recomputed whenever membership changes."
   ),
   // Ticket 15 (topic registry retirement, CONTEXT.md "Topic — retired"): the
   // registry this once named a segment into folded into tags — a
@@ -49790,6 +50073,11 @@ var rememberInputShape = {
   goal: external_exports.string().min(1).optional().describe("create only, optional: a seed row for the new segment's `goal` field."),
   members: external_exports.array(external_exports.string()).optional().describe(
     'create only, optional: seed member turn addresses ("S<session>/T<prompt>", as seen in context \u2014 from an approved proposal, never recalled or invented). Membership is recorded for exactly these turns; a call naming even one bad address seeds none.'
+  ),
+  // ticket 07 (rubric-v10, "Segment tags and note-time membership"): the
+  // segment's own hand-curated identity — never derived, unlike `type`.
+  tags: external_exports.array(external_exports.string()).optional().describe(
+    "create (optional) / retag (required): the segment's hand-curated tags \u2014 set once here, or replaced whole later with retag; never derived, never merged. Gates every NEW membership write (this tool's own `assign`, settlement's `reassign`, and `note`'s `segment` parameter): a turn may join only when its own tags carry every one of the segment's, or the write rejects naming the gap. Existing members are grandfathered, never re-checked. Empty (or omitted at create) gates nothing. Distinct from a relation's own lane tags \u2014 the two vocabularies never overlap, and a lane's own tag set stays as small as discrimination allows."
   ),
   // Ticket 01 (field-semantics spec, "Fields" table): each of the eight
   // editable fields gets its own one-line definition here, aligned with the
@@ -49819,7 +50107,7 @@ var rememberInputShape = {
   // ticket 02 (ownership-and-note-cadence spec): `assign`'s own turn
   // selector — an interval OR a list, one array parameter for both shapes.
   turns: external_exports.array(external_exports.string()).optional().describe(
-    'assign only (required): turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>", inclusive; the second T is optional) \u2014 as seen in context, never recalled or invented. An interval spanning even one missing turn rejects the whole call, naming which; nothing is assigned.'
+    'assign only (required): turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>", inclusive; the second T is optional) \u2014 as seen in context, never recalled or invented. An interval spanning even one missing turn rejects the whole call, naming which; nothing is assigned. When `id` is given, the target segment\'s own tags additionally gate the write: every named turn\'s tags must carry all of them, or the call rejects naming the gap (omit `id` to clear ownership instead, which has no gate).'
   )
 };
 var timelineInputShape = {
@@ -49931,184 +50219,470 @@ var rememberInputSchema = external_exports.object(rememberInputShape).strict().s
   }
 });
 
-// src/shared/flows.ts
-var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
-var TERMINATING_RELATION = "override";
-var INHERITING_RELATIONS = /* @__PURE__ */ new Set([
-  "grounds",
-  "consume",
-  "indexes"
-]);
-function isFlowSettlement(derivation, turnId) {
-  return derivation.flowById.get(turnId)?.settlement === turnId;
+// src/shared/lane-interpretation.ts
+var DEFAULT_SEGMENT = "\0default";
+function compareOrderKey(a, b) {
+  return a[0] - b[0] || a[1] - b[1];
 }
-function settlementsOfTurn(derivation, turnId) {
-  const settlements = /* @__PURE__ */ new Set();
-  for (const flowId of derivation.flowsByTurn.get(turnId) ?? []) {
-    const settlement = derivation.flowById.get(flowId)?.settlement;
-    if (settlement !== null && settlement !== void 0) {
-      settlements.add(settlement);
-    }
-  }
-  return [...settlements].sort((a, b) => a - b);
+function canonicalTagSet(tags) {
+  return [...new Set(tags)].sort();
 }
-function pushInto(index, key, value) {
-  const bucket = index.get(key);
-  if (bucket === void 0) {
-    index.set(key, [value]);
-    return;
-  }
-  bucket.push(value);
+function laneToken(segment, tags) {
+  return JSON.stringify([segment, canonicalTagSet(tags)]);
 }
-function deriveFlows(turns, edges) {
-  const isDecision = /* @__PURE__ */ new Map();
+function deriveLaneInterpretation(turns, edges) {
+  const segmentOf = /* @__PURE__ */ new Map();
+  const orderOf = /* @__PURE__ */ new Map();
   for (const turn of turns) {
-    isDecision.set(turn.id, phasesForTypes(turn.type).has("decision"));
+    segmentOf.set(turn.id, turn.segment ?? DEFAULT_SEGMENT);
+    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
   }
-  const advance = /* @__PURE__ */ new Map();
-  const retreat = /* @__PURE__ */ new Map();
-  const overridden = /* @__PURE__ */ new Set();
-  const inheritedFrom = /* @__PURE__ */ new Map();
+  const segmentFor = (id) => segmentOf.get(id) ?? DEFAULT_SEGMENT;
+  const orderFor = (id) => orderOf.get(id) ?? [0, id];
+  const groups = /* @__PURE__ */ new Map();
+  const warnings = [];
+  function addToGroup(segment, canon, edge) {
+    const token = laneToken(segment, canon);
+    let group = groups.get(token);
+    if (group === void 0) {
+      group = { segment, tagSet: [...canon], edges: [] };
+      groups.set(token, group);
+    }
+    group.edges.push(edge);
+    return token;
+  }
   for (const edge of edges) {
-    const citingKnown = isDecision.has(edge.citingId);
-    const citedKnown = isDecision.has(edge.citedId);
-    if (!citingKnown || !citedKnown) continue;
-    if (STANCE_RELATIONS.has(edge.relation)) {
-      if (!isDecision.get(edge.citingId) || !isDecision.get(edge.citedId)) continue;
-      if (edge.citingId === edge.citedId) continue;
-      pushInto(advance, edge.citedId, edge.citingId);
-      pushInto(retreat, edge.citingId, edge.citedId);
-    } else if (edge.relation === TERMINATING_RELATION) {
-      overridden.add(edge.citedId);
-    } else if (INHERITING_RELATIONS.has(edge.relation)) {
-      if (edge.citingId === edge.citedId) continue;
-      pushInto(inheritedFrom, edge.citedId, edge.citingId);
+    const canon = canonicalTagSet(edge.tags);
+    if (canon.length === 0) continue;
+    const citingSegment = segmentFor(edge.citingId);
+    const citedSegment = segmentFor(edge.citedId);
+    addToGroup(citingSegment, canon, edge);
+    if (citedSegment !== citingSegment) {
+      addToGroup(citedSegment, canon, edge);
+      warnings.push({
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        tagSet: canon,
+        citingSegment,
+        citedSegment
+      });
     }
   }
-  const termini = [];
-  for (const turn of turns) {
-    if (!isDecision.get(turn.id)) continue;
-    if ((advance.get(turn.id) ?? []).length === 0) termini.push(turn.id);
+  const events = [];
+  function pushEvent(citingId, citedId, relation, token) {
+    events.push({ citingId, citedId, relation, token });
   }
-  termini.sort((a, b) => a - b);
-  const flows = [];
-  const flowById = /* @__PURE__ */ new Map();
-  const flowsByTurn = /* @__PURE__ */ new Map();
-  for (const terminus of termini) {
-    const members = /* @__PURE__ */ new Set([terminus]);
-    const stack = [terminus];
-    while (stack.length > 0) {
-      const node = stack.pop();
-      for (const previous of retreat.get(node) ?? []) {
-        if (members.has(previous)) continue;
-        members.add(previous);
-        stack.push(previous);
+  for (const edge of edges) {
+    if (edge.relation !== "indexes" && edge.relation !== "override") continue;
+    const canon = canonicalTagSet(edge.tags);
+    if (canon.length === 0) {
+      if (edge.relation === "override") {
+        pushEvent(edge.citingId, edge.citedId, "override", null);
+      }
+      continue;
+    }
+    const citingSegment = segmentFor(edge.citingId);
+    const citedSegment = segmentFor(edge.citedId);
+    const citingToken = laneToken(citingSegment, canon);
+    if (groups.has(citingToken)) {
+      pushEvent(edge.citingId, edge.citedId, edge.relation, citingToken);
+    }
+    if (citedSegment !== citingSegment) {
+      const citedToken = laneToken(citedSegment, canon);
+      if (groups.has(citedToken)) {
+        pushEvent(edge.citingId, edge.citedId, edge.relation, citedToken);
       }
     }
-    const flow = {
-      id: terminus,
-      members: [...members].sort((a, b) => a - b),
-      settlement: overridden.has(terminus) ? null : terminus
-    };
-    flows.push(flow);
-    flowById.set(terminus, flow);
-    for (const member of flow.members) {
-      const memberships = flowsByTurn.get(member) ?? /* @__PURE__ */ new Set();
-      memberships.add(terminus);
-      flowsByTurn.set(member, memberships);
+  }
+  events.sort((a, b) => compareOrderKey(orderFor(a.citingId), orderFor(b.citingId)) || a.citingId - b.citingId);
+  const terminusOf = /* @__PURE__ */ new Map();
+  const everDeclared = /* @__PURE__ */ new Map();
+  const deadInLane = /* @__PURE__ */ new Map();
+  const latestEventTurn = /* @__PURE__ */ new Map();
+  for (const token of groups.keys()) {
+    terminusOf.set(token, null);
+    everDeclared.set(token, false);
+    deadInLane.set(token, /* @__PURE__ */ new Set());
+    latestEventTurn.set(token, null);
+  }
+  const globallyDead = /* @__PURE__ */ new Set();
+  let index = 0;
+  while (index < events.length) {
+    const citingId = events[index].citingId;
+    let end = index;
+    while (end < events.length && events[end].citingId === citingId) {
+      end += 1;
+    }
+    const batch = events.slice(index, end);
+    index = end;
+    for (const event of batch) {
+      if (event.relation !== "override") continue;
+      if (event.token === null) {
+        globallyDead.add(event.citedId);
+        for (const [token, terminus] of terminusOf) {
+          if (terminus === event.citedId) {
+            terminusOf.set(token, null);
+            latestEventTurn.set(token, citingId);
+          }
+        }
+      } else {
+        deadInLane.get(event.token).add(event.citedId);
+        if (terminusOf.get(event.token) === event.citedId) {
+          terminusOf.set(event.token, null);
+        }
+        latestEventTurn.set(event.token, citingId);
+      }
+    }
+    for (const event of batch) {
+      if (event.relation !== "indexes" || event.token === null) continue;
+      terminusOf.set(event.token, citingId);
+      everDeclared.set(event.token, true);
+      latestEventTurn.set(event.token, citingId);
     }
   }
-  const queue = [...flowsByTurn.keys()];
-  while (queue.length > 0) {
-    const cited = queue.pop();
-    const source = flowsByTurn.get(cited);
-    if (source === void 0) continue;
-    for (const citing of inheritedFrom.get(cited) ?? []) {
-      const target = flowsByTurn.get(citing) ?? /* @__PURE__ */ new Set();
-      let grew = false;
-      for (const flowId of source) {
-        if (!target.has(flowId)) {
-          target.add(flowId);
-          grew = true;
+  for (const [token, group] of groups) {
+    const current = latestEventTurn.get(token) ?? null;
+    if (current === null) continue;
+    let bestId = current;
+    let bestOrder = orderFor(current);
+    for (const edge of group.edges) {
+      if (edge.relation === "indexes" || edge.relation === "override") continue;
+      const order = orderFor(edge.citingId);
+      const cmp = compareOrderKey(order, bestOrder);
+      if (cmp > 0 || cmp === 0 && edge.citingId > bestId) {
+        bestOrder = order;
+        bestId = edge.citingId;
+      }
+    }
+    latestEventTurn.set(token, bestId);
+  }
+  const tokens = [...groups.keys()].sort();
+  const lanes = [];
+  const laneByToken = /* @__PURE__ */ new Map();
+  for (const token of tokens) {
+    const group = groups.get(token);
+    const memberIds = /* @__PURE__ */ new Set();
+    for (const edge of group.edges) {
+      memberIds.add(edge.citingId);
+      memberIds.add(edge.citedId);
+    }
+    const dead = deadInLane.get(token);
+    const members = [...memberIds].sort((a, b) => a - b).map((id) => ({ id, dead: globallyDead.has(id) || dead.has(id) }));
+    const terminus = terminusOf.get(token) ?? null;
+    const state = terminus !== null ? "declared" : everDeclared.get(token) ? "reopened" : "undeclared";
+    const lane = {
+      key: { segment: group.segment, tagSet: group.tagSet },
+      members,
+      declaration: {
+        state,
+        terminus,
+        latestEventTurn: latestEventTurn.get(token) ?? null
+      },
+      taggedEdges: group.edges
+    };
+    lanes.push(lane);
+    laneByToken.set(token, lane);
+  }
+  return { lanes, laneByToken, warnings };
+}
+
+// src/db/lane-checker-load.ts
+function turnOrderKey(sessionId, promptNumber) {
+  return [sessionId, promptNumber];
+}
+var CROSS_PHASE_CITEDNESS_RELATIONS = ["grounds", "verifies", "refutes"];
+var LANE_COMPONENT_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"];
+function edgeKey(row) {
+  return `${row.citingId}\0${row.citedId}\0${row.relation}\0${row.tags}`;
+}
+function segmentKeyFor(owningSegmentByTurn, turnId) {
+  const segmentId = owningSegmentByTurn.get(turnId);
+  return segmentId === void 0 ? DEFAULT_SEGMENT : String(segmentId);
+}
+function laneKeyToken(key) {
+  return laneToken(key.segment, key.tagSet);
+}
+function loadOwningSegments(db, turnIds) {
+  const ids = [...new Set(turnIds)];
+  if (ids.length === 0) {
+    return /* @__PURE__ */ new Map();
+  }
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = db.query(
+    `SELECT turn_id AS turnId, MIN(segment_id) AS segmentId
+       FROM segment_members
+       WHERE turn_id IN (${placeholders})
+       GROUP BY turn_id`
+  ).all(...ids);
+  return new Map(rows.map((row) => [row.turnId, row.segmentId]));
+}
+function resolveSeedTurnIds(db, scope) {
+  if (scope.kind === "range") {
+    return db.query(
+      `SELECT id FROM turns
+         WHERE session_id = ? AND prompt_number BETWEEN ? AND ?
+           AND ${liveTurnSql()}
+         ORDER BY prompt_number ASC`
+    ).all(scope.sessionId, scope.promptStart, scope.promptEnd).map((row) => row.id);
+  }
+  return db.query(
+    `SELECT t.id AS id
+       FROM turns t
+       JOIN segment_members sm ON sm.turn_id = t.id
+       WHERE sm.segment_id = ? AND ${liveTurnSql("t")}
+       ORDER BY t.created_at_epoch ASC, t.id ASC`
+  ).all(scope.segmentId).map((row) => row.id);
+}
+function loadTaggedEdgesTouching(db, turnIds) {
+  if (turnIds.length === 0) {
+    return [];
+  }
+  const placeholders = turnIds.map(() => "?").join(",");
+  return db.query(
+    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE (me.citing_id IN (${placeholders}) OR me.cited_id IN (${placeholders}))
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IS NOT NULL AND me.tags != '[]'
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+  ).all(...turnIds, ...turnIds);
+}
+function loadEdgesForExactTagSet(db, tagSet) {
+  if (tagSet.length === 0) {
+    return [];
+  }
+  const rows = db.query(
+    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.id IN (SELECT edge_row_id FROM memory_edge_tags WHERE tag = ?)
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IS NOT NULL
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+  ).all(tagSet[0]);
+  const wanted = canonicalTagSet(tagSet).join("");
+  return rows.filter((row) => canonicalTagSet(JSON.parse(row.tags)).join("") === wanted);
+}
+function loadEdgesByRelationTouching(db, turnIds, relations) {
+  if (turnIds.length === 0 || relations.length === 0) {
+    return [];
+  }
+  const idPlaceholders = turnIds.map(() => "?").join(",");
+  const relationPlaceholders = relations.map(() => "?").join(",");
+  return db.query(
+    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+  ).all(...turnIds, ...turnIds, ...relations);
+}
+function loadSegmentTurnIds(db, segmentId) {
+  return db.query(
+    `SELECT t.id AS id
+       FROM turns t
+       JOIN segment_members sm ON sm.turn_id = t.id
+       WHERE sm.segment_id = ? AND ${liveTurnSql("t")}`
+  ).all(segmentId).map((row) => row.id);
+}
+function loadComponentEdgesAmong(db, turnIds) {
+  if (turnIds.length === 0) {
+    return [];
+  }
+  const idPlaceholders = turnIds.map(() => "?").join(",");
+  const relationPlaceholders = LANE_COMPONENT_RELATIONS_SQL.map(() => "?").join(",");
+  return db.query(
+    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.citing_id IN (${idPlaceholders}) AND me.cited_id IN (${idPlaceholders})
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+  ).all(...turnIds, ...turnIds, ...LANE_COMPONENT_RELATIONS_SQL);
+}
+function loadSessionIds(db, turnIds) {
+  const ids = [...new Set(turnIds)];
+  if (ids.length === 0) {
+    return [];
+  }
+  const placeholders = ids.map(() => "?").join(",");
+  return db.query(
+    `SELECT DISTINCT session_id AS sessionId FROM turns WHERE id IN (${placeholders})`
+  ).all(...ids).map((row) => row.sessionId);
+}
+function widenComponentClosure(db, seedIds, sessionIds) {
+  if (seedIds.length === 0 || sessionIds.length === 0) {
+    return [];
+  }
+  const sessionPlaceholders = sessionIds.map(() => "?").join(",");
+  const relationPlaceholders = LANE_COMPONENT_RELATIONS_SQL.map(() => "?").join(",");
+  const found = /* @__PURE__ */ new Map();
+  const knownTurnIds = new Set(seedIds);
+  let frontier = new Set(seedIds);
+  while (frontier.size > 0) {
+    const frontierIds = [...frontier];
+    const idPlaceholders = frontierIds.map(() => "?").join(",");
+    const rows = db.query(
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+         FROM memory_edges me
+         JOIN turns tc ON tc.id = me.citing_id
+         JOIN turns td ON td.id = me.cited_id
+         WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
+           AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+           AND me.relation IN (${relationPlaceholders})
+           AND tc.session_id IN (${sessionPlaceholders}) AND td.session_id IN (${sessionPlaceholders})
+           AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+    ).all(...frontierIds, ...frontierIds, ...LANE_COMPONENT_RELATIONS_SQL, ...sessionIds, ...sessionIds);
+    const nextFrontier = /* @__PURE__ */ new Set();
+    for (const row of rows) {
+      found.set(edgeKey(row), row);
+      for (const id of [row.citingId, row.citedId]) {
+        if (!knownTurnIds.has(id)) {
+          knownTurnIds.add(id);
+          nextFrontier.add(id);
         }
       }
-      if (grew) {
-        flowsByTurn.set(citing, target);
-        queue.push(citing);
-      }
     }
+    frontier = nextFrontier;
   }
-  const membership = /* @__PURE__ */ new Map();
-  for (const [turnId, flowIds] of flowsByTurn) {
-    membership.set(turnId, [...flowIds].sort((a, b) => a - b));
-  }
-  const homeless = turns.filter((turn) => !membership.has(turn.id)).map((turn) => turn.id).sort((a, b) => a - b);
-  return { flows, flowById, flowsByTurn: membership, homeless };
+  return [...found.values()];
 }
-
-// src/db/flows.ts
-function deriveFlowsForSessions(db, sessionIds) {
-  const uniqueSessionIds = [...new Set(sessionIds)].filter(
-    (id) => Number.isSafeInteger(id) && id > 0
-  );
-  if (uniqueSessionIds.length === 0) {
-    return deriveFlows([], []);
+function loadLiveTurns(db, turnIds) {
+  const ids = [...new Set(turnIds)];
+  if (ids.length === 0) {
+    return /* @__PURE__ */ new Map();
   }
-  const sessionPlaceholders = uniqueSessionIds.map(() => "?").join(",");
-  const turnRows = db.query(
-    `SELECT id, type FROM turns
-       WHERE session_id IN (${sessionPlaceholders}) AND ${liveTurnSql()}`
-  ).all(...uniqueSessionIds);
-  const turns = turnRows.map((row) => ({
-    id: row.id,
-    type: parseTurnTypeArray(row.type)
-  }));
-  const turnIds = turns.map((turn) => turn.id);
-  if (turnIds.length === 0) {
-    return deriveFlows([], []);
-  }
-  const turnPlaceholders = turnIds.map(() => "?").join(",");
-  const edgeRows = db.query(
-    `SELECT citing_id AS citingId, cited_id AS citedId, relation
-       FROM memory_edges
-       WHERE citing_kind = 'turn' AND cited_kind = 'turn'
-         AND relation IN ('narrows', 'extends', 'override', 'grounds', 'consume', 'indexes')
-         AND (citing_id IN (${turnPlaceholders}) OR cited_id IN (${turnPlaceholders}))`
-  ).all(...turnIds, ...turnIds);
-  const edges = edgeRows.map((row) => ({
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = db.query(
+    `SELECT id, type, session_id AS sessionId, prompt_number AS promptNumber
+       FROM turns WHERE id IN (${placeholders}) AND ${liveTurnSql()}`
+  ).all(...ids);
+  return new Map(rows.map((row) => [row.id, row]));
+}
+function toEdgeInput(row) {
+  return {
     citingId: row.citingId,
     citedId: row.citedId,
-    relation: row.relation
-  }));
-  return deriveFlows(turns, edges);
+    relation: row.relation,
+    tags: canonicalTagSet(JSON.parse(row.tags))
+  };
 }
-function parseTurnTypeArray(value) {
-  if (!value) {
-    return [];
+function loadLaneCheckScope(db, scope) {
+  let involvedLaneKeys;
+  let seedTurnIds;
+  if (scope.kind === "lanes") {
+    involvedLaneKeys = [...scope.laneKeys];
+    seedTurnIds = [];
+  } else {
+    seedTurnIds = resolveSeedTurnIds(db, scope);
+    const discoveryRows = loadTaggedEdgesTouching(db, seedTurnIds);
+    const owningSegments = loadOwningSegments(
+      db,
+      discoveryRows.flatMap((row) => [row.citingId, row.citedId])
+    );
+    const seen = /* @__PURE__ */ new Map();
+    for (const row of discoveryRows) {
+      const tagSet = canonicalTagSet(JSON.parse(row.tags));
+      const citingKey = { segment: segmentKeyFor(owningSegments, row.citingId), tagSet };
+      const citedKey = { segment: segmentKeyFor(owningSegments, row.citedId), tagSet };
+      seen.set(laneKeyToken(citingKey), citingKey);
+      seen.set(laneKeyToken(citedKey), citedKey);
+    }
+    involvedLaneKeys = [...seen.values()];
   }
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-// src/shared/grounds-warning.ts
-function formatGroundsMidFlowWarnings(candidates) {
-  const warnings = [];
-  for (const candidate of candidates) {
-    if (candidate.settlementRefs.length === 0) {
+  const widenedByKey = /* @__PURE__ */ new Map();
+  for (const laneKey of involvedLaneKeys) {
+    const candidates = loadEdgesForExactTagSet(db, laneKey.tagSet);
+    if (candidates.length === 0) {
+      widenedByKey.set(laneKeyToken(laneKey), []);
       continue;
     }
-    if (candidate.settlementRefs.length === 1 && candidate.settlementRefs[0] === candidate.targetRef) {
-      continue;
-    }
-    warnings.push(
-      `warning: grounds toward ${candidate.targetRef} is mid-flow \u2014 this flow settles at ${candidate.settlementRefs.join(", ")}; cite that instead.`
+    const owningSegments = loadOwningSegments(
+      db,
+      candidates.flatMap((row) => [row.citingId, row.citedId])
+    );
+    widenedByKey.set(
+      laneKeyToken(laneKey),
+      candidates.filter(
+        (row) => segmentKeyFor(owningSegments, row.citingId) === laneKey.segment || segmentKeyFor(owningSegments, row.citedId) === laneKey.segment
+      )
     );
   }
-  return warnings;
+  const edgeMap = /* @__PURE__ */ new Map();
+  for (const rows of widenedByKey.values()) {
+    for (const row of rows) {
+      edgeMap.set(edgeKey(row), row);
+    }
+  }
+  const memberIds = new Set(seedTurnIds);
+  for (const row of edgeMap.values()) {
+    memberIds.add(row.citingId);
+    memberIds.add(row.citedId);
+  }
+  const memberIdList = [...memberIds];
+  for (const row of loadEdgesByRelationTouching(db, memberIdList, [...CROSS_PHASE_CITEDNESS_RELATIONS])) {
+    edgeMap.set(edgeKey(row), row);
+  }
+  for (const row of loadEdgesByRelationTouching(db, memberIdList, ["override"])) {
+    edgeMap.set(edgeKey(row), row);
+  }
+  const homelessMemberIds = /* @__PURE__ */ new Set();
+  for (const laneKey of involvedLaneKeys) {
+    if (laneKey.segment !== DEFAULT_SEGMENT) continue;
+    for (const row of widenedByKey.get(laneKeyToken(laneKey)) ?? []) {
+      homelessMemberIds.add(row.citingId);
+      homelessMemberIds.add(row.citedId);
+    }
+  }
+  if (homelessMemberIds.size > 0) {
+    const homelessSessionIds = loadSessionIds(db, [...homelessMemberIds]);
+    for (const row of widenComponentClosure(db, [...homelessMemberIds], homelessSessionIds)) {
+      edgeMap.set(edgeKey(row), row);
+    }
+  }
+  const realSegmentIds = [...new Set(involvedLaneKeys.map((key) => key.segment).filter((s) => s !== DEFAULT_SEGMENT))];
+  const segmentTurnIds = /* @__PURE__ */ new Set();
+  for (const segmentId of realSegmentIds) {
+    for (const id of loadSegmentTurnIds(db, Number(segmentId))) {
+      segmentTurnIds.add(id);
+    }
+  }
+  for (const row of loadComponentEdgesAmong(db, [...segmentTurnIds])) {
+    edgeMap.set(edgeKey(row), row);
+  }
+  const allTurnIds = new Set(memberIdList);
+  for (const row of edgeMap.values()) {
+    allTurnIds.add(row.citingId);
+    allTurnIds.add(row.citedId);
+  }
+  const turnRows = loadLiveTurns(db, [...allTurnIds]);
+  const owningSegmentsForTurns = loadOwningSegments(db, [...allTurnIds]);
+  const turns = [...turnRows.values()].map((row) => {
+    const segmentId = owningSegmentsForTurns.get(row.id);
+    const input = {
+      id: row.id,
+      type: JSON.parse(row.type),
+      order: turnOrderKey(row.sessionId, row.promptNumber)
+    };
+    if (segmentId !== void 0) {
+      input.segment = String(segmentId);
+    }
+    return input;
+  }).sort((a, b) => a.id - b.id);
+  const edges = [...edgeMap.values()].map(toEdgeInput).sort((a, b) => {
+    if (a.citingId !== b.citingId) return a.citingId - b.citingId;
+    if (a.citedId !== b.citedId) return a.citedId - b.citedId;
+    return a.relation.localeCompare(b.relation);
+  });
+  return { turns, edges, involvedLaneKeys };
 }
 
 // src/shared/tag-stripping.ts
@@ -50129,7 +50703,7 @@ function stripPrivateTags(text) {
 }
 var RETIRED_TAG_NAMESPACE = "topic:";
 function findRetiredTopicTag(tags) {
-  return tags.find((tag) => tag.startsWith(RETIRED_TAG_NAMESPACE)) ?? null;
+  return tags.find((tag) => tag.toLocaleLowerCase("en-US").startsWith(RETIRED_TAG_NAMESPACE)) ?? null;
 }
 function retiredTopicTagMessage(tag) {
   const bare = tag.slice(RETIRED_TAG_NAMESPACE.length);
@@ -50475,26 +51049,15 @@ function formatRetractionReceipt(counts) {
   }
   return `Retracted ${counts.retracted} relation(s)` + (counts.restored > 0 ? `, ${counts.restored} bare citation(s) restored (the prose still names them).` : ".");
 }
-function collectGroundsMidFlowWarnings(db, flows, edges) {
-  if (!flows) {
-    return [];
+function isRelationTargetEntry(value) {
+  if (typeof value === "string") {
+    return true;
   }
-  const candidates = [];
-  for (const edge of edges) {
-    if (edge.relation !== "grounds") {
-      continue;
-    }
-    const citedTurn = getTurnById(db, edge.cited.id);
-    if (!citedTurn) {
-      continue;
-    }
-    const settlementRefs = settlementsOfTurn(flows, edge.cited.id).map((settlementId) => getTurnById(db, settlementId)).filter((turn) => turn !== null).map((turn) => `S${turn.sessionId}/T${turn.promptNumber}`);
-    candidates.push({
-      targetRef: `S${citedTurn.sessionId}/T${citedTurn.promptNumber}`,
-      settlementRefs
-    });
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
   }
-  return formatGroundsMidFlowWarnings(candidates);
+  const candidate = value;
+  return typeof candidate.turn === "string" && Array.isArray(candidate.tags) && candidate.tags.every((tag) => typeof tag === "string");
 }
 function collectRelationFields(entries, input) {
   const fields = [];
@@ -50503,8 +51066,10 @@ function collectRelationFields(entries, input) {
     if (provided === void 0) {
       continue;
     }
-    if (!Array.isArray(provided) || provided.some((value) => typeof value !== "string")) {
-      fail2(`${key} must be an array of strings when present.`);
+    if (!Array.isArray(provided) || provided.some((value) => !isRelationTargetEntry(value))) {
+      fail2(
+        `${key} must be an array of addresses (bare strings) or {turn, tags} objects when present.`
+      );
     }
     if (provided.length > 0) {
       fields.push({ relation, targets: provided });
@@ -50517,26 +51082,32 @@ function touchesEdgeFields(input) {
     ([key]) => input[key] !== void 0
   );
 }
-function checkRelationTargetPhase(db, relation, raw, citingTurnId, citingPhases, flows) {
+function checkRelationTargetPhase(db, relation, raw, tags, citingTurnId, citingPhases, citingTurnTags) {
   if (!isTurnEdgeRelation(relation)) {
-    return null;
+    return { issue: null, isSelfGrounds: false };
   }
   const reference = parseBareAddressReference(raw);
   if (!reference) {
-    return null;
+    return { issue: null, isSelfGrounds: false };
   }
   if (reference.kind === "segment") {
     const result2 = validateRelationTarget({
       relation,
       citingPhases,
       targetKind: "segment",
-      citedPhases: /* @__PURE__ */ new Set()
+      citedPhases: /* @__PURE__ */ new Set(),
+      tags,
+      citingTurnTags,
+      citedTurnTags: /* @__PURE__ */ new Set()
     });
-    return result2.ok ? null : `${relation} "${raw}" ${result2.detail}`;
+    return {
+      issue: result2.ok ? null : `${relation} "${raw}" ${result2.detail}`,
+      isSelfGrounds: false
+    };
   }
   const cited = getTurn(db, reference.sessionId, reference.promptNumber);
   if (!cited) {
-    return null;
+    return { issue: null, isSelfGrounds: false };
   }
   const isSelf = cited.id === citingTurnId;
   const result = validateRelationTarget({
@@ -50545,49 +51116,74 @@ function checkRelationTargetPhase(db, relation, raw, citingTurnId, citingPhases,
     targetKind: "turn",
     citedPhases: phasesForTypes(cited.type),
     isSelfReference: isSelf,
-    isSettlement: isSelf && flows !== null ? isFlowSettlement(flows, citingTurnId) : false
+    tags,
+    citingTurnTags,
+    citedTurnTags: new Set(cited.tags)
   });
   if (!result.ok) {
-    return `${relation} "${raw}" ${result.detail}`;
+    return { issue: `${relation} "${raw}" ${result.detail}`, isSelfGrounds: false };
   }
-  return null;
+  return { issue: null, isSelfGrounds: isSelf && relation === "grounds" };
 }
-function resolveRelationFields(db, citingTurnId, citingSessionId, citingTurnType, input, nowEpoch) {
+function checkSelfGroundsTerminusPostWrite(db, citingTurnId, selfGroundsRaws) {
+  if (selfGroundsRaws.length === 0) {
+    return null;
+  }
+  const declaredTagSets = /* @__PURE__ */ new Map();
+  for (const edge of getOutgoingEdges(db, { kind: "turn", id: citingTurnId })) {
+    if (edge.relation !== "indexes" || edge.tags.length === 0) {
+      continue;
+    }
+    const canon = canonicalTagSet(edge.tags);
+    declaredTagSets.set(canon.join(""), canon);
+  }
+  const segmentId = getOwningSegmentId(db, citingTurnId);
+  const segment = segmentId === null ? DEFAULT_SEGMENT : String(segmentId);
+  const laneKeys = [...declaredTagSets.values()].map((tagSet) => ({ segment, tagSet }));
+  const facts = [];
+  if (laneKeys.length > 0) {
+    const projection = loadLaneCheckScope(db, { kind: "lanes", laneKeys });
+    const interpretation = deriveLaneInterpretation(projection.turns, projection.edges);
+    for (const key of laneKeys) {
+      const lane = interpretation.laneByToken.get(laneToken(key.segment, key.tagSet));
+      facts.push({
+        relation: "indexes",
+        tags: key.tagSet,
+        isCurrentTerminus: lane?.declaration.terminus === citingTurnId
+      });
+    }
+  }
+  const result = checkSelfGroundsTerminus(facts);
+  if (result.ok) {
+    return null;
+  }
+  return selfGroundsRaws.map((raw) => `grounds "${raw}" ${result.detail}`).join("; ");
+}
+function resolveRelationFields(db, citingTurnId, citingTurnType, citingTurnTags, input, nowEpoch) {
   const fields = collectRelationFields(RELATION_FIELD_ENTRIES, input);
   if (fields.length === 0) {
     return null;
   }
   const citingPhases = phasesForTypes(citingTurnType);
-  const needsFlows = fields.some((field) => field.relation === "grounds");
-  let flows = null;
-  if (needsFlows) {
-    const sessionIds = /* @__PURE__ */ new Set([citingSessionId]);
-    for (const field of fields) {
-      if (field.relation !== "grounds") {
-        continue;
-      }
-      for (const raw of field.targets) {
-        const reference = parseBareAddressReference(raw);
-        if (reference && reference.kind === "turn") {
-          sessionIds.add(reference.sessionId);
-        }
-      }
-    }
-    flows = deriveFlowsForSessions(db, [...sessionIds]);
-  }
+  const citingTagsSet = new Set(citingTurnTags);
   const phaseIssues = [];
+  const selfGroundsRaws = [];
   for (const field of fields) {
-    for (const raw of field.targets) {
-      const issue3 = checkRelationTargetPhase(
+    for (const entry of field.targets) {
+      const { raw, tags } = normalizeRelationTargetEntry(entry);
+      const { issue: issue3, isSelfGrounds } = checkRelationTargetPhase(
         db,
         field.relation,
         raw,
+        tags,
         citingTurnId,
         citingPhases,
-        flows
+        citingTagsSet
       );
       if (issue3) {
         phaseIssues.push(issue3);
+      } else if (isSelfGrounds) {
+        selfGroundsRaws.push(raw);
       }
     }
   }
@@ -50598,7 +51194,11 @@ function resolveRelationFields(db, citingTurnId, citingSessionId, citingTurnType
   if (attach.rejected.length > 0) {
     fail2(formatRelationRejections(attach.rejected, "relation"));
   }
-  return { attach, flows };
+  const terminusIssue = checkSelfGroundsTerminusPostWrite(db, citingTurnId, selfGroundsRaws);
+  if (terminusIssue) {
+    fail2(`relation field rejected: ${terminusIssue}.`);
+  }
+  return { attach };
 }
 function resolveRetractionFields(db, citingTurnId, input, nowEpoch) {
   const fields = collectRelationFields(RETRACTION_FIELD_ENTRIES, input);
@@ -50691,6 +51291,32 @@ function handleTurnWrite(db, address, input, options) {
       crossSessionRequiredMessage(address, options.callerSessionId)
     );
   }
+  let targetSegment = null;
+  if (input.segment !== void 0) {
+    if (typeof input.segment !== "string" || input.segment.trim() === "") {
+      return parameterError('segment must be a non-empty "E<n>" address when present.');
+    }
+    const parsedSegment = parseBareAddressReference(input.segment);
+    if (!parsedSegment || parsedSegment.kind !== "segment") {
+      return parameterError(`segment must be an "E<n>" address; got "${input.segment}".`);
+    }
+    const segment = getSegment(db, parsedSegment.segmentId);
+    if (!segment) {
+      return parameterError(`no segment E${parsedSegment.segmentId}.`);
+    }
+    if (typeof options.callerSessionId !== "number") {
+      return parameterError(
+        `segment membership requires a known caller session to verify attachment to E${segment.id}; caller session unknown.`
+      );
+    }
+    const attachedIds = getAttachedSegmentIds(db, options.callerSessionId);
+    if (!attachedIds.includes(segment.id)) {
+      return parameterError(
+        `E${segment.id} is not attached to this session (S${options.callerSessionId}) \u2014 remember(attach, id="E${segment.id}") first, or name a segment this session has attached.`
+      );
+    }
+    targetSegment = segment;
+  }
   let modeMap;
   try {
     modeMap = parseModeMap(input.mode, TURN_MODE_FIELDS);
@@ -50704,9 +51330,9 @@ function handleTurnWrite(db, address, input, options) {
     (key) => input[key] !== void 0 || isFieldEditMode(modeMap[key])
   );
   const touchesEdges = touchesEdgeFields(input);
-  if (providedFields.length === 0 && !touchesEdges) {
+  if (providedFields.length === 0 && !touchesEdges && targetSegment === null) {
     return parameterError(
-      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (override/narrows/extends/indexes/consume/grounds/verifies/refutes) or one of their retract\u2026 mirrors is required.`
+      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (override/narrows/extends/indexes/consume/grounds/verifies/refutes), one of their retract\u2026 mirrors, or segment is required.`
     );
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
@@ -50852,6 +51478,23 @@ function handleTurnWrite(db, address, input, options) {
           updatedTurn = written;
         }
       }
+      let membership = null;
+      if (targetSegment) {
+        const gate = checkSegmentMembershipTagGate(db, targetSegment.id, [turn.id]);
+        if (!gate.ok) {
+          fail2(formatSegmentMembershipGateRejection(targetSegment.id, gate.violations));
+        }
+        const assigned = reassignSegmentMembers(
+          db,
+          [turn.id],
+          targetSegment.id,
+          nowEpoch
+        );
+        membership = {
+          segmentId: targetSegment.id,
+          vacatedSegmentIds: assigned.vacatedSegmentIds
+        };
+      }
       if (touchedProse && promotesTurnRecord) {
         citations = recomputeTurnCitedPairs(
           db,
@@ -50869,13 +51512,12 @@ function handleTurnWrite(db, address, input, options) {
       const relationsResolution = resolveRelationFields(
         db,
         turn.id,
-        turn.sessionId,
         updatedTurn.type,
+        updatedTurn.tags,
         input,
         nowEpoch
       );
       const relations = relationsResolution?.attach ?? null;
-      const relationFlows = relationsResolution?.flows ?? null;
       if ((touchedProse || wantsFieldsWrite) && writer) {
         if (titleResolution !== void 0) {
           stampField(db, "turn", turn.id, "title", writer, nowEpoch);
@@ -50900,9 +51542,9 @@ function handleTurnWrite(db, address, input, options) {
         finalTags: tagsResolution?.value,
         citations,
         relations,
-        relationFlows,
         retractions,
-        stripped
+        stripped,
+        membership
       };
     });
   } catch (error49) {
@@ -50980,12 +51622,10 @@ function handleTurnWrite(db, address, input, options) {
     } else if (restated > 0) {
       parts.push(`${restated} relation(s) already present, nothing added.`);
     }
-    for (const warning of collectGroundsMidFlowWarnings(db, result.relationFlows, [
-      ...result.relations.written,
-      ...result.relations.restated
-    ])) {
-      parts.push(warning);
-    }
+  }
+  if (result.membership) {
+    const vacatedNote = result.membership.vacatedSegmentIds.length > 0 ? ` Removed from prior segment(s): ${result.membership.vacatedSegmentIds.map((id) => `E${id}`).join(", ")}.` : "";
+    parts.push(`Assigned to E${result.membership.segmentId}.${vacatedNote}`);
   }
   return textResult(parts.join(" "));
 }
@@ -51017,13 +51657,14 @@ var REMEMBER_VERBS = [
   "write",
   "edit",
   "close",
-  "assign"
+  "assign",
+  "retag"
 ];
 var RETIRED_REMEMBER_VERB_REPLACEMENT = {
   append: "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
   replace: "use `edit` instead \u2014 same oldString/newString shape."
 };
-var FIELD_WRITING_VERBS = ["create", "write", "edit"];
+var FIELD_WRITING_VERBS = ["create", "write", "edit", "retag"];
 function isFieldWritingVerb(verb) {
   return FIELD_WRITING_VERBS.includes(verb);
 }
@@ -51119,6 +51760,7 @@ function handleCreate(db, input, options) {
   let title;
   let goal;
   let memberAddresses;
+  let tags;
   try {
     title = resolveProseField("title", input.title, { required: true });
     goal = resolveProseField("goal", input.goal, { required: false });
@@ -51128,6 +51770,13 @@ function handleCreate(db, input, options) {
       memberAddresses = input.members;
     } else {
       fail3("members must be an array of strings when present.");
+    }
+    if (input.tags === void 0) {
+      tags = [];
+    } else if (Array.isArray(input.tags) && input.tags.every((value) => typeof value === "string")) {
+      tags = input.tags;
+    } else {
+      fail3("tags must be an array of strings when present.");
     }
   } catch (error49) {
     if (error49 instanceof RememberValidationError) {
@@ -51146,6 +51795,7 @@ function handleCreate(db, input, options) {
       }
       let segment = createSegment(db, {
         title,
+        tags,
         nowEpoch
       });
       if (turnIds.length > 0) {
@@ -51179,6 +51829,9 @@ function handleCreate(db, input, options) {
   );
   if (result.goalSeeded) {
     parts.push("goal: 1 row seeded.");
+  }
+  if (result.segment.tags.length > 0) {
+    parts.push(`tags: ${result.segment.tags.join(", ")}.`);
   }
   return textResult2(parts.join(" "));
 }
@@ -51518,10 +52171,25 @@ function handleAssign(db, input, options) {
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const result = writeTransaction(
-    db,
-    () => reassignSegmentMembers(db, turnIds, targetSegment?.id ?? null, nowEpoch)
-  );
+  const outcome = writeTransaction(db, () => {
+    if (targetSegment) {
+      const gate = checkSegmentMembershipTagGate(db, targetSegment.id, turnIds);
+      if (!gate.ok) {
+        return {
+          kind: "gate-rejected",
+          message: formatSegmentMembershipGateRejection(targetSegment.id, gate.violations)
+        };
+      }
+    }
+    return {
+      kind: "ok",
+      result: reassignSegmentMembers(db, turnIds, targetSegment?.id ?? null, nowEpoch)
+    };
+  });
+  if (outcome.kind === "gate-rejected") {
+    return parameterError2(outcome.message);
+  }
+  const result = outcome.result;
   const parts = [
     targetSegment ? `Assigned ${result.addedTurnIds.length} turn(s) to E${targetSegment.id}.` : `Cleared ownership on ${turnIds.length} turn(s) \u2014 now homeless.`
   ];
@@ -51531,6 +52199,38 @@ function handleAssign(db, input, options) {
     );
   }
   return textResult2(parts.join(" "));
+}
+function handleRetag(db, input, options) {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError2('id is required for retag \u2014 an "E<n>" address.');
+  }
+  if (!Array.isArray(input.tags) || input.tags.some((value) => typeof value !== "string")) {
+    return parameterError2(
+      "tags is required for retag \u2014 an array of strings, the full replacement set ([] clears every tag)."
+    );
+  }
+  const resolution = resolveSegmentTarget(db, input.id);
+  if (!resolution.ok) {
+    return parameterError2(resolution.message);
+  }
+  if (resolution.segment.status === "closed") {
+    return parameterError2(
+      `E${resolution.segment.id} is closed \u2014 segment tags may only change on an open segment; remember(close, id="E${resolution.segment.id}") reopens it.`
+    );
+  }
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const tags = input.tags;
+  const updated = writeTransaction(
+    db,
+    () => setSegmentTags(db, resolution.segment.id, tags, nowEpoch)
+  );
+  if (!updated) {
+    return parameterError2(`E${resolution.segment.id} no longer exists.`);
+  }
+  return textResult2(
+    `Retagged E${updated.id}: ${updated.tags.length > 0 ? updated.tags.join(", ") : "(none)"}. Gates every NEW assignment from now on; existing members are grandfathered, untouched.`
+  );
 }
 function isParameterError(result) {
   return result.content[0]?.text.startsWith("Parameter error:") ?? false;
@@ -51560,6 +52260,8 @@ function rememberTool(db, rawInput, options = {}) {
         return handleClose(db, rawInput, options);
       case "assign":
         return handleAssign(db, rawInput, options);
+      case "retag":
+        return handleRetag(db, rawInput, options);
     }
   })();
   if (typeof options.callerSessionId === "number" && !isParameterError(result) && isFieldWritingVerb(rawInput.verb)) {
@@ -51751,6 +52453,441 @@ function buildIsolatedEnv(workerEnv, capturedSessionEnv) {
   return isolatedEnv;
 }
 
+// src/shared/lane-checker.ts
+var STANCE_RELATION_WORDS = STANCE_RELATIONS;
+var LANE_COMPONENT_RELATIONS = /* @__PURE__ */ new Set([
+  ...STANCE_RELATIONS,
+  "consume",
+  "grounds"
+]);
+var LANE_PATH_RELATIONS = /* @__PURE__ */ new Set([...STANCE_RELATIONS, "consume"]);
+var UnionFind = class {
+  parent = /* @__PURE__ */ new Map();
+  add(id) {
+    if (!this.parent.has(id)) {
+      this.parent.set(id, id);
+    }
+  }
+  find(id) {
+    const parent = this.parent.get(id);
+    if (parent === void 0) {
+      this.parent.set(id, id);
+      return id;
+    }
+    if (parent === id) {
+      return id;
+    }
+    const root2 = this.find(parent);
+    this.parent.set(id, root2);
+    return root2;
+  }
+  union(a, b) {
+    const rootA = this.find(a);
+    const rootB = this.find(b);
+    if (rootA !== rootB) {
+      this.parent.set(rootA, rootB);
+    }
+  }
+};
+function countPaths(terminus, starts, out) {
+  const memo = /* @__PURE__ */ new Map();
+  const inProgress = /* @__PURE__ */ new Set();
+  const count = (node) => {
+    if (starts.has(node)) {
+      return 1;
+    }
+    const cached3 = memo.get(node);
+    if (cached3 !== void 0) {
+      return cached3;
+    }
+    if (inProgress.has(node)) {
+      return 0;
+    }
+    inProgress.add(node);
+    let sum = 0;
+    for (const next of out.get(node) ?? []) {
+      sum += count(next);
+    }
+    inProgress.delete(node);
+    memo.set(node, sum);
+    return sum;
+  };
+  return count(terminus);
+}
+function buildPathGraph(edgePairs) {
+  const out = /* @__PURE__ */ new Map();
+  const nodes = /* @__PURE__ */ new Set();
+  for (const [citingId, citedId] of edgePairs) {
+    nodes.add(citingId);
+    nodes.add(citedId);
+    let bucket = out.get(citingId);
+    if (bucket === void 0) {
+      bucket = /* @__PURE__ */ new Set();
+      out.set(citingId, bucket);
+    }
+    bucket.add(citedId);
+  }
+  const starts = /* @__PURE__ */ new Set();
+  for (const node of nodes) {
+    if ((out.get(node)?.size ?? 0) === 0) {
+      starts.add(node);
+    }
+  }
+  return { starts, out };
+}
+function zeroIndegreeNodes(out, nodes) {
+  const hasIncoming = /* @__PURE__ */ new Set();
+  for (const targets of out.values()) {
+    for (const target of targets) {
+      hasIncoming.add(target);
+    }
+  }
+  return [...nodes].filter((node) => !hasIncoming.has(node)).sort((a, b) => a - b);
+}
+function findForkJoinNodes(out) {
+  const inDegree = /* @__PURE__ */ new Map();
+  const joinNodes = [];
+  for (const [citingId, targets] of out) {
+    if (targets.size > 1) {
+      joinNodes.push(citingId);
+    }
+    for (const target of targets) {
+      inDegree.set(target, (inDegree.get(target) ?? 0) + 1);
+    }
+  }
+  const forkNodes = [...inDegree.entries()].filter(([, degree]) => degree > 1).map(([id]) => id).sort((a, b) => a - b);
+  joinNodes.sort((a, b) => a - b);
+  return { forkNodes, joinNodes };
+}
+function checkLanes(turns, edges) {
+  const { lanes, warnings } = deriveLaneInterpretation(turns, edges);
+  const turnById = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    turnById.set(turn.id, turn);
+  }
+  const segmentFor = (id) => turnById.get(id)?.segment ?? DEFAULT_SEGMENT;
+  const uf = new UnionFind();
+  for (const turn of turns) {
+    uf.add(turn.id);
+  }
+  for (const edge of edges) {
+    uf.add(edge.citingId);
+    uf.add(edge.citedId);
+    if (LANE_COMPONENT_RELATIONS.has(edge.relation) && segmentFor(edge.citingId) === segmentFor(edge.citedId)) {
+      uf.union(edge.citingId, edge.citedId);
+    }
+  }
+  const laneStats = [];
+  const componentReports = [];
+  const pathReports = [];
+  const componentLanes = /* @__PURE__ */ new Map();
+  const componentNodeLanes = /* @__PURE__ */ new Map();
+  const stanceCitersByNode = /* @__PURE__ */ new Map();
+  for (const lane of lanes) {
+    const memberIds = new Set(lane.members.map((member) => member.id));
+    const thisLaneToken = laneToken(lane.key.segment, lane.key.tagSet);
+    laneStats.push(buildLaneStats(lane, memberIds, turnById, edges));
+    for (const edge of lane.taggedEdges) {
+      if (!STANCE_RELATION_WORDS.has(edge.relation)) continue;
+      for (const nodeId of [edge.citedId, edge.citingId]) {
+        let bucket = stanceCitersByNode.get(nodeId);
+        if (bucket === void 0) {
+          bucket = /* @__PURE__ */ new Map();
+          stanceCitersByNode.set(nodeId, bucket);
+        }
+        bucket.set(thisLaneToken, lane.key);
+      }
+    }
+    const islandsByRoot = /* @__PURE__ */ new Map();
+    for (const id of memberIds) {
+      const root2 = uf.find(id);
+      const bucket = islandsByRoot.get(root2);
+      if (bucket === void 0) {
+        islandsByRoot.set(root2, [id]);
+      } else {
+        bucket.push(id);
+      }
+      const laneKeyList = componentLanes.get(root2);
+      if (laneKeyList === void 0) {
+        componentLanes.set(root2, [lane.key]);
+      } else if (!laneKeyList.some((key) => sameLaneKey(key, lane.key))) {
+        laneKeyList.push(lane.key);
+      }
+      let nodeLaneMap = componentNodeLanes.get(root2);
+      if (nodeLaneMap === void 0) {
+        nodeLaneMap = /* @__PURE__ */ new Map();
+        componentNodeLanes.set(root2, nodeLaneMap);
+      }
+      let laneTokens = nodeLaneMap.get(id);
+      if (laneTokens === void 0) {
+        laneTokens = /* @__PURE__ */ new Set();
+        nodeLaneMap.set(id, laneTokens);
+      }
+      laneTokens.add(thisLaneToken);
+    }
+    const islands = [...islandsByRoot.entries()].map(([, ids]) => {
+      const sorted = ids.sort((a, b) => a - b);
+      return { representative: sorted[0], memberIds: sorted };
+    }).sort((a, b) => a.representative - b.representative);
+    componentReports.push({ key: lane.key, componentCount: islands.length, islands });
+    pathReports.push(buildPathReport(lane, memberIds, edges, lanes));
+  }
+  const multiLaneComponents = [...componentLanes.entries()].filter(([, laneKeys]) => laneKeys.length > 1).map(([representative, laneKeys]) => {
+    const nodeLaneMap = componentNodeLanes.get(representative) ?? /* @__PURE__ */ new Map();
+    const sharedNodes = [...nodeLaneMap.entries()].filter(([, laneTokens]) => laneTokens.size > 1).map(([id]) => {
+      const citers = stanceCitersByNode.get(id);
+      const citingLanesByStance = citers ? [...citers.values()] : [];
+      return { id, citingLanesByStance, designedShape: citingLanesByStance.length >= 2 };
+    }).sort((a, b) => a.id - b.id);
+    return { representative, lanes: laneKeys, sharedNodes };
+  }).sort((a, b) => a.representative - b.representative);
+  return { lanes: laneStats, components: componentReports, multiLaneComponents, paths: pathReports, warnings };
+}
+function sameLaneKey(a, b) {
+  return laneToken(a.segment, a.tagSet) === laneToken(b.segment, b.tagSet);
+}
+function buildLaneStats(lane, memberIds, turnById, allEdges) {
+  const phases = /* @__PURE__ */ new Set();
+  for (const member of lane.members) {
+    const turn = turnById.get(member.id);
+    if (turn === void 0) {
+      continue;
+    }
+    for (const phase of phasesForTypes(turn.type)) {
+      phases.add(phase);
+    }
+  }
+  const edgeCountsByRelation = {};
+  for (const edge of lane.taggedEdges) {
+    edgeCountsByRelation[edge.relation] = (edgeCountsByRelation[edge.relation] ?? 0) + 1;
+  }
+  const groundsFromNonMembers = [];
+  const testimonyFromNonMembers = [];
+  for (const edge of allEdges) {
+    if (!memberIds.has(edge.citedId) || memberIds.has(edge.citingId)) {
+      continue;
+    }
+    if (edge.relation === "grounds") {
+      groundsFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
+    } else if (edge.relation === "verifies" || edge.relation === "refutes") {
+      testimonyFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
+    }
+  }
+  const missingTurnIds = [...memberIds].filter((id) => !turnById.has(id)).sort((a, b) => a - b);
+  return {
+    key: lane.key,
+    phases: [...phases],
+    members: lane.members,
+    edgeCountsByRelation,
+    declaration: lane.declaration,
+    citedness: { groundsFromNonMembers, testimonyFromNonMembers },
+    coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds }
+  };
+}
+function buildPathReport(lane, memberIds, allEdges, allLanes) {
+  const structuralPairs = lane.taggedEdges.filter((edge) => LANE_PATH_RELATIONS.has(edge.relation)).map((edge) => [edge.citingId, edge.citedId]);
+  const baseGraph = buildPathGraph(structuralPairs);
+  const { forkNodes, joinNodes } = findForkJoinNodes(baseGraph.out);
+  if (lane.declaration.state !== "declared" || lane.declaration.terminus === null) {
+    return {
+      key: lane.key,
+      status: "skipped",
+      skipReason: lane.declaration.state === "reopened" ? "reopened" : "undeclared",
+      starts: [...baseGraph.starts].sort((a, b) => a - b),
+      terminus: null,
+      pathCount: null,
+      forkNodes,
+      joinNodes,
+      folded: null
+    };
+  }
+  const terminus = lane.declaration.terminus;
+  const pathCount = countPaths(terminus, baseGraph.starts, baseGraph.out);
+  const crossPhaseGrounds = allEdges.filter(
+    (edge) => edge.relation === "grounds" && memberIds.has(edge.citedId) && !memberIds.has(edge.citingId)
+  );
+  const thisLaneToken = laneToken(lane.key.segment, lane.key.tagSet);
+  const foldedInLanes = /* @__PURE__ */ new Set([thisLaneToken]);
+  const citerLanePairs = [];
+  for (const citerId of new Set(crossPhaseGrounds.map((edge) => edge.citingId))) {
+    for (const otherLane of allLanes) {
+      const token = laneToken(otherLane.key.segment, otherLane.key.tagSet);
+      if (foldedInLanes.has(token)) continue;
+      if (!otherLane.members.some((member) => member.id === citerId)) continue;
+      foldedInLanes.add(token);
+      for (const edge of otherLane.taggedEdges) {
+        if (LANE_PATH_RELATIONS.has(edge.relation)) {
+          citerLanePairs.push([edge.citingId, edge.citedId]);
+        }
+      }
+    }
+  }
+  const foldedPairs = [
+    ...structuralPairs,
+    ...crossPhaseGrounds.map((edge) => [edge.citingId, edge.citedId]),
+    ...citerLanePairs
+  ];
+  const foldedGraph = buildPathGraph(foldedPairs);
+  const foldedNodes = /* @__PURE__ */ new Set([terminus]);
+  for (const [citingId, citedId] of foldedPairs) {
+    foldedNodes.add(citingId);
+    foldedNodes.add(citedId);
+  }
+  const foldedSources = zeroIndegreeNodes(foldedGraph.out, foldedNodes);
+  const foldedPathCount = foldedSources.reduce(
+    (sum, source) => sum + countPaths(source, foldedGraph.starts, foldedGraph.out),
+    0
+  );
+  return {
+    key: lane.key,
+    status: "ok",
+    starts: [...baseGraph.starts].sort((a, b) => a - b),
+    terminus,
+    pathCount,
+    forkNodes,
+    joinNodes,
+    folded: {
+      citingTurnsFolded: [...new Set(crossPhaseGrounds.map((edge) => edge.citingId))].sort((a, b) => a - b),
+      pathCount: foldedPathCount
+    }
+  };
+}
+
+// src/shared/lane-checker-render.ts
+function formatTagSet(key) {
+  const scope = key.segment === DEFAULT_SEGMENT ? "default" : "E" + key.segment;
+  return scope + ":{" + key.tagSet.join(",") + "}";
+}
+function formatMembers(members) {
+  return members.map((member) => member.dead ? member.id + "(dead)" : String(member.id)).join(", ");
+}
+function renderStatsReport(lane) {
+  const lines = [];
+  lines.push("Lane " + formatTagSet(lane.key) + " - phases: " + (lane.phases.join(",") || "(none)"));
+  lines.push("  members: " + formatMembers(lane.members));
+  const edgeCounts = Object.entries(lane.edgeCountsByRelation).map(([relation, count]) => relation + "=" + count).join(" ");
+  lines.push("  edges: " + (edgeCounts || "(none)"));
+  lines.push(
+    "  declaration: " + lane.declaration.state + (lane.declaration.terminus !== null ? " (terminus " + lane.declaration.terminus + ")" : "") + (lane.declaration.latestEventTurn !== null ? " [last event T" + lane.declaration.latestEventTurn + "]" : "")
+  );
+  const grounds = lane.citedness.groundsFromNonMembers.map(
+    (fact) => "T" + fact.citingId + "->T" + fact.citedId
+  );
+  const testimony = lane.citedness.testimonyFromNonMembers.map(
+    (fact) => "T" + fact.citingId + " " + fact.relation + " T" + fact.citedId
+  );
+  lines.push(
+    "  cited from outside: grounds[" + (grounds.join(", ") || "-") + "] testimony[" + (testimony.join(", ") || "-") + "]"
+  );
+  lines.push(
+    "  coverage: " + lane.coverage.status + (lane.coverage.missingTurnIds.length > 0 ? " (missing: " + lane.coverage.missingTurnIds.join(",") + ")" : "")
+  );
+  return lines;
+}
+function renderComponentReport(component) {
+  const lines = [];
+  const health = component.componentCount === 1 ? "healthy" : "SEVERED";
+  lines.push(
+    "Lane " + formatTagSet(component.key) + " - components: " + component.componentCount + " (" + health + ")"
+  );
+  for (const island of component.islands) {
+    lines.push("  island@" + island.representative + ": " + island.memberIds.join(","));
+  }
+  return lines;
+}
+function renderFoldedPaths(folded) {
+  const folding = folded.citingTurnsFolded.length > 0 ? folded.citingTurnsFolded.join(",") : "-";
+  return "folded pathCount=" + folded.pathCount + " (citing turns folded: " + folding + ")";
+}
+function renderForkJoin(path2) {
+  if (path2.forkNodes.length === 0 && path2.joinNodes.length === 0) {
+    return null;
+  }
+  return "fork: " + (path2.forkNodes.join(",") || "-") + " join: " + (path2.joinNodes.join(",") || "-");
+}
+function renderPathReport(path2) {
+  const lines = [];
+  if (path2.status === "skipped") {
+    lines.push(
+      "Lane " + formatTagSet(path2.key) + " - paths: skipped (" + path2.skipReason + "); starts: " + (path2.starts.join(",") || "-")
+    );
+    const skippedForkJoin = renderForkJoin(path2);
+    if (skippedForkJoin) {
+      lines.push("  " + skippedForkJoin);
+    }
+    return lines;
+  }
+  lines.push(
+    "Lane " + formatTagSet(path2.key) + " - paths: " + path2.pathCount + " (terminus T" + path2.terminus + "; starts: " + (path2.starts.join(",") || "-") + ")"
+  );
+  if (path2.folded) {
+    lines.push("  " + renderFoldedPaths(path2.folded));
+  }
+  const forkJoin = renderForkJoin(path2);
+  if (forkJoin) {
+    lines.push("  " + forkJoin);
+  }
+  return lines;
+}
+function renderSharedNodes(shared) {
+  return shared.sharedNodes.map(
+    (node) => "  shared T" + node.id + (node.designedShape ? " (designed fork/merge)" : " (judgment)") + ": " + node.citingLanesByStance.map(formatTagSet).join(", ")
+  );
+}
+function renderCrossSegmentWarning(warning) {
+  return "\u26A0 T" + warning.citingId + "(" + warning.citingSegment + ") -> T" + warning.citedId + "(" + warning.citedSegment + ") {" + warning.tagSet.join(",") + "}";
+}
+function renderLaneCheckerReports(result) {
+  const sections = [];
+  sections.push("## Report 1 -- lane statistics");
+  if (result.lanes.length === 0) {
+    sections.push("(no lanes in scope)");
+  } else {
+    for (const lane of result.lanes) {
+      sections.push(...renderStatsReport(lane));
+    }
+  }
+  sections.push("");
+  sections.push("## Report 2 -- component integrity");
+  if (result.components.length === 0) {
+    sections.push("(no lanes in scope)");
+  } else {
+    for (const component of result.components) {
+      sections.push(...renderComponentReport(component));
+    }
+  }
+  sections.push("");
+  sections.push("## Report 3 -- shared components (multi-lane entanglement)");
+  if (result.multiLaneComponents.length === 0) {
+    sections.push("(none)");
+  } else {
+    for (const shared of result.multiLaneComponents) {
+      sections.push("component@" + shared.representative + ": " + shared.lanes.map(formatTagSet).join(", "));
+      sections.push(...renderSharedNodes(shared));
+    }
+  }
+  sections.push("");
+  sections.push("## Report 4 -- start-to-terminus path counts");
+  if (result.paths.length === 0) {
+    sections.push("(no lanes in scope)");
+  } else {
+    for (const path2 of result.paths) {
+      sections.push(...renderPathReport(path2));
+    }
+  }
+  sections.push("");
+  sections.push("## Cross-segment warnings");
+  if (result.warnings.length === 0) {
+    sections.push("(none)");
+  } else {
+    sections.push(result.warnings.length + " cross-segment tagged edge(s):");
+    for (const warning of result.warnings) {
+      sections.push(renderCrossSegmentWarning(warning));
+    }
+  }
+  return sections.join("\n");
+}
+
 // src/worker/claude-executable.ts
 var import_node_fs5 = require("node:fs");
 var import_node_child_process = require("node:child_process");
@@ -51940,6 +53077,15 @@ function evaluateReassign(db, context, rawInput, nowEpoch) {
       ok: false,
       message: "reassign requires at least one DISTINCT turn address after de-duplication."
     };
+  }
+  if (targetSegmentId !== null) {
+    const gate = checkSegmentMembershipTagGate(db, targetSegmentId, turnIds);
+    if (!gate.ok) {
+      return {
+        ok: false,
+        message: formatSegmentMembershipGateRejection(targetSegmentId, gate.violations)
+      };
+    }
   }
   const result = reassignSegmentMembers(db, turnIds, targetSegmentId, nowEpoch);
   return {
@@ -52373,29 +53519,19 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
     const typeCorrectionLands = review?.type === void 0 || review.type.landed;
     return phasesForTypes(typeCorrectionLands ? normalizedType2 ?? turn.type : turn.type);
   };
-  let relationFlows = null;
+  const citingTurnTags = () => {
+    const tagsCorrectionLands = review?.tags === void 0 || review.tags.landed;
+    return new Set(tagsCorrectionLands ? landedUpdate.tags ?? turn.tags : turn.tags);
+  };
+  const selfGroundsRaws = [];
   if (relationFields.length > 0) {
     const phases = citingPhases();
-    const needsFlows = relationFields.some((field) => field.relation === "grounds");
-    if (needsFlows) {
-      const sessionIds = /* @__PURE__ */ new Set([context.sessionId]);
-      for (const field of relationFields) {
-        if (field.relation !== "grounds") {
-          continue;
-        }
-        for (const raw of field.targets) {
-          const reference = parseBareAddressReference(raw);
-          if (reference && reference.kind === "turn") {
-            sessionIds.add(reference.sessionId);
-          }
-        }
-      }
-      relationFlows = deriveFlowsForSessions(db, [...sessionIds]);
-    }
+    const citingTags = citingTurnTags();
     const rejections = [];
     for (const field of relationFields) {
       const key = RELATION_FIELD_ENTRIES.find(([, relation]) => relation === field.relation)[0];
-      for (const raw of field.targets) {
+      for (const entry of field.targets) {
+        const { raw, tags } = normalizeRelationTargetEntry(entry);
         const reference = parseBareAddressReference(raw);
         if (!reference) {
           rejections.push(`${key} "${raw}" is not a valid address`);
@@ -52411,18 +53547,25 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
           continue;
         }
         const isSelf = node.kind === "turn" && node.id === turn.id;
-        const citedPhases = node.kind === "turn" ? phasesForTypes(getTurnById(db, node.id)?.type ?? []) : /* @__PURE__ */ new Set();
+        const citedTurn = node.kind === "turn" ? getTurnById(db, node.id) : null;
+        const citedPhases = node.kind === "turn" ? phasesForTypes(citedTurn?.type ?? []) : /* @__PURE__ */ new Set();
+        const citedTags = node.kind === "turn" ? new Set(citedTurn?.tags ?? []) : /* @__PURE__ */ new Set();
         const legality = validateRelationTarget({
           relation: field.relation,
           citingPhases: phases,
           targetKind: node.kind,
           citedPhases,
           isSelfReference: isSelf,
-          isSettlement: isSelf && relationFlows !== null ? isFlowSettlement(relationFlows, turn.id) : false
+          tags,
+          citingTurnTags: citingTags,
+          citedTurnTags: citedTags
         });
         if (!legality.ok) {
           rejections.push(`${key} "${raw}" ${legality.detail}`);
           continue;
+        }
+        if (isSelf && field.relation === "grounds") {
+          selfGroundsRaws.push(raw);
         }
       }
     }
@@ -52501,18 +53644,20 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
     if (attached.rejected.length > 0) {
       return { ok: false, message: formatRelationRejections(attached.rejected, "relation") };
     }
+    if (selfGroundsRaws.length > 0) {
+      const terminusIssue = checkSelfGroundsTerminusPostWrite(db, turn.id, selfGroundsRaws);
+      if (terminusIssue) {
+        return { ok: false, message: `relation field rejected: ${terminusIssue}.` };
+      }
+    }
     relations = {
       written: attached.written.length,
       restated: attached.restated.length,
       retracted,
-      restored,
-      groundsWarnings: collectGroundsMidFlowWarnings(db, relationFlows, [
-        ...attached.written,
-        ...attached.restated
-      ])
+      restored
     };
   } else if (retracted > 0) {
-    relations = { written: 0, restated: 0, retracted, restored, groundsWarnings: [] };
+    relations = { written: 0, restated: 0, retracted, restored };
   }
   return {
     ok: true,
@@ -52593,9 +53738,6 @@ function renderSettlementTurnWriteReceipt(outcome) {
       );
     } else if (outcome.relations.restated > 0) {
       parts.push(`${outcome.relations.restated} relation(s) already present, nothing added.`);
-    }
-    for (const warning of outcome.relations.groundsWarnings) {
-      parts.push(warning);
     }
   }
   if (outcome.session) {
@@ -52829,10 +53971,12 @@ var SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__timeline",
   "mcp__mnemo__note",
   "mcp__mnemo__remember",
-  "mcp__mnemo__commit"
+  "mcp__mnemo__commit",
+  "mcp__mnemo__lane_check"
 ];
-var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s note, type/tags or edges, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the window or preceding-turns section) or `session` ("S<session>", this session). On `turn`: title/content/insight, type/tags and the edge fields, only for a turn shown in this prompt; omit to leave alone. A first note for a turn needs title and content together. A field that already holds something needs `mode.<field>: "write"` (the full replacement text or set) or the edit form `{ mode: "edit", oldString, newString }` for one exactly-matched span \u2014 the same rule, and the same words, the main agent\'s own `note` uses; a whole-field `write` over text this prompt showed only truncated is refused, and the edit form is the way through. Each field is checked and applied INDEPENDENTLY: if another writer (the main agent\'s own later note, or a prior settlement attempt) touched a field since this dispatch\'s context was read, that ONE field yields (reported in the receipt, not written) while the other still lands. override/narrows/extends/collects/consume/grounds/verifies/refutes: address lists \u2014 the SAME eight relations and legality validator the main agent\'s own `note` tool uses. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (wrong phase, an out-of-branch collects target, an illegal self-citation) is rejected, naming what is missing. Each has a retract\u2026 mirror (retractOverride \u2026) that deletes that edge; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own \u5173\u7CFB checklist above \u2014 this call only enforces address/phase/flow shape. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`.';
+var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s note, type/tags or edges, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the window or preceding-turns section) or `session` ("S<session>", this session). On `turn`: title/content/insight, type/tags and the edge fields, only for a turn shown in this prompt; omit to leave alone. A first note for a turn needs title and content together. A field that already holds something needs `mode.<field>: "write"` (the full replacement text or set) or the edit form `{ mode: "edit", oldString, newString }` for one exactly-matched span \u2014 the same rule, and the same words, the main agent\'s own `note` uses; a whole-field `write` over text this prompt showed only truncated is refused, and the edit form is the way through. Each field is checked and applied INDEPENDENTLY: if another writer (the main agent\'s own later note, or a prior settlement attempt) touched a field since this dispatch\'s context was read, that ONE field yields (reported in the receipt, not written) while the other still lands. override/narrows/extends/indexes/consume/grounds/verifies/refutes: address lists \u2014 the SAME eight relations and legality validator the main agent\'s own `note` tool uses. Each entry is a bare address (untagged \u2014 acts on the cited turn itself) or `{turn, tags}` (acts on that lane instead); every tag must already be on both this turn\'s and the target\'s own tags. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (wrong phase, an illegal tag, an illegal self-citation) is rejected, naming what is missing. Each has a retract\u2026 mirror (retractOverride \u2026) that deletes that edge; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own vocabulary above \u2014 this call only enforces phase domains, tag legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`.';
 var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = `WRITE a text-only task proposal, a membership correction, or a new segment \u2014 lands immediately, in this same call. action: "propose", "reassign" or "create". propose: addresses (one or more "S<session>/T<prompt>" turn addresses \u2014 a single homeless turn may open its own proposal, or name a cluster forming ONE coherent task) + title (a short suggested name) \u2014 stores a text-only suggestion for the user to confirm next session. Idempotent on the address SET (order-independent): repeating the same set (even after a retry) matches the earlier proposal instead of storing a second one. NEVER creates a segment and is never auto-adopted \u2014 do not propose an incoherent grab-bag. reassign: turns (one or more "S<session>/T<prompt>" addresses to correct) + id (any OPEN "E<n>", on this session's roster or not \u2014 a turn's right home is often a segment this session never attached) or id omitted to clear ownership (homeless). Correct a DISPLAYED mismatch; a closed segment, or an id naming nothing, is refused. create: title (the new segment's own name, written for the task's actual shape) + optional turns to seed as its members. The segment is attached to this session, so the next window sees it on the roster \u2014 check that roster first: joining an existing segment beats minting a new one. Never required \u2014 this window may finish without ever calling this tool.`;
+var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own scope (no parameters) and return its four reports as compact numbers and names \u2014 never a digraph, never a write. Report 1: per-lane statistics (members, edge counts, declaration state, who cites a member from outside). Report 2: whether each lane's members sit in one connected component (severed if not). Report 3: components several lanes' members share. Report 4: start-to-terminus path counts, plain and folded across cross-phase citations. Treat a finding as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never call this more than once, and never let its output alone justify a write without the usual Memory Rubric judgment.";
 var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls.";
 function textResult5(text) {
   return { content: [{ type: "text", text }] };
@@ -52874,9 +54018,10 @@ function createNoteSettlementSdkQuery(options) {
       jobId: request.jobId,
       claimGeneration: request.claimGeneration
     });
+    let laneCheckCalled = false;
     const server = createSdkMcpServerImpl({
       name: "mnemo",
-      version: "0.15.0",
+      version: "0.16.0",
       tools: [
         toolImpl(
           "recall",
@@ -52911,6 +54056,22 @@ function createNoteSettlementSdkQuery(options) {
           SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
           {},
           async () => writes.commit()
+        ),
+        toolImpl(
+          "lane_check",
+          SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
+          {},
+          async () => {
+            laneCheckCalled = true;
+            const projection = loadLaneCheckScope(options.db, {
+              kind: "range",
+              sessionId: request.sessionId,
+              promptStart: request.windowStart,
+              promptEnd: request.windowEnd
+            });
+            const result = checkLanes(projection.turns, projection.edges);
+            return textResult5(renderLaneCheckerReports(result));
+          }
         )
       ]
     });
@@ -52952,7 +54113,11 @@ function createNoteSettlementSdkQuery(options) {
       if (envelope === null) {
         throw new Error("note settlement query returned no result envelope");
       }
-      return { text: envelope, commitMetrics: writes.getLastCommitMetrics() };
+      return {
+        text: envelope,
+        commitMetrics: writes.getLastCommitMetrics(),
+        laneCheckCalled
+      };
     } finally {
       if (request.signal) {
         request.signal.removeEventListener("abort", forwardAbort);
@@ -55382,7 +56547,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.15.0",
+        version: "0.16.0",
         tools: [
           toolImpl(
             "recall",

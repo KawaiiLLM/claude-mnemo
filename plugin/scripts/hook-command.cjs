@@ -439,7 +439,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.15.0-mt440r9q" : "dev";
+var BUILD_ID = true ? "0.16.0-mt4ti6m1" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -471,6 +471,21 @@ var EDGE_PROVENANCES = [
   "judged",
   "asserted"
 ];
+function canonicalizeTagSet(tags) {
+  if (!Array.isArray(tags)) {
+    return [];
+  }
+  const set2 = /* @__PURE__ */ new Set();
+  for (const tag of tags) {
+    if (typeof tag === "string" && tag.length > 0) {
+      set2.add(tag);
+    }
+  }
+  return [...set2].sort();
+}
+function parseTagSet(raw) {
+  return canonicalizeTagSet(JSON.parse(raw));
+}
 var PROVENANCE_RANK = {
   retrieval: 0,
   rollback: 1,
@@ -491,19 +506,23 @@ function isEdgeProvenance(value) {
   return typeof value === "string" && EDGE_PROVENANCES.includes(value);
 }
 var EDGE_COLUMNS = `
+  id,
   citing_kind AS citingKind,
   citing_id AS citingId,
   cited_kind AS citedKind,
   cited_id AS citedId,
   relation,
   provenance,
+  tags,
   created_at_epoch AS createdAtEpoch
 `;
 function mapEdgeRow(row) {
   return {
+    id: row.id,
     citing: { kind: row.citingKind, id: row.citingId },
     cited: { kind: row.citedKind, id: row.citedId },
     relation: row.relation,
+    tags: parseTagSet(row.tags),
     provenance: row.provenance,
     createdAtEpoch: row.createdAtEpoch
   };
@@ -521,9 +540,13 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     `
       INSERT INTO memory_edges (
         citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation)
+        relation, provenance, tags, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      -- rubric-v10 ticket 01: tags joins the conflict target \u2014 identity is
+      -- now (pair, relation, tag set), so a DIFFERENT canonical set on the
+      -- same (pair, relation) is a fresh INSERT (a second, independent row),
+      -- never a conflict against an existing differently-tagged row.
+      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation, tags)
         -- D2: a repeat of the same claim is a NO-OP, not a correction. The
         -- assignment is deliberately the stored value itself: SQLite only
         -- runs RETURNING on a row the statement touched, and this write's
@@ -532,6 +555,9 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         DO UPDATE SET relation = memory_edges.relation
       RETURNING ${EDGE_COLUMNS}
     `
+  );
+  const insertTagIndexRow = db.query(
+    `INSERT OR IGNORE INTO memory_edge_tags (edge_row_id, tag) VALUES (?, ?)`
   );
   const insertBarePairRow = db.query(
     `
@@ -556,7 +582,7 @@ function writeMemoryEdges(db, edges, nowEpoch) {
   const readPairRow = db.query(
     `SELECT ${EDGE_COLUMNS} FROM memory_edges
      WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
-     ORDER BY relation ASC
+     ORDER BY relation ASC, tags ASC
      LIMIT 1`
   );
   for (const edge of edges) {
@@ -578,6 +604,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     }
     const createdAtEpoch = edge.createdAtEpoch ?? nowEpoch;
     if (edge.relation !== null) {
+      const tags = canonicalizeTagSet(edge.tags);
+      const tagsJson = JSON.stringify(tags);
       const row2 = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -585,6 +613,7 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         edge.cited.id,
         edge.relation,
         edge.provenance,
+        tagsJson,
         createdAtEpoch
       );
       dropBarePairRow.run(
@@ -595,6 +624,9 @@ function writeMemoryEdges(db, edges, nowEpoch) {
       );
       if (row2) {
         written.push(mapEdgeRow(row2));
+        for (const tag of tags) {
+          insertTagIndexRow.run(row2.id, tag);
+        }
       }
       continue;
     }
@@ -1801,37 +1833,31 @@ function compareDerivedTags(left, right) {
 }
 function recomputeSegmentFacets(db, segmentId) {
   const members = db.query(
-    `SELECT t.type AS type, t.tags AS tags
+    `SELECT t.type AS type
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
        WHERE sm.segment_id = ?`
   ).all(segmentId);
   const typeCounts = /* @__PURE__ */ new Map();
-  const tagCounts = /* @__PURE__ */ new Map();
   for (const member of members) {
     for (const word of new Set(parseMemberFacetArray(member.type))) {
       typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
-    }
-    for (const tag of new Set(parseMemberFacetArray(member.tags))) {
-      if (tag.includes(":") || tag.trim() === "") {
-        continue;
-      }
-      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
     }
   }
   const type = MEMORY_TYPES.filter((word) => typeCounts.has(word)).sort(
     (left, right) => (typeCounts.get(right) ?? 0) - (typeCounts.get(left) ?? 0) || MEMORY_TYPES.indexOf(left) - MEMORY_TYPES.indexOf(right)
   );
-  const tags = [...tagCounts.entries()].map(([tag, count]) => ({ tag, count })).sort(compareDerivedTags).map((entry) => entry.tag);
   const updated = mapSegmentRow(
     db.query(
       // `facets_stale = 0` in the same statement that stores the derivation:
       // the flag means "a derivation is owed", and this IS the derivation, so
       // whichever writer got here — membership, a member's own write, or the
-      // repair sweep — settles the debt by the act of paying it.
-      `UPDATE segments SET type = ?, tags = ?, facets_stale = 0 WHERE id = ?
+      // repair sweep — settles the debt by the act of paying it. `tags` is
+      // deliberately absent from this UPDATE (ticket 07) — that column is
+      // hand-curated identity now, untouched by any facet recomputation.
+      `UPDATE segments SET type = ?, facets_stale = 0 WHERE id = ?
          RETURNING ${SEGMENT_COLUMNS}`
-    ).get(JSON.stringify(type), JSON.stringify(tags), segmentId) ?? null
+    ).get(JSON.stringify(type), segmentId) ?? null
   );
   if (updated) {
     indexSegment(db, updated);
@@ -3081,6 +3107,11 @@ function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELAT
   const relationList = relationWords.map((word) => `'${word}'`).join(", ");
   return `
   CREATE TABLE IF NOT EXISTS ${tableName} (
+    -- rubric-v10 ticket 01 (lane model, "\u8FB9\u7684\u8EAB\u4EFD"): the surrogate row id \u2014
+    -- every edge assertion is now (citing, cited, relation, tag set) with its
+    -- own id, so a caller (retraction, the tag-index table) can address ONE
+    -- row precisely instead of a whole (pair, relation) group.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
     citing_id INTEGER NOT NULL,
     cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
@@ -3092,6 +3123,19 @@ function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELAT
     provenance TEXT NOT NULL CHECK (
       provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
     ),
+    -- rubric-v10 ticket 01 ("\u8FB9\u7684\u8EAB\u4EFD"): the row's IMMUTABLE canonical
+    -- lane-tag set \u2014 a JSON array, sorted and deduped at write time
+    -- (db/memory-edges.ts's canonicalizeTagSet), '[]' = untagged. Joins the
+    -- UNIQUE key below, so the SAME (pair, relation) may legally hold several
+    -- rows, one per distinct tag set: an untagged row, an {A} row and a {B}
+    -- row are three independent facts, and two singleton rows are NEVER the
+    -- merged-lane {A,B} row \u2014 only a write that explicitly names {A,B} gets
+    -- that row. This CHECK only refuses malformed JSON; it cannot enforce
+    -- "sorted, deduped" in SQL, so a canonicalization bug is a write-path
+    -- correctness property, guarded by a test, not by the schema.
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (
+      json_valid(tags) AND json_type(tags) = 'array'
+    ),
     created_at_epoch INTEGER NOT NULL,
     -- Relation-matrix spec ticket 05 ("\u81EA\u5F15\u7528"): the trailing OR relation IS
     -- NOT NULL arm is the whole widening \u2014 a BARE self row (no arm holds)
@@ -3100,7 +3144,13 @@ function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELAT
     -- may legally self-cite is a phase question this CHECK cannot ask; that
     -- lives in the validator only (see the comment above this function).
     CHECK (citing_kind <> cited_kind OR citing_id <> cited_id OR relation IS NOT NULL),
-    UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation)
+    -- rubric-v10 ticket 01: tags joins the identity key. relation's own
+    -- NULL-is-distinct behaviour under SQLite UNIQUE means this alone cannot
+    -- cap a pair's BARE rows at one -- idx_memory_edges_bare_pair below (a
+    -- partial index over the four pair columns only, ignoring relation/tags)
+    -- still carries that "existence record of last resort" invariant
+    -- unchanged; it predates this ticket and this ticket does not touch it.
+    UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags)
   );
 `;
 }
@@ -3114,6 +3164,16 @@ var MEMORY_EDGES_INDEXES_DDL = `
 `;
 var MEMORY_EDGES_UNION_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_UNION_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
 var MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
+var MEMORY_EDGE_TAGS_DDL = `
+  CREATE TABLE IF NOT EXISTS memory_edge_tags (
+    edge_row_id INTEGER NOT NULL REFERENCES memory_edges(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (edge_row_id, tag)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_memory_edge_tags_tag
+    ON memory_edge_tags(tag, edge_row_id);
+`;
 var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
     AFTER DELETE ON turns
@@ -3566,6 +3626,48 @@ function ensureMemoryEdgesIndexesRename(db) {
     db.exec("PRAGMA foreign_keys = ON;");
   }
 }
+function memoryEdgesTagSetIdentityIsStale(db) {
+  const storedDdl = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("tags TEXT NOT NULL");
+}
+function ensureMemoryEdgesTagSetIdentity(db) {
+  if (!memoryEdgesTagSetIdentityIsStale(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesTagSetIdentityIsStale(db)) {
+        return;
+      }
+      db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_tag_identity");
+      db.exec(
+        memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS)
+      );
+      db.exec(`
+        INSERT INTO memory_edges (
+          citing_kind, citing_id, cited_kind, cited_id,
+          relation, provenance, created_at_epoch
+        )
+        SELECT citing_kind, citing_id, cited_kind, cited_id,
+               relation, provenance, created_at_epoch
+        FROM memory_edges_pre_tag_identity;
+      `);
+      db.exec("DROP TABLE memory_edges_pre_tag_identity");
+      db.exec(MEMORY_EDGES_INDEXES_DDL);
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while adding the tag-set identity: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
 function ensureMemoryEdgesSchema(db) {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
@@ -3576,10 +3678,12 @@ function ensureMemoryEdgesSchema(db) {
     ensureMemoryEdgesVocabularyFlip(db);
     ensureMemoryEdgesRelationContract(db);
     ensureMemoryEdgesIndexesRename(db);
+    ensureMemoryEdgesTagSetIdentity(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
   db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
+  db.exec(MEMORY_EDGE_TAGS_DDL);
   if (isFirstCreation) {
     migrateTurnCitationsToEdges(db);
   }
@@ -4202,7 +4306,12 @@ var SEGMENTS_TOPIC_RETIRED_INDEXES_DDL = `
     ON segments(status, updated_at_epoch);
 `;
 function normalizeTopicNameToTag(name) {
-  return name.normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  const cased = name.normalize("NFKC").trim().toLocaleLowerCase("en-US");
+  let withoutRetiredNamespace = cased;
+  while (withoutRetiredNamespace.startsWith("topic:")) {
+    withoutRetiredNamespace = withoutRetiredNamespace.slice("topic:".length);
+  }
+  return withoutRetiredNamespace.replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
 function safeParseTagArray(value) {
   if (!value) {
@@ -4240,15 +4349,14 @@ function foldTopicNamesIntoSegmentTags(db) {
     const memberTurnIds = db.query(
       "SELECT turn_id AS turnId FROM segment_members WHERE segment_id = ?"
     ).all(segment.id).map((row) => row.turnId);
-    if (memberTurnIds.length === 0) {
-      const currentTags = safeParseTagArray(segment.tags);
-      if (currentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
-        continue;
-      }
+    const currentSegmentTags = safeParseTagArray(segment.tags);
+    if (!currentSegmentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
       db.query("UPDATE segments SET tags = ? WHERE id = ?").run(
-        JSON.stringify([...currentTags, bareTag]),
+        JSON.stringify([...currentSegmentTags, bareTag]),
         segment.id
       );
+    }
+    if (memberTurnIds.length === 0) {
       continue;
     }
     let foldedAny = false;
@@ -10392,8 +10500,16 @@ var EDGE_RELATIONS = [
   "verifies",
   "refutes"
 ];
-var SAME_PHASE_RELATIONS = ["override", "indexes", "consume"];
-var DECISION_ONLY_RELATIONS = ["narrows", "extends"];
+var SAME_PHASE_RELATIONS = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume"
+];
+var TAGGABLE_RELATIONS = new Set(
+  SAME_PHASE_RELATIONS
+);
 var EVIDENCE_SOURCE_RELATIONS = ["verifies", "refutes"];
 function buildRelationPhaseRequirement() {
   const table = Object.fromEntries(
@@ -10410,9 +10526,6 @@ function buildRelationPhaseRequirement() {
         table.grounds.push({ source, target });
       }
     }
-  }
-  for (const relation of DECISION_ONLY_RELATIONS) {
-    table[relation].push({ source: "decision", target: "decision" });
   }
   for (const relation of EVIDENCE_SOURCE_RELATIONS) {
     for (const phase of TURN_PHASES) {
@@ -13160,8 +13273,8 @@ function timelineQuery(db, input) {
 
 // src/shared/memory-rubric.ts
 var import_node_crypto2 = require("node:crypto");
-var MEMORY_RUBRIC_VERSION = "v9";
-var MEMORY_RUBRIC_TEXT = `# Memory Rubric v9
+var MEMORY_RUBRIC_VERSION = "v10";
+var MEMORY_RUBRIC_TEXT = `# Memory Rubric v10
 
 ## Fields
 
@@ -13220,68 +13333,77 @@ discovering synonym drift, merge into the earlier word.
 
 ## Relations (turn\u2192turn; recorded from the citing turn toward the cited)
 
-A FLOW is one separable line of work inside a phase \u2014 a chain of subtasks,
-sometimes one subtask, sometimes one node; each is equally a flow. Every phase
-runs its own: EVIDENCE flows establish facts, DECISION flows join rulings with
-narrows/extends and SETTLE where nothing further narrows or extends, DELIVERY
-flows join steps with consume (dispatch \u2192 acceptance \u2192 commit). Only the
-decision flow has graph-derived identity; the other two are reading aids, not
-machine-derived.
+THE INTERPRETATION PRINCIPLE: a tagged edge acts on a LANE; an untagged edge
+acts on the cited turn itself. Every word shares this one reading \u2014 there are
+no special cases.
 
-Eight words, four jobs:
-  JUDGING the cited conclusion \u2014 after reading me, must it still be read?
-  \xB7 override \u2014 no: it is wrong, and this node replaces it.
-  \xB7 narrows  \u2014 yes, but this node cuts a piece out of its scope.
-  \xB7 extends  \u2014 yes, and this node adds a piece.
-  AGGREGATING \u2014 which nodes do I stand for?
-  \xB7 indexes  \u2014 these: the flow converges here and I stand for it. Cite me and
-    you have cited the flow, so everything outside reaches it through this one
-    node, never through its members.
-  DEPENDING on it \u2014 if it turned out false, what happens to me?
-  \xB7 grounds  \u2014 I fall with it: a delivery on the decision it implements, a
-    decision on a finding, a release on its verification.
-  \xB7 consume  \u2014 nothing: I used its product and do not answer for it.
-  TESTING it \u2014 did I put the claim to a check?
-  \xB7 verifies / refutes \u2014 a result produced this turn, for it or against it.
+A LANE is a separable line of work inside one phase, under a segment,
+identified by an exact SET of tags scoped to that segment. Lanes never cross
+phases; only cross-phase relations connect lanes of different phases.
+{P}\u2192{P,c1} forks and {A}+{B}\u2192{A,B} merges are nothing but tag composition \u2014
+the machine knows only exact sets; parenthood and merging are human readings.
+A lane's tag set is as SMALL as discrimination allows, and the segment's own
+tags never join it \u2014 they gate membership, not lanes. An isolated single-turn
+product needs no tag and joins no lane, and is still cited cross-phase as
+usual.
 
-Where each may reach:
-- ONE decision flow: narrows, extends.
-- Same phase, regardless of flow: override, indexes, consume.
-- Cross-phase only: grounds; verifies/refutes from an evidence source toward a
-  decision or delivery target.
-A multi-phase turn is several steps merged into one: judge each phase's edge
-independently. It may cite ITSELF with grounds when it is both a flow's
-settlement and that settlement's implementer; nothing else self-cites.
+Eight words. Same-phase words MAY carry lane tags, none must; cross-phase
+words never do \u2014 lanes are phase-local:
+\xB7 override \u2014 the cited's main result no longer applies; this node fully
+  replaces it. Tagged: an in-lane correction \u2014 the lane reopens until a
+  fresh declaration. Untagged: a global repudiation of the conclusion, and
+  every lane it currently closes loses its terminus.
+\xB7 narrows  \u2014 part of the cited's result no longer applies; this node
+  corrects it.
+\xB7 extends  \u2014 the cited's result still applies; this node expands or
+  supplements it.
+\xB7 consume  \u2014 this node used its product and does not answer for it.
+\xB7 indexes  \u2014 convergence, aggregation, indexing: this node stands as the
+  representative, and the outside reaches the indexed through it. Tagged:
+  declares that lane CONVERGED \u2014 this node is its terminus and indexes the
+  lane's core valid nodes. Untagged: free aggregation (a release indexing
+  the artifacts it ships). An indexed node is never also consumed.
+\xB7 grounds  \u2014 this node stands or falls with the cited. Where a separate
+  spec turn exists, THE SPEC carries the grounds and the other artifacts
+  consume that carrier; without one, each artifact grounds the decision
+  directly.
+\xB7 verifies / refutes \u2014 a check result produced this turn, for / against the
+  cited conclusion; the source must carry an evidence phase.
 
-Cite a flow through the node it converges on \u2014 for a decision flow, its
-SETTLEMENT. A mid-flow grounds still stores; the receipt names that node
-instead. One route across the phases: when a SEPARATE delivery turn wrote the
-spec, THAT turn grounds the decision and the other artifacts consume it; when
-design and spec landed in one turn, each artifact grounds directly.
+Convergence never happens by silence: when a lane converges, its terminus
+declares it with a TAGGED indexes. All lane events \u2014 declarations,
+overrides, continuations \u2014 reduce in turn order; the latest declaration
+wins, and continuing past one is normal life (the next declaration
+supersedes it). SUBSET INVARIANT: every tag on an edge must already exist
+on both endpoint turns' tags \u2014 written forward, a lane member's note
+carries its lane tag anyway; a violation is refused, naming the gap.
 
-Every finished turn makes two passes.
-1. PRECURSORS \u2014 for each node that directly caused this turn, pick its word by
-   the four jobs; none fits \u2192 record nothing. Skipping levels to the arc's
-   origin is mislabeling; an orphan is legal ONLY as an unforeseen subtask start
-   or decision-free chatter, and edges are never invented to remove one.
-2. AGGREGATION \u2014 then ask of this turn itself: does a flow CONVERGE here \u2014 a
-   decision closing on its settlement, a delivery on the release that ships
-   it? Then index the nodes carrying its result. Later work may extend the
-   flow past this turn; the edge stays true as the aggregation it was.
-A pair may carry several relations, each stating a fact the others cannot
-derive \u2014 extends and indexes both subsume consume, so never write both. A
-refusal names the missing half \u2192 add the smallest missing type, or re-judge.
-A warning names a better target and stores the edge anyway \u2192 take it next
-correction.
+Three principles \u2014 what your edges aspire to; the checker reports facts and
+never enforces:
+\xB7 Reachability \u2014 a lane's members hang together on the segment's whole
+  graph, and a valid lane's terminus is cited from other phases, relaying
+  to delivery.
+\xB7 Component emergence \u2014 distinct lanes come out as distinct components,
+  never entangled by accident.
+\xB7 Minimality \u2014 paths from start to terminus stay few, within the phase and
+  in the cross-phase merged view alike.
 
-The release ritual: a release indexes the artifacts it ships and consumes the
-previous release if any \u2014 the first release is the chain's legal root. No
-grounds to the settlements it fixes: the artifacts already reach them.
+Axiom: a release indexes the artifacts it ships (untagged free aggregation)
+and consumes the previous release; the first release is the chain's legal
+root. It writes no grounds to settlements \u2014 the artifacts already carry the
+decision linkage.
 
-Edges are declared through the relation parameters; content owes no citation
-format. Delete an edge found false and rewrite as needed \u2014 retraction and
-re-judgment are both acts of judgment, never tidying. Pre-registration is not
-an edge: a prediction made before its test lives in insight, not in the graph.
+A multi-phase turn's edge is legal when any pairing is. A self-citation is
+a formal edge serving connectivity alone \u2014 legal when one turn is both a
+lane's terminus and its implementer \u2014 with no substantive meaning, and it
+never counts as adoption evidence. Edges are declared through the relation
+parameters; content owes no citation format. Delete an edge found false and
+rewrite as needed \u2014 retraction and re-judgment are both acts of judgment,
+never tidying. A prediction made before its test lives in insight, not in
+the graph. A skipped or rewound turn is not a node; a globally-overridden
+turn is a dead node that stays in the graph carrying the correction's
+story. Whether a lane was ADOPTED is a living judgment \u2014 the strongest
+evidence is an EXTERNAL delivery citation of its terminus.
 
 ## Segments (membership and creation)
 
@@ -13289,6 +13411,8 @@ an edge: a prediction made before its test lives in insight, not in the graph.
   unrelated turn staying homeless is a legal state. When one turn serves
   several workflows, membership still goes to the primary task its content
   serves \u2014 the other ties are carried by relation edges.
+- A segment's tags are hand-curated identity: a member turn carries ALL of
+  them. Lane tags are separate and never include them.
 - (Settlement side) membership and creation authority equal the main agent's:
   segments may be created, turns reassigned across them; correct only OBVIOUS
   mismatches, leave doubt alone.
