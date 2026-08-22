@@ -245,10 +245,28 @@ import { createHash } from "node:crypto";
  * the note describes" — which they visibly are, for the main agent — would
  * have silently stripped the other reader. Budget after: 8612 chars, 888
  * under the cap.
+ *
+ * v9→v10 (rubric-v10 spec, .scratch/rubric-v10/; user drafts and rulings
+ * [S15069/T1277]–[T1319], three peer rounds — two Codex, one mnemo-review):
+ * §Relations replaces WHOLESALE with the lane model. The FLOW concept, the
+ * four-job grouping, the separate reach block, the two-pass procedure, the
+ * cite-through-settlement paragraph and the refusal/warning mechanics all
+ * retire; ONE interpretation principle anchors every word (a tagged edge
+ * acts on a LANE, an untagged edge acts on the cited turn itself), a LANE is
+ * identified by its exact tag set scoped to the segment, convergence is
+ * DECLARED by a tagged indexes and never silent, the subset invariant guards
+ * tag writes, and the three principles enter as ASPIRATIONS (reversing their
+ * T1238 lint-only placement by user ruling T1277) while checker mechanics
+ * stay out. The release rules are named an Axiom — peer rounds proved them
+ * underivable from the principles. Splice source:
+ * .scratch/rubric-v10/relations-v10-en.md, authored by the main agent per
+ * the T1315 ruling. §Segments gains ONE line (ticket 07): segment tags are
+ * hand-curated membership identity, disjoint from lane tags. Budget after:
+ * 9395 rendered chars, 105 under the cap.
  */
-export const MEMORY_RUBRIC_VERSION = "v9";
+export const MEMORY_RUBRIC_VERSION = "v10";
 
-export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v9
+export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v10
 
 ## Fields
 
@@ -307,68 +325,77 @@ discovering synonym drift, merge into the earlier word.
 
 ## Relations (turn→turn; recorded from the citing turn toward the cited)
 
-A FLOW is one separable line of work inside a phase — a chain of subtasks,
-sometimes one subtask, sometimes one node; each is equally a flow. Every phase
-runs its own: EVIDENCE flows establish facts, DECISION flows join rulings with
-narrows/extends and SETTLE where nothing further narrows or extends, DELIVERY
-flows join steps with consume (dispatch → acceptance → commit). Only the
-decision flow has graph-derived identity; the other two are reading aids, not
-machine-derived.
+THE INTERPRETATION PRINCIPLE: a tagged edge acts on a LANE; an untagged edge
+acts on the cited turn itself. Every word shares this one reading — there are
+no special cases.
 
-Eight words, four jobs:
-  JUDGING the cited conclusion — after reading me, must it still be read?
-  · override — no: it is wrong, and this node replaces it.
-  · narrows  — yes, but this node cuts a piece out of its scope.
-  · extends  — yes, and this node adds a piece.
-  AGGREGATING — which nodes do I stand for?
-  · indexes  — these: the flow converges here and I stand for it. Cite me and
-    you have cited the flow, so everything outside reaches it through this one
-    node, never through its members.
-  DEPENDING on it — if it turned out false, what happens to me?
-  · grounds  — I fall with it: a delivery on the decision it implements, a
-    decision on a finding, a release on its verification.
-  · consume  — nothing: I used its product and do not answer for it.
-  TESTING it — did I put the claim to a check?
-  · verifies / refutes — a result produced this turn, for it or against it.
+A LANE is a separable line of work inside one phase, under a segment,
+identified by an exact SET of tags scoped to that segment. Lanes never cross
+phases; only cross-phase relations connect lanes of different phases.
+{P}→{P,c1} forks and {A}+{B}→{A,B} merges are nothing but tag composition —
+the machine knows only exact sets; parenthood and merging are human readings.
+A lane's tag set is as SMALL as discrimination allows, and the segment's own
+tags never join it — they gate membership, not lanes. An isolated single-turn
+product needs no tag and joins no lane, and is still cited cross-phase as
+usual.
 
-Where each may reach:
-- ONE decision flow: narrows, extends.
-- Same phase, regardless of flow: override, indexes, consume.
-- Cross-phase only: grounds; verifies/refutes from an evidence source toward a
-  decision or delivery target.
-A multi-phase turn is several steps merged into one: judge each phase's edge
-independently. It may cite ITSELF with grounds when it is both a flow's
-settlement and that settlement's implementer; nothing else self-cites.
+Eight words. Same-phase words MAY carry lane tags, none must; cross-phase
+words never do — lanes are phase-local:
+· override — the cited's main result no longer applies; this node fully
+  replaces it. Tagged: an in-lane correction — the lane reopens until a
+  fresh declaration. Untagged: a global repudiation of the conclusion, and
+  every lane it currently closes loses its terminus.
+· narrows  — part of the cited's result no longer applies; this node
+  corrects it.
+· extends  — the cited's result still applies; this node expands or
+  supplements it.
+· consume  — this node used its product and does not answer for it.
+· indexes  — convergence, aggregation, indexing: this node stands as the
+  representative, and the outside reaches the indexed through it. Tagged:
+  declares that lane CONVERGED — this node is its terminus and indexes the
+  lane's core valid nodes. Untagged: free aggregation (a release indexing
+  the artifacts it ships). An indexed node is never also consumed.
+· grounds  — this node stands or falls with the cited. Where a separate
+  spec turn exists, THE SPEC carries the grounds and the other artifacts
+  consume that carrier; without one, each artifact grounds the decision
+  directly.
+· verifies / refutes — a check result produced this turn, for / against the
+  cited conclusion; the source must carry an evidence phase.
 
-Cite a flow through the node it converges on — for a decision flow, its
-SETTLEMENT. A mid-flow grounds still stores; the receipt names that node
-instead. One route across the phases: when a SEPARATE delivery turn wrote the
-spec, THAT turn grounds the decision and the other artifacts consume it; when
-design and spec landed in one turn, each artifact grounds directly.
+Convergence never happens by silence: when a lane converges, its terminus
+declares it with a TAGGED indexes. All lane events — declarations,
+overrides, continuations — reduce in turn order; the latest declaration
+wins, and continuing past one is normal life (the next declaration
+supersedes it). SUBSET INVARIANT: every tag on an edge must already exist
+on both endpoint turns' tags — written forward, a lane member's note
+carries its lane tag anyway; a violation is refused, naming the gap.
 
-Every finished turn makes two passes.
-1. PRECURSORS — for each node that directly caused this turn, pick its word by
-   the four jobs; none fits → record nothing. Skipping levels to the arc's
-   origin is mislabeling; an orphan is legal ONLY as an unforeseen subtask start
-   or decision-free chatter, and edges are never invented to remove one.
-2. AGGREGATION — then ask of this turn itself: does a flow CONVERGE here — a
-   decision closing on its settlement, a delivery on the release that ships
-   it? Then index the nodes carrying its result. Later work may extend the
-   flow past this turn; the edge stays true as the aggregation it was.
-A pair may carry several relations, each stating a fact the others cannot
-derive — extends and indexes both subsume consume, so never write both. A
-refusal names the missing half → add the smallest missing type, or re-judge.
-A warning names a better target and stores the edge anyway → take it next
-correction.
+Three principles — what your edges aspire to; the checker reports facts and
+never enforces:
+· Reachability — a lane's members hang together on the segment's whole
+  graph, and a valid lane's terminus is cited from other phases, relaying
+  to delivery.
+· Component emergence — distinct lanes come out as distinct components,
+  never entangled by accident.
+· Minimality — paths from start to terminus stay few, within the phase and
+  in the cross-phase merged view alike.
 
-The release ritual: a release indexes the artifacts it ships and consumes the
-previous release if any — the first release is the chain's legal root. No
-grounds to the settlements it fixes: the artifacts already reach them.
+Axiom: a release indexes the artifacts it ships (untagged free aggregation)
+and consumes the previous release; the first release is the chain's legal
+root. It writes no grounds to settlements — the artifacts already carry the
+decision linkage.
 
-Edges are declared through the relation parameters; content owes no citation
-format. Delete an edge found false and rewrite as needed — retraction and
-re-judgment are both acts of judgment, never tidying. Pre-registration is not
-an edge: a prediction made before its test lives in insight, not in the graph.
+A multi-phase turn's edge is legal when any pairing is. A self-citation is
+a formal edge serving connectivity alone — legal when one turn is both a
+lane's terminus and its implementer — with no substantive meaning, and it
+never counts as adoption evidence. Edges are declared through the relation
+parameters; content owes no citation format. Delete an edge found false and
+rewrite as needed — retraction and re-judgment are both acts of judgment,
+never tidying. A prediction made before its test lives in insight, not in
+the graph. A skipped or rewound turn is not a node; a globally-overridden
+turn is a dead node that stays in the graph carrying the correction's
+story. Whether a lane was ADOPTED is a living judgment — the strongest
+evidence is an EXTERNAL delivery citation of its terminus.
 
 ## Segments (membership and creation)
 
@@ -376,6 +403,8 @@ an edge: a prediction made before its test lives in insight, not in the graph.
   unrelated turn staying homeless is a legal state. When one turn serves
   several workflows, membership still goes to the primary task its content
   serves — the other ties are carried by relation edges.
+- A segment's tags are hand-curated identity: a member turn carries ALL of
+  them. Lane tags are separate and never include them.
 - (Settlement side) membership and creation authority equal the main agent's:
   segments may be created, turns reassigned across them; correct only OBVIOUS
   mismatches, leave doubt alone.
