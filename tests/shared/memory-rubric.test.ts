@@ -8,6 +8,7 @@ import {
 } from "../../src/hooks/session-composition";
 import { MNEMO_TOOL_DESCRIPTIONS, noteInputShape } from "../../src/mcp/definitions";
 import {
+  EDGE_RELATIONS,
   isRelationLegalForPhases,
   type TurnPhase,
 } from "../../src/shared/turn-phase";
@@ -217,6 +218,16 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       "delivery→decision",
     ]);
 
+    // EXHAUSTIVENESS. Everything above checks the words the rules NAME; this
+    // checks that they name every word there is. Without it, a ninth relation
+    // added to the validator and forgotten in the rubric leaves this test
+    // green — and this vocabulary has already turned over three times
+    // (seven words → eight → the collects/indexes rename), so that is a
+    // measured pattern, not a hypothetical.
+    expect(
+      [...flowWords, ...samePhaseWords, "grounds", "verifies", "refutes"].sort(),
+    ).toEqual([...EDGE_RELATIONS].sort());
+
     // The verdict pair is the one word set with an asymmetric rule: an evidence
     // SOURCE only, and never an evidence target (a verdict's object is a claim
     // of another kind, [S15069/T1215]).
@@ -260,7 +271,11 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       "derive — extends and indexes both subsume consume, so never write both.",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain("refusal names the missing half");
-    expect(MEMORY_RUBRIC_TEXT).toContain("warning names a better target and stores anyway");
+    // "stores the edge anyway", not "stores anyway": the subject of the storing
+    // is the edge, not the warning.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "A warning names a better target and stores the edge anyway → take it next",
+    );
   });
 
   // The canonical route (spec law 7) moved out of the grounds bullet into the
@@ -272,11 +287,14 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // the clause that follows.
   test("v9 keeps the settlement-citation rule and the canonical route together", () => {
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "Cite a decision flow through its SETTLEMENT: a mid-flow grounds still stores,\n" +
-        "the receipt names it instead. One route across the phases: when a SEPARATE\n" +
-        "delivery turn wrote the spec, THAT turn grounds the decision and the other\n" +
-        "artifacts consume it; when design and spec landed in one turn, each artifact\n" +
-        "grounds directly.",
+      // The pronoun is spelled out: with "names it instead", the nearest noun
+      // is "a mid-flow grounds", so the sentence could be read as naming the
+      // mid-flow target — the exact opposite of the rule.
+      "Cite a decision flow through its SETTLEMENT: a mid-flow grounds still stores;\n" +
+        "the receipt names the SETTLEMENT instead. One route across the phases: when a\n" +
+        "SEPARATE delivery turn wrote the spec, THAT turn grounds the decision and the\n" +
+        "other artifacts consume it; when design and spec landed in one turn, each\n" +
+        "artifact grounds directly.",
     );
   });
 

@@ -148,7 +148,7 @@ import { createHash } from "node:crypto";
  *
  * v8→v9 (ruled [S15069/T1253]–[T1256], peer-discussed): §Relations is
  * REORGANISED — same law, three layers instead of one flat list. CONCEPTS
- * first (a workflow runs a flow per phase: evidence, decision, delivery),
+ * first (a workflow may run a flow per phase: evidence, decision, delivery),
  * then the words, then REACH RULES gathered in one place, then the
  * PROCEDURE. The user asked for the concept layer; the measurement that
  * shaped it is that the main agent wrote ZERO `indexes` edges across a whole
@@ -188,7 +188,8 @@ import { createHash } from "node:crypto";
  *      flow "ending where a decision takes it up" (contradicting this same
  *      section's rule that verifies/refutes may target delivery), and a
  *      delivery flow "ending at a release" (a release indexes ACROSS flows;
- *      not every chain has one). Now each flow is described by what JOINS it,
+ *      not every chain has one). Invented endpoints are gone; a flow names the relation that joins it where
+ *      one exists,
  *      and only the decision flow keeps a terminus, because only its
  *      settlement is graph-defined.
  *   3. "acts once per phase" implied a storage cardinality the validator does
@@ -315,11 +316,11 @@ A multi-phase turn is several steps merged into one: judge each phase's edge
 independently. It may cite ITSELF with grounds when it is both a flow's
 settlement and that settlement's implementer; nothing else self-cites.
 
-Cite a decision flow through its SETTLEMENT: a mid-flow grounds still stores,
-the receipt names it instead. One route across the phases: when a SEPARATE
-delivery turn wrote the spec, THAT turn grounds the decision and the other
-artifacts consume it; when design and spec landed in one turn, each artifact
-grounds directly.
+Cite a decision flow through its SETTLEMENT: a mid-flow grounds still stores;
+the receipt names the SETTLEMENT instead. One route across the phases: when a
+SEPARATE delivery turn wrote the spec, THAT turn grounds the decision and the
+other artifacts consume it; when design and spec landed in one turn, each
+artifact grounds directly.
 
 Every finished turn makes two passes.
 1. PRECURSORS — for each node that directly caused this turn, pick its word by
@@ -333,7 +334,7 @@ Every finished turn makes two passes.
 A pair may carry several relations, each stating a fact the others cannot
 derive — extends and indexes both subsume consume, so never write both. A
 refusal names the missing half → add the smallest missing type, or re-judge.
-A warning names a better target and stores anyway → take it at the next
+A warning names a better target and stores the edge anyway → take it next
 correction.
 
 The release ritual: a release indexes the artifacts it ships and consumes the
