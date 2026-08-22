@@ -6,7 +6,11 @@ import {
   MAX_INJECTED_BLOCK_CHARS,
   renderRubricBlock,
 } from "../../src/hooks/session-composition";
-import { MNEMO_TOOL_DESCRIPTIONS, noteInputShape } from "../../src/mcp/definitions";
+import {
+  MNEMO_TOOL_DESCRIPTIONS,
+  noteInputShape,
+  rememberInputShape,
+} from "../../src/mcp/definitions";
 import {
   EDGE_RELATIONS,
   isRelationLegalForPhases,
@@ -432,7 +436,7 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // here as its two now-separated contiguous halves (opening through the
   // length paragraph; the segment fields through the closing sentence), with
   // an ordering check standing in for the single old contiguous assertion.
-  test("v5 carries the Fields section, byte-for-byte, tickets 01+02's own definition table (now split by the type/tags sub-blocks between)", () => {
+  test("the turn-field definitions stay in the rubric, byte-for-byte (tickets 01+02)", () => {
     const fieldsOpening =
       "## Fields\n" +
       "\n" +
@@ -450,32 +454,67 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       "it hold nothing. Content leads with its conclusions: a reader's budget cuts\n" +
       "the tail, so whatever merely supports a decision comes after the decision.";
 
-    const fieldsClosing =
-      "Segment, Working State — what a resuming session needs to continue:\n" +
-      "- goal        — what this task is trying to achieve.\n" +
-      "- constraints — how the work must be done: norms, habits, standing preferences.\n" +
-      "- decisions   — concrete rulings about the task itself, settled and binding.\n" +
-      "- done        — what is finished and verified.\n" +
-      "- next_steps  — what is waiting to be done.\n" +
-      "- reference   — durable pointers: source locations, specs, PRs, URLs. Not plans.\n" +
-      "\n" +
-      // v6 compressed the Summary-layer content note for the 9500-char block
-      // cap (meaning preserved; the two-sentence focus contrast became a
-      // parenthetical) — this pin follows the spliced text, not ticket 02's
-      // original wording.
-      "Segment, Summary layer — what an outsider browsing the task reads:\n" +
-      "- content — the impression this arc leaves: what it is about and how it went\n" +
-      "            (focus on the arc, not per-turn conclusions).\n" +
-      "- insight — reusable experience this task has settled.\n" +
-      "\n" +
-      "A segment's title is set at creation. Its type and tags are DERIVED from its\n" +
-      "member turns and recomputed when membership changes — never written by hand.";
-
     expect(MEMORY_RUBRIC_TEXT).toContain(fieldsOpening);
-    expect(MEMORY_RUBRIC_TEXT).toContain(fieldsClosing);
-    expect(MEMORY_RUBRIC_TEXT.indexOf(fieldsOpening)).toBeLessThan(
-      MEMORY_RUBRIC_TEXT.indexOf(fieldsClosing),
+
+    // The turn fields stay HERE because the settlement surface has no
+    // `title`/`content` describe at all (settlementNoteInputShape omits them),
+    // so this block is that agent's only source for what those fields are.
+    // Deleting it as "duplicated with the note describes" would have silently
+    // stripped the settlement agent — the reason this comment exists.
+  });
+
+  // The segment-field definitions LEFT this file (user ruling, S15069/T1264:
+  // compress them into the tool describes, losing no information). They were
+  // duplicated for the main agent, which reads the same definitions on
+  // `remember`'s standing `field` describe, and dead weight for the settlement
+  // agent, whose membership surface has no `field` parameter at all. This test
+  // is the no-information-lost guarantee, made mechanical: every fact the
+  // removed block carried must be findable on a describe, and must NOT have
+  // grown a second home back in the rubric.
+  test("every segment-field fact the rubric dropped now lives on a remember describe", () => {
+    const field = rememberInputShape.field.description ?? "";
+    const title = rememberInputShape.title.description ?? "";
+
+    // The six Working State fields and the two Summary fields, each with the
+    // discriminator that made it distinguishable from its neighbours.
+    for (const fact of [
+      "goal: what this task is trying to achieve",
+      "constraints: how the work must be done — norms, habits, standing preferences",
+      "decisions: concrete rulings about the task itself, settled and binding",
+      "done: what is finished and verified",
+      "next_steps: what is waiting to be done",
+      "reference: durable pointers — source locations, specs, PRs, URLs; not plans",
+      "content: the impression this arc leaves, what it is about and how it went",
+      "insight: reusable experience this task has settled",
+    ]) {
+      expect(field).toContain(fact);
+    }
+
+    // The two framings — who each group of fields is written FOR — and the arc
+    // discriminator on content. These three were the parts the describe did
+    // NOT already carry before the migration.
+    expect(field).toContain("Working State, what a resuming session needs to continue");
+    expect(field).toContain("Summary, what an outsider browsing the task reads");
+    expect(field).toContain("(the arc, not per-turn conclusions)");
+
+    // The derivation rule, which lived ONLY in the rubric: it explains why this
+    // shape has no type/tags parameter, so it belongs beside the one identity
+    // field a caller does write.
+    expect(title).toContain("set once, here");
+    expect(title).toContain(
+      "A segment's type and tags are never written by hand: they are DERIVED from its member turns and recomputed whenever membership changes",
     );
+
+    // And the rubric must not re-grow a copy: two homes for one definition is
+    // the drift this file's own header exists to prevent.
+    for (const orphan of [
+      "Segment, Working State",
+      "Segment, Summary layer",
+      "next_steps  —",
+      "never written by hand",
+    ]) {
+      expect(MEMORY_RUBRIC_TEXT).not.toContain(orphan);
+    }
   });
 });
 

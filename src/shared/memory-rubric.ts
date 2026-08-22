@@ -207,6 +207,29 @@ import { createHash } from "node:crypto";
  * Budget: 9462 rendered chars, 38 under the cap. An interim state sat at
  * exactly 9500 (headroom zero) — unacceptable against a cap that truncates
  * silently rather than failing, so four passages were compressed for margin.
+ *
+ * Still v9 (user ruling [S15069/T1264]): the SEGMENT field definitions leave
+ * this file — the six Working State fields, the two Summary fields, and the
+ * type/tags derivation sentence — compressed into `remember`'s own describes
+ * with no information lost. Ticket 01 put them here so a writer could read
+ * what a field IS from the same injection that judges it; that reason has
+ * expired for the segment half, because `remember`'s `field` describe is a
+ * standing tool schema carrying the same eight definitions, and the one
+ * reader WITHOUT those describes — the settlement agent — has no segment-field
+ * parameter at all (its membership surface writes assignments, never fields).
+ * Three facts the describes lacked moved with them: the two framings (Working
+ * State is what a resuming session needs; Summary is what an outsider reads)
+ * and content's arc-not-per-turn discriminator; the derivation rule landed on
+ * the `title` describe, where it explains the conspicuous absence of type/tags
+ * from that shape. A migration test now asserts each fact on a describe AND
+ * asserts the rubric has not re-grown a copy.
+ *
+ * The TURN field definitions deliberately stay: `settlementNoteInputShape`
+ * omits `title` and `content` describes entirely, so this block is the
+ * settlement agent's only source for them. Deleting them as "duplicated with
+ * the note describes" — which they visibly are, for the main agent — would
+ * have silently stripped the other reader. Budget after: 8612 chars, 888
+ * under the cap.
  */
 export const MEMORY_RUBRIC_VERSION = "v9";
 
@@ -266,22 +289,6 @@ type — a closed vocabulary, one meaning per word:
 tags — nouns, naming things: project first, then subsystem/artifact; activity
 words belong to type. Lowercase-hyphenated; reuse existing tags first; on
 discovering synonym drift, merge into the earlier word.
-
-Segment, Working State — what a resuming session needs to continue:
-- goal        — what this task is trying to achieve.
-- constraints — how the work must be done: norms, habits, standing preferences.
-- decisions   — concrete rulings about the task itself, settled and binding.
-- done        — what is finished and verified.
-- next_steps  — what is waiting to be done.
-- reference   — durable pointers: source locations, specs, PRs, URLs. Not plans.
-
-Segment, Summary layer — what an outsider browsing the task reads:
-- content — the impression this arc leaves: what it is about and how it went
-            (focus on the arc, not per-turn conclusions).
-- insight — reusable experience this task has settled.
-
-A segment's title is set at creation. Its type and tags are DERIVED from its
-member turns and recomputed when membership changes — never written by hand.
 
 ## Relations (turn→turn; recorded from the citing turn toward the cited)
 

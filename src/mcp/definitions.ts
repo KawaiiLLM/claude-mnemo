@@ -550,7 +550,15 @@ export const rememberInputShape = {
     .string()
     .min(1)
     .optional()
-    .describe("create only (required): the segment's title, written in English."),
+    .describe(
+      // The derivation rule lived ONLY in the rubric's segment block; it lands
+      // here because this is the one place a caller names a segment's own
+      // identity fields, and `type`/`tags` are conspicuously absent from this
+      // shape — the describe now says why.
+      "create only (required): the segment's title, written in English — set once, here. " +
+        "A segment's type and tags are never written by hand: they are DERIVED from its " +
+        "member turns and recomputed whenever membership changes.",
+    ),
   // Ticket 15 (topic registry retirement, CONTEXT.md "Topic — retired"): the
   // registry this once named a segment into folded into tags — a
   // mechanism-level synonym split. Declared here ONLY so `rememberInputSchema`'s
@@ -584,14 +592,22 @@ export const rememberInputShape = {
     .enum(SEGMENT_EDITABLE_FIELDS)
     .optional()
     .describe(
-      "write/edit only (required): which field. Working State — " +
+      // The two framings and the arc discriminator moved here from the Memory
+      // Rubric's §Fields segment block, which retires: this describe is the
+      // main agent's standing source for what a segment field IS, and the
+      // settlement surface has no `field` parameter at all (it writes
+      // membership, never segment fields), so nothing else needed a copy.
+      "write/edit only (required): which field. " +
+        "Working State, what a resuming session needs to continue — " +
         "goal: what this task is trying to achieve. " +
         "constraints: how the work must be done — norms, habits, standing preferences. " +
         "decisions: concrete rulings about the task itself, settled and binding. " +
         "done: what is finished and verified. " +
         "next_steps: what is waiting to be done. " +
         "reference: durable pointers — source locations, specs, PRs, URLs; not plans. " +
-        "Summary — content: the impression this arc leaves, what it is about and how it went. " +
+        "Summary, what an outsider browsing the task reads — " +
+        "content: the impression this arc leaves, what it is about and how it went " +
+        "(the arc, not per-turn conclusions). " +
         "insight: reusable experience this task has settled.",
     ),
   // Ticket 05: `write`'s own payload — the field's WHOLE replacement text,

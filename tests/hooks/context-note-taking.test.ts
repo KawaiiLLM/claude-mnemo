@@ -137,12 +137,19 @@ describe("note-taking instructions injection", () => {
   // verbatim pinning of the table itself lives in that same rubric test file;
   // this guard only needs to know the table is THERE and the write-detail is
   // NOT.
-  test("the rubric injection carries the field-definition table (ticket 01 guard re-scope)", () => {
+  test("the rubric injection carries the TURN field-definition table (ticket 01 guard re-scope)", () => {
     expect(MEMORY_RUBRIC_TEXT).toContain("## Fields");
     expect(MEMORY_RUBRIC_TEXT).toContain("title   — the INDEX");
     expect(MEMORY_RUBRIC_TEXT).toContain("content — the CONCLUSIONS");
     expect(MEMORY_RUBRIC_TEXT).toContain("insight — REUSABLE experience");
-    expect(MEMORY_RUBRIC_TEXT).toContain(
+    // The SEGMENT half of ticket 01's table left this injection at the user's
+    // ruling [S15069/T1264]: it was a second copy of `remember`'s own standing
+    // `field` describe for the main agent, and the settlement agent — the only
+    // reader without those describes — has no segment-field parameter at all.
+    // Its migration is guaranteed fact-by-fact in tests/shared/
+    // memory-rubric.test.ts; here we only hold the boundary that made the
+    // removal safe, so that re-adding it re-opens the two-homes drift.
+    expect(MEMORY_RUBRIC_TEXT).not.toContain(
       "goal        — what this task is trying to achieve.",
     );
   });
