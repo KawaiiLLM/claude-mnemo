@@ -439,7 +439,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.14.0-mt38ehll" : "dev";
+var BUILD_ID = true ? "0.15.0-mt440r9q" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -704,12 +704,18 @@ function parseQualifiedReferences(content) {
   return references;
 }
 
+// src/db/turn-liveness.ts
+function liveTurnSql(alias = "") {
+  const prefix = alias ? `${alias}.` : "";
+  return `${prefix}was_rolled_back = 0 AND ${prefix}status != 'skipped'`;
+}
+
 // src/db/citations.ts
 var CITATION_RELATIONS = [
   "override",
   "narrows",
   "extends",
-  "collects",
+  "indexes",
   "consume",
   "grounds",
   "verifies",
@@ -844,7 +850,7 @@ function getSessionEffectiveCitations(db, sessionId) {
   const turns = db.query(
     `SELECT id, content
        FROM turns
-       WHERE session_id = ?
+       WHERE session_id = ? AND ${liveTurnSql()}
        ORDER BY prompt_number ASC, id ASC`
   ).all(sessionId);
   const sessionTurnIds = new Set(turns.map((turn) => turn.id));
@@ -859,6 +865,7 @@ function getSessionEffectiveCitations(db, sessionId) {
        JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
        JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
        WHERE citing.session_id = ? AND cited.session_id = ?
+         AND ${liveTurnSql("citing")} AND ${liveTurnSql("cited")}
        ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
   ).all(sessionId, sessionId);
   for (const edge of edgeRows) {
@@ -1883,6 +1890,9 @@ function getAttachedSessionIds(db, segmentId) {
 }
 function computeSegmentMemberFacetCounts(db, segmentId, eraCutoffEpoch = null) {
   const members = db.query(
+    // Facets summarise the CONTENT INDEX, not the graph, so they follow the
+    // member listing ([S15069/T915]: a rewound member stays visible, marked)
+    // rather than law 8's node set. Same reason as `rankSegmentMembers`.
     `SELECT t.type AS type, t.tags AS tags
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
@@ -3056,6 +3066,17 @@ var MEMORY_EDGES_CONTRACT_RELATION_WORDS = [
   "refutes",
   "supersedes"
 ];
+var MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume",
+  "grounds",
+  "verifies",
+  "refutes",
+  "supersedes"
+];
 function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELATION_WORDS) {
   const relationList = relationWords.map((word) => `'${word}'`).join(", ");
   return `
@@ -3092,7 +3113,7 @@ var MEMORY_EDGES_INDEXES_DDL = `
     WHERE relation IS NULL;
 `;
 var MEMORY_EDGES_UNION_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_UNION_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
-var MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_CONTRACT_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
+var MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
 var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
     AFTER DELETE ON turns
@@ -3410,7 +3431,7 @@ function memoryEdgesVocabularyFlipIsStale(db) {
   ).get()?.sql ?? null;
   return storedDdl !== null && !storedDdl.includes("'narrows'");
 }
-function collapseAndRebuildVocabularyFlip(db, relationWords) {
+function collapseAndRebuildVocabularyFlip(db, relationWords, remap = remapVocabularyFlipRelation) {
   db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_vocabulary_flip");
   db.exec(memoryEdgesTableDdl("memory_edges", relationWords));
   const legacyRows = db.query(
@@ -3422,7 +3443,7 @@ function collapseAndRebuildVocabularyFlip(db, relationWords) {
   ).all();
   const groups = /* @__PURE__ */ new Map();
   for (const row of legacyRows) {
-    const newRelation = remapVocabularyFlipRelation(row.relation);
+    const newRelation = remap(row.relation);
     const key = `${row.citingKind} ${row.citingId} ${row.citedKind} ${row.citedId} ${newRelation ?? ""}`;
     const bucket = groups.get(key);
     if (bucket) {
@@ -3439,7 +3460,7 @@ function collapseAndRebuildVocabularyFlip(db, relationWords) {
   );
   for (const bucket of groups.values()) {
     const sample = bucket[0];
-    const newRelation = remapVocabularyFlipRelation(sample.relation);
+    const newRelation = remap(sample.relation);
     const winner = pickWinningVocabularyFlipRow(bucket);
     insert.run(
       sample.citingKind,
@@ -3504,6 +3525,47 @@ function ensureMemoryEdgesRelationContract(db) {
     db.exec("PRAGMA foreign_keys = ON;");
   }
 }
+var INDEXES_RENAME_MAP = {
+  collects: "indexes"
+};
+function remapIndexesRename(relation) {
+  if (relation === null) {
+    return null;
+  }
+  return INDEXES_RENAME_MAP[relation] ?? relation;
+}
+function memoryEdgesIndexesRenameIsStale(db) {
+  const storedDdl = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
+  ).get()?.sql ?? null;
+  return storedDdl !== null && storedDdl.includes("'collects'");
+}
+function ensureMemoryEdgesIndexesRename(db) {
+  if (!memoryEdgesIndexesRenameIsStale(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesIndexesRenameIsStale(db)) {
+        return;
+      }
+      collapseAndRebuildVocabularyFlip(
+        db,
+        MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS,
+        remapIndexesRename
+      );
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while renaming collects to indexes: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
 function ensureMemoryEdgesSchema(db) {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
@@ -3513,6 +3575,7 @@ function ensureMemoryEdgesSchema(db) {
     ensureMemoryEdgesSelfReferenceCheck(db);
     ensureMemoryEdgesVocabularyFlip(db);
     ensureMemoryEdgesRelationContract(db);
+    ensureMemoryEdgesIndexesRename(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
@@ -6662,6 +6725,12 @@ function rankSegmentMembers(db, segmentId, limit, eraCutoffEpoch = null) {
     return [];
   }
   const rows = db.query(
+    // NOT a law-8 site, deliberately. Law 8 governs the GRAPH — nodes, edges,
+    // the derivations over them, the graph page. This ranking feeds the
+    // CONTENT INDEX (the segment card, recall's member listing), where
+    // [S15069/T915] rules the opposite: a rewound turn renders WITH its own
+    // marker rather than disappearing, because a reader who cannot see it
+    // cannot tell a withdrawn branch from a turn that never existed.
     `SELECT ${RANK_FACT_COLUMNS}
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
@@ -10317,13 +10386,13 @@ var EDGE_RELATIONS = [
   "override",
   "narrows",
   "extends",
-  "collects",
+  "indexes",
   "consume",
   "grounds",
   "verifies",
   "refutes"
 ];
-var SAME_PHASE_RELATIONS = ["override", "collects", "consume"];
+var SAME_PHASE_RELATIONS = ["override", "indexes", "consume"];
 var DECISION_ONLY_RELATIONS = ["narrows", "extends"];
 var EVIDENCE_SOURCE_RELATIONS = ["verifies", "refutes"];
 function buildRelationPhaseRequirement() {
@@ -10395,9 +10464,11 @@ function getTurnEdgeSignals(db, turnIds) {
     `SELECT DISTINCT e.cited_id AS targetId
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
+       JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
          AND e.relation = 'override'
-         AND citing.was_rolled_back = 0
+         AND ${liveTurnSql("citing")}
+         AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})`
   ).all(...uniqueIds);
   for (const row of overrideRows) {
@@ -10407,9 +10478,11 @@ function getTurnEdgeSignals(db, turnIds) {
     `SELECT e.cited_id AS targetId, COUNT(*) AS count
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
+       JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'grounds'
-         AND citing.was_rolled_back = 0
+         AND e.relation IN ('grounds', 'indexes')
+         AND ${liveTurnSql("citing")}
+         AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})
        GROUP BY e.cited_id`
   ).all(...uniqueIds);
@@ -10420,9 +10493,11 @@ function getTurnEdgeSignals(db, turnIds) {
     `SELECT e.cited_id AS targetId, citing.type AS citingType
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
+       JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
          AND e.relation = 'extends'
-         AND citing.was_rolled_back = 0
+         AND ${liveTurnSql("citing")}
+         AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})
        ORDER BY e.cited_id ASC, e.created_at_epoch ASC, e.citing_id ASC`
   ).all(...uniqueIds);
@@ -12615,10 +12690,18 @@ function resolveTurnRowLinks(db, turns) {
   const citingIds = [...result.keys()];
   const placeholders = citingIds.map(() => "?").join(",");
   const edges = db.query(
-    `SELECT DISTINCT citing_id AS citingId, cited_id AS citedId, relation
-         FROM memory_edges
-        WHERE citing_kind = 'turn' AND cited_kind = 'turn'
-          AND citing_id IN (${placeholders})`
+    // Law 8 (indexes-rescope spec): a deleted or dormant turn is not a node,
+    // so it may not appear as a `↳` antecedent either — the index row is the
+    // graph's most visible face. Filtered at BOTH ends here, at the source:
+    // the cited lookup below then reads only ids this filter already passed.
+    `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation
+         FROM memory_edges e
+         JOIN turns citing ON citing.id = e.citing_id
+         JOIN turns cited ON cited.id = e.cited_id
+        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+          AND ${liveTurnSql("citing")}
+          AND ${liveTurnSql("cited")}
+          AND e.citing_id IN (${placeholders})`
   ).all(...citingIds);
   if (edges.length === 0) {
     return result;
@@ -13077,8 +13160,8 @@ function timelineQuery(db, input) {
 
 // src/shared/memory-rubric.ts
 var import_node_crypto2 = require("node:crypto");
-var MEMORY_RUBRIC_VERSION = "v7";
-var MEMORY_RUBRIC_TEXT = `# Memory Rubric v7
+var MEMORY_RUBRIC_VERSION = "v9";
+var MEMORY_RUBRIC_TEXT = `# Memory Rubric v9
 
 ## Fields
 
@@ -13135,72 +13218,70 @@ tags \u2014 nouns, naming things: project first, then subsystem/artifact; activi
 words belong to type. Lowercase-hyphenated; reuse existing tags first; on
 discovering synonym drift, merge into the earlier word.
 
-Segment, Working State \u2014 what a resuming session needs to continue:
-- goal        \u2014 what this task is trying to achieve.
-- constraints \u2014 how the work must be done: norms, habits, standing preferences.
-- decisions   \u2014 concrete rulings about the task itself, settled and binding.
-- done        \u2014 what is finished and verified.
-- next_steps  \u2014 what is waiting to be done.
-- reference   \u2014 durable pointers: source locations, specs, PRs, URLs. Not plans.
-
-Segment, Summary layer \u2014 what an outsider browsing the task reads:
-- content \u2014 the impression this arc leaves: what it is about and how it went
-            (focus on the arc, not per-turn conclusions).
-- insight \u2014 reusable experience this task has settled.
-
-A segment's title is set at creation. Its type and tags are DERIVED from its
-member turns and recomputed when membership changes \u2014 never written by hand.
-
 ## Relations (turn\u2192turn; recorded from the citing turn toward the cited)
 
-- Edges are declared through the relation parameters alone; content owes no
-  citation format.
-- A flow is one chain of decisions joined by narrows/extends. Its SETTLEMENT is
-  the node nothing further narrows or extends. Delivery and evidence turns hold
-  no flow of their own \u2014 they reach one through the edges they write.
-- Eight words, three stances:
+A FLOW is one separable line of work inside a phase \u2014 a chain of subtasks,
+sometimes one subtask, sometimes one node; each is equally a flow. Every phase
+runs its own: EVIDENCE flows establish facts, DECISION flows join rulings with
+narrows/extends and SETTLE where nothing further narrows or extends, DELIVERY
+flows join steps with consume (dispatch \u2192 acceptance \u2192 commit). Only the
+decision flow has graph-derived identity; the other two are reading aids, not
+machine-derived.
+
+Eight words, four jobs:
   JUDGING the cited conclusion \u2014 after reading me, must it still be read?
   \xB7 override \u2014 no: it is wrong, and this node replaces it.
-  \xB7 narrows  \u2014 yes: it holds, but this node cuts a piece out of its scope.
-  \xB7 extends  \u2014 yes: it holds, and this node adds a piece.
-  \xB7 collects \u2014 this flow ends here, and these are the nodes that carry its
-    conclusion. Name the minimal set, all of it inside this flow: everything
-    citing this settlement reads them through it.
+  \xB7 narrows  \u2014 yes, but this node cuts a piece out of its scope.
+  \xB7 extends  \u2014 yes, and this node adds a piece.
+  AGGREGATING \u2014 which nodes do I stand for?
+  \xB7 indexes  \u2014 these: the flow converges here and I stand for it. Cite me and
+    you have cited the flow, so everything outside reaches it through this one
+    node, never through its members.
   DEPENDING on it \u2014 if it turned out false, what happens to me?
-  \xB7 grounds \u2014 I fall with it: a delivery resting on the decision it implements,
-    a decision on a finding, a release on its verification. Cite a flow through
-    its SETTLEMENT; a mid-flow target still stores, and the receipt names the
-    settlement to use instead.
-  \xB7 consume \u2014 nothing: I used its product and do not answer for it.
-    Dispatch \u2192 acceptance \u2192 commit chains are consume.
+  \xB7 grounds  \u2014 I fall with it: a delivery on the decision it implements, a
+    decision on a finding, a release on its verification.
+  \xB7 consume  \u2014 nothing: I used its product and do not answer for it.
   TESTING it \u2014 did I put the claim to a check?
   \xB7 verifies / refutes \u2014 a result produced this turn, for it or against it.
-- narrows, extends and collects serve ONE flow; override, grounds and consume
-  are indifferent to flow.
-- Every finished turn walks three steps; with several candidate precursors,
-  ask per candidate:
-  1. Is there a direct precursor \u2014 the node that directly caused this turn?
-     Skipping levels to the arc's origin is mislabeling. None \u2192 an orphan is
-     legal only as an unforeseen subtask start or decision-free chatter;
-     never invent edges to eliminate orphans.
-  2. Yes \u2192 pick the word by the three stances; none fits \u2192 record nothing.
-     A pair may carry several relations, but each must state a fact the others
-     cannot derive \u2014 remove each in turn: if extends holds, consume follows
-     from it, so never write both.
-  3. Refused or warned? A refusal names the half that is missing \u2192 add the
-     smallest missing type, or re-judge the relation. A warning names a better
-     target and stores the edge anyway \u2192 take it at the next correction.
-- A multi-phase turn is several steps merged into one: judge each phase's edge
-  toward a target independently. A turn may cite ITSELF with grounds when it is
-  both a flow's settlement and that settlement's implementer; nothing else
-  self-cites.
-- The release ritual: a release consumes the work it ships and grounds on the
-  settlements it fixes in place, citing the previous release when one exists \u2014
-  the first release is the chain's legal root.
-- Retraction: delete an edge found false, rewrite as needed \u2014 retraction and
-  re-judgment are acts of judgment; never retract merely to tidy.
-- Pre-registration is not an edge: a prediction made before its test lives
-  in insight, not in the graph.
+
+Where each may reach:
+- ONE decision flow: narrows, extends.
+- Same phase, regardless of flow: override, indexes, consume.
+- Cross-phase only: grounds; verifies/refutes from an evidence source toward a
+  decision or delivery target.
+A multi-phase turn is several steps merged into one: judge each phase's edge
+independently. It may cite ITSELF with grounds when it is both a flow's
+settlement and that settlement's implementer; nothing else self-cites.
+
+Cite a flow through the node it converges on \u2014 for a decision flow, its
+SETTLEMENT. A mid-flow grounds still stores; the receipt names that node
+instead. One route across the phases: when a SEPARATE delivery turn wrote the
+spec, THAT turn grounds the decision and the other artifacts consume it; when
+design and spec landed in one turn, each artifact grounds directly.
+
+Every finished turn makes two passes.
+1. PRECURSORS \u2014 for each node that directly caused this turn, pick its word by
+   the four jobs; none fits \u2192 record nothing. Skipping levels to the arc's
+   origin is mislabeling; an orphan is legal ONLY as an unforeseen subtask start
+   or decision-free chatter, and edges are never invented to remove one.
+2. AGGREGATION \u2014 then ask of this turn itself: does a flow CONVERGE here \u2014 a
+   decision closing on its settlement, a delivery on the release that ships
+   it? Then index the nodes carrying its result. Later work may extend the
+   flow past this turn; the edge stays true as the aggregation it was.
+A pair may carry several relations, each stating a fact the others cannot
+derive \u2014 extends and indexes both subsume consume, so never write both. A
+refusal names the missing half \u2192 add the smallest missing type, or re-judge.
+A warning names a better target and stores the edge anyway \u2192 take it next
+correction.
+
+The release ritual: a release indexes the artifacts it ships and consumes the
+previous release if any \u2014 the first release is the chain's legal root. No
+grounds to the settlements it fixes: the artifacts already reach them.
+
+Edges are declared through the relation parameters; content owes no citation
+format. Delete an edge found false and rewrite as needed \u2014 retraction and
+re-judgment are both acts of judgment, never tidying. Pre-registration is not
+an edge: a prediction made before its test lives in insight, not in the graph.
 
 ## Segments (membership and creation)
 

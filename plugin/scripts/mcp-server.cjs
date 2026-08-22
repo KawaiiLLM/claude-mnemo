@@ -7266,6 +7266,17 @@ var init_references = __esm({
   }
 });
 
+// src/db/turn-liveness.ts
+function liveTurnSql(alias = "") {
+  const prefix = alias ? `${alias}.` : "";
+  return `${prefix}was_rolled_back = 0 AND ${prefix}status != 'skipped'`;
+}
+var init_turn_liveness = __esm({
+  "src/db/turn-liveness.ts"() {
+    "use strict";
+  }
+});
+
 // src/db/citations.ts
 function isCitationRelation(value) {
   return typeof value === "string" && CITATION_RELATIONS.includes(value);
@@ -7549,7 +7560,7 @@ function getSessionEffectiveCitations(db, sessionId) {
   const turns = db.query(
     `SELECT id, content
        FROM turns
-       WHERE session_id = ?
+       WHERE session_id = ? AND ${liveTurnSql()}
        ORDER BY prompt_number ASC, id ASC`
   ).all(sessionId);
   const sessionTurnIds = new Set(turns.map((turn) => turn.id));
@@ -7564,6 +7575,7 @@ function getSessionEffectiveCitations(db, sessionId) {
        JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
        JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
        WHERE citing.session_id = ? AND cited.session_id = ?
+         AND ${liveTurnSql("citing")} AND ${liveTurnSql("cited")}
        ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
   ).all(sessionId, sessionId);
   for (const edge of edgeRows) {
@@ -7597,11 +7609,12 @@ var init_citations = __esm({
     "use strict";
     init_memory_edges();
     init_references();
+    init_turn_liveness();
     CITATION_RELATIONS = [
       "override",
       "narrows",
       "extends",
-      "collects",
+      "indexes",
       "consume",
       "grounds",
       "verifies",
@@ -9032,6 +9045,9 @@ function getAttachedSessionIds(db, segmentId) {
 }
 function computeSegmentMemberFacetCounts(db, segmentId, eraCutoffEpoch = null) {
   const members = db.query(
+    // Facets summarise the CONTENT INDEX, not the graph, so they follow the
+    // member listing ([S15069/T915]: a rewound member stays visible, marked)
+    // rather than law 8's node set. Same reason as `rankSegmentMembers`.
     `SELECT t.type AS type, t.tags AS tags
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
@@ -9190,7 +9206,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.14.0-mt38ehll" : "dev";
+    BUILD_ID = true ? "0.15.0-mt440r9q" : "dev";
   }
 });
 
@@ -9536,7 +9552,7 @@ function memoryEdgesVocabularyFlipIsStale(db) {
   ).get()?.sql ?? null;
   return storedDdl !== null && !storedDdl.includes("'narrows'");
 }
-function collapseAndRebuildVocabularyFlip(db, relationWords) {
+function collapseAndRebuildVocabularyFlip(db, relationWords, remap = remapVocabularyFlipRelation) {
   db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_vocabulary_flip");
   db.exec(memoryEdgesTableDdl("memory_edges", relationWords));
   const legacyRows = db.query(
@@ -9548,7 +9564,7 @@ function collapseAndRebuildVocabularyFlip(db, relationWords) {
   ).all();
   const groups = /* @__PURE__ */ new Map();
   for (const row of legacyRows) {
-    const newRelation = remapVocabularyFlipRelation(row.relation);
+    const newRelation = remap(row.relation);
     const key = `${row.citingKind} ${row.citingId} ${row.citedKind} ${row.citedId} ${newRelation ?? ""}`;
     const bucket = groups.get(key);
     if (bucket) {
@@ -9565,7 +9581,7 @@ function collapseAndRebuildVocabularyFlip(db, relationWords) {
   );
   for (const bucket of groups.values()) {
     const sample = bucket[0];
-    const newRelation = remapVocabularyFlipRelation(sample.relation);
+    const newRelation = remap(sample.relation);
     const winner = pickWinningVocabularyFlipRow(bucket);
     insert.run(
       sample.citingKind,
@@ -9630,6 +9646,44 @@ function ensureMemoryEdgesRelationContract(db) {
     db.exec("PRAGMA foreign_keys = ON;");
   }
 }
+function remapIndexesRename(relation) {
+  if (relation === null) {
+    return null;
+  }
+  return INDEXES_RENAME_MAP[relation] ?? relation;
+}
+function memoryEdgesIndexesRenameIsStale(db) {
+  const storedDdl = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'"
+  ).get()?.sql ?? null;
+  return storedDdl !== null && storedDdl.includes("'collects'");
+}
+function ensureMemoryEdgesIndexesRename(db) {
+  if (!memoryEdgesIndexesRenameIsStale(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesIndexesRenameIsStale(db)) {
+        return;
+      }
+      collapseAndRebuildVocabularyFlip(
+        db,
+        MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS,
+        remapIndexesRename
+      );
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while renaming collects to indexes: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
 function ensureMemoryEdgesSchema(db) {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
@@ -9639,6 +9693,7 @@ function ensureMemoryEdgesSchema(db) {
     ensureMemoryEdgesSelfReferenceCheck(db);
     ensureMemoryEdgesVocabularyFlip(db);
     ensureMemoryEdgesRelationContract(db);
+    ensureMemoryEdgesIndexesRename(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
@@ -10885,7 +10940,7 @@ function initializeDatabase(db) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_UNION_RELATION_WORDS, MEMORY_EDGES_CONTRACT_RELATION_WORDS, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_UNION_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, VOCABULARY_FLIP_RENAME, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
+var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_UNION_RELATION_WORDS, MEMORY_EDGES_CONTRACT_RELATION_WORDS, MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_UNION_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, VOCABULARY_FLIP_RENAME, INDEXES_RENAME_MAP, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -11981,6 +12036,17 @@ var init_schema = __esm({
       "refutes",
       "supersedes"
     ];
+    MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS = [
+      "override",
+      "narrows",
+      "extends",
+      "indexes",
+      "consume",
+      "grounds",
+      "verifies",
+      "refutes",
+      "supersedes"
+    ];
     MEMORY_EDGES_INDEXES_DDL = `
   CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
     ON memory_edges(cited_kind, cited_id, relation);
@@ -11990,7 +12056,7 @@ var init_schema = __esm({
     WHERE relation IS NULL;
 `;
     MEMORY_EDGES_UNION_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_UNION_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
-    MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_CONTRACT_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
+    MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
     MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
     AFTER DELETE ON turns
@@ -12037,6 +12103,9 @@ var init_schema = __esm({
       "grounded-on": "grounds",
       refines: "extends",
       encodes: "grounds"
+    };
+    INDEXES_RENAME_MAP = {
+      collects: "indexes"
     };
     NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE = "superseded by the settlement transition watermark (edge-mechanism-revision ticket 05, spec D8) \u2014 resettle via manual backfill";
     segmentsStatusVocabularyRebuildDdl = (tableName) => `
@@ -35794,7 +35863,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // those, "an uncited target rejects the call", with its retirement) — the
   // single-home grep guard (tests/shared/memory-rubric.test.ts) asserts the
   // judgment prose itself appears nowhere on this surface.
-  note: "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief \u2014 never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\nRelations \u2014 override/narrows/extends/collects/consume/grounds/verifies/refutes: turn-only address lists, declared independently of the prose (the body need not name the target, and a call carrying nothing but relations is valid). A pair may hold several relations at once; each `retract<Relation>` mirror deletes one. Which relation, if any \u2014 the judgment \u2014 lives in the Memory Rubric (SessionStart injection); this call only enforces address shape, phase legality, the collects flow-membership check, and your own read grant on the turn being written.\nTool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
+  note: "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief \u2014 never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\nRelations \u2014 override/narrows/extends/indexes/consume/grounds/verifies/refutes: turn-only address lists, declared independently of the prose (the body need not name the target, and a call carrying nothing but relations is valid). A pair may hold several relations at once; each `retract<Relation>` mirror deletes one. Which relation, if any \u2014 the judgment \u2014 lives in the Memory Rubric (SessionStart injection); this call only enforces address shape, phase legality (the self-citation gate included), and your own read grant on the turn being written.\nTool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
   // per-turn). Revives the retired 0.x tool name, now scoped to segments only.
@@ -35949,14 +36018,14 @@ var noteInputShape = {
   extends: external_exports3.array(external_exports3.string()).optional().describe(
     "Addresses a decision this turn still holds and adds a piece TO \u2014 same flow, decision-phase both ends. Judgment lives in the Memory Rubric."
   ),
-  collects: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses the minimal set carrying this flow's conclusion \u2014 legal only when this turn is ITSELF the branch's settlement (nothing further narrows/extends it) and every address already belongs to that same branch; an out-of-branch target rejects the whole call, naming the flow. Judgment lives in the Memory Rubric."
+  indexes: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses the same-phase nodes this turn gathers and stands for \u2014 they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). Same phase is the whole check: no flow, membership or terminus condition. An indexed target is not also consumed. Judgment lives in the Memory Rubric."
   ),
   consume: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow \u2014 a same-flow consume is normally subsumed by extends under the deletion test. Judgment lives in the Memory Rubric."
+    "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow \u2014 never written beside an extends or indexes on the same pair, which already imply it under the deletion test. Judgment lives in the Memory Rubric."
   ),
   grounds: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false \u2014 cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. A mid-flow target still stores; the receipt then names the branch's settlement to cite instead. Turn-only; may cite the citing turn itself only when this turn is both a flow's settlement and that settlement's implementer \u2014 every other relation refuses a self target outright. Judgment lives in the Memory Rubric."
+    "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false \u2014 cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. A mid-flow target still stores; the receipt then names the branch's settlement to cite instead. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; may cite the citing turn itself only when this turn is both a flow's settlement and that settlement's implementer \u2014 every other relation refuses a self target outright. Judgment lives in the Memory Rubric."
   ),
   verifies: external_exports3.array(external_exports3.string()).optional().describe(
     "Addresses the claim this turn tested FOR. Requires an evidence-phase source. Judgment lives in the Memory Rubric."
@@ -35982,8 +36051,8 @@ var noteInputShape = {
   retractExtends: external_exports3.array(external_exports3.string()).optional().describe(
     "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
   ),
-  retractCollects: external_exports3.array(external_exports3.string()).optional().describe(
-    "Addresses whose collects edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
+  retractIndexes: external_exports3.array(external_exports3.string()).optional().describe(
+    "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
   ),
   retractConsume: external_exports3.array(external_exports3.string()).optional().describe(
     "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it."
@@ -36017,7 +36086,13 @@ var rememberInputShape = {
   id: external_exports3.string().min(1).optional().describe(
     'attach/write/edit/close: the target segment \u2014 an "E<n>" address only. assign: the same, but OPTIONAL \u2014 omit entirely to clear ownership on `turns` instead of placing them. Not used by create.'
   ),
-  title: external_exports3.string().min(1).optional().describe("create only (required): the segment's title, written in English."),
+  title: external_exports3.string().min(1).optional().describe(
+    // The derivation rule lived ONLY in the rubric's segment block; it lands
+    // here because this is the one place a caller names a segment's own
+    // identity fields, and `type`/`tags` are conspicuously absent from this
+    // shape — the describe now says why.
+    "create only (required): the segment's title, written in English \u2014 set once, here. A segment's type and tags are never written by hand: they are DERIVED from its member turns and recomputed whenever membership changes."
+  ),
   // Ticket 15 (topic registry retirement, CONTEXT.md "Topic — retired"): the
   // registry this once named a segment into folded into tags — a
   // mechanism-level synonym split. Declared here ONLY so `rememberInputSchema`'s
@@ -36038,7 +36113,12 @@ var rememberInputShape = {
   // schema, the same reasoning `noteInputShape`'s per-field `.describe()`s
   // already follow.
   field: external_exports3.enum(SEGMENT_EDITABLE_FIELDS).optional().describe(
-    "write/edit only (required): which field. Working State \u2014 goal: what this task is trying to achieve. constraints: how the work must be done \u2014 norms, habits, standing preferences. decisions: concrete rulings about the task itself, settled and binding. done: what is finished and verified. next_steps: what is waiting to be done. reference: durable pointers \u2014 source locations, specs, PRs, URLs; not plans. Summary \u2014 content: the impression this arc leaves, what it is about and how it went. insight: reusable experience this task has settled."
+    // The two framings and the arc discriminator moved here from the Memory
+    // Rubric's §Fields segment block, which retires: this describe is the
+    // main agent's standing source for what a segment field IS, and the
+    // settlement surface has no `field` parameter at all (it writes
+    // membership, never segment fields), so nothing else needed a copy.
+    "write/edit only (required): which field. Working State, what a resuming session needs to continue \u2014 goal: what this task is trying to achieve. constraints: how the work must be done \u2014 norms, habits, standing preferences. decisions: concrete rulings about the task itself, settled and binding. done: what is finished and verified. next_steps: what is waiting to be done. reference: durable pointers \u2014 source locations, specs, PRs, URLs; not plans. Summary, what an outsider browsing the task reads \u2014 content: the impression this arc leaves, what it is about and how it went (the arc, not per-turn conclusions). insight: reusable experience this task has settled."
   ),
   // Ticket 05: `write`'s own payload — the field's WHOLE replacement text,
   // supplied verbatim (no automatic "- " row prefixing, unlike the retired
@@ -36090,7 +36170,7 @@ var settlementNoteInputShape = {
   override: noteInputShape.override,
   narrows: noteInputShape.narrows,
   extends: noteInputShape.extends,
-  collects: noteInputShape.collects,
+  indexes: noteInputShape.indexes,
   consume: noteInputShape.consume,
   grounds: noteInputShape.grounds,
   verifies: noteInputShape.verifies,
@@ -36098,7 +36178,7 @@ var settlementNoteInputShape = {
   retractOverride: noteInputShape.retractOverride,
   retractNarrows: noteInputShape.retractNarrows,
   retractExtends: noteInputShape.retractExtends,
-  retractCollects: noteInputShape.retractCollects,
+  retractIndexes: noteInputShape.retractIndexes,
   retractConsume: noteInputShape.retractConsume,
   retractGrounds: noteInputShape.retractGrounds,
   retractVerifies: noteInputShape.retractVerifies,
@@ -36205,7 +36285,7 @@ var EDGE_RELATIONS = [
   "override",
   "narrows",
   "extends",
-  "collects",
+  "indexes",
   "consume",
   "grounds",
   "verifies",
@@ -36214,7 +36294,7 @@ var EDGE_RELATIONS = [
 function isTurnEdgeRelation(value) {
   return typeof value === "string" && EDGE_RELATIONS.includes(value);
 }
-var SAME_PHASE_RELATIONS = ["override", "collects", "consume"];
+var SAME_PHASE_RELATIONS = ["override", "indexes", "consume"];
 var DECISION_ONLY_RELATIONS = ["narrows", "extends"];
 var EVIDENCE_SOURCE_RELATIONS = ["verifies", "refutes"];
 function buildRelationPhaseRequirement() {
@@ -36311,7 +36391,7 @@ var RELATION_FIELD_NAME = {
   override: "override",
   narrows: "narrows",
   extends: "extends",
-  collects: "collects",
+  indexes: "indexes",
   consume: "consume",
   grounds: "grounds",
   verifies: "verifies",
@@ -36321,12 +36401,13 @@ var RELATION_FIELD_NAME = {
 // src/shared/flows.ts
 var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
 var TERMINATING_RELATION = "override";
-var INHERITING_RELATIONS = /* @__PURE__ */ new Set(["grounds", "consume"]);
+var INHERITING_RELATIONS = /* @__PURE__ */ new Set([
+  "grounds",
+  "consume",
+  "indexes"
+]);
 function isFlowSettlement(derivation, turnId) {
   return derivation.flowById.get(turnId)?.settlement === turnId;
-}
-function isOwnFlowMember(derivation, terminusId, turnId) {
-  return derivation.flowById.get(terminusId)?.members.includes(turnId) ?? false;
 }
 function settlementsOfTurn(derivation, turnId) {
   const settlements = /* @__PURE__ */ new Set();
@@ -36433,6 +36514,7 @@ function deriveFlows(turns, edges) {
 }
 
 // src/db/flows.ts
+init_turn_liveness();
 function deriveFlowsForSessions(db, sessionIds) {
   const uniqueSessionIds = [...new Set(sessionIds)].filter(
     (id) => Number.isSafeInteger(id) && id > 0
@@ -36442,7 +36524,8 @@ function deriveFlowsForSessions(db, sessionIds) {
   }
   const sessionPlaceholders = uniqueSessionIds.map(() => "?").join(",");
   const turnRows = db.query(
-    `SELECT id, type FROM turns WHERE session_id IN (${sessionPlaceholders})`
+    `SELECT id, type FROM turns
+       WHERE session_id IN (${sessionPlaceholders}) AND ${liveTurnSql()}`
   ).all(...uniqueSessionIds);
   const turns = turnRows.map((row) => ({
     id: row.id,
@@ -36457,7 +36540,7 @@ function deriveFlowsForSessions(db, sessionIds) {
     `SELECT citing_id AS citingId, cited_id AS citedId, relation
        FROM memory_edges
        WHERE citing_kind = 'turn' AND cited_kind = 'turn'
-         AND relation IN ('narrows', 'extends', 'override', 'grounds', 'consume')
+         AND relation IN ('narrows', 'extends', 'override', 'grounds', 'consume', 'indexes')
          AND (citing_id IN (${turnPlaceholders}) OR cited_id IN (${turnPlaceholders}))`
   ).all(...turnIds, ...turnIds);
   const edges = edgeRows.map((row) => ({
@@ -37402,7 +37485,7 @@ function touchesEdgeFields(input) {
     ([key]) => input[key] !== void 0
   );
 }
-function checkRelationTargetPhase(db, relation, raw, citingTurnId, citingRef, citingPhases, flows) {
+function checkRelationTargetPhase(db, relation, raw, citingTurnId, citingPhases, flows) {
   if (!isTurnEdgeRelation(relation)) {
     return null;
   }
@@ -37435,30 +37518,20 @@ function checkRelationTargetPhase(db, relation, raw, citingTurnId, citingRef, ci
   if (!result.ok) {
     return `${relation} "${raw}" ${result.detail}`;
   }
-  if (relation === "collects" && flows !== null) {
-    if (!isFlowSettlement(flows, citingTurnId)) {
-      return `collects "${raw}" requires the citing turn to itself be a flow's live settlement (nothing further narrows/extends it, and no override killed its branch) \u2014 ${citingRef} is mid-flow, overridden, or belongs to no decision flow at all`;
-    }
-    if (!isOwnFlowMember(flows, citingTurnId, cited.id)) {
-      return `collects "${raw}" is not a member of the flow terminating at ${citingRef} \u2014 collects only names turns already inside this branch`;
-    }
-  }
   return null;
 }
-function resolveRelationFields(db, citingTurnId, citingSessionId, citingRef, citingTurnType, input, nowEpoch) {
+function resolveRelationFields(db, citingTurnId, citingSessionId, citingTurnType, input, nowEpoch) {
   const fields = collectRelationFields(RELATION_FIELD_ENTRIES, input);
   if (fields.length === 0) {
     return null;
   }
   const citingPhases = phasesForTypes(citingTurnType);
-  const needsFlows = fields.some(
-    (field) => field.relation === "collects" || field.relation === "grounds"
-  );
+  const needsFlows = fields.some((field) => field.relation === "grounds");
   let flows = null;
   if (needsFlows) {
     const sessionIds = /* @__PURE__ */ new Set([citingSessionId]);
     for (const field of fields) {
-      if (field.relation !== "collects" && field.relation !== "grounds") {
+      if (field.relation !== "grounds") {
         continue;
       }
       for (const raw of field.targets) {
@@ -37478,7 +37551,6 @@ function resolveRelationFields(db, citingTurnId, citingSessionId, citingRef, cit
         field.relation,
         raw,
         citingTurnId,
-        citingRef,
         citingPhases,
         flows
       );
@@ -37602,7 +37674,7 @@ function handleTurnWrite(db, address, input, options) {
   const touchesEdges = touchesEdgeFields(input);
   if (providedFields.length === 0 && !touchesEdges) {
     return parameterError(
-      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (override/narrows/extends/collects/consume/grounds/verifies/refutes) or one of their retract\u2026 mirrors is required.`
+      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (override/narrows/extends/indexes/consume/grounds/verifies/refutes) or one of their retract\u2026 mirrors is required.`
     );
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
@@ -37766,7 +37838,6 @@ function handleTurnWrite(db, address, input, options) {
         db,
         turn.id,
         turn.sessionId,
-        addressLabel,
         updatedTurn.type,
         input,
         nowEpoch
@@ -38042,6 +38113,12 @@ function rankSegmentMembers(db, segmentId, limit, eraCutoffEpoch = null) {
     return [];
   }
   const rows = db.query(
+    // NOT a law-8 site, deliberately. Law 8 governs the GRAPH — nodes, edges,
+    // the derivations over them, the graph page. This ranking feeds the
+    // CONTENT INDEX (the segment card, recall's member listing), where
+    // [S15069/T915] rules the opposite: a rewound turn renders WITH its own
+    // marker rather than disappearing, because a reader who cannot see it
+    // cannot tell a withdrawn branch from a turn that never existed.
     `SELECT ${RANK_FACT_COLUMNS}
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
@@ -41641,6 +41718,7 @@ function rememberTool(db, rawInput, options = {}) {
 init_citations();
 
 // src/db/edge-signals.ts
+init_turn_liveness();
 function zeroSignals() {
   return { overridden: false, refinesExcess: { decision: 0, delivery: 0 }, encodesCount: 0 };
 }
@@ -41678,9 +41756,11 @@ function getTurnEdgeSignals(db, turnIds) {
     `SELECT DISTINCT e.cited_id AS targetId
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
+       JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
          AND e.relation = 'override'
-         AND citing.was_rolled_back = 0
+         AND ${liveTurnSql("citing")}
+         AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})`
   ).all(...uniqueIds);
   for (const row of overrideRows) {
@@ -41690,9 +41770,11 @@ function getTurnEdgeSignals(db, turnIds) {
     `SELECT e.cited_id AS targetId, COUNT(*) AS count
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
+       JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'grounds'
-         AND citing.was_rolled_back = 0
+         AND e.relation IN ('grounds', 'indexes')
+         AND ${liveTurnSql("citing")}
+         AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})
        GROUP BY e.cited_id`
   ).all(...uniqueIds);
@@ -41703,9 +41785,11 @@ function getTurnEdgeSignals(db, turnIds) {
     `SELECT e.cited_id AS targetId, citing.type AS citingType
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
+       JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
          AND e.relation = 'extends'
-         AND citing.was_rolled_back = 0
+         AND ${liveTurnSql("citing")}
+         AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})
        ORDER BY e.cited_id ASC, e.created_at_epoch ASC, e.citing_id ASC`
   ).all(...uniqueIds);
@@ -41730,6 +41814,7 @@ function getTurnEdgeSignals(db, turnIds) {
 }
 
 // src/mcp/timeline.ts
+init_turn_liveness();
 init_segments();
 
 // src/diary/domain.ts
@@ -43585,10 +43670,18 @@ function resolveTurnRowLinks(db, turns) {
   const citingIds = [...result.keys()];
   const placeholders = citingIds.map(() => "?").join(",");
   const edges = db.query(
-    `SELECT DISTINCT citing_id AS citingId, cited_id AS citedId, relation
-         FROM memory_edges
-        WHERE citing_kind = 'turn' AND cited_kind = 'turn'
-          AND citing_id IN (${placeholders})`
+    // Law 8 (indexes-rescope spec): a deleted or dormant turn is not a node,
+    // so it may not appear as a `↳` antecedent either — the index row is the
+    // graph's most visible face. Filtered at BOTH ends here, at the source:
+    // the cited lookup below then reads only ids this filter already passed.
+    `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation
+         FROM memory_edges e
+         JOIN turns citing ON citing.id = e.citing_id
+         JOIN turns cited ON cited.id = e.cited_id
+        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+          AND ${liveTurnSql("citing")}
+          AND ${liveTurnSql("cited")}
+          AND e.citing_id IN (${placeholders})`
   ).all(...citingIds);
   if (edges.length === 0) {
     return result;
@@ -44155,7 +44248,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.14.0" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.15.0" : "0.0.0-test";
 function resolveCallerSessionIdFromEnv(db, env = process.env) {
   for (const identityKey of deriveProcessIdentityKeys(env)) {
     const sessionId = getMnemoSessionIdForProcessSession(db, identityKey);
