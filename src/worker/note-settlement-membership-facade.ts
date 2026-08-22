@@ -5,7 +5,9 @@ import { recordNoteSettlementProposal } from "../db/note-settlement-proposals";
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import {
   attachSegmentToSession,
+  checkSegmentMembershipTagGate,
   createSegment,
+  formatSegmentMembershipGateRejection,
   getSegment,
   reassignSegmentMembers,
 } from "../db/segments";
@@ -66,6 +68,15 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  * transaction, single ownership enforced by the write. The legal domain is
  * this session's own roster ∪ homeless (`id` omitted) — a restriction ticket
  * 04 has since deleted; see the paragraph above.
+ *
+ * TICKET 07 (rubric-v10, "Segment tags and note-time membership"): `reassign`
+ * now runs the SAME membership tag gate `remember(assign)` and `note`'s own
+ * `segment` parameter do (`checkSegmentMembershipTagGate`, db/segments.ts) —
+ * a turn missing one of the target segment's hand-curated tags is refused,
+ * naming the gap, before `reassignSegmentMembers` ever runs. `create`'s own
+ * seed-member reassignment below is deliberately NOT gated — see this
+ * ticket's own scope, which names three gated paths and excludes a fresh
+ * segment's first members.
  *
  * Registered under the tool name `remember` (not `segment`) in
  * note-settlement-sdk-query.ts — the settlement subagent uses the same tool
@@ -361,6 +372,21 @@ function evaluateReassign(
       ok: false,
       message: "reassign requires at least one DISTINCT turn address after de-duplication.",
     };
+  }
+
+  // Ticket 07 (rubric-v10, "Segment tags and note-time membership"): the same
+  // membership tag gate `remember(assign)` and `note`'s own `segment`
+  // parameter share — a turn must carry every one of the target segment's
+  // tags, or the whole reassignment rejects, naming the gap. No target
+  // (homeless) has no segment tags to satisfy.
+  if (targetSegmentId !== null) {
+    const gate = checkSegmentMembershipTagGate(db, targetSegmentId, turnIds);
+    if (!gate.ok) {
+      return {
+        ok: false,
+        message: formatSegmentMembershipGateRejection(targetSegmentId, gate.violations),
+      };
+    }
   }
 
   const result = reassignSegmentMembers(db, turnIds, targetSegmentId, nowEpoch);

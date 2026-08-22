@@ -23,6 +23,15 @@ import {
   recordDeclinedNoteDebt,
 } from "../db/note-debt";
 import { parseBareAddressReference } from "../db/references";
+import {
+  checkSegmentMembershipTagGate,
+  formatSegmentMembershipGateRejection,
+  getAttachedSegmentIds,
+  getSegment,
+  reassignSegmentMembers,
+  type ReassignSegmentMembersResult,
+  type SegmentRecord,
+} from "../db/segments";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import {
   getTurn,
@@ -215,6 +224,19 @@ export interface NoteToolInput {
   tags?: unknown;
   skip?: unknown;
   crossSession?: unknown;
+  /**
+   * Ticket 07 (rubric-v10, "Segment tags and note-time membership"): assign
+   * THIS turn's own membership to one segment ("E<n>") the calling session
+   * has ATTACHED — an unattached or nonexistent segment rejects, naming the
+   * attachment requirement. The target's own hand-curated tags gate the
+   * write, same as `remember`'s `assign` and settlement's `reassign`
+   * (`checkSegmentMembershipTagGate`, db/segments.ts): this turn's tags
+   * (after this same call's own `tags`, when given) must carry every one of
+   * them, or the call rejects naming the gap. `remember`'s `assign` stays
+   * the batch/reassignment/clearing surface — this parameter only ever
+   * targets the turn THIS call itself is writing.
+   */
+  segment?: unknown;
 
   // Flow-relations spec (ticket 02): one named field per relation, the
   // eight-word vocabulary. Targets are address tokens — see
@@ -967,6 +989,8 @@ interface TurnWriteTransactionResult {
   relations: AttachTurnRelationsResult | null;
   retractions: RetractTurnRelationsResult | null;
   stripped: boolean;
+  /** Ticket 07 (rubric-v10) — non-null only when `segment` was given and passed the gate. */
+  membership: { segmentId: number; vacatedSegmentIds: number[] } | null;
 }
 
 export function isValidPredecessorFor(
@@ -1024,6 +1048,41 @@ function handleTurnWrite(
     );
   }
 
+  // Ticket 07 (rubric-v10): `segment`'s own structural legality — address
+  // shape, existence, and the attachment restriction — is checked here,
+  // before the write transaction, the same way crossSession/compact-marker
+  // are. It does NOT depend on anything the transaction below writes; only
+  // the membership TAG gate does (it needs this turn's possibly-just-written
+  // tags), so that check runs inside the transaction instead — see below.
+  let targetSegment: SegmentRecord | null = null;
+  if (input.segment !== undefined) {
+    if (typeof input.segment !== "string" || input.segment.trim() === "") {
+      return parameterError('segment must be a non-empty "E<n>" address when present.');
+    }
+    const parsedSegment = parseBareAddressReference(input.segment);
+    if (!parsedSegment || parsedSegment.kind !== "segment") {
+      return parameterError(`segment must be an "E<n>" address; got "${input.segment}".`);
+    }
+    const segment = getSegment(db, parsedSegment.segmentId);
+    if (!segment) {
+      return parameterError(`no segment E${parsedSegment.segmentId}.`);
+    }
+    if (typeof options.callerSessionId !== "number") {
+      return parameterError(
+        `segment membership requires a known caller session to verify attachment to ` +
+          `E${segment.id}; caller session unknown.`,
+      );
+    }
+    const attachedIds = getAttachedSegmentIds(db, options.callerSessionId);
+    if (!attachedIds.includes(segment.id)) {
+      return parameterError(
+        `E${segment.id} is not attached to this session (S${options.callerSessionId}) — ` +
+          `remember(attach, id="E${segment.id}") first, or name a segment this session has attached.`,
+      );
+    }
+    targetSegment = segment;
+  }
+
   let modeMap: Partial<Record<string, FieldMode>>;
   try {
     modeMap = parseModeMap(input.mode, TURN_MODE_FIELDS);
@@ -1050,11 +1109,14 @@ function handleTurnWrite(
   // "at least one field" wording here would have re-imposed the C7
   // co-occurrence rule at the door, one layer above where it was deleted.
   const touchesEdges = touchesEdgeFields(input);
-  if (providedFields.length === 0 && !touchesEdges) {
+  // Ticket 07 (rubric-v10): `segment` alone is also a complete call — same
+  // reasoning as `touchesEdges` above, a pure membership assignment does
+  // real work without touching prose/type/tags or edges.
+  if (providedFields.length === 0 && !touchesEdges && targetSegment === null) {
     return parameterError(
       `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field` +
-        " (override/narrows/extends/indexes/consume/grounds/verifies/refutes)" +
-        " or one of their retract… mirrors is required.",
+        " (override/narrows/extends/indexes/consume/grounds/verifies/refutes)," +
+        " one of their retract… mirrors, or segment is required.",
     );
   }
 
@@ -1322,6 +1384,31 @@ function handleTurnWrite(
         }
       }
 
+      // Ticket 07 (rubric-v10): the membership tag gate, checked HERE — after
+      // `wantsFieldsWrite`'s own `updateTurnById` above has already landed,
+      // so a `tags` write earlier in this SAME call is what the gate judges
+      // this turn against (`checkSegmentMembershipTagGate` reads `turns`
+      // live). A violation throws and unwinds the whole transaction —
+      // nothing is co-written, matching every other whole-call validation in
+      // this function.
+      let membership: { segmentId: number; vacatedSegmentIds: number[] } | null = null;
+      if (targetSegment) {
+        const gate = checkSegmentMembershipTagGate(db, targetSegment.id, [turn.id]);
+        if (!gate.ok) {
+          fail(formatSegmentMembershipGateRejection(targetSegment.id, gate.violations));
+        }
+        const assigned: ReassignSegmentMembersResult = reassignSegmentMembers(
+          db,
+          [turn.id],
+          targetSegment.id,
+          nowEpoch,
+        );
+        membership = {
+          segmentId: targetSegment.id,
+          vacatedSegmentIds: assigned.vacatedSegmentIds,
+        };
+      }
+
       if (touchedProse && promotesTurnRecord) {
         citations = recomputeTurnCitedPairs(
           db,
@@ -1388,6 +1475,7 @@ function handleTurnWrite(
         relations,
         retractions,
         stripped,
+        membership,
       };
     });
   } catch (error) {
@@ -1507,6 +1595,17 @@ function handleTurnWrite(
     } else if (restated > 0) {
       parts.push(`${restated} relation(s) already present, nothing added.`);
     }
+  }
+
+  // Ticket 07 (rubric-v10): the membership assignment receipt.
+  if (result.membership) {
+    const vacatedNote =
+      result.membership.vacatedSegmentIds.length > 0
+        ? ` Removed from prior segment(s): ${result.membership.vacatedSegmentIds
+            .map((id) => `E${id}`)
+            .join(", ")}.`
+        : "";
+    parts.push(`Assigned to E${result.membership.segmentId}.${vacatedNote}`);
   }
 
   return textResult(parts.join(" "));

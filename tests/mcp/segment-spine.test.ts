@@ -112,9 +112,10 @@ function seedEraFixture(
     grade: 2,
   });
 
-  // Ticket 14 (spec K5a): a segment's tags and type are DERIVED from its
-  // members, so the row's facets have to be seeded on the turns. Frequency
-  // orders them — extraction-redesign on all three members, rendering on two.
+  // Ticket 14 (spec K5a): a segment's type is DERIVED from its members, so
+  // the row's own type facet has to be seeded on the turns. Frequency orders
+  // it. (rubric-v10 ticket 07: tags are no longer derived this way — the
+  // segment created below states its own hand-curated tags directly.)
   ids.research = makeTurn(10, {
     type: "research",
     title: "research the spine",
@@ -148,6 +149,11 @@ function seedEraFixture(
 
   const segment = createSegment(db, {
     title: "implement the segment spine",
+    // rubric-v10 ticket 07: tags are hand-curated identity now, not derived
+    // from members (`recomputeSegmentFacets` no longer touches this column)
+    // — stated explicitly here so the render assertions below still see the
+    // same two tags the member sweep used to produce on its own.
+    tags: ["extraction-redesign", "rendering"],
     nowEpoch: CUTOFF,
   });
   ids.segment = segment.id;

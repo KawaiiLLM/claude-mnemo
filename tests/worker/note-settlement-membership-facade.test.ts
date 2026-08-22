@@ -16,6 +16,7 @@ import {
   getSegment,
   getSegmentMemberTurnIds,
   listAttachedSegments,
+  setSegmentTags,
   toggleSegmentStatus,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -529,6 +530,163 @@ describe("reassign — cross-segment, bounded only by existence and status (tick
         turns: ["S1/T1"],
       }).success,
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reassign — the membership tag gate (rubric-v10 ticket 07): one of the
+// three call sites sharing `checkSegmentMembershipTagGate` (db/segments.ts).
+// ---------------------------------------------------------------------------
+
+describe("reassign — the membership tag gate (ticket 07)", () => {
+  test("a turn missing a target segment tag is refused, naming the gap and the segment; nothing is co-written", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1, { tags: ["lease"] }); // missing "fencing"
+    const job = claimWindow(sessionDbId, 1, 1);
+    const target = createSegment(db, {
+      title: "gated",
+      tags: ["lease", "fencing"],
+      nowEpoch: NOW,
+    });
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${target.id}` },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain(`E${target.id}`);
+    expect(!result.ok && result.message).toContain("fencing");
+    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([]);
+  });
+
+  test("a turn carrying every target tag is accepted", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1, { tags: ["lease", "fencing", "extra"] });
+    const job = claimWindow(sessionDbId, 1, 1);
+    const target = createSegment(db, {
+      title: "gated",
+      tags: ["lease", "fencing"],
+      nowEpoch: NOW,
+    });
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${target.id}` },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([t1]);
+  });
+
+  test("an EMPTY target segment.tags gates nothing — vacuous pass", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1); // untagged
+    const job = claimWindow(sessionDbId, 1, 1);
+    const target = createSegment(db, { title: "ungated", nowEpoch: NOW });
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${target.id}` },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([t1]);
+  });
+
+  test("id omitted (homeless) is never gated", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1); // untagged
+    const job = claimWindow(sessionDbId, 1, 1);
+    const attached = createSegment(db, { title: "was home", tags: ["required"], nowEpoch: NOW });
+    attachSegmentToSession(db, sessionDbId, attached.id, NOW);
+    addSegmentMembers(db, attached.id, [t1], NOW);
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`] },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(getSegmentMemberTurnIds(db, attached.id)).toEqual([]);
+  });
+
+  test("grandfathering: an existing member lacking the target's tags is untouched by retagging the segment or an unrelated reassign", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1); // untagged, joins before the segment is tagged
+    const t2 = seedTurn(sessionDbId, 2, { tags: ["required"] });
+    const job = claimWindow(sessionDbId, 1, 2);
+    const target = createSegment(db, { title: "grandfathered", nowEpoch: NOW });
+    addSegmentMembers(db, target.id, [t1], NOW); // pre-gate: untagged segment, vacuous pass
+    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([t1]);
+
+    // Tags land on the segment AFTER t1 already joined — nothing re-checks
+    // that pre-existing membership.
+    setSegmentTags(db, target.id, ["required"], NOW);
+    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([t1]);
+
+    // A later reassign call for a DIFFERENT turn is checked, but never
+    // re-checks t1's pre-gate membership.
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1, t2]) }),
+      { action: "reassign", turns: [`S${sessionDbId}/T2`], id: `E${target.id}` },
+      NOW,
+      { apply: true },
+    );
+    expect(result.ok).toBe(true);
+    expect(getSegmentMemberTurnIds(db, target.id).sort()).toEqual([t1, t2].sort());
+  });
+
+  // Mutation check (this ticket's own acceptance criterion): if the gate
+  // call in `evaluateReassign` were removed, this test would let a
+  // mismatched turn through undetected — it must fail loudly instead.
+  test("MUTATION CHECK: disabling the gate on this path would let a mismatched turn through undetected", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1); // carries no tags at all
+    const job = claimWindow(sessionDbId, 1, 1);
+    const target = createSegment(db, { title: "gated", tags: ["required"], nowEpoch: NOW });
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${target.id}` },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([]);
+  });
+
+  test("create's own seed-member reassignment is NOT gated (ticket 07 scope)", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1); // untagged
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      { action: "create", title: "fresh, tagged, seeded from an untagged turn", turns: [`S${sessionDbId}/T1`] },
+      NOW,
+      { apply: true },
+    );
+
+    expect(result.ok).toBe(true);
+    const segmentId = result.ok ? result.outcome.create!.segmentId! : -1;
+    expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([t1]);
   });
 });
 

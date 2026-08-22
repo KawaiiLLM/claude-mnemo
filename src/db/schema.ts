@@ -3715,28 +3715,19 @@ function safeParseTagArray(value: string | null): string[] {
  * Fold each segment's topic NAME into its tags — the durable home for the
  * information once the registry that used to carry it is gone.
  *
- * `segments.tags` is DERIVED from its members (`recomputeSegmentFacets`, spec
- * K5a): writing directly into it is safe only where NOTHING will ever
- * recompute it. For a segment WITH members, that is never guaranteed (a
- * future membership change recomputes and would silently erase a value
- * written straight into the column) — so the durable write lands on each
- * MEMBER TURN's own `tags` instead, the actual source `recomputeSegmentFacets`
- * reads, and this function then runs that SAME derivation once so the
- * migrated tag is visible immediately rather than waiting for the next
- * membership event.
- *
- * A segment with ZERO members has no such source — there is no member turn to
- * fold the tag into, and `recomputeSegmentFacets` would derive `[]` for it
- * regardless of what this writes. For that case only, this writes the topic
- * tag directly into `segments.tags`. This is the one write in this migration
- * NOT proof against a future recompute: if the segment later gains its first
- * member, that membership event re-derives `tags` from the member's own facets
- * and the seeded topic tag is superseded (not preserved) — flagged here
- * because it is the one place this migration's guarantee is weaker than
- * everywhere else, per this ticket's own caution about writing a value the
- * next recompute erases. No mechanism exists today to give a memberless
- * segment a tag source that survives its first membership event without
- * inventing new machinery this ticket does not ask for.
+ * REWRITTEN at rubric-v10 ticket 07: `segments.tags` is hand-curated identity
+ * now — the derivation half of `recomputeSegmentFacets` retired, so a direct
+ * write into the column is durable, and this migration IS a curation act
+ * performed under migration authority (the topic name was the segment's
+ * identity in the old registry; it becomes the segment's identity tag in the
+ * new model). The fold therefore writes BOTH sides for every segment: the
+ * bare tag lands directly on `segments.tags` (visible immediately, erased by
+ * nothing), and it still folds into each MEMBER TURN's own `tags` — no longer
+ * as a derivation source, but because ticket 07's membership gate requires a
+ * member to carry all of its segment's tags, and a fold that skipped the
+ * members would leave every one of them unable to be reassigned under the
+ * gate. The old member/memberless asymmetry (and its recompute-erasure
+ * caveat) is gone with the derivation that caused it.
  */
 function foldTopicNamesIntoSegmentTags(db: Database): void {
   const topicSegments = db
@@ -3781,15 +3772,15 @@ function foldTopicNamesIntoSegmentTags(db: Database): void {
       .all(segment.id)
       .map((row) => row.turnId);
 
-    if (memberTurnIds.length === 0) {
-      const currentTags = safeParseTagArray(segment.tags);
-      if (currentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
-        continue;
-      }
+    // The segment's own row first: hand-curated identity, written directly.
+    const currentSegmentTags = safeParseTagArray(segment.tags);
+    if (!currentSegmentTags.some((tag) => tag.toLocaleLowerCase("en-US") === bareTag)) {
       db.query<unknown, [string, number]>("UPDATE segments SET tags = ? WHERE id = ?").run(
-        JSON.stringify([...currentTags, bareTag]),
+        JSON.stringify([...currentSegmentTags, bareTag]),
         segment.id,
       );
+    }
+    if (memberTurnIds.length === 0) {
       continue;
     }
 
@@ -3809,10 +3800,8 @@ function foldTopicNamesIntoSegmentTags(db: Database): void {
       foldedAny = true;
     }
     if (foldedAny) {
-      // Re-derive NOW rather than leaving the trigger's `facets_stale` debt
-      // for the next batched sweep (`repairStaleSegmentFacets` pays at most
-      // `SEGMENT_FACET_REPAIR_BATCH` per process start) — a one-time
-      // migration needs the tag visible in THIS pass, not eventually.
+      // Type may shift when member tags change facets downstream; tags no
+      // longer derive (ticket 07), so this call is type-only housekeeping.
       recomputeSegmentFacets(db, segment.id);
     }
   }

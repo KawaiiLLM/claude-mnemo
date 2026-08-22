@@ -487,11 +487,13 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     expect(field).toContain("(the arc, not per-turn conclusions)");
 
     // The derivation rule, which lived ONLY in the rubric: it explains why this
-    // shape has no type/tags parameter, so it belongs beside the one identity
-    // field a caller does write.
+    // shape has no type parameter, so it belongs beside the identity fields a
+    // caller does write. Ticket 07 SPLIT the old claim: type stays derived,
+    // tags became hand-curated (create/retag) and gate membership — the pin
+    // follows the split, not the retired both-derived wording.
     expect(title).toContain("set once, here");
     expect(title).toContain(
-      "A segment's type and tags are never written by hand: they are DERIVED from its member turns and recomputed whenever membership changes",
+      "A segment's type is never written by hand: it is DERIVED from its member turns",
     );
 
     // And the rubric must not re-grow a copy: two homes for one definition is

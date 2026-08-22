@@ -9,13 +9,17 @@ import {
 import {
   appendSegmentWorkingStateRows,
   attachSegmentToSession,
+  checkSegmentMembershipTagGate,
   createSegment,
+  formatSegmentMembershipGateRejection,
   getSegment,
   reassignSegmentMembers,
   replaceInSegmentWorkingStateField,
   segmentEditableFieldValue,
+  setSegmentTags,
   toggleSegmentStatus,
   writeSegmentWorkingStateField,
+  type ReassignSegmentMembersResult,
   type ReplaceSegmentWorkingStateFieldResult,
   type SegmentRecord,
 } from "../db/segments";
@@ -51,7 +55,8 @@ export type RememberVerb =
   | "write"
   | "edit"
   | "close"
-  | "assign";
+  | "assign"
+  | "retag";
 const REMEMBER_VERBS: readonly RememberVerb[] = [
   "create",
   "attach",
@@ -59,6 +64,7 @@ const REMEMBER_VERBS: readonly RememberVerb[] = [
   "edit",
   "close",
   "assign",
+  "retag",
 ];
 
 // Ticket 05 (write-mode-edit-semantics, spec D1/D14): `append`/`replace`
@@ -82,8 +88,9 @@ const RETIRED_REMEMBER_VERB_REPLACEMENT: Record<string, string> = {
 // `append`/`replace`). `attach`/`close`/`assign` move a segment between
 // roster states or sessions without touching any of its fields, so they are
 // deliberately excluded — see `touchSessionRememberActivity`'s call site
-// below.
-const FIELD_WRITING_VERBS: readonly RememberVerb[] = ["create", "write", "edit"];
+// below. Ticket 07 (rubric-v10) adds `retag` — it writes the segment's own
+// tags field, the same "touches a field" reasoning as `write`/`edit`.
+const FIELD_WRITING_VERBS: readonly RememberVerb[] = ["create", "write", "edit", "retag"];
 
 function isFieldWritingVerb(verb: RememberVerb): boolean {
   return FIELD_WRITING_VERBS.includes(verb);
@@ -95,9 +102,13 @@ export interface RememberToolInput {
   title?: unknown;
   goal?: unknown;
   members?: unknown;
+  // create (optional) / retag (required, ticket 07): the segment's
+  // hand-curated tags — the full replacement set on retag, never merged.
+  tags?: unknown;
   // attach / write / edit / close / assign share `id` — a segment's
   // `E<n>` address (ticket 15: the topic-name fallback retired). `assign`
   // alone treats `id` as OPTIONAL: omitted means "clear ownership" (ticket 02).
+  // `retag` (ticket 07) requires `id` too.
   id?: unknown;
   // write / edit
   field?: unknown;
@@ -282,6 +293,7 @@ function handleCreate(
   let title: string;
   let goal: string | null;
   let memberAddresses: string[];
+  let tags: string[];
   try {
     title = resolveProseField("title", input.title, { required: true })!;
     goal = resolveProseField("goal", input.goal, { required: false });
@@ -295,6 +307,21 @@ function handleCreate(
       memberAddresses = input.members as string[];
     } else {
       fail("members must be an array of strings when present.");
+    }
+
+    // Ticket 07 (rubric-v10): the segment's own hand-curated tags, set once
+    // here — see `createSegment`'s own doc comment for why this no longer
+    // shares `type`'s "storage mechanics only, overwritten on first
+    // membership" story.
+    if (input.tags === undefined) {
+      tags = [];
+    } else if (
+      Array.isArray(input.tags) &&
+      input.tags.every((value) => typeof value === "string")
+    ) {
+      tags = input.tags as string[];
+    } else {
+      fail("tags must be an array of strings when present.");
     }
   } catch (error) {
     if (error instanceof RememberValidationError) {
@@ -316,6 +343,7 @@ function handleCreate(
 
       let segment = createSegment(db, {
         title,
+        tags,
         nowEpoch,
       });
 
@@ -362,6 +390,9 @@ function handleCreate(
   );
   if (result.goalSeeded) {
     parts.push("goal: 1 row seeded.");
+  }
+  if (result.segment.tags.length > 0) {
+    parts.push(`tags: ${result.segment.tags.join(", ")}.`);
   }
   return textResult(parts.join(" "));
 }
@@ -923,9 +954,36 @@ function handleAssign(
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const result = writeTransaction(db, () =>
-    reassignSegmentMembers(db, turnIds, targetSegment?.id ?? null, nowEpoch),
-  );
+
+  // Ticket 07 (rubric-v10): the membership tag gate, checked INSIDE the same
+  // transaction as the write it guards — a violation is refused, naming the
+  // gap, and nothing is co-written. Only relevant when a target is named;
+  // clearing ownership (`targetSegment === null`) has no segment tags to
+  // satisfy.
+  type AssignOutcome =
+    | { kind: "gate-rejected"; message: string }
+    | { kind: "ok"; result: ReassignSegmentMembersResult };
+
+  const outcome = writeTransaction(db, (): AssignOutcome => {
+    if (targetSegment) {
+      const gate = checkSegmentMembershipTagGate(db, targetSegment.id, turnIds);
+      if (!gate.ok) {
+        return {
+          kind: "gate-rejected",
+          message: formatSegmentMembershipGateRejection(targetSegment.id, gate.violations),
+        };
+      }
+    }
+    return {
+      kind: "ok",
+      result: reassignSegmentMembers(db, turnIds, targetSegment?.id ?? null, nowEpoch),
+    };
+  });
+
+  if (outcome.kind === "gate-rejected") {
+    return parameterError(outcome.message);
+  }
+  const result = outcome.result;
 
   const parts: string[] = [
     targetSegment
@@ -943,18 +1001,83 @@ function handleAssign(
 }
 
 // ---------------------------------------------------------------------------
+// retag
+// ---------------------------------------------------------------------------
+
+/**
+ * `remember`'s `retag` verb (ticket 07, rubric-v10): the segment tags' own
+ * edit path — hand-curated identity, replaced WHOLE, never merged (a caller
+ * composes the finished set itself). `[]` clears every tag (the membership
+ * gate then passes vacuously). Refuses on a closed segment, same discipline
+ * `write`/`edit` already apply to their own fields — see `setSegmentTags`
+ * (db/segments.ts) for why this needs no revision fence or write-gate check.
+ */
+function handleRetag(
+  db: Database,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError('id is required for retag — an "E<n>" address.');
+  }
+  if (!Array.isArray(input.tags) || input.tags.some((value) => typeof value !== "string")) {
+    return parameterError(
+      "tags is required for retag — an array of strings, the full replacement set ([] clears every tag).",
+    );
+  }
+
+  const resolution = resolveSegmentTarget(db, input.id);
+  if (!resolution.ok) {
+    return parameterError(resolution.message);
+  }
+  if (resolution.segment.status === "closed") {
+    return parameterError(
+      `E${resolution.segment.id} is closed — segment tags may only change on an open segment; ` +
+        `remember(close, id="E${resolution.segment.id}") reopens it.`,
+    );
+  }
+
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const tags = input.tags as string[];
+  const updated = writeTransaction(db, () =>
+    setSegmentTags(db, resolution.segment.id, tags, nowEpoch),
+  );
+
+  if (!updated) {
+    return parameterError(`E${resolution.segment.id} no longer exists.`);
+  }
+
+  return textResult(
+    `Retagged E${updated.id}: ${updated.tags.length > 0 ? updated.tags.join(", ") : "(none)"}. ` +
+      "Gates every NEW assignment from now on; existing members are grandfathered, untouched.",
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 /**
  * `remember` — the segment (semantic) write surface, revived beside `note`
- * (episodic) per ADR-0002. Six verbs, one tool: `create` mints a segment
+ * (episodic) per ADR-0002. Seven verbs, one tool: `create` mints a segment
  * from the roster the caller has in view; `attach` binds the current session
  * to one and returns its fields; `write`/`edit` (ticket 05) maintain one
  * named field (Working State, or content/insight) — `write` replaces it
  * whole, `edit` swaps an exactly-matched span within it; `close` toggles the
  * segment off (or back onto) the roster; `assign` (ticket 02) places or
- * clears turn ownership.
+ * clears turn ownership; `retag` (ticket 07, rubric-v10) replaces a
+ * segment's hand-curated tags whole.
+ *
+ * Ticket 07: a segment's tags are identity, not a member-frequency
+ * derivation — set at `create`, changed only by a deliberate `retag`. They
+ * gate every NEW membership write (`assign` here, settlement's `reassign`,
+ * and `note`'s own `segment` parameter): a turn may only join when its own
+ * tags carry every one of the segment's, or the call rejects naming the gap;
+ * existing members are grandfathered, never re-checked. Segment tags are a
+ * SEPARATE vocabulary from a relation's own lane tags (`note`'s
+ * override/narrows/…/indexes parameters) — the two never overlap, and a
+ * lane's own tag set stays as small as discrimination allows.
  */
 /** The one shape every handler's rejection takes — see `parameterError` above. */
 function isParameterError(result: ToolTextResult): boolean {
@@ -994,6 +1117,8 @@ export function rememberTool(
         return handleClose(db, rawInput, options);
       case "assign":
         return handleAssign(db, rawInput, options);
+      case "retag":
+        return handleRetag(db, rawInput, options);
     }
   })();
 

@@ -673,7 +673,8 @@ describe("tool surface", () => {
   // switch) renames the field-writing pair `append`/`replace` to `write`/
   // `edit` and widens the field list to content/insight. Ticket 02
   // (ownership-and-note-cadence spec) adds `assign` as a sixth verb.
-  it("the remember description names all six verbs, the field list, markup/citation/English rules and stays capped", () => {
+  // rubric-v10 ticket 07 adds `retag` as a seventh.
+  it("the remember description names all seven verbs, the field list, markup/citation/English rules and stays capped", () => {
     const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
     expect(remember).toContain("`create`");
     expect(remember).toContain("`attach`");
@@ -681,6 +682,7 @@ describe("tool surface", () => {
     expect(remember).toContain("`edit`");
     expect(remember).toContain("`close`");
     expect(remember).toContain("`assign`");
+    expect(remember).toContain("`retag`");
     expect(remember).toContain("goal, constraints, decisions, done, next_steps, reference");
     expect(remember).toContain("content, insight");
     expect(remember).toContain("Tool-call markup");
@@ -710,11 +712,18 @@ describe("tool surface", () => {
     // and the clear-ownership form are both load-bearing on sight.
     expect(remember).toContain("single ownership");
     expect(remember).toContain("clears ownership if `id` is omitted");
-    // Cap raised 380 -> 400 for the sixth verb's own clause (measured: the
-    // trimmed five-verb text alone already sat at 376, leaving no room for
-    // a real new capability without either cutting an EXISTING pinned
-    // assertion above or widening the cap slightly).
-    expect(estimateTokens(remember)).toBeLessThanOrEqual(400);
+    // rubric-v10 ticket 07: `retag`'s own clause plus `assign`'s new
+    // "gated by the target's own tags" — the membership tag gate this
+    // ticket adds is load-bearing on sight, not just on the field-level
+    // describes.
+    expect(remember).toContain("`retag` replaces a segment's hand-curated tags whole");
+    expect(remember).toContain("gated by the target's own tags");
+    // Cap raised 380 -> 400 (ticket 02's sixth verb) -> 440 (ticket 07's
+    // seventh verb plus its gate clause; measured: the six-verb text alone
+    // already sat at 419 with `retag` and the gate clause added, leaving no
+    // room without either cutting an EXISTING pinned assertion above or
+    // widening the cap slightly).
+    expect(estimateTokens(remember)).toBeLessThanOrEqual(440);
   });
 
   // Ticket 15 (topic registry retirement): `topic` stays declared on the

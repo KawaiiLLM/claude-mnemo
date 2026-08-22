@@ -451,41 +451,18 @@ describe("renderSegmentRosterBlock", () => {
 // 100-tok line budget — no per-tag frequency suffix any more).
 // ---------------------------------------------------------------------------
 
-describe("renderSegmentRosterBlock: tags (ticket 14)", () => {
-  /** A minimal turn carrying stated tags, member-added to a segment — `recomputeSegmentFacets`' own aggregation source, which is what populates `segment.tags`. */
-  function makeTurnWithTags(
-    db: Database,
-    sessionId: number,
-    promptNumber: number,
-    tags: string[],
-    epoch: number,
-  ): number {
-    return db
-      .query<{ id: number }, [number, number, string, number]>(
-        `INSERT INTO turns (
-           session_id, prompt_number, status, tags, created_at_epoch,
-           user_prompt, assistant_response
-         ) VALUES (?, ?, 'extracted', ?, ?, 'p', 'r')
-         RETURNING id`,
-      )
-      .get(sessionId, promptNumber, JSON.stringify(tags), epoch)!.id;
-  }
-
-  test("a roster row carries its segment's own derived tags, bare (no frequency suffix, no type facet at all)", () => {
+describe("renderSegmentRosterBlock: tags (ticket 14; hand-curated, not derived, since ticket 07 rubric-v10)", () => {
+  test("a roster row carries its segment's own hand-curated tags, bare (no frequency suffix, no type facet at all)", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const segment = createSegment(db, { title: "Tagged lane", nowEpoch: ERA + 1_000 });
-    const session = upsertSession(db, {
-      contentSessionId: "roster-tag-session",
-      project: "/tmp/project",
-      title: "session",
-      insight: null,
-      createdAtEpoch: 1_000,
-      updatedAtEpoch: null,
-      completedAtEpoch: null,
+    // Ticket 07 (rubric-v10): tags are set directly at `createSegment`, not
+    // derived from a member's own tags any more — `recomputeSegmentFacets`
+    // no longer touches this column.
+    const segment = createSegment(db, {
+      title: "Tagged lane",
+      tags: ["card"],
+      nowEpoch: ERA + 1_000,
     });
-    const t1 = makeTurnWithTags(db, session.id, 1, ["card"], 1_000);
-    addSegmentMembers(db, segment.id, [t1], 1_000);
 
     const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null });
     expect(roster).toContain("#card");
@@ -496,21 +473,13 @@ describe("renderSegmentRosterBlock: tags (ticket 14)", () => {
   test("an oversized row (many tags) is word-boundary cut to the item token budget, not silently unbounded", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const segment = createSegment(db, { title: "Many-tag lane", nowEpoch: ERA + 1_000 });
-    const session = upsertSession(db, {
-      contentSessionId: "roster-manytag-session",
-      project: "/tmp/project",
-      title: "session",
-      insight: null,
-      createdAtEpoch: 1_000,
-      updatedAtEpoch: null,
-      completedAtEpoch: null,
-    });
     const tags = Array.from({ length: 30 }, (_, index) => `tagverylong${index}padding${"x".repeat(15)}`);
-    tags.forEach((tag, index) => {
-      const turn = makeTurnWithTags(db, session.id, index + 1, [tag], 1_000 + index);
-      addSegmentMembers(db, segment.id, [turn], 1_000 + index);
+    const segment = createSegment(db, {
+      title: "Many-tag lane",
+      tags,
+      nowEpoch: ERA + 1_000,
     });
+    void segment;
 
     const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null, itemBudget: 30 });
     const shownTags = tags.filter((tag) => roster.includes(`#${tag}`));

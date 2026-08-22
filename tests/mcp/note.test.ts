@@ -5,7 +5,11 @@ import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { getNoteDebt, listOwedNoteTurns } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
-import { createSegment } from "../../src/db/segments";
+import {
+  attachSegmentToSession,
+  createSegment,
+  getSegmentMemberTurnIds,
+} from "../../src/db/segments";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
@@ -151,6 +155,7 @@ describe("note tool", () => {
       "tags",
       "skip",
       "crossSession",
+      "segment",
       "override",
       "narrows",
       "extends",
@@ -3713,5 +3718,197 @@ describe("write/edit vocabulary switch (ticket 05)", () => {
     expect(resultText(append)).toContain("edit");
 
     expect(getShadowNote(db, turnId)?.content).toBe("first"); // neither call landed
+  });
+});
+
+// ---------------------------------------------------------------------------
+// note-time membership (rubric-v10 ticket 07, "Segment tags and note-time
+// membership"): the third of the three gated paths, and the only one of the
+// three that lives on `note` rather than `remember`.
+// ---------------------------------------------------------------------------
+
+describe("note tool: segment membership parameter (rubric-v10 ticket 07)", () => {
+  let db: Database;
+  let sessionId: number;
+  let turnId: number;
+
+  function setTags(id: number, tags: readonly string[]): void {
+    db.query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?").run(
+      JSON.stringify(tags),
+      id,
+    );
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    sessionId = upsertSession(db, {
+      contentSessionId: "note-segment-session",
+      project: "claude-mnemo",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+
+    turnId = db
+      .query<{ id: number }, [number, number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?) RETURNING id`,
+      )
+      .get(sessionId, 1, 100)!.id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("assigns the turn to an attached segment with an empty tag set (vacuous pass)", () => {
+    const segment = createSegment(db, { title: "target", nowEpoch: 100 });
+    attachSegmentToSession(db, sessionId, segment.id, 100);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T1`, segment: `E${segment.id}` },
+      { callerSessionId: sessionId },
+    );
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(resultText(result)).toContain(`Assigned to E${segment.id}`);
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([turnId]);
+  });
+
+  test("rejects an unattached segment, naming the attachment requirement", () => {
+    const segment = createSegment(db, { title: "unattached", nowEpoch: 100 });
+    // deliberately NOT attached to this session
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T1`, segment: `E${segment.id}` },
+      { callerSessionId: sessionId },
+    );
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("attached");
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([]);
+  });
+
+  test("rejects a nonexistent segment", () => {
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T1`, segment: "E999999" },
+      { callerSessionId: sessionId },
+    );
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(getSegmentMemberTurnIds(db, 999999)).toEqual([]);
+  });
+
+  test("rejects when the caller session is unknown — attachment cannot be verified", () => {
+    const segment = createSegment(db, { title: "target", nowEpoch: 100 });
+    attachSegmentToSession(db, sessionId, segment.id, 100);
+
+    const result = noteTool(db, { turn: `S${sessionId}/T1`, segment: `E${segment.id}` });
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("caller session unknown");
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([]);
+  });
+
+  test("the segment's own tags gate the assignment: a turn missing one is refused, naming the gap and the segment", () => {
+    const segment = createSegment(db, {
+      title: "gated",
+      tags: ["lease", "fencing"],
+      nowEpoch: 100,
+    });
+    attachSegmentToSession(db, sessionId, segment.id, 100);
+    setTags(turnId, ["lease"]); // missing "fencing"
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T1`, segment: `E${segment.id}` },
+      { callerSessionId: sessionId },
+    );
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("fencing");
+    expect(resultText(result)).toContain(`E${segment.id}`);
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([]);
+  });
+
+  test("the gate judges the turn's tags AFTER this same call's own tags write", () => {
+    const segment = createSegment(db, {
+      title: "gated",
+      tags: ["lease", "fencing"],
+      nowEpoch: 100,
+    });
+    attachSegmentToSession(db, sessionId, segment.id, 100);
+    setTags(turnId, ["lease"]); // starts missing "fencing"
+
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T1`,
+        tags: ["lease", "fencing"],
+        mode: { tags: "write" },
+        segment: `E${segment.id}`,
+      },
+      { callerSessionId: sessionId },
+    );
+    expect(resultText(result)).toContain(`Assigned to E${segment.id}`);
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([turnId]);
+  });
+
+  // Ticket 02 (edge-mechanism-revision D1) established the pattern for a pure
+  // edge call; ticket 07 extends it — a pure `segment` call is also complete.
+  test("a segment parameter alone (no other field) is a complete call", () => {
+    const segment = createSegment(db, { title: "target", nowEpoch: 100 });
+    attachSegmentToSession(db, sessionId, segment.id, 100);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T1`, segment: `E${segment.id}` },
+      { callerSessionId: sessionId },
+    );
+    expect(isNoteSuccess(result)).toBe(true);
+  });
+
+  test("reassigns — vacates the prior segment when moved to a new attached segment", () => {
+    const segmentA = createSegment(db, { title: "a", nowEpoch: 100 });
+    const segmentB = createSegment(db, { title: "b", nowEpoch: 100 });
+    attachSegmentToSession(db, sessionId, segmentA.id, 100);
+    attachSegmentToSession(db, sessionId, segmentB.id, 100);
+
+    noteTool(
+      db,
+      { turn: `S${sessionId}/T1`, segment: `E${segmentA.id}` },
+      { callerSessionId: sessionId },
+    );
+    expect(getSegmentMemberTurnIds(db, segmentA.id)).toEqual([turnId]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T1`, segment: `E${segmentB.id}` },
+      { callerSessionId: sessionId },
+    );
+    expect(resultText(result)).toContain(`Assigned to E${segmentB.id}`);
+    expect(resultText(result)).toContain(`Removed from prior segment(s): E${segmentA.id}`);
+    expect(getSegmentMemberTurnIds(db, segmentA.id)).toEqual([]);
+    expect(getSegmentMemberTurnIds(db, segmentB.id)).toEqual([turnId]);
+  });
+
+  // Mutation check (this ticket's own acceptance criterion): if the gate
+  // call in `handleTurnWrite` were removed, this test would let a mismatched
+  // turn through undetected — it must fail loudly instead.
+  test("MUTATION CHECK: disabling the gate on this path would let a mismatched turn through undetected", () => {
+    const segment = createSegment(db, { title: "gated", tags: ["required"], nowEpoch: 100 });
+    attachSegmentToSession(db, sessionId, segment.id, 100);
+    // turnId carries no tags at all.
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T1`, segment: `E${segment.id}` },
+      { callerSessionId: sessionId },
+    );
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([]);
   });
 });

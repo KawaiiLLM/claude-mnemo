@@ -232,6 +232,27 @@ function parseMemberFacetArray(value: string | null): string[] {
   }
 }
 
+/**
+ * TICKET 07 (rubric-v10): trims, drops empties, dedupes preserving
+ * first-seen order — applied at both entry points a caller can set a
+ * segment's hand-curated tags from (`createSegment`'s `tags` and
+ * `setSegmentTags`), so the stored set has the same shape regardless of
+ * which one wrote it.
+ */
+function normalizeSegmentTagValues(tags: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const raw of tags) {
+    const trimmed = raw.trim();
+    if (trimmed === "" || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
 function mapSegmentRow(row: SegmentRow | null): SegmentRecord | null {
   return row
     ? {
@@ -248,13 +269,24 @@ export interface CreateSegmentInput {
   /** Ticket 14 (spec K5). */
   insight?: string | null;
   /**
-   * Storage mechanics only. The settlement tool no longer states either of
-   * these (spec K5a) — `recomputeSegmentFacets` derives both from the members
-   * the moment membership exists — so in production this arrives `[]` and is
-   * overwritten by the first `addSegmentMembers` call. It stays on the INSERT
-   * for a caller that has no members to derive from (a fixture, a repair).
+   * Storage mechanics only (spec K5a). The settlement tool never states
+   * this — `recomputeSegmentFacets` derives it from the members the moment
+   * membership exists — so in production this arrives `[]` and is
+   * overwritten by the first `addSegmentMembers` call. It stays on the
+   * INSERT for a caller that has no members to derive from (a fixture, a
+   * repair).
    */
   type?: string[];
+  /**
+   * TICKET 07 (rubric-v10, "Segment tags and note-time membership"):
+   * hand-curated identity, NOT derived — this field used to be treated
+   * identically to `type` above (both storage mechanics, both overwritten by
+   * the first membership change). It no longer is: this is where a caller
+   * sets a segment's tags, once, and they stay exactly as given until a
+   * deliberate `setSegmentTags`/`remember(retag)` call changes them.
+   * `checkSegmentMembershipTagGate` reads this value to gate every NEW
+   * membership write; no membership write ever rewrites it back.
+   */
   tags?: string[];
   status?: SegmentStatus;
   nowEpoch: number;
@@ -292,7 +324,7 @@ export function createSegment(
         input.content ?? null,
         input.insight ?? null,
         JSON.stringify(type),
-        JSON.stringify(input.tags ?? []),
+        JSON.stringify(normalizeSegmentTagValues(input.tags ?? [])),
         input.status ?? "open",
         input.nowEpoch,
         input.nowEpoch,
@@ -409,43 +441,47 @@ export function compareDerivedTags(
 }
 
 /**
- * A segment's `type` and `tags` computed from its members (spec K5a: "a value
- * the system can compute is a value the model can only get wrong"). A6 has
+ * A segment's `type` computed from its members (spec K5a: "a value the
+ * system can compute is a value the model can only get wrong"). A6 has
  * asserted the type union since it was written and nothing ever checked it —
  * this is the check.
  *
- *   - `type` is the UNION of the members' stated activities, ordered by the
- *     same frequency rule as the tags (most member turns first), with ties
- *     broken by the vocabulary's own canonical order (`MEMORY_TYPES`) so the
- *     value never depends on which member happened to be added first. The
- *     ordering is load-bearing, not cosmetic: `deriveDominantType`
- *     (db/segment-rank.ts) falls back to a segment's FIRST type word when the
- *     member mode is tied, and its whole contract is that the fallback is a
- *     judgement rather than arrival order — a frequency-ordered union keeps
- *     that true now that no one states the list. A legacy word a
- *     pre-vocabulary member still carries is dropped rather than propagated
- *     upward: `normalizeTypeValues` would refuse it on the next write, so
- *     storing it would make the segment unwritable.
- *   - `tags` are the members' tags ordered by FREQUENCY, most frequent first
- *     (ties by `compareDerivedTags`), which is also the natural truncation
- *     under a budget. Colon-namespaced tags are bookkeeping, not subject
- *     matter (`compact:`, `invalidated:`, `delivery:` — see db/turns.ts, which
- *     keeps exactly those on an invalidation and drops the freeform ones), so
- *     they never become what a segment is "about".
+ * `type` is the UNION of the members' stated activities, ordered by
+ * FREQUENCY (most member turns first), with ties broken by the vocabulary's
+ * own canonical order (`MEMORY_TYPES`) so the value never depends on which
+ * member happened to be added first. The ordering is load-bearing, not
+ * cosmetic: `deriveDominantType` (db/segment-rank.ts) falls back to a
+ * segment's FIRST type word when the member mode is tied, and its whole
+ * contract is that the fallback is a judgement rather than arrival order —
+ * a frequency-ordered union keeps that true now that no one states the
+ * list. A legacy word a pre-vocabulary member still carries is dropped
+ * rather than propagated upward: `normalizeTypeValues` would refuse it on
+ * the next write, so storing it would make the segment unwritable.
+ *
+ * TICKET 07 (rubric-v10, "Segment tags and note-time membership") RETIRED
+ * `tags` from this derivation. Before this ticket a segment's tags were the
+ * same kind of member-frequency mush `type` still is — this function used
+ * to compute both from the identical member sweep. Tags are now hand-curated
+ * identity (`CreateSegmentInput.tags`, `setSegmentTags`): set at creation,
+ * changed only through a deliberate `retag`, and never touched by a
+ * membership change — this function no longer reads member tags at all.
+ * `compareDerivedTags` survives as a general "frequency, then code-point
+ * order" comparator, still used by `computeSegmentMemberFacetCounts`'s own
+ * (display-only, non-persisting) tag tally below.
  *
  * Returns the recomputed row, or `null` if the segment is gone. Does NOT bump
  * `revision`: the revision fence exists for the model's body writes (whose CAS
  * would otherwise be invalidated by a facet recomputation it never made), and
  * a facet is no longer something a caller can state, so nothing can conflict.
  *
- * TICKET 15 (findings 1-3): this is the ONE derivation, and it has THREE
- * inputs, not one. Ticket 14 placed the only call in `addSegmentMembers` and
- * described that as the single invariant point; it is the single point for a
- * change of MEMBERSHIP, and a facet derives from the members' CONTENT too. The
- * inputs and who pays for each:
+ * TICKET 15 (findings 1-3; `type`-only after ticket 07): this is the ONE
+ * derivation, and it has THREE inputs, not one. Ticket 14 placed the only
+ * call in `addSegmentMembers` and described that as the single invariant
+ * point; it is the single point for a change of MEMBERSHIP, and the facet
+ * derives from the members' CONTENT too. The inputs and who pays for each:
  *
  *   1. a membership arriving — `addSegmentMembers`, unchanged;
- *   2. a member turn's own `type`/`tags` changing — the turn write path
+ *   2. a member turn's own `type` changing — the turn write path
  *      (`recomputeSegmentFacetsForTurn`, called from db/turns.ts);
  *   3. a membership LEAVING, which only ever happens through the
  *      `segment_members` FK cascade of a deleted turn or session — no
@@ -458,8 +494,8 @@ export function recomputeSegmentFacets(
   segmentId: number,
 ): SegmentRecord | null {
   const members = db
-    .query<{ type: string | null; tags: string | null }, [number]>(
-      `SELECT t.type AS type, t.tags AS tags
+    .query<{ type: string | null }, [number]>(
+      `SELECT t.type AS type
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
        WHERE sm.segment_id = ?`,
@@ -467,18 +503,9 @@ export function recomputeSegmentFacets(
     .all(segmentId);
 
   const typeCounts = new Map<string, number>();
-  const tagCounts = new Map<string, number>();
   for (const member of members) {
     for (const word of new Set(parseMemberFacetArray(member.type))) {
       typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
-    }
-    // Per MEMBER, deduplicated: a turn that repeats a tag is still one turn
-    // carrying it, so frequency counts turns and not array entries.
-    for (const tag of new Set(parseMemberFacetArray(member.tags))) {
-      if (tag.includes(":") || tag.trim() === "") {
-        continue;
-      }
-      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
     }
   }
 
@@ -487,44 +514,165 @@ export function recomputeSegmentFacets(
       (typeCounts.get(right) ?? 0) - (typeCounts.get(left) ?? 0) ||
       MEMORY_TYPES.indexOf(left) - MEMORY_TYPES.indexOf(right),
   );
-  const tags = [...tagCounts.entries()]
-    .map(([tag, count]) => ({ tag, count }))
-    .sort(compareDerivedTags)
-    .map((entry) => entry.tag);
 
   const updated = mapSegmentRow(
     db
-      .query<SegmentRow, [string, string, number]>(
+      .query<SegmentRow, [string, number]>(
         // `facets_stale = 0` in the same statement that stores the derivation:
         // the flag means "a derivation is owed", and this IS the derivation, so
         // whichever writer got here — membership, a member's own write, or the
-        // repair sweep — settles the debt by the act of paying it.
-        `UPDATE segments SET type = ?, tags = ?, facets_stale = 0 WHERE id = ?
+        // repair sweep — settles the debt by the act of paying it. `tags` is
+        // deliberately absent from this UPDATE (ticket 07) — that column is
+        // hand-curated identity now, untouched by any facet recomputation.
+        `UPDATE segments SET type = ?, facets_stale = 0 WHERE id = ?
          RETURNING ${SEGMENT_COLUMNS}`,
       )
-      .get(JSON.stringify(type), JSON.stringify(tags), segmentId) ?? null,
+      .get(JSON.stringify(type), segmentId) ?? null,
   );
 
   if (updated) {
     // The whole reason the derived value is STORED rather than resolved at
-    // read time (spec K5a): a segment is FTS-indexed with its tags, so an
-    // un-reindexed recomputation leaves the search facet describing a
+    // read time (spec K5a): a segment is FTS-indexed with its type/tags, so
+    // an un-reindexed recomputation leaves the search facet describing a
     // membership that no longer exists.
     indexSegment(db, updated);
   }
   return updated;
 }
 
+export interface SegmentMembershipGateViolation {
+  turnId: number;
+  /** "S<session>/T<prompt>" — the same address form every write surface renders; falls back to a bare id if the turn row is somehow gone. */
+  turnAddress: string;
+  missingTags: string[];
+}
+
+export interface SegmentMembershipGateResult {
+  ok: boolean;
+  segmentTags: string[];
+  violations: SegmentMembershipGateViolation[];
+}
+
 /**
- * Input 2 (ticket 15 finding 1): a member turn's `type`/`tags` just moved, so
- * every segment holding that turn has to re-derive.
+ * TICKET 07 (rubric-v10, "Segment tags and note-time membership"): the ONE
+ * membership gate every NEW assignment write checks before it lands — a
+ * member turn must carry ALL of the segment's own tags, the segment-level
+ * twin of the edge subset invariant (shared/turn-phase.ts / the Memory
+ * Rubric's "every tag on an edge must already exist on both endpoint turns'
+ * tags"). Three call sites share this single function rather than each
+ * re-deriving the rule — `mcp/remember.ts`'s `assign`,
+ * `worker/note-settlement-membership-facade.ts`'s `reassign`, and
+ * `mcp/note.ts`'s new `segment` parameter. The ticket's own mutation-check
+ * acceptance criterion fails a test if ANY ONE of the three stops calling it.
+ *
+ * An EMPTY `segment.tags` gates nothing (vacuous pass) — the pre-backfill
+ * state of every segment created before this ticket, and of any segment a
+ * caller deliberately leaves untagged. This function is consulted only at
+ * the moment a NEW assignment is about to land; it never re-checks a turn
+ * already a member, which is exactly what "grandfathered" means (the
+ * backfill campaign, not this gate, retro-tags those later).
+ *
+ * Reads `turns.tags` LIVE, not from a caller-supplied snapshot, so a call
+ * that also writes this same turn's tags earlier in the SAME transaction
+ * (`note`'s `segment` parameter alongside its own `tags` field) is judged
+ * against the tags it is about to actually carry.
+ */
+export function checkSegmentMembershipTagGate(
+  db: Database,
+  segmentId: number,
+  turnIds: readonly number[],
+): SegmentMembershipGateResult {
+  const segment = getSegment(db, segmentId);
+  const segmentTags = segment?.tags ?? [];
+  if (segmentTags.length === 0 || turnIds.length === 0) {
+    return { ok: true, segmentTags, violations: [] };
+  }
+
+  const placeholders = turnIds.map(() => "?").join(",");
+  const rows = db
+    .query<
+      { id: number; sessionId: number; promptNumber: number; tags: string | null },
+      number[]
+    >(
+      `SELECT id, session_id AS sessionId, prompt_number AS promptNumber, tags
+       FROM turns WHERE id IN (${placeholders})`,
+    )
+    .all(...turnIds);
+  const byId = new Map(rows.map((row) => [row.id, row]));
+
+  const violations: SegmentMembershipGateViolation[] = [];
+  for (const turnId of turnIds) {
+    const row = byId.get(turnId);
+    const turnTags = new Set(row ? parseMemberFacetArray(row.tags) : []);
+    const missingTags = segmentTags.filter((tag) => !turnTags.has(tag));
+    if (missingTags.length > 0) {
+      violations.push({
+        turnId,
+        turnAddress: row ? `S${row.sessionId}/T${row.promptNumber}` : `turn ${turnId}`,
+        missingTags,
+      });
+    }
+  }
+  return { ok: violations.length === 0, segmentTags, violations };
+}
+
+/** The gate's own rejection text — one register shared by all three call sites. */
+export function formatSegmentMembershipGateRejection(
+  segmentId: number,
+  violations: readonly SegmentMembershipGateViolation[],
+): string {
+  const lines = violations.map((v) => `${v.turnAddress} is missing: ${v.missingTags.join(", ")}`);
+  return (
+    `E${segmentId} requires every member to carry its tags — ${lines.join("; ")}. ` +
+    "Nothing was assigned."
+  );
+}
+
+/**
+ * `remember`'s `retag` verb (ticket 07): the segment tags' own edit path —
+ * hand-curated identity, replaced WHOLE (no append/merge form; a caller
+ * composes the finished set itself, the same "supply the finished text"
+ * discipline `writeSegmentWorkingStateField` already applies to a Working
+ * State field). `[]` clears every tag, which also clears the membership
+ * gate (vacuous pass) — a deliberate, observable act, not a silent no-op.
+ *
+ * No revision fence and no write-gate check, matching
+ * `appendSegmentWorkingStateRows`/`writeSegmentWorkingStateField` above:
+ * ADR-0002 makes segment maintenance advisory and single-writer-per-session.
+ */
+export function setSegmentTags(
+  db: Database,
+  segmentId: number,
+  tags: readonly string[],
+  nowEpoch: number,
+): SegmentRecord | null {
+  const normalized = normalizeSegmentTagValues(tags);
+  const updated = mapSegmentRow(
+    db
+      .query<SegmentRow, [string, number, number]>(
+        `UPDATE segments SET tags = ?, updated_at_epoch = ? WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`,
+      )
+      .get(JSON.stringify(normalized), nowEpoch, segmentId) ?? null,
+  );
+  if (updated) {
+    indexSegment(db, updated);
+  }
+  return updated;
+}
+
+/**
+ * Input 2 (ticket 15 finding 1): a member turn's `type` just moved, so every
+ * segment holding that turn has to re-derive. (Ticket 07: `tags` retired from
+ * this derivation — a member's tags changing no longer touches the segment's
+ * own hand-curated tags at all.)
  *
  * Called from the turn write path rather than resolved when a segment is read,
  * because spec K5a already settled that question in the same breath as the
- * derivation rule: "a segment is indexed to FTS with its tags, so the derived
+ * derivation rule: "a segment is indexed to FTS with its type, so the derived
  * value is stored and recomputed when membership changes, not resolved at read
  * time". A read-time derivation would still owe the FTS facet a write, so it
- * relocates the write rather than removing it — and leaves `tag:`/`type:`
+ * relocates the write rather than removing it — and leaves `type:`
  * search answering from the stale row in the meantime.
  *
  * Cheap by construction: one lookup on `idx_segment_members_turn`, which is
@@ -661,13 +809,24 @@ export function listRecentSegments(
 /**
  * Idempotent membership assertion; returns the turn ids newly linked.
  *
- * Membership is ONE of the three inputs to `type` and `tags` (spec K5a — see
- * `recomputeSegmentFacets` for the other two and who pays for each), so this
- * is where the derivation runs for a membership that arrives: a caller cannot
- * land members and forget it, and the FTS facet can never describe a
- * membership the row does not have. Recomputation runs only when this call
- * actually linked something new: an idempotent re-assertion changes no input
- * and therefore needs no recomputation.
+ * Membership is ONE of the three inputs to `type` (spec K5a — see
+ * `recomputeSegmentFacets` for the other two and who pays for each; ticket 07
+ * retired `tags` from this derivation entirely — see that function's own doc
+ * comment), so this is where the derivation runs for a membership that
+ * arrives: a caller cannot land members and forget it, and the FTS facet can
+ * never describe a membership the row does not have. Recomputation runs only
+ * when this call actually linked something new: an idempotent re-assertion
+ * changes no input and therefore needs no recomputation.
+ *
+ * TICKET 07 does NOT gate this function's own callers on the segment's tags
+ * — this is the low-level write primitive `remember(create)`'s member
+ * seeding and `evaluateCreate` (settlement's own `create` action) both use to
+ * land a fresh segment's SEED members, and the ticket's own scope names only
+ * three gated paths (`remember(assign)`, settlement's `reassign`, `note`'s
+ * `segment` parameter) — a segment's first members are established together
+ * with its identity, not assigned against an already-settled one. See
+ * `checkSegmentMembershipTagGate`, called explicitly at each of those three
+ * call sites instead of embedded here.
  *
  * Ticket 15 finding 8, checked rather than assumed: the partial-insert window
  * this loop opens (some memberships land, a later `turn_id` fails its foreign
@@ -1308,14 +1467,20 @@ export interface SegmentMemberFacetCounts {
 
 /**
  * Per-word/per-tag MEMBER counts (ticket 03), era-scoped to match whatever
- * member set the card's own member listing renders. `recomputeSegmentFacets`
- * already computes these counts internally but discards them once the
- * ordered word/tag arrays are derived — this is the same tally, kept, for a
- * reader who wants to know not just "which tags" but "how many members carry
- * each one". Ordering matches `recomputeSegmentFacets`: frequency descending,
- * ties broken by `MEMORY_TYPES`' own order for type and by tag spelling for
- * tags (`compareDerivedTags`), so a count line's ORDER never disagrees with
- * the stored `segment.type`/`segment.tags` arrays it is elaborating on.
+ * member set the card's own member listing renders — a reader-facing tally,
+ * "how many members carry each type word / tag", independent of
+ * `recomputeSegmentFacets`. Its `type` half orders the same way that
+ * function's own persisted `segment.type` does (frequency descending, ties by
+ * `MEMORY_TYPES`' own order), so a type count line's ORDER never disagrees
+ * with the stored array it is elaborating on.
+ *
+ * TICKET 07 (rubric-v10): its `tags` half is now display-only and
+ * DELIBERATELY UNRELATED to `segment.tags` — that column is hand-curated
+ * identity (never derived from members, see `recomputeSegmentFacets`'s own
+ * doc comment), while this tally still counts every MEMBER's own tags,
+ * frequency-ordered (`compareDerivedTags`), the way a card reader inspects
+ * what the membership actually looks like regardless of what the segment's
+ * own tags say a member is required to carry.
  */
 export function computeSegmentMemberFacetCounts(
   db: Database,

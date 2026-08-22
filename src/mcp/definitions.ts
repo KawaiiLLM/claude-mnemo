@@ -126,7 +126,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
   remember:
-    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Six verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership — or clears ownership if \`id\` is omitted. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
+    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Seven verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership, gated by the target's own tags — or clears ownership if \`id\` is omitted; \`retag\` replaces a segment's hand-curated tags whole. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
     "Maintenance is advisory, never a gate: every write/edit reports turns since this segment was last touched.\n" +
     "20-turn reminder: check membership, Working State, whether to create or attach — judgment lives in the Memory Rubric, not here.",
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -414,6 +414,18 @@ export const noteInputShape = {
     .describe(
       "true to confirm a write addressed at a turn outside the caller's own session; required whenever the address's session differs from the caller's, refused otherwise.",
     ),
+  // rubric-v10 ticket 07 ("Segment tags and note-time membership"): the
+  // note-time membership path — assigns THIS turn to one segment the calling
+  // session has ATTACHED, gated by the segment's own hand-curated tags.
+  // `remember`'s `assign` verb stays the batch/reassignment/clearing surface;
+  // this parameter only ever targets the turn this same call is writing.
+  segment: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Assign this turn\'s own membership to one segment this session has ATTACHED ("E<n>"). An unattached or nonexistent segment rejects, naming the attachment requirement ("remember(attach, id=...)" first). The segment\'s hand-curated tags gate the assignment — this turn\'s tags (after this same call\'s own `tags`, if given) must carry every one of them, or the call rejects naming the gap; an untagged segment gates nothing. `remember`\'s `assign` verb is the batch/reassignment/clearing surface instead.',
+    ),
 
   // Flow-relations spec (ticket 02, "六行律" — the six-row law): the eight-
   // word vocabulary that replaces ADR-0010's nine-cell grammar outright.
@@ -602,9 +614,19 @@ export const noteInputShape = {
 // set.
 export const rememberInputShape = {
   verb: z
-    .enum(["create", "attach", "write", "edit", "close", "assign", "append", "replace"])
+    .enum([
+      "create",
+      "attach",
+      "write",
+      "edit",
+      "close",
+      "assign",
+      "retag",
+      "append",
+      "replace",
+    ])
     .describe(
-      'create: mint a new segment. attach: bind the current session to one. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). assign: place turns into a segment (id set) or clear their ownership (id omitted).',
+      'create: mint a new segment. attach: bind the current session to one. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). assign: place turns into a segment (id set) or clear their ownership (id omitted) — the target segment\'s own tags gate the write, rejecting a turn whose tags don\'t carry all of them. retag: replace a segment\'s hand-curated tags whole (`tags`; the full replacement set — never derived, never merged).',
     ),
   id: z
     .string()
@@ -618,13 +640,12 @@ export const rememberInputShape = {
     .min(1)
     .optional()
     .describe(
-      // The derivation rule lived ONLY in the rubric's segment block; it lands
-      // here because this is the one place a caller names a segment's own
-      // identity fields, and `type`/`tags` are conspicuously absent from this
-      // shape — the describe now says why.
+      // ticket 07 (rubric-v10) split this describe's old claim in two: type
+      // stays derived (never a caller input, absent from this shape), tags
+      // no longer is — see the `tags` field just below for its own contract.
       "create only (required): the segment's title, written in English — set once, here. " +
-        "A segment's type and tags are never written by hand: they are DERIVED from its " +
-        "member turns and recomputed whenever membership changes.",
+        "A segment's type is never written by hand: it is DERIVED from its member turns " +
+        "and recomputed whenever membership changes.",
     ),
   // Ticket 15 (topic registry retirement, CONTEXT.md "Topic — retired"): the
   // registry this once named a segment into folded into tags — a
@@ -648,6 +669,14 @@ export const rememberInputShape = {
     .optional()
     .describe(
       'create only, optional: seed member turn addresses ("S<session>/T<prompt>", as seen in context — from an approved proposal, never recalled or invented). Membership is recorded for exactly these turns; a call naming even one bad address seeds none.',
+    ),
+  // ticket 07 (rubric-v10, "Segment tags and note-time membership"): the
+  // segment's own hand-curated identity — never derived, unlike `type`.
+  tags: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "create (optional) / retag (required): the segment's hand-curated tags — set once here, or replaced whole later with retag; never derived, never merged. Gates every NEW membership write (this tool's own `assign`, settlement's `reassign`, and `note`'s `segment` parameter): a turn may join only when its own tags carry every one of the segment's, or the write rejects naming the gap. Existing members are grandfathered, never re-checked. Empty (or omitted at create) gates nothing. Distinct from a relation's own lane tags — the two vocabularies never overlap, and a lane's own tag set stays as small as discrimination allows.",
     ),
   // Ticket 01 (field-semantics spec, "Fields" table): each of the eight
   // editable fields gets its own one-line definition here, aligned with the
@@ -705,7 +734,7 @@ export const rememberInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      'assign only (required): turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>", inclusive; the second T is optional) — as seen in context, never recalled or invented. An interval spanning even one missing turn rejects the whole call, naming which; nothing is assigned.',
+      'assign only (required): turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>", inclusive; the second T is optional) — as seen in context, never recalled or invented. An interval spanning even one missing turn rejects the whole call, naming which; nothing is assigned. When `id` is given, the target segment\'s own tags additionally gate the write: every named turn\'s tags must carry all of them, or the call rejects naming the gap (omit `id` to clear ownership instead, which has no gate).',
     ),
 };
 

@@ -7,17 +7,21 @@ import { initializeSchema } from "../../src/db/schema";
 import {
   addSegmentMembers,
   applySegmentWrites,
+  checkSegmentMembershipTagGate,
   countLiveSegments,
   createSegment,
+  formatSegmentMembershipGateRejection,
   getSegment,
   getSegmentMemberTurnIds,
   getSegmentsForTurn,
   isLiveSegmentEra,
   listLiveSegmentsByActivity,
+  reassignSegmentMembers,
   SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
   listOpenSegments,
   listRecentSegments,
   repairStaleSegmentFacets,
+  setSegmentTags,
   toggleSegmentStatus,
   writeSegmentWorkingStateField,
 } from "../../src/db/segments";
@@ -429,51 +433,41 @@ describe("segments and membership", () => {
     });
   });
 
-  describe("type and tags are DERIVED from the members (spec K5a, ticket 14)", () => {
-    test("type is the members' union, tags are frequency-ordered, both recomputed on membership change", () => {
-      const first = addTurn(1, 100, { type: ["design"], tags: ["lease", "fencing"] });
-      const second = addTurn(2, 200, { type: ["implement"], tags: ["lease"] });
-      const third = addTurn(3, 300, { type: ["implement"], tags: ["lease"] });
-      const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
+  describe("type is DERIVED from the members (spec K5a, ticket 14); tags are hand-curated, never derived (ticket 07, rubric-v10)", () => {
+    test("type is the members' union, recomputed on membership change; hand-curated tags survive untouched", () => {
+      const first = addTurn(1, 100, { type: ["design"] });
+      const second = addTurn(2, 200, { type: ["implement"] });
+      const third = addTurn(3, 300, { type: ["implement"] });
+      const segment = createSegment(db, {
+        title: "lease fencing",
+        tags: ["curated"],
+        nowEpoch: 100,
+      });
 
-      // No members yet: nothing to derive from, and nothing invented.
+      // No members yet: nothing to derive TYPE from, and nothing invented.
+      // `tags` is whatever was set at creation, independent of membership.
       expect(getSegment(db, segment.id)?.type).toEqual([]);
-      expect(getSegment(db, segment.id)?.tags).toEqual([]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["curated"]);
 
       addSegmentMembers(db, segment.id, [first, second], 100);
       expect(getSegment(db, segment.id)?.type).toEqual(["design", "implement"]);
-      // lease on both members, fencing on one.
-      expect(getSegment(db, segment.id)?.tags).toEqual(["lease", "fencing"]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["curated"]);
 
       // A third member moves implement ahead of design by frequency — the
       // recomputation is what makes this a fact about membership rather than
-      // about the order the members happened to arrive in.
+      // about the order the members happened to arrive in. Tags never move.
       addSegmentMembers(db, segment.id, [third], 200);
       expect(getSegment(db, segment.id)?.type).toEqual(["implement", "design"]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["curated"]);
     });
 
-    test("ties break deterministically: vocabulary order for type, the tag itself for tags", () => {
-      const only = addTurn(1, 100, {
-        type: ["fix", "research"],
-        tags: ["zulu", "alpha"],
-      });
+    test("type ties break deterministically by the vocabulary's own order", () => {
+      const only = addTurn(1, 100, { type: ["fix", "research"] });
       const segment = createSegment(db, { title: "tie", nowEpoch: 100 });
       addSegmentMembers(db, segment.id, [only], 100);
 
-      // research precedes fix in MEMORY_TYPES; alpha precedes zulu.
+      // research precedes fix in MEMORY_TYPES.
       expect(getSegment(db, segment.id)?.type).toEqual(["research", "fix"]);
-      expect(getSegment(db, segment.id)?.tags).toEqual(["alpha", "zulu"]);
-    });
-
-    test("a colon-namespaced tag is bookkeeping and never becomes what a segment is about", () => {
-      const turnId = addTurn(1, 100, {
-        type: ["ops"],
-        tags: ["release", "compact:boundary", "topic:retired"],
-      });
-      const segment = createSegment(db, { title: "release", nowEpoch: 100 });
-      addSegmentMembers(db, segment.id, [turnId], 100);
-
-      expect(getSegment(db, segment.id)?.tags).toEqual(["release"]);
     });
 
     test("a legacy type word a pre-vocabulary member still carries does not propagate upward", () => {
@@ -487,10 +481,14 @@ describe("segments and membership", () => {
       expect(getSegment(db, segment.id)?.type).toEqual(["fix"]);
     });
 
-    test("the FTS facet is rewritten with the derived tags, never left describing the old membership", () => {
-      const first = addTurn(1, 100, { tags: ["lease"] });
-      const second = addTurn(2, 200, { tags: ["fencing"] });
-      const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
+    test("the FTS facet tracks the derived TYPE on membership change; hand-curated tags stay whatever create/retag set", () => {
+      const first = addTurn(1, 100, { type: ["design"] });
+      const second = addTurn(2, 200, { type: ["implement"] });
+      const segment = createSegment(db, {
+        title: "lease fencing",
+        tags: ["lease"],
+        nowEpoch: 100,
+      });
       addSegmentMembers(db, segment.id, [first], 100);
 
       const readFacet = () =>
@@ -500,17 +498,26 @@ describe("segments and membership", () => {
           )
           .get(segment.id)!.extra ?? "";
 
+      expect(readFacet()).toContain("design");
       expect(readFacet()).toContain("lease");
-      expect(readFacet()).not.toContain("fencing");
+      expect(readFacet()).not.toContain("implement");
 
       addSegmentMembers(db, segment.id, [second], 200);
-      expect(readFacet()).toContain("fencing");
+      expect(readFacet()).toContain("implement");
+      // The hand-curated tag is untouched by the membership change that just
+      // reindexed the row — this is ticket 07's whole point, checked against
+      // the SAME search facet the old derivation used to rewrite.
+      expect(readFacet()).toContain("lease");
     });
 
-    test("recomputation follows a member LEAVING too — a deleted turn is a membership change", () => {
-      const kept = addTurn(1, 100, { type: ["design"], tags: ["lease"] });
-      const removed = addTurn(2, 200, { type: ["ops"], tags: ["release"] });
-      const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
+    test("recomputation follows a member LEAVING too — a deleted turn is a membership change (type only; tags are unaffected)", () => {
+      const kept = addTurn(1, 100, { type: ["design"] });
+      const removed = addTurn(2, 200, { type: ["ops"] });
+      const segment = createSegment(db, {
+        title: "lease fencing",
+        tags: ["lease"],
+        nowEpoch: 100,
+      });
       addSegmentMembers(db, segment.id, [kept, removed], 100);
       expect(getSegment(db, segment.id)?.type).toEqual(["design", "ops"]);
 
@@ -527,12 +534,15 @@ describe("segments and membership", () => {
       expect(repairStaleSegmentFacets(db)).toBe(1);
 
       expect(getSegment(db, segment.id)?.type).toEqual(["design"]);
+      // The hand-curated tag never moved — a member leaving is a TYPE
+      // recomputation input only (ticket 07).
       expect(getSegment(db, segment.id)?.tags).toEqual(["lease"]);
       expect(readFacetsStale(segment.id)).toBe(0);
       // The search facet, not just the stored row: a segment left findable by
-      // the deleted member's tag is half the bug.
+      // the deleted member's type is half the bug.
+      expect(readSegmentFtsExtra(segment.id)).toContain("design");
+      expect(readSegmentFtsExtra(segment.id)).not.toContain("ops");
       expect(readSegmentFtsExtra(segment.id)).toContain("lease");
-      expect(readSegmentFtsExtra(segment.id)).not.toContain("release");
     });
 
     test("a deleted SESSION reaches the debt the same way, through two cascades", () => {
@@ -553,10 +563,15 @@ describe("segments and membership", () => {
            VALUES (?, 1, 'extracted', 200, '["ops"]', '["release"]') RETURNING id`,
         )
         .get(other)!.id;
-      const kept = addTurn(1, 100, { type: ["design"], tags: ["lease"] });
-      const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
+      const kept = addTurn(1, 100, { type: ["design"] });
+      const segment = createSegment(db, {
+        title: "lease fencing",
+        tags: ["lease"],
+        nowEpoch: 100,
+      });
       addSegmentMembers(db, segment.id, [kept, doomed], 100);
-      expect(getSegment(db, segment.id)?.tags).toEqual(["lease", "release"]);
+      expect(getSegment(db, segment.id)?.type).toEqual(["design", "ops"]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["lease"]);
 
       db.query("PRAGMA foreign_keys = ON").run();
       db.query("DELETE FROM sessions WHERE id = ?").run(other);
@@ -567,7 +582,7 @@ describe("segments and membership", () => {
     });
 
     test("nothing owed is nothing done — the sweep is a no-op on a settled database", () => {
-      const member = addTurn(1, 100, { type: ["design"], tags: ["lease"] });
+      const member = addTurn(1, 100, { type: ["design"] });
       const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
       addSegmentMembers(db, segment.id, [member], 100);
 
@@ -586,10 +601,130 @@ describe("segments and membership", () => {
    * types T1, and a later settlement window revising an earlier turn's type,
    * which duty 1 explicitly invites.
    */
-  describe("a member's facets moving after membership (ticket 15 finding 1)", () => {
-    test("a type written after the membership reaches the segment and its FTS row", () => {
+  describe("segment tags: hand-curated identity and the membership gate (ticket 07, rubric-v10)", () => {
+    test("createSegment normalizes tags: trims, drops empties, dedupes", () => {
+      const segment = createSegment(db, {
+        title: "curated",
+        tags: [" lease ", "lease", "", "  ", "fencing"],
+        nowEpoch: 100,
+      });
+      expect(getSegment(db, segment.id)?.tags).toEqual(["lease", "fencing"]);
+    });
+
+    test("setSegmentTags replaces the set whole, normalized the same way, and reindexes the FTS row", () => {
+      const segment = createSegment(db, { title: "curated", tags: ["old"], nowEpoch: 100 });
+      const updated = setSegmentTags(db, segment.id, ["new", "new", " extra "], 200);
+      expect(updated?.tags).toEqual(["new", "extra"]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["new", "extra"]);
+      expect(readSegmentFtsExtra(segment.id)).toContain("extra");
+      expect(readSegmentFtsExtra(segment.id)).not.toContain("old");
+    });
+
+    test("setSegmentTags([]) clears every tag — an observable act, not a no-op", () => {
+      const segment = createSegment(db, { title: "curated", tags: ["lease"], nowEpoch: 100 });
+      const updated = setSegmentTags(db, segment.id, [], 200);
+      expect(updated?.tags).toEqual([]);
+    });
+
+    test("setSegmentTags on a missing segment returns null", () => {
+      expect(setSegmentTags(db, 999999, ["x"], 100)).toBeNull();
+    });
+
+    describe("checkSegmentMembershipTagGate", () => {
+      test("an EMPTY segment.tags gates nothing — vacuous pass, the pre-backfill state", () => {
+        const segment = createSegment(db, { title: "untagged", nowEpoch: 100 });
+        const turnId = addTurn(1, 100, { tags: [] });
+        const result = checkSegmentMembershipTagGate(db, segment.id, [turnId]);
+        expect(result.ok).toBe(true);
+        expect(result.violations).toEqual([]);
+      });
+
+      test("a turn carrying every segment tag passes", () => {
+        const segment = createSegment(db, {
+          title: "lease work",
+          tags: ["lease", "fencing"],
+          nowEpoch: 100,
+        });
+        const turnId = addTurn(1, 100, { tags: ["lease", "fencing", "extra"] });
+        const result = checkSegmentMembershipTagGate(db, segment.id, [turnId]);
+        expect(result.ok).toBe(true);
+      });
+
+      test("a turn missing one segment tag is refused, naming the gap and the segment", () => {
+        const segment = createSegment(db, {
+          title: "lease work",
+          tags: ["lease", "fencing"],
+          nowEpoch: 100,
+        });
+        const turnId = addTurn(1, 100, { tags: ["lease"] });
+        const result = checkSegmentMembershipTagGate(db, segment.id, [turnId]);
+        expect(result.ok).toBe(false);
+        expect(result.violations).toHaveLength(1);
+        expect(result.violations[0]?.missingTags).toEqual(["fencing"]);
+        expect(result.violations[0]?.turnAddress).toBe(`S${sessionId}/T1`);
+
+        const message = formatSegmentMembershipGateRejection(segment.id, result.violations);
+        expect(message).toContain(`E${segment.id}`);
+        expect(message).toContain("fencing");
+        expect(message).not.toContain("lease,");
+      });
+
+      test("multiple turns each report their own missing tags", () => {
+        const segment = createSegment(db, { title: "x", tags: ["a", "b"], nowEpoch: 100 });
+        const first = addTurn(1, 100, { tags: ["a"] });
+        const second = addTurn(2, 100, { tags: [] });
+        const result = checkSegmentMembershipTagGate(db, segment.id, [first, second]);
+        expect(result.ok).toBe(false);
+        expect(result.violations).toHaveLength(2);
+        expect(result.violations.find((v) => v.turnId === first)?.missingTags).toEqual(["b"]);
+        expect(result.violations.find((v) => v.turnId === second)?.missingTags).toEqual([
+          "a",
+          "b",
+        ]);
+      });
+    });
+
+    test("grandfathering: an existing member lacking the segment's (later-set) tags is untouched by an unrelated write", () => {
+      const segment = createSegment(db, { title: "grandfathered", nowEpoch: 100 });
+      const member = addTurn(1, 100, { tags: [] });
+      addSegmentMembers(db, segment.id, [member], 100);
+
+      // Tags land on the segment AFTER the member already joined — nothing
+      // re-checks that pre-existing membership.
+      setSegmentTags(db, segment.id, ["lease"], 200);
+      expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([member]);
+
+      // An unrelated write to the SAME segment (e.g. its Working State via
+      // applySegmentWrites) does not re-derive or re-check membership either.
+      applySegmentWrites(
+        db,
+        [{ segmentId: segment.id, expectedRevision: getSegment(db, segment.id)!.revision, content: "note" }],
+        { nowEpoch: 300 },
+      );
+      expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([member]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["lease"]);
+    });
+
+    test("reassignSegmentMembers itself performs no gate check — the gate is the CALLER's own responsibility at each of the three write paths", () => {
+      // This is the low-level primitive the three gated call sites (and the
+      // ungated `create` seeding) all share; it must stay gate-free so a
+      // caller who forgets the check does NOT get a free pass from this
+      // layer silently enforcing it a second, inconsistent way.
+      const segment = createSegment(db, { title: "x", tags: ["required"], nowEpoch: 100 });
+      const turnId = addTurn(1, 100, { tags: [] });
+      const result = reassignSegmentMembers(db, [turnId], segment.id, 100);
+      expect(result.addedTurnIds).toEqual([turnId]);
+    });
+  });
+
+  describe("a member's facets moving after membership (ticket 15 finding 1; type only after ticket 07)", () => {
+    test("a type written after the membership reaches the segment and its FTS row; the segment's own tags never move", () => {
       const member = addTurn(1, 100);
-      const segment = createSegment(db, { title: "lease fencing", nowEpoch: 100 });
+      const segment = createSegment(db, {
+        title: "lease fencing",
+        tags: ["curated"],
+        nowEpoch: 100,
+      });
       addSegmentMembers(db, segment.id, [member], 100);
       // The member had no type at all when it joined — the vacuous segment A6's
       // duty ordering exists to prevent.
@@ -602,14 +737,16 @@ describe("segments and membership", () => {
       });
 
       expect(getSegment(db, segment.id)?.type).toEqual(["design", "implement"]);
-      expect(getSegment(db, segment.id)?.tags).toEqual(["fencing", "lease"]);
-      expect(readSegmentFtsExtra(segment.id)).toContain("fencing");
+      // The member's own tags changed; the segment's hand-curated tags did not.
+      expect(getSegment(db, segment.id)?.tags).toEqual(["curated"]);
+      expect(readSegmentFtsExtra(segment.id)).toContain("design");
+      expect(readSegmentFtsExtra(segment.id)).toContain("curated");
       expect(readFacetsStale(segment.id)).toBe(0);
     });
 
     test("a REVISED type replaces the old one rather than accumulating, in every segment holding the turn", () => {
-      const revised = addTurn(1, 100, { type: ["ops"], tags: ["release"] });
-      const other = addTurn(2, 200, { type: ["design"], tags: ["lease"] });
+      const revised = addTurn(1, 100, { type: ["ops"] });
+      const other = addTurn(2, 200, { type: ["design"] });
       const first = createSegment(db, { title: "first", nowEpoch: 100 });
       const second = createSegment(db, { title: "second", nowEpoch: 100 });
       addSegmentMembers(db, first.id, [revised, other], 100);
@@ -618,54 +755,55 @@ describe("segments and membership", () => {
       // The later window's verdict on an earlier turn (settlement duty 1).
       updateTurnById(db, revised, {
         type: ["correction"],
-        tags: ["fencing"],
         updatedAtEpoch: 300,
       });
 
       expect(getSegment(db, first.id)?.type).toEqual(["design", "correction"]);
-      expect(getSegment(db, first.id)?.tags).toEqual(["fencing", "lease"]);
       expect(getSegment(db, second.id)?.type).toEqual(["correction"]);
-      expect(getSegment(db, second.id)?.tags).toEqual(["fencing"]);
-      expect(readSegmentFtsExtra(second.id)).not.toContain("release");
     });
 
-    test("a member reset back to no extraction empties what only it contributed", () => {
-      const member = addTurn(1, 100, { type: ["ops"], tags: ["release"] });
-      const segment = createSegment(db, { title: "release", nowEpoch: 100 });
+    test("a member reset back to no extraction empties what only it contributed to TYPE; the segment's own tags are untouched", () => {
+      const member = addTurn(1, 100, { type: ["ops"] });
+      const segment = createSegment(db, {
+        title: "release",
+        tags: ["curated"],
+        nowEpoch: 100,
+      });
       addSegmentMembers(db, segment.id, [member], 100);
       expect(getSegment(db, segment.id)?.type).toEqual(["ops"]);
 
       resetTurnExtractionFields(db, member, 300);
 
       expect(getSegment(db, segment.id)?.type).toEqual([]);
-      expect(getSegment(db, segment.id)?.tags).toEqual([]);
-      expect(readSegmentFtsExtra(segment.id)).not.toContain("release");
+      expect(getSegment(db, segment.id)?.tags).toEqual(["curated"]);
+      expect(readSegmentFtsExtra(segment.id)).not.toContain("ops");
+      expect(readSegmentFtsExtra(segment.id)).toContain("curated");
     });
 
-    test("a raw-SQL facet write leaves the debt on file for the sweep to pay", () => {
+    test("a raw-SQL facet write leaves the debt on file for the sweep to pay (type only)", () => {
       // The writers that do not go through `updateTurnById` —
       // hooks/capture-repair.ts claiming a compact boundary, the tag-namespace
       // migration — are out of reach of any call site, so the trigger is what
       // stands between them and a permanently stale facet.
-      const member = addTurn(1, 100, { type: ["ops"], tags: ["release"] });
-      const segment = createSegment(db, { title: "release", nowEpoch: 100 });
+      const member = addTurn(1, 100, { type: ["ops"] });
+      const segment = createSegment(db, {
+        title: "release",
+        tags: ["curated"],
+        nowEpoch: 100,
+      });
       addSegmentMembers(db, segment.id, [member], 100);
 
-      db.query("UPDATE turns SET type = '[\"design\"]', tags = '[\"lease\"]' WHERE id = ?").run(
-        member,
-      );
+      db.query("UPDATE turns SET type = '[\"design\"]' WHERE id = ?").run(member);
       expect(readFacetsStale(segment.id)).toBe(1);
 
       expect(repairStaleSegmentFacets(db)).toBe(1);
       expect(getSegment(db, segment.id)?.type).toEqual(["design"]);
-      expect(getSegment(db, segment.id)?.tags).toEqual(["lease"]);
+      expect(getSegment(db, segment.id)?.tags).toEqual(["curated"]);
 
-      // …and a write that restates the same facets raises no debt at all: the
+      // …and a write that restates the same facet raises no debt at all: the
       // trigger's WHEN clause asks the same question db/turns.ts gates its own
       // recomputation on, so the two never disagree about whether one is owed.
-      db.query("UPDATE turns SET type = '[\"design\"]', tags = '[\"lease\"]' WHERE id = ?").run(
-        member,
-      );
+      db.query("UPDATE turns SET type = '[\"design\"]' WHERE id = ?").run(member);
       expect(readFacetsStale(segment.id)).toBe(0);
     });
   });

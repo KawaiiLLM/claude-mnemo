@@ -206,7 +206,12 @@ describe("derived-facet backfill for segments written before K5a (ticket 15)", (
         .get().count,
     ).toBe(0);
     for (const id of ids) {
-      expect(getSegment(db, id)?.tags).toEqual(["lease"]);
+      const repaired = getSegment(db, id);
+      // Rubric-v10 ticket 07: the repair sweep derives TYPE only — a
+      // segment's tags are hand-curated identity now, so the raw-written
+      // value SURVIVES the sweep instead of being re-derived from members.
+      expect(repaired?.type).toEqual(["design"]);
+      expect(repaired?.tags).toEqual(["hand-typed-topic"]);
     }
   });
 
