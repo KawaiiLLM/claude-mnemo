@@ -3,8 +3,10 @@
 Persistent memory for Claude Code sessions: an episodic layer of recorded turns and
 a semantic layer of task containers, maintained by the agents that do the work.
 Vocabulary pinned by the 2026-08-17 segment redesign, the 2026-08-19
-edge-ownership redesign, the 2026-08-20 edge-mechanism revision and the
-2026-08-21/22 flow-relations and indexes amendments (ADR-0001…0012).
+edge-ownership redesign, the 2026-08-20 edge-mechanism revision, the
+2026-08-21/22 flow-relations and indexes amendments (ADR-0001…0012), and the
+2026-08-22 lane-model redesign (`.scratch/rubric-v10/`, ruled; ships with v10 —
+until that release the CODE still speaks the flow-era semantics).
 
 ## Language
 
@@ -16,9 +18,13 @@ conclusion, and any lesson.
 _Avoid_: extraction, summary
 
 **Segment**:
-The long-lived semantic container for one task lane, accumulating across sessions.
-Addressed by `E<n>`.
-_Avoid_: arc (for this concept)
+The long-lived semantic container for one task, accumulating across sessions.
+Addressed by `E<n>`. Its tags are hand-curated identity — set at creation,
+edited deliberately, required of every member — never derived; its type
+stays derived from members. Segment tags gate membership and NEVER join
+lane identity.
+_Avoid_: arc (for this concept), derived segment tags (retired — the
+frequency mush carried no identity)
 
 **Topic** — _retired_:
 The segment-grouping registry. Two mechanisms were recording one kind of
@@ -45,7 +51,12 @@ A session's reference to a segment as loaded working memory. Not a lifecycle obj
 _Avoid_: binding, subscription
 
 **Membership**:
-A turn's belonging to a segment, decided by the turn's content.
+A turn's belonging to a segment, decided by the turn's content and gated by
+the segment's tags: a member must carry ALL of them, the segment-level twin
+of the edge subset invariant — a turn lacking one is refused with the gap
+named, never co-written. Assignable at note time toward a segment the
+session has attached; `remember` assigns in batch. New assignments only;
+pre-gate memberships stand until the backfill retro-tags them.
 _Avoid_: attachment (sessions attach; turns are members)
 
 **Homeless turn (无归属)**:
@@ -95,72 +106,102 @@ A semantics boundary in stored data; reads never mix the two sides.
 ### Citation graph
 
 **Edge (关系边)**:
-A standalone turn→turn relation declaration, decoupled from note prose. A pair
-may carry several relations when each states a fact the others cannot derive
-(the deletion test); either writer may hard-delete a wrong one. Written under
-the citing turn's write authority — the cited turn need not have been read.
-Self-edges are illegal by default; see Self-citation for the one narrow
-exception.
+A standalone turn→turn relation declaration, decoupled from note prose. An
+edge assertion's identity is (citing, cited, relation, immutable lane-tag
+set): one pair/relation legally holds several rows — an untagged row, an {A}
+row and a {B} row are independent facts, and two singleton rows are never the
+merged {A,B} row; restatement and retraction operate on whole rows, sets are
+never unioned. A pair may carry several relations when each states a fact the
+others cannot derive (the deletion test); either writer may hard-delete a
+wrong one. Written under the citing turn's write authority — the cited turn
+need not have been read. Self-edges are illegal by default; see Self-citation.
 
-**Relation vocabulary (eight words, three stances)**:
-Eight relation words, checked by phase (evidence/decision/delivery, as
-above) and — for override alone — unrestricted across flow and layer.
-Three stances group them by what they ask of the cited turn: JUDGING
-(override, narrows, extends, indexes) — after reading me, must the cited
-still be read? DEPENDING (grounds, consume) — if the cited were false, what
-happens to me? TESTING (verifies, refutes) — did I test the claim, for or
-against? override replaces a wrong conclusion (same phase; not limited to
-one flow or layer) and terminates the cited branch — the overrider holds
-its own flow. narrows and extends hold within one decision-phase flow (both
-ends decision-phase, definitional) — a piece is cut / a piece is added,
-never strung together by time order alone. indexes is same-phase
-aggregation on either layer: this node gathers and represents the
-same-phase nodes carrying its effective content, and readers reach them
-through it — a decision settlement indexes its branch's carrying members, a
-release indexes the artifacts it ships. It is checked for same phase and
-nothing else; an indexed target is never also consumed (indexes subsumes
-consume on that pair, as extends already does). grounds is cross-phase ONLY
-— within one phase, dependency is continuation (narrows/extends) or usage
-(consume), never grounds; it absorbed the old encodes. Where a lane has an
-independent delivery-phase spec turn, THE spec carries the grounds and the
-implementation artifacts reach the decision through it (artifact —consume→
-spec —grounds→ decision); where design and spec-writing merged into one
-turn, artifacts ground directly — re-routing there would be phase-illegal.
-consume is same-phase, cross-flow: I used its product, no liability if it
-falls. verifies and refutes require the citing turn to carry an evidence
-phase and the cited a decision or delivery phase — never evidence: a
-verdict's object is a claim, and evidence's own object is the world (two
-measurements that agree are the same fact twice; one that disagrees is
-override). Every same-phase word is strictly same-phase, every cross-phase
-word strictly cross-phase — no word straddles the two scopes. Only ONE
-condition in the whole vocabulary is checked against graph state rather
-than field facts, and it belongs to grounds (see Self-citation); every
-other graph-derived condition warns, or is left to settlement review.
-_Avoid_: nine-cell grammar, per-word phase table, refines/encodes/collects/
-depends-on/grounded-on/evidence-for/evidence-against (retired — refines
-split into narrows+extends, depends-on split into consume+indexes, collects
-renamed indexes and widened from a decision flow's own terminus to
-aggregation on either layer, encodes merged into grounds, evidence-for/
--against renamed verifies/refutes, grounded-on renamed grounds)
+**Relation vocabulary (eight words, four jobs)**:
+Eight relation words, checked by phase (evidence/decision/delivery). Four
+jobs sort them by what they ask of the cited turn: JUDGING (override,
+narrows, extends) — after reading me, must the cited still be read?
+AGGREGATING (indexes) — which nodes do I stand for? DEPENDING (grounds,
+consume) — if the cited were false, what happens to me? TESTING (verifies,
+refutes) — did I test the claim, for or against? The same-phase words:
+override — the cited's main result no longer applies, this node fully
+replaces it; narrows — part of it no longer applies, this node corrects;
+extends — it still applies, this node adds; consume — I used its product,
+no liability if it falls; indexes — this node represents a set of
+same-phase nodes and readers reach them through it (an indexed target is
+never also consumed — indexes subsumes consume on that pair, as extends
+does). The cross-phase words: grounds — I fall with it (where a lane has an
+independent delivery-phase spec turn, the spec carries the grounds and
+artifacts consume the spec; without one, each artifact grounds the decision
+directly); verifies/refutes — the citing turn must carry an evidence phase
+and the cited a decision or delivery phase, never evidence (a verdict's
+object is a claim; evidence's own object is the world). Every same-phase
+word may carry lane tags, none must (see Interpretation principle);
+cross-phase words never do, since lanes are phase-local. narrows/extends
+are same-phase like their siblings — the decision-only cage was a fossil of
+the pre-unification flow definition and retired with it.
+_Avoid_: three stances (indexes holds its own job now), decision-only
+narrows/extends, nine-cell grammar, per-word phase table, refines/encodes/
+collects/depends-on/grounded-on/evidence-for/evidence-against (retired
+words — see ADR-0010…0012 for the renames)
 
-**Flow**:
-A branch of decisions joined by narrows/extends edges — not a connected
-component, and not stored: a derived view, recomputed on read, invalidated
-by any retraction. A flow's settlement is the branch node nothing further
-narrows or extends (a different sense of "settlement" than the asynchronous
-Judging pass above). override terminates a branch — the overrider holds its
-own flow rather than joining the branch it killed; a dead branch has no
-terminus, and no write-time gate enforces that any more — whether a dead
-branch's members may still be indexed is a judgment settlement review owns,
-and a surviving mid-branch conclusion stays reachable directly, by grounds.
-Delivery and evidence turns hold no flow of their own — they inherit
-through the grounds/consume/indexes edges they write, which is how a
-release reaches the lanes it ships. Segments never enter the graph as relation nodes: a flow
-is the emergent subgraph a segment's member turns carve among themselves,
-the segment stays their container.
-_Avoid_: workflow as a stored or explicitly named object, connected
-components as the flow definition (retired — a flow is branch topology via
-narrows/extends, not graph connectivity)
+**Interpretation principle (统一解读)**:
+A tagged edge acts on a LANE; an untagged edge acts on the cited TURN
+itself. Uniform across all words, no special cases: a tagged override
+revokes the victim's standing in that lane while an untagged override
+repudiates its conclusion globally; a tagged indexes declares that lane's
+convergence while an untagged indexes is free aggregation (a release
+indexing the artifacts it ships). Validity is therefore lane-relative for
+tagged kills and turn-global for untagged ones.
+
+**Lane**:
+A separable subworkflow inside one phase, under a segment. Its identity is
+its exact tag SET, scoped to the segment: the machine treats every distinct
+set as an independent lane, and {P}→{P,c1} forks or {A}+{B}→{A,B} merges
+are human narration read off tag composition — no stored hierarchy.
+Membership comes from being an endpoint of the lane's tagged edges; a
+single-node lane carries no tag and no machinery, and is consumed
+cross-phase directly. Lanes never cross phases; cross-segment tagged edges
+are legal and warned (the boundary and the workline disagree somewhere).
+The system core identifies no lane, no 起点, no 终点 — interpretation lives
+in the rubric and is encoded once, in the checker. Segments never enter the
+graph as relation nodes: a lane is the subgraph its tagged edges carve, the
+segment stays the container.
+_Avoid_: flow (retired — the decision-only branch topology derived from
+narrows/extends; superseded by tag-identified lanes across all phases),
+workflow as a stored object, connected components as the lane definition
+
+**Convergence declaration (收敛宣告 / 终点)**:
+A tagged indexes edge closing its lane: the declaring member becomes the
+lane's terminus and indexes the lane's core valid nodes. Convergence never
+happens by silence. All lane events — declarations, overrides, structural
+continuations — reduce in one order, the citing turn's position; the latest
+declaration is the terminus, and continuing past one is normal life (the
+next declaration supersedes it, no intermediate marker). A terminus
+overridden under the lane's own tag reopens that lane, terminus-less until
+a fresh declaration; repudiated by an untagged override, every lane it
+currently closes loses its terminus. A repudiated or reopened lane is
+revivable by any later member's fresh declaration.
+
+**Adoption (采纳 / valid lane)**:
+Whether a lane's outcome was taken up — a dynamic human judgment, never
+stored. Strongest evidence: an EXTERNAL delivery node citing the lane's
+terminus (self-citations never count). Necessary condition on the graph,
+reported by the checker and never enforced: a valid lane has a declared
+terminus; single-node lanes are exempt.
+
+**Lane checker (校验器)**:
+The one place interpretation is encoded — a read-only advisory tool that
+guides settlement toward edge completeness. Given a turn range (session or
+segment view) or named lanes, it reports four things: per-lane basic stats;
+each lane's member component count within the segment-global graph (1 is
+healthy — principle 1); whether one component holds several lanes'
+members (principle 2); and start-to-terminus path counts, same-phase and
+again with cross-phase citations folded in (few is the aspiration —
+principle 3, the current minimality definition). It reports numbers and
+names, never candidate edges; findings enter settlement's existing
+judgment, and partial coverage is declared, never silently passed off as
+absence. The text digraph rendering is for humans at the CLI; agents get
+the numbers.
 
 **Live turn (deleted / dormant)**:
 Which turns are graph nodes at all, under one shared predicate every read
@@ -172,21 +213,21 @@ restored WHOLE — its stored edges included, no re-judgment — the moment a
 late note promotes it back. Everything else is live.
 _Avoid_: treating skipped as deletion, per-read-side liveness filters
 
-**Multi-phase turn**:
-A turn whose type set spans more than one phase. Each phase judges its own
-edge toward a target independently, under that phase's own row in the
-relation vocabulary; when two of a turn's phases each legitimately earn an
-edge toward the same target, both are written — two true statements from
-two different halves of one turn, not an ambiguity to resolve.
+**Multi-phase turn (复合节点)**:
+A turn whose type set spans more than one phase, or that serves several
+lanes at once. Phase legality is loose by design: any legal pairing
+legalizes the edge, merged steps are not over-analyzed per phase. When two
+of a turn's phases each legitimately earn an edge toward the same target,
+both are written.
 
 **Self-citation**:
-A turn citing itself — grounds only, legal iff the turn is both a flow's
-settlement (the point nothing further narrows or extends it) and that
-settlement's own implementer. Fully machine-checkable: two structural
-facts, no content judgment call. Nothing else self-cites.
-_Avoid_: cross-phase self-citation gated by an "independently exhibitable
-artifact" (retired — self-citation narrows to grounds at settlement plus
-implementer, checked structurally instead of by content)
+A turn citing itself — a formal, connectivity-serving edge with no
+substantive meaning, allowed for the composite node that both closes a
+lane and implements that closure. Validated against the post-transaction
+graph (one call may declare the terminus and self-cite in a legal
+sequence); excluded from adoption evidence. Nothing else self-cites.
+_Avoid_: the retired structural settlement-plus-implementer gate checked
+against the pre-write graph
 
 **text-ref**:
 Best-effort extraction of turn addresses from prose — a display hint only, never
@@ -195,20 +236,17 @@ the prose that names it; relation rows never do.
 _Avoid_: upgrading (the retired path from bare pair to relation)
 
 **Release chain (发布链)**:
-The ritual every release turn performs: index the delivery artifacts it
-ships, and consume the previous release when one exists — the first release
-is the chain's legal root. Lineage is usage, not representation, which is
-why the chain itself stays consume. A release writes NO grounds to decision
-settlements: the decision linkage is transitive through the artifacts,
-which already ground on the rulings they carry, so a gap there is a missing
-artifact-side edge to repair rather than something for the release to
-re-derive. Curation is no longer split: the release chooses nothing about
-which settlements matter, each settlement chooses WHAT within its own flow
-(indexes), and the release's own choice is only which artifacts shipped.
-_Avoid_: depends-on/encodes (retired — a release ships via indexes and
-chains via consume), a release grounding on the settlements it fixes
-(retired — release-time re-derivation of what the artifact layer already
-recorded)
+An explicit AXIOM (peer review proved it underivable from the three
+principles): a release indexes the delivery artifacts it ships — untagged
+free aggregation, lane-independent — and consumes the previous release when
+one exists, the first being the chain's legal root. A release writes NO
+grounds to decision settlements: the decision linkage is transitive through
+the artifacts, which already ground on the rulings they carry, so a gap
+there is a missing artifact-side edge to repair rather than something for
+the release to re-derive.
+_Avoid_: depends-on/encodes (retired), a release grounding on the
+settlements it fixes (retired), presenting the ritual as emergent from the
+principles (conceded — it is minimal explicit legislation)
 
 ### Write gate
 
@@ -266,6 +304,14 @@ _Avoid_: overwrite, append, replace (the two retired vocabularies it replaces)
 
 **Tag**:
 A noun naming a thing — the project first, then subsystems or artifacts. Carries
-the theme the retired topic registry once held. Activities belong to `type`,
-never to tags.
-_Avoid_: activity-suffixed hybrids (`segment-design`)
+the theme the retired topic registry once held, and doubles as the lane label
+vocabulary under the SUBSET INVARIANT: every lane tag on an edge must already
+exist on both endpoint turns' tags — a violation rejects with a receipt naming
+the gap, nothing is co-written (the forward flow satisfies it naturally, since a
+lane member's note carries its lane tag; historical gaps belong to the
+migration). A lane's tag set is as small as discrimination allows, and a
+segment's own tags never join it — most relations live inside one segment, so
+they discriminate nothing there; they gate membership instead. Activities
+belong to `type`, never to tags.
+_Avoid_: activity-suffixed hybrids (`segment-design`), a separate lane-tag
+namespace or store (rejected — edge tags are a subset of ordinary turn tags)

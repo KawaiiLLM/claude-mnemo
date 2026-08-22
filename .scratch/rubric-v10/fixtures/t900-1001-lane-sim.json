@@ -1,0 +1,2281 @@
+{
+ "meta": {
+  "window": [
+   900,
+   1001
+  ],
+  "note": "v10 lane-model simulation; tags minted by hand judgment; simulated declarations flagged"
+ },
+ "lanes": [
+  {
+   "tag": "spec-design",
+   "kind": "decision",
+   "members": [
+    900,
+    901
+   ]
+  },
+  {
+   "tag": "settlement-scope",
+   "kind": "decision",
+   "members": [
+    900,
+    906
+   ]
+  },
+  {
+   "tag": "ownership",
+   "kind": "decision",
+   "members": [
+    900,
+    910,
+    912,
+    913
+   ]
+  },
+  {
+   "tag": "rewind-marking",
+   "kind": "decision",
+   "members": [
+    914,
+    915
+   ]
+  },
+  {
+   "tag": "view-spec",
+   "kind": "decision",
+   "members": [
+    919,
+    920,
+    921,
+    922
+   ]
+  },
+  {
+   "tag": "turn-edge-mechanism",
+   "kind": "decision",
+   "members": [
+    926,
+    927,
+    929
+   ]
+  },
+  {
+   "tag": "relation-vocabulary",
+   "kind": "decision",
+   "members": [
+    933,
+    935,
+    937,
+    938,
+    939
+   ]
+  },
+  {
+   "tag": "write-gate",
+   "kind": "decision",
+   "members": [
+    950,
+    951,
+    952,
+    953,
+    954,
+    955,
+    957,
+    958
+   ]
+  },
+  {
+   "tag": "cadence",
+   "kind": "decision",
+   "members": [
+    978,
+    979,
+    981
+   ]
+  },
+  {
+   "tag": "segment-audit",
+   "kind": "decision",
+   "members": [
+    989,
+    990
+   ]
+  },
+  {
+   "tag": "contract-repair",
+   "kind": "delivery",
+   "members": [
+    982,
+    983,
+    984
+   ]
+  },
+  {
+   "tag": "contract-verify",
+   "kind": "delivery",
+   "members": [
+    945,
+    946
+   ]
+  }
+ ],
+ "turns": [
+  {
+   "id": 900,
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "ownership",
+    "settlement-scope",
+    "note-cadence",
+    "membership",
+    "spec-design",
+    "observation-pipeline"
+   ],
+   "title": "design+ownership: the three ownership rulings merge into one spec with range mem"
+  },
+  {
+   "id": 901,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "working-state",
+    "segment-fields",
+    "spec-design",
+    "observation-pipeline"
+   ],
+   "title": "design+segment-fields: the Working State bullet rule stays in the spec, not dupl"
+  },
+  {
+   "id": 902,
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "ticket-tracking",
+    "turn-edge-mechanism",
+    "ownership",
+    "observation-pipeline"
+   ],
+   "title": "review+semantic-container: four more repair tickets fall to the edge spec, eight"
+  },
+  {
+   "id": 903,
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "ticket-tracking",
+    "spec-verification",
+    "traceability",
+    "observation-pipeline"
+   ],
+   "title": "review+semantic-container: the spec did finish; repair tickets came from checkin"
+  },
+  {
+   "id": 904,
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "ticket-tracking",
+    "annotation",
+    "observation-pipeline"
+   ],
+   "title": "review+semantic-container: superseded tickets annotated in three degrees, not on"
+  },
+  {
+   "id": 905,
+   "type": [
+    "delegate"
+   ],
+   "tags": [
+    "worker-dispatch",
+    "ticket-tracking",
+    "territory-split",
+    "observation-pipeline"
+   ],
+   "title": "delegate+semantic-container: eight live repair tickets go out on two territory-s"
+  },
+  {
+   "id": 906,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "settlement-scope",
+    "segment-fields",
+    "observation-pipeline"
+   ],
+   "title": "design+settlement: ticket 13 withdrawn, settlement touches no segment fields at "
+  },
+  {
+   "id": 907,
+   "type": [
+    "compact"
+   ],
+   "tags": [
+    "compact:pre_tokens=0",
+    "compact:trigger=manual"
+   ],
+   "title": "/compact"
+  },
+  {
+   "id": 909,
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "design-arc",
+    "recap",
+    "observation-pipeline"
+   ],
+   "title": "review+design-arc: timeline-backed recap of the session's design decisions"
+  },
+  {
+   "id": 910,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "session-fields",
+    "segment-fields",
+    "sessionstart",
+    "injection",
+    "observation-pipeline",
+    "ownership"
+   ],
+   "title": "design+session-fields: session shrinks to title+content, segments take the task "
+  },
+  {
+   "id": 911,
+   "type": [
+    "implement",
+    "review"
+   ],
+   "tags": [
+    "segments",
+    "segment-card",
+    "remember-tool",
+    "verification",
+    "observation-pipeline"
+   ],
+   "title": "implement+repair-closeout: eight-ticket batch verified, committed, cross-wired"
+  },
+  {
+   "id": 912,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "settlement-scope",
+    "session-fields",
+    "ownership",
+    "observation-pipeline"
+   ],
+   "title": "design+session-fields: settlement checks four fields, session content is writerl"
+  },
+  {
+   "id": 913,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "ownership",
+    "session-fields",
+    "membership",
+    "observation-pipeline"
+   ],
+   "title": "design+ownership: settlement writes session title/content, membership correction"
+  },
+  {
+   "id": 914,
+   "type": [
+    "review",
+    "discuss"
+   ],
+   "tags": [
+    "recall-view",
+    "rewind-marking",
+    "observation-pipeline"
+   ],
+   "title": "review+recall-view: pre-compact window reviewed, a skipped ruling surfaced"
+  },
+  {
+   "id": 915,
+   "type": [
+    "measure",
+    "correction"
+   ],
+   "tags": [
+    "rewind-marking",
+    "recall-view",
+    "rendering",
+    "observation-pipeline"
+   ],
+   "title": "measure+rewind-marking: the five anomalies are rewound branches recall never mar"
+  },
+  {
+   "id": 916,
+   "type": [
+    "measure"
+   ],
+   "tags": [
+    "segment-card",
+    "recall-view",
+    "rendering",
+    "observation-pipeline"
+   ],
+   "title": "measure+segment-card: designed E31 render produced on a migrated prod clone"
+  },
+  {
+   "id": 918,
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "recall-view",
+    "view-contracts",
+    "observation-pipeline"
+   ],
+   "title": "review+recall-view: eleven lived-experience problems across the two views"
+  },
+  {
+   "id": 919,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "recall-view",
+    "view-spec",
+    "filter",
+    "observation-pipeline"
+   ],
+   "title": "design+recall-view: one tool two shapes ruled, session title shows once"
+  },
+  {
+   "id": 920,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "view-spec",
+    "grill",
+    "observation-pipeline"
+   ],
+   "title": "design+view-spec: grill round one, eight frontier questions out"
+  },
+  {
+   "id": 921,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "view-spec",
+    "ranking",
+    "grill",
+    "observation-pipeline"
+   ],
+   "title": "design+view-spec: round one closes, ranking goes empirical, ordinal T pinned"
+  },
+  {
+   "id": 922,
+   "type": [
+    "discuss"
+   ],
+   "tags": [
+    "sequencing",
+    "turn-edge-mechanism",
+    "view-spec",
+    "observation-pipeline"
+   ],
+   "title": "discuss+sequencing: the edge spec enters implementation first, unblocked by the "
+  },
+  {
+   "id": 923,
+   "type": [
+    "delegate"
+   ],
+   "tags": [
+    "peer-review",
+    "spec-review",
+    "observation-pipeline"
+   ],
+   "title": "delegate+spec-review: both pending specs sent to the GPT peer for adversarial re"
+  },
+  {
+   "id": 924,
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "peer-review",
+    "spec-review",
+    "turn-edge-mechanism",
+    "observation-pipeline"
+   ],
+   "title": "review+spec-review: thirteen peer findings verified, six become grill questions"
+  },
+  {
+   "id": 925,
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "worker-dispatch",
+    "annotation-worker",
+    "overflow",
+    "observation-pipeline"
+   ],
+   "title": "ops+annotation-worker: resumed after a 64K output overflow with batch discipline"
+  },
+  {
+   "id": 926,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "turn-edge-mechanism",
+    "milestones",
+    "spec-review",
+    "observation-pipeline"
+   ],
+   "title": "design+spec-review: six rulings applied, legacy exits milestones, ops word pendi"
+  },
+  {
+   "id": 927,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "type-vocabulary",
+    "turn-edge-mechanism",
+    "observation-pipeline"
+   ],
+   "title": "design+type-vocabulary: codify withdrawn, ops is a gloss problem not a word prob"
+  },
+  {
+   "id": 928,
+   "type": [
+    "ops",
+    "design"
+   ],
+   "tags": [
+    "annotation-worker",
+    "spec-design",
+    "commit",
+    "observation-pipeline"
+   ],
+   "title": "ops+annotation-worker: stalled resume killed, lean restart on the dead worker's "
+  },
+  {
+   "id": 929,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "tickets",
+    "decomposition",
+    "turn-edge-mechanism",
+    "ownership",
+    "observation-pipeline"
+   ],
+   "title": "design+tickets: two specs cut into ten tickets in three territory groups"
+  },
+  {
+   "id": 930,
+   "type": [
+    "measure",
+    "delegate"
+   ],
+   "tags": [
+    "citation-edges",
+    "election",
+    "signal-ranking",
+    "tickets",
+    "observation-pipeline"
+   ],
+   "title": "measure+citation-edges: signal ranking reproduces the human A set, Q5 closes"
+  },
+  {
+   "id": 931,
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "worker-dispatch",
+    "tickets",
+    "observation-pipeline"
+   ],
+   "title": "ops+tickets: worker γ resumed after a transient 521"
+  },
+  {
+   "id": 932,
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "relation-vocabulary",
+    "rubric",
+    "turn-edge-mechanism",
+    "observation-pipeline"
+   ],
+   "title": "review+rubric: relation table restated, four rubrics audited, prompt layers mapp"
+  },
+  {
+   "id": 933,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "relation-vocabulary",
+    "grounded-on",
+    "turn-edge-mechanism",
+    "observation-pipeline"
+   ],
+   "title": "grounded-on joins the vocabulary and the rubric becomes one shared three-layer a"
+  },
+  {
+   "id": 934,
+   "type": [
+    "correction",
+    "fix"
+   ],
+   "tags": [
+    "note-titles",
+    "stale-build",
+    "process-discipline",
+    "observation-pipeline"
+   ],
+   "title": "the retired title prefix survived a whole session because the stale plugin kept "
+  },
+  {
+   "id": 935,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "relation-vocabulary",
+    "grounded-on",
+    "turn-edge-mechanism",
+    "commit",
+    "observation-pipeline"
+   ],
+   "title": "grounded-on entered the table and the three prompt layers got their concrete dra"
+  },
+  {
+   "id": 936,
+   "type": [
+    "implement",
+    "review"
+   ],
+   "tags": [
+    "session-fields",
+    "tickets",
+    "commit",
+    "observation-pipeline"
+   ],
+   "title": "ticket 04 verified and committed with schema.ts held back from the shared tree"
+  },
+  {
+   "id": 937,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "rubric",
+    "relation-vocabulary",
+    "type-vocabulary",
+    "observation-pipeline"
+   ],
+   "title": "every vocabulary word got a one-line definition and the three layers went to the"
+  },
+  {
+   "id": 938,
+   "type": [
+    "review",
+    "design"
+   ],
+   "tags": [
+    "peer-review",
+    "rubric",
+    "observation-pipeline",
+    "relation-vocabulary"
+   ],
+   "title": "peer discussion split into seven adoptions and two pushbacks, one factual"
+  },
+  {
+   "id": 939,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "peer-review",
+    "relation-vocabulary",
+    "validator",
+    "observation-pipeline"
+   ],
+   "title": "peer convergence landed: proactive edge checklist plus one shared validator for "
+  },
+  {
+   "id": 940,
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "rubric",
+    "tickets",
+    "observation-pipeline"
+   ],
+   "title": "rubric v2 shown whole as the ticket-11 acceptance base"
+  },
+  {
+   "id": 941,
+   "type": [
+    "measure"
+   ],
+   "tags": [
+    "milestone-budget",
+    "roster",
+    "tickets",
+    "observation-pipeline"
+   ],
+   "title": "the roster weighs 175 tokens live, so the rubric shares its block with room to s"
+  },
+  {
+   "id": 942,
+   "type": [
+    "implement",
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "turn-phase",
+    "tickets",
+    "verification",
+    "observation-pipeline"
+   ],
+   "title": "worker α verified by flipping the exists-rule, ticket 07 dispatched into the gap"
+  },
+  {
+   "id": 944,
+   "type": [
+    "compact"
+   ],
+   "tags": [
+    "compact:pre_tokens=0",
+    "compact:trigger=manual"
+   ],
+   "title": "/compact"
+  },
+  {
+   "id": 945,
+   "type": [
+    "implement",
+    "review",
+    "ops"
+   ],
+   "tags": [
+    "rubric",
+    "session-narrative",
+    "ticket-tracking",
+    "worker-verification",
+    "observation-pipeline",
+    "contract-verify"
+   ],
+   "title": "Worker δ's rubric single-home and session narrative verified and committed; duty"
+  },
+  {
+   "id": 946,
+   "type": [
+    "implement",
+    "review",
+    "ops"
+   ],
+   "tags": [
+    "ticket-08",
+    "settlement",
+    "validator",
+    "batch-closeout",
+    "docs",
+    "observation-pipeline",
+    "contract-verify"
+   ],
+   "title": "Ticket 08 verified with a validator-bypass mutation and the batch closes with do"
+  },
+  {
+   "id": 947,
+   "type": [
+    "delegate",
+    "review"
+   ],
+   "tags": [
+    "peer-review",
+    "adversarial-audit",
+    "edge-ownership",
+    "observation-pipeline"
+   ],
+   "title": "Adversarial batch review dispatched to the mnemo review peer"
+  },
+  {
+   "id": 948,
+   "type": [
+    "review",
+    "research"
+   ],
+   "tags": [
+    "peer-review",
+    "findings",
+    "defects",
+    "tradeoffs",
+    "observation-pipeline"
+   ],
+   "title": "Peer's six findings verified: two real defects, two documented trade-offs, two n"
+  },
+  {
+   "id": 949,
+   "type": [
+    "fix",
+    "implement"
+   ],
+   "tags": [
+    "edge-legality",
+    "type-correction",
+    "bugfix",
+    "observation-pipeline"
+   ],
+   "title": "Yielded type corrections no longer lend phases to edges; fixed as 95bc239"
+  },
+  {
+   "id": 950,
+   "type": [
+    "design",
+    "discuss"
+   ],
+   "tags": [
+    "staging",
+    "read-versioning",
+    "write-gate",
+    "observation-pipeline"
+   ],
+   "title": "Read-versioning proposal mapped onto existing fences; staging defended on three "
+  },
+  {
+   "id": 951,
+   "type": [
+    "design",
+    "review"
+   ],
+   "tags": [
+    "write-gate",
+    "staging",
+    "design-negotiation",
+    "observation-pipeline"
+   ],
+   "title": "Unified read-gate endorsed at field granularity; queue checks and selective roll"
+  },
+  {
+   "id": 952,
+   "type": [
+    "design",
+    "review"
+   ],
+   "tags": [
+    "staging",
+    "gate",
+    "architecture",
+    "observation-pipeline",
+    "write-gate"
+   ],
+   "title": "Two retractions collapse the case for staging; end-state is the gate alone"
+  },
+  {
+   "id": 953,
+   "type": [
+    "design",
+    "discuss"
+   ],
+   "tags": [
+    "read-write-contract",
+    "grill",
+    "spec-design",
+    "observation-pipeline",
+    "write-gate"
+   ],
+   "title": "Grill round one: seven frontier questions on the read-write contract"
+  },
+  {
+   "id": 954,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "write-gate",
+    "glossary",
+    "gate-design",
+    "observation-pipeline"
+   ],
+   "title": "Round two closes the gate design; three write-gate terms enter the glossary"
+  },
+  {
+   "id": 955,
+   "type": [
+    "design",
+    "discuss"
+   ],
+   "tags": [
+    "write-gate",
+    "commit-semantics",
+    "settlement",
+    "observation-pipeline"
+   ],
+   "title": "Round-two closers ruled: budget raise, minimal commit, flag kept"
+  },
+  {
+   "id": 957,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "render-budget",
+    "pagination",
+    "observation-pipeline",
+    "write-gate"
+   ],
+   "title": "Wrong frame: defended the page knife using the renderer being replaced"
+  },
+  {
+   "id": 958,
+   "type": [
+    "design",
+    "correction"
+   ],
+   "tags": [
+    "pagination",
+    "truncation",
+    "view-spec",
+    "observation-pipeline",
+    "write-gate"
+   ],
+   "title": "Pagination, not truncation: turn size is the only knife on field visibility"
+  },
+  {
+   "id": 959,
+   "type": [
+    "design",
+    "implement"
+   ],
+   "tags": [
+    "read-write-contract",
+    "spec-publication",
+    "observation-pipeline"
+   ],
+   "title": "The read-write-contract spec is published from the converged grill rulings"
+  },
+  {
+   "id": 960,
+   "type": [
+    "delegate",
+    "review"
+   ],
+   "tags": [
+    "peer-review",
+    "adversarial-audit",
+    "read-write-contract",
+    "observation-pipeline"
+   ],
+   "title": "Read-write-contract spec dispatched to a fresh peer session for adversarial revi"
+  },
+  {
+   "id": 961,
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "peer-review",
+    "findings",
+    "toctou",
+    "verification",
+    "observation-pipeline"
+   ],
+   "title": "Thirteen peer findings verified with three live code confirmations, grouped for "
+  },
+  {
+   "id": 962,
+   "type": [
+    "design",
+    "fix"
+   ],
+   "tags": [
+    "read-write-contract",
+    "spec-amendments",
+    "atomicity",
+    "observation-pipeline"
+   ],
+   "title": "All thirteen amendments folded into the spec in one revision pass"
+  },
+  {
+   "id": 963,
+   "type": [
+    "research",
+    "discuss"
+   ],
+   "tags": [
+    "settlement-triggers",
+    "lookback-window",
+    "observation-pipeline"
+   ],
+   "title": "Settlement triggers and lookback documented from the landed design"
+  },
+  {
+   "id": 964,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "settlement-triggers",
+    "window-retarget",
+    "compact",
+    "sessionend",
+    "observation-pipeline"
+   ],
+   "title": "Settlement retargeted to [25,50] windows with compact and sessionend demoted"
+  },
+  {
+   "id": 965,
+   "type": [
+    "design",
+    "delegate"
+   ],
+   "tags": [
+    "tickets",
+    "read-write-contract",
+    "decomposition",
+    "observation-pipeline"
+   ],
+   "title": "Ten tracer tickets cut from the read-write-contract spec in three chains"
+  },
+  {
+   "id": 966,
+   "type": [
+    "delegate",
+    "ops"
+   ],
+   "tags": [
+    "tickets",
+    "worker-dispatch",
+    "read-write-contract",
+    "observation-pipeline"
+   ],
+   "title": "Ten tickets published and wave one dispatched on two disjoint territories"
+  },
+  {
+   "id": 968,
+   "type": [
+    "fix",
+    "ops"
+   ],
+   "tags": [
+    "prompt-cache",
+    "parallel-tool-calls",
+    "claude-md",
+    "observation-pipeline"
+   ],
+   "title": "Parallel tool calls per batch capped at nine to keep the prompt cache warm"
+  },
+  {
+   "id": 969,
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "sessionstart",
+    "block-allocation",
+    "observation-pipeline"
+   ],
+   "title": "SessionStart block allocation documented from repo HEAD"
+  },
+  {
+   "id": 970,
+   "type": [
+    "implement",
+    "review",
+    "ops"
+   ],
+   "tags": [
+    "gate-chain",
+    "commit",
+    "write-gate",
+    "staleness",
+    "observation-pipeline"
+   ],
+   "title": "Gate chain committed as 8ffb07c after a staleness-neutralization mutation; view "
+  },
+  {
+   "id": 971,
+   "type": [
+    "implement",
+    "ops"
+   ],
+   "tags": [
+    "window-retarget",
+    "direct-write",
+    "idempotency",
+    "observation-pipeline"
+   ],
+   "title": "Window retarget committed as ff72909; direct-write worker dispatched with a corr"
+  },
+  {
+   "id": 972,
+   "type": [
+    "implement",
+    "review",
+    "ops"
+   ],
+   "tags": [
+    "view-chain",
+    "commit",
+    "scope-narrowing",
+    "observation-pipeline"
+   ],
+   "title": "View chain committed as 5eb9873 with four flagged scope narrowings surfaced"
+  },
+  {
+   "id": 973,
+   "type": [
+    "design",
+    "implement"
+   ],
+   "tags": [
+    "truncation-retirement",
+    "pagination",
+    "tickets",
+    "observation-pipeline"
+   ],
+   "title": "Truncate retires per ruling; two follow-up tickets published and one dispatched"
+  },
+  {
+   "id": 974,
+   "type": [
+    "implement",
+    "fix"
+   ],
+   "tags": [
+    "narrative-writer",
+    "gating",
+    "session-summary",
+    "observation-pipeline"
+   ],
+   "title": "The stitch landed as 679d24e: the narrative writer reads and is gated on the who"
+  },
+  {
+   "id": 975,
+   "type": [
+    "design",
+    "discuss"
+   ],
+   "tags": [
+    "segment-creation",
+    "homeless-session",
+    "observation-pipeline"
+   ],
+   "title": "New-session segment handling: homeless first, name it mid-conversation, proposal"
+  },
+  {
+   "id": 976,
+   "type": [
+    "implement",
+    "review",
+    "ops"
+   ],
+   "tags": [
+    "milestone-unification",
+    "commit",
+    "observation-pipeline"
+   ],
+   "title": "Milestone unification committed as ee2c6c0; the legacy body's fate goes to the u"
+  },
+  {
+   "id": 977,
+   "type": [
+    "research",
+    "review"
+   ],
+   "tags": [
+    "segment-creation",
+    "roster",
+    "prompting",
+    "observation-pipeline"
+   ],
+   "title": "Segment-creation timing guidance has no home; roster rendering documented"
+  },
+  {
+   "id": 978,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "cadence",
+    "rubric",
+    "roster",
+    "observation-pipeline"
+   ],
+   "title": "Cadence unifies, creation principles enter the rubric, and the roster moves onto"
+  },
+  {
+   "id": 979,
+   "type": [
+    "design",
+    "delegate"
+   ],
+   "tags": [
+    "cadence",
+    "rubric",
+    "roster",
+    "tickets",
+    "observation-pipeline"
+   ],
+   "title": "Topic judged a mechanism-level synonym split; tickets 13 and 14 published"
+  },
+  {
+   "id": 981,
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "topic-registry-retirement",
+    "tags-vocabulary",
+    "observation-pipeline",
+    "cadence"
+   ],
+   "title": "Topic retires into tags; the glossary syncs and ticket 15 publishes"
+  },
+  {
+   "id": 982,
+   "type": [
+    "implement",
+    "review",
+    "ops"
+   ],
+   "tags": [
+    "view-api-retirement",
+    "commit",
+    "ticket-11",
+    "observation-pipeline",
+    "contract-repair"
+   ],
+   "title": "Ticket 11 lands as d0590fe with the docs split out; peer re-dispatched and ticke"
+  },
+  {
+   "id": 983,
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "peer-review",
+    "findings",
+    "atomicity",
+    "coverage",
+    "observation-pipeline",
+    "contract-repair"
+   ],
+   "title": "Peer's five commit findings verified: two contract breaches, two coverage gaps, "
+  },
+  {
+   "id": 984,
+   "type": [
+    "fix",
+    "implement"
+   ],
+   "tags": [
+    "atomicity",
+    "direct-write",
+    "bugfix",
+    "observation-pipeline",
+    "contract-repair"
+   ],
+   "title": "Direct-write atomicity fixed as 7eae1c5 with the peer's failure shape as the red"
+  },
+  {
+   "id": 985,
+   "type": [
+    "implement",
+    "review",
+    "ops"
+   ],
+   "tags": [
+    "cadence",
+    "commit",
+    "ticket-13",
+    "observation-pipeline"
+   ],
+   "title": "Cadence ticket lands as 2f89e32; the stash reflex gets named in briefs"
+  },
+  {
+   "id": 986,
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "filter-contract",
+    "query-dialect",
+    "observation-pipeline"
+   ],
+   "title": "Filter contract documented: five AND predicates, orthogonal fields, retired quer"
+  },
+  {
+   "id": 987,
+   "type": [
+    "review",
+    "research"
+   ],
+   "tags": [
+    "docs",
+    "stale-teaching",
+    "query-dialect",
+    "observation-pipeline"
+   ],
+   "title": "Skill docs are the stale teacher: the query dialect fails silently after retirem"
+  },
+  {
+   "id": 988,
+   "type": [
+    "research",
+    "discuss"
+   ],
+   "tags": [
+    "pi-hermes-memory",
+    "comparison",
+    "observation-pipeline"
+   ],
+   "title": "pi-hermes-memory verdict: a clean single-layer system, subset of mnemo's three"
+  },
+  {
+   "id": 989,
+   "type": [
+    "review",
+    "measure",
+    "design"
+   ],
+   "tags": [
+    "mutation-testing",
+    "batch-grant",
+    "snapshot-guard",
+    "observation-pipeline",
+    "segment-audit"
+   ],
+   "title": "A mutation finally survived: the batch grant path had no snapshot guard"
+  },
+  {
+   "id": 990,
+   "type": [
+    "fix",
+    "design",
+    "correction"
+   ],
+   "tags": [
+    "hook-collapse",
+    "rubric-block",
+    "sessionstart",
+    "hooks-config",
+    "observation-pipeline",
+    "segment-audit"
+   ],
+   "title": "One hook slot cannot hold two growing blocks; the rubric gets its own (6d106fb)"
+  },
+  {
+   "id": 991,
+   "type": [
+    "fix",
+    "ops"
+   ],
+   "tags": [
+    "memory-loss",
+    "auto-memory",
+    "hook-collapse",
+    "observation-pipeline"
+   ],
+   "title": "The repeatedly-lost hook-collapse fact enters the always-loaded index"
+  },
+  {
+   "id": 992,
+   "type": [
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "segment",
+    "read-write-contract",
+    "observation-pipeline"
+   ],
+   "title": "Topic retirement verified on a production rehearsal and committed as 4ca8806"
+  },
+  {
+   "id": 993,
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "workflow",
+    "observation-pipeline"
+   ],
+   "title": "Terminal markdown ate the two-deed list; restated plainly"
+  },
+  {
+   "id": 994,
+   "type": [
+    "design",
+    "discuss"
+   ],
+   "tags": [
+    "milestones",
+    "edge-signals"
+   ],
+   "title": "Milestones cannot lift evidence turns today; grounded-on in-degree is the missin"
+  },
+  {
+   "id": 995,
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "edge-signals",
+    "milestones",
+    "anchoring-eval"
+   ],
+   "title": "Eight real loss instances become the anchoring validation set"
+  },
+  {
+   "id": 996,
+   "type": [
+    "research",
+    "review",
+    "ops"
+   ],
+   "tags": [
+    "edge-signals",
+    "read-write-contract",
+    "docs"
+   ],
+   "title": "Edge-trial results recalled whole; ticket 10 lands and the batch closes at 9fd1b"
+  },
+  {
+   "id": 997,
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "note-budget",
+    "settlement"
+   ],
+   "title": "Budget teeth exist at HEAD: two-times-per-field reject-and-teach, not yet live"
+  },
+  {
+   "id": 998,
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "release",
+    "read-write-contract"
+   ],
+   "title": "0.12.0 ships: seven version sites, refreshed guard probes, a fully green suite"
+  },
+  {
+   "id": 999,
+   "type": [
+    "delegate"
+   ],
+   "tags": [
+    "read-write-contract",
+    "review"
+   ],
+   "title": "Second commit review dispatched over the seven post-twelve commits"
+  },
+  {
+   "id": 1000,
+   "type": [
+    "review",
+    "measure"
+   ],
+   "tags": [
+    "read-write-contract",
+    "review"
+   ],
+   "title": "Round-two findings verified: the fixed class recurred inside its own ticket"
+  },
+  {
+   "id": 1001,
+   "type": [
+    "fix",
+    "ops"
+   ],
+   "tags": [
+    "claude-mnemo",
+    "read-write-contract",
+    "release"
+   ],
+   "title": "Peer round-two fixes landed and 0.12.1 shipped before any reload ran unguarded c"
+  }
+ ],
+ "edges": [
+  {
+   "citingId": 901,
+   "relation": "extends",
+   "citedId": 900,
+   "tags": [
+    "spec-design"
+   ]
+  },
+  {
+   "citingId": 902,
+   "relation": "consume",
+   "citedId": 900,
+   "tags": []
+  },
+  {
+   "citingId": 903,
+   "relation": "consume",
+   "citedId": 902,
+   "tags": []
+  },
+  {
+   "citingId": 904,
+   "relation": "consume",
+   "citedId": 902,
+   "tags": []
+  },
+  {
+   "citingId": 905,
+   "relation": "consume",
+   "citedId": 904,
+   "tags": []
+  },
+  {
+   "citingId": 906,
+   "relation": "narrows",
+   "citedId": 900,
+   "tags": [
+    "settlement-scope"
+   ]
+  },
+  {
+   "citingId": 910,
+   "relation": "extends",
+   "citedId": 900,
+   "tags": [
+    "ownership"
+   ]
+  },
+  {
+   "citingId": 911,
+   "relation": "consume",
+   "citedId": 905,
+   "tags": []
+  },
+  {
+   "citingId": 912,
+   "relation": "extends",
+   "citedId": 910,
+   "tags": [
+    "ownership"
+   ]
+  },
+  {
+   "citingId": 913,
+   "relation": "indexes",
+   "citedId": 900,
+   "tags": [
+    "ownership"
+   ]
+  },
+  {
+   "citingId": 913,
+   "relation": "indexes",
+   "citedId": 910,
+   "tags": [
+    "ownership"
+   ]
+  },
+  {
+   "citingId": 913,
+   "relation": "extends",
+   "citedId": 912,
+   "tags": [
+    "ownership"
+   ]
+  },
+  {
+   "citingId": 913,
+   "relation": "indexes",
+   "citedId": 912,
+   "tags": [
+    "ownership"
+   ]
+  },
+  {
+   "citingId": 913,
+   "relation": "narrows",
+   "citedId": 912,
+   "tags": [
+    "ownership"
+   ]
+  },
+  {
+   "citingId": 915,
+   "relation": "extends",
+   "citedId": 914,
+   "tags": [
+    "rewind-marking"
+   ]
+  },
+  {
+   "citingId": 919,
+   "relation": "grounds",
+   "citedId": 918,
+   "tags": []
+  },
+  {
+   "citingId": 920,
+   "relation": "extends",
+   "citedId": 919,
+   "tags": [
+    "view-spec"
+   ]
+  },
+  {
+   "citingId": 921,
+   "relation": "extends",
+   "citedId": 920,
+   "tags": [
+    "view-spec"
+   ]
+  },
+  {
+   "citingId": 922,
+   "relation": "indexes",
+   "citedId": 919,
+   "tags": [
+    "view-spec"
+   ]
+  },
+  {
+   "citingId": 922,
+   "relation": "extends",
+   "citedId": 921,
+   "tags": [
+    "view-spec"
+   ]
+  },
+  {
+   "citingId": 922,
+   "relation": "indexes",
+   "citedId": 921,
+   "tags": [
+    "view-spec"
+   ]
+  },
+  {
+   "citingId": 923,
+   "relation": "grounds",
+   "citedId": 922,
+   "tags": []
+  },
+  {
+   "citingId": 924,
+   "relation": "consume",
+   "citedId": 923,
+   "tags": []
+  },
+  {
+   "citingId": 926,
+   "relation": "grounds",
+   "citedId": 924,
+   "tags": []
+  },
+  {
+   "citingId": 927,
+   "relation": "extends",
+   "citedId": 926,
+   "tags": [
+    "turn-edge-mechanism"
+   ]
+  },
+  {
+   "citingId": 928,
+   "relation": "override",
+   "citedId": 925,
+   "tags": []
+  },
+  {
+   "citingId": 929,
+   "relation": "indexes",
+   "citedId": 926,
+   "tags": [
+    "turn-edge-mechanism"
+   ]
+  },
+  {
+   "citingId": 929,
+   "relation": "extends",
+   "citedId": 927,
+   "tags": [
+    "turn-edge-mechanism"
+   ]
+  },
+  {
+   "citingId": 929,
+   "relation": "indexes",
+   "citedId": 927,
+   "tags": [
+    "turn-edge-mechanism"
+   ]
+  },
+  {
+   "citingId": 930,
+   "relation": "grounds",
+   "citedId": 929,
+   "tags": []
+  },
+  {
+   "citingId": 931,
+   "relation": "consume",
+   "citedId": 930,
+   "tags": []
+  },
+  {
+   "citingId": 932,
+   "relation": "consume",
+   "citedId": 930,
+   "tags": []
+  },
+  {
+   "citingId": 933,
+   "relation": "grounds",
+   "citedId": 932,
+   "tags": []
+  },
+  {
+   "citingId": 935,
+   "relation": "extends",
+   "citedId": 933,
+   "tags": [
+    "relation-vocabulary"
+   ]
+  },
+  {
+   "citingId": 936,
+   "relation": "grounds",
+   "citedId": 910,
+   "tags": []
+  },
+  {
+   "citingId": 936,
+   "relation": "consume",
+   "citedId": 930,
+   "tags": []
+  },
+  {
+   "citingId": 937,
+   "relation": "extends",
+   "citedId": 935,
+   "tags": [
+    "relation-vocabulary"
+   ]
+  },
+  {
+   "citingId": 938,
+   "relation": "extends",
+   "citedId": 937,
+   "tags": [
+    "relation-vocabulary"
+   ]
+  },
+  {
+   "citingId": 939,
+   "relation": "indexes",
+   "citedId": 935,
+   "tags": [
+    "relation-vocabulary"
+   ]
+  },
+  {
+   "citingId": 939,
+   "relation": "indexes",
+   "citedId": 937,
+   "tags": [
+    "relation-vocabulary"
+   ]
+  },
+  {
+   "citingId": 939,
+   "relation": "extends",
+   "citedId": 938,
+   "tags": [
+    "relation-vocabulary"
+   ]
+  },
+  {
+   "citingId": 939,
+   "relation": "indexes",
+   "citedId": 938,
+   "tags": [
+    "relation-vocabulary"
+   ]
+  },
+  {
+   "citingId": 940,
+   "relation": "grounds",
+   "citedId": 939,
+   "tags": []
+  },
+  {
+   "citingId": 941,
+   "relation": "refutes",
+   "citedId": 935,
+   "tags": []
+  },
+  {
+   "citingId": 942,
+   "relation": "consume",
+   "citedId": 930,
+   "tags": []
+  },
+  {
+   "citingId": 942,
+   "relation": "grounds",
+   "citedId": 935,
+   "tags": []
+  },
+  {
+   "citingId": 945,
+   "relation": "grounds",
+   "citedId": 939,
+   "tags": []
+  },
+  {
+   "citingId": 946,
+   "relation": "grounds",
+   "citedId": 912,
+   "tags": []
+  },
+  {
+   "citingId": 946,
+   "relation": "consume",
+   "citedId": 945,
+   "tags": [
+    "contract-verify"
+   ]
+  },
+  {
+   "citingId": 947,
+   "relation": "consume",
+   "citedId": 946,
+   "tags": []
+  },
+  {
+   "citingId": 948,
+   "relation": "consume",
+   "citedId": 947,
+   "tags": []
+  },
+  {
+   "citingId": 949,
+   "relation": "consume",
+   "citedId": 948,
+   "tags": []
+  },
+  {
+   "citingId": 951,
+   "relation": "extends",
+   "citedId": 950,
+   "tags": [
+    "write-gate"
+   ]
+  },
+  {
+   "citingId": 952,
+   "relation": "narrows",
+   "citedId": 951,
+   "tags": [
+    "write-gate"
+   ]
+  },
+  {
+   "citingId": 953,
+   "relation": "extends",
+   "citedId": 952,
+   "tags": [
+    "write-gate"
+   ]
+  },
+  {
+   "citingId": 954,
+   "relation": "extends",
+   "citedId": 953,
+   "tags": [
+    "write-gate"
+   ]
+  },
+  {
+   "citingId": 955,
+   "relation": "extends",
+   "citedId": 954,
+   "tags": [
+    "write-gate"
+   ]
+  },
+  {
+   "citingId": 957,
+   "relation": "extends",
+   "citedId": 955,
+   "tags": [
+    "write-gate"
+   ]
+  },
+  {
+   "citingId": 958,
+   "relation": "override",
+   "citedId": 957,
+   "tags": [
+    "write-gate"
+   ]
+  },
+  {
+   "citingId": 959,
+   "relation": "grounds",
+   "citedId": 954,
+   "tags": []
+  },
+  {
+   "citingId": 959,
+   "relation": "grounds",
+   "citedId": 958,
+   "tags": []
+  },
+  {
+   "citingId": 960,
+   "relation": "consume",
+   "citedId": 959,
+   "tags": []
+  },
+  {
+   "citingId": 961,
+   "relation": "consume",
+   "citedId": 960,
+   "tags": []
+  },
+  {
+   "citingId": 962,
+   "relation": "grounds",
+   "citedId": 961,
+   "tags": []
+  },
+  {
+   "citingId": 964,
+   "relation": "grounds",
+   "citedId": 963,
+   "tags": []
+  },
+  {
+   "citingId": 965,
+   "relation": "grounds",
+   "citedId": 959,
+   "tags": []
+  },
+  {
+   "citingId": 965,
+   "relation": "consume",
+   "citedId": 962,
+   "tags": []
+  },
+  {
+   "citingId": 966,
+   "relation": "grounds",
+   "citedId": 965,
+   "tags": []
+  },
+  {
+   "citingId": 970,
+   "relation": "consume",
+   "citedId": 966,
+   "tags": []
+  },
+  {
+   "citingId": 971,
+   "relation": "grounds",
+   "citedId": 964,
+   "tags": []
+  },
+  {
+   "citingId": 971,
+   "relation": "consume",
+   "citedId": 966,
+   "tags": []
+  },
+  {
+   "citingId": 972,
+   "relation": "consume",
+   "citedId": 970,
+   "tags": []
+  },
+  {
+   "citingId": 973,
+   "relation": "grounds",
+   "citedId": 972,
+   "tags": []
+  },
+  {
+   "citingId": 974,
+   "relation": "grounds",
+   "citedId": 958,
+   "tags": []
+  },
+  {
+   "citingId": 974,
+   "relation": "consume",
+   "citedId": 972,
+   "tags": []
+  },
+  {
+   "citingId": 976,
+   "relation": "grounds",
+   "citedId": 973,
+   "tags": []
+  },
+  {
+   "citingId": 978,
+   "relation": "grounds",
+   "citedId": 977,
+   "tags": []
+  },
+  {
+   "citingId": 979,
+   "relation": "extends",
+   "citedId": 978,
+   "tags": [
+    "cadence"
+   ]
+  },
+  {
+   "citingId": 981,
+   "relation": "indexes",
+   "citedId": 978,
+   "tags": [
+    "cadence"
+   ]
+  },
+  {
+   "citingId": 981,
+   "relation": "extends",
+   "citedId": 979,
+   "tags": [
+    "cadence"
+   ]
+  },
+  {
+   "citingId": 981,
+   "relation": "indexes",
+   "citedId": 979,
+   "tags": [
+    "cadence"
+   ]
+  },
+  {
+   "citingId": 982,
+   "relation": "grounds",
+   "citedId": 973,
+   "tags": []
+  },
+  {
+   "citingId": 983,
+   "relation": "consume",
+   "citedId": 982,
+   "tags": [
+    "contract-repair"
+   ]
+  },
+  {
+   "citingId": 984,
+   "relation": "consume",
+   "citedId": 983,
+   "tags": [
+    "contract-repair"
+   ]
+  },
+  {
+   "citingId": 985,
+   "relation": "grounds",
+   "citedId": 978,
+   "tags": []
+  },
+  {
+   "citingId": 985,
+   "relation": "consume",
+   "citedId": 982,
+   "tags": []
+  },
+  {
+   "citingId": 989,
+   "relation": "grounds",
+   "citedId": 978,
+   "tags": []
+  },
+  {
+   "citingId": 990,
+   "relation": "narrows",
+   "citedId": 989,
+   "tags": [
+    "segment-audit"
+   ]
+  },
+  {
+   "citingId": 991,
+   "relation": "consume",
+   "citedId": 990,
+   "tags": []
+  },
+  {
+   "citingId": 992,
+   "relation": "grounds",
+   "citedId": 981,
+   "tags": []
+  },
+  {
+   "citingId": 992,
+   "relation": "consume",
+   "citedId": 989,
+   "tags": []
+  },
+  {
+   "citingId": 993,
+   "relation": "consume",
+   "citedId": 991,
+   "tags": []
+  },
+  {
+   "citingId": 994,
+   "relation": "grounds",
+   "citedId": 991,
+   "tags": []
+  },
+  {
+   "citingId": 995,
+   "relation": "grounds",
+   "citedId": 994,
+   "tags": []
+  },
+  {
+   "citingId": 996,
+   "relation": "consume",
+   "citedId": 987,
+   "tags": []
+  },
+  {
+   "citingId": 996,
+   "relation": "consume",
+   "citedId": 992,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 911,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 936,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 942,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 945,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 946,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 949,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 970,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 971,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 972,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 974,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 976,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 982,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 984,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 985,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 989,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 992,
+   "tags": []
+  },
+  {
+   "citingId": 998,
+   "relation": "indexes",
+   "citedId": 996,
+   "tags": []
+  },
+  {
+   "citingId": 999,
+   "relation": "consume",
+   "citedId": 998,
+   "tags": []
+  },
+  {
+   "citingId": 1000,
+   "relation": "consume",
+   "citedId": 999,
+   "tags": []
+  },
+  {
+   "citingId": 1001,
+   "relation": "consume",
+   "citedId": 998,
+   "tags": []
+  },
+  {
+   "citingId": 1001,
+   "relation": "consume",
+   "citedId": 999,
+   "tags": []
+  },
+  {
+   "citingId": 1001,
+   "relation": "indexes",
+   "citedId": 1000,
+   "tags": []
+  },
+  {
+   "citingId": 901,
+   "relation": "indexes",
+   "citedId": 900,
+   "tags": [
+    "spec-design"
+   ],
+   "simulated": true
+  },
+  {
+   "citingId": 906,
+   "relation": "indexes",
+   "citedId": 900,
+   "tags": [
+    "settlement-scope"
+   ],
+   "simulated": true
+  },
+  {
+   "citingId": 915,
+   "relation": "indexes",
+   "citedId": 914,
+   "tags": [
+    "rewind-marking"
+   ],
+   "simulated": true
+  },
+  {
+   "citingId": 990,
+   "relation": "indexes",
+   "citedId": 989,
+   "tags": [
+    "segment-audit"
+   ],
+   "simulated": true
+  },
+  {
+   "citingId": 984,
+   "relation": "indexes",
+   "citedId": 982,
+   "tags": [
+    "contract-repair"
+   ],
+   "simulated": true
+  },
+  {
+   "citingId": 984,
+   "relation": "indexes",
+   "citedId": 983,
+   "tags": [
+    "contract-repair"
+   ],
+   "simulated": true
+  },
+  {
+   "citingId": 946,
+   "relation": "indexes",
+   "citedId": 945,
+   "tags": [
+    "contract-verify"
+   ],
+   "simulated": true
+  }
+ ]
+}
