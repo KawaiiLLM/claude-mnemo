@@ -125,7 +125,8 @@ a turn range (session or segment view) or a batch of named lanes, and whose
 output is exactly FOUR reports: (1) per-lane basic statistics — tag set, segment,
 phase, member and dead-node counts, edge counts by word, declaration presence,
 latest lane event; (2) each involved lane's member component count within the
-SEGMENT-GLOBAL graph (all nodes, all eight words, undirected) — 1 is healthy,
+SEGMENT-GLOBAL graph (stance + consume + grounds, undirected — aggregation and
+testimony never enter, per the ruled domains) — 1 is healthy,
 more means the lane's members are severed (principle 1), with representative
 members per island; (3) whether one connected component holds several lanes'
 members (principle 2 — shared fork roots and merge nodes annotated as designed

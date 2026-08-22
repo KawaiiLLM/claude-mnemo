@@ -116,6 +116,15 @@ export interface NoteSettlementQueryRequest {
   sessionId: number;
   reviewableTurnIds: ReadonlySet<number>;
   contextBuiltAtEpoch: number;
+  /**
+   * The settled window's own prompt-number bounds (rubric-v10 ticket 06):
+   * the `lane_check` tool's scope, exactly `job.windowStart`/`windowEnd` —
+   * not `reviewableTurnIds`, which also carries the rendered LOOKBACK
+   * turns. A lane check runs over the window being settled, same as the
+   * spec's own "may run it over its window's lanes".
+   */
+  windowStart: number;
+  windowEnd: number;
   // Ticket 04 (edge-mechanism-revision D6): `eligibleRelationPairKeys` — spec
   // C7's frozen pre-run pair snapshot — is gone from this request, and
   // `getExistingEdgePairKeys` (the query that built it) is gone from
@@ -137,6 +146,15 @@ export interface NoteSettlementQueryRequest {
 export interface NoteSettlementQueryResult {
   text: string;
   commitMetrics: NoteSettlementCommitCounts | null;
+  /**
+   * Ticket 06: whether THIS run's `lane_check` tool was ever called.
+   * Optional (defaults to `false` when a caller omits it) so every existing
+   * `NoteSettlementQuery` stub predating this ticket keeps compiling
+   * unchanged — the reminder below degrades to "never called" for a stub
+   * that says nothing, which is the honest reading for a fixture that never
+   * modeled this tool at all.
+   */
+  laneCheckCalled?: boolean;
 }
 
 /**
@@ -177,6 +195,8 @@ export interface NoteSettlementWindowMetrics {
    * any point before this line runs.
    */
   commit: NoteSettlementCommitCounts | null;
+  /** Ticket 06: whether this run's `lane_check` tool was ever called — a reminder-only signal, never a factor in `committed`/failure accounting. */
+  laneCheckCalled: boolean;
 }
 
 export type NoteSettlementMetricsSink = (
@@ -272,6 +292,8 @@ export function createNoteSettlementDispatch(
         sessionId: job.sessionId,
         reviewableTurnIds: context.reviewableTurnIds,
         contextBuiltAtEpoch: context.builtAtEpoch,
+        windowStart: job.windowStart,
+        windowEnd: job.windowEnd,
       });
     } catch (error) {
       return {
@@ -313,7 +335,21 @@ export function createNoteSettlementDispatch(
       // incremented before this dispatch ran.
       attemptsExhausted: !committed && job.attempts >= maxAttempts,
       commit: committed ? queryResult.commitMetrics : null,
+      laneCheckCalled: queryResult.laneCheckCalled ?? false,
     });
+
+    // Ticket 06 (spec "settlement agent (v2 duty)"): a REMINDER, never a
+    // block and never a factor in this dispatch's own ok/failure verdict —
+    // the lane checker is advisory (spec: "findings enter the agent's
+    // EXISTING supply/correct/propose judgment... never an automatic write
+    // obligation"), so a run that settled its window cleanly without ever
+    // consulting it is not a bug, only something worth a log line for an
+    // operator watching the metrics stream.
+    if (!(queryResult.laneCheckCalled ?? false)) {
+      logger.warn(
+        `${NOTE_SETTLEMENT_METRICS_PREFIX} reminder: job ${job.id} (S${job.sessionId} T${job.windowStart}-${job.windowEnd}) completed without ever calling lane_check`,
+      );
+    }
 
     if (!committed) {
       // Ticket 06 (pinned decision): the run ENDED (no thrown/transient

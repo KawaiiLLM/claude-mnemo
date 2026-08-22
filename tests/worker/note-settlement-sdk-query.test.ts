@@ -121,9 +121,18 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         sessionId: sessionDbId,
         reviewableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
       });
 
-      expect([...handlers.keys()].sort()).toEqual(["commit", "note", "recall", "remember", "timeline"]);
+      expect([...handlers.keys()].sort()).toEqual([
+        "commit",
+        "lane_check",
+        "note",
+        "recall",
+        "remember",
+        "timeline",
+      ]);
       expect(handlers.has("check")).toBe(false);
     } finally {
       db?.close();
@@ -162,6 +171,8 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         sessionId: sessionDbId,
         reviewableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
       });
 
       expect(shapes.get("note")).toBe(settlementTurnWriteInputShape);
@@ -237,6 +248,8 @@ describe("direct write holds through the real registered handlers (ticket 05: st
         sessionId: sessionDbId,
         reviewableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
       });
 
       // After commit: the job itself is durably complete.

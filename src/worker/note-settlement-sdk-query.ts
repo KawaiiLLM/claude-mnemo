@@ -13,6 +13,9 @@ import {
 } from "../mcp/definitions";
 import { createDatabaseBackedHandlers } from "../mcp/handlers";
 import { buildIsolatedEnv } from "../mnemosyne/env";
+import { loadLaneCheckScope } from "../db/lane-checker-load";
+import { checkLanes } from "../shared/lane-checker";
+import { renderLaneCheckerReports } from "../shared/lane-checker-render";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type {
   NoteSettlementQuery,
@@ -48,6 +51,7 @@ const SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__note",
   "mcp__mnemo__remember",
   "mcp__mnemo__commit",
+  "mcp__mnemo__lane_check",
 ] as const;
 
 /**
@@ -143,6 +147,30 @@ const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
   "to this session, so the next window sees it on the roster — check that " +
   "roster first: joining an existing segment beats minting a new one. " +
   "Never required — this window may finish without ever calling this tool.";
+
+/**
+ * rubric-v10 ticket 06 (spec "settlement agent (v2 duty)"): the four-report
+ * lane checker, wired through the SAME `shared/lane-checker.ts` core the CLI
+ * renders (`scripts/lane-check.ts`) — no digraph, and no parameters: the
+ * scope is always this dispatch's own window (`request.sessionId` +
+ * `windowStart`/`windowEnd`), never a range the model could name itself, so
+ * there is nothing for it to get wrong here. Advisory only (spec: "findings
+ * enter the agent's EXISTING supply/correct/propose judgment... never an
+ * automatic write obligation") — this tool computes and reports, it never
+ * writes.
+ */
+const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
+  "Run the lane checker over THIS window's own scope (no parameters) and " +
+  "return its four reports as compact numbers and names — never a digraph, " +
+  "never a write. Report 1: per-lane statistics (members, edge counts, " +
+  "declaration state, who cites a member from outside). Report 2: whether " +
+  "each lane's members sit in one connected component (severed if not). " +
+  "Report 3: components several lanes' members share. Report 4: " +
+  "start-to-terminus path counts, plain and folded across cross-phase " +
+  "citations. Treat a finding as a CANDIDATE for the same supply/correct/ " +
+  "propose judgment every other duty above uses — never call this more " +
+  "than once, and never let its output alone justify a write without the " +
+  "usual Memory Rubric judgment.";
 
 /** Ticket 06 (spec "commit 重定位"): claim validity + a run summary + the job's terminal mark — no separate `check` tool. */
 const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
@@ -242,6 +270,12 @@ export function createNoteSettlementSdkQuery(
       claimGeneration: request.claimGeneration,
     });
 
+    // Ticket 06: read ONCE, after the model's run has fully ended (below,
+    // mirroring `getLastCommitMetrics`'s own "the model never sees this
+    // value" discipline) — a plain per-request flag, never exposed as a
+    // tool result itself, just whether the call ever happened.
+    let laneCheckCalled = false;
+
     const server = createSdkMcpServerImpl({
       name: "mnemo",
       version: "0.15.0",
@@ -283,6 +317,22 @@ export function createNoteSettlementSdkQuery(
           SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
           {},
           async () => writes.commit(),
+        ),
+        toolImpl(
+          "lane_check",
+          SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
+          {},
+          async () => {
+            laneCheckCalled = true;
+            const projection = loadLaneCheckScope(options.db, {
+              kind: "range",
+              sessionId: request.sessionId,
+              promptStart: request.windowStart,
+              promptEnd: request.windowEnd,
+            });
+            const result = checkLanes(projection.turns, projection.edges);
+            return textResult(renderLaneCheckerReports(result));
+          },
         ),
       ],
     });
@@ -334,7 +384,11 @@ export function createNoteSettlementSdkQuery(
       // under spec G9 (invisible to the grading agent at every point in its
       // run): the value did not exist anywhere the model could observe it
       // until this line.
-      return { text: envelope, commitMetrics: writes.getLastCommitMetrics() };
+      return {
+        text: envelope,
+        commitMetrics: writes.getLastCommitMetrics(),
+        laneCheckCalled,
+      };
     } finally {
       if (request.signal) {
         request.signal.removeEventListener("abort", forwardAbort);

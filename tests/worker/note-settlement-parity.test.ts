@@ -17,6 +17,14 @@ import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
  * TICKET 07 (write-mode-edit-semantics spec D12, [S15069/T1056]): "结算子代理
  * 的工具和主 agent 一致,不需要特殊对待,只多了一个 commit 工具".
  *
+ * RUBRIC-V10 TICKET 06 widens the allowed difference by one: `lane_check`
+ * (`note-settlement-sdk-query.ts`) is a second settlement-only tool, the
+ * read-only four-report checker the main agent has no equivalent surface
+ * for (its own reach is `recall`/`timeline`, neither of which derives lane
+ * semantics). `EXPECTED_SETTLEMENT_ONLY_TOOLS` below is updated
+ * deliberately, not silently widened — the underlying claim this file
+ * checks (every OTHER tool name matches exactly) still holds.
+ *
  * The pinned decision that produced this file: the claim has to be asserted at
  * the TOOL-REGISTRATION boundary, not by comparing two prose descriptions.
  * Both surfaces are captured here through their OWN registration seam — the
@@ -29,8 +37,8 @@ import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 const NOW = 1_800_000_000;
 
-/** The one difference the ruling allows. */
-const EXPECTED_SETTLEMENT_ONLY_TOOLS = ["commit"];
+/** The two differences the ruling allows. */
+const EXPECTED_SETTLEMENT_ONLY_TOOLS = ["commit", "lane_check"];
 
 function registeredMainToolNames(): string[] {
   const names: string[] = [];
@@ -113,6 +121,8 @@ async function captureSettlementRegistration(db: Database): Promise<{
     sessionId: sessionDbId,
     reviewableTurnIds: new Set([t1]),
     contextBuiltAtEpoch: NOW,
+    windowStart: 1,
+    windowEnd: 1,
   });
 
   return { names, shapes, descriptions };

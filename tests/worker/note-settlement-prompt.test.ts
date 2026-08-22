@@ -444,6 +444,26 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
     expect(prompt).toContain(renderMemoryRubricBlock());
     expect(prompt).toContain('hash="');
   });
+});
+
+/**
+ * rubric-v10 ticket 06 (spec "settlement agent (v2 duty)"): the Procedure
+ * paragraph gains one sentence pointing at `lane_check`. Pinned as a
+ * substring inside "## Procedure" itself — not merely present anywhere in
+ * the prompt — because the ticket's own words are "ONE sentence in its
+ * procedure area".
+ */
+describe("ticket 06 — the procedure area names lane_check as an advisory, post-first-pass call", () => {
+  test("the sentence sits inside the Procedure section, after the supply/correct/retract triad", () => {
+    const prompt = renderPrompt();
+    const procedure = prompt.slice(prompt.indexOf("## Procedure"), prompt.indexOf("## Duties"));
+
+    expect(procedure).toContain("lane_check");
+    expect(procedure).toContain("this window's own scope");
+    expect(procedure).toContain("supply/correct/propose");
+    expect(procedure).toContain("never a write obligation on its own");
+    expect(procedure.indexOf("RETRACT what is false")).toBeLessThan(procedure.indexOf("lane_check"));
+  });
 
   test("no pre-existence fence and no differential wording survives anywhere", () => {
     const prompt = renderPrompt();

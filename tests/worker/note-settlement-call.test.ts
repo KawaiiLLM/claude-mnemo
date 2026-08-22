@@ -1020,3 +1020,93 @@ describe("the dispatch's own outcome carries a failureClass (ticket 06)", () => 
     expect(!outcome.ok && outcome.failureClass).toBe("deterministic");
   });
 });
+
+/**
+ * rubric-v10 ticket 06: a run that never calls `lane_check` gets a
+ * LOG-LEVEL reminder only — never a block, and never a factor in this
+ * dispatch's own ok/failure verdict. `queryThatStages` never touches the
+ * `lane_check` tool at all (it drives the direct-write engine directly),
+ * so its `NoteSettlementQueryResult` carries no `laneCheckCalled` field —
+ * exactly the "a stub that says nothing" case `laneCheckCalled?: boolean`'s
+ * own `?? false` default exists for.
+ */
+describe("lane_check reminder (rubric-v10 ticket 06) — advisory, never a block", () => {
+  test("a committed window that never called lane_check logs a reminder, and still reports ok:true", async () => {
+    const fixture = seedFourTurnWindow();
+    const warnings: string[] = [];
+    const dispatch = createNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: queryThatStages((engine) => {
+        engine.commit();
+      }),
+      logger: {
+        warn: (...args: unknown[]) => warnings.push(args.map(String).join(" ")),
+        error: () => {},
+      },
+    });
+
+    const outcome = await dispatch({ job: fixture.job });
+
+    expect(outcome).toEqual({ ok: true });
+    expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("done");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("reminder");
+    expect(warnings[0]).toContain("lane_check");
+    expect(warnings[0]).toContain(`job ${fixture.job.id}`);
+  });
+
+  test("a run whose runQuery reports laneCheckCalled: true logs no reminder", async () => {
+    const fixture = seedFourTurnWindow();
+    const warnings: string[] = [];
+    const dispatch = createNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: async (request) => {
+        const staged = queryThatStages((engine) => {
+          engine.commit();
+        });
+        const result = await staged(request);
+        return { ...result, laneCheckCalled: true };
+      },
+      logger: {
+        warn: (...args: unknown[]) => warnings.push(args.map(String).join(" ")),
+        error: () => {},
+      },
+    });
+
+    const outcome = await dispatch({ job: fixture.job });
+
+    expect(outcome).toEqual({ ok: true });
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("a run that ends without committing STILL logs the reminder, and the reminder never changes the failure verdict", async () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1, { note: { title: "design+seam: x", content: "y" } });
+    classifyThrough(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const warnings: string[] = [];
+    const dispatch = createNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: queryThatStages(() => {
+        /* never commits, never calls lane_check either */
+      }),
+      logger: {
+        warn: (...args: unknown[]) => warnings.push(args.map(String).join(" ")),
+        error: () => {},
+      },
+    });
+
+    const outcome = await dispatch({ job });
+
+    expect(outcome.ok).toBe(false);
+    expect(!outcome.ok && outcome.failureClass).toBe("deterministic");
+    expect(warnings.some((line) => line.includes("lane_check"))).toBe(true);
+  });
+});

@@ -101,6 +101,15 @@ import type {
  * `context.windowTurns` alike; the model reads which addresses belong to
  * THIS window from the header line's own `S<session>/T<start>-T<end>` range,
  * not from a visual split in the body.
+ *
+ * RUBRIC-V10 TICKET 06'S ADDITION (spec "settlement agent (v2 duty)"): the
+ * Procedure paragraph gains one sentence pointing at the `lane_check` tool
+ * (`note-settlement-sdk-query.ts`) — a run may call it once, after its own
+ * first pass, and route whatever it reports through the SAME supply/
+ * correct/propose judgment this prompt already teaches. No new duty
+ * section: the checker is advisory only, and a run that never calls it
+ * still completes normally (the reminder for that case is a worker-side log
+ * line, `note-settlement-dispatch.ts`, never anything this prompt enforces).
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -215,7 +224,10 @@ export function renderNoteSettlementPrompt(
     "that names the wrong activity, a turn homed in the wrong segment), and",
     "RETRACT what is false (an edge whose claim the later turns refute).",
     "Leave alone what you are merely unsure about — the rubric's own judgment",
-    "sections are the standard, not your taste.",
+    "sections are the standard, not your taste. After this first pass of",
+    "writes, you may call `lane_check` over this window's own scope and route",
+    "any findings it reports through this same supply/correct/propose",
+    "judgment, never a write obligation on its own.",
     "",
     "## Duties",
     "",
