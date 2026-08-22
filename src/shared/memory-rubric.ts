@@ -145,10 +145,71 @@ import { createHash } from "node:crypto";
  * of labor ruled at T1238: they are review-time tooling for the backfill
  * pass and the graph page, not judgment every writer must carry. Version
  * bumped v7 → v8; every section outside §Relations is untouched.
+ *
+ * v8→v9 (ruled [S15069/T1253]–[T1256], peer-discussed): §Relations is
+ * REORGANISED — same law, three layers instead of one flat list. CONCEPTS
+ * first (a workflow runs a flow per phase: evidence, decision, delivery),
+ * then the words, then REACH RULES gathered in one place, then the
+ * PROCEDURE. The user asked for the concept layer; the measurement that
+ * shaped it is that the main agent wrote ZERO `indexes` edges across a whole
+ * window containing settlements that needed them.
+ *
+ * Two changes carry that behavioural intent, and neither is cosmetic.
+ * (1) `indexes` leaves the JUDGING group and takes its own — v8 announced
+ * three stances and then listed FOUR jobs: override/narrows/extends answer
+ * "must the cited still be read?" with no/yes/yes, while indexes answered a
+ * different question ("through me"). A word filed under a heading whose
+ * question it does not answer is a word the reader skips.
+ * (2) The checklist gains an AGGREGATION pass beside the precursor pass. The
+ * precursor question ("what caused this turn") can never generate an
+ * aggregation candidate, because aggregation is about what a turn stands FOR,
+ * not what stands behind it — so naming the flows without this pass would
+ * have renamed the table of contents and changed nothing. Writability rests
+ * on law 2: with the terminus gate retired, a turn need not know it is a
+ * FINAL settlement, only that it is gathering a conclusion now; a later
+ * `extends` moves the flow past it without falsifying the edge.
+ *
+ * Only the decision flow is graph-derived, and the text says so — evidence
+ * and delivery flows are reading aids here, not entities flows.ts computes
+ * (fixed premise, user-ruled: the machine is unchanged by this version, and
+ * `indexes` keeps its same-phase-only check).
+ *
+ * The first v9 draft claimed "no rule was dropped to fund it" and a peer diff
+ * against v8 disproved it — five losses, all repaired before this landed, and
+ * worth naming because compression is where rules die quietly:
+ *   1. Retraction lost BOTH predicates the user approved verbatim at
+ *      [S15069/T1130] — "rewrite as needed" (deleting a false edge without
+ *      replacing it loses the correction) and re-judgment being an act of
+ *      judgment in its own right. Worse, the guard test had been edited to
+ *      match the weakened line: a guard that follows the implementation
+ *      guards nothing.
+ *   2. The concept sentence invented lifecycles — "runs a flow per phase"
+ *      (a workflow may have no evidence, or not have shipped), an evidence
+ *      flow "ending where a decision takes it up" (contradicting this same
+ *      section's rule that verifies/refutes may target delivery), and a
+ *      delivery flow "ending at a release" (a release indexes ACROSS flows;
+ *      not every chain has one). Now each flow is described by what JOINS it,
+ *      and only the decision flow keeps a terminus, because only its
+ *      settlement is graph-defined.
+ *   3. "acts once per phase" implied a storage cardinality the validator does
+ *      not have — the exists-rule accepts an edge when ANY phase pairing is
+ *      legal. v8's "judge each phase's edge independently" is restored.
+ *   4. The orphan clause lost its ONLY, turning an exhaustive condition into
+ *      two examples.
+ *   5. "Dispatch → acceptance → commit chains are consume" vanished with the
+ *      old consume bullet; it now lives in the delivery flow's own definition,
+ *      which names consume as the word that joins those steps.
+ * A new guard binds the reach rules to `isRelationLegalForPhases` by parsing
+ * them out of this text, so teaching and validator can no longer drift apart
+ * silently — the failure shape this batch met twice elsewhere.
+ *
+ * Budget: 9462 rendered chars, 38 under the cap. An interim state sat at
+ * exactly 9500 (headroom zero) — unacceptable against a cap that truncates
+ * silently rather than failing, so four passages were compressed for margin.
  */
-export const MEMORY_RUBRIC_VERSION = "v8";
+export const MEMORY_RUBRIC_VERSION = "v9";
 
-export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v8
+export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v9
 
 ## Fields
 
@@ -223,57 +284,66 @@ member turns and recomputed when membership changes — never written by hand.
 
 ## Relations (turn→turn; recorded from the citing turn toward the cited)
 
-- Edges are declared through the relation parameters alone; content owes no
-  citation format.
-- A flow is one chain of decisions joined by narrows/extends. Its SETTLEMENT is
-  the node nothing further narrows or extends. Delivery and evidence turns hold
-  no flow of their own — they reach one through the edges they write.
-- Eight words, three stances:
+A WORKFLOW is one separable, nameable line of work, and it may run a flow per
+phase: an EVIDENCE flow, often a single finding or check; a DECISION flow,
+rulings joined by narrows/extends and SETTLED at the node nothing further
+narrows or extends; a DELIVERY flow, steps joined by consume — dispatch →
+acceptance → commit. Only the decision flow has graph-derived identity; the
+other two are reading aids, not machine-derived.
+
+Eight words, four jobs:
   JUDGING the cited conclusion — after reading me, must it still be read?
   · override — no: it is wrong, and this node replaces it.
-  · narrows  — yes: it holds, but this node cuts a piece out of its scope.
-  · extends  — yes: it holds, and this node adds a piece.
-  · indexes  — through me: I gather these same-phase nodes and stand for them,
-    so readers reach them here. A settlement indexes the members carrying its
-    branch's conclusion; a release, the artifacts it ships.
+  · narrows  — yes, but this node cuts a piece out of its scope.
+  · extends  — yes, and this node adds a piece.
+  AGGREGATING — which nodes do I stand for?
+  · indexes  — these, and readers reach them through me: a settlement's
+    carrying members, a release's shipped artifacts.
   DEPENDING on it — if it turned out false, what happens to me?
-  · grounds — I fall with it: a delivery resting on the decision it implements,
-    a decision on a finding, a release on its verification. Cite a flow through
-    its SETTLEMENT; a mid-flow target still stores, and the receipt names the
-    settlement to use instead. One route to the decision: when a SEPARATE
-    delivery turn wrote the spec, THAT turn carries the grounds and the other
-    artifacts consume it; when design and spec landed in one turn, each
-    artifact grounds directly.
-  · consume — nothing: I used its product and do not answer for it.
-    Dispatch → acceptance → commit chains are consume.
+  · grounds  — I fall with it: a delivery on the decision it implements, a
+    decision on a finding, a release on its verification.
+  · consume  — nothing: I used its product and do not answer for it.
   TESTING it — did I put the claim to a check?
   · verifies / refutes — a result produced this turn, for it or against it.
-- narrows and extends serve ONE flow; every other word is indifferent to it.
-- Every finished turn walks three steps; with several candidate precursors,
-  ask per candidate:
-  1. Is there a direct precursor — the node that directly caused this turn?
-     Skipping levels to the arc's origin is mislabeling. None → an orphan is
-     legal only as an unforeseen subtask start or decision-free chatter;
-     never invent edges to eliminate orphans.
-  2. Yes → pick the word by the three stances; none fits → record nothing.
-     A pair may carry several relations, but each must state a fact the others
-     cannot derive — remove each in turn: if extends or indexes holds, consume
-     follows from it, so never write both.
-  3. Refused or warned? A refusal names the half that is missing → add the
-     smallest missing type, or re-judge the relation. A warning names a better
-     target and stores the edge anyway → take it at the next correction.
-- A multi-phase turn is several steps merged into one: judge each phase's edge
-  toward a target independently. A turn may cite ITSELF with grounds when it is
-  both a flow's settlement and that settlement's implementer; nothing else
-  self-cites.
-- The release ritual: a release indexes the artifacts it ships and consumes the
-  previous release when one exists — the first release is the chain's legal
-  root. No grounds to the settlements it fixes: they are already reached
-  through the artifacts.
-- Retraction: delete an edge found false, rewrite as needed — retraction and
-  re-judgment are acts of judgment; never retract merely to tidy.
-- Pre-registration is not an edge: a prediction made before its test lives
-  in insight, not in the graph.
+
+Where each may reach:
+- ONE decision flow: narrows, extends.
+- Same phase, regardless of flow: override, indexes, consume.
+- Cross-phase only: grounds; verifies/refutes from an evidence source toward a
+  decision or delivery target.
+A multi-phase turn is several steps merged into one: judge each phase's edge
+independently. It may cite ITSELF with grounds when it is both a flow's
+settlement and that settlement's implementer; nothing else self-cites.
+
+Cite a decision flow through its SETTLEMENT: a mid-flow grounds still stores,
+the receipt names it instead. One route across the phases: when a SEPARATE
+delivery turn wrote the spec, THAT turn grounds the decision and the other
+artifacts consume it; when design and spec landed in one turn, each artifact
+grounds directly.
+
+Every finished turn makes two passes.
+1. PRECURSORS — for each node that directly caused this turn, pick its word by
+   the four jobs; none fits → record nothing. Skipping levels to the arc's
+   origin is mislabeling; an orphan is legal ONLY as an unforeseen subtask start
+   or decision-free chatter, and edges are never invented to remove one.
+2. AGGREGATION — then ask of this turn itself: does it stand for a set of
+   same-phase nodes? A turn that gathers a conclusion indexes what carries it.
+   Later work may extend the flow past this turn; the edge stays true as the
+   aggregation it was.
+A pair may carry several relations, each stating a fact the others cannot
+derive — extends and indexes both subsume consume, so never write both. A
+refusal names the missing half → add the smallest missing type, or re-judge.
+A warning names a better target and stores anyway → take it at the next
+correction.
+
+The release ritual: a release indexes the artifacts it ships and consumes the
+previous release if any — the first release is the chain's legal root. No
+grounds to the settlements it fixes: the artifacts already reach them.
+
+Edges are declared through the relation parameters; content owes no citation
+format. Delete an edge found false and rewrite as needed — retraction and
+re-judgment are both acts of judgment, never tidying. Pre-registration is not
+an edge: a prediction made before its test lives in insight, not in the graph.
 
 ## Segments (membership and creation)
 
