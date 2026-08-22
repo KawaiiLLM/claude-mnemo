@@ -259,6 +259,60 @@ describe("named-lanes scope", () => {
     expect(projection.turns).toEqual([]);
     expect(projection.edges).toEqual([]);
   });
+
+  // Round-5 review #13: the WIDEN pass used to filter candidates by the
+  // CITING turn's segment only. For a cross-segment tagged edge (citing turn
+  // in segment B, cited turn in segment A), naming the lane by the CITED
+  // side's own segment (A) resolved EMPTY — the row exists, carries the
+  // exact tag set, but its citingId's segment (B) never matches laneKey.segment
+  // (A), so the old `.filter` dropped it. Both endpoints must be able to
+  // match.
+  test("a named lane keyed by the CITED side's segment still resolves a cross-segment tagged edge written from the citing side's segment", () => {
+    const sessionId = seedSession();
+    const t1 = insertTurn(sessionId, 1); // cited turn, will own segment A
+    const t2 = insertTurn(sessionId, 2); // citing turn, will own segment B
+    const segmentA = createSegment(db, { title: "A", nowEpoch: NOW });
+    const segmentB = createSegment(db, { title: "B", nowEpoch: NOW });
+    addSegmentMembers(db, segmentA.id, [t1], NOW);
+    addSegmentMembers(db, segmentB.id, [t2], NOW);
+
+    tagEdge(t2, t1, "extends", ["cross-seg"]);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "lanes",
+      laneKeys: [{ segment: String(segmentA.id), tagSet: ["cross-seg"] }],
+    });
+
+    expect(projection.edges).toHaveLength(1);
+    const turnIds = new Set(projection.turns.map((turn) => turn.id));
+    expect(turnIds.has(t1)).toBe(true);
+    expect(turnIds.has(t2)).toBe(true);
+  });
+});
+
+describe("cited-side discovery — both endpoints' owning segments yield a lane key (round-5 review #13)", () => {
+  test("a segment's own range/segment scan discovers its OWN copy of a cross-segment lane even when only the CITED turn is in scope", () => {
+    const sessionId = seedSession();
+    const t1 = insertTurn(sessionId, 1); // cited turn, segment A -- the ONLY member of A's scan
+    const t2 = insertTurn(sessionId, 2); // citing turn, segment B
+    const segmentA = createSegment(db, { title: "A", nowEpoch: NOW });
+    const segmentB = createSegment(db, { title: "B", nowEpoch: NOW });
+    addSegmentMembers(db, segmentA.id, [t1], NOW);
+    addSegmentMembers(db, segmentB.id, [t2], NOW);
+
+    tagEdge(t2, t1, "extends", ["x"]);
+
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segmentA.id });
+
+    // Discovery must register segment A's OWN copy of this lane (the dual
+    // appearance the pure core itself produces), not only segment B's --
+    // the old citing-side-only discovery reported involvedLaneKeys as
+    // [{segment: B, tagSet: ["x"]}], mislabelling A's own scan.
+    expect(projection.involvedLaneKeys).toEqual(
+      expect.arrayContaining([{ segment: String(segmentA.id), tagSet: ["x"] }]),
+    );
+    expect(projection.edges).toHaveLength(1);
+  });
 });
 
 describe("law 8 -- rolled-back excluded, skipped dormant", () => {
@@ -415,10 +469,17 @@ describe("turn-order key (round-4 review #2) — reduction follows (session, pro
       promptEnd: 2,
     });
     const turnOrders = new Map(projection.turns.map((turn) => [turn.id, turn.order]));
-    // The adapter's own `order` must rank strictly by prompt_number, not id:
+    // The adapter's own `order` is a `[session_id, prompt_number]` tuple
+    // (round-5 review #10 — never a scalar encoding of the pair): it must
+    // rank strictly by prompt_number, not id, compared lexicographically.
     // promptTwo (smallest id) must carry the LARGEST order.
-    expect(turnOrders.get(promptTwo)!).toBeGreaterThan(turnOrders.get(promptOne)!);
-    expect(turnOrders.get(promptOne)!).toBeGreaterThan(turnOrders.get(promptZero)!);
+    const compare = (a: readonly [number, number], b: readonly [number, number]) => a[0] - b[0] || a[1] - b[1];
+    expect(compare(turnOrders.get(promptTwo)!, turnOrders.get(promptOne)!)).toBeGreaterThan(0);
+    expect(compare(turnOrders.get(promptOne)!, turnOrders.get(promptZero)!)).toBeGreaterThan(0);
+    // And exactly the direct, unencoded pair — no scalar formula anywhere.
+    expect(turnOrders.get(promptTwo)!).toEqual([sessionId, 2]);
+    expect(turnOrders.get(promptOne)!).toEqual([sessionId, 1]);
+    expect(turnOrders.get(promptZero)!).toEqual([sessionId, 0]);
 
     const result = checkLanes(projection.turns, projection.edges);
     // A reducer that (incorrectly) sorted by raw id would process promptOne
@@ -461,5 +522,63 @@ describe("segment-global component widening (round-4 review #4a)", () => {
 
     const result = checkLanes(projection.turns, projection.edges);
     expect(result.components[0]!.componentCount).toBe(1);
+  });
+});
+
+describe("homeless-lane fixpoint component widening (round-5 review #12)", () => {
+  test("a default-segment lane reaches a member two hops away via a bridge chain, not just a one-hop neighbourhood", () => {
+    const sessionId = seedSession();
+    const h1 = insertTurn(sessionId, 1);
+    const h2 = insertTurn(sessionId, 2);
+    const h3 = insertTurn(sessionId, 3);
+    const h4 = insertTurn(sessionId, 4);
+    // No segment created at all -- this lane is DEFAULT_SEGMENT/homeless, so
+    // it has no `segment_members` rows to widen from and depended solely on
+    // the old one-hop "touching" load, which lost the h3->h2 bridge edge
+    // exactly like the segment-scoped test above (neither h2 nor h3 is a
+    // lane member, so a one-hop load from {h1,h4} sees h2 (touches h1) and
+    // h3 (touches h4) but never discovers the h3->h2 edge between them).
+    tagEdge(h4, h1, "indexes", ["bridge"]);
+    tagEdge(h2, h1, "consume", []);
+    tagEdge(h3, h2, "consume", []);
+    tagEdge(h4, h3, "consume", []);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "lanes",
+      laneKeys: [{ segment: DEFAULT_SEGMENT, tagSet: ["bridge"] }],
+    });
+    expect(
+      projection.edges.some((edge) => edge.citingId === h3 && edge.citedId === h2 && edge.relation === "consume"),
+    ).toBe(true);
+
+    const result = checkLanes(projection.turns, projection.edges);
+    // The true graph is ONE component (h1-h2-h3-h4 all bridged); the old
+    // one-hop floor reported 2 (h1/h2 severed from h3/h4).
+    expect(result.components[0]!.componentCount).toBe(1);
+  });
+
+  test("the fixpoint closure is bounded to the lane's own sessions — a same-shape bridge chain in a DIFFERENT session is never traversed", () => {
+    const sessionId = seedSession();
+    const otherSessionId = seedSession("lane-load-other");
+    const h1 = insertTurn(sessionId, 1);
+    const h4 = insertTurn(sessionId, 2);
+    // h2/h3 live in a DIFFERENT session -- structurally reachable only if
+    // the closure ignored the session bound entirely.
+    const h2 = insertTurn(otherSessionId, 1);
+    const h3 = insertTurn(otherSessionId, 2);
+    tagEdge(h4, h1, "indexes", ["isolated"]);
+    tagEdge(h2, h1, "consume", []);
+    tagEdge(h3, h2, "consume", []);
+    tagEdge(h4, h3, "consume", []);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "lanes",
+      laneKeys: [{ segment: DEFAULT_SEGMENT, tagSet: ["isolated"] }],
+    });
+
+    const result = checkLanes(projection.turns, projection.edges);
+    // Bounded to the lane's own session: h1/h4 never reach h2/h3 at all, so
+    // the honest report is 2 severed components, not a false-healthy 1.
+    expect(result.components[0]!.componentCount).toBe(2);
   });
 });

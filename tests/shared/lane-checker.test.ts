@@ -16,7 +16,7 @@ const edge = (
   tags: string[] = [],
 ): LaneEdgeInput => ({ citingId, relation, citedId, tags });
 
-const tagSetSignature = (tags: readonly string[]) => [...new Set(tags)].sort().join("");
+const tagSetSignature = (tags: readonly string[]) => [...new Set(tags)].sort().join("\u0001");
 
 function findLaneStats(result: ReturnType<typeof checkLanes>, tagSet: string[]) {
   const signature = tagSetSignature(tagSet);
@@ -104,11 +104,27 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   //   - every lane with no external grounds citer at all (contract-repair,
   //     contract-verify, rewind-marking, segment-audit, settlement-scope,
   //     spec-design): stays 1 (folded === base when there is nothing to fold)
-  test("folded path counts recomputed under the corrected fold semantics (round-4 review #3)", () => {
+  //
+  // Round-5 review #11 shifted ONE of these again, further: `ownership`
+  // 3 -> 4. Citer 946 (external, grounds member 912 mid-chain) is ITSELF a
+  // member of the `{contract-verify}` lane (946 --consume--> 945, tagged
+  // `contract-verify`) — the fix now folds that lane's own structural edge
+  // in too, not just 946's bare grounds entry point. 945 has no further
+  // tagged path edge, so it becomes a second zero-indegree "start" reachable
+  // only through 946, and 946 itself gains a SECOND outgoing edge in the
+  // merged graph (946->912 the grounds fold, 946->945 contract-verify's own
+  // edge) — a fork at 946, contributing two independent routes
+  // (946->912->910->900 and 946->945) instead of one. Every other lane's
+  // external citer (936 for ownership; 985/989/992 for cadence; 940/942/945
+  // for relation-vocabulary; 930 for turn-edge-mechanism; 923 for view-spec)
+  // is NOT itself a tagged member of any other lane, so their folded counts
+  // are unaffected by this batch. Recomputed by running the real
+  // implementation against the fixture, not hand-guessed.
+  test("folded path counts recomputed under the corrected fold semantics (round-4 review #3, round-5 review #11)", () => {
     const expectedFolded: Record<string, number> = {
       "spec-design": 1,
       "settlement-scope": 1,
-      ownership: 3,
+      ownership: 4,
       "rewind-marking": 1,
       "view-spec": 1,
       "turn-edge-mechanism": 1,
@@ -248,6 +264,46 @@ describe("path counting — fork, merge, and one cross-phase fold, hand-computed
   });
 });
 
+describe("the fold merges the citer's OWN lane too, not just its bare entry edge (round-5 review #11)", () => {
+  // Lane A {left}: 2->1 (declared, terminus 2). Lane B {right}: 4->3
+  // (declared, terminus 4). T4 (B's terminus) grounds T2 (A's terminus),
+  // cross-phase. The OLD fold reading only ever added the bare entry edge
+  // 4->2, giving folded({left}) = 1 (4's only route is 4->2->1, identical in
+  // shape to A's own base count). The spec requires "two lanes citing
+  // across phases counted as ONE merged graph": folding must also pull in
+  // B's OWN structural edge (4->3), so 4 gets a SECOND route (4->3, with 3
+  // now a start of the merged graph) alongside 4->2->1 — folded({left})
+  // must be 2, not 1.
+  const turns = [design(1), design(2), design(3), design(4)];
+  const edges = [
+    edge(2, "extends", 1, ["left"]),
+    edge(2, "indexes", 1, ["left"]),
+    edge(4, "extends", 3, ["right"]),
+    edge(4, "indexes", 3, ["right"]),
+    edge(4, "grounds", 2, []), // cross-phase: B's terminus grounds A's terminus
+  ];
+  const result = checkLanes(turns, edges);
+
+  test("folded pathCount for {left} is 2 — the citer's own lane {right} joins the merged graph, not just its entry edge", () => {
+    const path = findPath(result, ["left"]);
+    expect(path?.folded?.citingTurnsFolded).toEqual([4]);
+    expect(path?.folded?.pathCount).toBe(2);
+  });
+
+  test("a citer with no lane membership of its own still folds as a bare entry edge only (no regression for the plain case)", () => {
+    // Same shape, but the citer (5) belongs to no lane at all.
+    const plainTurns = [design(1), design(2), design(5, ["implement"])];
+    const plainEdges = [
+      edge(2, "extends", 1, ["solo"]),
+      edge(2, "indexes", 1, ["solo"]),
+      edge(5, "grounds", 2, []),
+    ];
+    const plainResult = checkLanes(plainTurns, plainEdges);
+    const path = findPath(plainResult, ["solo"]);
+    expect(path?.folded?.pathCount).toBe(1);
+  });
+});
+
 describe("reports 2/3 build from stance+consume+grounds only — override is excluded", () => {
   test("two members connected ONLY by an override edge do not share a component — the same edge WOULD union them if override were mistakenly included", () => {
     // 10 and 11 share no narrows/extends/consume/grounds edge at all, only a
@@ -382,6 +438,31 @@ describe("report 3 gains shared-node sets with a designed-shape annotation (roun
     const node = shared.sharedNodes.find((n) => n.id === 10);
     expect(node?.designedShape).toBe(false);
     expect(node?.citingLanesByStance.map((key) => key.tagSet)).toEqual([["left"]]);
+  });
+});
+
+describe("report 3 also detects a CITING-side merge node, not just a cited-side fork root (round-5 review #15)", () => {
+  test("a turn citing INTO two lanes via stance-tagged edges is a merge node, annotated designedShape: true", () => {
+    // T3 --{left}--> T1 and T3 --{right}--> T2: T3 is the CITING endpoint of
+    // both stance edges (never the cited one) — the OLD code only indexed
+    // `citedId -> lane`, so T3 (never a cited id here) produced an EMPTY
+    // `citingLanesByStance` and read as designedShape: false, even though it
+    // is textbook a designed merge node (one turn's decision draws on two
+    // distinct lanes at once).
+    const turns = [design(1), design(2), design(3)];
+    const edges = [
+      edge(3, "extends", 1, ["left"]),
+      edge(3, "extends", 2, ["right"]),
+    ];
+    const result = checkLanes(turns, edges);
+    expect(result.multiLaneComponents).toHaveLength(1);
+    const shared = result.multiLaneComponents[0]!;
+    const node = shared.sharedNodes.find((n) => n.id === 3);
+    expect(node).toBeDefined();
+    expect(node?.designedShape).toBe(true);
+    expect(node?.citingLanesByStance.map((key) => key.tagSet)).toEqual(
+      expect.arrayContaining([["left"], ["right"]]),
+    );
   });
 });
 

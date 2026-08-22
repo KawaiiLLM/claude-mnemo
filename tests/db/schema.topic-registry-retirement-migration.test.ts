@@ -191,6 +191,37 @@ describe("topic registry retirement migration (ticket 15)", () => {
     expect(findRetiredTopicTag(segmentTags)).toBeNull();
   });
 
+  // Round-5 review #16b: the fold used to strip only ONE `topic:` prefix —
+  // a legacy name doubly poisoned (`"topic:topic:Alpha"`, e.g. from an
+  // earlier partial migration attempt or a copy/paste) folded to
+  // `"topic:alpha"`, which STILL carries the retired namespace the write
+  // boundary (`findRetiredTopicTag`) refuses forever — the exact closure
+  // failure this migration exists to prevent. The strip must repeat until
+  // the prefix is fully gone.
+  test("a legacy topic name carrying the DOUBLE-prefixed retired namespace folds to a fully bare tag", () => {
+    const member = addTurn(1, ["existing"]);
+    const segment = createSegment(db, { title: "double-prefixed topic segment", nowEpoch: 100 });
+    addSegmentMembers(db, segment.id, [member], 100);
+
+    downgradeToLegacyTopicRegistry(db);
+    const topicId = insertLegacyTopic(db, "topic:topic:Alpha");
+    setSegmentTopic(db, segment.id, topicId);
+
+    initializeSchema(db);
+
+    const memberTags: string[] = JSON.parse(
+      db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(member)!.tags,
+    );
+    const segmentTags = getSegment(db, segment.id)?.tags ?? [];
+
+    expect(memberTags).toContain("alpha");
+    expect(memberTags.some((tag) => tag.toLowerCase().startsWith("topic:"))).toBe(false);
+    expect(segmentTags).toContain("alpha");
+    expect(segmentTags.some((tag) => tag.toLowerCase().startsWith("topic:"))).toBe(false);
+    expect(findRetiredTopicTag(memberTags)).toBeNull();
+    expect(findRetiredTopicTag(segmentTags)).toBeNull();
+  });
+
   test("a topic name already present as a tag (case-insensitively) is not duplicated", () => {
     const member = addTurn(1, ["Already-Here"]);
     const segment = createSegment(db, { title: "the segment", nowEpoch: 100 });

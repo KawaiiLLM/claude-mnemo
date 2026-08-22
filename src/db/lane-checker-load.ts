@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import {
   canonicalTagSet,
   DEFAULT_SEGMENT,
+  laneToken,
   type LaneEdgeInput,
   type LaneKey,
   type LaneTurnInput,
@@ -38,29 +39,40 @@ import { liveTurnSql } from "./turn-liveness";
  *   2. DISCOVER — for `range`/`segment` scopes, find every LANE (segment +
  *      exact canonical tag set) touched by a tagged edge with either
  *      endpoint in the seed set. The `lanes` scope skips this: its lane set
- *      is exactly what the caller named.
+ *      is exactly what the caller named. BOTH endpoints' owning segments
+ *      yield a lane key (round-5 review #13) — a cross-segment tagged edge
+ *      is a real, legal shape (`lane-interpretation.ts`'s own dual
+ *      appearance), so discovering only the citing side's copy would leave
+ *      the cited side's own segment scan blind to a lane it is genuinely a
+ *      member of.
  *   3. WIDEN — for every involved lane, load its FULL tagged edge set
  *      (every `memory_edges` row anywhere in the database whose canonical
- *      tag set matches exactly, filtered to the lane's own segment), not
- *      merely the rows that happened to touch the seed range. This is what
- *      makes a lane declared long before or extended long after the
- *      requested window still resolve whole.
+ *      tag set matches exactly, filtered to match the lane's own segment
+ *      from EITHER endpoint, round-5 review #13 — the same dual-appearance
+ *      reasoning as DISCOVER, applied on the read-back side so a
+ *      caller-named lane resolves regardless of which side of a
+ *      cross-segment edge it names), not merely the rows that happened to
+ *      touch the seed range. This is what makes a lane declared long before
+ *      or extended long after the requested window still resolve whole.
  *
  * A fourth pass loads the SUPPLEMENTARY edges the core's reports need beyond
  * a lane's own tagged edges: cross-phase citedness into lane members
  * (report 1/4), untagged override touching a member (global kill, dead-node
- * detection), and the SEGMENT-GLOBAL component graph report 2/3 needs
- * (round-4 review #4): every live turn owned by each involved lane's own
- * segment, plus every live LANE_COMPONENT_RELATIONS edge with BOTH endpoints
- * inside that segment-wide turn set — not merely a one-hop neighbourhood out
- * from the lane's own members, which truncated transitive in-segment
- * connectivity a two-hop-away member could still reach. A default-segment
- * (homeless) lane has no `segment_members` rows to widen from at all, so
- * this pass is a no-op for it and the older one-hop `LANE_COMPONENT_RELATIONS`
- * touching-load below remains its only (unchanged, still-approximate)
- * component source; for a real segment the segment-global pass strictly
- * widens beyond that one-hop load, so both run — the one-hop pass is a
- * conservative floor, never a ceiling.
+ * detection), and the component graph report 2/3 needs. For a REAL segment
+ * this is the SEGMENT-GLOBAL pass (round-4 review #4): every live turn owned
+ * by each involved lane's own segment, plus every live
+ * LANE_COMPONENT_RELATIONS edge with BOTH endpoints inside that segment-wide
+ * turn set. A default-segment (homeless) lane has no `segment_members` rows
+ * to widen from at all, so it instead gets an iterative FIXPOINT closure
+ * (round-5 review #12) — BFS over LANE_COMPONENT_RELATIONS edges starting
+ * from the lane's own members, one hop at a time, until no new turn is
+ * discovered, bounded to the sessions the lane's own members already live
+ * in (never a database-wide walk). This replaces the old one-hop-only
+ * "touching" load, which saw only a member's immediate neighbours and lost
+ * any bridge edge more than one hop away (a chain `T2->T1, T3->T2, T4->T3`
+ * with only T1/T4 tagged would report the bridge severed at T2/T3, when the
+ * true graph is one component) — no hop-count approximation remains
+ * anywhere in report 2's graph.
  *
  * COVERAGE (requirement 1's other half). The core's own report 1
  * (`LaneStatsReport.coverage`) is the honest signal: it is populated
@@ -96,14 +108,21 @@ interface TurnLiteRow {
  * be inserted after (and so carry a higher row id than) turns that
  * chronologically follow it. `sessionId` is itself an auto-increment id
  * (monotonic in session-creation order), so this compound key is a total
- * order across sessions too, not just within one. `PROMPT_NUMBER_SPAN` only
- * needs to exceed any real `prompt_number` (routinely under a few thousand);
- * 1e8 leaves session ids room into the billions before any collision risk,
- * far past `Number.MAX_SAFE_INTEGER`'s actual headroom for this schema.
+ * order across sessions too, not just within one.
+ *
+ * Round-5 review #10: an EARLIER version of this file collapsed the pair
+ * into one scalar (`sessionId * SPAN + promptNumber`). That both COLLIDES
+ * (`1 * SPAN + SPAN === 2 * SPAN + 0` for any `SPAN`, whenever a smaller
+ * `sessionId`'s `promptNumber` reaches exactly one `SPAN`) and LOSES
+ * PRECISION at realistic magnitudes (`SPAN * SPAN + 0 === SPAN * SPAN + 1`
+ * once the product exceeds `Number.MAX_SAFE_INTEGER`'s headroom, which a
+ * `SPAN` of 1e8 already does the moment `sessionId` itself reaches 1e8).
+ * `LaneTurnInput.order` is a TUPLE now (`shared/lane-interpretation.ts`'s
+ * `LaneOrderKey`), compared lexicographically by the core — so the pair is
+ * carried through unencoded, with neither failure mode.
  */
-const PROMPT_NUMBER_SPAN = 100_000_000;
-function turnOrderKey(sessionId: number, promptNumber: number): number {
-  return sessionId * PROMPT_NUMBER_SPAN + promptNumber;
+function turnOrderKey(sessionId: number, promptNumber: number): readonly [number, number] {
+  return [sessionId, promptNumber];
 }
 
 interface EdgeLiteRow {
@@ -126,8 +145,15 @@ function segmentKeyFor(owningSegmentByTurn: ReadonlyMap<number, number>, turnId:
   return segmentId === undefined ? DEFAULT_SEGMENT : String(segmentId);
 }
 
+/**
+ * The same-shape lookup key `deriveLaneInterpretation` uses internally,
+ * reused directly rather than re-implemented (round-5 review #14: a
+ * separately maintained delimiter join here drifted from the core's own
+ * fix and reintroduced the identical collision — a tag containing the
+ * delimiter character collides one tag set with a differently-split one).
+ */
 function laneKeyToken(key: LaneKey): string {
-  return `${key.segment}\u0000${key.tagSet.join("\u0001")}`;
+  return laneToken(key.segment, key.tagSet);
 }
 
 /** Every `segment_members` row's owning segment for the given turn ids, batched in one query (`MIN` mirrors `getOwningSegmentId`'s own "lowest id wins" tie-break for a legacy multi-membership row). */
@@ -276,6 +302,78 @@ function loadComponentEdgesAmong(db: Database, turnIds: readonly number[]): Edge
     .all(...turnIds, ...turnIds, ...LANE_COMPONENT_RELATIONS_SQL);
 }
 
+/** Every DISTINCT session id the given turns belong to — the session bound `widenComponentClosure` (round-5 review #12) stays inside. */
+function loadSessionIds(db: Database, turnIds: readonly number[]): number[] {
+  const ids = [...new Set(turnIds)];
+  if (ids.length === 0) {
+    return [];
+  }
+  const placeholders = ids.map(() => "?").join(",");
+  return db
+    .query<{ sessionId: number }, number[]>(
+      `SELECT DISTINCT session_id AS sessionId FROM turns WHERE id IN (${placeholders})`,
+    )
+    .all(...ids)
+    .map((row) => row.sessionId);
+}
+
+/**
+ * Iterative FIXPOINT closure over `LANE_COMPONENT_RELATIONS_SQL` edges
+ * (round-5 review #12) — the replacement for the old one-hop "touching"
+ * load, which only ever saw a member's immediate neighbours and lost any
+ * bridge edge more than one hop away (`T2->T1, T3->T2, T4->T3` with only
+ * T1/T4 tagged reported the chain severed at T2/T3). BFS one hop at a time
+ * from `seedIds`, feeding each round's newly discovered turn ids back in as
+ * the next round's frontier, until a round discovers nothing new. Bounded to
+ * `sessionIds` — never a database-wide walk — so an edge whose far endpoint
+ * sits outside the lane's own sessions is simply not traversed, the same
+ * "declared boundary, not silently unbounded" posture `liveTurnSql`'s own
+ * law-8 gate takes elsewhere in this file.
+ */
+function widenComponentClosure(
+  db: Database,
+  seedIds: readonly number[],
+  sessionIds: readonly number[],
+): EdgeLiteRow[] {
+  if (seedIds.length === 0 || sessionIds.length === 0) {
+    return [];
+  }
+  const sessionPlaceholders = sessionIds.map(() => "?").join(",");
+  const relationPlaceholders = LANE_COMPONENT_RELATIONS_SQL.map(() => "?").join(",");
+  const found = new Map<string, EdgeLiteRow>();
+  const knownTurnIds = new Set<number>(seedIds);
+  let frontier = new Set<number>(seedIds);
+  while (frontier.size > 0) {
+    const frontierIds = [...frontier];
+    const idPlaceholders = frontierIds.map(() => "?").join(",");
+    const rows = db
+      .query<EdgeLiteRow, (number | string)[]>(
+        `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+         FROM memory_edges me
+         JOIN turns tc ON tc.id = me.citing_id
+         JOIN turns td ON td.id = me.cited_id
+         WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
+           AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+           AND me.relation IN (${relationPlaceholders})
+           AND tc.session_id IN (${sessionPlaceholders}) AND td.session_id IN (${sessionPlaceholders})
+           AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
+      )
+      .all(...frontierIds, ...frontierIds, ...LANE_COMPONENT_RELATIONS_SQL, ...sessionIds, ...sessionIds);
+    const nextFrontier = new Set<number>();
+    for (const row of rows) {
+      found.set(edgeKey(row), row);
+      for (const id of [row.citingId, row.citedId]) {
+        if (!knownTurnIds.has(id)) {
+          knownTurnIds.add(id);
+          nextFrontier.add(id);
+        }
+      }
+    }
+    frontier = nextFrontier;
+  }
+  return [...found.values()];
+}
+
 function loadLiveTurns(db: Database, turnIds: readonly number[]): Map<number, TurnLiteRow> {
   const ids = [...new Set(turnIds)];
   if (ids.length === 0) {
@@ -316,15 +414,22 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   } else {
     seedTurnIds = resolveSeedTurnIds(db, scope);
     const discoveryRows = loadTaggedEdgesTouching(db, seedTurnIds);
-    const citingIds = discoveryRows.map((row) => row.citingId);
-    const owningSegments = loadOwningSegments(db, citingIds);
+    // Round-5 review #13: both endpoints' owning segments yield a lane key,
+    // not just the citing side's — a cross-segment tagged edge dual-
+    // registers under BOTH segments in the pure core, and discovery must
+    // find both copies so either side's own segment scan sees its own
+    // membership.
+    const owningSegments = loadOwningSegments(
+      db,
+      discoveryRows.flatMap((row) => [row.citingId, row.citedId]),
+    );
     const seen = new Map<string, LaneKey>();
     for (const row of discoveryRows) {
-      const key: LaneKey = {
-        segment: segmentKeyFor(owningSegments, row.citingId),
-        tagSet: canonicalTagSet(JSON.parse(row.tags) as string[]),
-      };
-      seen.set(laneKeyToken(key), key);
+      const tagSet = canonicalTagSet(JSON.parse(row.tags) as string[]);
+      const citingKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citingId), tagSet };
+      const citedKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citedId), tagSet };
+      seen.set(laneKeyToken(citingKey), citingKey);
+      seen.set(laneKeyToken(citedKey), citedKey);
     }
     involvedLaneKeys = [...seen.values()];
   }
@@ -339,11 +444,19 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     }
     const owningSegments = loadOwningSegments(
       db,
-      candidates.map((row) => row.citingId),
+      candidates.flatMap((row) => [row.citingId, row.citedId]),
     );
+    // Round-5 review #13: match from EITHER endpoint's segment — a named
+    // lane's own dual-registered cross-segment copy must resolve regardless
+    // of which side of the edge carries the segment being asked about
+    // (the pure core dual-registers once the edge is loaded either way).
     widenedByKey.set(
       laneKeyToken(laneKey),
-      candidates.filter((row) => segmentKeyFor(owningSegments, row.citingId) === laneKey.segment),
+      candidates.filter(
+        (row) =>
+          segmentKeyFor(owningSegments, row.citingId) === laneKey.segment ||
+          segmentKeyFor(owningSegments, row.citedId) === laneKey.segment,
+      ),
     );
   }
 
@@ -369,11 +482,24 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   for (const row of loadEdgesByRelationTouching(db, memberIdList, ["override"])) {
     edgeMap.set(edgeKey(row), row);
   }
-  // One-hop floor (kept unconditionally — the segment-global pass below is a
-  // real segment's superset, but a default-segment/homeless lane has no
-  // `segment_members` to widen from at all, so this stays its only source).
-  for (const row of loadEdgesByRelationTouching(db, memberIdList, [...LANE_COMPONENT_RELATIONS_SQL])) {
-    edgeMap.set(edgeKey(row), row);
+  // HOMELESS-LANE FIXPOINT CLOSURE (round-5 review #12): a default-segment
+  // lane has no `segment_members` to widen from at all, so its own members
+  // get an iterative BFS closure over LANE_COMPONENT_RELATIONS edges instead
+  // of the old one-hop "touching" load — bounded to the sessions those
+  // members already live in.
+  const homelessMemberIds = new Set<number>();
+  for (const laneKey of involvedLaneKeys) {
+    if (laneKey.segment !== DEFAULT_SEGMENT) continue;
+    for (const row of widenedByKey.get(laneKeyToken(laneKey)) ?? []) {
+      homelessMemberIds.add(row.citingId);
+      homelessMemberIds.add(row.citedId);
+    }
+  }
+  if (homelessMemberIds.size > 0) {
+    const homelessSessionIds = loadSessionIds(db, [...homelessMemberIds]);
+    for (const row of widenComponentClosure(db, [...homelessMemberIds], homelessSessionIds)) {
+      edgeMap.set(edgeKey(row), row);
+    }
   }
   // SEGMENT-GLOBAL component graph (round-4 review #4a): every live turn
   // owned by each involved lane's own (real) segment, plus every live

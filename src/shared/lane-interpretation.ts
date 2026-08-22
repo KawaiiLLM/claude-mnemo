@@ -25,6 +25,13 @@
  *                           a backfill-inserted earlier turn can carry a
  *                           LATER row id, so `id` alone is not always
  *                           "later" (draft: "一切 lane 事件…按 turn 序归约").
+ *                           `order` is a TWO-ELEMENT TUPLE compared
+ *                           lexicographically (round-5 review #10) — a
+ *                           scalar encoding of `(session_id, prompt_number)`
+ *                           both collides (two distinct pairs hashing to the
+ *                           same number) and loses precision at the sizes
+ *                           this schema can reach; a tuple has neither
+ *                           failure mode.
  *   - tagged override,    -> lane-local correction: the cited turn loses its
  *     same tag as this        EFFECTIVE status in this lane (a dead node)
  *     lane                    regardless of whether it currently is the
@@ -91,13 +98,29 @@ export const DEFAULT_SEGMENT = "\u0000default";
  * `prompt_number`) must be able to say so explicitly. A plain fixture whose
  * ids ARE already in true order needs no `order` field at all.
  */
+/**
+ * The reduction-order key: `[major, minor]`, compared lexicographically
+ * (major first, then minor) — never collapsed into one scalar (round-5
+ * review #10: `session_id * SPAN + prompt_number`-style encoding both
+ * collides across distinct pairs and loses precision at realistic
+ * magnitudes). The DB adapter supplies `[session_id, prompt_number]`
+ * directly; a plain fixture that only cares about relative order may supply
+ * `[0, n]` for a synthetic sequence `n`.
+ */
+export type LaneOrderKey = readonly [number, number];
+
 export interface LaneTurnInput {
   id: number;
   type: readonly string[];
   /** Lane identity's segment half. Omitted turns share `DEFAULT_SEGMENT`. */
   segment?: string;
-  /** Explicit reduction-order key. Defaults to `id` when omitted. */
-  order?: number;
+  /** Explicit reduction-order key. Defaults to `[0, id]` when omitted. */
+  order?: LaneOrderKey;
+}
+
+/** Lexicographic tuple compare — the core's ONE ordering primitive (round-5 review #10): no scalar encoding of the pair anywhere. */
+function compareOrderKey(a: LaneOrderKey, b: LaneOrderKey): number {
+  return a[0] - b[0] || a[1] - b[1];
 }
 
 /** One edge assertion row (ticket 01's shape): `tags` is the row's own IMMUTABLE canonical tag set, `[]` for untagged. `citingId` is always the LATER turn (`turn-phase.ts`'s direction convention). */
@@ -181,13 +204,18 @@ export function canonicalTagSet(tags: readonly string[]): string[] {
   return [...new Set(tags)].sort();
 }
 
-function tagSetKey(tags: readonly string[]): string {
-  return canonicalTagSet(tags).join("\u0001");
-}
-
-/** The token a lane is grouped and looked up by: segment + canonical tag set, joined so neither half can collide into the other. */
+/**
+ * The token a lane is grouped and looked up by: segment + canonical tag set.
+ * JSON-encoded as a `[segment, tagSet]` pair (round-5 review #14) -- the
+ * former U+0000/U+0001-delimited join collided whenever a real tag happened
+ * to CONTAIN the delimiter character itself: `["a","b"]` joined on U+0001
+ * produces the identical string to the single tag `["a\u0001b"]` joined the
+ * same way. `JSON.stringify` self-delimits every element via its own
+ * quoting/escaping, so no input can ever produce two different
+ * `[segment, tagSet]` pairs that serialize identically.
+ */
 export function laneToken(segment: string, tags: readonly string[]): string {
-  return `${segment}\u0000${tagSetKey(tags)}`;
+  return JSON.stringify([segment, canonicalTagSet(tags)]);
 }
 
 interface MutableLaneGroup {
@@ -215,17 +243,17 @@ export function deriveLaneInterpretation(
   edges: readonly LaneEdgeInput[],
 ): LaneInterpretation {
   const segmentOf = new Map<number, string>();
-  const orderOf = new Map<number, number>();
+  const orderOf = new Map<number, LaneOrderKey>();
   for (const turn of turns) {
     segmentOf.set(turn.id, turn.segment ?? DEFAULT_SEGMENT);
-    orderOf.set(turn.id, turn.order ?? turn.id);
+    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
   }
   // A turn absent from `turns` (partial-coverage input, `lane-checker.ts`'s
   // coverage report) still needs a segment/order to group and sort by — it
   // falls back to its own id for both, so an incomplete projection degrades
   // to "one extra default scope, sorted by its own id" rather than throwing.
   const segmentFor = (id: number): string => segmentOf.get(id) ?? DEFAULT_SEGMENT;
-  const orderFor = (id: number): number => orderOf.get(id) ?? id;
+  const orderFor = (id: number): LaneOrderKey => orderOf.get(id) ?? [0, id];
 
   // ---- lane enumeration: group by (a segment, exact tag set) ----
   // A cross-segment tagged edge (citing/cited segments differ) is a real,
@@ -293,7 +321,7 @@ export function deriveLaneInterpretation(
       }
     }
   }
-  events.sort((a, b) => orderFor(a.citingId) - orderFor(b.citingId) || a.citingId - b.citingId);
+  events.sort((a, b) => compareOrderKey(orderFor(a.citingId), orderFor(b.citingId)) || a.citingId - b.citingId);
 
   const terminusOf = new Map<string, number | null>();
   const everDeclared = new Map<string, boolean>();
@@ -365,7 +393,8 @@ export function deriveLaneInterpretation(
     for (const edge of group.edges) {
       if (edge.relation === "indexes" || edge.relation === "override") continue; // already accounted above
       const order = orderFor(edge.citingId);
-      if (order > bestOrder || (order === bestOrder && edge.citingId > bestId)) {
+      const cmp = compareOrderKey(order, bestOrder);
+      if (cmp > 0 || (cmp === 0 && edge.citingId > bestId)) {
         bestOrder = order;
         bestId = edge.citingId;
       }

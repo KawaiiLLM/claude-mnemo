@@ -31,11 +31,21 @@ const RETIRED_TAG_NAMESPACE = "topic:";
  * stopped a caller from writing it straight back in until this check landed
  * (peer review item 3 on ticket 02) — an existing `remember` test even
  * expected `topic:a&b` to persist. Returns the first offending tag, or null.
+ *
+ * Case-INSENSITIVE (round-5 review #16a): `Topic:routing`/`TOPIC:routing`
+ * carry the identical retired namespace as `topic:routing` — a
+ * case-sensitive `startsWith` let a caller through the gate by nothing more
+ * than a capital letter. The comparison lowercases before matching; the
+ * RETURNED tag keeps its original casing (`retiredTopicTagMessage` slices by
+ * a fixed index, not by matched text, so it still names the bare word
+ * correctly regardless of the namespace's casing).
  */
 export function findRetiredTopicTag(
   tags: readonly string[],
 ): string | null {
-  return tags.find((tag) => tag.startsWith(RETIRED_TAG_NAMESPACE)) ?? null;
+  return (
+    tags.find((tag) => tag.toLocaleLowerCase("en-US").startsWith(RETIRED_TAG_NAMESPACE)) ?? null
+  );
 }
 
 /**

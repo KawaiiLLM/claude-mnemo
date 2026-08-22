@@ -130,9 +130,9 @@ describe("declaration/override/continuation ordering by turn — the mutation-de
   // that silently fell back to `id`-based sorting (the pre-fix behaviour)
   // would land terminus=500 here; correct order-key reduction lands 100.
   test("turn-order reduction uses the explicit `order` key, never raw `id` — a backfilled turn's larger id does not make it 'later'", () => {
-    const earlyBackfilled: LaneTurnInput = { id: 999, type: ["design"], order: 1 }; // true order 1st, but the LARGEST id
-    const middle: LaneTurnInput = { id: 500, type: ["design"], order: 2 };
-    const late: LaneTurnInput = { id: 100, type: ["design"], order: 3 }; // true order 3rd (latest), but the SMALLEST id
+    const earlyBackfilled: LaneTurnInput = { id: 999, type: ["design"], order: [0, 1] }; // true order 1st, but the LARGEST id
+    const middle: LaneTurnInput = { id: 500, type: ["design"], order: [0, 2] };
+    const late: LaneTurnInput = { id: 100, type: ["design"], order: [0, 3] }; // true order 3rd (latest), but the SMALLEST id
     const turns = [earlyBackfilled, middle, late];
     const e1 = edge(500, "indexes", 999, ["m"]); // order 2 declares terminus=500
     const e2 = edge(100, "indexes", 999, ["m"]); // order 3 declares terminus=100 -- must win
@@ -188,6 +188,56 @@ describe("declaration/override/continuation ordering by turn — the mutation-de
     // 503 is a member (endpoint of the lane's own tagged edge) but never
     // became the terminus — silence never establishes convergence.
     expect(lane?.members.map((m) => m.id)).toEqual([501, 502, 503]);
+  });
+});
+
+describe("order key is a lexicographically-compared tuple, never a scalar encoding (round-5 review #10)", () => {
+  // The defect: a PRIOR version of the DB adapter encoded `(session_id,
+  // prompt_number)` as `sessionId * 1e8 + promptNumber`, which both COLLIDES
+  // (`1*1e8 + 1e8 === 2*1e8 + 0`) and loses precision. The core's own fix is
+  // to never accept a scalar at all — `LaneTurnInput.order` is a two-element
+  // tuple, compared element-wise. This test proves the core does real
+  // lexicographic comparison (major element dominates regardless of how
+  // large the minor element gets), not some derived scalar that could still
+  // collide the same way internally.
+  test("a turn whose order tuple has a huge minor component still sorts strictly BEFORE a turn with a larger major component and a tiny minor one", () => {
+    const base: LaneTurnInput = { id: 1, type: ["design"] };
+    // Major=1 with an enormous minor vs major=2 with a minor of 0 — a scalar
+    // encoding with any fixed span collides or misorders pairs like this;
+    // lexicographic tuple compare never does, regardless of magnitude.
+    const early: LaneTurnInput = { id: 2, type: ["design"], order: [1, 100_000_000] };
+    const late: LaneTurnInput = { id: 3, type: ["design"], order: [2, 0] };
+    const edges = [
+      edge(2, "indexes", 1, ["ord"]),
+      edge(3, "indexes", 1, ["ord"]),
+    ];
+    const lane = laneOf(deriveLaneInterpretation([base, early, late], edges), ["ord"]);
+    // `late` (order [2,0]) must win regardless of array/id position — id 3 >
+    // id 2 here too, so this alone would not distinguish a correct
+    // lexicographic-tuple reducer from a buggy id-fallback one; the real
+    // proof is the companion DB-adapter test where id order is INVERTED
+    // relative to true (session, prompt) order.
+    expect(lane?.declaration.terminus).toBe(3);
+  });
+});
+
+describe("laneToken never collides a differently-split tag set with one containing the delimiter literally (round-5 review #14)", () => {
+  test("['a','b'] and a single tag whose text literally contains the old U+0001 join character are distinct lane tokens", () => {
+    // The defect: the old join was `canonicalTagSet(tags).join(\"\\u0001\")`
+    // then `segment + \"\\u0000\" + tagSetKey`. A tag whose own text CONTAINS
+    // that join character collides with a differently-split tag set that
+    // joins to the identical string: `[\"a\",\"b\"]` joined on U+0001
+    // produces \"a\\u0001b\", and the single tag `[\"a\\u0001b\"]` (one
+    // element, no separator emitted) joins to the SAME string.
+    const tokenSplit = laneToken(DEFAULT_SEGMENT, ["a", "b"]);
+    const tokenLiteral = laneToken(DEFAULT_SEGMENT, ["a\u0001b"]);
+    expect(tokenSplit).not.toBe(tokenLiteral);
+  });
+
+  test("a segment name containing the old U+0000 separator does not collide two different (segment, tagSet) pairs", () => {
+    const a = laneToken("x\u0000y", ["z"]);
+    const b = laneToken("x", ["y\u0000z"]);
+    expect(a).not.toBe(b);
   });
 });
 

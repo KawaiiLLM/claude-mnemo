@@ -49,6 +49,20 @@
  * untouched by the fold (a fold edge never grants a member a new outgoing
  * entry), so a lane with no external grounds still gets folded === base.
  *
+ * Round-5 review #11 extended the merge one step further: "two lanes citing
+ * across phases counted as one" means one merged GRAPH, not just one merged
+ * ENTRY EDGE — when an external citer is itself a member of ANOTHER lane,
+ * that lane's own path-domain (stance+consume) edges join the merged graph
+ * too, so `countPaths` can walk the citer's own chain back to ITS lane's
+ * starts, not just stop at the citer's bare entry point. Lane A `T2->T1`,
+ * lane B `T4->T3`, `T4 grounds T2` (T4 external to A, but a B member):
+ * folding in ONLY the entry edge `T4->T2` gives folded=1 (T4's own route to
+ * T1 is invisible); folding in B's own `T4->T3` edge too gives folded=2
+ * (`T4->T3` and `T4->T2->T1`) — the two lanes' shapes are genuinely merged,
+ * not just bridged at one point. Guarded against double-counting a lane
+ * folded in from more than one citer, or re-folding the lane's own edges
+ * back into itself.
+ *
  * Cited-ness (report 1) is LANE-WIDE, not terminus-only: an incoming
  * cross-phase `grounds`/`verifies`/`refutes` counts if its target is ANY
  * lane member, because a post-declaration settlement can be grounded
@@ -154,9 +168,17 @@ export interface LaneComponentReport {
 /** A node shared by >=1 of this component's lanes (round-4 review #7's diagnostic identity). */
 export interface LaneSharedNode {
   id: number;
-  /** Every DISTINCT lane (among this component's own) that cites this node via a STANCE (narrows/extends) tagged edge. */
+  /**
+   * Every DISTINCT lane (among this component's own) this node touches via
+   * one of ITS OWN STANCE (narrows/extends) tagged edges — either as the
+   * CITED endpoint (a shared fork root several lanes' edges converge on) or
+   * as the CITING endpoint (a merge node: this turn itself cites INTO two
+   * different lanes, round-5 review #15). Both directions read as the same
+   * "designed shape" signal; the field does not distinguish which direction
+   * produced a given entry.
+   */
   citingLanesByStance: LaneKey[];
-  /** `citingLanesByStance.length >= 2` — a node several lanes' own stance edges converge on is a designed fork root or merge node, not an anomaly; fewer (0 or 1) surfaces the sharing for human judgment instead (e.g. only consume/grounds ties it in). */
+  /** `citingLanesByStance.length >= 2` — a node several lanes' own stance edges converge on (from either direction) is a designed fork root or merge node, not an anomaly; fewer (0 or 1) surfaces the sharing for human judgment instead (e.g. only consume/grounds ties it in). */
   designedShape: boolean;
 }
 
@@ -379,12 +401,21 @@ export function checkLanes(
 
     for (const edge of lane.taggedEdges) {
       if (!STANCE_RELATION_WORDS.has(edge.relation)) continue;
-      let bucket = stanceCitersByNode.get(edge.citedId);
-      if (bucket === undefined) {
-        bucket = new Map();
-        stanceCitersByNode.set(edge.citedId, bucket);
+      // Both directions register (round-5 review #15): a node CITED by a
+      // stance edge is a shared fork root (the original reading), and a
+      // node CITING via a stance edge into two different lanes is equally a
+      // designed shape — a merge node, T3 --{left}--> T1 and T3 --{right}-->
+      // T2 at once. Both read off the SAME map/field: `citingLanesByStance`
+      // is "every distinct lane this node touches via one of its own stance
+      // edges", not "cited-side only".
+      for (const nodeId of [edge.citedId, edge.citingId]) {
+        let bucket = stanceCitersByNode.get(nodeId);
+        if (bucket === undefined) {
+          bucket = new Map();
+          stanceCitersByNode.set(nodeId, bucket);
+        }
+        bucket.set(thisLaneToken, lane.key);
       }
-      bucket.set(thisLaneToken, lane.key);
     }
 
     // ---- Report 2 (and feeding report 3) ----
@@ -424,7 +455,7 @@ export function checkLanes(
     componentReports.push({ key: lane.key, componentCount: islands.length, islands });
 
     // ---- Report 4 ----
-    pathReports.push(buildPathReport(lane, memberIds, edges));
+    pathReports.push(buildPathReport(lane, memberIds, edges, lanes));
   }
 
   const multiLaneComponents: MultiLaneComponent[] = [...componentLanes.entries()]
@@ -503,6 +534,7 @@ function buildPathReport(
   lane: Lane,
   memberIds: ReadonlySet<number>,
   allEdges: readonly LaneEdgeInput[],
+  allLanes: readonly Lane[],
 ): LanePathReport {
   const structuralPairs: Array<readonly [number, number]> = lane.taggedEdges
     .filter((edge) => LANE_PATH_RELATIONS.has(edge.relation))
@@ -537,9 +569,40 @@ function buildPathReport(
   const crossPhaseGrounds = allEdges.filter(
     (edge) => edge.relation === "grounds" && memberIds.has(edge.citedId) && !memberIds.has(edge.citingId),
   );
+
+  // Round-5 review #11: "two lanes citing across phases counted as one
+  // merged graph" means the merge is of LANES, not just of the one grounds
+  // edge — when an external citer is ITSELF a member of another lane, that
+  // lane's own path-domain (stance+consume) edges join the merged graph
+  // too, so the citer's own chain back to ITS lane's starts is reachable
+  // and gets summed, not just the citer's bare entry edge into this lane.
+  // Guarded against double-counting: a lane is folded in at most once even
+  // if several citers share it, and this lane's own token is pre-seeded so
+  // it can never be re-added to itself (a citer can never be a member of
+  // `lane` — `crossPhaseGrounds` already filtered `!memberIds.has(citingId)`
+  // — but the guard is kept explicit rather than relying on that exclusion
+  // alone).
+  const thisLaneToken = laneToken(lane.key.segment, lane.key.tagSet);
+  const foldedInLanes = new Set<string>([thisLaneToken]);
+  const citerLanePairs: Array<readonly [number, number]> = [];
+  for (const citerId of new Set(crossPhaseGrounds.map((edge) => edge.citingId))) {
+    for (const otherLane of allLanes) {
+      const token = laneToken(otherLane.key.segment, otherLane.key.tagSet);
+      if (foldedInLanes.has(token)) continue;
+      if (!otherLane.members.some((member) => member.id === citerId)) continue;
+      foldedInLanes.add(token);
+      for (const edge of otherLane.taggedEdges) {
+        if (LANE_PATH_RELATIONS.has(edge.relation)) {
+          citerLanePairs.push([edge.citingId, edge.citedId]);
+        }
+      }
+    }
+  }
+
   const foldedPairs: Array<readonly [number, number]> = [
     ...structuralPairs,
     ...crossPhaseGrounds.map((edge) => [edge.citingId, edge.citedId] as const),
+    ...citerLanePairs,
   ];
   const foldedGraph = buildPathGraph(foldedPairs);
   const foldedNodes = new Set<number>([terminus]);

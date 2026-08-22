@@ -3701,10 +3701,21 @@ const SEGMENTS_TOPIC_RETIRED_INDEXES_DDL = `
  * prefix (`"topic:"`, `"Topic:   "`) normalizes to the empty string exactly
  * as before — the existing `topic-<id>` fallback in
  * `foldTopicNamesIntoSegmentTags` still catches it, unchanged.
+ *
+ * Round-5 review #16b: the strip above only ever removed ONE prefix — a
+ * legacy name doubly poisoned (`"topic:topic:Alpha"`, however that arose)
+ * folded to `"topic:alpha"`, still carrying the retired namespace the write
+ * boundary refuses forever, closing the loop `findRetiredTopicTag` this
+ * migration is supposed to satisfy. The strip now repeats until the prefix
+ * is gone (each pass removes exactly `"topic:".length` characters, so the
+ * loop is bounded by the string's own length and always terminates).
  */
 function normalizeTopicNameToTag(name: string): string {
   const cased = name.normalize("NFKC").trim().toLocaleLowerCase("en-US");
-  const withoutRetiredNamespace = cased.startsWith("topic:") ? cased.slice("topic:".length) : cased;
+  let withoutRetiredNamespace = cased;
+  while (withoutRetiredNamespace.startsWith("topic:")) {
+    withoutRetiredNamespace = withoutRetiredNamespace.slice("topic:".length);
+  }
   return withoutRetiredNamespace
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
