@@ -129,10 +129,14 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // indexes subsumes consume exactly as extends already did.
   test("v8 teaches the canonical grounds route and the indexes/consume dedup", () => {
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "    settlement to use instead. One route to the decision: when the work has a\n" +
-        "    spec turn of its own, THAT turn carries the grounds and the other artifacts\n" +
-        "    consume it instead; when design and spec landed in one turn, each artifact\n" +
-        "    grounds directly.",
+      // "SEPARATE delivery turn" states law 7's precondition in the two words
+      // that matter: a decision-only turn that happens to write a spec is not
+      // the route's subject (an artifact consuming it would be phase-illegal),
+      // and a merged design+spec turn is excluded by the clause that follows.
+      "    settlement to use instead. One route to the decision: when a SEPARATE\n" +
+        "    delivery turn wrote the spec, THAT turn carries the grounds and the other\n" +
+        "    artifacts consume it; when design and spec landed in one turn, each\n" +
+        "    artifact grounds directly.",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "     cannot derive — remove each in turn: if extends or indexes holds, consume\n" +

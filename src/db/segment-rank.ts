@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { parseQualifiedReferences } from "./references";
 import { getSegment, type SegmentRecord } from "./segments";
+import { liveTurnSql } from "./turn-liveness";
 import { isSegmentEra } from "../segment-era";
 import { typeListsEqual } from "../shared/type-vocabulary";
 
@@ -219,6 +220,12 @@ export function rankSegmentMembers(
 
   const rows = db
     .query<MemberRankFactsRow, number[]>(
+      // NOT a law-8 site, deliberately. Law 8 governs the GRAPH — nodes, edges,
+      // the derivations over them, the graph page. This ranking feeds the
+      // CONTENT INDEX (the segment card, recall's member listing), where
+      // [S15069/T915] rules the opposite: a rewound turn renders WITH its own
+      // marker rather than disappearing, because a reader who cannot see it
+      // cannot tell a withdrawn branch from a turn that never existed.
       `SELECT ${RANK_FACT_COLUMNS}
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id

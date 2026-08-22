@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { reconcileCitedPairs } from "./memory-edges";
 import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
+import { liveTurnSql } from "./turn-liveness";
 import {
   SEGMENT_EDITABLE_FIELDS,
   type SegmentEditableField,
@@ -1323,6 +1324,9 @@ export function computeSegmentMemberFacetCounts(
 ): SegmentMemberFacetCounts {
   const members = db
     .query<{ type: string | null; tags: string | null }, number[]>(
+      // Facets summarise the CONTENT INDEX, not the graph, so they follow the
+      // member listing ([S15069/T915]: a rewound member stays visible, marked)
+      // rather than law 8's node set. Same reason as `rankSegmentMembers`.
       `SELECT t.type AS type, t.tags AS tags
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id

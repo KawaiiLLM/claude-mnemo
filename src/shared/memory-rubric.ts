@@ -240,10 +240,10 @@ member turns and recomputed when membership changes — never written by hand.
   · grounds — I fall with it: a delivery resting on the decision it implements,
     a decision on a finding, a release on its verification. Cite a flow through
     its SETTLEMENT; a mid-flow target still stores, and the receipt names the
-    settlement to use instead. One route to the decision: when the work has a
-    spec turn of its own, THAT turn carries the grounds and the other artifacts
-    consume it instead; when design and spec landed in one turn, each artifact
-    grounds directly.
+    settlement to use instead. One route to the decision: when a SEPARATE
+    delivery turn wrote the spec, THAT turn carries the grounds and the other
+    artifacts consume it; when design and spec landed in one turn, each
+    artifact grounds directly.
   · consume — nothing: I used its product and do not answer for it.
     Dispatch → acceptance → commit chains are consume.
   TESTING it — did I put the claim to a check?

@@ -13,6 +13,7 @@ import {
   type SegmentSpineRow,
 } from "../db/segment-rank";
 import { getTurnEdgeSignals, type TurnEdgeSignals } from "../db/edge-signals";
+import { liveTurnSql } from "../db/turn-liveness";
 import { getSegment, type SegmentRecord } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
@@ -3810,10 +3811,18 @@ function resolveTurnRowLinks(
   const placeholders = citingIds.map(() => "?").join(",");
   const edges = db
     .query<{ citingId: number; citedId: number; relation: string }, number[]>(
-      `SELECT DISTINCT citing_id AS citingId, cited_id AS citedId, relation
-         FROM memory_edges
-        WHERE citing_kind = 'turn' AND cited_kind = 'turn'
-          AND citing_id IN (${placeholders})`,
+      // Law 8 (indexes-rescope spec): a deleted or dormant turn is not a node,
+      // so it may not appear as a `↳` antecedent either — the index row is the
+      // graph's most visible face. Filtered at BOTH ends here, at the source:
+      // the cited lookup below then reads only ids this filter already passed.
+      `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation
+         FROM memory_edges e
+         JOIN turns citing ON citing.id = e.citing_id
+         JOIN turns cited ON cited.id = e.cited_id
+        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+          AND ${liveTurnSql("citing")}
+          AND ${liveTurnSql("cited")}
+          AND e.citing_id IN (${placeholders})`,
     )
     .all(...citingIds);
   if (edges.length === 0) {

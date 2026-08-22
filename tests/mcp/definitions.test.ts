@@ -453,7 +453,7 @@ describe("tool surface", () => {
     expect(shape.grounds.description).toContain("absorbs the retired grounded-on/encodes");
     expect(shape.grounds.description).toContain("if it were false");
     expect(shape.grounds.description).toContain(
-      "One route to the decision: when the work has its own spec turn, THAT turn carries the grounds",
+      "One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds",
     );
     expect(shape.grounds.description).toContain(
       "with design and spec in one turn, each artifact grounds directly",
