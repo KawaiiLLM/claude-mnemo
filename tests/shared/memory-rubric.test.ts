@@ -101,20 +101,25 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     // delivery flow ends at a release (releases index across flows; not every
     // chain has one). Only the decision flow keeps a terminus, because only its
     // settlement is graph-defined.
+    // ONE definition of a flow, instantiated per phase (user ruling
+    // S15069/T1265): a phase-local separable line of work, where a single
+    // subtask and even a single node are equally flows. The earlier draft gave
+    // three different definitions, which read as three kinds of thing.
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "A WORKFLOW is one separable, nameable line of work, and it may run a flow per",
+      "A FLOW is one separable line of work inside a phase — a chain of subtasks,\n" +
+        "sometimes one subtask, sometimes one node; each is equally a flow.",
     );
-    expect(MEMORY_RUBRIC_TEXT).toContain("an EVIDENCE flow, often a single finding or check");
+    expect(MEMORY_RUBRIC_TEXT).toContain("EVIDENCE flows establish facts");
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "a DECISION flow,\nrulings joined by narrows/extends and SETTLED at the node nothing further\nnarrows or extends",
+      "DECISION flows join rulings with\nnarrows/extends and SETTLE where nothing further narrows or extends",
     );
-    // The delivery flow names consume as its joining word — this is where v8's
-    // "Dispatch → acceptance → commit chains are consume" mapping now lives.
+    // Delivery names consume as its joining word — this is where v8's
+    // "Dispatch → acceptance → commit chains are consume" mapping lives.
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "a DELIVERY flow, steps joined by consume — dispatch →\nacceptance → commit.",
+      "DELIVERY\nflows join steps with consume (dispatch → acceptance → commit).",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "Only the decision flow has graph-derived identity; the\nother two are reading aids, not machine-derived.",
+      "Only the\ndecision flow has graph-derived identity; the other two are reading aids, not\nmachine-derived.",
     );
 
     // Four jobs, indexes standing on its own question.
@@ -130,9 +135,13 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     );
     expect(MEMORY_RUBRIC_TEXT).toContain("  · extends  — yes, and this node adds a piece.");
     expect(MEMORY_RUBRIC_TEXT).toContain("  AGGREGATING — which nodes do I stand for?");
+    // The word now carries its PURPOSE, not just its shape (S15069/T1265):
+    // it declares a flow converged and makes this node the flow's proxy, which
+    // is what licenses everything outside to cite one node instead of members.
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "  · indexes  — these, and readers reach them through me: a settlement's\n" +
-        "    carrying members, a release's shipped artifacts.",
+      "  · indexes  — these: the flow converges here and I stand for it. Cite me and\n" +
+        "    you have cited the flow, so everything outside reaches it through this one\n" +
+        "    node, never through its members.",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "  DEPENDING on it — if it turned out false, what happens to me?",
@@ -264,11 +273,14 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "A multi-phase turn is several steps merged into one: judge each phase's edge\nindependently.",
     );
+    // The trigger is CONVERGENCE of a flow, not the looser "does it stand for
+    // a set of nodes" (S15069/T1262): every turn can answer the loose question,
+    // and for most the honest answer is "no, I am one link".
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "2. AGGREGATION — then ask of this turn itself: does it stand for a set of\n" +
-        "   same-phase nodes? A turn that gathers a conclusion indexes what carries it.\n" +
-        "   Later work may extend the flow past this turn; the edge stays true as the\n" +
-        "   aggregation it was.",
+      "2. AGGREGATION — then ask of this turn itself: does a flow CONVERGE here — a\n" +
+        "   decision closing on its settlement, a delivery on the release that ships\n" +
+        "   it? Then index the nodes carrying its result. Later work may extend the\n" +
+        "   flow past this turn; the edge stays true as the aggregation it was.",
     );
     // The dedup and the refusal/warning handling survive the compression.
     expect(MEMORY_RUBRIC_TEXT).toContain(
@@ -294,8 +306,9 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       // The pronoun is spelled out: with "names it instead", the nearest noun
       // is "a mid-flow grounds", so the sentence could be read as naming the
       // mid-flow target — the exact opposite of the rule.
-      "Cite a decision flow through its SETTLEMENT: a mid-flow grounds still stores;\n" +
-        "the receipt names the SETTLEMENT instead. One route across the phases: when a\n" +
+      "Cite a flow through the node it converges on — for a decision flow, its\n" +
+        "SETTLEMENT. A mid-flow grounds still stores; the receipt names that node\n" +
+        "instead. One route across the phases: when a\n" +
         "SEPARATE delivery turn wrote the spec, THAT turn grounds the decision and the\n" +
         "other artifacts consume it; when design and spec landed in one turn, each\n" +
         "artifact grounds directly.",

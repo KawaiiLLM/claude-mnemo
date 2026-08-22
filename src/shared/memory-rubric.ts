@@ -224,6 +224,21 @@ import { createHash } from "node:crypto";
  * from that shape. A migration test now asserts each fact on a describe AND
  * asserts the rubric has not re-grown a copy.
  *
+ * Still v9 (user rulings [S15069/T1262], [S15069/T1265]): §Relations gains the
+ * two things that make `indexes` reachable at all. The flow concept unifies —
+ * ONE definition (a separable line of work inside a phase, where a single
+ * subtask and even a single node are equally flows), instantiated per phase,
+ * replacing three separate descriptions that read as three kinds of thing.
+ * And `indexes` states its PURPOSE rather than only its shape: it declares a
+ * flow CONVERGED and makes that node the flow's proxy — cite the node and you
+ * have cited the flow, so everything outside reaches it through one node and
+ * never through its members. That sentence is what licenses the citation rule
+ * (now generalised from "cite a decision flow through its SETTLEMENT" to "cite
+ * a flow through the node it converges on"), and it gives the aggregation pass
+ * a sharp trigger: CONVERGENCE, not the looser "does this turn stand for a set
+ * of nodes" — a question every turn can answer, and for most the honest answer
+ * is "no, I am one link".
+ *
  * The TURN field definitions deliberately stay: `settlementNoteInputShape`
  * omits `title` and `content` describes entirely, so this block is the
  * settlement agent's only source for them. Deleting them as "duplicated with
@@ -292,12 +307,13 @@ discovering synonym drift, merge into the earlier word.
 
 ## Relations (turn→turn; recorded from the citing turn toward the cited)
 
-A WORKFLOW is one separable, nameable line of work, and it may run a flow per
-phase: an EVIDENCE flow, often a single finding or check; a DECISION flow,
-rulings joined by narrows/extends and SETTLED at the node nothing further
-narrows or extends; a DELIVERY flow, steps joined by consume — dispatch →
-acceptance → commit. Only the decision flow has graph-derived identity; the
-other two are reading aids, not machine-derived.
+A FLOW is one separable line of work inside a phase — a chain of subtasks,
+sometimes one subtask, sometimes one node; each is equally a flow. Every phase
+runs its own: EVIDENCE flows establish facts, DECISION flows join rulings with
+narrows/extends and SETTLE where nothing further narrows or extends, DELIVERY
+flows join steps with consume (dispatch → acceptance → commit). Only the
+decision flow has graph-derived identity; the other two are reading aids, not
+machine-derived.
 
 Eight words, four jobs:
   JUDGING the cited conclusion — after reading me, must it still be read?
@@ -305,8 +321,9 @@ Eight words, four jobs:
   · narrows  — yes, but this node cuts a piece out of its scope.
   · extends  — yes, and this node adds a piece.
   AGGREGATING — which nodes do I stand for?
-  · indexes  — these, and readers reach them through me: a settlement's
-    carrying members, a release's shipped artifacts.
+  · indexes  — these: the flow converges here and I stand for it. Cite me and
+    you have cited the flow, so everything outside reaches it through this one
+    node, never through its members.
   DEPENDING on it — if it turned out false, what happens to me?
   · grounds  — I fall with it: a delivery on the decision it implements, a
     decision on a finding, a release on its verification.
@@ -323,8 +340,9 @@ A multi-phase turn is several steps merged into one: judge each phase's edge
 independently. It may cite ITSELF with grounds when it is both a flow's
 settlement and that settlement's implementer; nothing else self-cites.
 
-Cite a decision flow through its SETTLEMENT: a mid-flow grounds still stores;
-the receipt names the SETTLEMENT instead. One route across the phases: when a
+Cite a flow through the node it converges on — for a decision flow, its
+SETTLEMENT. A mid-flow grounds still stores; the receipt names that node
+instead. One route across the phases: when a
 SEPARATE delivery turn wrote the spec, THAT turn grounds the decision and the
 other artifacts consume it; when design and spec landed in one turn, each
 artifact grounds directly.
@@ -334,10 +352,10 @@ Every finished turn makes two passes.
    the four jobs; none fits → record nothing. Skipping levels to the arc's
    origin is mislabeling; an orphan is legal ONLY as an unforeseen subtask start
    or decision-free chatter, and edges are never invented to remove one.
-2. AGGREGATION — then ask of this turn itself: does it stand for a set of
-   same-phase nodes? A turn that gathers a conclusion indexes what carries it.
-   Later work may extend the flow past this turn; the edge stays true as the
-   aggregation it was.
+2. AGGREGATION — then ask of this turn itself: does a flow CONVERGE here — a
+   decision closing on its settlement, a delivery on the release that ships
+   it? Then index the nodes carrying its result. Later work may extend the
+   flow past this turn; the edge stays true as the aggregation it was.
 A pair may carry several relations, each stating a fact the others cannot
 derive — extends and indexes both subsume consume, so never write both. A
 refusal names the missing half → add the smallest missing type, or re-judge.
