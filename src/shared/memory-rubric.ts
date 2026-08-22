@@ -342,10 +342,9 @@ settlement and that settlement's implementer; nothing else self-cites.
 
 Cite a flow through the node it converges on — for a decision flow, its
 SETTLEMENT. A mid-flow grounds still stores; the receipt names that node
-instead. One route across the phases: when a
-SEPARATE delivery turn wrote the spec, THAT turn grounds the decision and the
-other artifacts consume it; when design and spec landed in one turn, each
-artifact grounds directly.
+instead. One route across the phases: when a SEPARATE delivery turn wrote the
+spec, THAT turn grounds the decision and the other artifacts consume it; when
+design and spec landed in one turn, each artifact grounds directly.
 
 Every finished turn makes two passes.
 1. PRECURSORS — for each node that directly caused this turn, pick its word by

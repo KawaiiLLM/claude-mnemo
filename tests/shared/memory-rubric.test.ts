@@ -308,10 +308,9 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       // mid-flow target — the exact opposite of the rule.
       "Cite a flow through the node it converges on — for a decision flow, its\n" +
         "SETTLEMENT. A mid-flow grounds still stores; the receipt names that node\n" +
-        "instead. One route across the phases: when a\n" +
-        "SEPARATE delivery turn wrote the spec, THAT turn grounds the decision and the\n" +
-        "other artifacts consume it; when design and spec landed in one turn, each\n" +
-        "artifact grounds directly.",
+        "instead. One route across the phases: when a SEPARATE delivery turn wrote the\n" +
+        "spec, THAT turn grounds the decision and the other artifacts consume it; when\n" +
+        "design and spec landed in one turn, each artifact grounds directly.",
     );
   });
 
