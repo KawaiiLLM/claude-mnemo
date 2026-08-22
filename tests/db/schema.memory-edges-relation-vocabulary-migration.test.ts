@@ -101,19 +101,23 @@ describe("memory_edges relation vocabulary migration", () => {
     // retired words this migration alone would have widened for
     // ('grounded-on'/'refines') no longer do, and garbage still does not.
     db.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 5, 'turn', 6, 'grounds', 'asserted', 300)",
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 5, 'turn', 6, 'grounds', 'asserted', 300)`,
     );
     db.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 7, 'turn', 8, 'extends', 'asserted', 400)",
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 7, 'turn', 8, 'extends', 'asserted', 400)`,
     );
     expect(() =>
       db.exec(
-        "INSERT INTO memory_edges VALUES ('turn', 9, 'turn', 10, 'grounded-on', 'asserted', 500)",
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+         VALUES ('turn', 9, 'turn', 10, 'grounded-on', 'asserted', 500)`,
       ),
     ).toThrow();
     expect(() =>
       db.exec(
-        "INSERT INTO memory_edges VALUES ('turn', 9, 'turn', 10, 'bogus-word', 'asserted', 500)",
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+         VALUES ('turn', 9, 'turn', 10, 'bogus-word', 'asserted', 500)`,
       ),
     ).toThrow();
   });
@@ -144,7 +148,8 @@ describe("memory_edges relation vocabulary migration", () => {
     const fresh = createDatabase(":memory:");
     initializeSchema(fresh);
     fresh.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)",
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)`,
     );
     expect(storedTableSql(fresh)).not.toContain("'grounded-on'");
     expect(storedTableSql(fresh)).toContain("'grounds'");

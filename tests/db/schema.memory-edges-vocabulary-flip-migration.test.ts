@@ -163,14 +163,17 @@ describe("memory_edges vocabulary flip migration (flow-relations spec, ticket 02
     // included, so `collects` does not survive to the final stored CHECK any
     // more than `depends-on` does above.
     db.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 90, 'turn', 91, 'narrows', 'asserted', 50)",
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 90, 'turn', 91, 'narrows', 'asserted', 50)`,
     );
     db.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 92, 'turn', 93, 'indexes', 'asserted', 55)",
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 92, 'turn', 93, 'indexes', 'asserted', 55)`,
     );
     expect(() =>
       db.exec(
-        "INSERT INTO memory_edges VALUES ('turn', 94, 'turn', 95, 'bogus-word', 'asserted', 60)",
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+         VALUES ('turn', 94, 'turn', 95, 'bogus-word', 'asserted', 60)`,
       ),
     ).toThrow();
   });
@@ -222,7 +225,8 @@ describe("memory_edges vocabulary flip migration (flow-relations spec, ticket 02
     const fresh = createDatabase(":memory:");
     initializeSchema(fresh);
     fresh.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)",
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)`,
     );
     expect(storedTableSql(fresh)).toContain("'narrows'");
     fresh.close();

@@ -353,9 +353,11 @@ describe("session queries", () => {
         getOutgoingEdges(db, { kind: "session", id: sessionId }),
       ).toEqual([
         {
+          id: expect.any(Number),
           citing: { kind: "session", id: sessionId },
           cited: { kind: "turn", id: turnId },
           relation: null,
+          tags: [],
           provenance: "text-ref",
           createdAtEpoch: 200,
         },

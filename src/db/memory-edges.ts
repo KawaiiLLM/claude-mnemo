@@ -5,6 +5,7 @@ import {
   isCitationRelation,
   type CitationRelation,
 } from "./citations";
+import { runWriteTransaction } from "./database";
 
 /**
  * The universal citation graph (spec D7). One table for every edge the system
@@ -83,10 +84,26 @@ export interface CitingNode {
 }
 
 export interface MemoryEdge {
+  /**
+   * rubric-v10 ticket 01 ("边的身份"): the surrogate row id. Identity is now
+   * (citing, cited, relation, tag set), not (citing, cited, relation) alone,
+   * so a pair/relation may legally hold several rows and something has to
+   * name ONE of them precisely — this is that name.
+   */
+  id: number;
   citing: CitingNode;
   cited: EdgeNode;
   /** D2: part of the row's identity. Null = the pair's bare, unattributed citation row. */
   relation: CitationRelation | null;
+  /**
+   * rubric-v10 ticket 01: the row's IMMUTABLE canonical lane-tag set —
+   * sorted, deduped, `[]` = untagged. Joins `relation` in the row's identity:
+   * a second write of the same (pair, relation) under a DIFFERENT set is a
+   * second, independent row; the same set is an idempotent restatement of
+   * this one. Never unioned across rows — two singleton-tag rows are not the
+   * merged-set row.
+   */
+  tags: string[];
   provenance: EdgeProvenance;
   createdAtEpoch: number;
 }
@@ -97,6 +114,22 @@ export interface WriteEdgeInput {
   relation: CitationRelation | null;
   provenance: EdgeProvenance;
   /**
+   * rubric-v10 ticket 01: the lane tags this write asserts on a
+   * relation-carrying edge — canonicalized (sorted, deduped) at write time,
+   * omitted or empty means untagged. Storage only: this function does not
+   * validate a tag against the citing/cited turns' own tags (the subset
+   * invariant) or against word taggability — that gate is ticket 02's, layered
+   * above this primitive, the same trust model phase legality already has
+   * here (see the note above `writeMemoryEdges`).
+   *
+   * Ignored on a BARE write (`relation: null`): the bare row is the pair's
+   * pre-existing "existence record of last resort" (see the docstring above
+   * `EDGE_PROVENANCES`'s home in this file), capped at one per pair by
+   * `idx_memory_edges_bare_pair` regardless of tags, and this ticket does not
+   * extend lane identity to it — lanes are a same-phase RELATION concept.
+   */
+  tags?: readonly string[];
+  /**
    * Historical override for a one-time backfill (schema.ts's legacy
    * `turn_citations` retirement): the row being carried across already
    * happened at a real moment, and re-stamping it "now" would make "when did
@@ -104,6 +137,35 @@ export interface WriteEdgeInput {
    * batch's own `nowEpoch`.
    */
   createdAtEpoch?: number;
+}
+
+/**
+ * rubric-v10 ticket 01: canonicalize a raw tag list into the row's IMMUTABLE
+ * identity form — sorted, deduped, non-string/empty entries dropped. The same
+ * function on both sides of a comparison (write path, tests) is what makes
+ * "same set = idempotent restatement" hold: two callers who mean the same
+ * lane must serialize to the same JSON text regardless of the order or
+ * repetition they handed the array in.
+ */
+export function canonicalizeTagSet(tags: unknown): string[] {
+  if (!Array.isArray(tags)) {
+    return [];
+  }
+  const set = new Set<string>();
+  for (const tag of tags) {
+    if (typeof tag === "string" && tag.length > 0) {
+      set.add(tag);
+    }
+  }
+  return [...set].sort();
+}
+
+function parseTagSet(raw: string): string[] {
+  // The table's own CHECK (json_valid + json_type = 'array') guarantees this
+  // parses to an array; canonicalizeTagSet is still run over it so a row
+  // written by any path outside writeMemoryEdges (a migration's raw SQL) is
+  // read back in the same canonical shape rather than trusted verbatim.
+  return canonicalizeTagSet(JSON.parse(raw));
 }
 
 /**
@@ -174,30 +236,37 @@ export function parseNodeRef(ref: string): EdgeNode | null {
 }
 
 const EDGE_COLUMNS = `
+  id,
   citing_kind AS citingKind,
   citing_id AS citingId,
   cited_kind AS citedKind,
   cited_id AS citedId,
   relation,
   provenance,
+  tags,
   created_at_epoch AS createdAtEpoch
 `;
 
 interface EdgeRow {
+  id: number;
   citingKind: CitingNodeKind;
   citingId: number;
   citedKind: EdgeNodeKind;
   citedId: number;
   relation: CitationRelation | null;
   provenance: EdgeProvenance;
+  /** Raw stored JSON text — parsed through `parseTagSet` in `mapEdgeRow`. */
+  tags: string;
   createdAtEpoch: number;
 }
 
 function mapEdgeRow(row: EdgeRow): MemoryEdge {
   return {
+    id: row.id,
     citing: { kind: row.citingKind, id: row.citingId },
     cited: { kind: row.citedKind, id: row.citedId },
     relation: row.relation,
+    tags: parseTagSet(row.tags),
     provenance: row.provenance,
     createdAtEpoch: row.createdAtEpoch,
   };
@@ -319,14 +388,18 @@ export function writeMemoryEdges(
 
   const insertRelationRow = db.query<
     EdgeRow,
-    [CitingNodeKind, number, EdgeNodeKind, number, string, string, number]
+    [CitingNodeKind, number, EdgeNodeKind, number, string, string, string, number]
   >(
     `
       INSERT INTO memory_edges (
         citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation)
+        relation, provenance, tags, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      -- rubric-v10 ticket 01: tags joins the conflict target — identity is
+      -- now (pair, relation, tag set), so a DIFFERENT canonical set on the
+      -- same (pair, relation) is a fresh INSERT (a second, independent row),
+      -- never a conflict against an existing differently-tagged row.
+      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation, tags)
         -- D2: a repeat of the same claim is a NO-OP, not a correction. The
         -- assignment is deliberately the stored value itself: SQLite only
         -- runs RETURNING on a row the statement touched, and this write's
@@ -335,6 +408,15 @@ export function writeMemoryEdges(
         DO UPDATE SET relation = memory_edges.relation
       RETURNING ${EDGE_COLUMNS}
     `,
+  );
+
+  // rubric-v10 ticket 01: the query-index maintenance half of a
+  // relation-carrying write — one row per tag, keyed on the edge's own
+  // surrogate id. `OR IGNORE` makes this self-healing on a restatement (the
+  // row's id is stable across a no-op conflict above, so its tag rows are
+  // already there) without a redundant existence check.
+  const insertTagIndexRow = db.query<unknown, [number, string]>(
+    `INSERT OR IGNORE INTO memory_edge_tags (edge_row_id, tag) VALUES (?, ?)`,
   );
 
   // The bare row is the pair's existence record of last resort, so it is
@@ -390,7 +472,7 @@ export function writeMemoryEdges(
   >(
     `SELECT ${EDGE_COLUMNS} FROM memory_edges
      WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
-     ORDER BY relation ASC
+     ORDER BY relation ASC, tags ASC
      LIMIT 1`,
   );
 
@@ -421,6 +503,8 @@ export function writeMemoryEdges(
     }
     const createdAtEpoch = edge.createdAtEpoch ?? nowEpoch;
     if (edge.relation !== null) {
+      const tags = canonicalizeTagSet(edge.tags);
+      const tagsJson = JSON.stringify(tags);
       const row = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -428,6 +512,7 @@ export function writeMemoryEdges(
         edge.cited.id,
         edge.relation,
         edge.provenance,
+        tagsJson,
         createdAtEpoch,
       );
       dropBarePairRow.run(
@@ -438,6 +523,9 @@ export function writeMemoryEdges(
       );
       if (row) {
         written.push(mapEdgeRow(row));
+        for (const tag of tags) {
+          insertTagIndexRow.run(row.id, tag);
+        }
       }
       continue;
     }
@@ -480,6 +568,16 @@ export interface RetractEdgeInput {
    * retractions and a caller that means one must not silently get the other.
    */
   relation: CitationRelation | null;
+  /**
+   * rubric-v10 ticket 01: the tag set completing the row address — identity
+   * is (pair, relation, tag set), so retraction addresses exactly ONE row by
+   * naming its set too, canonicalized the same way a write does. Omitted
+   * (the default every pre-ticket caller still uses) means untagged (`[]`),
+   * which is what every row retraction ever addressed before this ticket —
+   * so an existing caller that never passes `tags` keeps deleting exactly the
+   * untagged row it always did, nothing more.
+   */
+  tags?: readonly string[];
 }
 
 export interface RetractEdgesResult {
@@ -518,14 +616,20 @@ export function retractMemoryEdges(
   const rejected: RetractEdgesResult["rejected"] = [];
 
   // `relation IS ?` rather than `=`: null-safe equality, so one statement
-  // addresses both a named relation and the bare row.
+  // addresses both a named relation and the bare row. `tags = ?` (rubric-v10
+  // ticket 01) completes the row address: identity is (pair, relation, tag
+  // set), so this now deletes exactly ONE row rather than every row a wider
+  // (pair, relation) address used to match. `memory_edge_tags`' ON DELETE
+  // CASCADE (schema.ts) keeps the tag index consistent with no code here
+  // having to clean it up by hand.
   const del = db.query<
     EdgeRow,
-    [CitingNodeKind, number, EdgeNodeKind, number, string | null]
+    [CitingNodeKind, number, EdgeNodeKind, number, string | null, string]
   >(
     `DELETE FROM memory_edges
      WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
        AND relation IS ?
+       AND tags = ?
      RETURNING ${EDGE_COLUMNS}`,
   );
 
@@ -539,12 +643,14 @@ export function retractMemoryEdges(
       continue;
     }
 
+    const tagsJson = JSON.stringify(canonicalizeTagSet(edge.tags));
     const rows = del.all(
       edge.citing.kind,
       edge.citing.id,
       edge.cited.kind,
       edge.cited.id,
       edge.relation,
+      tagsJson,
     );
     if (rows.length === 0) {
       rejected.push({ input: edge, reason: "no-such-edge" });
@@ -563,7 +669,7 @@ export function getOutgoingEdges(db: Database, citing: CitingNode): MemoryEdge[]
     .query<EdgeRow, [CitingNodeKind, number]>(
       `SELECT ${EDGE_COLUMNS} FROM memory_edges
        WHERE citing_kind = ? AND citing_id = ?
-       ORDER BY cited_kind ASC, cited_id ASC, relation ASC`,
+       ORDER BY cited_kind ASC, cited_id ASC, relation ASC, tags ASC`,
     )
     .all(citing.kind, citing.id)
     .map(mapEdgeRow);
@@ -574,10 +680,49 @@ export function getIncomingEdges(db: Database, cited: EdgeNode): MemoryEdge[] {
     .query<EdgeRow, [EdgeNodeKind, number]>(
       `SELECT ${EDGE_COLUMNS} FROM memory_edges
        WHERE cited_kind = ? AND cited_id = ?
-       ORDER BY citing_kind ASC, citing_id ASC, relation ASC`,
+       ORDER BY citing_kind ASC, citing_id ASC, relation ASC, tags ASC`,
     )
     .all(cited.kind, cited.id)
     .map(mapEdgeRow);
+}
+
+/**
+ * rubric-v10 ticket 01: rows currently carrying `tag` — a QUERY-only lookup
+ * through `memory_edge_tags`, ordered by edge row id for determinism. Never a
+ * second semantics source: every row it names is re-read from
+ * `memory_edges` (`mapEdgeRow` off the join), so a caller sees exactly the
+ * canonical set the edge row itself stores, not the index's own bookkeeping.
+ */
+export function getEdgesByTag(db: Database, tag: string): MemoryEdge[] {
+  return db
+    .query<EdgeRow, [string]>(
+      `SELECT ${EDGE_COLUMNS} FROM memory_edges
+       WHERE id IN (
+         SELECT edge_row_id FROM memory_edge_tags WHERE tag = ?
+       )
+       ORDER BY id ASC`,
+    )
+    .all(tag)
+    .map(mapEdgeRow);
+}
+
+/**
+ * rubric-v10 ticket 01 ("A query index table... maintained on insert/delete
+ * ... It must be rebuildable from the edge table"): drop and regenerate
+ * `memory_edge_tags` from `memory_edges.tags` alone. The index carries no
+ * semantics of its own — every reader treats it as a lookup accelerator, not
+ * a source of truth — so this is always safe and always converges to the
+ * same content as a database that never lost it.
+ */
+export function rebuildMemoryEdgeTagsIndex(db: Database): void {
+  runWriteTransaction(db, () => {
+    db.exec("DELETE FROM memory_edge_tags");
+    db.exec(`
+      INSERT INTO memory_edge_tags (edge_row_id, tag)
+      SELECT memory_edges.id, tag_value.value
+      FROM memory_edges, json_each(memory_edges.tags) AS tag_value
+    `);
+  });
 }
 
 export interface ReconcileCitedPairsResult {

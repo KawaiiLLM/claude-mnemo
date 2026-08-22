@@ -1227,9 +1227,11 @@ describe("note tool citations (spec C6)", () => {
       getOutgoingEdges(db, { kind: "turn", id: targetTurnId }),
     ).toEqual([
       {
+        id: expect.any(Number),
         citing: { kind: "turn", id: targetTurnId },
         cited: { kind: "turn", id: citedTurnId },
         relation: null,
+        tags: [],
         provenance: "text-ref",
         createdAtEpoch: 900,
       },

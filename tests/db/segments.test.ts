@@ -798,9 +798,11 @@ describe("segments and membership", () => {
         getOutgoingEdges(db, { kind: "segment", id: segment.id }),
       ).toEqual([
         {
+          id: expect.any(Number),
           citing: { kind: "segment", id: segment.id },
           cited: { kind: "turn", id: target },
           relation: null,
+          tags: [],
           provenance: "text-ref",
           createdAtEpoch: 100,
         },

@@ -1255,6 +1255,11 @@ function memoryEdgesTableDdl(
   const relationList = relationWords.map((word) => `'${word}'`).join(", ");
   return `
   CREATE TABLE IF NOT EXISTS ${tableName} (
+    -- rubric-v10 ticket 01 (lane model, "边的身份"): the surrogate row id —
+    -- every edge assertion is now (citing, cited, relation, tag set) with its
+    -- own id, so a caller (retraction, the tag-index table) can address ONE
+    -- row precisely instead of a whole (pair, relation) group.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
     citing_id INTEGER NOT NULL,
     cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
@@ -1266,6 +1271,19 @@ function memoryEdgesTableDdl(
     provenance TEXT NOT NULL CHECK (
       provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
     ),
+    -- rubric-v10 ticket 01 ("边的身份"): the row's IMMUTABLE canonical
+    -- lane-tag set — a JSON array, sorted and deduped at write time
+    -- (db/memory-edges.ts's canonicalizeTagSet), '[]' = untagged. Joins the
+    -- UNIQUE key below, so the SAME (pair, relation) may legally hold several
+    -- rows, one per distinct tag set: an untagged row, an {A} row and a {B}
+    -- row are three independent facts, and two singleton rows are NEVER the
+    -- merged-lane {A,B} row — only a write that explicitly names {A,B} gets
+    -- that row. This CHECK only refuses malformed JSON; it cannot enforce
+    -- "sorted, deduped" in SQL, so a canonicalization bug is a write-path
+    -- correctness property, guarded by a test, not by the schema.
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (
+      json_valid(tags) AND json_type(tags) = 'array'
+    ),
     created_at_epoch INTEGER NOT NULL,
     -- Relation-matrix spec ticket 05 ("自引用"): the trailing OR relation IS
     -- NOT NULL arm is the whole widening — a BARE self row (no arm holds)
@@ -1274,7 +1292,13 @@ function memoryEdgesTableDdl(
     -- may legally self-cite is a phase question this CHECK cannot ask; that
     -- lives in the validator only (see the comment above this function).
     CHECK (citing_kind <> cited_kind OR citing_id <> cited_id OR relation IS NOT NULL),
-    UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation)
+    -- rubric-v10 ticket 01: tags joins the identity key. relation's own
+    -- NULL-is-distinct behaviour under SQLite UNIQUE means this alone cannot
+    -- cap a pair's BARE rows at one -- idx_memory_edges_bare_pair below (a
+    -- partial index over the four pair columns only, ignoring relation/tags)
+    -- still carries that "existence record of last resort" invariant
+    -- unchanged; it predates this ticket and this ticket does not touch it.
+    UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags)
   );
 `;
 }
@@ -1309,6 +1333,26 @@ const MEMORY_EDGES_UNION_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDG
 // shape) and `ensureMemoryEdgesIndexesRename` below — `hasTable` gates BOTH
 // out for a first creation, same as every earlier migration in this chain.
 const MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
+
+// rubric-v10 ticket 01: the tag-keyed QUERY index — one row per (edge row,
+// tag), never a second source of truth. Semantics always read the edge row's
+// own `tags` set; this table exists so "which rows carry tag X" is an
+// indexed lookup instead of a `json_each` scan over every edge. ON DELETE
+// CASCADE off `memory_edges.id` is what keeps it consistent under retraction
+// with no code in this file having to remember to clean it up by hand — and
+// it is fully REBUILDABLE from `memory_edges.tags` alone
+// (`rebuildMemoryEdgeTagsIndex`, db/memory-edges.ts), so dropping it loses no
+// semantics, only lookup speed.
+const MEMORY_EDGE_TAGS_DDL = `
+  CREATE TABLE IF NOT EXISTS memory_edge_tags (
+    edge_row_id INTEGER NOT NULL REFERENCES memory_edges(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (edge_row_id, tag)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_memory_edge_tags_tag
+    ON memory_edge_tags(tag, edge_row_id);
+`;
 
 // Spec C15: the retired `turn_citations` table carried `ON DELETE CASCADE`;
 // `memory_edges` cannot, because citing_id/cited_id are shared across three
@@ -2250,6 +2294,85 @@ function ensureMemoryEdgesIndexesRename(db: Database): void {
   }
 }
 
+/**
+ * rubric-v10 ticket 01 (spec "Edge tag storage and write gate", draft's
+ * "迁移决策" item 1): the surrogate `id` and the tag-set column/uniqueness
+ * key. Detection reads the stored DDL for the new column's own marker text —
+ * same idiom as every earlier probe in this chain — which a pristine
+ * pre-ticket table can never contain, so "already migrated" and "never
+ * reached" cannot be confused.
+ */
+function memoryEdgesTagSetIdentityIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("tags TEXT NOT NULL");
+}
+
+/**
+ * Same rebuild-under-a-temporary-name-then-swap shape as every earlier
+ * `memory_edges` migration in this file, but a STRAIGHT copy rather than
+ * `collapseAndRebuildVocabularyFlip`'s bucket-and-collapse pass: the OLD
+ * table's own UNIQUE constraint already capped every (pair, relation) at one
+ * row, so adding a fresh surrogate id and defaulting every existing row's tag
+ * set to `'[]'` cannot create a collision this rebuild would have to resolve.
+ * Row count is therefore preserved exactly — zero data change beyond the two
+ * new columns and the widened uniqueness key, per the migration's own
+ * standing requirement.
+ *
+ * Chained immediately after `ensureMemoryEdgesIndexesRename`: by the time
+ * this runs, the table's CHECK is already whichever relation-word list this
+ * file's chain has settled on (today, `MEMORY_EDGES_INDEXES_RENAME_RELATION_
+ * WORDS`), and this migration does not touch vocabulary at all — it targets
+ * that same, already-current word list, same as `MEMORY_EDGES_DDL` below.
+ */
+function ensureMemoryEdgesTagSetIdentity(db: Database): void {
+  if (!memoryEdgesTagSetIdentityIsStale(db)) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesTagSetIdentityIsStale(db)) {
+        return;
+      }
+
+      db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_tag_identity");
+      db.exec(
+        memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS),
+      );
+
+      db.exec(`
+        INSERT INTO memory_edges (
+          citing_kind, citing_id, cited_kind, cited_id,
+          relation, provenance, created_at_epoch
+        )
+        SELECT citing_kind, citing_id, cited_kind, cited_id,
+               relation, provenance, created_at_epoch
+        FROM memory_edges_pre_tag_identity;
+      `);
+
+      db.exec("DROP TABLE memory_edges_pre_tag_identity");
+      db.exec(MEMORY_EDGES_INDEXES_DDL);
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while adding the tag-set identity: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 function ensureMemoryEdgesSchema(db: Database): void {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
@@ -2260,6 +2383,7 @@ function ensureMemoryEdgesSchema(db: Database): void {
     ensureMemoryEdgesVocabularyFlip(db);
     ensureMemoryEdgesRelationContract(db);
     ensureMemoryEdgesIndexesRename(db);
+    ensureMemoryEdgesTagSetIdentity(db);
   }
   db.exec(MEMORY_EDGES_DDL);
   // 2026-08-21 incident crutch removal ([S15069/T1136]): a review rehearsal ran
@@ -2276,6 +2400,9 @@ function ensureMemoryEdgesSchema(db: Database): void {
   // process start, including on a database whose triggers already exist from
   // an earlier version of this same function.
   db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
+  // rubric-v10 ticket 01: idempotent (CREATE TABLE/INDEX IF NOT EXISTS),
+  // depends on memory_edges.id existing above it in this same function.
+  db.exec(MEMORY_EDGE_TAGS_DDL);
 
   if (isFirstCreation) {
     migrateTurnCitationsToEdges(db);

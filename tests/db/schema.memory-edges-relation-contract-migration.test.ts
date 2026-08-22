@@ -132,13 +132,17 @@ describe("memory_edges relation contract migration (flow-relations spec, ticket 
       { citingKind: "turn", citingId: 15, citedKind: "turn", citedId: 16, relation: null, provenance: "text-ref", createdAtEpoch: 800 },
     ]);
 
-    // New words insert cleanly; a retired word is now cleanly refused.
+    // New words insert cleanly; a retired word is now cleanly refused. Explicit
+    // column list (rubric-v10 ticket 01): the post-migration table carries
+    // `id`/`tags` too, which default cleanly when omitted from the list.
     db.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 90, 'turn', 91, 'narrows', 'asserted', 50)",
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 90, 'turn', 91, 'narrows', 'asserted', 50)`,
     );
     expect(() =>
       db.exec(
-        "INSERT INTO memory_edges VALUES ('turn', 92, 'turn', 93, 'depends-on', 'asserted', 55)",
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+         VALUES ('turn', 92, 'turn', 93, 'depends-on', 'asserted', 55)`,
       ),
     ).toThrow();
   });
@@ -249,11 +253,13 @@ describe("memory_edges relation contract migration (flow-relations spec, ticket 
 
     expect(storedTableSql(fresh)).not.toContain("'depends-on'");
     fresh.exec(
-      "INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)",
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)`,
     );
     expect(() =>
       fresh.exec(
-        "INSERT INTO memory_edges VALUES ('turn', 3, 'turn', 4, 'encodes', 'asserted', 100)",
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+         VALUES ('turn', 3, 'turn', 4, 'encodes', 'asserted', 100)`,
       ),
     ).toThrow();
     fresh.close();

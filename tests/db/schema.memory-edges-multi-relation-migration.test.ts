@@ -163,8 +163,11 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     });
     expect(allEdges(db)).toEqual(expected);
     expect(storedTableSql(db)).toContain("citing_kind <> cited_kind");
+    // rubric-v10 ticket 01 widened this same UNIQUE with `tags` — this test's
+    // own concern (pair-identity structure surviving the rebuild) is still
+    // covered by the wider substring.
     expect(storedTableSql(db)).toContain(
-      "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation)",
+      "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags)",
     );
   });
 
@@ -309,10 +312,12 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     // And multi-relation writes work again immediately after (fresh pair —
     // the fixture's own migrated rows already occupy the low ids).
     db.exec(
-      `INSERT INTO memory_edges VALUES ('turn', 91, 'turn', 92, 'grounds', 'asserted', 100)`,
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 91, 'turn', 92, 'grounds', 'asserted', 100)`,
     );
     db.exec(
-      `INSERT INTO memory_edges VALUES ('turn', 91, 'turn', 92, 'consume', 'asserted', 100)`,
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 91, 'turn', 92, 'consume', 'asserted', 100)`,
     );
   });
 
@@ -322,22 +327,26 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
 
     expect(storedTableSql(fresh)).toContain("citing_kind <> cited_kind");
     fresh.exec(
-      `INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)`,
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)`,
     );
     fresh.exec(
-      `INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 2, 'consume', 'asserted', 100)`,
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', 1, 'turn', 2, 'consume', 'asserted', 100)`,
     );
     // A fresh database is born in the FINAL shape, self-reference migration
     // (ticket 05) included: a RELATION-carrying self row is legal storage...
     expect(() =>
       fresh.exec(
-        `INSERT INTO memory_edges VALUES ('turn', 1, 'turn', 1, 'consume', 'asserted', 100)`,
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+         VALUES ('turn', 1, 'turn', 1, 'consume', 'asserted', 100)`,
       ),
     ).not.toThrow();
     // ...only the BARE self row stays banned.
     expect(() =>
       fresh.exec(
-        `INSERT INTO memory_edges VALUES ('turn', 3, 'turn', 3, NULL, 'text-ref', 100)`,
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+         VALUES ('turn', 3, 'turn', 3, NULL, 'text-ref', 100)`,
       ),
     ).toThrow();
     fresh.close();

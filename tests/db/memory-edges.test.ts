@@ -3,15 +3,18 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import {
+  canonicalizeTagSet,
   countMemoryEdges,
   reconcileCitedPairs,
   formatNodeRef,
   getEdgeInDegree,
+  getEdgesByTag,
   getIncomingEdges,
   getOutgoingEdges,
   isCitationRelation,
   pairKey,
   parseNodeRef,
+  rebuildMemoryEdgeTagsIndex,
   retractMemoryEdges,
   writeMemoryEdges,
 } from "../../src/db/memory-edges";
@@ -143,9 +146,11 @@ describe("universal memory edges", () => {
     expect(getOutgoingEdges(db, { kind: "turn", id: turnId })).toHaveLength(1);
     expect(getIncomingEdges(db, { kind: "segment", id: segment.id })).toEqual([
       {
+        id: expect.any(Number),
         citing: { kind: "turn", id: turnId },
         cited: { kind: "segment", id: segment.id },
         relation: "consume",
+        tags: [],
         provenance: "retrieval",
         createdAtEpoch: 300,
       },
@@ -248,9 +253,11 @@ describe("universal memory edges", () => {
     );
     expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([
       {
+        id: expect.any(Number),
         citing: { kind: "turn", id: citing },
         cited: { kind: "turn", id: cited },
         relation: "supersedes",
+        tags: [],
         provenance: "judged",
         createdAtEpoch: 400,
       },
@@ -950,6 +957,345 @@ describe("universal memory edges", () => {
           { relation: null, provenance: "judged", createdAtEpoch: 3000 },
         ]);
       });
+    });
+  });
+
+  // rubric-v10 ticket 01 (spec "Edge tag storage and write gate", draft's
+  // "边的身份"): identity widens to (pair, relation, canonical tag set). This
+  // block is storage-only — no subset-invariant or word-taggability gate
+  // exists yet (ticket 02); it proves the row shape, the identity, the
+  // retraction address and the query index alone.
+  describe("rubric-v10 ticket 01: lane tag-set identity", () => {
+    function rawTagsOf(db: Database, citing: number, cited: number): string[] {
+      return db
+        .query<{ tags: string }, [number, number]>(
+          `SELECT tags FROM memory_edges
+           WHERE citing_kind = 'turn' AND citing_id = ?
+             AND cited_kind = 'turn' AND cited_id = ?
+           ORDER BY tags ASC`,
+        )
+        .all(citing, cited)
+        .map((row) => row.tags);
+    }
+
+    test("canonicalizeTagSet sorts and dedupes — MUTATION CHECK: an unsorted/duplicated input must not survive as stored", () => {
+      // A mutant that dropped the sort or the dedupe would store the tags in
+      // whatever order/multiplicity the caller handed them, and this exact
+      // string comparison would catch it.
+      expect(canonicalizeTagSet(["b", "a", "b", "a", "c"])).toEqual(["a", "b", "c"]);
+      expect(canonicalizeTagSet([])).toEqual([]);
+      expect(canonicalizeTagSet(undefined)).toEqual([]);
+      expect(canonicalizeTagSet(["only"])).toEqual(["only"]);
+    });
+
+    test("a write stores the CANONICAL set even when handed an unsorted, duplicated array", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation: "consume",
+            provenance: "asserted",
+            tags: ["beta", "alpha", "beta"],
+          },
+        ],
+        300,
+      );
+
+      // Raw stored JSON text, not the mapped/re-canonicalized read side —
+      // this is the property that actually lives in the database, so a
+      // canonicalization bug that only happened to read back correctly
+      // (mapEdgeRow re-canonicalizes) would still be caught here.
+      expect(rawTagsOf(db, citing, cited)).toEqual(['["alpha","beta"]']);
+
+      const stored = getOutgoingEdges(db, { kind: "turn", id: citing });
+      expect(stored).toHaveLength(1);
+      expect(stored[0]?.tags).toEqual(["alpha", "beta"]);
+    });
+
+    test("a DIFFERENT tag set on the same (pair, relation) is a SECOND, independent row — never merged into the union", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+      const pair = {
+        citing: { kind: "turn" as const, id: citing },
+        cited: { kind: "turn" as const, id: cited },
+        relation: "consume" as const,
+        provenance: "asserted" as const,
+      };
+
+      writeMemoryEdges(db, [{ ...pair, tags: ["laneA"] }], 300);
+      writeMemoryEdges(db, [{ ...pair, tags: ["laneB"] }], 400);
+
+      const stored = getOutgoingEdges(db, { kind: "turn", id: citing });
+      // MUTATION CHECK (cross-row unioning): two rows, not one row carrying
+      // the union {laneA, laneB} — a mutant that unioned sets across writes
+      // (or a conflict target that ignored `tags`) would collapse this to a
+      // single row and fail both assertions below.
+      expect(stored).toHaveLength(2);
+      expect(stored.map((edge) => edge.tags)).toEqual([["laneA"], ["laneB"]]);
+      expect(countMemoryEdges(db)).toBe(2);
+      // Each row keeps its own surrogate id — two independent facts, not one
+      // row addressable two ways.
+      expect(stored[0]?.id).not.toBe(stored[1]?.id);
+    });
+
+    test("re-writing the SAME canonical set is an idempotent restatement: one row, first sighting stands", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+      const pair = {
+        citing: { kind: "turn" as const, id: citing },
+        cited: { kind: "turn" as const, id: cited },
+        relation: "extends" as const,
+      };
+
+      const first = writeMemoryEdges(
+        db,
+        [{ ...pair, provenance: "retrieval", tags: ["A", "B"] }],
+        300,
+      );
+      // Same set, different order/repetition, different provenance/time —
+      // still the same canonical set, so still the same row.
+      const second = writeMemoryEdges(
+        db,
+        [{ ...pair, provenance: "judged", tags: ["B", "B", "A"] }],
+        400,
+      );
+
+      const stored = getOutgoingEdges(db, { kind: "turn", id: citing });
+      expect(stored).toHaveLength(1);
+      expect(stored[0]?.tags).toEqual(["A", "B"]);
+      expect(stored[0]?.provenance).toBe("retrieval");
+      expect(stored[0]?.createdAtEpoch).toBe(300);
+      expect(first.written[0]?.id).toBe(second.written[0]?.id);
+    });
+
+    test("omitted tags and an explicit empty array both mean untagged, and both collide with each other (D2's own untagged case)", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+      const pair = {
+        citing: { kind: "turn" as const, id: citing },
+        cited: { kind: "turn" as const, id: cited },
+        relation: "narrows" as const,
+        provenance: "asserted" as const,
+      };
+
+      writeMemoryEdges(db, [pair], 300);
+      writeMemoryEdges(db, [{ ...pair, tags: [] }], 400);
+
+      const stored = getOutgoingEdges(db, { kind: "turn", id: citing });
+      expect(stored).toHaveLength(1);
+      expect(stored[0]?.tags).toEqual([]);
+      expect(stored[0]?.createdAtEpoch).toBe(300);
+    });
+
+    test("retraction addresses exactly ONE row: a tagged retraction leaves siblings (untagged and other tag sets) untouched", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+      const pair = {
+        citing: { kind: "turn" as const, id: citing },
+        cited: { kind: "turn" as const, id: cited },
+        relation: "override" as const,
+        provenance: "asserted" as const,
+      };
+
+      writeMemoryEdges(db, [pair], 300);
+      writeMemoryEdges(db, [{ ...pair, tags: ["laneA"] }], 400);
+      writeMemoryEdges(db, [{ ...pair, tags: ["laneB"] }], 500);
+      expect(countMemoryEdges(db)).toBe(3);
+
+      const result = retractMemoryEdges(db, [
+        { citing: pair.citing, cited: pair.cited, relation: "override", tags: ["laneA"] },
+      ]);
+
+      expect(result.rejected).toEqual([]);
+      expect(result.deleted).toHaveLength(1);
+      expect(result.deleted[0]?.tags).toEqual(["laneA"]);
+
+      const survivors = getOutgoingEdges(db, { kind: "turn", id: citing });
+      // Sort key is the raw JSON text ('["laneB"]' vs '[]'): '"' (0x22) sorts
+      // before ']' (0x5D), so a tagged row sorts before the untagged one.
+      expect(survivors.map((edge) => edge.tags).sort()).toEqual([[], ["laneB"]]);
+    });
+
+    test("an EXISTING caller's untagged (pair, relation) retraction — no tags argument at all — still deletes exactly the untagged row, unaffected by tagged siblings", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+      const pair = {
+        citing: { kind: "turn" as const, id: citing },
+        cited: { kind: "turn" as const, id: cited },
+        relation: "consume" as const,
+        provenance: "asserted" as const,
+      };
+
+      writeMemoryEdges(db, [pair], 300);
+      writeMemoryEdges(db, [{ ...pair, tags: ["laneA"] }], 400);
+
+      // The pre-ticket-01 call shape: no `tags` field at all.
+      const result = retractMemoryEdges(db, [
+        { citing: pair.citing, cited: pair.cited, relation: "consume" },
+      ]);
+
+      expect(result.deleted).toHaveLength(1);
+      expect(result.deleted[0]?.tags).toEqual([]);
+      const survivors = getOutgoingEdges(db, { kind: "turn", id: citing });
+      expect(survivors).toHaveLength(1);
+      expect(survivors[0]?.tags).toEqual(["laneA"]);
+    });
+
+    describe("query index table (memory_edge_tags)", () => {
+      function tagIndexRows(db: Database): Array<{ edgeRowId: number; tag: string }> {
+        return db
+          .query<{ edgeRowId: number; tag: string }, []>(
+            `SELECT edge_row_id AS edgeRowId, tag FROM memory_edge_tags
+             ORDER BY edge_row_id ASC, tag ASC`,
+          )
+          .all();
+      }
+
+      test("insert populates one row per tag, keyed on the edge's own surrogate id", () => {
+        const citing = addTurn(1);
+        const cited = addTurn(2);
+
+        const { written } = writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: citing },
+              cited: { kind: "turn", id: cited },
+              relation: "consume",
+              provenance: "asserted",
+              tags: ["alpha", "beta"],
+            },
+          ],
+          300,
+        );
+        const edgeId = written[0]!.id;
+
+        expect(tagIndexRows(db)).toEqual([
+          { edgeRowId: edgeId, tag: "alpha" },
+          { edgeRowId: edgeId, tag: "beta" },
+        ]);
+        expect(getEdgesByTag(db, "alpha").map((e) => e.id)).toEqual([edgeId]);
+        expect(getEdgesByTag(db, "beta").map((e) => e.id)).toEqual([edgeId]);
+        expect(getEdgesByTag(db, "gamma")).toEqual([]);
+      });
+
+      test("retraction cascades: the retracted row's tag rows go, a sibling's stay", () => {
+        const citing = addTurn(1);
+        const cited = addTurn(2);
+        const pair = {
+          citing: { kind: "turn" as const, id: citing },
+          cited: { kind: "turn" as const, id: cited },
+          relation: "narrows" as const,
+          provenance: "asserted" as const,
+        };
+
+        const first = writeMemoryEdges(db, [{ ...pair, tags: ["laneA"] }], 300);
+        const second = writeMemoryEdges(db, [{ ...pair, tags: ["laneB"] }], 400);
+        const firstId = first.written[0]!.id;
+        const secondId = second.written[0]!.id;
+        expect(tagIndexRows(db)).toHaveLength(2);
+
+        retractMemoryEdges(db, [
+          { citing: pair.citing, cited: pair.cited, relation: "narrows", tags: ["laneA"] },
+        ]);
+
+        expect(tagIndexRows(db)).toEqual([{ edgeRowId: secondId, tag: "laneB" }]);
+        expect(getEdgesByTag(db, "laneA")).toEqual([]);
+        expect(getEdgesByTag(db, "laneB").map((e) => e.id)).toEqual([secondId]);
+        expect(firstId).not.toBe(secondId);
+      });
+
+      test("a restatement of the same set does not duplicate its tag-index rows", () => {
+        const citing = addTurn(1);
+        const cited = addTurn(2);
+        const pair = {
+          citing: { kind: "turn" as const, id: citing },
+          cited: { kind: "turn" as const, id: cited },
+          relation: "extends" as const,
+          provenance: "asserted" as const,
+        };
+
+        writeMemoryEdges(db, [{ ...pair, tags: ["laneA"] }], 300);
+        writeMemoryEdges(db, [{ ...pair, tags: ["laneA"] }], 400);
+        writeMemoryEdges(db, [{ ...pair, tags: ["laneA"] }], 500);
+
+        expect(tagIndexRows(db)).toHaveLength(1);
+      });
+
+      test("rebuildMemoryEdgeTagsIndex reconstructs the index from memory_edges.tags alone (index drop loses no semantics)", () => {
+        const citing = addTurn(1);
+        const cited = addTurn(2);
+        const other = addTurn(3);
+
+        const a = writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: citing },
+              cited: { kind: "turn", id: cited },
+              relation: "consume",
+              provenance: "asserted",
+              tags: ["alpha", "beta"],
+            },
+          ],
+          300,
+        );
+        const b = writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: citing },
+              cited: { kind: "turn", id: other },
+              relation: "grounds",
+              provenance: "asserted",
+              tags: ["gamma"],
+            },
+          ],
+          400,
+        );
+        const expected = tagIndexRows(db);
+        expect(expected.length).toBeGreaterThan(0);
+
+        // Simulate the index being lost entirely (or drifted) — the ticket's
+        // own claim is that dropping it loses no semantics because it is
+        // fully rebuildable from the edge table.
+        db.exec("DELETE FROM memory_edge_tags");
+        expect(tagIndexRows(db)).toEqual([]);
+
+        rebuildMemoryEdgeTagsIndex(db);
+
+        expect(tagIndexRows(db)).toEqual(expected);
+        expect(getEdgesByTag(db, "alpha").map((e) => e.id)).toEqual([a.written[0]!.id]);
+        expect(getEdgesByTag(db, "gamma").map((e) => e.id)).toEqual([b.written[0]!.id]);
+      });
+    });
+
+    test("a bare (untagged) write ignores any tags argument — lane identity is a same-phase RELATION concept, not the bare existence row's", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+
+      const { written } = writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation: null,
+            provenance: "text-ref",
+            tags: ["ignored"],
+          },
+        ],
+        300,
+      );
+
+      expect(written).toHaveLength(1);
+      expect(written[0]?.tags).toEqual([]);
+      expect(getEdgesByTag(db, "ignored")).toEqual([]);
     });
   });
 });
