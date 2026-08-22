@@ -3687,12 +3687,25 @@ const SEGMENTS_TOPIC_RETIRED_INDEXES_DDL = `
  * (now-retired) `normalizeTopicKey` used, so two spellings the registry's
  * exact-name lookup already treated as the SAME topic fold onto the
  * identical tag rather than minting two.
+ *
+ * Round-4 review #8: `stripRetiredTopicTagNamespace` above runs BEFORE this
+ * fold and only ever touches EXISTING `turns.tags` values — a legacy topic
+ * NAME such as `"topic:Alpha"` (the registry never forbade the prefix
+ * appearing in a name, only in a live tag) reached this function untouched,
+ * and since nothing here dropped the `topic:` namespace, the fold minted a
+ * FRESH `"topic:alpha"` tag — re-introducing the very namespace `spec B6`
+ * retired, and one the write boundary (`shared/tag-stripping.ts`'s
+ * `findRetiredTopicTag`) then refuses forever. The strip runs on the
+ * lowercased name (so `"Topic:Alpha"`/`"TOPIC:Alpha"` are caught too) and
+ * BEFORE the hyphen/whitespace collapse, so a name that is nothing but the
+ * prefix (`"topic:"`, `"Topic:   "`) normalizes to the empty string exactly
+ * as before — the existing `topic-<id>` fallback in
+ * `foldTopicNamesIntoSegmentTags` still catches it, unchanged.
  */
 function normalizeTopicNameToTag(name: string): string {
-  return name
-    .normalize("NFKC")
-    .trim()
-    .toLocaleLowerCase("en-US")
+  const cased = name.normalize("NFKC").trim().toLocaleLowerCase("en-US");
+  const withoutRetiredNamespace = cased.startsWith("topic:") ? cased.slice("topic:".length) : cased;
+  return withoutRetiredNamespace
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");

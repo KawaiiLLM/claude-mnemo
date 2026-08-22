@@ -73,24 +73,38 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * frozen-readable storage only (`db/citations.ts`'s `CITATION_RELATIONS`),
  * never a member of this module's write vocabulary.
  *
- * ## Self-citation (rubric-v10 ticket 02: post-transaction, not flow-derived)
+ * ## Self-citation (rubric-v10 ticket 02; round-4 review #1 hardened Gate C)
  *
  * The old phase-spanning self rule (a multi-phase turn could self-cite with
  * any CROSS-PHASE word) retires with the vocabulary it was built for. Exactly
- * one relation may ever cite the citing turn itself: `grounds`. Its actual
- * legality is no longer decided by a flow derivation (settlement +
- * implementer) — the lane model retires that concept from the write path —
- * it is decided against the POST-TRANSACTION graph: a self-`grounds` is legal
- * iff, after every edge THIS SAME CALL writes has landed, the citing turn
- * carries at least one TAGGED `indexes` edge of its own (declared in this
- * same call, in either order relative to the `grounds` field, or already
- * stored from an earlier call). `validateRelationTarget` below therefore
- * treats a self-`grounds` as phase-legal unconditionally (the ordinary
- * same/cross-phase pairing does not apply to a self target anyway) — the
- * terminus question is answered by `checkSelfGroundsTerminus`, a SEPARATE
- * function callers invoke only after their write has landed, because this
- * module has no DB access to check it inline and the fact does not exist
- * until the write does.
+ * one relation may ever cite the citing turn itself: `grounds`. Legality
+ * rests on TWO conditions — the old flow-derived "settlement + implementer"
+ * reading survives as a composite-node requirement even though the lane
+ * model retires the flow DERIVATION itself:
+ *
+ *   - the IMPLEMENTER half, checked HERE (structural, pre-write): the citing
+ *     turn's own phase set must include `delivery` — a decision-only turn
+ *     can never self-ground. This needs nothing the write has not already
+ *     told this module (`citingPhases` is a pre-write fact), so it is part
+ *     of `validateRelationTarget`'s ordinary verdict, not deferred.
+ *   - the SETTLEMENT half, checked AFTER the write lands (Gate C, graph-
+ *     state): the citing turn must be the CURRENT terminus of a lane it
+ *     declared via a TAGGED `indexes` edge of its own (declared in this same
+ *     call, in either order relative to the `grounds` field, or already
+ *     stored from an earlier call) — a LATER tagged override (that lane
+ *     reopens) or untagged override (that turn's conclusion is repudiated
+ *     globally) unseats a stale declaration, and a self-`grounds` resting on
+ *     one is refused. This half needs the post-transaction graph (and the
+ *     lane's full event history to detect a later override), which this
+ *     DB-free module cannot read — it is `checkSelfGroundsTerminus` below, a
+ *     SEPARATE function callers invoke only after their write has landed,
+ *     fed evidence THEY compute (typically via `shared/lane-interpretation.ts`'s
+ *     `deriveLaneInterpretation`) rather than derived here.
+ *
+ * `validateRelationTarget` therefore treats a self-`grounds` as PHASE-PAIR
+ * legal unconditionally (the ordinary same/cross-phase pairing does not
+ * apply to a self target anyway) but still enforces the implementer half
+ * inline; the terminus half stays Gate C, post-transaction only.
  *
  * Every other relation refuses a self target outright, whatever the phase.
  *
@@ -345,6 +359,12 @@ const SELF_NOT_GROUNDS_DETAIL =
   "is this turn's own address, and only `grounds` may ever cite the citing turn itself — " +
   "every other relation compares two DIFFERENT turns, so citing itself with one of them is a tautology, not a claim";
 
+/** round-4 review #1: the implementer-half rejection — checked inline, pre-write, since it needs only the citing turn's own already-known phase set. */
+const SELF_NOT_DELIVERY_DETAIL =
+  "is this turn's own address; a self-`grounds` additionally needs this turn's own type to carry a " +
+  "delivery-phase word (e.g. `implement`) — the implementer half of settlement+implementer; a " +
+  "decision-only turn cannot self-ground";
+
 /**
  * rubric-v10 ticket 02 (Gate C, post-transaction): the detail both
  * `checkSelfGroundsTerminus` below (a rejection AFTER the write) and a
@@ -353,8 +373,10 @@ const SELF_NOT_GROUNDS_DETAIL =
  */
 export const SELF_GROUNDS_NO_TERMINUS_DETAIL =
   "is this turn's own address; a self-`grounds` is legal only when, after every edge this call " +
-  "writes has landed, this turn carries at least one TAGGED `indexes` edge of its own — declared " +
-  "in this same call (either order relative to grounds) or already stored from an earlier one";
+  "writes has landed, this turn is CURRENTLY the terminus of a lane it declared via a TAGGED " +
+  "`indexes` edge of its own — declared in this same call (either order relative to grounds) or " +
+  "already stored from an earlier one, and NOT since reopened (a later tagged override) or " +
+  "repudiated (a later untagged override)";
 
 const TAG_NOT_TAGGABLE_DETAIL =
   "carries no lane tags — only override/narrows/extends/consume/indexes (same-phase words) may";
@@ -412,9 +434,11 @@ export type RelationTargetRejectionReason =
   | "segment-target"
   | "phase-illegal"
   | "self-not-grounds"
+  /** round-4 review #1: a self-`grounds` whose citing turn carries no delivery-phase type — the implementer half of the composite-node requirement, checked pre-write. */
+  | "self-not-delivery"
   | "tag-not-taggable"
   | "tag-missing"
-  /** rubric-v10 ticket 02 (Gate C): only `checkSelfGroundsTerminus` ever returns this — a self-`grounds` with no tagged-indexes terminus in the post-transaction graph. */
+  /** rubric-v10 ticket 02 (Gate C): only `checkSelfGroundsTerminus` ever returns this — a self-`grounds` with no CURRENT tagged-indexes terminus in the post-transaction graph. */
   | "self-not-terminus";
 
 export type RelationTargetValidationResult =
@@ -485,6 +509,12 @@ export function validateRelationTarget(
     if (input.relation !== "grounds") {
       return { ok: false, reason: "self-not-grounds", detail: SELF_NOT_GROUNDS_DETAIL };
     }
+    // round-4 review #1 (the implementer half, checked here — see this
+    // module's header): a decision-only turn can never self-ground, whether
+    // or not it holds some lane's terminus.
+    if (!input.citingPhases.has("delivery")) {
+      return { ok: false, reason: "self-not-delivery", detail: SELF_NOT_DELIVERY_DETAIL };
+    }
   } else if (!isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
     return {
       ok: false,
@@ -508,12 +538,27 @@ export function validateRelationTarget(
 export interface RelationEdgeFact {
   relation: string | null;
   tags: readonly string[];
+  /**
+   * round-4 review #1: whether the CITING turn is CURRENTLY this
+   * declaration's lane terminus in the post-transaction graph. The caller
+   * computes this by reducing the lane's full event history (typically
+   * `shared/lane-interpretation.ts`'s `deriveLaneInterpretation`, in turn
+   * order — never edge-write order) BEFORE building this fact, so a later
+   * tagged override (reopen) or untagged override (repudiation) is already
+   * folded in. Omitted or `false` FAILS CLOSED: a fact asserting only "this
+   * relation is a tagged `indexes`", with no positive proof it still stands,
+   * must never ground — that narrower fact being treated as sufficient was
+   * exactly the stale-declaration bug this field closes.
+   */
+  isCurrentTerminus?: boolean;
 }
 
 export function hasTaggedTerminusDeclaration(
   edges: readonly RelationEdgeFact[],
 ): boolean {
-  return edges.some((edge) => edge.relation === "indexes" && edge.tags.length > 0);
+  return edges.some(
+    (edge) => edge.relation === "indexes" && edge.tags.length > 0 && edge.isCurrentTerminus === true,
+  );
 }
 
 export function checkSelfGroundsTerminus(

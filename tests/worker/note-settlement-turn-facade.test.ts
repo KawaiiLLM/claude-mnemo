@@ -906,17 +906,20 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
   });
 
-  // rubric-v10 ticket 02 ("自引用", Gate C): the settlement write path shares
-  // the SAME `validateRelationTarget`/`checkSelfGroundsTerminus` gates as
-  // the main agent's `note` — only `grounds` may ever self-cite, legal iff
-  // after this call's edges land the citing turn carries a TAGGED `indexes`
-  // edge of its own. A tagged-indexes declaration plus the self-grounds in
-  // ONE call passes.
+  // rubric-v10 ticket 02 ("自引用", Gate C); round-4 review #1 hardened it:
+  // the settlement write path shares the SAME `validateRelationTarget`/
+  // `checkSelfGroundsTerminusPostWrite` gates as the main agent's `note` —
+  // only `grounds` may ever self-cite, legal iff the citing turn ALSO carries
+  // a delivery-phase type (the implementer half, checked pre-write) AND,
+  // after this call's edges land, is the CURRENT terminus of a lane it
+  // declared via a TAGGED `indexes` edge of its own. `t1` is a COMPOSITE
+  // node here (`design` + `implement`), both halves at once. A tagged-
+  // indexes declaration plus the self-grounds in ONE call passes.
   test("a self-grounds is accepted through the settlement path when the same call also declares a tagged-indexes terminus", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
+    updateTurnById(db, t1, { type: ["design", "implement"], tags: ["lane-a"] });
     updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
     const job = claimWindow(sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
@@ -948,11 +951,12 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
   // own transaction wrapper's contract (see its doc comment: "a compound
   // call whose LATER half rejects after an EARLIER half already applied —
   // commits or vanishes as a UNIT" — a property of the wrapper, not of this
-  // function called bare), exercised by that module's own test suite.
+  // function called bare), exercised by that module's own test suite. `t1`
+  // carries `implement` too, isolating Gate C from the pre-write delivery gate.
   test("the same self-grounds without any terminus-declaring edge still rejects through the settlement path", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    updateTurnById(db, t1, { type: ["design"] });
+    updateTurnById(db, t1, { type: ["design", "implement"] });
     const job = claimWindow(sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
 
@@ -964,6 +968,84 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain("TAGGED");
+  });
+
+  // round-4 review #1's own acceptance criterion, exercised through the
+  // settlement path too: "decision-only self-grounds REJECTS" — refused
+  // pre-write (`self-not-delivery`), even with a legal tagged-indexes
+  // declaration in the same call.
+  test("a decision-only turn's self-grounds rejects through the settlement path even with a legal declaration in the same call", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
+    updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
+
+    const result = write(
+      context,
+      {
+        turn: `S${sessionDbId}/T1`,
+        indexes: [{ turn: `S${sessionDbId}/T2`, tags: ["lane-a"] }],
+        grounds: [`S${sessionDbId}/T1`],
+      },
+      NOW,
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("delivery");
+    expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
+  });
+
+  // round-4 review #1's own acceptance criterion, exercised through the
+  // settlement path too: "stale-declaration self-grounds REJECTS" — a LATER
+  // turn's tag-matched override reopens the lane a self-grounds turn
+  // declared in an earlier call; a fresh self-grounds attempt after that
+  // must not read the stale declaration as still legal.
+  test("a stale terminus declaration — reopened by a LATER turn's tag-matched override — rejects a fresh self-grounds through the settlement path", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { type: ["design", "implement"], tags: ["lane-a"] });
+    updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
+    const job = claimWindow(sessionDbId, 1, 4);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
+
+    const declare = write(
+      context,
+      {
+        turn: `S${sessionDbId}/T1`,
+        indexes: [{ turn: `S${sessionDbId}/T2`, tags: ["lane-a"] }],
+        grounds: [`S${sessionDbId}/T1`],
+      },
+      NOW,
+    );
+    expect(resultText(declare)).toContain("2 relation");
+
+    const t4 = seedTurn(sessionDbId, 4);
+    updateTurnById(db, t4, { type: ["design"], tags: ["lane-a"] });
+    const laterContext = baseContext(job, { reviewableTurnIds: new Set([t4]) });
+    const reopen = write(
+      laterContext,
+      { turn: `S${sessionDbId}/T4`, override: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
+      NOW + 1,
+    );
+    expect(resultText(reopen)).toContain("1 relation");
+
+    const staleAttempt = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, grounds: [`S${sessionDbId}/T1`] },
+      NOW + 2,
+    );
+
+    expect(resultText(staleAttempt)).toStartWith("Parameter error:");
+    expect(resultText(staleAttempt)).toContain("TAGGED");
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: t1 }).filter(
+        (edge) => edge.relation === "grounds" && edge.cited.id === t1,
+      ),
+    ).toHaveLength(1);
   });
 
   test("an edge write is gated on the CITING turn's `type` — checked, never stamped", () => {

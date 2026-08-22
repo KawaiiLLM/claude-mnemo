@@ -118,31 +118,61 @@ describe("event reduction — the four override cases", () => {
 });
 
 describe("declaration/override/continuation ordering by turn — the mutation-detecting property", () => {
-  // Load-bearing property: reduction is sorted by CITING-TURN id, never by
-  // the position an edge happens to occupy in the input array. Edges below
-  // are handed in DESCENDING/scrambled array order on purpose; a reducer
-  // that (incorrectly) folded events in array order would let e1 (T404's
-  // declaration) get overwritten by e2 (T402's declaration, processed
-  // SECOND in the array despite being chronologically EARLIER), landing
-  // terminus=402. Correct turn-order reduction must land terminus=404 (the
-  // higher citing-turn id — "later wins").
-  test("turn-order reduction wins over edge ARRAY order — shuffled input still finds the LATEST-by-turn declaration", () => {
+  // Load-bearing property (round-4 review #2): reduction is sorted by the
+  // TURN-ORDER KEY (`LaneTurnInput.order`, defaulting to `id` only when
+  // omitted), never by edge ARRAY position, and — this is the corrected
+  // half — never by raw `id` either once `order` diverges from it. A
+  // backfill-inserted earlier turn can carry a LATER row id than turns that
+  // chronologically follow it, so a reducer that (incorrectly) sorted by
+  // `id` would let the truly-later declaration lose to the truly-earlier
+  // one whenever backfill inverted their id order. The fixture below gives
+  // every turn an `order` that is the EXACT REVERSE of its `id` — a reducer
+  // that silently fell back to `id`-based sorting (the pre-fix behaviour)
+  // would land terminus=500 here; correct order-key reduction lands 100.
+  test("turn-order reduction uses the explicit `order` key, never raw `id` — a backfilled turn's larger id does not make it 'later'", () => {
+    const earlyBackfilled: LaneTurnInput = { id: 999, type: ["design"], order: 1 }; // true order 1st, but the LARGEST id
+    const middle: LaneTurnInput = { id: 500, type: ["design"], order: 2 };
+    const late: LaneTurnInput = { id: 100, type: ["design"], order: 3 }; // true order 3rd (latest), but the SMALLEST id
+    const turns = [earlyBackfilled, middle, late];
+    const e1 = edge(500, "indexes", 999, ["m"]); // order 2 declares terminus=500
+    const e2 = edge(100, "indexes", 999, ["m"]); // order 3 declares terminus=100 -- must win
+    const e3 = edge(500, "extends", 999, ["m"]);
+    const e4 = edge(100, "extends", 500, ["m"]);
+
+    const lane = laneOf(deriveLaneInterpretation(turns, [e1, e2, e3, e4]), ["m"]);
+    // A reducer sorting by raw id (100 < 500 < 999) would process
+    // citingId=100 BEFORE citingId=500, landing terminus=500 — the old,
+    // wrong reading. Correct order-key reduction processes order=2 (id 500)
+    // before order=3 (id 100), so 100's declaration wins.
+    expect(lane?.declaration.terminus).toBe(100);
+    expect(lane?.declaration.state).toBe("declared");
+
+    // Sanity: shuffling the ARRAY order of the exact same edges agrees —
+    // the result depends only on `order`, never on array position either.
+    const reordered = [e4, e3, e2, e1];
+    const laneReordered = laneOf(deriveLaneInterpretation(turns, reordered), ["m"]);
+    expect(laneReordered?.declaration.terminus).toBe(100);
+  });
+
+  test("with no explicit `order`, `id` is the order key — plain fixtures (id already in true order) are unaffected", () => {
     const turns = [design(401), design(402), design(403), design(404)];
     const e1 = edge(404, "indexes", 403, ["m"]); // latest declaration, turn 404
     const e2 = edge(402, "indexes", 401, ["m"]); // earlier declaration, turn 402
-    const e3 = edge(403, "extends", 402, ["m"]);
-    const e4 = edge(402, "extends", 401, ["m"]);
-    const e5 = edge(404, "extends", 403, ["m"]);
-    const scrambled = [e1, e2, e3, e4, e5]; // array order: 404, 402, 403, 402, 404
+    const scrambled = [e1, e2]; // array order does not match id order either
     const lane = laneOf(deriveLaneInterpretation(turns, scrambled), ["m"]);
     expect(lane?.declaration.terminus).toBe(404);
-    expect(lane?.declaration.state).toBe("declared");
+  });
 
-    // Sanity: a DIFFERENT array ordering of the exact same edge set agrees —
-    // the result depends only on citingId, never on array position.
-    const reordered = [e4, e3, e5, e2, e1];
-    const laneReordered = laneOf(deriveLaneInterpretation(turns, reordered), ["m"]);
-    expect(laneReordered?.declaration.terminus).toBe(404);
+  test("structural continuations advance latestEventTurn once a lane has been declared — silence does not, but living past a declaration does", () => {
+    const turns = [design(20), design(21), design(22)];
+    const edges = [
+      edge(21, "extends", 20, ["cont"]),
+      edge(21, "indexes", 20, ["cont"]), // declares at 21
+      edge(22, "extends", 21, ["cont"]), // continuation past the declaration
+    ];
+    const lane = laneOf(deriveLaneInterpretation(turns, edges), ["cont"]);
+    expect(lane?.declaration.terminus).toBe(21); // continuation never moves the terminus
+    expect(lane?.declaration.latestEventTurn).toBe(22); // but it IS the freshest activity
   });
 
   test("continuation after a declaration does not retroactively move it — only a NEW indexes event does", () => {
@@ -158,5 +188,51 @@ describe("declaration/override/continuation ordering by turn — the mutation-de
     // 503 is a member (endpoint of the lane's own tagged edge) but never
     // became the terminus — silence never establishes convergence.
     expect(lane?.members.map((m) => m.id)).toEqual([501, 502, 503]);
+  });
+});
+
+describe("cross-segment tagged edges — dual appearance and warnings (round-4 review #5)", () => {
+  test("a cross-segment tagged edge enumerates its lane from BOTH sides' segments, and is named in `warnings`", () => {
+    const turns: LaneTurnInput[] = [
+      { id: 1, type: ["design"], segment: "A" },
+      { id: 2, type: ["design"], segment: "B" },
+    ];
+    const edges = [edge(2, "extends", 1, ["x"])]; // citing turn 2 in segment B cites turn 1 in segment A
+    const derivation = deriveLaneInterpretation(turns, edges);
+
+    const laneA = laneOf(derivation, ["x"], "A");
+    const laneB = laneOf(derivation, ["x"], "B");
+    expect(laneA).toBeDefined();
+    expect(laneB).toBeDefined();
+    // Both sides see the SAME members/tagged edges — it is the same fact,
+    // filed under two segment scans.
+    expect(laneA?.members.map((m) => m.id)).toEqual([1, 2]);
+    expect(laneB?.members.map((m) => m.id)).toEqual([1, 2]);
+    expect(derivation.lanes).toHaveLength(2);
+
+    expect(derivation.warnings).toEqual([
+      { citingId: 2, citedId: 1, tagSet: ["x"], citingSegment: "B", citedSegment: "A" },
+    ]);
+  });
+
+  test("a same-segment tagged edge never warns and enumerates only once", () => {
+    const turns = [design(1), design(2)];
+    const edges = [edge(2, "extends", 1, ["y"])];
+    const derivation = deriveLaneInterpretation(turns, edges);
+    expect(derivation.warnings).toEqual([]);
+    expect(derivation.lanes.filter((lane) => lane.key.tagSet.join("") === "y")).toHaveLength(1);
+  });
+
+  test("a cross-segment declaration (tagged indexes) is reduced identically on both sides", () => {
+    const turns: LaneTurnInput[] = [
+      { id: 10, type: ["design"], segment: "A" },
+      { id: 11, type: ["design"], segment: "B" },
+    ];
+    const edges = [edge(11, "indexes", 10, ["z"])];
+    const derivation = deriveLaneInterpretation(turns, edges);
+    const laneA = laneOf(derivation, ["z"], "A");
+    const laneB = laneOf(derivation, ["z"], "B");
+    expect(laneA?.declaration).toEqual({ state: "declared", terminus: 11, latestEventTurn: 11 });
+    expect(laneB?.declaration).toEqual({ state: "declared", terminus: 11, latestEventTurn: 11 });
   });
 });

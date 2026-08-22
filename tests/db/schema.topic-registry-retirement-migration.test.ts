@@ -6,6 +6,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment, getSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { recallMemory } from "../../src/mcp/recall";
+import { findRetiredTopicTag } from "../../src/shared/tag-stripping";
 
 /**
  * Ticket 15 (topic registry retirement, CONTEXT.md "Topic — retired").
@@ -159,6 +160,35 @@ describe("topic registry retirement migration (ticket 15)", () => {
     expect(memberBTags).toContain("my-cool-topic");
 
     expect(getSegment(db, segment.id)?.tags).toContain("my-cool-topic");
+  });
+
+  // Round-4 review #8: `stripRetiredTopicTagNamespace` only ever strips an
+  // EXISTING tag — a legacy topic NAME still carrying the retired `topic:`
+  // namespace used to fold onto a FRESH tag of the same poisoned shape
+  // (`"topic:alpha"`), which the write boundary then refused forever. The
+  // fold must strip the namespace off the NAME before minting the tag.
+  test("a legacy topic name carrying the retired topic: namespace folds to a bare tag the write boundary accepts", () => {
+    const member = addTurn(1, ["existing"]);
+    const segment = createSegment(db, { title: "prefixed topic segment", nowEpoch: 100 });
+    addSegmentMembers(db, segment.id, [member], 100);
+
+    downgradeToLegacyTopicRegistry(db);
+    const topicId = insertLegacyTopic(db, "topic:Alpha");
+    setSegmentTopic(db, segment.id, topicId);
+
+    initializeSchema(db);
+
+    const memberTags: string[] = JSON.parse(
+      db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(member)!.tags,
+    );
+    const segmentTags = getSegment(db, segment.id)?.tags ?? [];
+
+    expect(memberTags).toContain("alpha");
+    expect(memberTags.some((tag) => tag.startsWith("topic:"))).toBe(false);
+    expect(segmentTags).toContain("alpha");
+    expect(segmentTags.some((tag) => tag.startsWith("topic:"))).toBe(false);
+    expect(findRetiredTopicTag(memberTags)).toBeNull();
+    expect(findRetiredTopicTag(segmentTags)).toBeNull();
   });
 
   test("a topic name already present as a tag (case-insensitively) is not duplicated", () => {

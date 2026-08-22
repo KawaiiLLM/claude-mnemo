@@ -28,24 +28,26 @@
  * add to path counts (duplicate probes are legal fact multiplicity, not
  * extra routes).
  *
- * PROVABLE INVARIANT (worth knowing before reading `buildPathReport`): a
- * folded grounds edge is added `citingId(external) -> citedId(member)`, and
- * "citing nodes included" only ever grants the EXTERNAL node a new outgoing
- * entry — never the member (a fold edge never touches a member's own
- * out-set), and the fold's own membership filter (`citer must be a
- * non-member`) means no member's out-set can transitively reach that
- * external node either. `countPaths` only sums over a node's OUTGOING
- * edges, so a folded external node is structurally UNREACHABLE from the
- * terminus's own traversal — folding can add entries to `citingTurnsFolded`
- * but can never change `pathCount` for ANY input, only prove it stayed
- * stable under the wider graph. This matches every declared lane in the
- * golden corpus (folded pathCount === base pathCount, all equal to 1) and is
- * the only reading consistent with those pinned numbers: the alternative —
- * reversing the fold edge to `member -> external` (mirroring `flows.ts`'s
- * inheritance-reversal precedent for `grounds`/`consume`/`indexes`) — would
- * have moved `{ownership}`'s folded count from 1 to 2, contradicting the
- * ticket's own pinned value, so that reversed reading is deliberately NOT
- * used here.
+ * FOLD SEMANTICS (`buildPathReport`'s `folded` half — round-4 review #3
+ * corrected an earlier draft's "folding never changes any count" reading,
+ * which was provably true FOR THE WRONG REASON: the fold edge was added
+ * `citingId(external) -> citedId(member)`, making the external node
+ * structurally unreachable from the terminus's own traversal, so it could
+ * only ever prove stability, never growth — an invariant that held for
+ * every input but meant folding could never do the one thing it exists to
+ * do). Corrected reading: 将两侧视为一个 lane, from every start-less node to
+ * the lane's own starts. The MERGED graph is the lane's base structural
+ * pairs plus, for every external grounds-citer of a member, its own entry
+ * edge (citer -> member) — unchanged from the earlier draft. What changed
+ * is which nodes COUNT: the folded count sums `countPaths` from EVERY node
+ * with no incoming edge in the merged graph — the lane's own terminus (as
+ * before) AND each external citer (new) — rather than from the terminus
+ * alone. A citer with no incoming edge is a second, independent root the
+ * merge introduces; summing its own path count is exactly "folding it into
+ * the lane" (the citer's route to the lane's starts is now counted
+ * alongside the terminus's own routes), while the terminus's OWN count is
+ * untouched by the fold (a fold edge never grants a member a new outgoing
+ * entry), so a lane with no external grounds still gets folded === base.
  *
  * Cited-ness (report 1) is LANE-WIDE, not terminus-only: an incoming
  * cross-phase `grounds`/`verifies`/`refutes` counts if its target is ANY
@@ -61,8 +63,11 @@
 import { STANCE_RELATIONS } from "./turn-phase";
 import {
   canonicalTagSet,
+  DEFAULT_SEGMENT,
   deriveLaneInterpretation,
+  laneToken,
   type Lane,
+  type LaneCrossSegmentWarning,
   type LaneDeclaration,
   type LaneEdgeInput,
   type LaneKey,
@@ -72,7 +77,11 @@ import {
 } from "./lane-interpretation";
 import { phasesForTypes } from "./turn-phase";
 
+/** `STANCE_RELATIONS` widened to `ReadonlySet<string>` so it can test a plain `LaneEdgeInput.relation` without a cast at each call site. */
+const STANCE_RELATION_WORDS: ReadonlySet<string> = STANCE_RELATIONS;
+
 export type {
+  LaneCrossSegmentWarning,
   LaneDeclaration,
   LaneDeclarationState,
   LaneEdgeInput,
@@ -142,10 +151,21 @@ export interface LaneComponentReport {
 
 // ---------------------------------------------------------------- Report 3
 
+/** A node shared by >=1 of this component's lanes (round-4 review #7's diagnostic identity). */
+export interface LaneSharedNode {
+  id: number;
+  /** Every DISTINCT lane (among this component's own) that cites this node via a STANCE (narrows/extends) tagged edge. */
+  citingLanesByStance: LaneKey[];
+  /** `citingLanesByStance.length >= 2` — a node several lanes' own stance edges converge on is a designed fork root or merge node, not an anomaly; fewer (0 or 1) surfaces the sharing for human judgment instead (e.g. only consume/grounds ties it in). */
+  designedShape: boolean;
+}
+
 export interface MultiLaneComponent {
   /** Smallest turn id in the shared global component. */
   representative: number;
   lanes: LaneKey[];
+  /** Nodes that are members of more than one of `lanes` — the fork-root/merge-node identity, annotated. */
+  sharedNodes: LaneSharedNode[];
 }
 
 // ---------------------------------------------------------------- Report 4
@@ -166,6 +186,10 @@ export interface LanePathReport {
   terminus: number | null;
   /** `null` iff skipped. */
   pathCount: number | null;
+  /** Nodes with more than one distinct citer in the BASE structural graph — a shared origin several branches point at (round-4 review #7). Non-empty only when `pathCount` (or the base graph's own shape) exceeds 1. */
+  forkNodes: number[];
+  /** Nodes with more than one distinct outgoing structural edge — a node that cites (merges) more than one predecessor. Non-empty only when `pathCount` exceeds 1. */
+  joinNodes: number[];
   /** `null` iff skipped — folding a lane with no terminus has nothing to count paths TO. */
   folded: LaneFoldedPaths | null;
 }
@@ -177,6 +201,8 @@ export interface LaneCheckerResult {
   components: LaneComponentReport[];
   multiLaneComponents: MultiLaneComponent[];
   paths: LanePathReport[];
+  /** Every cross-segment tagged edge in scope — legal, warned, never rejected (round-4 review #5). Passed through from `deriveLaneInterpretation` unchanged. */
+  warnings: readonly LaneCrossSegmentWarning[];
 }
 
 /** Union-find, path-compressed — local to one `checkLanes` call, shared across reports 2/3. */
@@ -266,6 +292,37 @@ function buildPathGraph(edgePairs: Iterable<readonly [number, number]>): PathGra
   return { starts, out };
 }
 
+/** Every node with NO incoming edge among `nodes`/`out` — the fold's "source" set (round-4 review #3): the lane's own terminus (nothing structural cites it) plus, once folded in, each external grounds-citer (nothing in the merged graph ever cites a citer). */
+function zeroIndegreeNodes(out: ReadonlyMap<number, ReadonlySet<number>>, nodes: ReadonlySet<number>): number[] {
+  const hasIncoming = new Set<number>();
+  for (const targets of out.values()) {
+    for (const target of targets) {
+      hasIncoming.add(target);
+    }
+  }
+  return [...nodes].filter((node) => !hasIncoming.has(node)).sort((a, b) => a - b);
+}
+
+/** Fork (shared origin, in-degree > 1) and join/merge (multiple predecessors, out-degree > 1) nodes in a structural graph (round-4 review #7's report-4 diagnostic identity). */
+function findForkJoinNodes(out: ReadonlyMap<number, ReadonlySet<number>>): { forkNodes: number[]; joinNodes: number[] } {
+  const inDegree = new Map<number, number>();
+  const joinNodes: number[] = [];
+  for (const [citingId, targets] of out) {
+    if (targets.size > 1) {
+      joinNodes.push(citingId);
+    }
+    for (const target of targets) {
+      inDegree.set(target, (inDegree.get(target) ?? 0) + 1);
+    }
+  }
+  const forkNodes = [...inDegree.entries()]
+    .filter(([, degree]) => degree > 1)
+    .map(([id]) => id)
+    .sort((a, b) => a - b);
+  joinNodes.sort((a, b) => a - b);
+  return { forkNodes, joinNodes };
+}
+
 /**
  * Run all four reports over one turn/edge set. Pure: no database, no I/O, no
  * write path imported — the DB adapter (ticket 06) is the only place this
@@ -276,13 +333,22 @@ export function checkLanes(
   turns: readonly LaneTurnInput[],
   edges: readonly LaneEdgeInput[],
 ): LaneCheckerResult {
-  const { lanes } = deriveLaneInterpretation(turns, edges);
+  const { lanes, warnings } = deriveLaneInterpretation(turns, edges);
   const turnById = new Map<number, LaneTurnInput>();
   for (const turn of turns) {
     turnById.set(turn.id, turn);
   }
+  // Same fallback convention `lane-interpretation.ts`'s own `segmentFor`
+  // uses: a turn absent from `turns` (partial coverage) reads as DEFAULT_SEGMENT.
+  const segmentFor = (id: number): string => turnById.get(id)?.segment ?? DEFAULT_SEGMENT;
 
-  // ---- shared global graph for reports 2/3 ----
+  // ---- shared global graph for reports 2/3, PARTITIONED BY SEGMENT (round-4
+  // review #4b): a stance/consume/grounds edge only unions its two endpoints
+  // when they share a segment — a node in segment B can never bridge two
+  // members of segment A, even via a legal cross-segment `grounds` citation.
+  // Turn ids are globally unique, so a single un-namespaced UnionFind is
+  // still safe to key components/islands by; only the UNION step itself
+  // needs the segment gate. ----
   const uf = new UnionFind();
   for (const turn of turns) {
     uf.add(turn.id);
@@ -290,7 +356,7 @@ export function checkLanes(
   for (const edge of edges) {
     uf.add(edge.citingId);
     uf.add(edge.citedId);
-    if (LANE_COMPONENT_RELATIONS.has(edge.relation)) {
+    if (LANE_COMPONENT_RELATIONS.has(edge.relation) && segmentFor(edge.citingId) === segmentFor(edge.citedId)) {
       uf.union(edge.citingId, edge.citedId);
     }
   }
@@ -299,12 +365,27 @@ export function checkLanes(
   const componentReports: LaneComponentReport[] = [];
   const pathReports: LanePathReport[] = [];
   const componentLanes = new Map<number, LaneKey[]>();
+  // root -> nodeId -> the set of (this component's) lane tokens that count the node a member — report 3's shared-node identity.
+  const componentNodeLanes = new Map<number, Map<number, Set<string>>>();
+  // citedId -> laneToken -> LaneKey, for every STANCE-tagged citation — report 3's designed-shape annotation.
+  const stanceCitersByNode = new Map<number, Map<string, LaneKey>>();
 
   for (const lane of lanes) {
     const memberIds = new Set(lane.members.map((member) => member.id));
+    const thisLaneToken = laneToken(lane.key.segment, lane.key.tagSet);
 
     // ---- Report 1 ----
     laneStats.push(buildLaneStats(lane, memberIds, turnById, edges));
+
+    for (const edge of lane.taggedEdges) {
+      if (!STANCE_RELATION_WORDS.has(edge.relation)) continue;
+      let bucket = stanceCitersByNode.get(edge.citedId);
+      if (bucket === undefined) {
+        bucket = new Map();
+        stanceCitersByNode.set(edge.citedId, bucket);
+      }
+      bucket.set(thisLaneToken, lane.key);
+    }
 
     // ---- Report 2 (and feeding report 3) ----
     const islandsByRoot = new Map<number, number[]>();
@@ -322,6 +403,17 @@ export function checkLanes(
       } else if (!laneKeyList.some((key) => sameLaneKey(key, lane.key))) {
         laneKeyList.push(lane.key);
       }
+      let nodeLaneMap = componentNodeLanes.get(root);
+      if (nodeLaneMap === undefined) {
+        nodeLaneMap = new Map();
+        componentNodeLanes.set(root, nodeLaneMap);
+      }
+      let laneTokens = nodeLaneMap.get(id);
+      if (laneTokens === undefined) {
+        laneTokens = new Set();
+        nodeLaneMap.set(id, laneTokens);
+      }
+      laneTokens.add(thisLaneToken);
     }
     const islands: LaneIsland[] = [...islandsByRoot.entries()]
       .map(([, ids]) => {
@@ -337,14 +429,26 @@ export function checkLanes(
 
   const multiLaneComponents: MultiLaneComponent[] = [...componentLanes.entries()]
     .filter(([, laneKeys]) => laneKeys.length > 1)
-    .map(([representative, laneKeys]) => ({ representative, lanes: laneKeys }))
+    .map(([representative, laneKeys]) => {
+      const nodeLaneMap = componentNodeLanes.get(representative) ?? new Map<number, Set<string>>();
+      const sharedNodes: LaneSharedNode[] = [...nodeLaneMap.entries()]
+        .filter(([, laneTokens]) => laneTokens.size > 1)
+        .map(([id]) => {
+          const citers = stanceCitersByNode.get(id);
+          const citingLanesByStance = citers ? [...citers.values()] : [];
+          return { id, citingLanesByStance, designedShape: citingLanesByStance.length >= 2 };
+        })
+        .sort((a, b) => a.id - b.id);
+      return { representative, lanes: laneKeys, sharedNodes };
+    })
     .sort((a, b) => a.representative - b.representative);
 
-  return { lanes: laneStats, components: componentReports, multiLaneComponents, paths: pathReports };
+  return { lanes: laneStats, components: componentReports, multiLaneComponents, paths: pathReports, warnings };
 }
 
+/** Segment + exact canonical tag set equality — via `laneToken`'s own escaped join (round-4 review #6: a plain `tagSet.join("")` collides `{"a","bc"}` with `{"ab","c"}`). */
 function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
-  return a.segment === b.segment && a.tagSet.join("") === b.tagSet.join("");
+  return laneToken(a.segment, a.tagSet) === laneToken(b.segment, b.tagSet);
 }
 
 function buildLaneStats(
@@ -404,6 +508,7 @@ function buildPathReport(
     .filter((edge) => LANE_PATH_RELATIONS.has(edge.relation))
     .map((edge) => [edge.citingId, edge.citedId] as const);
   const baseGraph = buildPathGraph(structuralPairs);
+  const { forkNodes, joinNodes } = findForkJoinNodes(baseGraph.out);
 
   if (lane.declaration.state !== "declared" || lane.declaration.terminus === null) {
     return {
@@ -413,6 +518,8 @@ function buildPathReport(
       starts: [...baseGraph.starts].sort((a, b) => a - b),
       terminus: null,
       pathCount: null,
+      forkNodes,
+      joinNodes,
       folded: null,
     };
   }
@@ -420,14 +527,31 @@ function buildPathReport(
   const terminus = lane.declaration.terminus;
   const pathCount = countPaths(terminus, baseGraph.starts, baseGraph.out);
 
+  // Fold (round-4 review #3): merged graph = the lane's own structural pairs
+  // plus, for each external grounds-citer of a member, its own entry edge
+  // (citer -> member). The folded count sums `countPaths` from EVERY node
+  // with no incoming edge in that merged graph — the terminus (as always)
+  // AND each external citer (new) — see the module header's FOLD SEMANTICS
+  // note for why summing sources, not just re-walking from the terminus, is
+  // the only reading under which folding can ever change anything.
   const crossPhaseGrounds = allEdges.filter(
     (edge) => edge.relation === "grounds" && memberIds.has(edge.citedId) && !memberIds.has(edge.citingId),
   );
-  const foldedGraph = buildPathGraph([
+  const foldedPairs: Array<readonly [number, number]> = [
     ...structuralPairs,
     ...crossPhaseGrounds.map((edge) => [edge.citingId, edge.citedId] as const),
-  ]);
-  const foldedPathCount = countPaths(terminus, foldedGraph.starts, foldedGraph.out);
+  ];
+  const foldedGraph = buildPathGraph(foldedPairs);
+  const foldedNodes = new Set<number>([terminus]);
+  for (const [citingId, citedId] of foldedPairs) {
+    foldedNodes.add(citingId);
+    foldedNodes.add(citedId);
+  }
+  const foldedSources = zeroIndegreeNodes(foldedGraph.out, foldedNodes);
+  const foldedPathCount = foldedSources.reduce(
+    (sum, source) => sum + countPaths(source, foldedGraph.starts, foldedGraph.out),
+    0,
+  );
 
   return {
     key: lane.key,
@@ -435,6 +559,8 @@ function buildPathReport(
     starts: [...baseGraph.starts].sort((a, b) => a - b),
     terminus,
     pathCount,
+    forkNodes,
+    joinNodes,
     folded: {
       citingTurnsFolded: [...new Set(crossPhaseGrounds.map((edge) => edge.citingId))].sort((a, b) => a - b),
       pathCount: foldedPathCount,

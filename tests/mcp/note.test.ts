@@ -1577,15 +1577,17 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 
-  // rubric-v10 ticket 02 ("自引用", Gate C): only `grounds` may ever self-
-  // cite, and its actual legality is decided against the POST-TRANSACTION
-  // graph — legal iff, after every edge this call writes has landed, the
-  // citing turn carries at least one TAGGED `indexes` edge of its own
-  // (declared in this same call, or already stored). The old phase-spanning
-  // self rule and the flow-derived settlement+implementer gate both retire
-  // with the vocabulary they were built for.
+  // rubric-v10 ticket 02 ("自引用", Gate C); round-4 review #1 hardened it:
+  // only `grounds` may ever self-cite, and legality now rests on TWO
+  // conditions — the implementer half (the citing turn's own type carries a
+  // delivery-phase word, checked pre-write) and the settlement half (after
+  // every edge this call writes has landed, the citing turn is the CURRENT
+  // terminus of a lane it declared via a TAGGED `indexes` edge of its own,
+  // declared in this same call or already stored). `targetTurnId` is a
+  // COMPOSITE node here (`design` + `implement`) — both halves at once, the
+  // old flow-derived settlement+implementer reading's surviving shape.
   test("a single call carrying a tagged-indexes declaration plus self-grounds passes, in one atomic write", () => {
-    setType(targetTurnId, ["design"]);
+    setType(targetTurnId, ["design", "implement"]);
     setType(earlierTurnId, ["design"]);
     setTags(targetTurnId, ["lane-a"]);
     setTags(earlierTurnId, ["lane-a"]);
@@ -1616,9 +1618,10 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
   // Mutation-critical (ticket's own acceptance criterion): with the
   // terminus-declaring edge absent, the SAME self-grounds still rejects — if
   // Gate C were disabled (admitted unconditionally) this test would flip to
-  // a false pass.
+  // a false pass. `targetTurnId` carries `implement` too so this exercises
+  // Gate C specifically, not the (separate) pre-write delivery-phase gate.
   test("the same self-grounds WITHOUT any terminus-declaring edge in the post-transaction graph still rejects", () => {
-    setType(targetTurnId, ["design"]);
+    setType(targetTurnId, ["design", "implement"]);
 
     const result = noteTool(
       db,
@@ -1634,7 +1637,7 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
   });
 
   test("self-grounds passes when the tagged-indexes terminus was already stored from an EARLIER call", () => {
-    setType(targetTurnId, ["design"]);
+    setType(targetTurnId, ["design", "implement"]);
     setType(earlierTurnId, ["design"]);
     setTags(targetTurnId, ["lane-a"]);
     setTags(earlierTurnId, ["lane-a"]);
@@ -1661,9 +1664,10 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
 
   // An UNTAGGED indexes edge is free aggregation, never a terminus
   // declaration (draft-lane-model.md's 统一解读原则) — it must not satisfy
-  // Gate C.
+  // Gate C. `implement` is on `targetTurnId` too, for the same reason as
+  // above: isolate Gate C from the pre-write delivery-phase gate.
   test("an untagged indexes edge does not satisfy Gate C — self-grounds still rejects", () => {
-    setType(targetTurnId, ["design"]);
+    setType(targetTurnId, ["design", "implement"]);
     setType(earlierTurnId, ["design"]);
 
     const result = noteTool(
@@ -1681,6 +1685,100 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     // Atomic: the whole call rolls back, so the untagged indexes edge that
     // WOULD have been legal on its own does not survive either.
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  // round-4 review #1's own acceptance criterion: "decision-only self-grounds
+  // REJECTS" — a turn with no delivery-phase type can never self-ground, even
+  // carrying a legal tagged-indexes declaration in the very same call. This
+  // is the pre-write half (`self-not-delivery`), refused before Gate C (the
+  // post-transaction terminus check) ever runs.
+  test("a decision-only turn's self-grounds rejects even with a legal tagged-indexes declaration in the same call", () => {
+    setType(targetTurnId, ["design"]);
+    setType(earlierTurnId, ["design"]);
+    setTags(targetTurnId, ["lane-a"]);
+    setTags(earlierTurnId, ["lane-a"]);
+
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        indexes: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }],
+        grounds: [`S${sessionId}/T3`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain(`grounds "S${sessionId}/T3"`);
+    expect(resultText(result)).toContain("delivery");
+    // Atomic: the indexes edge that would otherwise be legal on its own does
+    // not survive the whole call's rollback either.
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  // round-4 review #1's own acceptance criterion: "stale-declaration
+  // self-grounds REJECTS" — a lane's terminus declaration this turn made in
+  // an EARLIER call no longer stands once a LATER turn's tag-matched
+  // override reopens that lane; a fresh self-grounds attempt after that must
+  // not read the stale declaration as still legal. Exercises the exact bug
+  // round-4 review #1 found: the old check only asked "did the citing turn
+  // EVER write a tagged indexes edge" and never re-examined it against a
+  // later override written by someone else.
+  test("a stale terminus declaration — reopened by a LATER turn's tag-matched override — rejects a fresh self-grounds", () => {
+    setType(targetTurnId, ["design", "implement"]);
+    setType(earlierTurnId, ["design"]);
+    setTags(targetTurnId, ["lane-a"]);
+    setTags(earlierTurnId, ["lane-a"]);
+
+    // T3 declares itself the {lane-a} terminus and self-grounds in one call
+    // — legal, per the earlier "single call" test above.
+    const declare = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        indexes: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }],
+        grounds: [`S${sessionId}/T3`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(isNoteSuccess(declare)).toBe(true);
+
+    // A later turn, T4, overrides T3 WITHIN the {lane-a} lane (same tag on
+    // both endpoints) — this reopens the lane: T3 is no longer its terminus.
+    const laterTurnId = db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
+      )
+      .get(sessionId, 4, "Fourth turn — reopens the lane", 120)!.id;
+    setType(laterTurnId, ["design"]);
+    setTags(laterTurnId, ["lane-a"]);
+
+    const reopen = noteTool(
+      db,
+      { turn: `S${sessionId}/T4`, override: [{ turn: `S${sessionId}/T3`, tags: ["lane-a"] }] },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(isNoteSuccess(reopen)).toBe(true);
+
+    // A FRESH self-grounds attempt by T3, resting on the now-stale
+    // declaration from the first call, must reject.
+    const staleAttempt = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T3`] },
+      { now: () => 1000, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(staleAttempt)).toStartWith("Parameter error:");
+    expect(resultText(staleAttempt)).toContain(`grounds "S${sessionId}/T3"`);
+    expect(resultText(staleAttempt)).toContain("TAGGED");
+    // The first call's grounds edge stands (that call was legal and already
+    // committed); the second, stale attempt adds nothing.
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).filter(
+        (edge) => edge.relation === "grounds" && edge.cited.id === targetTurnId,
+      ),
+    ).toHaveLength(1);
   });
 
   test("a call carrying no field and no edge parameter still names what it needs", () => {

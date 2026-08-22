@@ -49,11 +49,18 @@ import { liveTurnSql } from "./turn-liveness";
  * A fourth pass loads the SUPPLEMENTARY edges the core's reports need beyond
  * a lane's own tagged edges: cross-phase citedness into lane members
  * (report 1/4), untagged override touching a member (global kill, dead-node
- * detection), and the LANE_COMPONENT_RELATIONS neighbourhood one hop out
- * from every member (report 2/3's shared-component graph). This is a
- * ONE-HOP neighbourhood, not a full transitive closure — an honest, bounded
- * approximation the module comment above `loadLaneCheckScope` documents as
- * this adapter's own limit, not the core's.
+ * detection), and the SEGMENT-GLOBAL component graph report 2/3 needs
+ * (round-4 review #4): every live turn owned by each involved lane's own
+ * segment, plus every live LANE_COMPONENT_RELATIONS edge with BOTH endpoints
+ * inside that segment-wide turn set — not merely a one-hop neighbourhood out
+ * from the lane's own members, which truncated transitive in-segment
+ * connectivity a two-hop-away member could still reach. A default-segment
+ * (homeless) lane has no `segment_members` rows to widen from at all, so
+ * this pass is a no-op for it and the older one-hop `LANE_COMPONENT_RELATIONS`
+ * touching-load below remains its only (unchanged, still-approximate)
+ * component source; for a real segment the segment-global pass strictly
+ * widens beyond that one-hop load, so both run — the one-hop pass is a
+ * conservative floor, never a ceiling.
  *
  * COVERAGE (requirement 1's other half). The core's own report 1
  * (`LaneStatsReport.coverage`) is the honest signal: it is populated
@@ -79,6 +86,24 @@ export interface LaneCheckProjection {
 interface TurnLiteRow {
   id: number;
   type: string;
+  sessionId: number;
+  promptNumber: number;
+}
+
+/**
+ * The true reduction-order key (round-4 review #2): `(session_id,
+ * prompt_number)` position, never the row's own `id` — a backfilled turn can
+ * be inserted after (and so carry a higher row id than) turns that
+ * chronologically follow it. `sessionId` is itself an auto-increment id
+ * (monotonic in session-creation order), so this compound key is a total
+ * order across sessions too, not just within one. `PROMPT_NUMBER_SPAN` only
+ * needs to exceed any real `prompt_number` (routinely under a few thousand);
+ * 1e8 leaves session ids room into the billions before any collision risk,
+ * far past `Number.MAX_SAFE_INTEGER`'s actual headroom for this schema.
+ */
+const PROMPT_NUMBER_SPAN = 100_000_000;
+function turnOrderKey(sessionId: number, promptNumber: number): number {
+  return sessionId * PROMPT_NUMBER_SPAN + promptNumber;
 }
 
 interface EdgeLiteRow {
@@ -217,6 +242,40 @@ function loadEdgesByRelationTouching(
     .all(...turnIds, ...turnIds, ...relations);
 }
 
+/** Every live turn id owned by `segmentId` — the SEGMENT-GLOBAL membership set (round-4 review #4a), not filtered to any particular lane's tagged edges. */
+function loadSegmentTurnIds(db: Database, segmentId: number): number[] {
+  return db
+    .query<{ id: number }, [number]>(
+      `SELECT t.id AS id
+       FROM turns t
+       JOIN segment_members sm ON sm.turn_id = t.id
+       WHERE sm.segment_id = ? AND ${liveTurnSql("t")}`,
+    )
+    .all(segmentId)
+    .map((row) => row.id);
+}
+
+/** Every live `LANE_COMPONENT_RELATIONS_SQL` edge with BOTH endpoints inside `turnIds` — "all stance/consume/grounds edges among" a segment's own turns (round-4 review #4a), as opposed to `loadEdgesByRelationTouching`'s one-hop-from-a-member "touching" scope. */
+function loadComponentEdgesAmong(db: Database, turnIds: readonly number[]): EdgeLiteRow[] {
+  if (turnIds.length === 0) {
+    return [];
+  }
+  const idPlaceholders = turnIds.map(() => "?").join(",");
+  const relationPlaceholders = LANE_COMPONENT_RELATIONS_SQL.map(() => "?").join(",");
+  return db
+    .query<EdgeLiteRow, (number | string)[]>(
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.citing_id IN (${idPlaceholders}) AND me.cited_id IN (${idPlaceholders})
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
+    )
+    .all(...turnIds, ...turnIds, ...LANE_COMPONENT_RELATIONS_SQL);
+}
+
 function loadLiveTurns(db: Database, turnIds: readonly number[]): Map<number, TurnLiteRow> {
   const ids = [...new Set(turnIds)];
   if (ids.length === 0) {
@@ -225,7 +284,8 @@ function loadLiveTurns(db: Database, turnIds: readonly number[]): Map<number, Tu
   const placeholders = ids.map(() => "?").join(",");
   const rows = db
     .query<TurnLiteRow, number[]>(
-      `SELECT id, type FROM turns WHERE id IN (${placeholders}) AND ${liveTurnSql()}`,
+      `SELECT id, type, session_id AS sessionId, prompt_number AS promptNumber
+       FROM turns WHERE id IN (${placeholders}) AND ${liveTurnSql()}`,
     )
     .all(...ids);
   return new Map(rows.map((row) => [row.id, row]));
@@ -309,7 +369,23 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   for (const row of loadEdgesByRelationTouching(db, memberIdList, ["override"])) {
     edgeMap.set(edgeKey(row), row);
   }
+  // One-hop floor (kept unconditionally — the segment-global pass below is a
+  // real segment's superset, but a default-segment/homeless lane has no
+  // `segment_members` to widen from at all, so this stays its only source).
   for (const row of loadEdgesByRelationTouching(db, memberIdList, [...LANE_COMPONENT_RELATIONS_SQL])) {
+    edgeMap.set(edgeKey(row), row);
+  }
+  // SEGMENT-GLOBAL component graph (round-4 review #4a): every live turn
+  // owned by each involved lane's own (real) segment, plus every live
+  // component-relation edge with BOTH endpoints in that turn set.
+  const realSegmentIds = [...new Set(involvedLaneKeys.map((key) => key.segment).filter((s) => s !== DEFAULT_SEGMENT))];
+  const segmentTurnIds = new Set<number>();
+  for (const segmentId of realSegmentIds) {
+    for (const id of loadSegmentTurnIds(db, Number(segmentId))) {
+      segmentTurnIds.add(id);
+    }
+  }
+  for (const row of loadComponentEdgesAmong(db, [...segmentTurnIds])) {
     edgeMap.set(edgeKey(row), row);
   }
 
@@ -328,6 +404,7 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
       const input: LaneTurnInput = {
         id: row.id,
         type: JSON.parse(row.type) as string[],
+        order: turnOrderKey(row.sessionId, row.promptNumber),
       };
       if (segmentId !== undefined) {
         input.segment = String(segmentId);
@@ -349,3 +426,10 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
 // the relation vocabulary for validating a `--lane` argument's shape need
 // not also import `turn-phase.ts` directly.
 export { EDGE_RELATIONS };
+
+// Re-exported so a consumer (`mcp/note.ts`'s settlement `lane_check` tool)
+// that names a lane by its own `LaneKey` need not also import
+// `shared/lane-interpretation.ts` directly — pre-existing gap, not part of
+// this batch's own defect set, fixed in passing since it lives in this
+// module's own export surface.
+export type { LaneKey };

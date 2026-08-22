@@ -190,6 +190,63 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
       db?.close();
     }
   });
+
+  // Round-4 review #9: the registered description used to teach the retired
+  // `collects` word, an "out-of-branch collects target" rejection example,
+  // and "address/phase/flow shape" validation — all flow/branch-era
+  // language the lane model retired. Pinned at the ACTUAL registration seam
+  // (not a hand-copied excerpt) so a future edit to the constant cannot
+  // silently reintroduce it.
+  test("the registered note tool's description teaches indexes, not collects, with no flow/branch language", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+
+      const { toolImpl, descriptions } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        reviewableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      });
+
+      const description = descriptions.get("note")!;
+      expect(description).toContain("indexes");
+      expect(description).not.toContain("collects");
+      expect(description).not.toContain("out-of-branch");
+      expect(description).not.toContain("flow");
+      expect(description).not.toContain("branch");
+      // The current contract: entries are bare-or-`{turn, tags}`, and
+      // validation is phase domains + tag legality + the self-citation gate.
+      expect(description).toContain("{turn, tags}");
+      expect(description).toContain("self-citation gate");
+    } finally {
+      db?.close();
+    }
+  });
 });
 
 describe("direct write holds through the real registered handlers (ticket 05: staging is unwired)", () => {

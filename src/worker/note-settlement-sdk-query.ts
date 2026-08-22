@@ -77,7 +77,7 @@ const SETTLEMENT_ALLOWED_TOOLS = [
  * claim validity + a run summary + the job's terminal mark (see its own
  * description below).
  */
-const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
+export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "WRITE a turn's note, type/tags or edges, OR this " +
   "session's narrative — lands immediately, in this same call. Hindsight " +
   "work: supply what is missing, correct what is wrong, retract what is " +
@@ -97,17 +97,20 @@ const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "prior settlement attempt) touched a field since this dispatch's context " +
   "was read, that ONE field yields (reported in the receipt, not written) " +
   "while the other still lands. " +
-  "override/narrows/extends/collects/consume/grounds/verifies/refutes: " +
+  "override/narrows/extends/indexes/consume/grounds/verifies/refutes: " +
   "address lists — the SAME eight relations and legality validator the main " +
-  "agent's own `note` tool uses. An edge stands on its own: no prose " +
-  "citation, no pre-existing link between the two turns, and one pair may " +
-  "carry several relations at once; a structurally illegal call (wrong " +
-  "phase, an out-of-branch collects target, an illegal self-citation) is " +
-  "rejected, naming what is missing. Each has a retract… mirror " +
-  "(retractOverride …) that deletes that edge; an address carrying no " +
-  "such edge rejects the call, naming it, and nothing is deleted. " +
-  "Which relation, if any, is the Memory Rubric's own 关系 checklist " +
-  "above — this call only enforces address/phase/flow shape. " +
+  "agent's own `note` tool uses. Each entry is a bare address (untagged — " +
+  "acts on the cited turn itself) or `{turn, tags}` (acts on that lane " +
+  "instead); every tag must already be on both this turn's and the " +
+  "target's own tags. An edge stands on its own: no prose citation, no " +
+  "pre-existing link between the two turns, and one pair may carry several " +
+  "relations at once; a structurally illegal call (wrong phase, an illegal " +
+  "tag, an illegal self-citation) is rejected, naming what is missing. " +
+  "Each has a retract… mirror (retractOverride …) that deletes that edge; " +
+  "an address carrying no such edge rejects the call, naming it, and " +
+  "nothing is deleted. Which relation, if any, is the Memory Rubric's own " +
+  "vocabulary above — this call only enforces phase domains, tag legality " +
+  "and the self-citation gate. " +
   "On `session`: `title`/`content` only — type/tags/edges are refused. " +
   "A field that already holds something needs `mode.<field>`: \"write\" " +
   "replaces it whole (supply the finished text), or the edit form " +

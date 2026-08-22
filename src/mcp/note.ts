@@ -15,6 +15,7 @@ import {
   type TurnRelationRejectionReason,
 } from "../db/citations";
 import { runWriteTransaction } from "../db/database";
+import { loadLaneCheckScope, type LaneKey } from "../db/lane-checker-load";
 import { getOutgoingEdges } from "../db/memory-edges";
 import {
   closeNoteDebtAsDeclined,
@@ -27,6 +28,7 @@ import {
   checkSegmentMembershipTagGate,
   formatSegmentMembershipGateRejection,
   getAttachedSegmentIds,
+  getOwningSegmentId,
   getSegment,
   reassignSegmentMembers,
   type ReassignSegmentMembersResult,
@@ -52,6 +54,12 @@ import {
   type FieldMode,
   type FieldResolution,
 } from "./field-mode";
+import {
+  canonicalTagSet,
+  DEFAULT_SEGMENT,
+  deriveLaneInterpretation,
+  laneToken,
+} from "../shared/lane-interpretation";
 import { isSegmentEra } from "../segment-era";
 import { formatBudgetWarning, formatNoteBudget } from "../shared/note-budget";
 import {
@@ -75,6 +83,7 @@ import {
   phasesForTypes,
   RELATION_FIELD_NAME,
   validateRelationTarget,
+  type RelationEdgeFact,
   type TurnEdgeRelation,
   type TurnPhase,
 } from "../shared/turn-phase";
@@ -775,8 +784,22 @@ function checkRelationTargetPhase(
  * `grounds` address token this call carried (there is ordinarily exactly
  * one, but nothing stops a caller repeating it), so a failed check names
  * every one of them the same way `phaseIssues` names its own rejections.
+ *
+ * Round-4 review #1: the OLD version of this function asked only "did the
+ * citing turn EVER write a tagged `indexes` edge" — `getOutgoingEdges`'s own
+ * historical rows, never re-examined against a LATER override written by
+ * anyone else, so a lane reopened (or repudiated) since this turn's
+ * declaration still read as legal. The fix loads the FULL lane(s) this turn
+ * declared (every tagged `indexes` edge among its own outgoing edges) via
+ * `loadLaneCheckScope`'s `"lanes"` scope — the same read-only adapter the
+ * lane checker uses — and reduces them with `deriveLaneInterpretation`
+ * (`shared/lane-interpretation.ts`; turn order, not edge-array order), then
+ * credits a declaration only when its lane's CURRENT terminus is still this
+ * turn. Exported so the settlement facade (`note-settlement-turn-facade.ts`)
+ * shares this one derivation instead of re-deriving it from a narrower,
+ * stale query of its own.
  */
-function checkSelfGroundsTerminusPostWrite(
+export function checkSelfGroundsTerminusPostWrite(
   db: Database,
   citingTurnId: number,
   selfGroundsRaws: readonly string[],
@@ -784,8 +807,38 @@ function checkSelfGroundsTerminusPostWrite(
   if (selfGroundsRaws.length === 0) {
     return null;
   }
-  const edges = getOutgoingEdges(db, { kind: "turn", id: citingTurnId });
-  const result = checkSelfGroundsTerminus(edges);
+
+  // Every tag set this turn has EVER declared a terminus for (its own
+  // outgoing tagged `indexes` edges) — the candidate lanes Gate C must
+  // re-examine against the live graph.
+  const declaredTagSets = new Map<string, string[]>();
+  for (const edge of getOutgoingEdges(db, { kind: "turn", id: citingTurnId })) {
+    if (edge.relation !== "indexes" || edge.tags.length === 0) {
+      continue;
+    }
+    const canon = canonicalTagSet(edge.tags);
+    declaredTagSets.set(canon.join("\u0001"), canon);
+  }
+
+  const segmentId = getOwningSegmentId(db, citingTurnId);
+  const segment = segmentId === null ? DEFAULT_SEGMENT : String(segmentId);
+  const laneKeys: LaneKey[] = [...declaredTagSets.values()].map((tagSet) => ({ segment, tagSet }));
+
+  const facts: RelationEdgeFact[] = [];
+  if (laneKeys.length > 0) {
+    const projection = loadLaneCheckScope(db, { kind: "lanes", laneKeys });
+    const interpretation = deriveLaneInterpretation(projection.turns, projection.edges);
+    for (const key of laneKeys) {
+      const lane = interpretation.laneByToken.get(laneToken(key.segment, key.tagSet));
+      facts.push({
+        relation: "indexes",
+        tags: key.tagSet,
+        isCurrentTerminus: lane?.declaration.terminus === citingTurnId,
+      });
+    }
+  }
+
+  const result = checkSelfGroundsTerminus(facts);
   if (result.ok) {
     return null;
   }

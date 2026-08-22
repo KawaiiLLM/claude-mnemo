@@ -395,3 +395,71 @@ describe("load-bearing property: no edge ever points at a turn absent from the p
     }
   });
 });
+
+describe("turn-order key (round-4 review #2) — reduction follows (session, prompt_number), never row id", () => {
+  test("a backfilled turn's larger row id does not make its declaration 'later' — the adapter supplies the true prompt-number order", () => {
+    const sessionId = seedSession();
+    // Inserted in REVERSE prompt-number order — prompt 2 gets the SMALLEST
+    // row id, prompt 0 the LARGEST — simulating a backfill: an id ordering
+    // that inverts the turns' true conversational position.
+    const promptTwo = insertTurn(sessionId, 2);
+    const promptOne = insertTurn(sessionId, 1);
+    const promptZero = insertTurn(sessionId, 0);
+    tagEdge(promptTwo, promptZero, "indexes", ["lane"]);
+    tagEdge(promptOne, promptZero, "indexes", ["lane"]);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 0,
+      promptEnd: 2,
+    });
+    const turnOrders = new Map(projection.turns.map((turn) => [turn.id, turn.order]));
+    // The adapter's own `order` must rank strictly by prompt_number, not id:
+    // promptTwo (smallest id) must carry the LARGEST order.
+    expect(turnOrders.get(promptTwo)!).toBeGreaterThan(turnOrders.get(promptOne)!);
+    expect(turnOrders.get(promptOne)!).toBeGreaterThan(turnOrders.get(promptZero)!);
+
+    const result = checkLanes(projection.turns, projection.edges);
+    // A reducer that (incorrectly) sorted by raw id would process promptOne
+    // (id 2) before promptTwo (id 1) is false here since ids run
+    // promptTwo < promptOne < promptZero — sorting by id would process
+    // promptTwo FIRST and promptOne LAST, landing terminus=promptOne. True
+    // prompt-number order processes promptOne (prompt 1) before promptTwo
+    // (prompt 2), so promptTwo's declaration must win.
+    expect(result.lanes[0]!.declaration.terminus).toBe(promptTwo);
+  });
+});
+
+describe("segment-global component widening (round-4 review #4a)", () => {
+  test("R2 reaches a member two hops away through the segment's OTHER members, not just a one-hop neighbourhood", () => {
+    const sessionId = seedSession();
+    const h1 = insertTurn(sessionId, 1);
+    const h2 = insertTurn(sessionId, 2);
+    const h3 = insertTurn(sessionId, 3);
+    const h4 = insertTurn(sessionId, 4);
+    const segment = createSegment(db, { title: "hop segment", nowEpoch: NOW });
+    addSegmentMembers(db, segment.id, [h1, h2, h3, h4], NOW);
+
+    // Lane members are h1/h4 only (the sole tagged edge). h1 and h4 are
+    // connected to each other ONLY through two untagged `consume` hops via
+    // h2 and h3 — a one-hop-from-a-member load would see h2 (touches h1)
+    // and h3 (touches h4) but never the h3->h2 edge between them, since
+    // neither h2 nor h3 is itself a lane member.
+    tagEdge(h4, h1, "indexes", ["lane"]);
+    tagEdge(h2, h1, "consume", []);
+    tagEdge(h3, h2, "consume", []);
+    tagEdge(h4, h3, "consume", []);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "lanes",
+      laneKeys: [{ segment: String(segment.id), tagSet: ["lane"] }],
+    });
+    expect(
+      projection.edges.some((edge) => edge.citingId === h3 && edge.citedId === h2 && edge.relation === "consume"),
+    ).toBe(true);
+
+    const result = checkLanes(projection.turns, projection.edges);
+    expect(result.components[0]!.componentCount).toBe(1);
+  });
+});

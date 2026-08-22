@@ -462,11 +462,20 @@ describe("tool surface", () => {
     expect(shape.grounds.description).toContain(
       "with design and spec in one turn, each artifact grounds directly",
     );
-    // rubric-v10 ticket 02 (Gate C): self-citation is now a post-transaction
-    // tagged-indexes terminus declaration, not a flow-derived settlement+
-    // implementer condition.
+    // rubric-v10 ticket 02 (Gate C); round-4 review #1 hardened it: self-
+    // citation reads as two conditions — an implementer half (delivery-phase
+    // type, checked pre-write) and a CURRENT-terminus half (post-transaction,
+    // stale after a later override), not the old flow-derived settlement+
+    // implementer condition and not a "carries a tagged indexes edge, ever"
+    // reading either.
     expect(shape.grounds.description).toContain(
-      "may cite the citing turn itself only when, after this call's edges land, this turn carries a TAGGED indexes edge",
+      "may cite the citing turn itself only when this turn's own type carries a delivery-phase word",
+    );
+    expect(shape.grounds.description).toContain(
+      "is the CURRENT terminus of a lane it declared via a TAGGED indexes edge",
+    );
+    expect(shape.grounds.description).toContain(
+      "a later override that reopens or repudiates that declaration means it no longer qualifies",
     );
   });
 

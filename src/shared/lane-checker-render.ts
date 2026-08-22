@@ -1,12 +1,13 @@
 import type {
   LaneCheckerResult,
   LaneComponentReport,
+  LaneCrossSegmentWarning,
   LaneFoldedPaths,
   LaneMember,
   LanePathReport,
   LaneStatsReport,
 } from "./lane-checker";
-import { DEFAULT_SEGMENT, type LaneKey } from "./lane-interpretation";
+import { DEFAULT_SEGMENT, laneToken, type LaneKey } from "./lane-interpretation";
 
 /**
  * The lane checker's two renderers (rubric-v10 ticket 06). Both consume
@@ -96,6 +97,18 @@ function renderFoldedPaths(folded: LaneFoldedPaths): string {
   return "folded pathCount=" + folded.pathCount + " (citing turns folded: " + folding + ")";
 }
 
+function renderForkJoin(path: LanePathReport): string | null {
+  if (path.forkNodes.length === 0 && path.joinNodes.length === 0) {
+    return null;
+  }
+  return (
+    "fork: " +
+    (path.forkNodes.join(",") || "-") +
+    " join: " +
+    (path.joinNodes.join(",") || "-")
+  );
+}
+
 function renderPathReport(path: LanePathReport): string[] {
   const lines: string[] = [];
   if (path.status === "skipped") {
@@ -107,6 +120,10 @@ function renderPathReport(path: LanePathReport): string[] {
         "); starts: " +
         (path.starts.join(",") || "-"),
     );
+    const skippedForkJoin = renderForkJoin(path);
+    if (skippedForkJoin) {
+      lines.push("  " + skippedForkJoin);
+    }
     return lines;
   }
   lines.push(
@@ -123,7 +140,38 @@ function renderPathReport(path: LanePathReport): string[] {
   if (path.folded) {
     lines.push("  " + renderFoldedPaths(path.folded));
   }
+  const forkJoin = renderForkJoin(path);
+  if (forkJoin) {
+    lines.push("  " + forkJoin);
+  }
   return lines;
+}
+
+function renderSharedNodes(shared: LaneCheckerResult["multiLaneComponents"][number]): string[] {
+  return shared.sharedNodes.map(
+    (node) =>
+      "  shared T" +
+      node.id +
+      (node.designedShape ? " (designed fork/merge)" : " (judgment)") +
+      ": " +
+      node.citingLanesByStance.map(formatTagSet).join(", "),
+  );
+}
+
+function renderCrossSegmentWarning(warning: LaneCrossSegmentWarning): string {
+  return (
+    "⚠ T" +
+    warning.citingId +
+    "(" +
+    warning.citingSegment +
+    ") -> T" +
+    warning.citedId +
+    "(" +
+    warning.citedSegment +
+    ") {" +
+    warning.tagSet.join(",") +
+    "}"
+  );
 }
 
 /**
@@ -161,6 +209,7 @@ export function renderLaneCheckerReports(result: LaneCheckerResult): string {
   } else {
     for (const shared of result.multiLaneComponents) {
       sections.push("component@" + shared.representative + ": " + shared.lanes.map(formatTagSet).join(", "));
+      sections.push(...renderSharedNodes(shared));
     }
   }
 
@@ -171,6 +220,17 @@ export function renderLaneCheckerReports(result: LaneCheckerResult): string {
   } else {
     for (const path of result.paths) {
       sections.push(...renderPathReport(path));
+    }
+  }
+
+  sections.push("");
+  sections.push("## Cross-segment warnings");
+  if (result.warnings.length === 0) {
+    sections.push("(none)");
+  } else {
+    sections.push(result.warnings.length + " cross-segment tagged edge(s):");
+    for (const warning of result.warnings) {
+      sections.push(renderCrossSegmentWarning(warning));
     }
   }
 
@@ -219,8 +279,9 @@ function truncateToColumns(line: string): string {
   return line.slice(0, MAX_DIGRAPH_COLUMNS - 3) + "...";
 }
 
+/** Segment + exact canonical tag set equality — via `laneToken`'s own escaped join (round-4 review #6: a plain `tagSet.join("")` collides `{"a","bc"}` with `{"ab","c"}`). */
 function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
-  return a.segment === b.segment && a.tagSet.join("") === b.tagSet.join("");
+  return laneToken(a.segment, a.tagSet) === laneToken(b.segment, b.tagSet);
 }
 
 /**

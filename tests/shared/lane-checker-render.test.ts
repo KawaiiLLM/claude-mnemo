@@ -20,7 +20,7 @@ import { DEFAULT_SEGMENT } from "../../src/shared/lane-interpretation";
 const LANE_KEY = { segment: "42", tagSet: ["ownership"] };
 
 function emptyResult(): LaneCheckerResult {
-  return { lanes: [], components: [], multiLaneComponents: [], paths: [] };
+  return { lanes: [], components: [], multiLaneComponents: [], paths: [], warnings: [] };
 }
 
 describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => {
@@ -60,6 +60,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       components: [],
       multiLaneComponents: [],
       paths: [],
+      warnings: [],
     };
 
     const text = renderLaneCheckerReports(result);
@@ -93,6 +94,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       components: [],
       multiLaneComponents: [],
       paths: [],
+      warnings: [],
     };
 
     const text = renderLaneCheckerReports(result);
@@ -114,9 +116,16 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
         },
       ],
       multiLaneComponents: [
-        { representative: 5, lanes: [LANE_KEY, { segment: "9", tagSet: ["other"] }] },
+        {
+          representative: 5,
+          lanes: [LANE_KEY, { segment: "9", tagSet: ["other"] }],
+          sharedNodes: [
+            { id: 5, citingLanesByStance: [LANE_KEY, { segment: "9", tagSet: ["other"] }], designedShape: true },
+          ],
+        },
       ],
       paths: [],
+      warnings: [],
     };
 
     const text = renderLaneCheckerReports(result);
@@ -125,6 +134,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("island@3: 3");
     expect(text).toContain("component@5:");
     expect(text).toContain("E9:{other}");
+    expect(text).toContain("shared T5 (designed fork/merge)");
   });
 
   test("report 4 prints a skipped lane's reason and an ok lane's folded count", () => {
@@ -140,6 +150,8 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           starts: [1, 2],
           terminus: null,
           pathCount: null,
+          forkNodes: [],
+          joinNodes: [],
           folded: null,
         },
         {
@@ -148,9 +160,12 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           starts: [1],
           terminus: 3,
           pathCount: 2,
+          forkNodes: [1],
+          joinNodes: [3],
           folded: { citingTurnsFolded: [8], pathCount: 2 },
         },
       ],
+      warnings: [],
     };
 
     const text = renderLaneCheckerReports(result);
@@ -159,6 +174,22 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("paths: 2 (terminus T3");
     expect(text).toContain("folded pathCount=2");
     expect(text).toContain("citing turns folded: 8");
+    expect(text).toContain("fork: 1 join: 3");
+  });
+
+  test("cross-segment warnings render under a ⚠ line with a leading count, and an empty set says so explicitly", () => {
+    const withWarnings: LaneCheckerResult = {
+      ...emptyResult(),
+      warnings: [{ citingId: 2, citedId: 1, tagSet: ["x"], citingSegment: "B", citedSegment: "A" }],
+    };
+    const text = renderLaneCheckerReports(withWarnings);
+    expect(text).toContain("## Cross-segment warnings");
+    expect(text).toContain("1 cross-segment tagged edge(s):");
+    expect(text).toContain("⚠ T2(B) -> T1(A) {x}");
+
+    const withoutWarnings = renderLaneCheckerReports(emptyResult());
+    expect(withoutWarnings).toContain("## Cross-segment warnings");
+    expect(withoutWarnings).toContain("(none)");
   });
 });
 
@@ -183,8 +214,18 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       components: [],
       multiLaneComponents: [],
       paths: [
-        { key: LANE_KEY, status: "ok", starts: [1], terminus: 3, pathCount: 1, folded: { citingTurnsFolded: [], pathCount: 1 } },
+        {
+          key: LANE_KEY,
+          status: "ok",
+          starts: [1],
+          terminus: 3,
+          pathCount: 1,
+          forkNodes: [],
+          joinNodes: [],
+          folded: { citingTurnsFolded: [], pathCount: 1 },
+        },
       ],
+      warnings: [],
     };
 
     const digraph = renderLaneDigraph(result);
@@ -210,8 +251,18 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       components: [],
       multiLaneComponents: [],
       paths: [
-        { key: LANE_KEY, status: "ok", starts: [2, 3], terminus: 1, pathCount: 2, folded: { citingTurnsFolded: [], pathCount: 2 } },
+        {
+          key: LANE_KEY,
+          status: "ok",
+          starts: [2, 3],
+          terminus: 1,
+          pathCount: 2,
+          forkNodes: [],
+          joinNodes: [1],
+          folded: { citingTurnsFolded: [], pathCount: 2 },
+        },
       ],
+      warnings: [],
     };
 
     const digraph = renderLaneDigraph(result);
@@ -244,6 +295,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       components: [],
       multiLaneComponents: [],
       paths: [],
+      warnings: [],
     };
 
     const digraph = renderLaneDigraph(result);
@@ -270,6 +322,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       components: [],
       multiLaneComponents: [],
       paths: [],
+      warnings: [],
     };
 
     const digraph = renderLaneDigraph(result);
@@ -298,8 +351,18 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       components: [],
       multiLaneComponents: [],
       paths: [
-        { key: LANE_KEY, status: "ok", starts: [1], terminus: 999, pathCount: 0, folded: { citingTurnsFolded: [], pathCount: 0 } },
+        {
+          key: LANE_KEY,
+          status: "ok",
+          starts: [1],
+          terminus: 999,
+          pathCount: 0,
+          forkNodes: [],
+          joinNodes: [],
+          folded: { citingTurnsFolded: [], pathCount: 0 },
+        },
       ],
+      warnings: [],
     };
 
     expect(() => renderLaneCheckerReports(result)).not.toThrow();

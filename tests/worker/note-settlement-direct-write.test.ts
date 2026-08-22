@@ -295,7 +295,9 @@ describe("a rejected direct write leaves no partial state (one transaction per c
   test("a self-grounds with no tagged-indexes terminus rolls back the edge it already wrote", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    updateTurnById(db, t1, { type: ["design"] });
+    // round-4 review #1: `implement` isolates Gate C (no current terminus)
+    // from the separate pre-write delivery-phase gate (`self-not-delivery`).
+    updateTurnById(db, t1, { type: ["design", "implement"] });
     const job = claimWindow(sessionDbId, 1, 1);
     const engine = createSettlementDirectWriteEngine({
       db,

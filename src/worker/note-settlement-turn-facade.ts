@@ -10,7 +10,7 @@ import {
   type TurnRelationFieldInput,
 } from "../db/citations";
 import { resolveEraCutoff } from "../db/era";
-import { getOutgoingEdges, type EdgeNode } from "../db/memory-edges";
+import type { EdgeNode } from "../db/memory-edges";
 import { closeNoteDebtAsNoted } from "../db/note-debt";
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import { getSession, updateSessionFields } from "../db/sessions";
@@ -35,6 +35,7 @@ import {
 } from "../mcp/field-mode";
 import {
   bracketBareTurnReferences,
+  checkSelfGroundsTerminusPostWrite,
   completeReadRemedyForTurnField,
   formatRelationRejections,
   formatRetractionReceipt,
@@ -59,7 +60,6 @@ import {
 } from "../shared/tag-stripping";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
 import {
-  checkSelfGroundsTerminus,
   phasesForTypes,
   validateRelationTarget,
   type TurnEdgeRelation,
@@ -1124,20 +1124,22 @@ export function evaluateSettlementTurnWrite(
     // call actually carried a self-`grounds` target, AFTER every edge this
     // call writes (retraction, then this attach) has landed — a tagged-
     // indexes declaration written earlier in the SAME attach counts too,
-    // since `getOutgoingEdges` re-reads the live table. The caller
+    // since `checkSelfGroundsTerminusPostWrite` re-reads the live table. The caller
     // (`note-settlement-direct-write.ts`'s `writeNote`) wraps this whole
     // evaluation in one transaction and throws on `ok: false`, so this
     // rejection rolls back the attach (and the retraction, and the prose/
     // review writes) it comes after — the same all-or-nothing shape a
     // pre-write rejection already gets.
     if (selfGroundsRaws.length > 0) {
-      const postEdges = getOutgoingEdges(db, { kind: "turn", id: turn.id });
-      const terminus = checkSelfGroundsTerminus(postEdges);
-      if (!terminus.ok) {
-        const message = selfGroundsRaws
-          .map((raw) => `grounds "${raw}" ${terminus.detail}`)
-          .join("; ");
-        return { ok: false, message: `relation field rejected: ${message}.` };
+      // Round-4 review #1: shares `mcp/note.ts`'s own current-terminus
+      // derivation (loads the declared lane(s) via `loadLaneCheckScope` and
+      // reduces them with `deriveLaneInterpretation`) rather than the old
+      // narrower "does this turn's own outgoing edge list carry a tagged
+      // indexes edge" query, which never saw a LATER override written by a
+      // different turn.
+      const terminusIssue = checkSelfGroundsTerminusPostWrite(db, turn.id, selfGroundsRaws);
+      if (terminusIssue) {
+        return { ok: false, message: `relation field rejected: ${terminusIssue}.` };
       }
     }
     relations = {

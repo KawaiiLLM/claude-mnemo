@@ -19,8 +19,12 @@
  *
  *   - tagged indexes     -> DECLARATION: the citing turn becomes the lane's
  *                           terminus. Latest wins, reduced in CITING-TURN
- *                           order — never edge array order (draft: "一切 lane
- *                           事件…按 turn 序归约").
+ *                           order — never edge array order, and never the
+ *                           citing turn's raw `id` either when the caller
+ *                           supplies a truer order (`LaneTurnInput.order`):
+ *                           a backfill-inserted earlier turn can carry a
+ *                           LATER row id, so `id` alone is not always
+ *                           "later" (draft: "一切 lane 事件…按 turn 序归约").
  *   - tagged override,    -> lane-local correction: the cited turn loses its
  *     same tag as this        EFFECTIVE status in this lane (a dead node)
  *     lane                    regardless of whether it currently is the
@@ -76,12 +80,24 @@ export type { TurnPhase };
 /** Segment sentinel a turn with no `segment` field shares — "the fixture has no segments" reads as one default scope. */
 export const DEFAULT_SEGMENT = "\u0000default";
 
-/** One taggable input turn. `id` doubles as the turn-order key (ascending = later) — `flows.ts`'s `FlowTurnInput` convention: "whatever id space the caller addresses turns by", assumed order-comparable. */
+/**
+ * One taggable input turn. `id` doubles as the turn-order key (ascending =
+ * later) by default — `flows.ts`'s `FlowTurnInput` convention: "whatever id
+ * space the caller addresses turns by", assumed order-comparable — UNLESS
+ * `order` is supplied, in which case reduction sorts by `order` instead:
+ * insertion id and true chronological position can diverge (a backfilled
+ * turn gets a later row id for an earlier conversational position), so a
+ * caller that knows the true order (the DB adapter, from `session_id` +
+ * `prompt_number`) must be able to say so explicitly. A plain fixture whose
+ * ids ARE already in true order needs no `order` field at all.
+ */
 export interface LaneTurnInput {
   id: number;
   type: readonly string[];
   /** Lane identity's segment half. Omitted turns share `DEFAULT_SEGMENT`. */
   segment?: string;
+  /** Explicit reduction-order key. Defaults to `id` when omitted. */
+  order?: number;
 }
 
 /** One edge assertion row (ticket 01's shape): `tags` is the row's own IMMUTABLE canonical tag set, `[]` for untagged. `citingId` is always the LATER turn (`turn-phase.ts`'s direction convention). */
@@ -111,7 +127,18 @@ export interface LaneDeclaration {
   state: LaneDeclarationState;
   /** The current terminus, or `null` when reopened/undeclared. */
   terminus: number | null;
-  /** citing turn id of the most recent reduction event touching this lane (a declaration, an in-lane override, or a global kill that closed it). `null` if no event ever touched the lane at all. */
+  /**
+   * citing turn id of the most recent lane event, in reduction order: a
+   * declaration, an in-lane override, a global kill that closed the lane, OR
+   * (once at least one of those three has ever touched the lane) a later
+   * structural continuation (a tagged narrows/extends/consume edge) — a lane
+   * keeps living after its declaration, and this field tracks that. `null`
+   * iff NO declaration/override event ever touched the lane (the pure
+   * "silence never establishes convergence" case) — a lane with only
+   * continuation edges and no declaration/override stays `null` here even
+   * though it has structural activity, preserving the undeclared/
+   * override-touched distinction the module header documents.
+   */
   latestEventTurn: number | null;
 }
 
@@ -124,10 +151,29 @@ export interface Lane {
   taggedEdges: readonly LaneEdgeInput[];
 }
 
+/** One cross-segment tagged edge — legal (never rejected), always warned. */
+export interface LaneCrossSegmentWarning {
+  citingId: number;
+  citedId: number;
+  /** Canonical tag set the edge carries. */
+  tagSet: readonly string[];
+  citingSegment: string;
+  citedSegment: string;
+}
+
 export interface LaneInterpretation {
-  /** Every enumerated lane, ordered by segment then canonical tag key — deterministic, not input order. */
+  /**
+   * Every enumerated lane, ordered by segment then canonical tag key —
+   * deterministic, not input order. A cross-segment tagged edge (citing and
+   * cited turns in different segments) enumerates its lane TWICE, once per
+   * side's segment — "the lane is enumerable from both sides' segment
+   * scans" — both copies share the same members/tagged edges/declaration
+   * state, differing only in `key.segment`.
+   */
   lanes: readonly Lane[];
   laneByToken: ReadonlyMap<string, Lane>;
+  /** Every cross-segment tagged edge, named (not merely reflected in the dual lane appearance above) — legal and warned, never rejected. */
+  warnings: readonly LaneCrossSegmentWarning[];
 }
 
 /** Dedupe + sort — the row's own canonical form (mirrors `db/memory-edges.ts`'s `canonicalizeTagSet`, redeclared here so this module stays free of any DB-layer dependency). */
@@ -169,53 +215,85 @@ export function deriveLaneInterpretation(
   edges: readonly LaneEdgeInput[],
 ): LaneInterpretation {
   const segmentOf = new Map<number, string>();
+  const orderOf = new Map<number, number>();
   for (const turn of turns) {
     segmentOf.set(turn.id, turn.segment ?? DEFAULT_SEGMENT);
+    orderOf.set(turn.id, turn.order ?? turn.id);
   }
   // A turn absent from `turns` (partial-coverage input, `lane-checker.ts`'s
-  // coverage report) still needs a segment to group by — it falls into the
-  // CITING side's own segment lookup, defaulting when even the citing turn
-  // is unknown, so an incomplete projection degrades to "one extra default
-  // scope" rather than throwing.
+  // coverage report) still needs a segment/order to group and sort by — it
+  // falls back to its own id for both, so an incomplete projection degrades
+  // to "one extra default scope, sorted by its own id" rather than throwing.
   const segmentFor = (id: number): string => segmentOf.get(id) ?? DEFAULT_SEGMENT;
+  const orderFor = (id: number): number => orderOf.get(id) ?? id;
 
-  // ---- lane enumeration: group by (citing turn's segment, exact tag set) ----
+  // ---- lane enumeration: group by (a segment, exact tag set) ----
   // A cross-segment tagged edge (citing/cited segments differ) is a real,
-  // allowed shape (draft: "偶尔耦合允许") — this module assigns it to the
-  // CITING side's lane only; a dual-appearance / cross-segment warning view
-  // is left to a caller that wants it (out of this ticket's required scope).
+  // allowed shape (draft: "偶尔耦合允许") — DUAL APPEARANCE: it registers in
+  // BOTH sides' segment groups, so a caller scanning either segment's lanes
+  // finds it, and is recorded once in `warnings` (legal, warned, never
+  // rejected — the write gate's business is elsewhere, not this module's).
   const groups = new Map<string, MutableLaneGroup>();
-  for (const edge of edges) {
-    const canon = canonicalTagSet(edge.tags);
-    if (canon.length === 0) continue; // untagged: forms no lane (requirement 2)
-    const segment = segmentFor(edge.citingId);
+  const warnings: LaneCrossSegmentWarning[] = [];
+  function addToGroup(segment: string, canon: readonly string[], edge: LaneEdgeInput): string {
     const token = laneToken(segment, canon);
     let group = groups.get(token);
     if (group === undefined) {
-      group = { segment, tagSet: canon, edges: [] };
+      group = { segment, tagSet: [...canon], edges: [] };
       groups.set(token, group);
     }
     group.edges.push(edge);
+    return token;
+  }
+  for (const edge of edges) {
+    const canon = canonicalTagSet(edge.tags);
+    if (canon.length === 0) continue; // untagged: forms no lane (requirement 2)
+    const citingSegment = segmentFor(edge.citingId);
+    const citedSegment = segmentFor(edge.citedId);
+    addToGroup(citingSegment, canon, edge);
+    if (citedSegment !== citingSegment) {
+      addToGroup(citedSegment, canon, edge);
+      warnings.push({
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        tagSet: canon,
+        citingSegment,
+        citedSegment,
+      });
+    }
   }
 
-  // ---- unified event reduction, in CITING-TURN order (never edge array order) ----
+  // ---- unified event reduction, in TURN-ORDER (never edge array order, never raw id when `order` differs) ----
   const events: ReduceEvent[] = [];
+  function pushEvent(citingId: number, citedId: number, relation: "indexes" | "override", token: string | null): void {
+    events.push({ citingId, citedId, relation, token });
+  }
   for (const edge of edges) {
     if (edge.relation !== "indexes" && edge.relation !== "override") continue;
     const canon = canonicalTagSet(edge.tags);
     if (canon.length === 0) {
       if (edge.relation === "override") {
-        events.push({ citingId: edge.citingId, citedId: edge.citedId, relation: "override", token: null });
+        pushEvent(edge.citingId, edge.citedId, "override", null);
       }
       // an untagged indexes is free aggregation — no lane event at all.
       continue;
     }
-    const segment = segmentFor(edge.citingId);
-    const token = laneToken(segment, canon);
-    if (!groups.has(token)) continue; // defensive: every tagged indexes/override is itself a tagged edge, so its group always exists — kept for robustness against malformed input.
-    events.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation as "indexes" | "override", token });
+    const citingSegment = segmentFor(edge.citingId);
+    const citedSegment = segmentFor(edge.citedId);
+    const citingToken = laneToken(citingSegment, canon);
+    // defensive: every tagged indexes/override is itself a tagged edge, so
+    // its group(s) always exist — kept for robustness against malformed input.
+    if (groups.has(citingToken)) {
+      pushEvent(edge.citingId, edge.citedId, edge.relation, citingToken);
+    }
+    if (citedSegment !== citingSegment) {
+      const citedToken = laneToken(citedSegment, canon);
+      if (groups.has(citedToken)) {
+        pushEvent(edge.citingId, edge.citedId, edge.relation, citedToken);
+      }
+    }
   }
-  events.sort((a, b) => a.citingId - b.citingId);
+  events.sort((a, b) => orderFor(a.citingId) - orderFor(b.citingId) || a.citingId - b.citingId);
 
   const terminusOf = new Map<string, number | null>();
   const everDeclared = new Map<string, boolean>();
@@ -273,6 +351,28 @@ export function deriveLaneInterpretation(
     }
   }
 
+  // ---- structural continuations advance latestEventTurn too, but only for
+  // a lane that has ALREADY been touched by a declaration/override event —
+  // an untouched lane's latestEventTurn stays `null` ("no reduction event
+  // ever touched the lane"), preserving the two-undeclared-subcases contract
+  // the module header documents; a touched lane keeps tracking its freshest
+  // activity as the lane continues living past that event. ----
+  for (const [token, group] of groups) {
+    const current = latestEventTurn.get(token) ?? null;
+    if (current === null) continue;
+    let bestId = current;
+    let bestOrder = orderFor(current);
+    for (const edge of group.edges) {
+      if (edge.relation === "indexes" || edge.relation === "override") continue; // already accounted above
+      const order = orderFor(edge.citingId);
+      if (order > bestOrder || (order === bestOrder && edge.citingId > bestId)) {
+        bestOrder = order;
+        bestId = edge.citingId;
+      }
+    }
+    latestEventTurn.set(token, bestId);
+  }
+
   // ---- assemble lanes, deterministic order (segment, then tag key) ----
   const tokens = [...groups.keys()].sort();
   const lanes: Lane[] = [];
@@ -305,5 +405,5 @@ export function deriveLaneInterpretation(
     laneByToken.set(token, lane);
   }
 
-  return { lanes, laneByToken };
+  return { lanes, laneByToken, warnings };
 }

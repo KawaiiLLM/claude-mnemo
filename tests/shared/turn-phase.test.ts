@@ -388,7 +388,25 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       }
     });
 
-    test("a self-grounds is admitted at this layer regardless of phase — a decision-only turn included", () => {
+    test("a self-grounds is admitted at this layer for a delivery-carrying turn, whatever the other phase", () => {
+      const result = validateRelationTarget({
+        relation: "grounds",
+        citingPhases: new Set(["decision", "delivery"]),
+        targetKind: "turn",
+        citedPhases: new Set(["decision", "delivery"]),
+        isSelfReference: true,
+      });
+      expect(result).toEqual({ ok: true });
+    });
+
+    // round-4 review #1: the implementer half is checked HERE, pre-write —
+    // a decision-only turn (no `delivery` in its own phase set) can never
+    // self-ground, whether or not it holds some lane's terminus. The OLD
+    // version of this layer admitted a self-grounds unconditionally on
+    // phase, deferring the whole legality question to post-transaction Gate
+    // C — this is the fix, caught by round-4 review #1 as a "decision-only
+    // self-grounds REJECTS" contract requirement.
+    test("a decision-only turn's self-grounds is refused right here, before Gate C ever runs", () => {
       const result = validateRelationTarget({
         relation: "grounds",
         citingPhases: new Set(["decision"]),
@@ -396,7 +414,11 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
         citedPhases: new Set(["decision"]),
         isSelfReference: true,
       });
-      expect(result).toEqual({ ok: true });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("self-not-delivery");
+        expect(result.detail).toContain("delivery");
+      }
     });
 
     test("a self-grounds carrying tags still rejects — grounds is never taggable, self or not", () => {
@@ -419,14 +441,40 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
   // SEPARATE post-transaction function — see this module's header for why it
   // cannot live inside `validateRelationTarget`.
   describe("checkSelfGroundsTerminus / hasTaggedTerminusDeclaration — Gate C, post-transaction", () => {
-    test("a tagged indexes edge among the citing turn's outgoing edges makes it legal", () => {
-      const edges = [{ relation: "indexes", tags: ["lane-a"] }];
+    test("a tagged indexes edge PROVEN to be the current terminus makes it legal", () => {
+      const edges = [{ relation: "indexes", tags: ["lane-a"], isCurrentTerminus: true }];
       expect(hasTaggedTerminusDeclaration(edges)).toBe(true);
       expect(checkSelfGroundsTerminus(edges)).toEqual({ ok: true });
     });
 
+    // round-4 review #1's own headline fix: the OLD version of this pure
+    // function asked only "is there a tagged indexes fact" and treated that
+    // as sufficient — exactly the stale-declaration bug. A fact that is
+    // relation=indexes/tagged but carries NO positive proof of currency (the
+    // caller's own narrower, pre-fix evidence shape) must now fail closed,
+    // not pass by omission.
+    test("a tagged indexes fact with NO current-terminus proof fails closed — the stale-declaration case", () => {
+      const edges = [{ relation: "indexes", tags: ["lane-a"] }];
+      expect(hasTaggedTerminusDeclaration(edges)).toBe(false);
+      const result = checkSelfGroundsTerminus(edges);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("self-not-terminus");
+      }
+    });
+
+    test("isCurrentTerminus explicitly false — a lane reopened or repudiated since the declaration — still rejects", () => {
+      const edges = [{ relation: "indexes", tags: ["lane-a"], isCurrentTerminus: false }];
+      expect(hasTaggedTerminusDeclaration(edges)).toBe(false);
+      const result = checkSelfGroundsTerminus(edges);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("self-not-terminus");
+      }
+    });
+
     test("an UNTAGGED indexes edge does not count — untagged indexes is free aggregation, not a terminus declaration", () => {
-      const edges = [{ relation: "indexes", tags: [] }];
+      const edges = [{ relation: "indexes", tags: [], isCurrentTerminus: true }];
       expect(hasTaggedTerminusDeclaration(edges)).toBe(false);
       const result = checkSelfGroundsTerminus(edges);
       expect(result.ok).toBe(false);
@@ -436,7 +484,7 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
     });
 
     test("a tagged edge of a DIFFERENT relation does not count — only indexes declares a terminus", () => {
-      const edges = [{ relation: "override", tags: ["lane-a"] }];
+      const edges = [{ relation: "override", tags: ["lane-a"], isCurrentTerminus: true }];
       expect(hasTaggedTerminusDeclaration(edges)).toBe(false);
     });
 
