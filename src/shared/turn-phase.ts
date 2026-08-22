@@ -223,6 +223,21 @@ export function isTaggableRelation(relation: TurnEdgeRelation): boolean {
   return TAGGABLE_RELATIONS.has(relation);
 }
 
+/**
+ * The two relations that build a decision BRANCH — `narrows`/`extends`.
+ * Relocated here (rubric-v10 ticket 04) from the retired `shared/flows.ts`
+ * (the decision-flow derivation, whose read-side callers all retire with
+ * this ticket): this module is the vocabulary's one stated home (see
+ * `flows.ts`'s own former header note, "this module therefore does NOT
+ * re-declare the relation vocabulary, whose one home is the write path"),
+ * so a constant naming a subset of that vocabulary belongs here rather than
+ * in a new file. The one surviving reader is `shared/lane-checker.ts`
+ * (ticket 05's checker), which needs the same two words for its own
+ * component/path reports — unrelated to flow derivation, which no longer
+ * exists anywhere in the tree.
+ */
+export const STANCE_RELATIONS: ReadonlySet<TurnEdgeRelation> = new Set(["narrows", "extends"]);
+
 /** `verifies`/`refutes`: the SOURCE must be evidence-phase; the target decision- or delivery-phase — never evidence ([S15069/T1215]). */
 const EVIDENCE_SOURCE_RELATIONS: readonly TurnEdgeRelation[] = ["verifies", "refutes"];
 

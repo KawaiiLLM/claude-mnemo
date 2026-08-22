@@ -58,7 +58,7 @@
  * the "citing turn is NOT a lane member" filter.
  */
 
-import { STANCE_RELATIONS } from "./flows";
+import { STANCE_RELATIONS } from "./turn-phase";
 import {
   canonicalTagSet,
   deriveLaneInterpretation,
