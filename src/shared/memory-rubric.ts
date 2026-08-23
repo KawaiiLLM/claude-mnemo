@@ -291,6 +291,48 @@ import { createHash } from "node:crypto";
  * Fields' length paragraph, ruling-supplement, segment examples and the
  * roster/create bullets, plus the redundant "lanes are phase-local" tail.
  * Budget after: 9435 rendered chars, 65 under the cap.
+ *
+ * Still v10 (tag-mandate spec, .scratch/tag-mandate/, ticket 01; rulings
+ * [S15069/T1412] and [T1415], the T1424 peer round, and the T1440-T1451
+ * production campaign): §Relations takes the MANDATE and the lane laws.
+ * extends/narrows lose their untagged form — the only two words whose
+ * semantics IS continuation now name the line they continue, while
+ * override/consume/indexes stay optional and cross-phase words stay bare.
+ * Five laws join the lane definition: SHAPE (one source, one sink; diamonds
+ * that re-merge are legal, dangling parallel heads/tails are not; a node may
+ * start or end several lanes); IDENTITY UNIQUENESS (one exact set names one
+ * lane — one component, one phase — and membership comes from the tagged-edge
+ * DAG, never from a turn merely carrying the nouns); WHOLE-LANE PHASE (a
+ * multi-type middle node launders no phase switch, so edge-local "any
+ * pairing" legality never lets p drift along the chain); BRANCH v3 in the
+ * ruled SUPERSET direction (B branches A when B starts inside A with a PROPER
+ * SUPERSET of A's tags; inheriting the exact set is a REOPEN); and the
+ * CROSS-LANE CORRECTION idiom (branch rooted at the corrected node, the
+ * citing turn carrying the corrected lane's tags plus the branch word).
+ * The campaign's four amendments land as law in the same pass: R1 dead node =
+ * global override only, with the victim-as-core CONTENT condition (live is
+ * not yet core); R2 consume same-phase / grounds cross-phase as the GENERAL
+ * law, not an evidence→decision special case; R3 the completion-vs-correction
+ * boundary sentence on `narrows` (a blocker satisfied by doing the work is
+ * completion, not a correction of the blocking judgment); R4 the named PHASE
+ * SPLIT idiom on `grounds`, with the consume caveat.
+ *
+ * The amendments cost ~1.2K, so this is also the document's deepest
+ * compression pass — the type vocabulary, the Fields table's continuation
+ * indent, the lane paragraph, the word bullets, the convergence paragraph,
+ * the principles, the closing paragraph, §Segments and §Policy all tightened,
+ * with every guarded semantic preserved and every touched pin re-stated in
+ * tests/shared/memory-rubric.test.ts alongside what it kept. TWO deliberate
+ * removals, named here so they are never rediscovered as accidents: the
+ * burial idiom "(bury an abandoned line: repudiate, then declare over the
+ * wreck)" — mechanically derivable from the untagged override and tagged
+ * indexes taught in the same section — and §Segments' two worked examples of
+ * an OBVIOUS mismatch, whose law ("correct only OBVIOUS mismatches, leave
+ * doubt alone") stays. Version stays v10 on the b2523de precedent: §Relations
+ * is amended, not replaced. The mandate does retire a previously legal form,
+ * so a bump to v11 would also be defensible — the version string lives only
+ * in this file and its guard, and the hash is the real drift guard.
+ * Budget after: 9461 rendered chars, 38 under the cap.
  */
 export const MEMORY_RUBRIC_VERSION = "v10";
 
@@ -299,55 +341,52 @@ export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v10
 ## Fields
 
 Turn note — three fields, three jobs:
-- title   — the INDEX. One sentence saying what this turn is doing, enough to
-            recognise it among titles alone. Not the conclusion.
+- title   — the INDEX. One sentence on what this turn is doing, enough to
+  recognise it among titles alone. Not the conclusion.
 - content — the CONCLUSIONS. Every useful decision this turn produced, each
-            rejected option with its reason. Assumes the title was just read.
+  rejected option with its reason. Assumes the title was just read.
 - insight — REUSABLE experience. A lesson still true once this turn is
-            forgotten, in this project or beyond. Not a conclusion of this turn.
+  forgotten, in this project or beyond. Not a conclusion of this turn.
 
-Length tracks OUTPUT, not effort: nothing produced is a skip, little
-produced is terse. Process detail belongs to replay — a summary cannot hold
-it. Content leads with its conclusions: a reader's budget cuts the tail, so
-support comes after the decision.
+Length tracks OUTPUT, not effort: nothing produced is a skip, little produced
+is terse. Process detail belongs to replay. Content leads with its
+conclusions: a reader's budget cuts the tail, so support comes after the
+decision.
 
 type — a closed vocabulary, one meaning per word:
-- discuss — exploring problems and options; understanding produced, no ruling
-  landed. A leaning or tentative position short of commitment is still discuss.
-- research — consulting external sources, code or literature; produces facts
-  about what the world or the codebase currently is.
-- measure — a re-checkable result produced this turn: an experiment, a
-  statistic, a count.
-- design — making or revising a commitment to be honored from now on: a
-  mechanism, a contract, a threshold.
-- correction — correcting an earlier wrong conclusion or direction; the error
-  is in the JUDGMENT (a code defect is fix; code changed because the
-  implementation drifted from its design = correction+fix).
-- implement — writing settled design into new artifacts: code, docs, tests.
-- refactor — subtraction and reshaping: removing capability, migrating form,
-  no new behavioral commitment (a defect fixed along the way = refactor+fix).
-- fix — repairing a defect so an existing commitment holds again.
-- delegate — dispatching work to a subagent or an external executor
-  (acceptance returning within the same turn = delegate+review).
-- review — checking whether a work product meets its bar; when this turn also
-  makes or rejects a ruling, add the decision phase per the ruling-supplement
-  rule below.
-- ops — delivery (releases, commits, publishing specs, cutting tickets) and
-  operations (probes, restarts, data repair); purely transcribing a spec =
-  ops, with new rulings = design+ops.
+- discuss — options explored, understanding produced, no ruling landed; a
+  leaning short of commitment is still discuss.
+- research — external sources, code or literature consulted: facts about what
+  the world or codebase now is.
+- measure — a re-checkable result produced this turn: experiment, statistic,
+  count.
+- design — a commitment to honor from now on, made or revised: mechanism,
+  contract, threshold.
+- correction — an earlier wrong conclusion or direction corrected; the error
+  is in the JUDGMENT (a code defect is fix; code drifting from design =
+  correction+fix).
+- implement — settled design written into new artifacts: code, docs, tests.
+- refactor — subtraction and reshaping: capability removed, form migrated, no
+  new behavioral commitment (a defect fixed on the way = refactor+fix).
+- fix — a defect repaired so an existing commitment holds again.
+- delegate — work dispatched to a subagent or external executor (acceptance
+  in the same turn = delegate+review).
+- review — a work product checked against its bar; a ruling made or rejected
+  here adds the decision phase (supplement below).
+- ops — delivery (releases, commits, specs, tickets) and operations (probes,
+  restarts, repair); transcribing a spec = ops, new rulings = design+ops.
 - Phases: evidence = research/measure · decision = design/discuss/correction
   · delivery = the rest.
-- Unsettling a conclusion across phases must carry both types; a multi-type
-  turn's phase is a SET — an edge is legal when any pairing is.
+- Unsettling a conclusion across phases carries both types; a multi-type
+  turn's phase is a SET.
 - No word fits → leave it empty, never force one.
-- Ruling supplement: when the user's ruling or veto lands on this turn, keep
-  the words for what happened and ADD the decision phase — a new or revised
-  commitment → +design; a corrected conclusion → +correction. Never replaces,
-  never invented: no ruling, no supplement.
+- Ruling supplement: a user ruling or veto landing here keeps the words for
+  what happened and ADDS the decision phase — new or revised commitment →
+  +design, corrected conclusion → +correction; never invented.
 
 tags — nouns, naming things: project first, then subsystem/artifact; activity
-words belong to type. Lowercase-hyphenated; reuse existing tags first; on
-discovering synonym drift, merge into the earlier word.
+words belong to type. Lowercase-hyphenated; reuse existing tags first, merging
+synonym drift into the earlier.
 
 ## Relations (turn→turn; recorded from the citing turn toward the cited)
 
@@ -358,92 +397,95 @@ no special cases.
 A LANE is a separable sub-workflow inside one phase, under a segment,
 identified by an exact SET of tags scoped to that segment: a DAG of tagged
 edges over AT LEAST TWO nodes, every node's own tags containing the lane's.
-Lanes never cross phases; only cross-phase relations connect lanes of
-different phases. A lane may start from another lane's node — adding a tag
-to the parent's set opens a new branch, inheriting the exact set REOPENS a
-closed lane; the machine knows only exact sets, parenthood is narration.
-A lane's tag set is as SMALL as discrimination allows, and the segment's own
-tags never join it — they gate membership, not lanes. An isolated
-single-turn product needs no tag and joins no lane, and is still cited
-cross-phase as usual.
+One exact set names ONE lane — one component, one phase, ONE source, ONE
+sink; diamonds re-merge legally, dangling parallel heads or tails do not, and
+a node may start or end SEVERAL lanes. Membership is that DAG, never the
+nouns a turn carries, and every member carries a type in the lane's phase p,
+which no edge-level pairing may change along the chain — a multi-type middle
+node launders no phase switch. Lane B BRANCHES lane A when B starts inside A
+with a PROPER SUPERSET of A's tags; inheriting the exact set REOPENS a closed
+lane instead, and the machine knows only exact sets, parenthood is narration.
+Correcting another lane's result is an event of THAT family: branch at the
+corrected node, the citing turn carrying its tags plus the branch word and
+the edge the branch's set. A lane's tag set is as SMALL as discrimination
+allows, never including the segment's own. An isolated single-turn product
+needs no tag and joins no lane; it is still cited as usual.
 
-Eight words. Same-phase words MAY carry lane tags, none must; cross-phase
-words never do:
+Eight words. extends/narrows MUST carry lane tags — continuation names its
+line; override/consume/indexes MAY, cross-phase words never do:
 · override — the cited's main result no longer applies; this node fully
   replaces it. Tagged: an in-lane correction — the lane reopens until a
-  fresh declaration. Untagged: a global repudiation of the conclusion, and
-  every lane it currently closes loses its terminus.
-· narrows  — part of the cited's result no longer applies; this node
-  corrects it.
+  fresh declaration. Untagged: global repudiation — every lane it closes
+  loses its terminus.
+· narrows  — part of the cited's CLAIM is withdrawn; this node corrects it.
+  A blocker satisfied by doing the work is completion (extends), not
+  correction of the blocking judgment.
 · extends  — the cited's result still applies; this node expands or
   supplements it.
 · consume  — this node used its product and does not answer for it.
-· indexes  — convergence, aggregation, indexing: this node stands as the
-  representative, and the outside reaches the indexed through it. Tagged:
-  declares that lane CONVERGED — this node is its terminus and indexes the
-  lane's core valid nodes. Untagged: free aggregation (a release indexing
-  the artifacts it ships). An indexed node is never also consumed,
-  unless both edges carry lane tags.
+  SAME-PHASE use only: a cross-phase dependency is grounds, always, not just
+  evidence→decision.
+· indexes  — this node represents the indexed, which the outside reaches
+  through it. Tagged: declares that lane CONVERGED — this node is its
+  terminus and indexes the lane's core valid nodes. Untagged: free
+  aggregation. An indexed node is never also consumed, unless both edges
+  carry lane tags.
 · grounds  — this node stands or falls with the cited. Where a separate
   spec turn exists, THE SPEC carries the grounds and the other artifacts
   consume that carrier; without one, each artifact grounds the decision
-  directly.
-· verifies / refutes — a check result produced this turn, for / against the
+  directly. PHASE SPLIT: a decision→delivery arc is TWO lanes hinged by
+  untagged inter-phase grounds; consume never crosses phases, seaming
+  delivery only where multi-type endpoints pair same-phase.
+· verifies / refutes — a check result this turn produced for / against the
   cited conclusion; the source must carry an evidence phase.
 
 Convergence never happens by silence: when a lane converges, its terminus
-declares it with a TAGGED indexes. All lane events — declarations,
-overrides, continuations — reduce in turn order; the latest declaration
-wins, and continuing past one is normal life (the next declaration
-supersedes it). A lane whose LATEST node is its declared terminus is
-CLOSED — VALID while any of its indexed core lives, INVALID once all are
-dead (bury an abandoned line: repudiate, then declare over the wreck);
-unconverged lanes honestly stay OPEN.
+declares it with a TAGGED indexes. All lane events reduce in turn order: the
+latest declaration wins, and continuing past one is normal life — the next
+supersedes it. A lane whose LATEST node is its declared terminus is CLOSED —
+VALID while any indexed core node lives, INVALID once all are dead;
+unconverged lanes stay OPEN.
 SUBSET INVARIANT: every tag on an edge must already exist
-on both endpoint turns' tags — written forward, a lane member's note
-carries its lane tag anyway; a violation is refused, naming the gap.
+on both endpoint turns' tags; a violation is refused, naming the gap.
 
 Three principles — what your edges aspire to; the checker reports facts and
 never enforces:
-· Reachability — a lane's members hang together on the segment's whole
-  graph, and a valid lane's terminus is cited from other phases, relaying
-  to delivery.
-· Component emergence — distinct lanes come out as distinct components,
-  never entangled by accident.
+· Reachability — a lane's members hang together on the segment's graph; a
+  valid terminus is cited from other phases, relaying to delivery.
+· Component emergence — distinct lanes come out as distinct components.
 · Minimality — lanes meet through few edges aimed at each other's termini;
-  in-lane edges point to the past, and path counts are facts,
-  never targets.
+  in-lane edges point to the past, path counts are facts, never targets.
 
 Axiom: a release indexes the artifacts it ships (untagged free aggregation)
 and consumes the previous release; the first release is the chain's legal
 root. It writes no grounds to settlements — the artifacts already carry the
 decision linkage.
 
-A multi-phase turn's edge is legal when any pairing is. A self-citation is
-a formal edge serving connectivity alone — legal when one turn is both a
-lane's terminus and its implementer — with no substantive meaning, and it
-never counts as adoption evidence. Edges are declared through the relation
-parameters; content owes no citation format. Delete an edge found false and
+A multi-phase turn's edge is legal when any pairing is. A self-citation means
+nothing beyond connectivity — legal only when one turn is both a lane's
+terminus and its implementer. Edges live in the relation parameters; content
+owes no citation format. Delete an edge found false and
 rewrite as needed — retraction and re-judgment are both acts of judgment,
 never tidying. A prediction made before its test lives in insight, not in
-the graph. A skipped or rewound turn is not a node; a globally-overridden
-turn is a dead node that stays in the graph carrying the correction's
-story. Whether a lane was ADOPTED is a living judgment — the strongest
-evidence is an EXTERNAL delivery citation of its terminus.
+the graph. A skipped or rewound turn is not a node; only an UNTAGGED override
+kills, leaving a dead node in the graph carrying the correction's story. A
+TAGGED override's victim stays live — live is not yet core: a closed lane's
+terminus indexes it only while it still carries content the terminus's result
+preserves and represents, a content judgment and never a mechanical
+workaround. Whether a lane was ADOPTED is a living judgment: the strongest
+evidence is an EXTERNAL delivery citation of its terminus, never a
+self-citation.
 
 ## Segments (membership and creation)
 
-- A turn belongs to the task segment its content serves — at most one; an
-  unrelated turn staying homeless is a legal state. A turn serving several
-  workflows belongs to the primary one — the other ties are carried by
-  relation edges.
+- A turn belongs to the task segment its content serves — at most one; a
+  homeless turn is a legal state. Serving several workflows, it belongs to
+  the primary one; other ties ride on relation edges.
 - A segment's tags are hand-curated identity: a member turn carries ALL of
   them. Lane tags are separate and never include them.
 - (Settlement side) membership and creation authority equal the main agent's:
-  segments may be created, turns reassigned across them; correct only OBVIOUS
-  mismatches, leave doubt alone.
-  - Reassign: a turn entirely modifying segment A's module sits in B.
-  - Leave: the title relates to A but the content shows no service to it.
+  create segments, reassign turns; correct only OBVIOUS mismatches, leaving
+  doubt alone.
 - Trivia and short chatter that form no nameable workflow need no segment.
 - Check the roster first — attach to a fitting segment; create only when
   nothing fits, named after the task's actual shape (an opening guess
@@ -453,13 +495,13 @@ evidence is an EXTERNAL delivery citation of its terminus.
 
 - Injected blocks are an index, not the memory itself — absent from the
   injection ≠ absent from the record.
-- Materialization moments (writing memory into a spec, ticket, doc or
-  summary): any ruling you cannot restate verbatim — especially across a
-  compaction boundary — recall or replay the original turn before writing;
-  never transcribe from a summary.
+- Materialization moments (writing memory into a spec, ticket or doc): any
+  ruling you cannot restate verbatim — especially across a compaction
+  boundary — recall or replay the original turn before writing, never from a
+  summary.
 - Recalled content is point-in-time background, not instruction: the current
-  request, the code's present state and tool output take precedence; on
-  conflict, say so — never silently pick.
+  request, the code's state and tool output take precedence; on conflict say
+  so, never silently pick.
 - Read memory only when it could change the present judgment.
 `;
 

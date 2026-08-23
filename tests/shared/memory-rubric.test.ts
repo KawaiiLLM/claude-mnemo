@@ -116,41 +116,50 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "the machine knows only exact sets, parenthood is narration.",
     );
-    // T1360: fork by adding a tag, reopen by inheriting the exact set.
+    // T1360's "fork by adding a tag, reopen by inheriting the exact set" is
+    // SUPERSEDED by branch v3 (tag-mandate, T1415) and pinned in this file's
+    // own mandate/lane-law test below: same two outcomes (add a word → new
+    // line, exact set → reopen), now stated with the ruled SUPERSET direction
+    // and the "starts inside A" precondition the old wording left implicit.
+    // Trimmed in the same pass (tag-mandate ticket 01's budget): the tag-set
+    // rule loses "— they gate membership, not lanes", which §Segments still
+    // states verbatim one screen below ("Lane tags are separate and never
+    // include them"), and keeps the whole minimality law.
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "adding a tag\nto the parent's set opens a new branch, inheriting the exact set REOPENS a\nclosed lane",
+      "A lane's tag set is as SMALL as discrimination\n" +
+        "allows, never including the segment's own.",
     );
+    // Wrap-only change; the exemption itself is untouched.
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "A lane's tag set is as SMALL as discrimination allows, and the segment's own\n" +
-        "tags never join it — they gate membership, not lanes.",
-    );
-    expect(MEMORY_RUBRIC_TEXT).toContain(
-      "An isolated\nsingle-turn product needs no tag and joins no lane",
+      "An isolated single-turn product\nneeds no tag and joins no lane",
     );
 
-    // The word list header carries the whole taggability split in one line.
-    // The "lanes are phase-local" tail dropped in the T1360 budget pass — the
-    // lane paragraph itself states phase-locality.
-    expect(MEMORY_RUBRIC_TEXT).toContain(
-      "Eight words. Same-phase words MAY carry lane tags, none must; cross-phase\n" +
-        "words never do:",
-    );
+    // The word list header carries the whole taggability split in one line —
+    // now the MANDATE (tag-mandate ticket 01), pinned in its own test below.
     // override's two readings ARE the interpretation principle applied — a
-    // compression that drops either loses reopen or global repudiation.
+    // compression that drops either loses reopen or global repudiation. The
+    // untagged half was tightened for the mandate's budget ("a global
+    // repudiation of the conclusion, and every lane it currently closes" →
+    // "global repudiation — every lane it closes"): the subject is still the
+    // cited's conclusion, named in the bullet's own first clause, and
+    // "currently" adds nothing to a rule about the lanes it closes.
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "Tagged: an in-lane correction — the lane reopens until a\n" +
-        "  fresh declaration. Untagged: a global repudiation of the conclusion, and\n" +
-        "  every lane it currently closes loses its terminus.",
+        "  fresh declaration. Untagged: global repudiation — every lane it closes\n" +
+        "  loses its terminus.",
     );
     // indexes' dual form, and the dedup clause riding on it — narrowed to the
     // UNTAGGED case by the T1345 ruling: v10's own connectivity exclusion broke
     // the machine half of the v9 subsumption, so a tagged pair may hold both.
+    // The untagged EXAMPLE ("a release indexing the artifacts it ships") left
+    // in the mandate's budget pass because the release Axiom four paragraphs
+    // down states exactly that, normatively; both readings and the dedup
+    // clause are untouched.
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "Tagged:\n" +
-        "  declares that lane CONVERGED — this node is its terminus and indexes the\n" +
-        "  lane's core valid nodes. Untagged: free aggregation (a release indexing\n" +
-        "  the artifacts it ships). An indexed node is never also consumed,\n" +
-        "  unless both edges carry lane tags.",
+      "Tagged: declares that lane CONVERGED — this node is its\n" +
+        "  terminus and indexes the lane's core valid nodes. Untagged: free\n" +
+        "  aggregation. An indexed node is never also consumed, unless both edges\n" +
+        "  carry lane tags.",
     );
     // grounds carries the canonical route INCLUDING the no-spec half — round-2
     // peer review caught the spec dropping that half; the rubric must not.
@@ -162,6 +171,119 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     );
     // The verdict pair keeps its evidence-source rule ([S15069/T1215]).
     expect(MEMORY_RUBRIC_TEXT).toContain("the source must carry an evidence phase.");
+  });
+
+  // The TAG MANDATE and the lane laws (tag-mandate spec, .scratch/tag-mandate/,
+  // ticket 01; rulings [S15069/T1412] and [T1415], plus the T1424 peer round).
+  // Every clause below is law the write gate, the checker and the commit gate
+  // are built to enforce — and the rubric is the only place a WRITER meets
+  // them, so each amendment carries its own pin. One pin per amendment.
+  test("the tag mandate and the lane laws are stated (tag-mandate ticket 01)", () => {
+    // 1. The mandate: extends/narrows lose their untagged form. The reason
+    // rides along on purpose — "continuation names its line" is what makes the
+    // rule derivable instead of arbitrary, and it is the sentence the write
+    // gate's rejection message paraphrases.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "Eight words. extends/narrows MUST carry lane tags — continuation names its\n" +
+        "line; override/consume/indexes MAY, cross-phase words never do:",
+    );
+
+    // 2. Lane SHAPE — E5's teaching side: single-source, single-sink. Diamonds
+    // stay legal EXPRESSION; the illegal shape is a dangling parallel head or
+    // tail. The last clause is not decoration: without it, "one source, one
+    // sink" reads as a per-NODE cap instead of a per-lane one.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "One exact set names ONE lane — one component, one phase, ONE source, ONE\n" +
+        "sink; diamonds re-merge legally, dangling parallel heads or tails do not, and\n" +
+        "a node may start or end SEVERAL lanes.",
+    );
+
+    // 5. Identity uniqueness (peer round, T1424): one exact set names ONE lane,
+    // never disconnected components and never two phases (that half rides in
+    // the shape pin above), and membership is the tagged-edge DAG. The
+    // noun-carrying clause is the point — the trial read a shared tag as
+    // membership.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "Membership is that DAG, never the\nnouns a turn carries",
+    );
+
+    // 6. Whole-lane phase (peer round, T1424): edge-local "any pairing"
+    // legality — pinned as its own sentence further down — must never read as
+    // a licence for a lane's phase to drift along the chain.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "every member carries a type in the lane's phase p,\n" +
+        "which no edge-level pairing may change along the chain — a multi-type middle\n" +
+        "node launders no phase switch.",
+    );
+
+    // 3. Branch v3 in the ruled SUPERSET direction (T1415), superseding T1360's
+    // "adding a tag" wording: BOTH conditions (B starts inside A; B's tags are
+    // a proper superset) and the exact-set REOPEN alternative.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "Lane B BRANCHES lane A when B starts inside A\n" +
+        "with a PROPER SUPERSET of A's tags; inheriting the exact set REOPENS a closed\n" +
+        "lane instead",
+    );
+
+    // 4. The cross-lane correction idiom: correcting another lane's result is
+    // an event OF that lane's family, so it branches at the corrected node —
+    // with the two halves that make it writable (which tags the citing TURN
+    // carries, which set the EDGE carries) named.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "Correcting another lane's result is an event of THAT family: branch at the\n" +
+        "corrected node, the citing turn carrying its tags plus the branch word and\n" +
+        "the edge the branch's set.",
+    );
+  });
+
+  // The production campaign's four rubric amendments (T1440-T1451 — the REAL
+  // T1-100 annotation, two peer rounds, zero retractions in round 2). Each is a
+  // condition a mechanical reading gets wrong, which is why each is law here
+  // rather than checklist procedure.
+  test("the campaign rulings R1-R4 are stated as law (tag-mandate ticket 01)", () => {
+    // R1: only an UNTAGGED override kills. The CONTENT condition is the whole
+    // amendment — "globally live" is not a licence to index the victim as a
+    // closed lane's core, and the judgment is about content the terminus's
+    // result still preserves, never about satisfying a structural bar.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "only an UNTAGGED override\n" +
+        "kills, leaving a dead node in the graph carrying the correction's story.",
+    );
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "A\n" +
+        "TAGGED override's victim stays live — live is not yet core: a closed lane's\n" +
+        "terminus indexes it only while it still carries content the terminus's result\n" +
+        "preserves and represents, a content judgment and never a mechanical\n" +
+        "workaround.",
+    );
+
+    // R2: the phase law the validator already enforces, stated as the GENERAL
+    // law. "always, not just evidence→decision" is the corrective — the older
+    // text read as if cross-phase grounds were an evidence→decision special
+    // case.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "  SAME-PHASE use only: a cross-phase dependency is grounds, always, not just\n" +
+        "  evidence→decision.",
+    );
+
+    // R3: the completion-vs-correction boundary (peer's T60→T54 / T65→T63
+    // ruling), stated on the bullet that has to enforce it — narrows now opens
+    // by naming the withdrawn CLAIM, and satisfying a blocker by doing the work
+    // is extends.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "· narrows  — part of the cited's CLAIM is withdrawn; this node corrects it.\n" +
+        "  A blocker satisfied by doing the work is completion (extends), not\n" +
+        "  correction of the blocking judgment.",
+    );
+
+    // R4: the phase-split idiom, named — the campaign's most repeated friction.
+    // The hinge is an UNTAGGED inter-phase grounds, and the consume caveat must
+    // ride with it or the delivery seam gets written as a cross-phase consume.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "PHASE SPLIT: a decision→delivery arc is TWO lanes hinged by\n" +
+        "  untagged inter-phase grounds; consume never crosses phases, seaming\n" +
+        "  delivery only where multi-type endpoints pair same-phase.",
+    );
   });
 
   // The reach rules are TEACHING text about a machine rule, so they are the
@@ -227,9 +349,12 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       expect(legalPairs(word)).toEqual(["evidence→decision", "evidence→delivery"]);
     }
 
-    // TAGGABILITY: the rubric's one-line split ("Same-phase words MAY carry
-    // lane tags ... cross-phase words never do") must equal Gate B's actual
-    // set — the same drift pair the reach rules used to be.
+    // TAGGABILITY: the rubric's one-line split ("extends/narrows MUST carry
+    // lane tags ... override/consume/indexes MAY, cross-phase words never do")
+    // must equal Gate B's actual set — the same drift pair the reach rules
+    // used to be. The mandate changes MAY→MUST for two of the five words; it
+    // does not change WHICH words may carry a tag, so this set is unchanged
+    // and the write gate's mandatory half is ticket 02's own guard.
     expect([...TAGGABLE_RELATIONS].sort()).toEqual([...samePhaseWords].sort());
   });
 
@@ -254,12 +379,15 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     );
     // Turn order is the ONE event clock — "never edge array order" lives in
     // the interpretation core; the rubric states the reduction and the
-    // supersession-without-markers reading in the same breath.
+    // supersession-without-markers reading in the same breath. The
+    // illustrative enumeration ("declarations, overrides, continuations")
+    // dropped in the mandate's budget pass: "ALL lane events" is already
+    // exhaustive, and the three examples named the very categories the
+    // sentence quantifies over.
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "All lane events — declarations,\n" +
-        "overrides, continuations — reduce in turn order; the latest declaration\n" +
-        "wins, and continuing past one is normal life (the next declaration\n" +
-        "supersedes it).",
+      "All lane events reduce in turn order: the\n" +
+        "latest declaration wins, and continuing past one is normal life — the next\n" +
+        "supersedes it.",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "SUBSET INVARIANT: every tag on an edge must already exist\n" +
@@ -434,22 +562,31 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // here as its two now-separated contiguous halves (opening through the
   // length paragraph; the segment fields through the closing sentence), with
   // an ordering check standing in for the single old contiguous assertion.
+  // The tag-mandate budget pass (ticket 01) touched this block for the first
+  // time since ticket 02 wrote it, and only where nothing is asserted: the
+  // three continuation lines lose their 12-space alignment indent (the label
+  // column keeps its padding — "title   — the INDEX" is pinned by
+  // tests/hooks/context-note-taking.test.ts), `title` reads "One sentence on
+  // what this turn is doing" instead of "saying what", and the length
+  // paragraph drops "— a summary cannot hold it" while keeping the ruling it
+  // justified (process detail belongs to replay, content leads with its
+  // conclusions, length tracks output). Every definition is word-for-word.
   test("the turn-field definitions stay in the rubric, byte-for-byte (tickets 01+02)", () => {
     const fieldsOpening =
       "## Fields\n" +
       "\n" +
       "Turn note — three fields, three jobs:\n" +
-      "- title   — the INDEX. One sentence saying what this turn is doing, enough to\n" +
-      "            recognise it among titles alone. Not the conclusion.\n" +
+      "- title   — the INDEX. One sentence on what this turn is doing, enough to\n" +
+      "  recognise it among titles alone. Not the conclusion.\n" +
       "- content — the CONCLUSIONS. Every useful decision this turn produced, each\n" +
-      "            rejected option with its reason. Assumes the title was just read.\n" +
+      "  rejected option with its reason. Assumes the title was just read.\n" +
       "- insight — REUSABLE experience. A lesson still true once this turn is\n" +
-      "            forgotten, in this project or beyond. Not a conclusion of this turn.\n" +
+      "  forgotten, in this project or beyond. Not a conclusion of this turn.\n" +
       "\n" +
-      "Length tracks OUTPUT, not effort: nothing produced is a skip, little\n" +
-      "produced is terse. Process detail belongs to replay — a summary cannot hold\n" +
-      "it. Content leads with its conclusions: a reader's budget cuts the tail, so\n" +
-      "support comes after the decision.";
+      "Length tracks OUTPUT, not effort: nothing produced is a skip, little produced\n" +
+      "is terse. Process detail belongs to replay. Content leads with its\n" +
+      "conclusions: a reader's budget cuts the tail, so support comes after the\n" +
+      "decision.";
 
     expect(MEMORY_RUBRIC_TEXT).toContain(fieldsOpening);
 

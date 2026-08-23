@@ -23,7 +23,7 @@ amendment guard-pinned. Spec: `.scratch/tag-mandate/spec.md` — sections
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: mandate weakened → 1 red, R3 body flipped → 1 red; suites re-run green after the sibling-mutation tree repair; v10 kept per precedent — hash is the drift guard; both deliberate deletions ratified)
 
 - [ ] Every amendment present with meaning intact (compression is free,
       loss is not); the existing text's unrelated pins survive
