@@ -100,6 +100,28 @@ graph-state write rejections).
 
 ## Settlement surface
 
+- **PULL architecture (ruled S15069/T1452):** the pushed window rendering
+  RETIRES. The settlement prompt defines the turn RANGE (window ∪ lookback,
+  the writable scope) and the duties; the agent reads content itself via
+  its own recall/timeline calls — the same way the T1-100 production
+  campaign's agent worked. Consequences, all simplifications:
+  - Read-grant licensing unifies onto the agent's own recalls (the special
+    "rendered-in-full licenses the write" channel retires with the
+    rendering; one grant rule for every writer).
+  - The prompt keeps: rubric, duties, range definition, roster pointer,
+    commit contract. Segment cards and turn content are recalled on demand.
+  - HARD DEPENDENCY: edge-read-surface ticket 01 (the recall `relations`
+    field + ↳ words) must land first — under pull, the agent's ONLY view
+    of existing edges is the read surface, which today renders none.
+  - Cost shape flips from one big cacheable prompt to on-demand reads;
+    campaign evidence says this is affordable (100 turns ≈ 132 small
+    calls), and real windows are half that size.
+- **The settlement prompt rewrite is authored by the main agent personally
+  (user ruling T1452), never delegated to a worker.**
+- **The mandate reaches every teaching surface (ruled T1452):** the note
+  tool's extends/narrows `.describe()` lines say tagged-form-only (shared
+  zod objects — main agent and settlement facade inherit together), and
+  the checklist teaches it procedurally.
 - The prompt's edges bullet gains the `{turn, tags}` entry form (today it
   teaches only bare addresses — root cause #1 of the zero-lane result) and
   one sentence for the mandate.
