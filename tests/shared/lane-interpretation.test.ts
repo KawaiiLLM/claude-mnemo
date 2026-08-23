@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_SEGMENT,
   deriveLaneInterpretation,
+  deriveLaneStates,
   laneToken,
   type LaneEdgeInput,
   type LaneTurnInput,
@@ -284,5 +285,103 @@ describe("cross-segment tagged edges — dual appearance and warnings (round-4 r
     const laneB = laneOf(derivation, ["z"], "B");
     expect(laneA?.declaration).toEqual({ state: "declared", terminus: 11, latestEventTurn: 11 });
     expect(laneB?.declaration).toEqual({ state: "declared", terminus: 11, latestEventTurn: 11 });
+  });
+});
+
+// ------------------------------------------------------------------------
+// Lane-state helper (milestone-election spec, ticket 02): closed/open,
+// valid/invalid, lastDeclarer — derived ADDITIVELY from the reduction above,
+// never a second reduction pass.
+// ------------------------------------------------------------------------
+
+function stateOf(
+  turns: readonly LaneTurnInput[],
+  edges: readonly LaneEdgeInput[],
+  tags: string[],
+  segment: string = DEFAULT_SEGMENT,
+) {
+  const derivation = deriveLaneInterpretation(turns, edges);
+  const states = deriveLaneStates(derivation.lanes, turns);
+  return states.get(laneToken(segment, tags));
+}
+
+describe("lane-state helper — closed/open, valid/invalid, lastDeclarer", () => {
+  test("the mutation-detecting property: a DECLARED lane that keeps living past its own declaration (a continuation, no re-declaration) reads OPEN here, even though the raw reduction still reports state 'declared' — 'closed' means the lane's LATEST node IS the terminus, not merely that a terminus currently exists", () => {
+    const turns = [design(20), design(21), design(22)];
+    const edges = [
+      edge(21, "extends", 20, ["cont"]),
+      edge(21, "indexes", 20, ["cont"]), // declares at 21
+      edge(22, "extends", 21, ["cont"]), // continuation past the declaration
+    ];
+    // Sanity: the raw reduction (companion test above) reports this lane
+    // "declared" with terminus 21 and latestEventTurn 22 — a naive helper
+    // reading only `state === "declared"` would (wrongly) call this closed.
+    const state = stateOf(turns, edges, ["cont"]);
+    expect(state?.closure).toBe("open");
+    expect(state?.validity).toBeNull();
+    expect(state?.terminus).toBe(21);
+    expect(state?.lastDeclarer).toBe(21); // still the only indexes writer
+  });
+
+  test("a lane reopened by a later override (terminus nulled) reads OPEN, and lastDeclarer recovers the pre-override winner declaration.terminus no longer names", () => {
+    const turns = [design(101), design(102), design(103)];
+    const edges = [
+      edge(102, "extends", 101, ["x"]),
+      edge(102, "indexes", 101, ["x"]),
+      edge(103, "override", 102, ["x"]), // reopens
+    ];
+    const state = stateOf(turns, edges, ["x"]);
+    expect(state?.closure).toBe("open");
+    expect(state?.validity).toBeNull();
+    expect(state?.terminus).toBeNull(); // the raw declaration.terminus is null...
+    expect(state?.lastDeclarer).toBe(102); // ...but lastDeclarer still names 102
+  });
+
+  test("an undeclared lane (only structural continuation, no `indexes` ever) reads OPEN with lastDeclarer null — 'open, no declarer, no seat'", () => {
+    const turns = [design(401), design(402), design(403)];
+    const edges = [edge(402, "extends", 401, ["silent"]), edge(403, "extends", 402, ["silent"])];
+    const state = stateOf(turns, edges, ["silent"]);
+    expect(state?.closure).toBe("open");
+    expect(state?.validity).toBeNull();
+    expect(state?.terminus).toBeNull();
+    expect(state?.lastDeclarer).toBeNull();
+  });
+
+  test("a plain closed lane with a living core reads CLOSED/valid, and lastDeclarer equals the terminus", () => {
+    const turns = [design(30), design(31)];
+    const edges = [edge(31, "extends", 30, ["v"]), edge(31, "indexes", 30, ["v"])];
+    const state = stateOf(turns, edges, ["v"]);
+    expect(state?.closure).toBe("closed");
+    expect(state?.validity).toBe("valid");
+    expect(state?.terminus).toBe(31);
+    expect(state?.lastDeclarer).toBe(31);
+  });
+
+  test("the abandonment ritual — repudiate (kill the wrong conclusion), THEN declare closure indexing the now-dead core — reads CLOSED/invalid: the entire indexed core is dead", () => {
+    const turns = [design(10), design(11), design(12), design(13)];
+    const edges = [
+      edge(11, "extends", 10, ["dead"]),
+      edge(12, "override", 11, ["dead"]), // repudiate 11 first
+      edge(13, "indexes", 11, ["dead"]), // then declare closure indexing the dead core
+    ];
+    const state = stateOf(turns, edges, ["dead"]);
+    expect(state?.closure).toBe("closed");
+    expect(state?.validity).toBe("invalid");
+    expect(state?.terminus).toBe(13);
+    expect(state?.lastDeclarer).toBe(13);
+  });
+
+  test("a closed lane's core with at least one living member alongside a dead one still reads valid — 'at least one living node' is the test, not 'all living'", () => {
+    const turns = [design(40), design(41), design(42), design(43)];
+    const edges = [
+      edge(41, "extends", 40, ["mix"]),
+      edge(42, "extends", 41, ["mix"]),
+      edge(43, "override", 41, ["mix"]), // 41 dies in-lane, but is not the terminus
+      edge(43, "indexes", 41, ["mix"]),
+      edge(43, "indexes", 42, ["mix"]), // 42 (living) joins the declared core too
+    ];
+    const state = stateOf(turns, edges, ["mix"]);
+    expect(state?.closure).toBe("closed");
+    expect(state?.validity).toBe("valid");
   });
 });

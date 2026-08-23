@@ -1,0 +1,306 @@
+/**
+ * Milestone election v2 — lane-first structural election
+ * (`.scratch/milestone-election/spec.md`, ticket 02). Pure derivation over
+ * plain arrays, the same "turns + edges in, judged output out" contract
+ * `lane-checker.ts` follows: no database, no I/O, no module-level state, no
+ * rendering. This module supersedes the effGrade + edge-signal election
+ * chain in `mcp/timeline.ts` wholesale (spec's own framing) — but that
+ * retirement is out of THIS ticket's territory; this file only adds the new
+ * election, it does not touch the old one.
+ *
+ * ## The election, in one pass over the spec's five steps
+ *
+ * 1. **Candidacy exclusion** (uniform): a rolled-back turn
+ *    (`MilestoneTurnInput.wasRolledBack`), a skipped turn
+ *    (`MilestoneTurnInput.skipped`), or any node that is the CITED end of an
+ *    `override` or `refutes` edge — ANY tag state, tagged or untagged —
+ *    leaves candidacy entirely. Recovery is edge retraction, not this
+ *    module's business. Excluded nodes are NOT removed from the graph: their
+ *    own edges still contribute to every OTHER node's in-/out-degree, and
+ *    `deriveLaneInterpretation` still reduces over the full, unfiltered
+ *    input — exclusion only prunes the final CANDIDATE list.
+ * 2. **Identity tiers**, computed via `lane-interpretation.ts`'s shared
+ *    reduction + its additive `deriveLaneStates` helper — no parallel lane
+ *    derivation in this module:
+ *      ① untagged-`indexes` writers (cross-lane aggregation — releases);
+ *      ② a closed-VALID lane's terminus, or an open lane's `lastDeclarer`
+ *        (an invalid closed lane seats nobody; an undeclared lane with no
+ *        declarer ever seats nobody either — "open, no declarer, no seat");
+ *      ③ nodes INDEXED (any tag state) by a tier-①/② node that made the
+ *        `budget`-bounded stage-1 cut — a genuine TWO-STAGE fill: stage 1
+ *        ranks every tier-①/② candidate and takes the top `budget`; only
+ *        THAT "elected" subset's own `indexes` edges grant tier ③, so a
+ *        tier-①/② candidate that qualifies but loses the stage-1 cut grants
+ *        no tier-③ seats to anyone (spec's own measured case: 913, ownership's
+ *        terminus, ranks below budget and so never seeds tier ③ even though
+ *        it is itself a legitimate closed-valid terminus, still returned
+ *        here at its true tier ②, just ranked low);
+ *      ④ correctors — a node that wrote an `override` edge, or that cites
+ *        (any relation) a turn with `wasRolledBack: true`;
+ *      ⑤ everything else.
+ *    `budget` is used ONLY to define this stage-1/"elected" boundary for
+ *    tier ③ — it never truncates this module's own return value. The
+ *    renderer (ticket 03) decides the final displayed row count, which may
+ *    or may not reuse the same number.
+ * 3. **Within a tier**: positive in-degree over six words — `narrows`,
+ *    `extends`, `consume`, `indexes`, `grounds`, `verifies` — +1 PER EDGE,
+ *    self-edges included (no `citingId !== citedId` filter anywhere below;
+ *    T1180's self-`grounds` prices a real declared convergence). Ties break
+ *    by out-degree (ALL eight relation words, unfiltered). Remaining ties
+ *    break by the LATER turn (`LaneOrderKey` compare, never raw `id` alone —
+ *    same backfill-safety discipline `lane-interpretation.ts` already
+ *    established).
+ * 4. **Return shape**: the FULL ordered candidacy (every non-excluded node
+ *    touched by `turns`/`edges`), in ELECTION RANK order — tier ascending,
+ *    then the within-tier rule above. This is NOT display/time order; a
+ *    caller wanting the spec's step-5 "elected rows render in time order"
+ *    takes `candidates.slice(0, displayBudget)` and re-sorts that slice by
+ *    `order` itself (the renderer's job, ticket 03) — budget CUTTING is
+ *    deliberately not this module's concern even though a `budget` number is
+ *    one of its own parameters (see point 2 above: that number feeds tier
+ *    ③'s internal two-stage fill, a different question from "how many rows
+ *    does the UI show").
+ * 5. Degradation to recency on an edgeless window needs no special-cased
+ *    branch: with zero edges, every surviving node is tier ⑤ with
+ *    in-/out-degree 0, so the tier/degree keys of the sort all tie and the
+ *    LATER-TURN tiebreak alone decides the order — which IS recency
+ *    ordering. `deriveLaneInterpretation` also degrades for free (zero
+ *    tagged edges enumerates zero lanes).
+ */
+
+import {
+  canonicalTagSet,
+  compareOrderKey,
+  deriveLaneInterpretation,
+  deriveLaneStates,
+  type LaneEdgeInput,
+  type LaneOrderKey,
+  type LaneTurnInput,
+} from "./lane-interpretation";
+
+export type { LaneEdgeInput } from "./lane-interpretation";
+
+/**
+ * One taggable input turn, `lane-interpretation.ts`'s `LaneTurnInput` widened
+ * with the two turn-level reversal flags candidacy exclusion (step 1) reads
+ * — `mcp/timeline.ts`'s own `turns.was_rolled_back` / `status === 'skipped'`
+ * naming, re-declared here so this module stays free of any DB-layer
+ * dependency (same reasoning `lane-interpretation.ts`'s own header gives for
+ * `canonicalTagSet`). Both default to `false`/absent when omitted — a plain
+ * fixture that never marks either simply has nothing rolled back or skipped.
+ */
+export interface MilestoneTurnInput extends LaneTurnInput {
+  wasRolledBack?: boolean;
+  skipped?: boolean;
+}
+
+/** The five identity tiers, ascending — tier 1 is the highest ("lexicographic, highest wins"). */
+export type MilestoneTier = 1 | 2 | 3 | 4 | 5;
+
+export type MilestoneTierReason =
+  | "release"
+  | "closed-valid-terminus"
+  | "open-last-declarer"
+  | "indexed-by-elected"
+  | "corrector"
+  | "other";
+
+export interface MilestoneCandidate {
+  id: number;
+  tier: MilestoneTier;
+  /** Which tier-qualification rule produced `tier` — informational; `tier` itself is what election rank reads. */
+  reason: MilestoneTierReason;
+  /** Positive in-degree, six words, self-edges included (point 3 above). */
+  inDegree: number;
+  /** Out-degree, all eight relation words, self-edges included. */
+  outDegree: number;
+  order: LaneOrderKey;
+}
+
+export interface MilestoneElectionResult {
+  /**
+   * Every non-excluded node touched by `turns`/`edges`, in ELECTION RANK
+   * order (tier ascending, then the within-tier rule) — NOT display/time
+   * order. Budget cutting and time-order display are the renderer's job
+   * (ticket 03); this array is never truncated to `budget`.
+   */
+  candidates: readonly MilestoneCandidate[];
+  /** Node ids that left candidacy entirely (step 1) — ascending. */
+  excluded: readonly number[];
+}
+
+/** The spec's "six words" — positive in-degree domain. `override`/`refutes` are candidacy killers, never degree contributors. */
+const IN_DEGREE_RELATIONS: ReadonlySet<string> = new Set([
+  "narrows",
+  "extends",
+  "consume",
+  "indexes",
+  "grounds",
+  "verifies",
+]);
+
+interface RankKey {
+  tier: MilestoneTier;
+  inDegree: number;
+  outDegree: number;
+  order: LaneOrderKey;
+  id: number;
+}
+
+/** Tier ascending, then in-degree desc, then out-degree desc, then the LATER turn wins, then id desc as a final deterministic fallback. */
+function rankCompare(a: RankKey, b: RankKey): number {
+  if (a.tier !== b.tier) return a.tier - b.tier;
+  if (a.inDegree !== b.inDegree) return b.inDegree - a.inDegree;
+  if (a.outDegree !== b.outDegree) return b.outDegree - a.outDegree;
+  const orderCmp = compareOrderKey(b.order, a.order); // later order sorts first
+  if (orderCmp !== 0) return orderCmp;
+  return b.id - a.id;
+}
+
+/**
+ * Run the election over one turn/edge set. `budget` bounds the tier-③
+ * two-stage fill's "elected ①②" boundary only (point 2 above) — it never
+ * truncates the returned `candidates` array.
+ */
+export function electMilestones(
+  turns: readonly MilestoneTurnInput[],
+  edges: readonly LaneEdgeInput[],
+  budget: number,
+): MilestoneElectionResult {
+  const orderOf = new Map<number, LaneOrderKey>();
+  const rolledBackOf = new Map<number, boolean>();
+  for (const turn of turns) {
+    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+    rolledBackOf.set(turn.id, turn.wasRolledBack === true);
+  }
+  const orderFor = (id: number): LaneOrderKey => orderOf.get(id) ?? [0, id];
+
+  const allIds = new Set<number>();
+  for (const turn of turns) {
+    allIds.add(turn.id);
+  }
+  for (const edge of edges) {
+    allIds.add(edge.citingId);
+    allIds.add(edge.citedId);
+  }
+
+  // ---- step 1: candidacy exclusion ----
+  const excluded = new Set<number>();
+  for (const turn of turns) {
+    if (turn.wasRolledBack === true || turn.skipped === true) {
+      excluded.add(turn.id);
+    }
+  }
+  for (const edge of edges) {
+    if (edge.relation === "override" || edge.relation === "refutes") {
+      excluded.add(edge.citedId);
+    }
+  }
+
+  // ---- degree tallies over the FULL, unfiltered edge set ----
+  const inDegree = new Map<number, number>();
+  const outDegree = new Map<number, number>();
+  for (const edge of edges) {
+    if (IN_DEGREE_RELATIONS.has(edge.relation)) {
+      inDegree.set(edge.citedId, (inDegree.get(edge.citedId) ?? 0) + 1);
+    }
+    outDegree.set(edge.citingId, (outDegree.get(edge.citingId) ?? 0) + 1);
+  }
+
+  // ---- tier ① — untagged-indexes writers ----
+  const tier1 = new Set<number>();
+  for (const edge of edges) {
+    if (edge.relation === "indexes" && canonicalTagSet(edge.tags).length === 0) {
+      tier1.add(edge.citingId);
+    }
+  }
+
+  // ---- tier ② — closed-valid termini, open lanes' last declarer — via the shared lane-state helper, no parallel derivation ----
+  const { lanes } = deriveLaneInterpretation(turns, edges);
+  const laneStates = deriveLaneStates(lanes, turns);
+  const tier2 = new Map<number, MilestoneTierReason>();
+  for (const state of laneStates.values()) {
+    if (state.closure === "closed") {
+      if (state.validity === "valid" && state.terminus !== null && !tier2.has(state.terminus)) {
+        tier2.set(state.terminus, "closed-valid-terminus");
+      }
+      // closed-invalid: no tier-2 seat (spec) — nothing added.
+    } else if (state.lastDeclarer !== null && !tier2.has(state.lastDeclarer)) {
+      tier2.set(state.lastDeclarer, "open-last-declarer");
+    }
+  }
+
+  const candidateIds = [...allIds].filter((id) => !excluded.has(id));
+
+  const toRankKey = (id: number, tier: MilestoneTier): RankKey => ({
+    tier,
+    inDegree: inDegree.get(id) ?? 0,
+    outDegree: outDegree.get(id) ?? 0,
+    order: orderFor(id),
+    id,
+  });
+
+  // ---- stage 1: tier ①/② candidates, ranked ----
+  const stage1: MilestoneCandidate[] = [];
+  for (const id of candidateIds) {
+    let tier: MilestoneTier | undefined;
+    let reason: MilestoneTierReason = "other";
+    if (tier1.has(id)) {
+      tier = 1;
+      reason = "release";
+    } else if (tier2.has(id)) {
+      tier = 2;
+      reason = tier2.get(id)!;
+    }
+    if (tier === undefined) continue;
+    stage1.push({ ...toRankKey(id, tier), reason });
+  }
+  stage1.sort(rankCompare);
+
+  // ---- the stage-1/"elected" boundary tier ③ reads (budget-bounded, never a truncation of THIS module's return) ----
+  const electedIds = new Set(stage1.slice(0, Math.max(0, budget)).map((c) => c.id));
+
+  // ---- tier ③ — indexed by an elected ①/② node (any tag state) ----
+  const indexedByElected = new Set<number>();
+  for (const edge of edges) {
+    if (edge.relation === "indexes" && electedIds.has(edge.citingId)) {
+      indexedByElected.add(edge.citedId);
+    }
+  }
+
+  // ---- tier ④ — correctors: override writers, or citers (any relation) of a rolled-back turn ----
+  const correctors = new Set<number>();
+  for (const edge of edges) {
+    if (edge.relation === "override") {
+      correctors.add(edge.citingId);
+    }
+    if (rolledBackOf.get(edge.citedId) === true) {
+      correctors.add(edge.citingId);
+    }
+  }
+
+  const stage1Ids = new Set(stage1.map((c) => c.id));
+  const rest: MilestoneCandidate[] = [];
+  for (const id of candidateIds) {
+    if (stage1Ids.has(id)) continue; // already tier ①/② — the best tier already wins
+    let tier: MilestoneTier;
+    let reason: MilestoneTierReason;
+    if (indexedByElected.has(id)) {
+      tier = 3;
+      reason = "indexed-by-elected";
+    } else if (correctors.has(id)) {
+      tier = 4;
+      reason = "corrector";
+    } else {
+      tier = 5;
+      reason = "other";
+    }
+    rest.push({ ...toRankKey(id, tier), reason });
+  }
+  rest.sort(rankCompare);
+
+  return {
+    candidates: [...stage1, ...rest],
+    excluded: [...excluded].sort((a, b) => a - b),
+  };
+}

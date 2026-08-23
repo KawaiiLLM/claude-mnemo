@@ -132,8 +132,8 @@ export interface LaneTurnInput {
   createdAtEpoch?: number;
 }
 
-/** Lexicographic tuple compare — the core's ONE ordering primitive (round-5 review #10): no scalar encoding of the pair anywhere. */
-function compareOrderKey(a: LaneOrderKey, b: LaneOrderKey): number {
+/** Lexicographic tuple compare — the core's ONE ordering primitive (round-5 review #10): no scalar encoding of the pair anywhere. Exported (milestone-election spec, ticket 02) so a derived-view helper built ON this core's output (`deriveLaneStates` below, and any future one) never reimplements tuple comparison of its own. */
+export function compareOrderKey(a: LaneOrderKey, b: LaneOrderKey): number {
   return a[0] - b[0] || a[1] - b[1];
 }
 
@@ -449,4 +449,129 @@ export function deriveLaneInterpretation(
   }
 
   return { lanes, laneByToken, warnings };
+}
+
+/**
+ * ## Lane-state helper (milestone-election spec, ticket 02) — ADDITIVE ONLY
+ *
+ * `closed`/`open`, `valid`/`invalid`, and each lane's `lastDeclarer`, read
+ * straight off ONE `deriveLaneInterpretation` result — no second reduction
+ * pass, no new event, nothing above this comment touched. Two independent
+ * consumers share this: the election module (`shared/milestone-election.ts`)
+ * for identity tier ②, and `lane-checker.ts`'s report 1 (ticket 04) for its
+ * state line — "no parallel derivations anywhere" (spec's implementation
+ * note).
+ *
+ *   - **closed**: the declaration is CURRENTLY active (`state ===
+ *     "declared"`) AND nothing has touched the lane since — the declaring
+ *     turn is STILL the lane's freshest activity
+ *     (`declaration.terminus === declaration.latestEventTurn`). A lane that
+ *     kept living past its own declaration (a narrows/extends continuation
+ *     with no re-declaration — `latestEventTurn` advances past `terminus`,
+ *     see this module's own "structural continuations" pass above) is
+ *     **open**, not closed, even though the raw reduction still reports
+ *     `state: "declared"`: the spec's own test is "the lane's LATEST node
+ *     is its terminus," not merely "a terminus currently exists." This is
+ *     the one non-obvious fold in this helper — the mutation-detecting
+ *     property a caller should probe first.
+ *   - **open**: everything else — undeclared, reopened (override-nulled),
+ *     or declared-but-continued (above).
+ *   - **valid** (closed lanes only): the terminus's OWN tagged-`indexes`
+ *     edges name its "declared core" (every citedId it indexes IN THIS
+ *     LANE); valid iff at least one core member is not `dead` (the
+ *     reduction's own override-driven flag) — the repudiate-then-declare
+ *     ritual is "kill the wrong conclusions, THEN declare closure indexing
+ *     the dead core," so an abandoned lane's core reads entirely dead.
+ *     `null` for an open lane — validity is undefined before closure.
+ *   - **lastDeclarer**: the citingId of the lane's own tagged-`indexes`
+ *     edge with the LATEST order key (ties broken by the higher citingId,
+ *     matching the reduction's own event-batch order) — `null` iff the
+ *     lane was NEVER declared at all (no tagged `indexes` edge exists for
+ *     it: "open, no declarer, no seat," this repo's `{write-gate}` fixture
+ *     lane). Provably equals `declaration.terminus` whenever the lane is
+ *     currently declared: the reduction's "latest wins" rule means the
+ *     order-maximal declaration is always the standing terminus unless a
+ *     LATER override reopened it, and a later override can only ever
+ *     target the order-maximal declaration (any still-later `indexes`
+ *     event would simply re-declare over it first) — so the two fields
+ *     diverge only for a reopened lane, where `lastDeclarer` recovers the
+ *     pre-override winner `declaration.terminus` no longer names.
+ */
+
+export type LaneClosure = "closed" | "open";
+export type LaneValidity = "valid" | "invalid";
+
+export interface LaneState {
+  key: LaneKey;
+  closure: LaneClosure;
+  /** Only meaningful when `closure === "closed"`; `null` for an open lane — validity is undefined before closure. */
+  validity: LaneValidity | null;
+  /** Mirrors `declaration.terminus` — `null` unless the lane is currently declared. */
+  terminus: number | null;
+  /** `null` iff the lane was never declared at all (no tagged `indexes` edge exists for it anywhere in its history). */
+  lastDeclarer: number | null;
+}
+
+function laneLastDeclarer(lane: Lane, orderFor: (id: number) => LaneOrderKey): number | null {
+  let bestId: number | null = null;
+  let bestOrder: LaneOrderKey = [0, 0];
+  for (const edge of lane.taggedEdges) {
+    if (edge.relation !== "indexes") continue;
+    const order = orderFor(edge.citingId);
+    const cmp = bestId === null ? 1 : compareOrderKey(order, bestOrder);
+    if (cmp > 0 || (cmp === 0 && edge.citingId > bestId!)) {
+      bestOrder = order;
+      bestId = edge.citingId;
+    }
+  }
+  return bestId;
+}
+
+/** `dead` per this lane's own members (global kill or in-lane override) — see module header, "dead status is a final-state snapshot." */
+function laneValidity(lane: Lane): LaneValidity {
+  const deadById = new Map(lane.members.map((member) => [member.id, member.dead] as const));
+  const terminus = lane.declaration.terminus;
+  const core = lane.taggedEdges
+    .filter((edge) => edge.relation === "indexes" && edge.citingId === terminus)
+    .map((edge) => edge.citedId);
+  const anyLiving = core.some((id) => deadById.get(id) === false);
+  return anyLiving ? "valid" : "invalid";
+}
+
+/**
+ * Derive `closed`/`open`, `valid`/`invalid`, and `lastDeclarer` for every
+ * lane in `lanes` (typically `deriveLaneInterpretation(turns, edges).lanes`,
+ * passed straight through) — pure, keyed by the same lane token
+ * `laneByToken` uses, so a caller already holding one `deriveLaneInterpretation`
+ * result can look a lane's state up by `laneToken(key.segment, key.tagSet)`
+ * with no re-derivation. `turns` is needed again here only for the same
+ * `order` lookup `deriveLaneInterpretation` itself builds internally — this
+ * helper does not read `deriveLaneInterpretation`'s own internal state, only
+ * its OUTPUT (`Lane.declaration`/`Lane.members`/`Lane.taggedEdges`).
+ */
+export function deriveLaneStates(
+  lanes: readonly Lane[],
+  turns: readonly LaneTurnInput[],
+): ReadonlyMap<string, LaneState> {
+  const orderOf = new Map<number, LaneOrderKey>();
+  for (const turn of turns) {
+    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+  }
+  const orderFor = (id: number): LaneOrderKey => orderOf.get(id) ?? [0, id];
+
+  const states = new Map<string, LaneState>();
+  for (const lane of lanes) {
+    const closed =
+      lane.declaration.state === "declared" &&
+      lane.declaration.terminus === lane.declaration.latestEventTurn;
+    const token = laneToken(lane.key.segment, lane.key.tagSet);
+    states.set(token, {
+      key: lane.key,
+      closure: closed ? "closed" : "open",
+      validity: closed ? laneValidity(lane) : null,
+      terminus: lane.declaration.terminus,
+      lastDeclarer: laneLastDeclarer(lane, orderFor),
+    });
+  }
+  return states;
 }

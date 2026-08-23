@@ -22,7 +22,7 @@ reduction, additive only): the election consumes it here, the checker (ticket
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: closure conjunction → 2 red, tier-3 budget boundary → 1 red)
 
 - [ ] Golden: on the T900-1001 fixture
       (.scratch/rubric-v10/fixtures/t900-1001-lane-sim.json) the top nine are
