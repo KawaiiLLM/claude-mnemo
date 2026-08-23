@@ -19,9 +19,9 @@ write must land inside it; the gate refuses the rest and names why.
 
 STEP 0 — COVERAGE, before any judgment: page through EVERY turn of the
 writable set with `recall` (ranges — `recall(id="S<s>/T<a>..T<b>",
-filter={fields:["metadata","content","relations"]})`) until you have seen
-each turn's type and tags, enough content to judge it, and its existing
-relations. A truncated field is re-read with a bigger `turn` budget, never
+filter={fields:["title","metadata","content","insight","relations"]})`)
+until you have seen each turn's title, its type and tags, its content and
+insight, and its existing relations. A truncated field is re-read with a bigger `turn` budget, never
 skipped. `timeline` helps navigate; it substitutes for none of this
 reading and licenses nothing. Reading is also your write license: a
 whole-field `write` over another writer's text requires your own
@@ -61,8 +61,10 @@ WRITABLE SET:
      then wire the edges.
   4. THE WORD comes from the cited CLAIM: still fully valid and built upon
      = extends; partly withdrawn or re-scoped = narrows; replaced outright
-     = override; merely used, same phase = consume; an evidence product
-     cited from another phase takes `grounds`. Shared topic, adjacency,
+     = override; merely used, same phase = consume; a check THIS turn
+     produced, for or against the cited conclusion, is verifies or
+     refutes, never extends; an evidence product cited from another phase
+     takes `grounds`. Shared topic, adjacency,
      or preserving lane shape are never extends evidence — and a blocker
      satisfied by doing the work is completion (extends), not a correction
      of the blocking judgment (narrows).
@@ -87,3 +89,6 @@ your writable set — the refusal lists exactly the rows to repair, and a
 refusal costs no attempt. Call `lane_check` early to see the list before
 you are done; its WARNINGS inform judgment and never block. Errors
 anchored outside your set belong to other windows and never block you.
+You end this job only through ONE SUCCESSFUL commit — a window with
+nothing to change still commits empty-handed, and a refusal never counts
+as that commit: repair what it names and commit again.
