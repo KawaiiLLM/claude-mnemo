@@ -513,6 +513,104 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
   });
 });
 
+describe("ticket 01 (agent-thinking-config): maxThinkingTokens passthrough", () => {
+  test("a configured value reaches the SDK query options verbatim", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+
+      const { toolImpl } = captureToolImpl();
+      const seenCalls: Array<{ options: Record<string, unknown> }> = [];
+      const queryImpl = mock((call: { options: Record<string, unknown> }) => {
+        seenCalls.push(call);
+        return (async function* () {
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })();
+      });
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        maxThinkingTokens: 4_000,
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        reviewableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      });
+
+      expect(seenCalls[0]?.options.maxThinkingTokens).toBe(4_000);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test.each([
+    ["null", null],
+    ["absent", undefined],
+  ] as const)(
+    "%s configuration omits the key from the SDK query options (absence, not undefined-valued presence)",
+    async (_label, value) => {
+      let db: Database | undefined;
+      try {
+        db = createDatabase(":memory:");
+        initializeSchema(db);
+        const { sessionDbId, t1, job } = seedFixture(db);
+
+        const { toolImpl } = captureToolImpl();
+        const seenCalls: Array<{ options: Record<string, unknown> }> = [];
+        const queryImpl = mock((call: { options: Record<string, unknown> }) => {
+          seenCalls.push(call);
+          return (async function* () {
+            yield { type: "result", subtype: "success", is_error: false, result: "done" };
+          })();
+        });
+
+        const runQuery = createNoteSettlementSdkQuery({
+          db,
+          dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+          queryImpl: queryImpl as never,
+          createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+          toolImpl: toolImpl as never,
+          now: () => NOW,
+        });
+
+        await runQuery({
+          prompt: "settle",
+          systemPrompt: "system",
+          model: "claude-sonnet-5",
+          maxThinkingTokens: value,
+          jobId: job.id,
+          claimGeneration: job.claimGeneration,
+          sessionId: sessionDbId,
+          reviewableTurnIds: new Set([t1]),
+          contextBuiltAtEpoch: NOW,
+          windowStart: 1,
+          windowEnd: 1,
+        });
+
+        expect("maxThinkingTokens" in seenCalls[0]!.options).toBe(false);
+      } finally {
+        db?.close();
+      }
+    },
+  );
+});
+
 describe("direct write holds through the real registered handlers (ticket 05: staging is unwired)", () => {
   test("a note call through the actual SDK tool lands IMMEDIATELY — no staging, commit only marks the job done", async () => {
     let db: Database | undefined;

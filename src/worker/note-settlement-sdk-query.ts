@@ -370,6 +370,11 @@ export function createNoteSettlementSdkQuery(
           hooks: { Stop: [{ hooks: [stopHook] }] },
           abortController,
           systemPrompt: request.systemPrompt,
+          // Ticket 01: omit the SDK option entirely rather than pass an
+          // undefined-valued key when unconfigured (null or absent).
+          ...(request.maxThinkingTokens != null
+        ? { maxThinkingTokens: request.maxThinkingTokens }
+        : {}),
         },
       });
 

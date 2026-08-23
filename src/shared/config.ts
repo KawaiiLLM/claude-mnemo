@@ -38,6 +38,8 @@ export interface MnemoConfig {
   dreamAgentEnabled: boolean;
   /** Model used by the merged nightly dream agent. */
   dreamAgentModel: DreamAgentModel;
+  /** Same as `noteSettlementMaxThinkingTokens`, for the nightly dream agent's SDK query. */
+  dreamAgentMaxThinkingTokens: number | null;
   /** Total wall-clock timeout for one merged nightly dream-agent request. */
   dreamAgentTimeoutMs: number;
   /** Idle watchdog: abort a dream request after this long with no streamed activity. */
@@ -53,6 +55,20 @@ export interface MnemoConfig {
   dreamAgentBacklogLimit: number;
   /** Model for P2 note settlement's single stateless call (spec D9, 裁决 10). */
   noteSettlementModel: DreamAgentModel;
+  /**
+   * Thinking-token budget for the settlement agent's SDK query (ruling
+   * S15069/T1433-T1435). A positive integer is passed through as the
+   * Claude Agent SDK's own `maxThinkingTokens` query option (verified
+   * against the installed SDK's `Options.maxThinkingTokens` — same
+   * spelling). `null` — the default — omits the option entirely, so an
+   * unconfigured install gets the model's own default and changes nothing.
+   * (Package name deliberately not spelled out here: a static reachability
+   * check treats any literal mention of it in a file reachable from
+   * `worker/server.ts` as an SDK import — see
+   * tests/worker/server.note-settlement-triggers.test.ts's
+   * `sdkImportsReachableFromWorkerCore`.)
+   */
+  noteSettlementMaxThinkingTokens: number | null;
   /**
    * Decided turns that must accumulate before turn-stop planning cuts a window
    * (db/note-settlement.ts's `NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS` re-export
@@ -131,12 +147,14 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   eraCutoffEpoch: null,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
+  dreamAgentMaxThinkingTokens: null,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
   dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
   dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
   dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
   dreamAgentBacklogLimit: 1,
   noteSettlementModel: DEFAULT_NOTE_SETTLEMENT_MODEL,
+  noteSettlementMaxThinkingTokens: null,
   noteSettlementThresholdTurns: DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS,
   noteSettlementCapTurns: DEFAULT_NOTE_SETTLEMENT_CAP_TURNS,
   noteSettlementBackfillMaxTurns: DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
@@ -174,6 +192,33 @@ function resolveAgentModel(
     `[claude-mnemo] Invalid ${fieldName} ${JSON.stringify(value)}; using ${fallback}.`,
   );
   return fallback;
+}
+
+/**
+ * Shared by both thinking-budget fields (ticket 01): `dreamAgentMaxThinkingTokens`
+ * and `noteSettlementMaxThinkingTokens` are positive-integer-or-null with the
+ * SAME "absent or null omits the SDK option" semantics, so one resolver
+ * replaces the two that would otherwise drift apart. Unlike `resolveAgentModel`,
+ * an absent or explicit `null` value is not itself invalid — it is the
+ * documented default — so only a value that is present and wrong (non-integer,
+ * zero, negative, a string, ...) warns.
+ */
+function resolveMaxThinkingTokens(
+  fieldName: string,
+  value: unknown,
+  logger: ConfigWarningLogger,
+): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
+    return value;
+  }
+
+  logger.warn(
+    `[claude-mnemo] Invalid ${fieldName} ${JSON.stringify(value)}; using null.`,
+  );
+  return null;
 }
 
 function resolveDreamAgentTimeZone(
@@ -267,6 +312,11 @@ function clampConfig(
       DEFAULT_DREAM_AGENT_MODEL,
       logger,
     ),
+    dreamAgentMaxThinkingTokens: resolveMaxThinkingTokens(
+      "dreamAgentMaxThinkingTokens",
+      config.dreamAgentMaxThinkingTokens,
+      logger,
+    ),
     dreamAgentTimeoutMs: clampInteger(
       config.dreamAgentTimeoutMs,
       60_000,
@@ -299,6 +349,11 @@ function clampConfig(
       "noteSettlementModel",
       rawNoteSettlementModel,
       DEFAULT_NOTE_SETTLEMENT_MODEL,
+      logger,
+    ),
+    noteSettlementMaxThinkingTokens: resolveMaxThinkingTokens(
+      "noteSettlementMaxThinkingTokens",
+      config.noteSettlementMaxThinkingTokens,
       logger,
     ),
     noteSettlementThresholdTurns,

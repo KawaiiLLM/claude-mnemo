@@ -24,7 +24,7 @@ Semantics:
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: resolver boundary >0→>=0 → 2 red; unconditional spread both sites → 4 red absence pins)
 
 - [ ] Config parse pins: valid integer lands; absent/null yields null;
       invalid warns naming the exact key and falls back to null — both keys

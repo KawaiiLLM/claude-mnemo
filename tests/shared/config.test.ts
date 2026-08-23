@@ -370,4 +370,67 @@ describe("shared config", () => {
       `[claude-mnemo] Invalid noteSettlementModel "future-model-alias"; using ${DEFAULT_NOTE_SETTLEMENT_MODEL}.`,
     ]);
   });
+
+  // Ticket 01 (agent-thinking-config, S15069/T1433-T1435): thinking-token
+  // budgets for the settlement and dream agents' SDK queries. Both keys
+  // share one resolver, so the same pins are asserted for each.
+  describe.each([
+    ["dreamAgentMaxThinkingTokens"] as const,
+    ["noteSettlementMaxThinkingTokens"] as const,
+  ])("%s", (field) => {
+    test("defaults to null", () => {
+      expect(DEFAULT_CONFIG[field]).toBeNull();
+      expect(loadConfig("/definitely-missing")[field]).toBeNull();
+    });
+
+    test("a valid positive integer lands", () => {
+      const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+      mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+      const warnings: string[] = [];
+
+      writeFileSync(
+        `${home}/.claude-mnemo/config.json`,
+        JSON.stringify({ [field]: 4_000 }),
+      );
+      expect(
+        loadConfig(home, { warn: (message) => warnings.push(message) })[field],
+      ).toBe(4_000);
+      expect(warnings).toEqual([]);
+    });
+
+    test("an explicit null yields null with no warning", () => {
+      const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+      mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+      const warnings: string[] = [];
+
+      writeFileSync(
+        `${home}/.claude-mnemo/config.json`,
+        JSON.stringify({ [field]: null }),
+      );
+      expect(
+        loadConfig(home, { warn: (message) => warnings.push(message) })[field],
+      ).toBeNull();
+      expect(warnings).toEqual([]);
+    });
+
+    test.each([0, -1, 1.5, "4000"])(
+      "invalid value %p warns naming the exact key and falls back to null",
+      (invalid) => {
+        const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+        mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+        const warnings: string[] = [];
+
+        writeFileSync(
+          `${home}/.claude-mnemo/config.json`,
+          JSON.stringify({ [field]: invalid }),
+        );
+        expect(
+          loadConfig(home, { warn: (message) => warnings.push(message) })[field],
+        ).toBeNull();
+        expect(warnings).toEqual([
+          `[claude-mnemo] Invalid ${field} ${JSON.stringify(invalid)}; using null.`,
+        ]);
+      },
+    );
+  });
 });

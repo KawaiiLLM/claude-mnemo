@@ -16,6 +16,12 @@ export interface DiaryAgentRunInput {
   toolHandlers: DiaryAgentToolHandlers;
   /** Defaults to the configured product generation's reviewed dream model. */
   model?: DreamAgentModel;
+  /**
+   * Ticket 01 (S15069/T1433-T1435): the dream agent's own thinking-token
+   * budget, resolved from `dreamAgentMaxThinkingTokens`. `null` or omitted
+   * means the SDK query's `maxThinkingTokens` option is left out entirely.
+   */
+  maxThinkingTokens?: number | null;
 }
 
 export interface DiaryAgentQueryRequest extends DiaryAgentRunInput {

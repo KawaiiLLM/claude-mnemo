@@ -54,7 +54,10 @@ export interface CreateDreamJobProcessorOptions {
   configLogger?: DreamJobLogger;
   config?: Pick<
     MnemoConfig,
-    "dreamAgentModel" | "dreamAgentTimeZone" | "dreamAgentHour"
+    | "dreamAgentModel"
+    | "dreamAgentMaxThinkingTokens"
+    | "dreamAgentTimeZone"
+    | "dreamAgentHour"
   >;
 }
 
@@ -356,6 +359,7 @@ export function createDreamJobProcessor(
         await options.agentRunner.run({
           date,
           model: config.dreamAgentModel,
+          maxThinkingTokens: config.dreamAgentMaxThinkingTokens,
           prompt: buildDreamPrompt(
             date,
             options.dataRoot,

@@ -100,6 +100,14 @@ export interface NoteSettlementQueryRequest {
   prompt: string;
   systemPrompt: string;
   model: string;
+  /**
+   * Ticket 01 (S15069/T1433-T1435): the settlement agent's own thinking-token
+   * budget, resolved from `noteSettlementMaxThinkingTokens`. `null` or
+   * omitted means the SDK query's `maxThinkingTokens` option is left out
+   * entirely — same as `model`, the resolved config value travels on the
+   * request rather than being read again inside the query layer.
+   */
+  maxThinkingTokens?: number | null;
   signal?: AbortSignal;
   /**
    * Job identity and the write facades' per-dispatch scope (ticket 10a/10b,
@@ -287,6 +295,7 @@ export function createNoteSettlementDispatch(
         prompt: renderNoteSettlementPrompt(context),
         systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
         model,
+        maxThinkingTokens: config.noteSettlementMaxThinkingTokens,
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: job.sessionId,

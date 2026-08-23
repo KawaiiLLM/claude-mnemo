@@ -216,6 +216,58 @@ describe("shared SDK agent query", () => {
     expect(descriptions.get("read_turn_detail")).toContain("*_truncated");
   });
 
+  test("ticket 01 (agent-thinking-config): a configured maxThinkingTokens reaches the SDK query options verbatim", async () => {
+    const toolImpl = (name: string) => ({ name });
+    const seenCalls: Array<{ options: Record<string, unknown> }> = [];
+    const queryImpl = mock((call: { options: Record<string, unknown> }) => {
+      seenCalls.push(call);
+      return (async function* () {
+        yield { type: "result", subtype: "success", is_error: false, result: "done" };
+      })();
+    });
+
+    await createDiarySdkQuery({
+      dataRoot: "/tmp/claude-mnemo-diary-sdk-thinking",
+      queryImpl: queryImpl as never,
+      createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+      toolImpl: toolImpl as never,
+    }).runQuery({
+      ...sdkRequest(),
+      maxThinkingTokens: 4_000,
+    });
+
+    expect(seenCalls[0]?.options.maxThinkingTokens).toBe(4_000);
+  });
+
+  test.each([
+    ["null", null],
+    ["absent", undefined],
+  ] as const)(
+    "ticket 01: %s maxThinkingTokens omits the key from the SDK query options (absence, not undefined-valued presence)",
+    async (_label, value) => {
+      const toolImpl = (name: string) => ({ name });
+      const seenCalls: Array<{ options: Record<string, unknown> }> = [];
+      const queryImpl = mock((call: { options: Record<string, unknown> }) => {
+        seenCalls.push(call);
+        return (async function* () {
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })();
+      });
+
+      await createDiarySdkQuery({
+        dataRoot: "/tmp/claude-mnemo-diary-sdk-thinking",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+      }).runQuery({
+        ...sdkRequest(),
+        maxThinkingTokens: value,
+      });
+
+      expect("maxThinkingTokens" in seenCalls[0]!.options).toBe(false);
+    },
+  );
+
   test("caps every rule read/write tool result under the shared context budget", async () => {
     const handlers = new Map<string, (args: Record<string, unknown>) => Promise<unknown>>();
     const oversized = "x".repeat(WORKER_TOOL_RESULT_MAX_CHARS * 2);
