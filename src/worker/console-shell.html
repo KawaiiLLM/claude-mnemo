@@ -554,7 +554,10 @@ function paintFilters(){
     if (!anyFocus) continue;
     const inComp = p.dataset.lane!=="" && selLanes.has(p.dataset.lane);
     const soloDirect = solo!==null && (p.dataset.s==solo || p.dataset.t==solo);
-    if (inComp || soloDirect) p.classList.add("hot");
+    // 卡片节点(sel)的入边出边一律上色,带不带 tag 都是——T1416 ruling;
+    // 权重/虚线语义不变,只解除灰化。
+    const selDirect = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);
+    if (inComp || soloDirect || selDirect) p.classList.add("hot");
     else p.classList.add("gray");
   }
   for (const [tok, el] of laneChips) el.classList.toggle("on", selLanes.has(tok));

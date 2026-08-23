@@ -270,6 +270,14 @@ describe("console-shell.html behavior-matrix wiring spot checks", () => {
     expect(html).toContain("scrollTo({top:");
   });
 
+  test("the panel node's own incident edges paint hot regardless of tag (T1416 ruling) — sel joins the hot union beside component lanes and solo", () => {
+    expect(html).toContain("const selDirect = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);");
+    expect(html).toContain('if (inComp || soloDirect || selDirect) p.classList.add("hot");');
+    // The teeth: the pre-T1416 two-term union must be gone — its presence
+    // would mean sel's untagged/cross-phase incident edges gray out again.
+    expect(html).not.toContain('if (inComp || soloDirect) p.classList.add("hot");');
+  });
+
   test("sessions sidebar wires load-more through nextCursor (peer finding #10) — page one alone is not the whole story", () => {
     expect(html).toContain("let sessionsNextCursor = null;");
     expect(html).toContain("sessionsNextCursor = sessionsRes.nextCursor ?? null;");
