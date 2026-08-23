@@ -130,12 +130,18 @@ testimony never enter, per the ruled domains) — 1 is healthy,
 more means the lane's members are severed (principle 1), with representative
 members per island; (3) whether one connected component holds several lanes'
 members (principle 2 — shared fork roots and merge nodes annotated as designed
-shapes, whole-lane entanglement surfaced for judgment); (4) start-to-terminus
+shapes, whole-lane entanglement surfaced for judgment); (4) three blocks, per the
+T1343 re-aim of principle 3: (a) inter-lane interfaces — per lane pair, the
+edge count and how many land on a non-terminus member of a declared cited lane
+(bypass; few interfaces and zero bypass are the aspiration); (b) start-to-terminus
 path counts — same-phase over the lane's structural edges, and again with
 cross-phase citations folded in (two lanes citing across phases counted as one)
-— few is the aspiration, this is the current minimality definition (principle 3);
-counts above 1 list the fork/join points. Multi-start lanes sum per-start counts;
-an undeclared lane is marked in report 1 and skipped in report 4. The tool
+— reported as facts with no target; counts above 1 list the fork/join points;
+(c) time-order violations — an edge whose citing turn does not postdate its
+cited turn (same-session by prompt order, cross-session by wall-clock,
+self-citation exempt) breaks the in-lane DAG guarantee and is listed verbatim.
+Multi-start lanes sum per-start counts; an undeclared lane is marked in report 1
+and skipped in report 4's path block. The tool
 reports numbers and names, NEVER candidate edges; the range only decides which
 lanes are reported, projection widens to each lane's full live edges, and
 partial coverage is declared rather than passed off as absence. Adoption

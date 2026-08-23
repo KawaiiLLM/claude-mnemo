@@ -168,9 +168,11 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "never a write. Report 1: per-lane statistics (members, edge counts, " +
   "declaration state, who cites a member from outside). Report 2: whether " +
   "each lane's members sit in one connected component (severed if not). " +
-  "Report 3: components several lanes' members share. Report 4: " +
+  "Report 3: components several lanes' members share. Report 4, three " +
+  "blocks: inter-lane interface counts with terminus-bypass edges; " +
   "start-to-terminus path counts, plain and folded across cross-phase " +
-  "citations. Treat a finding as a CANDIDATE for the same supply/correct/ " +
+  "citations (facts, no target); time-order violations (an edge citing " +
+  "the future). Treat a finding as a CANDIDATE for the same supply/correct/ " +
   "propose judgment every other duty above uses — never call this more " +
   "than once, and never let its output alone justify a write without the " +
   "usual Memory Rubric judgment.";

@@ -135,12 +135,15 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
         "  fresh declaration. Untagged: a global repudiation of the conclusion, and\n" +
         "  every lane it currently closes loses its terminus.",
     );
-    // indexes' dual form, and the dedup clause riding on it.
+    // indexes' dual form, and the dedup clause riding on it — narrowed to the
+    // UNTAGGED case by the T1345 ruling: v10's own connectivity exclusion broke
+    // the machine half of the v9 subsumption, so a tagged pair may hold both.
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "Tagged:\n" +
         "  declares that lane CONVERGED — this node is its terminus and indexes the\n" +
         "  lane's core valid nodes. Untagged: free aggregation (a release indexing\n" +
-        "  the artifacts it ships). An indexed node is never also consumed.",
+        "  the artifacts it ships). An indexed node is never also consumed,\n" +
+        "  unless both edges carry lane tags.",
     );
     // grounds carries the canonical route INCLUDING the no-spec half — round-2
     // peer review caught the spec dropping that half; the rubric must not.

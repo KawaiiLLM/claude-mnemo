@@ -195,9 +195,11 @@ guides settlement toward edge completeness. Given a turn range (session or
 segment view) or named lanes, it reports four things: per-lane basic stats;
 each lane's member component count within the segment-global graph (1 is
 healthy — principle 1); whether one component holds several lanes'
-members (principle 2); and start-to-terminus path counts, same-phase and
-again with cross-phase citations folded in (few is the aspiration —
-principle 3, the current minimality definition). It reports numbers and
+members (principle 2); and a three-block fourth report: inter-lane
+interface counts with terminus-bypass edges (few and zero are the
+aspiration — principle 3), start-to-terminus path counts as untargeted
+facts, and time-order violations (an edge citing the future; the in-lane
+DAG guarantee). It reports numbers and
 names, never candidate edges; findings enter settlement's existing
 judgment, and partial coverage is declared, never silently passed off as
 absence. The text digraph rendering is for humans at the CLI; agents get

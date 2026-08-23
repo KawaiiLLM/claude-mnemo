@@ -116,6 +116,20 @@ export interface LaneTurnInput {
   segment?: string;
   /** Explicit reduction-order key. Defaults to `[0, id]` when omitted. */
   order?: LaneOrderKey;
+  /**
+   * Wall-clock creation epoch (rubric-v10 ticket 08). Read by NOTHING in
+   * this module's own reduction — `deriveLaneInterpretation` orders purely
+   * by `order`/`id`, never by wall-clock time. The one reader is
+   * `lane-checker.ts`'s report-4(c) time-order check, which needs an actual
+   * clock (not the `[session_id, prompt_number]` tuple `order` carries) to
+   * compare two turns from DIFFERENT sessions — a tuple's `session_id` half
+   * is an auto-increment id with no wall-clock meaning across sessions, so
+   * it can never stand in for `created_at_epoch` there. Optional: a plain
+   * fixture that never sets it simply gets no per-edge time-order judgement
+   * for any CROSS-session pair touching it (same-session pairs need only
+   * `order`, so they are judged regardless).
+   */
+  createdAtEpoch?: number;
 }
 
 /** Lexicographic tuple compare — the core's ONE ordering primitive (round-5 review #10): no scalar encoding of the pair anywhere. */

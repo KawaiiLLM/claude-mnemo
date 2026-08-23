@@ -6,6 +6,42 @@
  * text. Numbers, names, states only; the CLI/settlement-tool renderers
  * (ticket 06) are the only consumers that turn this into prose or a digraph.
  *
+ * ## Report 4 splits into three blocks (rubric-v10 ticket 08, T1343 ruling)
+ *
+ * The aspiration this report chases moves from "few in-lane paths" to "few
+ * inter-lane edges, aimed at termini", plus an in-lane DAG guarantee — three
+ * independently-computed blocks, none derived from the others:
+ *
+ *   (a) INTERFACES + BYPASS (`computeInterfaces`/`computeBypass`) — per
+ *       unordered pair of reported lanes, the count of edges crossing
+ *       between them over the SAME domain reports 2/3 already use
+ *       (`LANE_COMPONENT_RELATIONS`: stance + consume + grounds), excluding
+ *       an edge whose own tag set already equals either lane's exact set (a
+ *       lane's own structural edge is never counted as crossing INTO
+ *       itself). Per DECLARED lane, bypass counts an incoming same-domain
+ *       edge from outside the lane that lands on a member OTHER than the
+ *       lane's current (event-reduced) `declaration.terminus` — reusing
+ *       that field directly, never re-deriving the reduction.
+ *   (b) PATH COUNTS (`buildPathReport`, unchanged from ticket 05) — facts,
+ *       no target: this block's own mechanics carry no aspiration framing,
+ *       only the report identity itself moved (report 4 as a whole is no
+ *       longer "the path report").
+ *   (c) TIME-ORDER VIOLATIONS (`computeTimeOrderViolations`) — the DAG
+ *       guarantee: every edge among the loaded turns, ALL EIGHT relation
+ *       words (unlike (a)/(b), aggregation/testimony are not excluded here
+ *       — a backfill-corrupt `indexes` or `verifies` edge is exactly as
+ *       forward-pointing a defect as a stance edge), must have its citing
+ *       turn postdate its cited turn. Same-session pairs compare
+ *       `LaneOrderKey`'s own `[session_id, prompt_number]` tuple (never
+ *       ACROSS sessions — a `session_id` is an auto-increment id with no
+ *       wall-clock meaning relative to another session's, the "tuple-order
+ *       trap"); cross-session pairs compare `LaneTurnInput.createdAtEpoch`
+ *       instead, a field this report is the one and only reader of. Per-edge,
+ *       not a cycle search: a forward edge is corrupt on its own the moment
+ *       it is written (the backfill risk surface), before any cycle could
+ *       even form — report 4(b)'s existing cycle guard (contributes 0, never
+ *       hangs) stays exactly as-is underneath, unrelated to this check.
+ *
  * ## Report domains — three distinct participations, per word
  *
  * Reports 2/3 build their graph from **stance + consume + grounds** edges
@@ -86,6 +122,7 @@ import {
   type LaneEdgeInput,
   type LaneKey,
   type LaneMember,
+  type LaneOrderKey,
   type LaneTurnInput,
   type TurnPhase,
 } from "./lane-interpretation";
@@ -190,7 +227,32 @@ export interface MultiLaneComponent {
   sharedNodes: LaneSharedNode[];
 }
 
-// ---------------------------------------------------------------- Report 4
+// -------------------------------------------------------------- Report 4(a)
+
+/** One unordered pair of distinct reported lanes and the count of edges crossing between them — see module header block (a). Only pairs with `count > 0` are ever emitted (a sparse report, matching every other cross-lane list in this module — `MultiLaneComponent`, `LaneCrossSegmentWarning`). */
+export interface LaneInterfacePair {
+  laneA: LaneKey;
+  laneB: LaneKey;
+  count: number;
+}
+
+/** One bypass edge — an incoming same-domain citation from outside a declared lane landing on a member other than its current terminus. */
+export interface LaneBypassEdge {
+  citingId: number;
+  citedId: number;
+  relation: string;
+  /** The edge's OWN canonical tag set — `[]` for untagged (a bypass edge is never one of the lane's own tagged edges, so this is almost always `[]` or a third lane's tag set, never the target lane's). */
+  tags: readonly string[];
+}
+
+/** Per DECLARED lane (module header block (a)) — undeclared/reopened lanes (no current terminus to bypass) never appear here at all, rather than an entry with a meaningless zero. */
+export interface LaneBypassReport {
+  key: LaneKey;
+  count: number;
+  edges: LaneBypassEdge[];
+}
+
+// -------------------------------------------------------------- Report 4(b)
 
 export interface LaneFoldedPaths {
   /** External (non-member) citing turns whose cross-phase `grounds` citation of a lane member was folded in. */
@@ -216,13 +278,30 @@ export interface LanePathReport {
   folded: LaneFoldedPaths | null;
 }
 
+// -------------------------------------------------------------- Report 4(c)
+
+/** One forward-pointing edge (module header block (c)) — citing does not postdate cited. Self-citations are exempt and never appear here (a self edge has no time-order claim to violate). */
+export interface LaneTimeOrderViolation {
+  citingId: number;
+  citedId: number;
+  relation: string;
+  tags: readonly string[];
+}
+
 // -------------------------------------------------------------------------
 
 export interface LaneCheckerResult {
   lanes: LaneStatsReport[];
   components: LaneComponentReport[];
   multiLaneComponents: MultiLaneComponent[];
+  /** Report 4(a) — see module header. Sparse: only crossing pairs with `count > 0`. */
+  interfaces: LaneInterfacePair[];
+  /** Report 4(a) — see module header. One entry per DECLARED lane only. */
+  bypass: LaneBypassReport[];
+  /** Report 4(b), mechanics unchanged from ticket 05. */
   paths: LanePathReport[];
+  /** Report 4(c) — see module header. */
+  timeOrderViolations: LaneTimeOrderViolation[];
   /** Every cross-segment tagged edge in scope — legal, warned, never rejected (round-4 review #5). Passed through from `deriveLaneInterpretation` unchanged. */
   warnings: readonly LaneCrossSegmentWarning[];
 }
@@ -343,6 +422,143 @@ function findForkJoinNodes(out: ReadonlyMap<number, ReadonlySet<number>>): { for
     .sort((a, b) => a - b);
   joinNodes.sort((a, b) => a - b);
   return { forkNodes, joinNodes };
+}
+
+/** Exact tag-SET equality (both pre-canonicalized: deduped, ascending) — deliberately NOT `sameLaneKey`/`laneToken`, which also fold in a segment; an edge carries no segment of its own, only its two endpoint turns do, so the interfaces exclusion (module header block (a)) compares tag arrays alone. */
+function tagSetEqualsExact(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((tag, index) => tag === b[index]);
+}
+
+/**
+ * Report 4(a), interfaces half (module header): for each unordered pair of
+ * reported `lanes`, the count of `LANE_COMPONENT_RELATIONS` edges in the
+ * FULL edge set with one endpoint a member of one lane and the other a
+ * member of the other, excluding an edge whose own canonical tag set already
+ * equals either lane's exact set — that edge is one of the lane's OWN
+ * tagged edges (by `deriveLaneInterpretation`'s own grouping, an edge tagged
+ * with a lane's exact set makes both its endpoints members of THAT lane,
+ * never merely "the other side" of a crossing), not a crossing between two
+ * distinct lanes. Only pairs with `count > 0` are emitted — a sparse report.
+ */
+function computeInterfaces(lanes: readonly Lane[], allEdges: readonly LaneEdgeInput[]): LaneInterfacePair[] {
+  const memberSets = lanes.map((lane) => new Set(lane.members.map((member) => member.id)));
+  const componentEdges = allEdges.filter((edge) => LANE_COMPONENT_RELATIONS.has(edge.relation));
+  const pairs: LaneInterfacePair[] = [];
+  for (let i = 0; i < lanes.length; i += 1) {
+    for (let j = i + 1; j < lanes.length; j += 1) {
+      const laneA = lanes[i]!;
+      const laneB = lanes[j]!;
+      const membersA = memberSets[i]!;
+      const membersB = memberSets[j]!;
+      let count = 0;
+      for (const edge of componentEdges) {
+        const crosses =
+          (membersA.has(edge.citingId) && membersB.has(edge.citedId)) ||
+          (membersB.has(edge.citingId) && membersA.has(edge.citedId));
+        if (!crosses) continue;
+        const edgeTagSet = canonicalTagSet(edge.tags);
+        if (tagSetEqualsExact(edgeTagSet, laneA.key.tagSet) || tagSetEqualsExact(edgeTagSet, laneB.key.tagSet)) {
+          continue;
+        }
+        count += 1;
+      }
+      if (count > 0) {
+        pairs.push({ laneA: laneA.key, laneB: laneB.key, count });
+      }
+    }
+  }
+  return pairs;
+}
+
+/**
+ * Report 4(a), bypass half (module header): per DECLARED lane (skipped
+ * lanes have no current terminus to bypass), a `LANE_COMPONENT_RELATIONS`
+ * edge whose citing turn is OUTSIDE the lane and whose cited turn IS a
+ * member but is NOT `lane.declaration.terminus` — the event-reduced
+ * terminus `lane-interpretation.ts` already computed, read here directly,
+ * never re-derived. No tag-set exclusion is needed here (unlike the
+ * interfaces half): an edge tagged with the lane's own exact set would make
+ * its citing turn a member of the lane by construction, so "citing turn
+ * outside the lane" already rules that case out structurally.
+ */
+function computeBypass(lanes: readonly Lane[], allEdges: readonly LaneEdgeInput[]): LaneBypassReport[] {
+  const componentEdges = allEdges.filter((edge) => LANE_COMPONENT_RELATIONS.has(edge.relation));
+  const reports: LaneBypassReport[] = [];
+  for (const lane of lanes) {
+    if (lane.declaration.state !== "declared" || lane.declaration.terminus === null) {
+      continue;
+    }
+    const terminus = lane.declaration.terminus;
+    const memberIds = new Set(lane.members.map((member) => member.id));
+    const bypassEdges: LaneBypassEdge[] = [];
+    for (const edge of componentEdges) {
+      if (memberIds.has(edge.citingId)) continue; // must arrive from OUTSIDE the lane
+      if (!memberIds.has(edge.citedId)) continue; // must land ON a member
+      if (edge.citedId === terminus) continue; // landing on the terminus itself is not a bypass
+      bypassEdges.push({
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relation: edge.relation,
+        tags: canonicalTagSet(edge.tags),
+      });
+    }
+    bypassEdges.sort((a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation));
+    reports.push({ key: lane.key, count: bypassEdges.length, edges: bypassEdges });
+  }
+  return reports;
+}
+
+/**
+ * Report 4(c) (module header): every edge among the loaded turns, ALL EIGHT
+ * relation words (no domain filter — aggregation/testimony included), must
+ * have its citing turn postdate its cited turn. Self-citations are exempt.
+ * Same-session pairs (`order[0]` equal) compare `order[1]` (`prompt_number`)
+ * strictly greater; cross-session pairs never compare the `order` tuple at
+ * all (the tuple-order trap — a `session_id` carries no wall-clock meaning
+ * relative to another session's) and instead compare `createdAtEpoch`,
+ * violating only when the citing turn's epoch is STRICTLY LESS than the
+ * cited turn's (ties pass). A turn missing from `turnById`, or missing the
+ * epoch a cross-session comparison needs, yields no judgement for edges
+ * touching it — the same "never fabricate completeness" posture report 1's
+ * `coverage` already takes, rather than a false pass or false violation.
+ */
+function computeTimeOrderViolations(
+  turnById: ReadonlyMap<number, LaneTurnInput>,
+  allEdges: readonly LaneEdgeInput[],
+): LaneTimeOrderViolation[] {
+  // Same fallback `lane-interpretation.ts`'s own internal `orderFor` uses: a
+  // turn absent from the input, or one that never set `order`, defaults to
+  // `[0, id]` — every such turn shares session "0" and is compared by its
+  // own id as a same-session stand-in for prompt_number.
+  const orderFor = (id: number): LaneOrderKey => turnById.get(id)?.order ?? [0, id];
+
+  const violations: LaneTimeOrderViolation[] = [];
+  for (const edge of allEdges) {
+    if (edge.citingId === edge.citedId) continue; // self-citation exempt
+    const citingOrder = orderFor(edge.citingId);
+    const citedOrder = orderFor(edge.citedId);
+    let violated: boolean;
+    if (citingOrder[0] === citedOrder[0]) {
+      violated = !(citingOrder[1] > citedOrder[1]);
+    } else {
+      const citingEpoch = turnById.get(edge.citingId)?.createdAtEpoch;
+      const citedEpoch = turnById.get(edge.citedId)?.createdAtEpoch;
+      if (citingEpoch === undefined || citedEpoch === undefined) continue; // cannot judge — no fabricated verdict
+      violated = citingEpoch < citedEpoch;
+    }
+    if (violated) {
+      violations.push({
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relation: edge.relation,
+        tags: canonicalTagSet(edge.tags),
+      });
+    }
+  }
+  violations.sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation),
+  );
+  return violations;
 }
 
 /**
@@ -474,7 +690,20 @@ export function checkLanes(
     })
     .sort((a, b) => a.representative - b.representative);
 
-  return { lanes: laneStats, components: componentReports, multiLaneComponents, paths: pathReports, warnings };
+  const interfaces = computeInterfaces(lanes, edges);
+  const bypass = computeBypass(lanes, edges);
+  const timeOrderViolations = computeTimeOrderViolations(turnById, edges);
+
+  return {
+    lanes: laneStats,
+    components: componentReports,
+    multiLaneComponents,
+    interfaces,
+    bypass,
+    paths: pathReports,
+    timeOrderViolations,
+    warnings,
+  };
 }
 
 /** Segment + exact canonical tag set equality — via `laneToken`'s own escaped join (round-4 review #6: a plain `tagSet.join("")` collides `{"a","bc"}` with `{"ab","c"}`). */

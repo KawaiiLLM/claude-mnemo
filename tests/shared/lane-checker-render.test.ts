@@ -20,7 +20,16 @@ import { DEFAULT_SEGMENT } from "../../src/shared/lane-interpretation";
 const LANE_KEY = { segment: "42", tagSet: ["ownership"] };
 
 function emptyResult(): LaneCheckerResult {
-  return { lanes: [], components: [], multiLaneComponents: [], paths: [], warnings: [] };
+  return {
+    lanes: [],
+    components: [],
+    multiLaneComponents: [],
+    interfaces: [],
+    bypass: [],
+    paths: [],
+    timeOrderViolations: [],
+    warnings: [],
+  };
 }
 
 describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => {
@@ -59,7 +68,10 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       ],
       components: [],
       multiLaneComponents: [],
+      interfaces: [],
+      bypass: [],
       paths: [],
+      timeOrderViolations: [],
       warnings: [],
     };
 
@@ -93,7 +105,10 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       ],
       components: [],
       multiLaneComponents: [],
+      interfaces: [],
+      bypass: [],
       paths: [],
+      timeOrderViolations: [],
       warnings: [],
     };
 
@@ -124,7 +139,10 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           ],
         },
       ],
+      interfaces: [],
+      bypass: [],
       paths: [],
+      timeOrderViolations: [],
       warnings: [],
     };
 
@@ -137,11 +155,14 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("shared T5 (designed fork/merge)");
   });
 
-  test("report 4 prints a skipped lane's reason and an ok lane's folded count", () => {
+  test("report 4b prints a skipped lane's reason and an ok lane's folded count", () => {
     const result: LaneCheckerResult = {
       lanes: [],
       components: [],
       multiLaneComponents: [],
+      interfaces: [],
+      bypass: [],
+      timeOrderViolations: [],
       paths: [
         {
           key: LANE_KEY,
@@ -175,6 +196,52 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("folded pathCount=2");
     expect(text).toContain("citing turns folded: 8");
     expect(text).toContain("fork: 1 join: 3");
+  });
+
+  test("report 4a prints an inter-lane interface pair's count and a declared lane's bypass edges", () => {
+    const otherKey = { segment: "9", tagSet: ["b"] };
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      interfaces: [{ laneA: LANE_KEY, laneB: otherKey, count: 3 }],
+      bypass: [
+        {
+          key: LANE_KEY,
+          count: 1,
+          edges: [{ citingId: 7, citedId: 2, relation: "consume", tags: [] }],
+        },
+      ],
+    };
+
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("Report 4a");
+    expect(text).toContain("E42:{ownership} <-> E9:{b}: 3");
+    expect(text).toContain("bypass: 1");
+    expect(text).toContain("T7 -> T2 (consume)");
+  });
+
+  test("report 4a prints an explicit empty marker for both interfaces and bypass when neither has anything to show", () => {
+    const text = renderLaneCheckerReports(emptyResult());
+    expect(text).toContain("(no inter-lane interfaces)");
+    expect(text).toContain("(no declared lanes)");
+  });
+
+  test("report 4c lists a time-order violation verbatim (citing, cited, relation, tags)", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      timeOrderViolations: [{ citingId: 3, citedId: 9, relation: "extends", tags: ["ownership"] }],
+    };
+
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("Report 4c");
+    expect(text).toContain("T3 -> T9 (extends {ownership})");
+  });
+
+  test("report 4c prints an explicit empty marker when there are no violations", () => {
+    const text = renderLaneCheckerReports(emptyResult());
+    expect(text).toContain("## Report 4c -- time-order violations (the DAG guarantee)");
+    const lines = text.split("\n");
+    const headingIndex = lines.findIndex((line) => line.includes("Report 4c"));
+    expect(lines[headingIndex + 1]).toBe("(none)");
   });
 
   test("cross-segment warnings render under a ⚠ line with a leading count, and an empty set says so explicitly", () => {
@@ -213,6 +280,9 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       ],
       components: [],
       multiLaneComponents: [],
+      interfaces: [],
+      bypass: [],
+      timeOrderViolations: [],
       paths: [
         {
           key: LANE_KEY,
@@ -250,6 +320,9 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       ],
       components: [],
       multiLaneComponents: [],
+      interfaces: [],
+      bypass: [],
+      timeOrderViolations: [],
       paths: [
         {
           key: LANE_KEY,
@@ -294,6 +367,9 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       ],
       components: [],
       multiLaneComponents: [],
+      interfaces: [],
+      bypass: [],
+      timeOrderViolations: [],
       paths: [],
       warnings: [],
     };
@@ -321,6 +397,9 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       ],
       components: [],
       multiLaneComponents: [],
+      interfaces: [],
+      bypass: [],
+      timeOrderViolations: [],
       paths: [],
       warnings: [],
     };
@@ -350,6 +429,9 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       ],
       components: [],
       multiLaneComponents: [],
+      interfaces: [],
+      bypass: [],
+      timeOrderViolations: [],
       paths: [
         {
           key: LANE_KEY,

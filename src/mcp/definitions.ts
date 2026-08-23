@@ -468,7 +468,7 @@ export const noteInputShape = {
     .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses the same-phase nodes this turn gathers and stands for — they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). Same phase is the whole check: no flow, membership or terminus condition. An indexed target is not also consumed. " +
+      "Addresses the same-phase nodes this turn gathers and stands for — they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). Same phase is the whole check: no flow, membership or terminus condition. An indexed target is not also consumed by an UNTAGGED edge; a tagged consume may sit beside a tagged indexes — lane structure and convergence declaration are separate facts." +
         RELATION_TAG_FORM_LINE +
         " A tagged entry additionally DECLARES that lane's convergence (its terminus) — see grounds' own self-citation reading below. Judgment lives in the Memory Rubric.",
     ),
@@ -476,7 +476,7 @@ export const noteInputShape = {
     .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow — never written beside an extends or indexes on the same pair, which already imply it under the deletion test. " +
+      "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow — never written beside an extends on the same pair, and never untagged beside an indexes (each already implies it); a TAGGED consume beside a tagged indexes is legal — the declaration does not carry the lane-structure fact." +
         RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
   grounds: z

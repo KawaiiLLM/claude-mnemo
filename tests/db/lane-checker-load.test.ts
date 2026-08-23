@@ -525,6 +525,30 @@ describe("segment-global component widening (round-4 review #4a)", () => {
   });
 });
 
+describe("createdAtEpoch is plumbed onto the loaded turn shape (rubric-v10 ticket 08)", () => {
+  test("each loaded turn carries its own created_at_epoch, matching what was inserted", () => {
+    const sessionId = seedSession();
+    const t1 = insertTurn(sessionId, 1);
+    const t2 = insertTurn(sessionId, 2);
+    tagEdge(t2, t1, "extends", ["ownership"]);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+    const epochs = new Map(projection.turns.map((turn) => [turn.id, turn.createdAtEpoch]));
+    // `insertTurn` sets `created_at_epoch = NOW + promptNumber` (see this
+    // file's own helper above) — the ONE reader of this field is
+    // `lane-checker.ts`'s report-4(c) time-order check, for cross-session
+    // comparisons; this test only proves the adapter carries the real DB
+    // value through unchanged, not that any check runs on it here.
+    expect(epochs.get(t1)).toBe(NOW + 1);
+    expect(epochs.get(t2)).toBe(NOW + 2);
+  });
+});
+
 describe("homeless-lane fixpoint component widening (round-5 review #12)", () => {
   test("a default-segment lane reaches a member two hops away via a bridge chain, not just a one-hop neighbourhood", () => {
     const sessionId = seedSession();

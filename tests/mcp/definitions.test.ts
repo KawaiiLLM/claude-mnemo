@@ -443,9 +443,14 @@ describe("tool surface", () => {
     // merely reworded around.
     expect(shape.indexes.description).not.toContain("branch's settlement");
     expect(shape.indexes.description).not.toContain("already belongs to that same branch");
-    // consume carries the other half of the same dedup, beside extends.
+    // consume carries the other half of the same dedup — the extends half
+    // unconditional, the indexes half narrowed to untagged (T1345 ruling),
+    // with the tagged coexistence stated positively.
     expect(shape.consume.description).toContain(
-      "never written beside an extends or indexes on the same pair",
+      "never written beside an extends on the same pair, and never untagged beside an indexes",
+    );
+    expect(shape.consume.description).toContain(
+      "a TAGGED consume beside a tagged indexes is legal",
     );
 
     expect(shape.grounds.description).toContain("cross-phase only");

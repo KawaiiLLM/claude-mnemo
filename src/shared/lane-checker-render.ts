@@ -1,11 +1,14 @@
 import type {
+  LaneBypassReport,
   LaneCheckerResult,
   LaneComponentReport,
   LaneCrossSegmentWarning,
   LaneFoldedPaths,
+  LaneInterfacePair,
   LaneMember,
   LanePathReport,
   LaneStatsReport,
+  LaneTimeOrderViolation,
 } from "./lane-checker";
 import { DEFAULT_SEGMENT, laneToken, type LaneKey } from "./lane-interpretation";
 
@@ -147,6 +150,25 @@ function renderPathReport(path: LanePathReport): string[] {
   return lines;
 }
 
+function renderInterfacePair(pair: LaneInterfacePair): string {
+  return "  " + formatTagSet(pair.laneA) + " <-> " + formatTagSet(pair.laneB) + ": " + pair.count;
+}
+
+function renderBypassReport(report: LaneBypassReport): string[] {
+  const lines: string[] = [];
+  lines.push("  Lane " + formatTagSet(report.key) + " - bypass: " + report.count);
+  for (const edge of report.edges) {
+    const tags = edge.tags.length > 0 ? " {" + edge.tags.join(",") + "}" : "";
+    lines.push("    T" + edge.citingId + " -> T" + edge.citedId + " (" + edge.relation + tags + ")");
+  }
+  return lines;
+}
+
+function renderTimeOrderViolation(violation: LaneTimeOrderViolation): string {
+  const tags = violation.tags.length > 0 ? " {" + violation.tags.join(",") + "}" : "";
+  return "  T" + violation.citingId + " -> T" + violation.citedId + " (" + violation.relation + tags + ")";
+}
+
 function renderSharedNodes(shared: LaneCheckerResult["multiLaneComponents"][number]): string[] {
   return shared.sharedNodes.map(
     (node) =>
@@ -214,12 +236,39 @@ export function renderLaneCheckerReports(result: LaneCheckerResult): string {
   }
 
   sections.push("");
-  sections.push("## Report 4 -- start-to-terminus path counts");
+  sections.push("## Report 4a -- inter-lane interfaces + per-lane bypass (fewer/zero is the aspiration; nothing enforced)");
+  if (result.interfaces.length === 0) {
+    sections.push("(no inter-lane interfaces)");
+  } else {
+    for (const pair of result.interfaces) {
+      sections.push(renderInterfacePair(pair));
+    }
+  }
+  if (result.bypass.length === 0) {
+    sections.push("(no declared lanes)");
+  } else {
+    for (const report of result.bypass) {
+      sections.push(...renderBypassReport(report));
+    }
+  }
+
+  sections.push("");
+  sections.push("## Report 4b -- start-to-terminus path counts (fact, no target)");
   if (result.paths.length === 0) {
     sections.push("(no lanes in scope)");
   } else {
     for (const path of result.paths) {
       sections.push(...renderPathReport(path));
+    }
+  }
+
+  sections.push("");
+  sections.push("## Report 4c -- time-order violations (the DAG guarantee)");
+  if (result.timeOrderViolations.length === 0) {
+    sections.push("(none)");
+  } else {
+    for (const violation of result.timeOrderViolations) {
+      sections.push(renderTimeOrderViolation(violation));
     }
   }
 

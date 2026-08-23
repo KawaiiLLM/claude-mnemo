@@ -100,6 +100,8 @@ interface TurnLiteRow {
   type: string;
   sessionId: number;
   promptNumber: number;
+  /** rubric-v10 ticket 08: plumbed straight onto `LaneTurnInput.createdAtEpoch` — the ONLY reader is `lane-checker.ts`'s report-4(c) time-order check, for the cross-session half of that comparison (`order`'s `[session_id, prompt_number]` tuple is never compared across sessions — a `session_id` carries no wall-clock meaning relative to another session's). */
+  createdAtEpoch: number;
 }
 
 /**
@@ -382,7 +384,7 @@ function loadLiveTurns(db: Database, turnIds: readonly number[]): Map<number, Tu
   const placeholders = ids.map(() => "?").join(",");
   const rows = db
     .query<TurnLiteRow, number[]>(
-      `SELECT id, type, session_id AS sessionId, prompt_number AS promptNumber
+      `SELECT id, type, session_id AS sessionId, prompt_number AS promptNumber, created_at_epoch AS createdAtEpoch
        FROM turns WHERE id IN (${placeholders}) AND ${liveTurnSql()}`,
     )
     .all(...ids);
@@ -531,6 +533,7 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
         id: row.id,
         type: JSON.parse(row.type) as string[],
         order: turnOrderKey(row.sessionId, row.promptNumber),
+        createdAtEpoch: row.createdAtEpoch,
       };
       if (segmentId !== undefined) {
         input.segment = String(segmentId);

@@ -4,6 +4,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   checkLanes,
+  DEFAULT_SEGMENT,
   type LaneEdgeInput,
   type LaneTurnInput,
 } from "../../src/shared/lane-checker";
@@ -185,6 +186,60 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
       expect(lane.coverage.status).toBe("whole");
       expect(lane.coverage.missingTurnIds).toEqual([]);
     }
+  });
+
+  // rubric-v10 ticket 08 — recomputed by running the real implementation
+  // against the fixture (`/tmp/dump-golden-08.ts`-style probe), not
+  // hand-guessed, the same methodology the folded-path goldens above use.
+  test("report 4a golden — inter-lane interface pairs", () => {
+    const pairs = result.interfaces
+      .map((pair) => `${pair.laneA.tagSet.join(",")}<->${pair.laneB.tagSet.join(",")}:${pair.count}`)
+      .sort();
+    expect(pairs).toEqual([
+      "cadence<->segment-audit:1",
+      "contract-verify<->ownership:1",
+      "contract-verify<->relation-vocabulary:1",
+    ]);
+  });
+
+  test("report 4a golden — per-declared-lane bypass counts (write-gate is undeclared and never appears)", () => {
+    const counts: Record<string, number> = {};
+    for (const report of result.bypass) {
+      counts[report.key.tagSet.join(",")] = report.count;
+    }
+    expect(counts).toEqual({
+      cadence: 2,
+      "contract-repair": 1,
+      "contract-verify": 0,
+      ownership: 5,
+      "relation-vocabulary": 1,
+      "rewind-marking": 0,
+      "segment-audit": 1,
+      "settlement-scope": 3,
+      "spec-design": 3,
+      "turn-edge-mechanism": 0,
+      "view-spec": 0,
+    });
+    expect(Object.keys(counts).sort()).toEqual([...declaredLaneTags].sort());
+    expect(result.bypass.some((report) => report.key.tagSet.join(",") === "write-gate")).toBe(false);
+  });
+
+  // The 900-heavy shared root: T900 is a member of THREE lanes at once
+  // (spec-design, settlement-scope, ownership all narrow/extend/consume it)
+  // and is never any of their own termini, so every OTHER lane's own
+  // structural edge touching T900 registers as bypass for whichever lane(s)
+  // count it a member — a real, intended finding this fixture surfaces, not
+  // a double-counting bug (each such edge is excluded from ITS OWN lane's
+  // bypass count, since a same-tag edge structurally makes its citing turn
+  // a member of that lane).
+  test("ownership's 5 bypass edges are exactly the non-ownership-tagged edges landing on T900 (mid-member) plus T910/T912 (mid-members)", () => {
+    const ownershipBypass = result.bypass.find((report) => report.key.tagSet.join(",") === "ownership");
+    const pairs = ownershipBypass?.edges.map((e) => `${e.citingId}->${e.citedId}`).sort();
+    expect(pairs).toEqual(["901->900", "902->900", "906->900", "936->910", "946->912"]);
+  });
+
+  test("report 4c golden — no time-order violations: the fixture has no cross-session or forward edges", () => {
+    expect(result.timeOrderViolations).toEqual([]);
   });
 });
 
@@ -517,5 +572,143 @@ describe("LaneCheckerResult.warnings passes through cross-segment tagged edges (
   test("no cross-segment edges means an empty `warnings` array, not an absent field", () => {
     const result = checkLanes([design(1), design(2)], [edge(2, "extends", 1, ["y"])]);
     expect(result.warnings).toEqual([]);
+  });
+});
+
+// ------------------------------------------------ report 4a: interfaces + bypass (rubric-v10 ticket 08)
+
+describe("report 4a — inter-lane interfaces + per-declared-lane bypass", () => {
+  // Lane {alpha}: 101(start) <-extends- 102(mid member) <-extends,indexes- 103(terminus).
+  // Lane {beta}: 201(start) <-extends,indexes- 202(terminus).
+  const turns = [design(101), design(102), design(103), design(201), design(202)];
+  const laneEdges = [
+    edge(102, "extends", 101, ["alpha"]),
+    edge(103, "extends", 102, ["alpha"]),
+    edge(103, "indexes", 102, ["alpha"]),
+    edge(202, "extends", 201, ["beta"]),
+    edge(202, "indexes", 201, ["beta"]),
+  ];
+  const alphaKey = { segment: DEFAULT_SEGMENT, tagSet: ["alpha"] };
+  const betaKey = { segment: DEFAULT_SEGMENT, tagSet: ["beta"] };
+
+  test("an untagged consume bridge between two lanes counts as ONE inter-lane interface", () => {
+    const edges = [...laneEdges, edge(202, "consume", 102, [])]; // beta's terminus -> alpha's mid member
+    const result = checkLanes(turns, edges);
+    expect(result.interfaces).toEqual([{ laneA: alphaKey, laneB: betaKey, count: 1 }]);
+  });
+
+  test("the bridge landing on a declared lane's MID member (not its terminus) is bypass 1", () => {
+    const edges = [...laneEdges, edge(202, "consume", 102, [])];
+    const result = checkLanes(turns, edges);
+    const alphaBypass = result.bypass.find((report) => tagSetSignature(report.key.tagSet) === tagSetSignature(["alpha"]));
+    expect(alphaBypass?.count).toBe(1);
+    expect(alphaBypass?.edges).toEqual([{ citingId: 202, citedId: 102, relation: "consume", tags: [] }]);
+    // beta itself is never bypassed by this edge — 202 is beta's OWN terminus (the citing side), not an outside citation into beta.
+    const betaBypass = result.bypass.find((report) => tagSetSignature(report.key.tagSet) === tagSetSignature(["beta"]));
+    expect(betaBypass?.count).toBe(0);
+  });
+
+  test("re-pointing the SAME bridge at the lane's own terminus drops bypass to 0 — interface count is unaffected", () => {
+    const edges = [...laneEdges, edge(202, "consume", 103, [])]; // now lands on alpha's terminus, 103
+    const result = checkLanes(turns, edges);
+    const alphaBypass = result.bypass.find((report) => tagSetSignature(report.key.tagSet) === tagSetSignature(["alpha"]));
+    expect(alphaBypass?.count).toBe(0);
+    expect(alphaBypass?.edges).toEqual([]);
+    expect(result.interfaces).toEqual([{ laneA: alphaKey, laneB: betaKey, count: 1 }]);
+  });
+
+  test("testimony/aggregation edges crossing between two lanes never count as interfaces", () => {
+    const edges = [
+      ...laneEdges,
+      edge(202, "indexes", 102, []), // aggregation
+      edge(202, "refutes", 102, []), // testimony
+    ];
+    const result = checkLanes(turns, edges);
+    // Neither the aggregation nor the testimony edge is in
+    // LANE_COMPONENT_RELATIONS (stance+consume+grounds), so the pair has no
+    // interface edge at all here — no entry is emitted (count > 0 only).
+    expect(result.interfaces).toEqual([]);
+  });
+
+  test("undeclared/reopened lanes never appear in the bypass report at all", () => {
+    // {gamma} is undeclared (no tagged indexes ever) -- has structural
+    // members but no terminus to bypass.
+    const gammaEdges = [edge(302, "extends", 301, ["gamma"])];
+    const edges = [...laneEdges, ...gammaEdges];
+    const result = checkLanes([...turns, design(301), design(302)], edges);
+    const gammaBypass = result.bypass.find((report) => tagSetSignature(report.key.tagSet) === tagSetSignature(["gamma"]));
+    expect(gammaBypass).toBeUndefined();
+  });
+});
+
+// ------------------------------------------------ report 4c: time-order violations (rubric-v10 ticket 08)
+
+describe("report 4c — time-order violations", () => {
+  const turnAt = (id: number, order: readonly [number, number], createdAtEpoch?: number): LaneTurnInput => ({
+    id,
+    type: ["design"],
+    order,
+    ...(createdAtEpoch !== undefined ? { createdAtEpoch } : {}),
+  });
+
+  test("a same-session forward edge (citing prompt < cited prompt) is listed as a violation", () => {
+    const turns = [turnAt(1, [1, 2]), turnAt(2, [1, 9])];
+    const edges = [edge(1, "extends", 2, ["x"])]; // citing prompt 2 < cited prompt 9
+    const result = checkLanes(turns, edges);
+    expect(result.timeOrderViolations).toEqual([{ citingId: 1, citedId: 2, relation: "extends", tags: ["x"] }]);
+  });
+
+  test("a same-session edge where citing strictly postdates cited passes", () => {
+    const turns = [turnAt(1, [1, 9]), turnAt(2, [1, 2])];
+    const edges = [edge(1, "extends", 2, ["x"])]; // citing prompt 9 > cited prompt 2
+    const result = checkLanes(turns, edges);
+    expect(result.timeOrderViolations).toEqual([]);
+  });
+
+  // The tuple-order trap (regression): citing's (session,prompt) tuple [5,1]
+  // is lexicographically GREATER than cited's [3,100] (a raw tuple compare
+  // would wrongly PASS this), but citing's own wall-clock epoch is EARLIER
+  // than cited's — the true, epoch-governed violation.
+  test("a cross-session pair whose tuple order inverts wall-clock order fails by epoch, not tuple", () => {
+    const turns = [turnAt(10, [5, 1], 2000), turnAt(11, [3, 100], 5000)];
+    const edges = [edge(10, "grounds", 11, [])];
+    const result = checkLanes(turns, edges);
+    expect(result.timeOrderViolations).toEqual([{ citingId: 10, citedId: 11, relation: "grounds", tags: [] }]);
+  });
+
+  test("a cross-session pair with EQUAL epoch passes — ties pass", () => {
+    const turns = [turnAt(20, [5, 1], 3000), turnAt(21, [3, 100], 3000)];
+    const edges = [edge(20, "grounds", 21, [])];
+    const result = checkLanes(turns, edges);
+    expect(result.timeOrderViolations).toEqual([]);
+  });
+
+  test("a cross-session pair with citing epoch strictly greater passes", () => {
+    const turns = [turnAt(30, [5, 1], 9000), turnAt(31, [3, 100], 1000)];
+    const edges = [edge(30, "grounds", 31, [])];
+    const result = checkLanes(turns, edges);
+    expect(result.timeOrderViolations).toEqual([]);
+  });
+
+  test("self-citation is exempt even with a corrupt order", () => {
+    const turns = [turnAt(40, [1, 1])];
+    const edges = [edge(40, "grounds", 40, [])];
+    const result = checkLanes(turns, edges);
+    expect(result.timeOrderViolations).toEqual([]);
+  });
+
+  test("all eight relation words are checked — aggregation (indexes) included, not just stance/consume/grounds", () => {
+    const turns = [turnAt(50, [1, 1]), turnAt(51, [1, 9])];
+    const edges = [edge(50, "indexes", 51, [])]; // citing prompt 1 < cited prompt 9
+    const result = checkLanes(turns, edges);
+    expect(result.timeOrderViolations).toEqual([{ citingId: 50, citedId: 51, relation: "indexes", tags: [] }]);
+  });
+
+  test("a turn missing order/epoch data yields no judgement for edges touching it — never a fabricated verdict", () => {
+    const turns = [design(60), turnAt(61, [1, 5])]; // 60 has no `order` at all -> falls back to [0, 60]
+    const edges = [edge(61, "grounds", 60, [])]; // 61's order [1,5] vs 60's fallback [0,60]: different "session" (0 vs 1) -> cross-session, needs epoch
+    const result = checkLanes(turns, edges);
+    // Neither turn carries `createdAtEpoch`, so the cross-session comparison cannot be judged.
+    expect(result.timeOrderViolations).toEqual([]);
   });
 });

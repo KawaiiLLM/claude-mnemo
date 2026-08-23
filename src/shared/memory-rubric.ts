@@ -263,6 +263,23 @@ import { createHash } from "node:crypto";
  * the T1315 ruling. §Segments gains ONE line (ticket 07): segment tags are
  * hand-curated membership identity, disjoint from lane tags. Budget after:
  * 9395 rendered chars, 105 under the cap.
+ *
+ * Still v10 (user ruling [S15069/T1343]): principle 3 re-aims. Minimality
+ * moves from "few start-terminus paths" to few INTER-lane edges aimed at
+ * termini; in-lane structure owes a DAG (edges point to the past) and path
+ * counts demote to reported facts with no target — measured on T900-1001,
+ * every in-lane count was already 1 while seven lanes shared one component,
+ * so the information lives between lanes. The checker's report 4 splits to
+ * match (rubric-v10 ticket 08); mechanics stay out of this text as ever.
+ *
+ * Still v10 (user ruling [S15069/T1345]): the indexed-never-consumed ban
+ * narrows to the UNTAGGED case. The v9 deletion-test subsumption held for
+ * both readers; v10's own ruling that indexes never enters connectivity
+ * broke the machine half — a tagged consume states the lane-structure fact
+ * a tagged indexes cannot supply (T984's severed terminus was the proof),
+ * so on a tagged pair the two are independent assertions. The extends half
+ * of the ban is untouched: extends subsumes consume on both readers.
+ * Budget after: 9471 rendered chars, 29 under the cap.
  */
 export const MEMORY_RUBRIC_VERSION = "v10";
 
@@ -354,7 +371,8 @@ words never do — lanes are phase-local:
   representative, and the outside reaches the indexed through it. Tagged:
   declares that lane CONVERGED — this node is its terminus and indexes the
   lane's core valid nodes. Untagged: free aggregation (a release indexing
-  the artifacts it ships). An indexed node is never also consumed.
+  the artifacts it ships). An indexed node is never also consumed,
+  unless both edges carry lane tags.
 · grounds  — this node stands or falls with the cited. Where a separate
   spec turn exists, THE SPEC carries the grounds and the other artifacts
   consume that carrier; without one, each artifact grounds the decision
@@ -377,8 +395,9 @@ never enforces:
   to delivery.
 · Component emergence — distinct lanes come out as distinct components,
   never entangled by accident.
-· Minimality — paths from start to terminus stay few, within the phase and
-  in the cross-phase merged view alike.
+· Minimality — lanes meet through few edges aimed at each other's termini;
+  in-lane edges point to the past, and path counts are facts,
+  never targets.
 
 Axiom: a release indexes the artifacts it ships (untagged free aggregation)
 and consumes the previous release; the first release is the chain's legal

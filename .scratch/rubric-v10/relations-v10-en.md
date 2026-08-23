@@ -58,8 +58,9 @@ never enforces:
   to delivery.
 · Component emergence — distinct lanes come out as distinct components,
   never entangled by accident.
-· Minimality — paths from start to terminus stay few, within the phase and
-  in the cross-phase merged view alike.
+· Minimality — lanes meet through few edges aimed at each other's termini;
+  in-lane edges point to the past, and path counts are facts to read,
+  never targets.
 
 Axiom: a release indexes the artifacts it ships (untagged free aggregation)
 and consumes the previous release; the first release is the chain's legal
