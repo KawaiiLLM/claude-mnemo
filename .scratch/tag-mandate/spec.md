@@ -81,8 +81,9 @@ time-order violations, undeclared lanes, terminus citedness.
 Every error instance anchors at a turn: an edge error at its CITING turn, a
 type error at the turn itself, an E5 shape error at the violating extra
 source/sink node. The commit gate counts ONLY instances anchored inside the
-window's writable scope (window ∪ rendered lookback) — an error anchored
-outside blocks its OWN window, never this one. This keeps every commit
+window's writable scope (window ∪ DECLARED lookback — see the pull
+architecture's immutable writable set) — an error anchored outside blocks
+its OWN window, never this one. This keeps every commit
 refusal repairable by the agent it refuses: retag, retract and re-type are
 all within its writable power. Without this scoping, one bad out-of-window
 edge pins a window on a permanently failing commit — the terminal-state trap
@@ -108,20 +109,49 @@ graph-state write rejections).
   - Read-grant licensing unifies onto the agent's own recalls (the special
     "rendered-in-full licenses the write" channel retires with the
     rendering; one grant rule for every writer).
-  - The prompt keeps: rubric, duties, range definition, roster pointer,
+  - **The writable set is IMMUTABLE and declared (peer round, T1455):**
+    settlement computes the exact writable turn-id set BEFORE the run —
+    window + declared lookback — and lists it in the prompt. Recalling a
+    turn outside it grants reading only, never writing; the commit gate
+    judges error anchors against this SAME immutable set. The declared
+    lookback must at least close over the external endpoints of every
+    in-scope anchored edge, or repairing an untagged extends/narrows could
+    require tagging an endpoint the agent cannot write — the deadlock the
+    anchoring rule exists to prevent.
+  - **Coverage contract (peer round, T1455) — checklist Step 0:** before
+    lane construction, the agent pages through EVERY turn of the writable
+    set — metadata/tags/type, content sufficient to judge, and relations;
+    a truncated read is continued, never skipped. `timeline` navigates but
+    never substitutes for the exhaustive recall and grants nothing. PUSH
+    guaranteed whole-window visibility implicitly; without this step PULL
+    re-opens the trial's thread-blindness failure. Test-pinned at minimum;
+    a commit-visible coverage receipt is the harder option if drift shows.
+  - The prompt keeps: rubric, duties, the writable set, roster pointer,
     commit contract. Segment cards and turn content are recalled on demand.
-  - HARD DEPENDENCY: edge-read-surface ticket 01 (the recall `relations`
-    field + ↳ words) must land first — under pull, the agent's ONLY view
-    of existing edges is the read surface, which today renders none.
+  - HARD DEPENDENCY: edge-read-surface ticket 01 must land first AND meet
+    this completeness bar (peer round, T1455): incoming + outgoing edges,
+    relation word, canonical exact tag set, counterpart address, direction,
+    legacy/out-of-vocabulary rows all visible; pagination and byte caps
+    never silently drop edges; and the settlement SDK agent's tool
+    allowlist verifiably includes recall. Ticket 01's acceptance is judged
+    against this bar. Under pull, the read surface is the agent's ONLY
+    view of existing edges — today it renders none.
   - Cost shape flips from one big cacheable prompt to on-demand reads;
     campaign evidence says this is affordable (100 turns ≈ 132 small
     calls), and real windows are half that size.
 - **The settlement prompt rewrite is authored by the main agent personally
   (user ruling T1452), never delegated to a worker.**
-- **The mandate reaches every teaching surface (ruled T1452):** the note
-  tool's extends/narrows `.describe()` lines say tagged-form-only (shared
-  zod objects — main agent and settlement facade inherit together), and
-  the checklist teaches it procedurally.
+- **The mandate reaches every teaching surface (ruled T1452), with the
+  assertion/retraction split (peer round, T1455):** NEW extends/narrows
+  ASSERTIONS are tagged-form-only — taught on the note tool's
+  extends/narrows `.describe()` lines (shared zod objects — main agent and
+  settlement facade inherit together). `retractExtends`/`retractNarrows`
+  KEEP accepting bare addresses: legacy untagged rows must stay deletable,
+  and a shared describe rewrite must not caption the retraction mirrors.
+  The teaching-surface set, enumerated and acceptance-checked as a whole:
+  rubric text, assertion describes, settlement checklist/prompt, skill
+  docs, and the write-gate rejection message; plus a guard (test or grep)
+  that no surface still shows a bare extends/narrows assertion example.
 - The prompt's edges bullet gains the `{turn, tags}` entry form (today it
   teaches only bare addresses — root cause #1 of the zero-lane result) and
   one sentence for the mandate.
@@ -230,28 +260,35 @@ exactly one home:
 
 **Rubric (law — the rubric text ticket must budget for these):**
 - R1 *Dead node = global override only, stated:* a TAGGED override's victim
-  stays a live node — it may even serve as a closed lane's surviving core
-  (the T32→T31 pattern: a 2-node lane's terminus indexes the very node it
-  overrode, since self-indexes is barred). Today this is load-bearing
-  unwritten inference.
-- R2 *The consume/grounds phase asymmetry the gate already enforces:* an
-  evidence-phase product cited from a decision turn takes `grounds`, never
-  `consume` (the validator refuses; the rubric text reads the opposite way).
+  stays a globally live node. Live does NOT automatically make it a closed
+  lane's valid core — the terminus may index the victim ONLY when the
+  victim still carries content the terminus's result preserves and
+  represents (T32 indexes T31 because T31's spec body survives, revised,
+  inside T32 — a content judgment, never a mechanical workaround for the
+  self-indexes bar).
+- R2 *The consume/grounds phase law the gate already enforces:* `consume`
+  expresses SAME-phase use only; `grounds` expresses CROSS-phase
+  dependency — the general law, not an evidence→decision special case (the
+  validator enforces it; the rubric text currently reads the opposite way).
 - R3 *Completion vs correction, the extends/narrows boundary sentence:* "a
   blocker satisfied by doing the work is completion (extends), not a
   correction of the blocking judgment (narrows); narrows requires part of
   the cited CLAIM to be withdrawn" (peer's T60→T54 / T65→T63 ruling).
 - R4 *The phase-split idiom, named:* one real arc running decision→delivery
-  is TWO lanes (one per phase) hinged by cross-phase grounds/consume — the
-  grade-hierarchy + task-causality-grading pattern. The most repeated
-  friction of the campaign; a named idiom beats each writer rediscovering it.
+  is TWO lanes (one per phase) hinged by untagged inter-phase `grounds`;
+  `consume` may serve as the delivery seam ONLY where multi-type endpoints
+  give it a same-phase pairing — it is never a cross-phase relation. The
+  grade-hierarchy + task-causality-grading pattern; the most repeated
+  friction of the campaign, so a named idiom beats rediscovery.
 
 **Settlement checklist (procedure):**
-- C1 *Ops/status turns stay laneless:* one-off state records and polling
-  turns (watchdog armed, backgrounded, restarted) carry no lane result —
-  never lane them, and never use one as semantic glue between real nodes
-  (the corrected claim must be restated by a real node, as T48 narrowing
-  T45's own "reliable pattern" restatement showed).
+- C1 *Pure status turns stay laneless; propositions decide:* a turn that
+  only records state or polls (watchdog armed, backgrounded) joins no lane
+  and never serves as semantic glue. But an ops turn that PROPOSES, ADOPTS
+  or CORRECTS a reusable proposition joins the lane for that proposition —
+  T45 entered the watchdog lane exactly because its content restated the
+  "reliable pattern" claim, which T48 then narrowed. The test is the
+  proposition, not the turn's ops surface.
 - C2 *Convergence = open questions closed:* a thread whose own flagged
   unknowns stay unaddressed remains OPEN no matter how it tails off
   (skillopt); explicit resolved/converged language, completed verification,
