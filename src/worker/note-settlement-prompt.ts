@@ -110,6 +110,25 @@ import type {
  * section: the checker is advisory only, and a run that never calls it
  * still completes normally (the reminder for that case is a worker-side log
  * line, `note-settlement-dispatch.ts`, never anything this prompt enforces).
+ *
+ * TICKET 01'S DUTY (semantic-conformance spec, ruling [S15069/T1396]: "缺失
+ * 或不符合现行语义的,重新标注;符合现行语义的,进行检查、纠正与补充"): duty 2's
+ * RECONCILIATION preamble now states a two-branch split that applies to
+ * EVERY annotation, on every window alike — job 76 (T1-100 backfill) had
+ * left 82/96 legacy-typed turns untouched because the old wording read
+ * legacy content as keepable standing material once a window was "already
+ * written". MISSING (empty on a substantive turn) or NON-CONFORMING
+ * (stated, but the word is retired) is RE-ANNOTATED FROM SCRATCH — judged
+ * under the Memory Rubric exactly as a first writer would today, never as a
+ * correction of the old word. CONFORMING annotations keep the existing
+ * check/correct/supplement discipline, unchanged. The one field with an
+ * actual closed vocabulary today is `type`
+ * (`src/shared/type-vocabulary.ts`'s `MEMORY_TYPES`); this duty NAMES that
+ * vocabulary as the conformance test without restating it — the word list
+ * and its meanings stay the Rubric's own, one copy, pointer discipline
+ * intact. Edges carry no analogous debt: `EDGE_RELATIONS` already drives
+ * every relation word this prompt offers, so a retired relation word is
+ * never among the call shapes offered here in the first place.
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -262,7 +281,16 @@ export function renderNoteSettlementPrompt(
     "2. RECONCILIATION (notes, type/tags, membership, edges), via the `note`",
     "   and `remember` tools — supply, correct, retract, as the procedure",
     "   above describes. Judge every one of them by the Memory Rubric's own",
-    "   sections; this prompt states only the call shape.",
+    "   sections; this prompt states only the call shape. Every annotation",
+    "   you meet follows the SAME rule on every window, backfill or check:",
+    "   MISSING (empty on a substantive turn) or NON-CONFORMING (stated,",
+    "   but in vocabulary this system no longer uses — for `type`,",
+    "   conformance means every word is a member of the closed vocabulary",
+    "   the Rubric defines above) is RE-ANNOTATED FROM SCRATCH — judged",
+    "   under the Memory Rubric exactly as a first writer would today;",
+    "   the old word being retired IS the nonconformity, not a mistake to",
+    "   correct. A CONFORMING annotation keeps the ordinary discipline",
+    "   instead: check it, correct the explicit, supplement what is missing, leave doubt alone.",
     "   - notes: `note` with `turn` plus `title`, `content` and/or `insight`.",
     "     A turn with no note yet takes `title` and `content` together (a",
     "     first note needs both); a field that already holds something needs",

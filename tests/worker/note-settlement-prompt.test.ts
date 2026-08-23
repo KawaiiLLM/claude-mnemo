@@ -17,6 +17,7 @@ import { buildCollapsedTurnsForSession } from "../../src/mcp/recall";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { renderRubricBlock } from "../../src/hooks/session-composition";
 import { MEMORY_RUBRIC_TEXT, renderMemoryRubricBlock } from "../../src/shared/memory-rubric";
+import { MEMORY_TYPES } from "../../src/shared/type-vocabulary";
 import { buildNoteSettlementContext } from "../../src/worker/note-settlement-context";
 import { renderNoteSettlementPrompt } from "../../src/worker/note-settlement-prompt";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
@@ -443,6 +444,77 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
     // injection's (pinned in full by the describe above this one).
     expect(prompt).toContain(renderMemoryRubricBlock());
     expect(prompt).toContain('hash="');
+  });
+});
+
+/**
+ * Ticket 01 (semantic-conformance spec, ruling [S15069/T1396]): the
+ * RECONCILIATION duty's preamble states the two-branch split — MISSING or
+ * NON-CONFORMING annotations are re-annotated from scratch, exactly as a
+ * first writer would judge them today; CONFORMING annotations keep the
+ * existing check/correct/supplement discipline. Job 76 left 82/96
+ * legacy-typed turns untouched because the old prompt read them as
+ * keepable standing content once a window was "already written" — every
+ * assertion below is pinned as a substring INSIDE duty 2 itself (not
+ * merely present somewhere in the prompt), because the ticket's own
+ * deliverable is duty 2's framing, not a free-floating sentence.
+ */
+describe("ticket 01 — RECONCILIATION states re-annotate-non-conforming / check-correct-supplement-conforming", () => {
+  function duty2Text(prompt: string): string {
+    return prompt.slice(
+      prompt.indexOf("2. RECONCILIATION"),
+      prompt.indexOf("   - notes: `note` with `turn` plus `title`"),
+    );
+  }
+
+  test("the MISSING/NON-CONFORMING branch: re-annotate from scratch, as a first writer would, not a correction", () => {
+    const prompt = renderPrompt();
+    const duty2 = duty2Text(prompt);
+
+    expect(duty2).toContain("MISSING");
+    expect(duty2).toContain("NON-CONFORMING");
+    expect(duty2).toContain("RE-ANNOTATED FROM SCRATCH");
+    expect(duty2).toContain("as a first writer would today");
+    expect(duty2).toContain("the old word being retired IS the nonconformity");
+    expect(duty2).toContain("not a mistake to");
+  });
+
+  test("the CONFORMING branch keeps the existing check/correct/supplement discipline", () => {
+    const prompt = renderPrompt();
+    const duty2 = duty2Text(prompt);
+
+    expect(duty2).toContain("CONFORMING");
+    expect(duty2).toContain("keeps the ordinary discipline");
+    expect(duty2).toContain(
+      "correct the explicit, supplement what is missing, leave doubt alone",
+    );
+  });
+
+  test("the closed vocabulary is NAMED as the conformance test for `type`, not restated", () => {
+    const prompt = renderPrompt();
+    const duty2 = duty2Text(prompt);
+
+    expect(duty2).toContain("conformance means every word is a member of the closed vocabulary");
+    // Pointer discipline: duty 2's OWN prose never repeats the word list or
+    // its definitions — those stay the Rubric's one copy. (The words do
+    // appear elsewhere in the full prompt, inside the injected Rubric
+    // block itself — this checks duty 2's own added prose only.)
+    for (const word of MEMORY_TYPES) {
+      expect(duty2).not.toContain(`"${word}"`);
+    }
+  });
+
+  test("the split is uniform across window kinds — no backfill/check special-casing", () => {
+    const prompt = renderPrompt();
+    const duty2 = duty2Text(prompt);
+
+    expect(duty2).toContain("follows the SAME rule on every window, backfill or check");
+    // The pre-era gate (`allow_pre_era`) and its wording live entirely in
+    // the worker's job-claiming path (db/note-settlement.ts, server.ts),
+    // never in this prompt — nothing here special-cases it, so there is
+    // nothing to name or exclude.
+    expect(prompt).not.toContain("pre-era");
+    expect(prompt).not.toContain("allow_pre_era");
   });
 });
 
