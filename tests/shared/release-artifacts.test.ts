@@ -19,7 +19,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.16.0", () => {
+  test("release metadata is consistently bumped to 0.17.0", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -44,12 +44,12 @@ describe("release artifacts", () => {
       "utf8",
     );
 
-    expect(packageJson.version).toBe("0.16.0");
-    expect(pluginManifest.version).toBe("0.16.0");
-    expect(marketplace.metadata?.version).toBe("0.16.0");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.16.0");
-    expect(diarySdkQuery).toContain('version: "0.16.0"');
-    expect(settlementSdkQuery).toContain('version: "0.16.0"');
+    expect(packageJson.version).toBe("0.17.0");
+    expect(pluginManifest.version).toBe("0.17.0");
+    expect(marketplace.metadata?.version).toBe("0.17.0");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.17.0");
+    expect(diarySdkQuery).toContain('version: "0.17.0"');
+    expect(settlementSdkQuery).toContain('version: "0.17.0"');
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -180,6 +180,17 @@ describe("release artifacts", () => {
       "claim_generation", // lease ownership fence — a stale worker commits nothing
       "settleCompletedTurn", // ticket 15: completion settles the row, no agent
       "completionFloorStatus", // the ONE definition of an un-noted turn's status
+      // 0.17.0 — memory console (worker HTTP seam): the request gate and the
+      // final-envelope byte bound; a stale worker bundle would 404 /console.
+      "evaluateRequestGate",
+      "applyGraphByteBound",
+      "electionCoverage", // R2 #11: election tiers computed on the full snapshot
+      // 0.17.0 — semantic conformance: the checker's vocabulary fact block and
+      // the settlement re-annotation duty (non-conforming is never standing
+      // content).
+      "vocabularyConformance",
+      "RE-ANNOTATED FROM SCRATCH",
+      "getRolledBackCiterIds", // R1 #7: the corrector fact the live edge feed cannot carry
     ]) {
       expect(worker).toContain(marker);
     }
@@ -221,10 +232,8 @@ describe("release artifacts", () => {
       "OUTCOME_TAGS",
       '"release"', // release tag → 🏁 milestone
       "REVERSED_ROLE_TAGS", // literal rolled-back role tag → ↩️ milestone
-      "parseInlineCitations", // shared literal inline-citation grammar
       "turn_citations", // structured citation edge table
       "bracketBareTurnReferences", // bare-id → [T<n>] write-side backstop
-      "buildCorrectionGraph", // corrector-promotion / victim-demotion selection
       "json_each", // tag: facet — json_each exact-match clause
       "workerRecallInputShape", // worker recall schema shared by SDK agents
       "renderMilestoneBody", // unified row renderer — arc body
@@ -236,10 +245,6 @@ describe("release artifacts", () => {
       // Day frames degrade with the units: a day that loses its last row folds
       // into a collapsed run, and consecutive collapsed days cost one line.
       "collapseState",
-      "noteHidden", // `+N more` conservation for a day with no rendered rows
-      // esbuild writes the bundle ASCII-escaped, so a CJK render literal is
-      // matched in its escaped form: `被T` (🚫 back-link on a superseded ↳ row).
-      "\\u88ABT",
       // The `前件` fold counter that used to sit beside it RETIRED with
       // view-render-repair ticket 05's one row form — the fold renders a bare
       // `+N` now, too generic to pin. What that marker was really guarding is
@@ -248,9 +253,35 @@ describe("release artifacts", () => {
       // so a stale bundle here would double-print `↳ T1, T1`.
       "resolveTurnRowLinks",
       "compareMilestoneRank", // one ordering for selection rank and budget degradation
-      "citerPromptNumbers", // full citer list — antecedent re-homing after a removal
+      // 0.17.0 — the milestone election (spec .scratch/milestone-election/):
+      // five identity tiers over lane structure replace the old
+      // correction-graph/always-keep/effGrade chain outright.
+      "electMilestones", // the pure election core
+      "buildElectedCitations", // ↳ = elected-only citation index from lane edges
+      "deriveLaneStates", // closed-valid/closed-invalid/open, shared with the checker
+      "getRolledBackCiterIds", // R1 #7 corrector channel
+      "compareOrderKeyAcrossSessions", // R1 #6 cross-session rank tie-break
     ]) {
       expect(mcpServer).toContain(marker);
+    }
+
+    // The election redesign DELETED the old milestone machinery from source
+    // (milestone-election ticket 03, f7ae051): corrector-promotion graph,
+    // antecedent re-homing, the `+N more` conservation row, and the escaped
+    // `被T` back-link literal on superseded ↳ rows. A stale mcp-server bundle
+    // would still carry them — absence is the rebuild's signature, the same
+    // pattern the worker's demolished-extraction block uses above.
+    // (`parseInlineCitations` is NOT in this list: db/citations.ts still
+    // exports it for the write-side grammar, it merely fell out of this
+    // bundle when the prose-re-parse ↳ path retired — its presence would not
+    // indicate staleness, only a new legitimate consumer.)
+    for (const removed of [
+      "buildCorrectionGraph",
+      "citerPromptNumbers",
+      "noteHidden",
+      "\\u88ABT",
+    ]) {
+      expect(mcpServer).not.toContain(removed);
     }
 
     // The `tag:` rejection was removed when the turn-scoped facet landed; a

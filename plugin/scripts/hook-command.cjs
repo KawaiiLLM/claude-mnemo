@@ -439,7 +439,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.16.0-mt4ti6m1" : "dev";
+var BUILD_ID = true ? "0.17.0-mt5yqw13" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -460,6 +460,122 @@ function recordInitializerBuild(db, buildId, nowEpoch) {
      ON CONFLICT(id) DO UPDATE SET build_id = ?, recorded_at_epoch = ?`
   ).run(buildId, nowEpoch, buildId, nowEpoch);
 }
+
+// src/db/turn-liveness.ts
+function liveTurnSql(alias = "") {
+  const prefix = alias ? `${alias}.` : "";
+  return `${prefix}was_rolled_back = 0 AND ${prefix}status != 'skipped'`;
+}
+
+// src/shared/type-vocabulary.ts
+var MEMORY_TYPES = [
+  "discuss",
+  "research",
+  "design",
+  "implement",
+  "refactor",
+  "fix",
+  "measure",
+  "review",
+  "ops",
+  "delegate",
+  "correction"
+];
+function isMemoryType(value) {
+  return typeof value === "string" && MEMORY_TYPES.includes(value);
+}
+var TYPE_GLYPH = {
+  discuss: "\u{1F4AC}",
+  research: "\u{1F50D}",
+  design: "\u2696\uFE0F",
+  implement: "\u{1F527}",
+  refactor: "\u{1F504}",
+  fix: "\u{1F534}",
+  measure: "\u{1F4CA}",
+  review: "\u2705",
+  ops: "\u2699\uFE0F",
+  delegate: "\u{1F91D}",
+  correction: "\u21A9\uFE0F"
+};
+var COMPACT_TYPE_GLYPH = "\u23F8";
+var LEGACY_TYPE_GLYPH = {
+  bugfix: "\u{1F534}",
+  feature: "\u{1F7E3}",
+  refactor: "\u{1F504}",
+  change: "\u2705",
+  discovery: "\u{1F535}",
+  decision: "\u2696\uFE0F",
+  compact: COMPACT_TYPE_GLYPH
+};
+function typeWordGlyph(word) {
+  if (isMemoryType(word)) {
+    return TYPE_GLYPH[word];
+  }
+  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
+}
+function typeListGlyph(types) {
+  if (!types || types.length === 0) {
+    return "\u2022";
+  }
+  return types.map(typeWordGlyph).join("");
+}
+function typeListsEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
+// src/shared/turn-phase.ts
+var TURN_PHASES = ["evidence", "decision", "delivery"];
+var EDGE_RELATIONS = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume",
+  "grounds",
+  "verifies",
+  "refutes"
+];
+var SAME_PHASE_RELATIONS = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume"
+];
+var TAGGABLE_RELATIONS = new Set(
+  SAME_PHASE_RELATIONS
+);
+var EVIDENCE_SOURCE_RELATIONS = ["verifies", "refutes"];
+function buildRelationPhaseRequirement() {
+  const table = Object.fromEntries(
+    EDGE_RELATIONS.map((relation) => [relation, []])
+  );
+  for (const phase of TURN_PHASES) {
+    for (const relation of SAME_PHASE_RELATIONS) {
+      table[relation].push({ source: phase, target: phase });
+    }
+  }
+  for (const source of TURN_PHASES) {
+    for (const target of TURN_PHASES) {
+      if (source !== target) {
+        table.grounds.push({ source, target });
+      }
+    }
+  }
+  for (const relation of EVIDENCE_SOURCE_RELATIONS) {
+    for (const phase of TURN_PHASES) {
+      if (phase === "evidence") {
+        continue;
+      }
+      table[relation].push({ source: "evidence", target: phase });
+    }
+  }
+  return table;
+}
+var RELATION_PHASE_REQUIREMENT = buildRelationPhaseRequirement();
 
 // src/db/memory-edges.ts
 var EDGE_NODE_KINDS = ["turn", "segment"];
@@ -654,6 +770,49 @@ function writeMemoryEdges(db, edges, nowEpoch) {
   }
   return { written, rejected };
 }
+function getRelationEdgesAmongTurns(db, turnIds) {
+  const ids = [...new Set(turnIds)];
+  if (ids.length === 0) {
+    return [];
+  }
+  const idPlaceholders = ids.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  return db.query(
+    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation, me.tags AS tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+  ).all(...ids, ...ids, ...EDGE_RELATIONS).map((row) => ({
+    citingId: row.citingId,
+    citedId: row.citedId,
+    relation: row.relation,
+    tags: parseTagSet(row.tags)
+  }));
+}
+function getRolledBackCiterIds(db, citingTurnIds) {
+  const ids = [...new Set(citingTurnIds)];
+  if (ids.length === 0) {
+    return [];
+  }
+  const idPlaceholders = ids.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  return db.query(
+    `SELECT DISTINCT me.citing_id AS citingId
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.citing_id IN (${idPlaceholders})
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")}
+         AND td.was_rolled_back = 1
+       ORDER BY me.citing_id ASC`
+  ).all(...ids, ...EDGE_RELATIONS).map((row) => row.citingId);
+}
 function countMemoryEdges(db) {
   return db.query("SELECT COUNT(*) AS count FROM memory_edges").get()?.count ?? 0;
 }
@@ -736,12 +895,6 @@ function parseQualifiedReferences(content) {
   return references;
 }
 
-// src/db/turn-liveness.ts
-function liveTurnSql(alias = "") {
-  const prefix = alias ? `${alias}.` : "";
-  return `${prefix}was_rolled_back = 0 AND ${prefix}status != 'skipped'`;
-}
-
 // src/db/citations.ts
 var CITATION_RELATIONS = [
   "override",
@@ -756,174 +909,6 @@ var CITATION_RELATIONS = [
 ];
 function isCitationRelation(value) {
   return typeof value === "string" && CITATION_RELATIONS.includes(value);
-}
-var INLINE_RANGE_EXPANSION_CAP = 8;
-var RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
-var LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
-var LIST_ELEMENT_PATTERN = /T(\d+)/g;
-var SINGLE_PATTERN = /^T(\d+)$/;
-var ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
-function parsePositiveId2(digits) {
-  const id = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
-}
-function* citationBracketBodies(content) {
-  let index = 0;
-  while (index < content.length) {
-    const open2 = content.indexOf("[", index);
-    if (open2 === -1) {
-      return;
-    }
-    const close = content.indexOf("]", open2 + 1);
-    if (close === -1) {
-      return;
-    }
-    const body = content.slice(open2 + 1, close);
-    index = close + 1;
-    if (body.includes("[")) {
-      continue;
-    }
-    yield body;
-  }
-}
-function expandBracketBody(body) {
-  if (/[\n\r]/.test(body)) {
-    return [];
-  }
-  const inner = body.trim();
-  const range = RANGE_PATTERN.exec(inner);
-  if (range) {
-    const start = parsePositiveId2(range[1]);
-    const end = parsePositiveId2(range[2]);
-    if (start === null || end === null || end < start) {
-      return [];
-    }
-    const span = end - start + 1;
-    if (span > INLINE_RANGE_EXPANSION_CAP) {
-      return [start, end];
-    }
-    const ids = [];
-    for (let id = start; id <= end; id += 1) {
-      ids.push(id);
-    }
-    return ids;
-  }
-  if (LIST_PATTERN.test(inner)) {
-    const ids = [];
-    LIST_ELEMENT_PATTERN.lastIndex = 0;
-    let element;
-    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
-      const id = parsePositiveId2(element[1]);
-      if (id === null) {
-        return [];
-      }
-      ids.push(id);
-    }
-    return ids;
-  }
-  const single = SINGLE_PATTERN.exec(inner);
-  if (single) {
-    const id = parsePositiveId2(single[1]);
-    return id === null ? [] : [id];
-  }
-  const annotated = ANNOTATED_PATTERN.exec(inner);
-  if (annotated) {
-    const id = parsePositiveId2(annotated[1]);
-    return id === null ? [] : [id];
-  }
-  return [];
-}
-function parseInlineCitations(content, maxRefs) {
-  if (!content) {
-    return [];
-  }
-  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
-  if (cap <= 0) {
-    return [];
-  }
-  const ids = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const body of citationBracketBodies(content)) {
-    for (const id of expandBracketBody(body)) {
-      if (seen.has(id)) {
-        continue;
-      }
-      seen.add(id);
-      ids.push(id);
-      if (ids.length >= cap) {
-        return ids;
-      }
-    }
-  }
-  return ids;
-}
-function appendUnseen(into, ids) {
-  const seen = new Set(into);
-  for (const id of ids) {
-    if (!seen.has(id)) {
-      seen.add(id);
-      into.push(id);
-    }
-  }
-}
-function dedupeCitedIds(edges) {
-  const citedTurnIds = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (seen.has(edge.citedTurnId)) {
-      continue;
-    }
-    seen.add(edge.citedTurnId);
-    citedTurnIds.push(edge.citedTurnId);
-  }
-  return citedTurnIds;
-}
-function getSessionEffectiveCitations(db, sessionId) {
-  const turns = db.query(
-    `SELECT id, content
-       FROM turns
-       WHERE session_id = ? AND ${liveTurnSql()}
-       ORDER BY prompt_number ASC, id ASC`
-  ).all(sessionId);
-  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
-  const edgesByCiter = /* @__PURE__ */ new Map();
-  const edgeRows = db.query(
-    `SELECT
-         e.citing_id AS citingTurnId,
-         e.cited_id AS citedTurnId,
-         e.relation,
-         e.created_at_epoch AS createdAtEpoch
-       FROM memory_edges e
-       JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
-       JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
-       WHERE citing.session_id = ? AND cited.session_id = ?
-         AND ${liveTurnSql("citing")} AND ${liveTurnSql("cited")}
-       ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
-  ).all(sessionId, sessionId);
-  for (const edge of edgeRows) {
-    if (edge.citedTurnId === edge.citingTurnId) {
-      continue;
-    }
-    const bucket = edgesByCiter.get(edge.citingTurnId);
-    if (bucket) {
-      bucket.push(edge);
-    } else {
-      edgesByCiter.set(edge.citingTurnId, [edge]);
-    }
-  }
-  const effective = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    const edges = edgesByCiter.get(turn.id) ?? [];
-    const citedTurnIds = dedupeCitedIds(edges);
-    appendUnseen(
-      citedTurnIds,
-      parseInlineCitations(turn.content).filter(
-        (id) => id !== turn.id && sessionTurnIds.has(id)
-      )
-    );
-    effective.set(turn.id, { citedTurnIds, edges });
-  }
-  return effective;
 }
 
 // src/db/note-settlement-proposals.ts
@@ -1707,65 +1692,6 @@ function searchMemory(db, options) {
     return querySegmentsByScope(db, options, query);
   }
   return queryObservationsByScope(db, options, query);
-}
-
-// src/shared/type-vocabulary.ts
-var MEMORY_TYPES = [
-  "discuss",
-  "research",
-  "design",
-  "implement",
-  "refactor",
-  "fix",
-  "measure",
-  "review",
-  "ops",
-  "delegate",
-  "correction"
-];
-function isMemoryType(value) {
-  return typeof value === "string" && MEMORY_TYPES.includes(value);
-}
-var TYPE_GLYPH = {
-  discuss: "\u{1F4AC}",
-  research: "\u{1F50D}",
-  design: "\u2696\uFE0F",
-  implement: "\u{1F527}",
-  refactor: "\u{1F504}",
-  fix: "\u{1F534}",
-  measure: "\u{1F4CA}",
-  review: "\u2705",
-  ops: "\u2699\uFE0F",
-  delegate: "\u{1F91D}",
-  correction: "\u21A9\uFE0F"
-};
-var COMPACT_TYPE_GLYPH = "\u23F8";
-var LEGACY_TYPE_GLYPH = {
-  bugfix: "\u{1F534}",
-  feature: "\u{1F7E3}",
-  refactor: "\u{1F504}",
-  change: "\u2705",
-  discovery: "\u{1F535}",
-  decision: "\u2696\uFE0F",
-  compact: COMPACT_TYPE_GLYPH
-};
-function typeWordGlyph(word) {
-  if (isMemoryType(word)) {
-    return TYPE_GLYPH[word];
-  }
-  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
-}
-function typeListGlyph(types) {
-  if (!types || types.length === 0) {
-    return "\u2022";
-  }
-  return types.map(typeWordGlyph).join("");
-}
-function typeListsEqual(left, right) {
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every((value, index) => value === right[index]);
 }
 
 // src/db/segments.ts
@@ -10465,175 +10391,6 @@ function renderSegmentRosterFeed(db, options = {}) {
   );
 }
 
-// src/shared/turn-phase.ts
-var TURN_PHASES = ["evidence", "decision", "delivery"];
-var TYPE_PHASE = {
-  research: "evidence",
-  measure: "evidence",
-  design: "decision",
-  discuss: "decision",
-  correction: "decision",
-  implement: "delivery",
-  refactor: "delivery",
-  fix: "delivery",
-  delegate: "delivery",
-  review: "delivery",
-  ops: "delivery"
-};
-function phasesForTypes(types) {
-  const phases = /* @__PURE__ */ new Set();
-  for (const raw of types) {
-    const phase = TYPE_PHASE[raw];
-    if (phase !== void 0) {
-      phases.add(phase);
-    }
-  }
-  return phases;
-}
-var EDGE_RELATIONS = [
-  "override",
-  "narrows",
-  "extends",
-  "indexes",
-  "consume",
-  "grounds",
-  "verifies",
-  "refutes"
-];
-var SAME_PHASE_RELATIONS = [
-  "override",
-  "narrows",
-  "extends",
-  "indexes",
-  "consume"
-];
-var TAGGABLE_RELATIONS = new Set(
-  SAME_PHASE_RELATIONS
-);
-var EVIDENCE_SOURCE_RELATIONS = ["verifies", "refutes"];
-function buildRelationPhaseRequirement() {
-  const table = Object.fromEntries(
-    EDGE_RELATIONS.map((relation) => [relation, []])
-  );
-  for (const phase of TURN_PHASES) {
-    for (const relation of SAME_PHASE_RELATIONS) {
-      table[relation].push({ source: phase, target: phase });
-    }
-  }
-  for (const source of TURN_PHASES) {
-    for (const target of TURN_PHASES) {
-      if (source !== target) {
-        table.grounds.push({ source, target });
-      }
-    }
-  }
-  for (const relation of EVIDENCE_SOURCE_RELATIONS) {
-    for (const phase of TURN_PHASES) {
-      if (phase === "evidence") {
-        continue;
-      }
-      table[relation].push({ source: "evidence", target: phase });
-    }
-  }
-  return table;
-}
-var RELATION_PHASE_REQUIREMENT = buildRelationPhaseRequirement();
-
-// src/db/edge-signals.ts
-function zeroSignals() {
-  return { overridden: false, refinesExcess: { decision: 0, delivery: 0 }, encodesCount: 0 };
-}
-function parseTypeArray(value) {
-  if (!value) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-function primaryPhaseBucket(phases) {
-  if (phases.has("decision")) {
-    return "decision";
-  }
-  if (phases.has("delivery")) {
-    return "delivery";
-  }
-  return null;
-}
-function getTurnEdgeSignals(db, turnIds) {
-  const result = /* @__PURE__ */ new Map();
-  const uniqueIds = [...new Set(turnIds)];
-  for (const id of uniqueIds) {
-    result.set(id, zeroSignals());
-  }
-  if (uniqueIds.length === 0) {
-    return result;
-  }
-  const placeholders = uniqueIds.map(() => "?").join(",");
-  const overrideRows = db.query(
-    `SELECT DISTINCT e.cited_id AS targetId
-       FROM memory_edges e
-       JOIN turns citing ON citing.id = e.citing_id
-       JOIN turns cited ON cited.id = e.cited_id
-       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'override'
-         AND ${liveTurnSql("citing")}
-         AND ${liveTurnSql("cited")}
-         AND e.cited_id IN (${placeholders})`
-  ).all(...uniqueIds);
-  for (const row of overrideRows) {
-    result.get(row.targetId).overridden = true;
-  }
-  const encodesRows = db.query(
-    `SELECT e.cited_id AS targetId, COUNT(*) AS count
-       FROM memory_edges e
-       JOIN turns citing ON citing.id = e.citing_id
-       JOIN turns cited ON cited.id = e.cited_id
-       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation IN ('grounds', 'indexes')
-         AND ${liveTurnSql("citing")}
-         AND ${liveTurnSql("cited")}
-         AND e.cited_id IN (${placeholders})
-       GROUP BY e.cited_id`
-  ).all(...uniqueIds);
-  for (const row of encodesRows) {
-    result.get(row.targetId).encodesCount = row.count;
-  }
-  const refinesRows = db.query(
-    `SELECT e.cited_id AS targetId, citing.type AS citingType
-       FROM memory_edges e
-       JOIN turns citing ON citing.id = e.citing_id
-       JOIN turns cited ON cited.id = e.cited_id
-       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'extends'
-         AND ${liveTurnSql("citing")}
-         AND ${liveTurnSql("cited")}
-         AND e.cited_id IN (${placeholders})
-       ORDER BY e.cited_id ASC, e.created_at_epoch ASC, e.citing_id ASC`
-  ).all(...uniqueIds);
-  let currentTarget = null;
-  let seenForTarget = 0;
-  for (const row of refinesRows) {
-    if (row.targetId !== currentTarget) {
-      currentTarget = row.targetId;
-      seenForTarget = 0;
-    }
-    seenForTarget += 1;
-    if (seenForTarget === 1) {
-      continue;
-    }
-    const phases = phasesForTypes(parseTypeArray(row.citingType));
-    const bucket = primaryPhaseBucket(phases);
-    if (bucket) {
-      result.get(row.targetId).refinesExcess[bucket] += 1;
-    }
-  }
-  return result;
-}
-
 // src/diary/domain.ts
 var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
 function estimateDiaryTokens(text) {
@@ -10642,6 +10399,367 @@ function estimateDiaryTokens(text) {
     weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
   }
   return Math.ceil(weightedCodePoints * 1.2);
+}
+
+// src/shared/lane-interpretation.ts
+var DEFAULT_SEGMENT = "\0default";
+function compareOrderKey(a, b) {
+  return a[0] - b[0] || a[1] - b[1];
+}
+function compareOrderKeyAcrossSessions(a, b) {
+  if (a.order[0] === b.order[0]) {
+    return compareOrderKey(a.order, b.order);
+  }
+  if (a.createdAtEpoch !== void 0 && b.createdAtEpoch !== void 0) {
+    return a.createdAtEpoch - b.createdAtEpoch;
+  }
+  return compareOrderKey(a.order, b.order);
+}
+function canonicalTagSet(tags) {
+  return [...new Set(tags)].sort();
+}
+function laneToken(segment, tags) {
+  return JSON.stringify([segment, canonicalTagSet(tags)]);
+}
+function deriveLaneInterpretation(turns, edges) {
+  const segmentOf = /* @__PURE__ */ new Map();
+  const orderOf = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    segmentOf.set(turn.id, turn.segment ?? DEFAULT_SEGMENT);
+    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+  }
+  const segmentFor = (id) => segmentOf.get(id) ?? DEFAULT_SEGMENT;
+  const orderFor = (id) => orderOf.get(id) ?? [0, id];
+  const groups = /* @__PURE__ */ new Map();
+  const warnings = [];
+  function addToGroup(segment, canon, edge) {
+    const token = laneToken(segment, canon);
+    let group = groups.get(token);
+    if (group === void 0) {
+      group = { segment, tagSet: [...canon], edges: [] };
+      groups.set(token, group);
+    }
+    group.edges.push(edge);
+    return token;
+  }
+  for (const edge of edges) {
+    const canon = canonicalTagSet(edge.tags);
+    if (canon.length === 0) continue;
+    const citingSegment = segmentFor(edge.citingId);
+    const citedSegment = segmentFor(edge.citedId);
+    addToGroup(citingSegment, canon, edge);
+    if (citedSegment !== citingSegment) {
+      addToGroup(citedSegment, canon, edge);
+      warnings.push({
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        tagSet: canon,
+        citingSegment,
+        citedSegment
+      });
+    }
+  }
+  const events = [];
+  function pushEvent(citingId, citedId, relation, token) {
+    events.push({ citingId, citedId, relation, token });
+  }
+  for (const edge of edges) {
+    if (edge.relation !== "indexes" && edge.relation !== "override") continue;
+    const canon = canonicalTagSet(edge.tags);
+    if (canon.length === 0) {
+      if (edge.relation === "override") {
+        pushEvent(edge.citingId, edge.citedId, "override", null);
+      }
+      continue;
+    }
+    const citingSegment = segmentFor(edge.citingId);
+    const citedSegment = segmentFor(edge.citedId);
+    const citingToken = laneToken(citingSegment, canon);
+    if (groups.has(citingToken)) {
+      pushEvent(edge.citingId, edge.citedId, edge.relation, citingToken);
+    }
+    if (citedSegment !== citingSegment) {
+      const citedToken = laneToken(citedSegment, canon);
+      if (groups.has(citedToken)) {
+        pushEvent(edge.citingId, edge.citedId, edge.relation, citedToken);
+      }
+    }
+  }
+  events.sort((a, b) => compareOrderKey(orderFor(a.citingId), orderFor(b.citingId)) || a.citingId - b.citingId);
+  const terminusOf = /* @__PURE__ */ new Map();
+  const everDeclared = /* @__PURE__ */ new Map();
+  const deadInLane = /* @__PURE__ */ new Map();
+  const latestEventTurn = /* @__PURE__ */ new Map();
+  for (const token of groups.keys()) {
+    terminusOf.set(token, null);
+    everDeclared.set(token, false);
+    deadInLane.set(token, /* @__PURE__ */ new Set());
+    latestEventTurn.set(token, null);
+  }
+  const globallyDead = /* @__PURE__ */ new Set();
+  let index = 0;
+  while (index < events.length) {
+    const citingId = events[index].citingId;
+    let end = index;
+    while (end < events.length && events[end].citingId === citingId) {
+      end += 1;
+    }
+    const batch = events.slice(index, end);
+    index = end;
+    for (const event of batch) {
+      if (event.relation !== "override") continue;
+      if (event.token === null) {
+        globallyDead.add(event.citedId);
+        for (const [token, terminus] of terminusOf) {
+          if (terminus === event.citedId) {
+            terminusOf.set(token, null);
+            latestEventTurn.set(token, citingId);
+          }
+        }
+      } else {
+        deadInLane.get(event.token).add(event.citedId);
+        if (terminusOf.get(event.token) === event.citedId) {
+          terminusOf.set(event.token, null);
+        }
+        latestEventTurn.set(event.token, citingId);
+      }
+    }
+    for (const event of batch) {
+      if (event.relation !== "indexes" || event.token === null) continue;
+      terminusOf.set(event.token, citingId);
+      everDeclared.set(event.token, true);
+      latestEventTurn.set(event.token, citingId);
+    }
+  }
+  for (const [token, group] of groups) {
+    const current = latestEventTurn.get(token) ?? null;
+    if (current === null) continue;
+    let bestId = current;
+    let bestOrder = orderFor(current);
+    for (const edge of group.edges) {
+      if (edge.relation === "indexes" || edge.relation === "override") continue;
+      const order = orderFor(edge.citingId);
+      const cmp = compareOrderKey(order, bestOrder);
+      if (cmp > 0 || cmp === 0 && edge.citingId > bestId) {
+        bestOrder = order;
+        bestId = edge.citingId;
+      }
+    }
+    latestEventTurn.set(token, bestId);
+  }
+  const tokens = [...groups.keys()].sort();
+  const lanes = [];
+  const laneByToken = /* @__PURE__ */ new Map();
+  for (const token of tokens) {
+    const group = groups.get(token);
+    const memberIds = /* @__PURE__ */ new Set();
+    for (const edge of group.edges) {
+      memberIds.add(edge.citingId);
+      memberIds.add(edge.citedId);
+    }
+    const dead = deadInLane.get(token);
+    const members = [...memberIds].sort((a, b) => a - b).map((id) => ({ id, dead: globallyDead.has(id) || dead.has(id) }));
+    const terminus = terminusOf.get(token) ?? null;
+    const state = terminus !== null ? "declared" : everDeclared.get(token) ? "reopened" : "undeclared";
+    const lane = {
+      key: { segment: group.segment, tagSet: group.tagSet },
+      members,
+      declaration: {
+        state,
+        terminus,
+        latestEventTurn: latestEventTurn.get(token) ?? null
+      },
+      taggedEdges: group.edges
+    };
+    lanes.push(lane);
+    laneByToken.set(token, lane);
+  }
+  return { lanes, laneByToken, warnings };
+}
+function laneLastDeclarer(lane, orderFor) {
+  let bestId = null;
+  let bestOrder = [0, 0];
+  for (const edge of lane.taggedEdges) {
+    if (edge.relation !== "indexes") continue;
+    const order = orderFor(edge.citingId);
+    const cmp = bestId === null ? 1 : compareOrderKey(order, bestOrder);
+    if (cmp > 0 || cmp === 0 && edge.citingId > bestId) {
+      bestOrder = order;
+      bestId = edge.citingId;
+    }
+  }
+  return bestId;
+}
+function laneValidity(lane) {
+  const deadById = new Map(lane.members.map((member) => [member.id, member.dead]));
+  const terminus = lane.declaration.terminus;
+  const core = lane.taggedEdges.filter((edge) => edge.relation === "indexes" && edge.citingId === terminus).map((edge) => edge.citedId);
+  const anyLiving = core.some((id) => deadById.get(id) === false);
+  return anyLiving ? "valid" : "invalid";
+}
+function deriveLaneStates(lanes, turns) {
+  const orderOf = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+  }
+  const orderFor = (id) => orderOf.get(id) ?? [0, id];
+  const states = /* @__PURE__ */ new Map();
+  for (const lane of lanes) {
+    const closed = lane.declaration.state === "declared" && lane.declaration.terminus === lane.declaration.latestEventTurn;
+    const token = laneToken(lane.key.segment, lane.key.tagSet);
+    states.set(token, {
+      key: lane.key,
+      closure: closed ? "closed" : "open",
+      validity: closed ? laneValidity(lane) : null,
+      terminus: lane.declaration.terminus,
+      lastDeclarer: laneLastDeclarer(lane, orderFor)
+    });
+  }
+  return states;
+}
+
+// src/shared/milestone-election.ts
+var IN_DEGREE_RELATIONS = /* @__PURE__ */ new Set([
+  "narrows",
+  "extends",
+  "consume",
+  "indexes",
+  "grounds",
+  "verifies"
+]);
+function rankCompare(a, b) {
+  if (a.tier !== b.tier) return a.tier - b.tier;
+  if (a.inDegree !== b.inDegree) return b.inDegree - a.inDegree;
+  if (a.outDegree !== b.outDegree) return b.outDegree - a.outDegree;
+  const orderCmp = compareOrderKeyAcrossSessions(
+    { order: b.order, createdAtEpoch: b.epoch },
+    { order: a.order, createdAtEpoch: a.epoch }
+  );
+  if (orderCmp !== 0) return orderCmp;
+  return b.id - a.id;
+}
+function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
+  const orderOf = /* @__PURE__ */ new Map();
+  const rolledBackOf = /* @__PURE__ */ new Map();
+  const epochOf = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+    rolledBackOf.set(turn.id, turn.wasRolledBack === true);
+    if (turn.createdAtEpoch !== void 0) {
+      epochOf.set(turn.id, turn.createdAtEpoch);
+    }
+  }
+  const orderFor = (id) => orderOf.get(id) ?? [0, id];
+  const epochFor = (id) => epochOf.get(id);
+  const eligibleIds = /* @__PURE__ */ new Set();
+  for (const turn of turns) {
+    if (turn.eligible !== false) {
+      eligibleIds.add(turn.id);
+    }
+  }
+  const excluded = /* @__PURE__ */ new Set();
+  for (const turn of turns) {
+    if (turn.wasRolledBack === true || turn.skipped === true) {
+      excluded.add(turn.id);
+    }
+  }
+  for (const edge of edges) {
+    if (edge.relation === "override" || edge.relation === "refutes") {
+      excluded.add(edge.citedId);
+    }
+  }
+  const inDegree = /* @__PURE__ */ new Map();
+  const outDegree = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (IN_DEGREE_RELATIONS.has(edge.relation)) {
+      inDegree.set(edge.citedId, (inDegree.get(edge.citedId) ?? 0) + 1);
+    }
+    outDegree.set(edge.citingId, (outDegree.get(edge.citingId) ?? 0) + 1);
+  }
+  const tier1 = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (edge.relation === "indexes" && canonicalTagSet(edge.tags).length === 0) {
+      tier1.add(edge.citingId);
+    }
+  }
+  const { lanes } = deriveLaneInterpretation(turns, edges);
+  const laneStates = deriveLaneStates(lanes, turns);
+  const tier2 = /* @__PURE__ */ new Map();
+  for (const state of laneStates.values()) {
+    if (state.closure === "closed") {
+      if (state.validity === "valid" && state.terminus !== null && !tier2.has(state.terminus)) {
+        tier2.set(state.terminus, "closed-valid-terminus");
+      }
+    } else if (state.lastDeclarer !== null && !tier2.has(state.lastDeclarer)) {
+      tier2.set(state.lastDeclarer, "open-last-declarer");
+    }
+  }
+  const candidateIds = [...eligibleIds].filter((id) => !excluded.has(id));
+  const toRankKey = (id, tier) => ({
+    tier,
+    inDegree: inDegree.get(id) ?? 0,
+    outDegree: outDegree.get(id) ?? 0,
+    order: orderFor(id),
+    epoch: epochFor(id),
+    id
+  });
+  const stage1 = [];
+  for (const id of candidateIds) {
+    let tier;
+    let reason = "other";
+    if (tier1.has(id)) {
+      tier = 1;
+      reason = "release";
+    } else if (tier2.has(id)) {
+      tier = 2;
+      reason = tier2.get(id);
+    }
+    if (tier === void 0) continue;
+    stage1.push({ ...toRankKey(id, tier), reason });
+  }
+  stage1.sort(rankCompare);
+  const electedIds = new Set(stage1.slice(0, Math.max(0, budget)).map((c) => c.id));
+  const indexedByElected = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (edge.relation === "indexes" && electedIds.has(edge.citingId)) {
+      indexedByElected.add(edge.citedId);
+    }
+  }
+  const correctors = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (edge.relation === "override") {
+      correctors.add(edge.citingId);
+    }
+    if (rolledBackOf.get(edge.citedId) === true) {
+      correctors.add(edge.citingId);
+    }
+  }
+  for (const id of rolledBackCiterIds) {
+    correctors.add(id);
+  }
+  const stage1Ids = new Set(stage1.map((c) => c.id));
+  const rest = [];
+  for (const id of candidateIds) {
+    if (stage1Ids.has(id)) continue;
+    let tier;
+    let reason;
+    if (indexedByElected.has(id)) {
+      tier = 3;
+      reason = "indexed-by-elected";
+    } else if (correctors.has(id)) {
+      tier = 4;
+      reason = "corrector";
+    } else {
+      tier = 5;
+      reason = "other";
+    }
+    rest.push({ ...toRankKey(id, tier), reason });
+  }
+  rest.sort(rankCompare);
+  return {
+    candidates: [...stage1, ...rest],
+    excluded: [...excluded].sort((a, b) => a - b)
+  };
 }
 
 // src/shared/transcript-parser.ts
@@ -10970,12 +11088,6 @@ function countUserPromptsInEntries(entries) {
   return count;
 }
 
-// src/task-causality-era.ts
-var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = 1784711427;
-function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
-  return createdAtEpoch >= cutoffEpoch;
-}
-
 // src/mcp/timeline.ts
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var BROKEN_PROMPT_MIN_PREFIX = 20;
@@ -11233,79 +11345,7 @@ function milestoneMarker(turn, options = {}) {
   }
   return null;
 }
-var MILESTONE_LEGACY_TYPE_GRADE = {
-  decision: 3,
-  feature: 2,
-  refactor: 2,
-  bugfix: 2,
-  change: 1,
-  discovery: 1
-};
-var MILESTONE_LEGACY_GRADE_CAP = 3;
-var MILESTONE_SPINE_MIN_EFF_GRADE = 3;
-var MILESTONE_POOL_MIN_EFF_GRADE = 2;
-var MILESTONE_PULL_MAX_EFF_GRADE = 2;
-var MILESTONE_TIE_CITED_WEIGHT = 0.25;
-var MILESTONE_TIE_CITED_CAP = 2;
-var MILESTONE_TIE_INSIGHT_WEIGHT = 0.25;
-var MILESTONE_TIE_PURE_SPEC_WEIGHT = 0.15;
-var MILESTONE_TIE_BREAK_MAX = 0.9;
-var MILESTONE_PURE_SPEC_RE = /^docs\/(?:plans|specs|superpowers)\/.*\.md$/;
 var MILESTONE_VERSION_RE = /\b0\.\d+\.\d+\b/g;
-var MILESTONE_PULLED_LABEL_CAP = 60;
-function milestoneEffGrade(turn, taskCausalityEraCutoffEpoch) {
-  if (isTaskCausalityEra(turn.createdAtEpoch, taskCausalityEraCutoffEpoch)) {
-    const grade = turn.significanceGrade;
-    if (grade === null || grade === void 0) {
-      return 0;
-    }
-    return Math.max(0, Math.min(4, grade));
-  }
-  return legacyEffGrade(turn);
-}
-function legacyEffGrade(turn) {
-  const legacyType = turn.type[0] ?? "";
-  let grade = MILESTONE_LEGACY_TYPE_GRADE[legacyType] ?? 0;
-  if ((legacyType === "feature" || legacyType === "refactor" || legacyType === "change") && turn.filesModified.length === 0) {
-    grade = 0;
-  }
-  if (hasMilestoneInsight(turn)) {
-    grade += 1;
-  }
-  return Math.min(grade, MILESTONE_LEGACY_GRADE_CAP);
-}
-function hasMilestoneInsight(turn) {
-  return typeof turn.insight === "string" && turn.insight.trim() !== "" && turn.insight !== "[]";
-}
-function isPureSpecTurn(turn) {
-  return turn.filesModified.length > 0 && turn.filesModified.every((path2) => MILESTONE_PURE_SPEC_RE.test(path2));
-}
-function milestoneTieBreak(turn, citedBy = 0) {
-  const raw = MILESTONE_TIE_CITED_WEIGHT * Math.min(Math.max(citedBy, 0), MILESTONE_TIE_CITED_CAP) + (hasMilestoneInsight(turn) ? MILESTONE_TIE_INSIGHT_WEIGHT : 0) + (isPureSpecTurn(turn) ? MILESTONE_TIE_PURE_SPEC_WEIGHT : 0);
-  return Math.min(raw, MILESTONE_TIE_BREAK_MAX);
-}
-function inlineCitationFallback(turns) {
-  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
-  const effective = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    effective.set(turn.id, {
-      citedTurnIds: parseInlineCitations(turn.content).filter(
-        (id) => id !== turn.id && sessionTurnIds.has(id)
-      ),
-      edges: []
-    });
-  }
-  return effective;
-}
-function citationInDegree(citations) {
-  const inDegree = /* @__PURE__ */ new Map();
-  for (const entry of citations.values()) {
-    for (const citedTurnId of entry.citedTurnIds) {
-      inDegree.set(citedTurnId, (inDegree.get(citedTurnId) ?? 0) + 1);
-    }
-  }
-  return inDegree;
-}
 function extractMilestoneVersion(title) {
   if (!title) return null;
   const matches = [...title.matchAll(MILESTONE_VERSION_RE)];
@@ -11350,61 +11390,6 @@ function demotedOutcomePrompts(seq) {
     closeChain(chain);
   }
   return demoted;
-}
-function buildCorrectionGraph(turns, options = {}) {
-  const correctors = /* @__PURE__ */ new Set();
-  const supersededVictims = /* @__PURE__ */ new Set();
-  const supersedersByVictim = /* @__PURE__ */ new Map();
-  const byDbId = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    byDbId.set(turn.id, turn);
-  }
-  const citations = options.citations ?? inlineCitationFallback(turns);
-  for (const corrector of turns) {
-    const entry = citations.get(corrector.id);
-    if (entry === void 0) {
-      continue;
-    }
-    const supersededIds = /* @__PURE__ */ new Set();
-    const structuredTargets = /* @__PURE__ */ new Set();
-    for (const edge of entry.edges) {
-      structuredTargets.add(edge.citedTurnId);
-      if (edge.relation === "supersedes") {
-        supersededIds.add(edge.citedTurnId);
-      }
-    }
-    if (!isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
-      for (const citedTurnId of entry.citedTurnIds) {
-        if (structuredTargets.has(citedTurnId)) {
-          continue;
-        }
-        const cited = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
-        if (cited && milestoneMarker(cited) === "reversed") {
-          supersededIds.add(citedTurnId);
-        }
-      }
-    }
-    for (const citedTurnId of supersededIds) {
-      const victim = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
-      if (!victim || victim.sessionId !== corrector.sessionId || // Predecessor guard: a causal reference points backward.
-      victim.promptNumber >= corrector.promptNumber) {
-        continue;
-      }
-      correctors.add(corrector.id);
-      supersededVictims.add(victim.id);
-      const bucket = supersedersByVictim.get(victim.id) ?? [];
-      bucket.push(corrector);
-      supersedersByVictim.set(victim.id, bucket);
-    }
-  }
-  const supersededBy = /* @__PURE__ */ new Map();
-  for (const [victimId, superseders] of supersedersByVictim) {
-    supersededBy.set(
-      victimId,
-      [...superseders].sort((left, right) => left.promptNumber - right.promptNumber).map((turn) => turn.id)
-    );
-  }
-  return { correctors, supersededVictims, supersededBy };
 }
 function getCompactMetadata(tags) {
   let preTokens = 0;
@@ -11597,129 +11582,99 @@ function compareMilestoneRank(left, right) {
 function isTimelineExcludedTurn(turn) {
   return turn.wasRolledBack || turn.status === "skipped";
 }
+function buildElectedCitations(laneEdges, electedIds) {
+  const citedByTurn = /* @__PURE__ */ new Map();
+  for (const edge of laneEdges) {
+    if (edge.citingId === edge.citedId) continue;
+    if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
+    const bucket = citedByTurn.get(edge.citingId) ?? [];
+    if (!bucket.includes(edge.citedId)) {
+      bucket.push(edge.citedId);
+    }
+    citedByTurn.set(edge.citingId, bucket);
+  }
+  return citedByTurn;
+}
+function fetchExternalElectionTurns(db, laneEdges, windowIds) {
+  const externalIds = /* @__PURE__ */ new Set();
+  for (const edge of laneEdges) {
+    if (!windowIds.has(edge.citingId)) {
+      externalIds.add(edge.citingId);
+    }
+    if (!windowIds.has(edge.citedId)) {
+      externalIds.add(edge.citedId);
+    }
+  }
+  if (externalIds.size === 0) {
+    return [];
+  }
+  const ids = [...externalIds];
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = db.query(
+    `SELECT id, session_id AS sessionId, prompt_number AS promptNumber,
+              created_at_epoch AS createdAtEpoch, was_rolled_back AS wasRolledBack
+       FROM turns WHERE id IN (${placeholders})`
+  ).all(...ids);
+  return rows.map((row) => ({
+    id: row.id,
+    type: [],
+    order: [row.sessionId, row.promptNumber],
+    createdAtEpoch: row.createdAtEpoch,
+    wasRolledBack: row.wasRolledBack === 1,
+    eligible: false
+  }));
+}
 function selectMilestoneTurns(view) {
-  const eraCutoff = view.taskCausalityEraCutoffEpoch;
-  const rawUniverse = view.sessionTurns ?? view.windowTurns;
-  const universe = rawUniverse.filter((turn) => !isTimelineExcludedTurn(turn));
   const seq = sortTurnsForAnalysis(view.windowTurns).filter(
     (turn) => !isTimelineExcludedTurn(turn) && !turn.type.includes("compact")
   );
   if (seq.length === 0) {
-    return {
-      kept: [],
-      ranked: [],
-      pulled: [],
-      overflowByDay: [],
-      effGradeByTurnId: /* @__PURE__ */ new Map()
-    };
+    return { kept: [], ranked: [], overflowByDay: [] };
   }
-  const excludedIds = new Set(
-    rawUniverse.filter((turn) => isTimelineExcludedTurn(turn)).map((turn) => turn.id)
+  const laneEdges = view.laneEdges ?? [];
+  const electionTurns = seq.map((turn) => ({
+    id: turn.id,
+    type: turn.type,
+    order: [turn.sessionId, turn.promptNumber],
+    createdAtEpoch: turn.createdAtEpoch
+  }));
+  const { candidates } = electMilestones(
+    [...electionTurns, ...view.externalTurns ?? []],
+    laneEdges,
+    view.budget,
+    view.rolledBackCiterIds ?? []
   );
-  const rawCitations = view.citations ?? inlineCitationFallback(universe);
-  const citations = excludedIds.size === 0 ? rawCitations : new Map([...rawCitations].filter(([citerId]) => !excludedIds.has(citerId)));
-  const inDegree = citationInDegree(citations);
-  const universeById = new Map(universe.map((turn) => [turn.id, turn]));
-  const inWindowById = new Map(seq.map((turn) => [turn.id, turn]));
-  const graph = buildCorrectionGraph(universe, {
-    citations,
-    resolveCited: (id) => universeById.get(id),
-    taskCausalityEraCutoffEpoch: eraCutoff
-  });
-  const effGradeOf = (turn) => milestoneEffGrade(turn, eraCutoff);
-  const endpoints = /* @__PURE__ */ new Set([seq[0].id]);
-  const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
-  endpoints.add((lastTitled ?? seq[seq.length - 1]).id);
+  const windowIds = new Set(seq.map((turn) => turn.id));
+  const windowCandidates = candidates.filter((candidate) => windowIds.has(candidate.id));
   const demotedOutcomes = demotedOutcomePrompts(seq);
   const markerForSelection = (turn) => {
     const marker = milestoneMarker(turn);
     return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
   };
-  const isAlwaysKeep = (turn) => {
-    if (endpoints.has(turn.id)) {
-      return true;
-    }
-    if (graph.correctors.has(turn.id)) {
-      return true;
-    }
-    if (milestoneMarker(turn) === "reversed") {
-      return true;
-    }
-    return isTaskCausalityEra(turn.createdAtEpoch, eraCutoff) && effGradeOf(turn) === 4;
-  };
-  const promptNumbersOf = (turnIds) => turnIds.map((id) => universeById.get(id)?.promptNumber ?? inWindowById.get(id)?.promptNumber).filter((promptNumber) => promptNumber !== void 0);
-  const keptIds = /* @__PURE__ */ new Set();
-  const rows = [];
-  const poolRows = [];
-  for (const turn of seq) {
-    const effGrade = effGradeOf(turn);
-    const alwaysKeep = isAlwaysKeep(turn);
-    const spine = effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
-    if (!alwaysKeep && !spine && effGrade < MILESTONE_POOL_MIN_EFF_GRADE) {
-      continue;
-    }
-    const superseders = graph.supersededBy.get(turn.id);
-    const row = {
+  const turnById = new Map(seq.map((turn) => [turn.id, turn]));
+  const electedSlice = windowCandidates.slice(0, Math.max(0, view.budget));
+  const electedIds = new Set(electedSlice.map((candidate) => candidate.id));
+  const citedByTurn = buildElectedCitations(laneEdges, electedIds);
+  const antecedentsOf = (turnId) => [...citedByTurn.get(turnId) ?? []].sort((a, b) => turnById.get(a).promptNumber - turnById.get(b).promptNumber).map((id) => `T${turnById.get(id).promptNumber}`);
+  const rankedRows = windowCandidates.map((candidate) => {
+    const turn = turnById.get(candidate.id);
+    return {
       turn,
-      score: effGrade + milestoneTieBreak(turn, inDegree.get(turn.id) ?? 0),
-      effGrade,
-      alwaysKeep,
-      spine,
+      score: 0,
+      tier: candidate.tier,
       marker: markerForSelection(turn),
-      ...superseders ? { supersededBy: promptNumbersOf(superseders) } : {}
+      antecedents: antecedentsOf(turn.id)
     };
-    poolRows.push(row);
-    if (alwaysKeep || spine) {
-      keptIds.add(turn.id);
-      rows.push(row);
-    }
-  }
-  const ranked = [...poolRows].sort(compareMilestoneRank);
-  const pulled = [];
-  const pulledIds = /* @__PURE__ */ new Set();
-  const pulledByTurnId = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    const entry = citations.get(row.turn.id);
-    if (entry === void 0) {
-      continue;
-    }
-    for (const citedTurnId of entry.citedTurnIds) {
-      if (keptIds.has(citedTurnId)) {
-        continue;
-      }
-      const already = pulledByTurnId.get(citedTurnId);
-      if (already !== void 0) {
-        if (!already.citerPromptNumbers.includes(row.turn.promptNumber)) {
-          already.citerPromptNumbers.push(row.turn.promptNumber);
-        }
-        continue;
-      }
-      const cited = universeById.get(citedTurnId);
-      if (cited === void 0 || cited.type.includes("compact") || cited.sessionId !== row.turn.sessionId || // Predecessor guard: a causal reference points backward.
-      cited.promptNumber >= row.turn.promptNumber) {
-        continue;
-      }
-      const effGrade = effGradeOf(cited);
-      if (effGrade > MILESTONE_PULL_MAX_EFF_GRADE) {
-        continue;
-      }
-      pulledIds.add(citedTurnId);
-      const antecedent = {
-        turn: cited,
-        effGrade,
-        citedByPromptNumber: row.turn.promptNumber,
-        citerPromptNumbers: [row.turn.promptNumber],
-        label: pulledAntecedentLabel(cited),
-        supersededBy: promptNumbersOf(graph.supersededBy.get(citedTurnId) ?? [])
-      };
-      pulled.push(antecedent);
-      pulledByTurnId.set(citedTurnId, antecedent);
-    }
-  }
+  });
+  rankedRows.forEach((row, index) => {
+    row.score = rankedRows.length - index;
+  });
+  const kept = rankedRows.slice(0, Math.max(0, view.budget)).slice().sort((a, b) => a.turn.promptNumber - b.turn.promptNumber);
+  const keptIds = new Set(kept.map((row) => row.turn.id));
   const overflowByDay = [];
   const droppedByDay = /* @__PURE__ */ new Map();
   for (const turn of seq) {
-    if (keptIds.has(turn.id) || pulledIds.has(turn.id)) {
+    if (keptIds.has(turn.id)) {
       continue;
     }
     const day = formatLocalDate(turn.createdAtEpoch);
@@ -11737,18 +11692,7 @@ function selectMilestoneTurns(view) {
       labelEpoch: byPrompt[0].createdAtEpoch
     });
   }
-  const effGradeByTurnId = /* @__PURE__ */ new Map();
-  for (const turn of seq) {
-    effGradeByTurnId.set(turn.id, effGradeOf(turn));
-  }
-  return { kept: rows, ranked, pulled, overflowByDay, effGradeByTurnId };
-}
-function pulledAntecedentLabel(turn, signal) {
-  if (turn.title !== null && turn.title.trim() !== "") {
-    return turn.title;
-  }
-  const prompt = cleanPromptForLabel(turn.userPrompt);
-  return prompt === "" ? "(untitled)" : truncateText(prompt, { limit: MILESTONE_PULLED_LABEL_CAP, signal });
+  return { kept, ranked: rankedRows, overflowByDay };
 }
 function sortTurnsForAnalysis(turns) {
   return [...turns].sort((left, right) => {
@@ -11796,7 +11740,7 @@ function deriveTimelineBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
+function buildTimelineView(db, input, preloadedTurns) {
   const parsed = parseTimelineId(input.id);
   const viewKind = input.view ?? "turns";
   const session = getSession(db, parsed.sessionId);
@@ -11841,14 +11785,17 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
-  const citations = preloadedCitations ?? getSessionEffectiveCitations(db, session.id);
+  const milestoneBudget = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
+  const legacyWindowIds = new Set(legacyWindowTurns.map((turn) => turn.id));
+  const laneEdges = getRelationEdgesAmongTurns(db, [...legacyWindowIds]);
+  const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, legacyWindowIds);
+  const rolledBackCiterIds = getRolledBackCiterIds(db, [...legacyWindowIds]);
   const milestoneSelection = selectMilestoneTurns({
-    session,
     windowTurns: legacyWindowTurns,
-    windowSignals,
-    compactBoundaries,
-    sessionTurns: legacySessionTurns,
-    citations
+    laneEdges,
+    externalTurns: externalElectionTurns,
+    rolledBackCiterIds,
+    budget: milestoneBudget
   });
   const pagedTurns = viewKind === "turns" ? paginateItems2(windowTurns, page, pageSize) : emptyPaginatedItems(windowTurns.length, pageSize);
   const milestoneTail = viewKind === "milestones" && input.milestoneTail === true;
@@ -11902,8 +11849,6 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     windowTurns,
     pageTurns: pagedTurns.items,
     pagedMilestones: pagedMilestones.items,
-    milestonePulled: viewKind === "milestones" ? milestoneSelection.pulled : [],
-    turnEffGrades: milestoneSelection.effGradeByTurnId,
     milestoneDayGroups,
     viewItemTotal,
     pageAnchorEpoch,
@@ -12134,7 +12079,7 @@ function initialUnitTrim(unit) {
   return {
     showDesc: true,
     descTokens: null,
-    pulledShown: Math.min(unit.pulled.length, MILESTONE_UNIT_PULLED_CAP),
+    antecedentsShown: Math.min(unit.milestone.antecedents.length, MILESTONE_UNIT_PULLED_CAP),
     titleTokens: null,
     promptTokens: null,
     showFiles: true
@@ -12157,12 +12102,11 @@ function renderUnitLines(unit, trim, titleCap, signal) {
     title = truncateToTokens(title, trim.titleTokens);
   }
   const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
-  const mainBackLink = milestone.supersededBy && milestone.supersededBy.length > 0 ? ` \u2192\u88ABT${milestone.supersededBy.join("/T")}\u63A8\u7FFB` : "";
   const markerGlyph = milestone.marker === null ? "" : `${glyph} `;
   const promptTail = prompt === "" ? "" : ` \xB7 "${prompt}"`;
   const stamp = `${formatLocalMonthDay(milestone.turn.createdAtEpoch)} ${formatLocalTime(milestone.turn.createdAtEpoch)}`;
   const lines = [
-    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${typeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}${mainBackLink}`.trimEnd()
+    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${typeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd()
   ];
   if (trim.showDesc) {
     const raw = milestoneDescText(milestone.turn);
@@ -12173,12 +12117,12 @@ function renderUnitLines(unit, trim, titleCap, signal) {
       }
     }
   }
-  const shown = unit.pulled.slice(0, trim.pulledShown);
-  const foldedPulled = unit.pulled.length - trim.pulledShown;
-  if (shown.length > 0 || foldedPulled > 0) {
+  const shown = milestone.antecedents.slice(0, trim.antecedentsShown);
+  const foldedAntecedents = milestone.antecedents.length - trim.antecedentsShown;
+  if (shown.length > 0 || foldedAntecedents > 0) {
     const addresses = [
-      ...shown.map((antecedent) => `T${antecedent.turn.promptNumber}`),
-      ...foldedPulled > 0 ? [`+${foldedPulled}`] : []
+      ...shown,
+      ...foldedAntecedents > 0 ? [`+${foldedAntecedents}`] : []
     ];
     lines.push(`${TIMELINE_FIELD_INDENT}\u21B3 ${addresses.join(", ")}`);
   }
@@ -12230,8 +12174,8 @@ function fitUnitTrim(unit, titleCap, cap, base, signal) {
   if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
-  while (trim.pulledShown > 0 && unitTokens(unit, trim, titleCap, signal) > cap) {
-    trim.pulledShown -= 1;
+  while (trim.antecedentsShown > 0 && unitTokens(unit, trim, titleCap, signal) > cap) {
+    trim.antecedentsShown -= 1;
   }
   if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
@@ -12291,52 +12235,14 @@ function tokensFromWeightTenths(tenths) {
   return Math.ceil(tenths * 12 / 100);
 }
 function createMilestoneBodyModel(view, titleCap, signal) {
-  const pagedPrompts = new Set(
-    view.pagedMilestones.map((milestone) => milestone.turn.promptNumber)
-  );
-  const milestoneByPrompt = new Map(
-    view.pagedMilestones.map((milestone) => [milestone.turn.promptNumber, milestone])
-  );
-  const mainRowTurnIds = new Set(
-    view.pagedMilestones.map((milestone) => milestone.turn.id)
-  );
-  const pullable = view.milestonePulled.filter(
-    (antecedent) => !mainRowTurnIds.has(antecedent.turn.id)
-  );
-  const pullOrder = new Map(
-    pullable.map((antecedent, index) => [antecedent, index])
-  );
-  const antecedentDates = new Map(
-    pullable.map(
-      (antecedent) => [antecedent, formatLocalDate(antecedent.turn.createdAtEpoch)]
-    )
-  );
-  const retainedPrompts = new Set(pagedPrompts);
   const removed = /* @__PURE__ */ new Set();
   const descOff = /* @__PURE__ */ new Set();
-  const homedPulled = /* @__PURE__ */ new Map();
   const unitEntries = /* @__PURE__ */ new Map();
   const sections = view.milestoneDayGroups.map((group) => ({
     date: group.date,
     labelEpoch: group.labelEpoch,
     group
   }));
-  const groupedDates = new Set(sections.map((section) => section.date));
-  const syntheticEpochs = /* @__PURE__ */ new Map();
-  for (const antecedent of pullable) {
-    const date5 = antecedentDates.get(antecedent);
-    if (groupedDates.has(date5)) {
-      continue;
-    }
-    const known = syntheticEpochs.get(date5);
-    if (known === void 0 || antecedent.turn.createdAtEpoch < known) {
-      syntheticEpochs.set(date5, antecedent.turn.createdAtEpoch);
-    }
-  }
-  for (const [date5, labelEpoch] of syntheticEpochs) {
-    sections.push({ date: date5, labelEpoch, group: null });
-  }
-  sections.sort((left, right) => left.labelEpoch - right.labelEpoch);
   const orderedStates = sections.map((section, index) => {
     const overflow = section.group?.overflow ?? null;
     return {
@@ -12352,9 +12258,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
       run: null
     };
   });
-  const stateByDate = new Map(
-    orderedStates.map((state) => [state.section.date, state])
-  );
   const stateOfMilestone = /* @__PURE__ */ new Map();
   for (const state of orderedStates) {
     for (const milestone of state.rows) {
@@ -12363,7 +12266,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
   }
   let totalTenths = 0;
   let priced = false;
-  let framed = false;
   function lineTenths(line) {
     return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
   }
@@ -12372,15 +12274,7 @@ function createMilestoneBodyModel(view, titleCap, signal) {
     if (cached2 !== void 0) {
       return cached2;
     }
-    const pulled = [...homedPulled.get(milestone.turn.promptNumber) ?? []].sort(
-      (left, right) => (pullOrder.get(left) ?? 0) - (pullOrder.get(right) ?? 0)
-    );
-    const lines = renderUnitFitted(
-      { milestone, pulled },
-      titleCap,
-      descOff.has(milestone),
-      signal
-    );
+    const lines = renderUnitFitted({ milestone }, titleCap, descOff.has(milestone), signal);
     const entry = {
       lines,
       tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0)
@@ -12489,47 +12383,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
     }
     priceRun(run);
   }
-  function noteHidden(state, promptNumber) {
-    state.hiddenCount += 1;
-    state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
-    state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
-    if (!framed) {
-      return;
-    }
-    const { run } = state;
-    if (run === null) {
-      refreshExpandedFrame(state);
-      return;
-    }
-    run.hidden += 1;
-    run.promptLo = Math.min(run.promptLo, promptNumber);
-    run.promptHi = Math.max(run.promptHi, promptNumber);
-    priceRun(run);
-  }
-  function homeAntecedent(antecedent) {
-    const home = antecedent.citerPromptNumbers.find(
-      (promptNumber) => retainedPrompts.has(promptNumber)
-    );
-    if (home !== void 0) {
-      homedPulled.set(home, [...homedPulled.get(home) ?? [], antecedent]);
-      const host = milestoneByPrompt.get(home);
-      if (host !== void 0) {
-        invalidateUnit(host);
-      }
-      return;
-    }
-    if (!antecedent.citerPromptNumbers.some((promptNumber) => pagedPrompts.has(promptNumber))) {
-      return;
-    }
-    const state = stateByDate.get(antecedentDates.get(antecedent));
-    if (state === void 0) {
-      return;
-    }
-    noteHidden(state, antecedent.turn.promptNumber);
-  }
-  for (const antecedent of pullable) {
-    homeAntecedent(antecedent);
-  }
   for (const state of orderedStates) {
     state.unitTenths = state.rows.reduce(
       (sum, milestone) => sum + unitEntryFor(milestone).tenths,
@@ -12545,7 +12398,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
       refreshExpandedFrame(state);
     }
   }
-  framed = true;
   totalTenths += NEWLINE_WEIGHT_TENTHS;
   return {
     disableDesc(milestone) {
@@ -12561,7 +12413,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
       }
       const promptNumber = milestone.turn.promptNumber;
       removed.add(milestone);
-      retainedPrompts.delete(promptNumber);
       const state = stateOfMilestone.get(milestone);
       if (state !== void 0) {
         const entry = unitEntryFor(milestone);
@@ -12579,11 +12430,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
         }
       }
       unitEntries.delete(milestone);
-      const orphaned = homedPulled.get(promptNumber) ?? [];
-      homedPulled.delete(promptNumber);
-      for (const antecedent of orphaned) {
-        homeAntecedent(antecedent);
-      }
     },
     weightTenths() {
       return totalTenths;
@@ -12641,9 +12487,6 @@ function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightTenths
     }
   }
   for (const milestone of milestoneDegradationOrder(view)) {
-    if (milestone.alwaysKeep) {
-      continue;
-    }
     body.removeUnit(milestone);
     if (fits()) {
       return result();
@@ -12894,55 +12737,63 @@ function fetchUserPrompts(db, turnIds) {
   }
   return result;
 }
-function compareEdgeSignalRank(left, right, signals) {
-  const leftSignal = signals.get(left.turnId);
-  const rightSignal = signals.get(right.turnId);
-  if (leftSignal.encodesCount !== rightSignal.encodesCount) {
-    return rightSignal.encodesCount - leftSignal.encodesCount;
-  }
-  if (leftSignal.refinesExcess.decision !== rightSignal.refinesExcess.decision) {
-    return rightSignal.refinesExcess.decision - leftSignal.refinesExcess.decision;
-  }
-  if (leftSignal.refinesExcess.delivery !== rightSignal.refinesExcess.delivery) {
-    return rightSignal.refinesExcess.delivery - leftSignal.refinesExcess.delivery;
-  }
-  if (left.createdAtEpoch !== right.createdAtEpoch) {
-    return right.createdAtEpoch - left.createdAtEpoch;
-  }
-  return right.turnId - left.turnId;
-}
-function selectSegmentMilestonesByEdgeSignals(db, members, pageSize, taskCausalityEraCutoffEpoch) {
+function selectSegmentMilestonesByEdgeSignals(db, members, pageSize, _taskCausalityEraCutoffEpoch) {
   const liveMembers = excludeTimelineHiddenMembers(db, members);
-  const eraEligible = liveMembers.filter(
-    (member) => isTaskCausalityEra(member.createdAtEpoch, taskCausalityEraCutoffEpoch)
-  );
-  if (eraEligible.length === 0) {
+  if (liveMembers.length === 0) {
     return { kept: [], demotedCount: 0 };
   }
-  const signals = getTurnEdgeSignals(db, eraEligible.map((member) => member.turnId));
-  const candidates = eraEligible.filter((member) => !signals.get(member.turnId).overridden);
-  const ranked = [...candidates].sort(
-    (left, right) => compareEdgeSignalRank(left, right, signals)
+  const admissionCap = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
+  const memberIds = new Set(liveMembers.map((member) => member.turnId));
+  const laneEdges = getRelationEdgesAmongTurns(db, [...memberIds]);
+  const electionTurns = liveMembers.map((member) => ({
+    id: member.turnId,
+    type: member.type,
+    order: [member.sessionId, member.promptNumber],
+    createdAtEpoch: member.createdAtEpoch
+  }));
+  const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, memberIds);
+  const rolledBackCiterIds = getRolledBackCiterIds(db, [...memberIds]);
+  const { candidates } = electMilestones(
+    [...electionTurns, ...externalElectionTurns],
+    laneEdges,
+    admissionCap,
+    rolledBackCiterIds
   );
-  const admitted = new Set(ranked.slice(0, Math.max(0, pageSize)).map((member) => member.turnId));
+  const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
+  const admittedList = windowCandidates.slice(0, Math.max(0, admissionCap));
+  const admittedIds = new Set(admittedList.map((candidate) => candidate.id));
   const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
-  const keptMembers = liveMembers.filter((member) => admitted.has(member.turnId));
-  const links = resolveTurnRowLinks(db, keptMembers);
-  const userPrompts = fetchUserPrompts(db, keptMembers.map((member) => member.turnId));
+  const keptMembers = liveMembers.filter((member) => admittedIds.has(member.turnId));
+  const orderedKeptMembers = [...keptMembers].sort(
+    (left, right) => chronologicalOrdinals.get(left.turnId) - chronologicalOrdinals.get(right.turnId)
+  );
+  const memberById = new Map(liveMembers.map((member) => [member.turnId, member]));
+  const citedByTurn = buildElectedCitations(laneEdges, admittedIds);
+  const userPrompts = fetchUserPrompts(db, orderedKeptMembers.map((member) => member.turnId));
   const sessionTitles = /* @__PURE__ */ new Map();
-  const kept = keptMembers.map((member) => {
+  const kept = orderedKeptMembers.map((member) => {
     if (!sessionTitles.has(member.sessionId)) {
       sessionTitles.set(member.sessionId, getSession(db, member.sessionId)?.title ?? null);
     }
+    const citedIds = [...citedByTurn.get(member.turnId) ?? []].sort((a, b) => {
+      const memberA = memberById.get(a);
+      const memberB = memberById.get(b);
+      return memberA.sessionId !== memberB.sessionId ? memberA.sessionId - memberB.sessionId : memberA.promptNumber - memberB.promptNumber;
+    });
+    const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
+      const cited = memberById.get(id);
+      return cited.sessionId === member.sessionId ? `T${cited.promptNumber}` : `S${cited.sessionId}/T${cited.promptNumber}`;
+    });
+    const folded = citedIds.length - shown.length;
     return {
       member,
       ordinal: chronologicalOrdinals.get(member.turnId),
-      antecedents: links.get(member.turnId)?.antecedents ?? [],
+      antecedents: folded > 0 ? [...shown, `+${folded}`] : shown,
       sessionTitle: sessionTitles.get(member.sessionId) ?? null,
       userPrompt: userPrompts.get(member.turnId) ?? null
     };
   });
-  return { kept, demotedCount: candidates.length - kept.length };
+  return { kept, demotedCount: windowCandidates.length - kept.length };
 }
 function renderSegmentMilestoneRow(row, titleCap, includeSessionPrefix, signal) {
   const { member } = row;
@@ -13286,11 +13137,10 @@ Turn note \u2014 three fields, three jobs:
 - insight \u2014 REUSABLE experience. A lesson still true once this turn is
             forgotten, in this project or beyond. Not a conclusion of this turn.
 
-Length tracks OUTPUT, not effort. A turn that produced nothing is a skip; one
-that produced a lot may run long; one that produced little must be terse.
-Process detail belongs to replay \u2014 a summary cannot hold it, and trying makes
-it hold nothing. Content leads with its conclusions: a reader's budget cuts
-the tail, so whatever merely supports a decision comes after the decision.
+Length tracks OUTPUT, not effort: nothing produced is a skip, little
+produced is terse. Process detail belongs to replay \u2014 a summary cannot hold
+it. Content leads with its conclusions: a reader's budget cuts the tail, so
+support comes after the decision.
 
 type \u2014 a closed vocabulary, one meaning per word:
 - discuss \u2014 exploring problems and options; understanding produced, no ruling
@@ -13322,10 +13172,9 @@ type \u2014 a closed vocabulary, one meaning per word:
   turn's phase is a SET \u2014 an edge is legal when any pairing is.
 - No word fits \u2192 leave it empty, never force one.
 - Ruling supplement: when the user's ruling or veto lands on this turn, keep
-  the words for what actually happened and ADD the decision phase \u2014 a
-  constraint formed or revised to be honored from now on \u2192 +design; an
-  existing conclusion corrected \u2192 +correction. The supplement never replaces
-  and is never invented: no ruling, no supplement.
+  the words for what happened and ADD the decision phase \u2014 a new or revised
+  commitment \u2192 +design; a corrected conclusion \u2192 +correction. Never replaces,
+  never invented: no ruling, no supplement.
 
 tags \u2014 nouns, naming things: project first, then subsystem/artifact; activity
 words belong to type. Lowercase-hyphenated; reuse existing tags first; on
@@ -13337,18 +13186,20 @@ THE INTERPRETATION PRINCIPLE: a tagged edge acts on a LANE; an untagged edge
 acts on the cited turn itself. Every word shares this one reading \u2014 there are
 no special cases.
 
-A LANE is a separable line of work inside one phase, under a segment,
-identified by an exact SET of tags scoped to that segment. Lanes never cross
-phases; only cross-phase relations connect lanes of different phases.
-{P}\u2192{P,c1} forks and {A}+{B}\u2192{A,B} merges are nothing but tag composition \u2014
-the machine knows only exact sets; parenthood and merging are human readings.
+A LANE is a separable sub-workflow inside one phase, under a segment,
+identified by an exact SET of tags scoped to that segment: a DAG of tagged
+edges over AT LEAST TWO nodes, every node's own tags containing the lane's.
+Lanes never cross phases; only cross-phase relations connect lanes of
+different phases. A lane may start from another lane's node \u2014 adding a tag
+to the parent's set opens a new branch, inheriting the exact set REOPENS a
+closed lane; the machine knows only exact sets, parenthood is narration.
 A lane's tag set is as SMALL as discrimination allows, and the segment's own
-tags never join it \u2014 they gate membership, not lanes. An isolated single-turn
-product needs no tag and joins no lane, and is still cited cross-phase as
-usual.
+tags never join it \u2014 they gate membership, not lanes. An isolated
+single-turn product needs no tag and joins no lane, and is still cited
+cross-phase as usual.
 
 Eight words. Same-phase words MAY carry lane tags, none must; cross-phase
-words never do \u2014 lanes are phase-local:
+words never do:
 \xB7 override \u2014 the cited's main result no longer applies; this node fully
   replaces it. Tagged: an in-lane correction \u2014 the lane reopens until a
   fresh declaration. Untagged: a global repudiation of the conclusion, and
@@ -13362,7 +13213,8 @@ words never do \u2014 lanes are phase-local:
   representative, and the outside reaches the indexed through it. Tagged:
   declares that lane CONVERGED \u2014 this node is its terminus and indexes the
   lane's core valid nodes. Untagged: free aggregation (a release indexing
-  the artifacts it ships). An indexed node is never also consumed.
+  the artifacts it ships). An indexed node is never also consumed,
+  unless both edges carry lane tags.
 \xB7 grounds  \u2014 this node stands or falls with the cited. Where a separate
   spec turn exists, THE SPEC carries the grounds and the other artifacts
   consume that carrier; without one, each artifact grounds the decision
@@ -13374,7 +13226,11 @@ Convergence never happens by silence: when a lane converges, its terminus
 declares it with a TAGGED indexes. All lane events \u2014 declarations,
 overrides, continuations \u2014 reduce in turn order; the latest declaration
 wins, and continuing past one is normal life (the next declaration
-supersedes it). SUBSET INVARIANT: every tag on an edge must already exist
+supersedes it). A lane whose LATEST node is its declared terminus is
+CLOSED \u2014 VALID while any of its indexed core lives, INVALID once all are
+dead (bury an abandoned line: repudiate, then declare over the wreck);
+unconverged lanes honestly stay OPEN.
+SUBSET INVARIANT: every tag on an edge must already exist
 on both endpoint turns' tags \u2014 written forward, a lane member's note
 carries its lane tag anyway; a violation is refused, naming the gap.
 
@@ -13385,8 +13241,9 @@ never enforces:
   to delivery.
 \xB7 Component emergence \u2014 distinct lanes come out as distinct components,
   never entangled by accident.
-\xB7 Minimality \u2014 paths from start to terminus stay few, within the phase and
-  in the cross-phase merged view alike.
+\xB7 Minimality \u2014 lanes meet through few edges aimed at each other's termini;
+  in-lane edges point to the past, and path counts are facts,
+  never targets.
 
 Axiom: a release indexes the artifacts it ships (untagged free aggregation)
 and consumes the previous release; the first release is the chain's legal
@@ -13408,23 +13265,20 @@ evidence is an EXTERNAL delivery citation of its terminus.
 ## Segments (membership and creation)
 
 - A turn belongs to the task segment its content serves \u2014 at most one; an
-  unrelated turn staying homeless is a legal state. When one turn serves
-  several workflows, membership still goes to the primary task its content
-  serves \u2014 the other ties are carried by relation edges.
+  unrelated turn staying homeless is a legal state. A turn serving several
+  workflows belongs to the primary one \u2014 the other ties are carried by
+  relation edges.
 - A segment's tags are hand-curated identity: a member turn carries ALL of
   them. Lane tags are separate and never include them.
 - (Settlement side) membership and creation authority equal the main agent's:
   segments may be created, turns reassigned across them; correct only OBVIOUS
   mismatches, leave doubt alone.
-  - Positive example: a turn entirely modifies segment A's module but is
-    assigned to B \u2192 reassign to A.
-  - Counterexample: the title relates to A but the content shows no service
-    to it \u2192 leave it.
+  - Reassign: a turn entirely modifying segment A's module sits in B.
+  - Leave: the title relates to A but the content shows no service to it.
 - Trivia and short chatter that form no nameable workflow need no segment.
-- When a segment seems needed, check the roster first \u2014 attach to a fitting
-  existing segment before creating a new one.
-- Create only when nothing fits; name it after the task's actual shape \u2014 an
-  opening guess anchors the segment to the wrong shape.
+- Check the roster first \u2014 attach to a fitting segment; create only when
+  nothing fits, named after the task's actual shape (an opening guess
+  anchors it wrong).
 
 ## Policy (when to read)
 

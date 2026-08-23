@@ -40,6 +40,7 @@ __export(server_exports, {
   createWorkerFetchHandler: () => createWorkerFetchHandler,
   createWorkerServerState: () => createWorkerServerState,
   ensureWorkerPidFile: () => ensureWorkerPidFile,
+  evaluateRequestGate: () => evaluateRequestGate,
   isProcessAlive: () => isProcessAlive,
   main: () => main,
   registerShutdownCleanup: () => registerShutdownCleanup,
@@ -51,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.16.0-mt4ti6m1" : "dev";
+var BUILD_ID = true ? "0.17.0-mt5yqw13" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -981,106 +982,6 @@ var CITATION_RELATIONS = [
 function isCitationRelation(value) {
   return typeof value === "string" && CITATION_RELATIONS.includes(value);
 }
-var INLINE_RANGE_EXPANSION_CAP = 8;
-var RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
-var LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
-var LIST_ELEMENT_PATTERN = /T(\d+)/g;
-var SINGLE_PATTERN = /^T(\d+)$/;
-var ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
-function parsePositiveId2(digits) {
-  const id = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
-}
-function* citationBracketBodies(content) {
-  let index = 0;
-  while (index < content.length) {
-    const open3 = content.indexOf("[", index);
-    if (open3 === -1) {
-      return;
-    }
-    const close = content.indexOf("]", open3 + 1);
-    if (close === -1) {
-      return;
-    }
-    const body = content.slice(open3 + 1, close);
-    index = close + 1;
-    if (body.includes("[")) {
-      continue;
-    }
-    yield body;
-  }
-}
-function expandBracketBody(body) {
-  if (/[\n\r]/.test(body)) {
-    return [];
-  }
-  const inner = body.trim();
-  const range = RANGE_PATTERN.exec(inner);
-  if (range) {
-    const start = parsePositiveId2(range[1]);
-    const end = parsePositiveId2(range[2]);
-    if (start === null || end === null || end < start) {
-      return [];
-    }
-    const span = end - start + 1;
-    if (span > INLINE_RANGE_EXPANSION_CAP) {
-      return [start, end];
-    }
-    const ids = [];
-    for (let id = start; id <= end; id += 1) {
-      ids.push(id);
-    }
-    return ids;
-  }
-  if (LIST_PATTERN.test(inner)) {
-    const ids = [];
-    LIST_ELEMENT_PATTERN.lastIndex = 0;
-    let element;
-    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
-      const id = parsePositiveId2(element[1]);
-      if (id === null) {
-        return [];
-      }
-      ids.push(id);
-    }
-    return ids;
-  }
-  const single = SINGLE_PATTERN.exec(inner);
-  if (single) {
-    const id = parsePositiveId2(single[1]);
-    return id === null ? [] : [id];
-  }
-  const annotated = ANNOTATED_PATTERN.exec(inner);
-  if (annotated) {
-    const id = parsePositiveId2(annotated[1]);
-    return id === null ? [] : [id];
-  }
-  return [];
-}
-function parseInlineCitations(content, maxRefs) {
-  if (!content) {
-    return [];
-  }
-  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
-  if (cap <= 0) {
-    return [];
-  }
-  const ids = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const body of citationBracketBodies(content)) {
-    for (const id of expandBracketBody(body)) {
-      if (seen.has(id)) {
-        continue;
-      }
-      seen.add(id);
-      ids.push(id);
-      if (ids.length >= cap) {
-        return ids;
-      }
-    }
-  }
-  return ids;
-}
 function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, logger) {
   const references = [
     ...parseQualifiedReferences(fields.title),
@@ -1249,74 +1150,269 @@ function retractTurnRelations(db, citingTurnId, fields, nowEpoch = Math.floor(Da
   );
   return { deleted, restored, rejected: [] };
 }
-function appendUnseen(into, ids) {
-  const seen = new Set(into);
-  for (const id of ids) {
-    if (!seen.has(id)) {
-      seen.add(id);
-      into.push(id);
-    }
-  }
+
+// src/shared/type-vocabulary.ts
+var MEMORY_TYPES = [
+  "discuss",
+  "research",
+  "design",
+  "implement",
+  "refactor",
+  "fix",
+  "measure",
+  "review",
+  "ops",
+  "delegate",
+  "correction"
+];
+function isMemoryType(value) {
+  return typeof value === "string" && MEMORY_TYPES.includes(value);
 }
-function dedupeCitedIds(edges) {
-  const citedTurnIds = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (seen.has(edge.citedTurnId)) {
+var TYPE_GLYPH = {
+  discuss: "\u{1F4AC}",
+  research: "\u{1F50D}",
+  design: "\u2696\uFE0F",
+  implement: "\u{1F527}",
+  refactor: "\u{1F504}",
+  fix: "\u{1F534}",
+  measure: "\u{1F4CA}",
+  review: "\u2705",
+  ops: "\u2699\uFE0F",
+  delegate: "\u{1F91D}",
+  correction: "\u21A9\uFE0F"
+};
+var COMPACT_TYPE_GLYPH = "\u23F8";
+var LEGACY_TYPE_GLYPH = {
+  bugfix: "\u{1F534}",
+  feature: "\u{1F7E3}",
+  refactor: "\u{1F504}",
+  change: "\u2705",
+  discovery: "\u{1F535}",
+  decision: "\u2696\uFE0F",
+  compact: COMPACT_TYPE_GLYPH
+};
+function typeWordGlyph(word) {
+  if (isMemoryType(word)) {
+    return TYPE_GLYPH[word];
+  }
+  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
+}
+function typeListGlyph(types) {
+  if (!types || types.length === 0) {
+    return "\u2022";
+  }
+  return types.map(typeWordGlyph).join("");
+}
+function normalizeTypeValues(values) {
+  const normalized = [];
+  for (const raw of values) {
+    const value = raw.trim();
+    if (!value) {
       continue;
     }
-    seen.add(edge.citedTurnId);
-    citedTurnIds.push(edge.citedTurnId);
-  }
-  return citedTurnIds;
-}
-function getSessionEffectiveCitations(db, sessionId) {
-  const turns = db.query(
-    `SELECT id, content
-       FROM turns
-       WHERE session_id = ? AND ${liveTurnSql()}
-       ORDER BY prompt_number ASC, id ASC`
-  ).all(sessionId);
-  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
-  const edgesByCiter = /* @__PURE__ */ new Map();
-  const edgeRows = db.query(
-    `SELECT
-         e.citing_id AS citingTurnId,
-         e.cited_id AS citedTurnId,
-         e.relation,
-         e.created_at_epoch AS createdAtEpoch
-       FROM memory_edges e
-       JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
-       JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
-       WHERE citing.session_id = ? AND cited.session_id = ?
-         AND ${liveTurnSql("citing")} AND ${liveTurnSql("cited")}
-       ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
-  ).all(sessionId, sessionId);
-  for (const edge of edgeRows) {
-    if (edge.citedTurnId === edge.citingTurnId) {
-      continue;
+    if (!isMemoryType(value)) {
+      throw new Error(`unknown type value: ${raw}`);
     }
-    const bucket = edgesByCiter.get(edge.citingTurnId);
-    if (bucket) {
-      bucket.push(edge);
-    } else {
-      edgesByCiter.set(edge.citingTurnId, [edge]);
+    if (!normalized.includes(value)) {
+      normalized.push(value);
     }
   }
-  const effective = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    const edges = edgesByCiter.get(turn.id) ?? [];
-    const citedTurnIds = dedupeCitedIds(edges);
-    appendUnseen(
-      citedTurnIds,
-      parseInlineCitations(turn.content).filter(
-        (id) => id !== turn.id && sessionTurnIds.has(id)
-      )
-    );
-    effective.set(turn.id, { citedTurnIds, edges });
-  }
-  return effective;
+  return normalized;
 }
+function typeListsEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
+// src/shared/turn-phase.ts
+var TURN_PHASES = ["evidence", "decision", "delivery"];
+var TYPE_PHASE = {
+  research: "evidence",
+  measure: "evidence",
+  design: "decision",
+  discuss: "decision",
+  correction: "decision",
+  implement: "delivery",
+  refactor: "delivery",
+  fix: "delivery",
+  delegate: "delivery",
+  review: "delivery",
+  ops: "delivery"
+};
+var PHASE_CANONICAL_TYPE = {
+  evidence: "research",
+  decision: "design",
+  delivery: "implement"
+};
+function phasesForTypes(types) {
+  const phases = /* @__PURE__ */ new Set();
+  for (const raw of types) {
+    const phase = TYPE_PHASE[raw];
+    if (phase !== void 0) {
+      phases.add(phase);
+    }
+  }
+  return phases;
+}
+var EDGE_RELATIONS = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume",
+  "grounds",
+  "verifies",
+  "refutes"
+];
+function isTurnEdgeRelation(value) {
+  return typeof value === "string" && EDGE_RELATIONS.includes(value);
+}
+var SAME_PHASE_RELATIONS = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume"
+];
+var TAGGABLE_RELATIONS = new Set(
+  SAME_PHASE_RELATIONS
+);
+function isTaggableRelation(relation) {
+  return TAGGABLE_RELATIONS.has(relation);
+}
+var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
+var EVIDENCE_SOURCE_RELATIONS = ["verifies", "refutes"];
+function buildRelationPhaseRequirement() {
+  const table = Object.fromEntries(
+    EDGE_RELATIONS.map((relation) => [relation, []])
+  );
+  for (const phase of TURN_PHASES) {
+    for (const relation of SAME_PHASE_RELATIONS) {
+      table[relation].push({ source: phase, target: phase });
+    }
+  }
+  for (const source of TURN_PHASES) {
+    for (const target of TURN_PHASES) {
+      if (source !== target) {
+        table.grounds.push({ source, target });
+      }
+    }
+  }
+  for (const relation of EVIDENCE_SOURCE_RELATIONS) {
+    for (const phase of TURN_PHASES) {
+      if (phase === "evidence") {
+        continue;
+      }
+      table[relation].push({ source: "evidence", target: phase });
+    }
+  }
+  return table;
+}
+var RELATION_PHASE_REQUIREMENT = buildRelationPhaseRequirement();
+function isRelationLegalForPhases(relation, citingPhases, citedPhases) {
+  return RELATION_PHASE_REQUIREMENT[relation].some(
+    (pair) => citingPhases.has(pair.source) && citedPhases.has(pair.target)
+  );
+}
+function phaseRequirementClause(side, phases) {
+  const options = phases.map(
+    (phase) => `a ${phase}-phase type (e.g. \`${PHASE_CANONICAL_TYPE[phase]}\`)`
+  );
+  const subject = side === "self" ? "this turn's own type list" : `the ${side} turn`;
+  return `${subject} to carry ${options.join(" or ")}`;
+}
+function explainRelationPhaseRejection(relation, citingPhases, citedPhases) {
+  const pairs = RELATION_PHASE_REQUIREMENT[relation];
+  const sourceSatisfiedPairs = pairs.filter((pair) => citingPhases.has(pair.source));
+  if (sourceSatisfiedPairs.length === 0) {
+    const sourcePhases = [...new Set(pairs.map((pair) => pair.source))];
+    return `needs ${phaseRequirementClause("citing", sourcePhases)}`;
+  }
+  const targetPhases = [...new Set(sourceSatisfiedPairs.map((pair) => pair.target))];
+  return `needs ${phaseRequirementClause("cited", targetPhases)}`;
+}
+var SELF_NOT_GROUNDS_DETAIL = "is this turn's own address, and only `grounds` may ever cite the citing turn itself \u2014 every other relation compares two DIFFERENT turns, so citing itself with one of them is a tautology, not a claim";
+var SELF_NOT_DELIVERY_DETAIL = "is this turn's own address; a self-`grounds` additionally needs this turn's own type to carry a delivery-phase word (e.g. `implement`) \u2014 the implementer half of settlement+implementer; a decision-only turn cannot self-ground";
+var SELF_GROUNDS_NO_TERMINUS_DETAIL = "is this turn's own address; a self-`grounds` is legal only when, after every edge this call writes has landed, this turn is CURRENTLY the terminus of a lane it declared via a TAGGED `indexes` edge of its own \u2014 declared in this same call (either order relative to grounds) or already stored from an earlier one, and NOT since reopened (a later tagged override) or repudiated (a later untagged override)";
+var TAG_NOT_TAGGABLE_DETAIL = "carries no lane tags \u2014 only override/narrows/extends/consume/indexes (same-phase words) may";
+function tagMissingDetail(missing) {
+  const clauses = missing.map(
+    (entry) => `"${entry.tag}" is missing from the ${entry.endpoint} turn's tags`
+  );
+  return `carries a tag that fails the subset invariant \u2014 ${clauses.join("; ")}`;
+}
+var SEGMENT_TARGET_DETAIL = "is a segment address \u2014 relation targets are turn-only; a segment tie goes through ownership (e.g. remember's assign/attach) or a bare cites reference, never a relation";
+function checkTagLegality(input) {
+  const tags = input.tags ?? [];
+  if (tags.length === 0) {
+    return { ok: true };
+  }
+  if (!isTaggableRelation(input.relation)) {
+    return { ok: false, reason: "tag-not-taggable", detail: TAG_NOT_TAGGABLE_DETAIL };
+  }
+  const citingTags = input.citingTurnTags ?? /* @__PURE__ */ new Set();
+  const citedTags = input.citedTurnTags ?? /* @__PURE__ */ new Set();
+  const missing = [];
+  for (const tag of tags) {
+    if (!citingTags.has(tag)) {
+      missing.push({ tag, endpoint: "citing" });
+    }
+    if (!citedTags.has(tag)) {
+      missing.push({ tag, endpoint: "cited" });
+    }
+  }
+  if (missing.length > 0) {
+    return { ok: false, reason: "tag-missing", detail: tagMissingDetail(missing) };
+  }
+  return { ok: true };
+}
+function validateRelationTarget(input) {
+  if (input.targetKind === "segment") {
+    return { ok: false, reason: "segment-target", detail: SEGMENT_TARGET_DETAIL };
+  }
+  if (input.isSelfReference) {
+    if (input.relation !== "grounds") {
+      return { ok: false, reason: "self-not-grounds", detail: SELF_NOT_GROUNDS_DETAIL };
+    }
+    if (!input.citingPhases.has("delivery")) {
+      return { ok: false, reason: "self-not-delivery", detail: SELF_NOT_DELIVERY_DETAIL };
+    }
+  } else if (!isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
+    return {
+      ok: false,
+      reason: "phase-illegal",
+      detail: explainRelationPhaseRejection(input.relation, input.citingPhases, input.citedPhases)
+    };
+  }
+  return checkTagLegality(input);
+}
+function hasTaggedTerminusDeclaration(edges) {
+  return edges.some(
+    (edge) => edge.relation === "indexes" && edge.tags.length > 0 && edge.isCurrentTerminus === true
+  );
+}
+function checkSelfGroundsTerminus(edges) {
+  if (hasTaggedTerminusDeclaration(edges)) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: "self-not-terminus",
+    detail: SELF_GROUNDS_NO_TERMINUS_DETAIL
+  };
+}
+var RELATION_FIELD_NAME = {
+  override: "override",
+  narrows: "narrows",
+  extends: "extends",
+  indexes: "indexes",
+  consume: "consume",
+  grounds: "grounds",
+  verifies: "verifies",
+  refutes: "refutes"
+};
 
 // src/db/memory-edges.ts
 var EDGE_NODE_KINDS = ["turn", "segment"];
@@ -1558,6 +1654,49 @@ function getOutgoingEdges(db, citing) {
        WHERE citing_kind = ? AND citing_id = ?
        ORDER BY cited_kind ASC, cited_id ASC, relation ASC, tags ASC`
   ).all(citing.kind, citing.id).map(mapEdgeRow);
+}
+function getRelationEdgesAmongTurns(db, turnIds) {
+  const ids = [...new Set(turnIds)];
+  if (ids.length === 0) {
+    return [];
+  }
+  const idPlaceholders = ids.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  return db.query(
+    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation, me.tags AS tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+  ).all(...ids, ...ids, ...EDGE_RELATIONS).map((row) => ({
+    citingId: row.citingId,
+    citedId: row.citedId,
+    relation: row.relation,
+    tags: parseTagSet(row.tags)
+  }));
+}
+function getRolledBackCiterIds(db, citingTurnIds) {
+  const ids = [...new Set(citingTurnIds)];
+  if (ids.length === 0) {
+    return [];
+  }
+  const idPlaceholders = ids.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  return db.query(
+    `SELECT DISTINCT me.citing_id AS citingId
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.citing_id IN (${idPlaceholders})
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")}
+         AND td.was_rolled_back = 1
+       ORDER BY me.citing_id ASC`
+  ).all(...ids, ...EDGE_RELATIONS).map((row) => row.citingId);
 }
 function reconcileCitedPairs(db, citing, citedNodes, nowEpoch, provenance) {
   const desired = /* @__PURE__ */ new Map();
@@ -2581,81 +2720,6 @@ function getObservation(db, observationId) {
   return mapObservationRow(
     db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
   );
-}
-
-// src/shared/type-vocabulary.ts
-var MEMORY_TYPES = [
-  "discuss",
-  "research",
-  "design",
-  "implement",
-  "refactor",
-  "fix",
-  "measure",
-  "review",
-  "ops",
-  "delegate",
-  "correction"
-];
-function isMemoryType(value) {
-  return typeof value === "string" && MEMORY_TYPES.includes(value);
-}
-var TYPE_GLYPH = {
-  discuss: "\u{1F4AC}",
-  research: "\u{1F50D}",
-  design: "\u2696\uFE0F",
-  implement: "\u{1F527}",
-  refactor: "\u{1F504}",
-  fix: "\u{1F534}",
-  measure: "\u{1F4CA}",
-  review: "\u2705",
-  ops: "\u2699\uFE0F",
-  delegate: "\u{1F91D}",
-  correction: "\u21A9\uFE0F"
-};
-var COMPACT_TYPE_GLYPH = "\u23F8";
-var LEGACY_TYPE_GLYPH = {
-  bugfix: "\u{1F534}",
-  feature: "\u{1F7E3}",
-  refactor: "\u{1F504}",
-  change: "\u2705",
-  discovery: "\u{1F535}",
-  decision: "\u2696\uFE0F",
-  compact: COMPACT_TYPE_GLYPH
-};
-function typeWordGlyph(word) {
-  if (isMemoryType(word)) {
-    return TYPE_GLYPH[word];
-  }
-  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
-}
-function typeListGlyph(types) {
-  if (!types || types.length === 0) {
-    return "\u2022";
-  }
-  return types.map(typeWordGlyph).join("");
-}
-function normalizeTypeValues(values) {
-  const normalized = [];
-  for (const raw of values) {
-    const value = raw.trim();
-    if (!value) {
-      continue;
-    }
-    if (!isMemoryType(value)) {
-      throw new Error(`unknown type value: ${raw}`);
-    }
-    if (!normalized.includes(value)) {
-      normalized.push(value);
-    }
-  }
-  return normalized;
-}
-function typeListsEqual(left, right) {
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every((value, index) => value === right[index]);
 }
 
 // src/db/segments.ts
@@ -8539,289 +8603,6 @@ function getSegmentMembershipForTurns(db, turnIds) {
   return membership;
 }
 
-// src/shared/turn-phase.ts
-var TURN_PHASES = ["evidence", "decision", "delivery"];
-var TYPE_PHASE = {
-  research: "evidence",
-  measure: "evidence",
-  design: "decision",
-  discuss: "decision",
-  correction: "decision",
-  implement: "delivery",
-  refactor: "delivery",
-  fix: "delivery",
-  delegate: "delivery",
-  review: "delivery",
-  ops: "delivery"
-};
-var PHASE_CANONICAL_TYPE = {
-  evidence: "research",
-  decision: "design",
-  delivery: "implement"
-};
-function phasesForTypes(types) {
-  const phases = /* @__PURE__ */ new Set();
-  for (const raw of types) {
-    const phase = TYPE_PHASE[raw];
-    if (phase !== void 0) {
-      phases.add(phase);
-    }
-  }
-  return phases;
-}
-var EDGE_RELATIONS = [
-  "override",
-  "narrows",
-  "extends",
-  "indexes",
-  "consume",
-  "grounds",
-  "verifies",
-  "refutes"
-];
-function isTurnEdgeRelation(value) {
-  return typeof value === "string" && EDGE_RELATIONS.includes(value);
-}
-var SAME_PHASE_RELATIONS = [
-  "override",
-  "narrows",
-  "extends",
-  "indexes",
-  "consume"
-];
-var TAGGABLE_RELATIONS = new Set(
-  SAME_PHASE_RELATIONS
-);
-function isTaggableRelation(relation) {
-  return TAGGABLE_RELATIONS.has(relation);
-}
-var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
-var EVIDENCE_SOURCE_RELATIONS = ["verifies", "refutes"];
-function buildRelationPhaseRequirement() {
-  const table = Object.fromEntries(
-    EDGE_RELATIONS.map((relation) => [relation, []])
-  );
-  for (const phase of TURN_PHASES) {
-    for (const relation of SAME_PHASE_RELATIONS) {
-      table[relation].push({ source: phase, target: phase });
-    }
-  }
-  for (const source of TURN_PHASES) {
-    for (const target of TURN_PHASES) {
-      if (source !== target) {
-        table.grounds.push({ source, target });
-      }
-    }
-  }
-  for (const relation of EVIDENCE_SOURCE_RELATIONS) {
-    for (const phase of TURN_PHASES) {
-      if (phase === "evidence") {
-        continue;
-      }
-      table[relation].push({ source: "evidence", target: phase });
-    }
-  }
-  return table;
-}
-var RELATION_PHASE_REQUIREMENT = buildRelationPhaseRequirement();
-function isRelationLegalForPhases(relation, citingPhases, citedPhases) {
-  return RELATION_PHASE_REQUIREMENT[relation].some(
-    (pair) => citingPhases.has(pair.source) && citedPhases.has(pair.target)
-  );
-}
-function phaseRequirementClause(side, phases) {
-  const options = phases.map(
-    (phase) => `a ${phase}-phase type (e.g. \`${PHASE_CANONICAL_TYPE[phase]}\`)`
-  );
-  const subject = side === "self" ? "this turn's own type list" : `the ${side} turn`;
-  return `${subject} to carry ${options.join(" or ")}`;
-}
-function explainRelationPhaseRejection(relation, citingPhases, citedPhases) {
-  const pairs = RELATION_PHASE_REQUIREMENT[relation];
-  const sourceSatisfiedPairs = pairs.filter((pair) => citingPhases.has(pair.source));
-  if (sourceSatisfiedPairs.length === 0) {
-    const sourcePhases = [...new Set(pairs.map((pair) => pair.source))];
-    return `needs ${phaseRequirementClause("citing", sourcePhases)}`;
-  }
-  const targetPhases = [...new Set(sourceSatisfiedPairs.map((pair) => pair.target))];
-  return `needs ${phaseRequirementClause("cited", targetPhases)}`;
-}
-var SELF_NOT_GROUNDS_DETAIL = "is this turn's own address, and only `grounds` may ever cite the citing turn itself \u2014 every other relation compares two DIFFERENT turns, so citing itself with one of them is a tautology, not a claim";
-var SELF_NOT_DELIVERY_DETAIL = "is this turn's own address; a self-`grounds` additionally needs this turn's own type to carry a delivery-phase word (e.g. `implement`) \u2014 the implementer half of settlement+implementer; a decision-only turn cannot self-ground";
-var SELF_GROUNDS_NO_TERMINUS_DETAIL = "is this turn's own address; a self-`grounds` is legal only when, after every edge this call writes has landed, this turn is CURRENTLY the terminus of a lane it declared via a TAGGED `indexes` edge of its own \u2014 declared in this same call (either order relative to grounds) or already stored from an earlier one, and NOT since reopened (a later tagged override) or repudiated (a later untagged override)";
-var TAG_NOT_TAGGABLE_DETAIL = "carries no lane tags \u2014 only override/narrows/extends/consume/indexes (same-phase words) may";
-function tagMissingDetail(missing) {
-  const clauses = missing.map(
-    (entry) => `"${entry.tag}" is missing from the ${entry.endpoint} turn's tags`
-  );
-  return `carries a tag that fails the subset invariant \u2014 ${clauses.join("; ")}`;
-}
-var SEGMENT_TARGET_DETAIL = "is a segment address \u2014 relation targets are turn-only; a segment tie goes through ownership (e.g. remember's assign/attach) or a bare cites reference, never a relation";
-function checkTagLegality(input) {
-  const tags = input.tags ?? [];
-  if (tags.length === 0) {
-    return { ok: true };
-  }
-  if (!isTaggableRelation(input.relation)) {
-    return { ok: false, reason: "tag-not-taggable", detail: TAG_NOT_TAGGABLE_DETAIL };
-  }
-  const citingTags = input.citingTurnTags ?? /* @__PURE__ */ new Set();
-  const citedTags = input.citedTurnTags ?? /* @__PURE__ */ new Set();
-  const missing = [];
-  for (const tag of tags) {
-    if (!citingTags.has(tag)) {
-      missing.push({ tag, endpoint: "citing" });
-    }
-    if (!citedTags.has(tag)) {
-      missing.push({ tag, endpoint: "cited" });
-    }
-  }
-  if (missing.length > 0) {
-    return { ok: false, reason: "tag-missing", detail: tagMissingDetail(missing) };
-  }
-  return { ok: true };
-}
-function validateRelationTarget(input) {
-  if (input.targetKind === "segment") {
-    return { ok: false, reason: "segment-target", detail: SEGMENT_TARGET_DETAIL };
-  }
-  if (input.isSelfReference) {
-    if (input.relation !== "grounds") {
-      return { ok: false, reason: "self-not-grounds", detail: SELF_NOT_GROUNDS_DETAIL };
-    }
-    if (!input.citingPhases.has("delivery")) {
-      return { ok: false, reason: "self-not-delivery", detail: SELF_NOT_DELIVERY_DETAIL };
-    }
-  } else if (!isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
-    return {
-      ok: false,
-      reason: "phase-illegal",
-      detail: explainRelationPhaseRejection(input.relation, input.citingPhases, input.citedPhases)
-    };
-  }
-  return checkTagLegality(input);
-}
-function hasTaggedTerminusDeclaration(edges) {
-  return edges.some(
-    (edge) => edge.relation === "indexes" && edge.tags.length > 0 && edge.isCurrentTerminus === true
-  );
-}
-function checkSelfGroundsTerminus(edges) {
-  if (hasTaggedTerminusDeclaration(edges)) {
-    return { ok: true };
-  }
-  return {
-    ok: false,
-    reason: "self-not-terminus",
-    detail: SELF_GROUNDS_NO_TERMINUS_DETAIL
-  };
-}
-var RELATION_FIELD_NAME = {
-  override: "override",
-  narrows: "narrows",
-  extends: "extends",
-  indexes: "indexes",
-  consume: "consume",
-  grounds: "grounds",
-  verifies: "verifies",
-  refutes: "refutes"
-};
-
-// src/db/edge-signals.ts
-function zeroSignals() {
-  return { overridden: false, refinesExcess: { decision: 0, delivery: 0 }, encodesCount: 0 };
-}
-function parseTypeArray(value) {
-  if (!value) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-function primaryPhaseBucket(phases) {
-  if (phases.has("decision")) {
-    return "decision";
-  }
-  if (phases.has("delivery")) {
-    return "delivery";
-  }
-  return null;
-}
-function getTurnEdgeSignals(db, turnIds) {
-  const result = /* @__PURE__ */ new Map();
-  const uniqueIds = [...new Set(turnIds)];
-  for (const id of uniqueIds) {
-    result.set(id, zeroSignals());
-  }
-  if (uniqueIds.length === 0) {
-    return result;
-  }
-  const placeholders = uniqueIds.map(() => "?").join(",");
-  const overrideRows = db.query(
-    `SELECT DISTINCT e.cited_id AS targetId
-       FROM memory_edges e
-       JOIN turns citing ON citing.id = e.citing_id
-       JOIN turns cited ON cited.id = e.cited_id
-       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'override'
-         AND ${liveTurnSql("citing")}
-         AND ${liveTurnSql("cited")}
-         AND e.cited_id IN (${placeholders})`
-  ).all(...uniqueIds);
-  for (const row of overrideRows) {
-    result.get(row.targetId).overridden = true;
-  }
-  const encodesRows = db.query(
-    `SELECT e.cited_id AS targetId, COUNT(*) AS count
-       FROM memory_edges e
-       JOIN turns citing ON citing.id = e.citing_id
-       JOIN turns cited ON cited.id = e.cited_id
-       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation IN ('grounds', 'indexes')
-         AND ${liveTurnSql("citing")}
-         AND ${liveTurnSql("cited")}
-         AND e.cited_id IN (${placeholders})
-       GROUP BY e.cited_id`
-  ).all(...uniqueIds);
-  for (const row of encodesRows) {
-    result.get(row.targetId).encodesCount = row.count;
-  }
-  const refinesRows = db.query(
-    `SELECT e.cited_id AS targetId, citing.type AS citingType
-       FROM memory_edges e
-       JOIN turns citing ON citing.id = e.citing_id
-       JOIN turns cited ON cited.id = e.cited_id
-       WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'extends'
-         AND ${liveTurnSql("citing")}
-         AND ${liveTurnSql("cited")}
-         AND e.cited_id IN (${placeholders})
-       ORDER BY e.cited_id ASC, e.created_at_epoch ASC, e.citing_id ASC`
-  ).all(...uniqueIds);
-  let currentTarget = null;
-  let seenForTarget = 0;
-  for (const row of refinesRows) {
-    if (row.targetId !== currentTarget) {
-      currentTarget = row.targetId;
-      seenForTarget = 0;
-    }
-    seenForTarget += 1;
-    if (seenForTarget === 1) {
-      continue;
-    }
-    const phases = phasesForTypes(parseTypeArray(row.citingType));
-    const bucket = primaryPhaseBucket(phases);
-    if (bucket) {
-      result.get(row.targetId).refinesExcess[bucket] += 1;
-    }
-  }
-  return result;
-}
-
 // src/diary/domain.ts
 var import_node_crypto = require("node:crypto");
 var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
@@ -8865,6 +8646,367 @@ function estimateDiaryTokens(text) {
     weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
   }
   return Math.ceil(weightedCodePoints * 1.2);
+}
+
+// src/shared/lane-interpretation.ts
+var DEFAULT_SEGMENT = "\0default";
+function compareOrderKey(a, b) {
+  return a[0] - b[0] || a[1] - b[1];
+}
+function compareOrderKeyAcrossSessions(a, b) {
+  if (a.order[0] === b.order[0]) {
+    return compareOrderKey(a.order, b.order);
+  }
+  if (a.createdAtEpoch !== void 0 && b.createdAtEpoch !== void 0) {
+    return a.createdAtEpoch - b.createdAtEpoch;
+  }
+  return compareOrderKey(a.order, b.order);
+}
+function canonicalTagSet(tags) {
+  return [...new Set(tags)].sort();
+}
+function laneToken(segment, tags) {
+  return JSON.stringify([segment, canonicalTagSet(tags)]);
+}
+function deriveLaneInterpretation(turns, edges) {
+  const segmentOf = /* @__PURE__ */ new Map();
+  const orderOf = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    segmentOf.set(turn.id, turn.segment ?? DEFAULT_SEGMENT);
+    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+  }
+  const segmentFor = (id) => segmentOf.get(id) ?? DEFAULT_SEGMENT;
+  const orderFor = (id) => orderOf.get(id) ?? [0, id];
+  const groups = /* @__PURE__ */ new Map();
+  const warnings = [];
+  function addToGroup(segment, canon, edge) {
+    const token = laneToken(segment, canon);
+    let group = groups.get(token);
+    if (group === void 0) {
+      group = { segment, tagSet: [...canon], edges: [] };
+      groups.set(token, group);
+    }
+    group.edges.push(edge);
+    return token;
+  }
+  for (const edge of edges) {
+    const canon = canonicalTagSet(edge.tags);
+    if (canon.length === 0) continue;
+    const citingSegment = segmentFor(edge.citingId);
+    const citedSegment = segmentFor(edge.citedId);
+    addToGroup(citingSegment, canon, edge);
+    if (citedSegment !== citingSegment) {
+      addToGroup(citedSegment, canon, edge);
+      warnings.push({
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        tagSet: canon,
+        citingSegment,
+        citedSegment
+      });
+    }
+  }
+  const events = [];
+  function pushEvent(citingId, citedId, relation, token) {
+    events.push({ citingId, citedId, relation, token });
+  }
+  for (const edge of edges) {
+    if (edge.relation !== "indexes" && edge.relation !== "override") continue;
+    const canon = canonicalTagSet(edge.tags);
+    if (canon.length === 0) {
+      if (edge.relation === "override") {
+        pushEvent(edge.citingId, edge.citedId, "override", null);
+      }
+      continue;
+    }
+    const citingSegment = segmentFor(edge.citingId);
+    const citedSegment = segmentFor(edge.citedId);
+    const citingToken = laneToken(citingSegment, canon);
+    if (groups.has(citingToken)) {
+      pushEvent(edge.citingId, edge.citedId, edge.relation, citingToken);
+    }
+    if (citedSegment !== citingSegment) {
+      const citedToken = laneToken(citedSegment, canon);
+      if (groups.has(citedToken)) {
+        pushEvent(edge.citingId, edge.citedId, edge.relation, citedToken);
+      }
+    }
+  }
+  events.sort((a, b) => compareOrderKey(orderFor(a.citingId), orderFor(b.citingId)) || a.citingId - b.citingId);
+  const terminusOf = /* @__PURE__ */ new Map();
+  const everDeclared = /* @__PURE__ */ new Map();
+  const deadInLane = /* @__PURE__ */ new Map();
+  const latestEventTurn = /* @__PURE__ */ new Map();
+  for (const token of groups.keys()) {
+    terminusOf.set(token, null);
+    everDeclared.set(token, false);
+    deadInLane.set(token, /* @__PURE__ */ new Set());
+    latestEventTurn.set(token, null);
+  }
+  const globallyDead = /* @__PURE__ */ new Set();
+  let index = 0;
+  while (index < events.length) {
+    const citingId = events[index].citingId;
+    let end = index;
+    while (end < events.length && events[end].citingId === citingId) {
+      end += 1;
+    }
+    const batch = events.slice(index, end);
+    index = end;
+    for (const event of batch) {
+      if (event.relation !== "override") continue;
+      if (event.token === null) {
+        globallyDead.add(event.citedId);
+        for (const [token, terminus] of terminusOf) {
+          if (terminus === event.citedId) {
+            terminusOf.set(token, null);
+            latestEventTurn.set(token, citingId);
+          }
+        }
+      } else {
+        deadInLane.get(event.token).add(event.citedId);
+        if (terminusOf.get(event.token) === event.citedId) {
+          terminusOf.set(event.token, null);
+        }
+        latestEventTurn.set(event.token, citingId);
+      }
+    }
+    for (const event of batch) {
+      if (event.relation !== "indexes" || event.token === null) continue;
+      terminusOf.set(event.token, citingId);
+      everDeclared.set(event.token, true);
+      latestEventTurn.set(event.token, citingId);
+    }
+  }
+  for (const [token, group] of groups) {
+    const current = latestEventTurn.get(token) ?? null;
+    if (current === null) continue;
+    let bestId = current;
+    let bestOrder = orderFor(current);
+    for (const edge of group.edges) {
+      if (edge.relation === "indexes" || edge.relation === "override") continue;
+      const order = orderFor(edge.citingId);
+      const cmp = compareOrderKey(order, bestOrder);
+      if (cmp > 0 || cmp === 0 && edge.citingId > bestId) {
+        bestOrder = order;
+        bestId = edge.citingId;
+      }
+    }
+    latestEventTurn.set(token, bestId);
+  }
+  const tokens = [...groups.keys()].sort();
+  const lanes = [];
+  const laneByToken = /* @__PURE__ */ new Map();
+  for (const token of tokens) {
+    const group = groups.get(token);
+    const memberIds = /* @__PURE__ */ new Set();
+    for (const edge of group.edges) {
+      memberIds.add(edge.citingId);
+      memberIds.add(edge.citedId);
+    }
+    const dead = deadInLane.get(token);
+    const members = [...memberIds].sort((a, b) => a - b).map((id) => ({ id, dead: globallyDead.has(id) || dead.has(id) }));
+    const terminus = terminusOf.get(token) ?? null;
+    const state = terminus !== null ? "declared" : everDeclared.get(token) ? "reopened" : "undeclared";
+    const lane = {
+      key: { segment: group.segment, tagSet: group.tagSet },
+      members,
+      declaration: {
+        state,
+        terminus,
+        latestEventTurn: latestEventTurn.get(token) ?? null
+      },
+      taggedEdges: group.edges
+    };
+    lanes.push(lane);
+    laneByToken.set(token, lane);
+  }
+  return { lanes, laneByToken, warnings };
+}
+function laneLastDeclarer(lane, orderFor) {
+  let bestId = null;
+  let bestOrder = [0, 0];
+  for (const edge of lane.taggedEdges) {
+    if (edge.relation !== "indexes") continue;
+    const order = orderFor(edge.citingId);
+    const cmp = bestId === null ? 1 : compareOrderKey(order, bestOrder);
+    if (cmp > 0 || cmp === 0 && edge.citingId > bestId) {
+      bestOrder = order;
+      bestId = edge.citingId;
+    }
+  }
+  return bestId;
+}
+function laneValidity(lane) {
+  const deadById = new Map(lane.members.map((member) => [member.id, member.dead]));
+  const terminus = lane.declaration.terminus;
+  const core = lane.taggedEdges.filter((edge) => edge.relation === "indexes" && edge.citingId === terminus).map((edge) => edge.citedId);
+  const anyLiving = core.some((id) => deadById.get(id) === false);
+  return anyLiving ? "valid" : "invalid";
+}
+function deriveLaneStates(lanes, turns) {
+  const orderOf = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+  }
+  const orderFor = (id) => orderOf.get(id) ?? [0, id];
+  const states = /* @__PURE__ */ new Map();
+  for (const lane of lanes) {
+    const closed = lane.declaration.state === "declared" && lane.declaration.terminus === lane.declaration.latestEventTurn;
+    const token = laneToken(lane.key.segment, lane.key.tagSet);
+    states.set(token, {
+      key: lane.key,
+      closure: closed ? "closed" : "open",
+      validity: closed ? laneValidity(lane) : null,
+      terminus: lane.declaration.terminus,
+      lastDeclarer: laneLastDeclarer(lane, orderFor)
+    });
+  }
+  return states;
+}
+
+// src/shared/milestone-election.ts
+var IN_DEGREE_RELATIONS = /* @__PURE__ */ new Set([
+  "narrows",
+  "extends",
+  "consume",
+  "indexes",
+  "grounds",
+  "verifies"
+]);
+function rankCompare(a, b) {
+  if (a.tier !== b.tier) return a.tier - b.tier;
+  if (a.inDegree !== b.inDegree) return b.inDegree - a.inDegree;
+  if (a.outDegree !== b.outDegree) return b.outDegree - a.outDegree;
+  const orderCmp = compareOrderKeyAcrossSessions(
+    { order: b.order, createdAtEpoch: b.epoch },
+    { order: a.order, createdAtEpoch: a.epoch }
+  );
+  if (orderCmp !== 0) return orderCmp;
+  return b.id - a.id;
+}
+function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
+  const orderOf = /* @__PURE__ */ new Map();
+  const rolledBackOf = /* @__PURE__ */ new Map();
+  const epochOf = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+    rolledBackOf.set(turn.id, turn.wasRolledBack === true);
+    if (turn.createdAtEpoch !== void 0) {
+      epochOf.set(turn.id, turn.createdAtEpoch);
+    }
+  }
+  const orderFor = (id) => orderOf.get(id) ?? [0, id];
+  const epochFor = (id) => epochOf.get(id);
+  const eligibleIds = /* @__PURE__ */ new Set();
+  for (const turn of turns) {
+    if (turn.eligible !== false) {
+      eligibleIds.add(turn.id);
+    }
+  }
+  const excluded = /* @__PURE__ */ new Set();
+  for (const turn of turns) {
+    if (turn.wasRolledBack === true || turn.skipped === true) {
+      excluded.add(turn.id);
+    }
+  }
+  for (const edge of edges) {
+    if (edge.relation === "override" || edge.relation === "refutes") {
+      excluded.add(edge.citedId);
+    }
+  }
+  const inDegree = /* @__PURE__ */ new Map();
+  const outDegree = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (IN_DEGREE_RELATIONS.has(edge.relation)) {
+      inDegree.set(edge.citedId, (inDegree.get(edge.citedId) ?? 0) + 1);
+    }
+    outDegree.set(edge.citingId, (outDegree.get(edge.citingId) ?? 0) + 1);
+  }
+  const tier1 = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (edge.relation === "indexes" && canonicalTagSet(edge.tags).length === 0) {
+      tier1.add(edge.citingId);
+    }
+  }
+  const { lanes } = deriveLaneInterpretation(turns, edges);
+  const laneStates = deriveLaneStates(lanes, turns);
+  const tier2 = /* @__PURE__ */ new Map();
+  for (const state of laneStates.values()) {
+    if (state.closure === "closed") {
+      if (state.validity === "valid" && state.terminus !== null && !tier2.has(state.terminus)) {
+        tier2.set(state.terminus, "closed-valid-terminus");
+      }
+    } else if (state.lastDeclarer !== null && !tier2.has(state.lastDeclarer)) {
+      tier2.set(state.lastDeclarer, "open-last-declarer");
+    }
+  }
+  const candidateIds = [...eligibleIds].filter((id) => !excluded.has(id));
+  const toRankKey = (id, tier) => ({
+    tier,
+    inDegree: inDegree.get(id) ?? 0,
+    outDegree: outDegree.get(id) ?? 0,
+    order: orderFor(id),
+    epoch: epochFor(id),
+    id
+  });
+  const stage1 = [];
+  for (const id of candidateIds) {
+    let tier;
+    let reason = "other";
+    if (tier1.has(id)) {
+      tier = 1;
+      reason = "release";
+    } else if (tier2.has(id)) {
+      tier = 2;
+      reason = tier2.get(id);
+    }
+    if (tier === void 0) continue;
+    stage1.push({ ...toRankKey(id, tier), reason });
+  }
+  stage1.sort(rankCompare);
+  const electedIds = new Set(stage1.slice(0, Math.max(0, budget)).map((c) => c.id));
+  const indexedByElected = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (edge.relation === "indexes" && electedIds.has(edge.citingId)) {
+      indexedByElected.add(edge.citedId);
+    }
+  }
+  const correctors = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (edge.relation === "override") {
+      correctors.add(edge.citingId);
+    }
+    if (rolledBackOf.get(edge.citedId) === true) {
+      correctors.add(edge.citingId);
+    }
+  }
+  for (const id of rolledBackCiterIds) {
+    correctors.add(id);
+  }
+  const stage1Ids = new Set(stage1.map((c) => c.id));
+  const rest = [];
+  for (const id of candidateIds) {
+    if (stage1Ids.has(id)) continue;
+    let tier;
+    let reason;
+    if (indexedByElected.has(id)) {
+      tier = 3;
+      reason = "indexed-by-elected";
+    } else if (correctors.has(id)) {
+      tier = 4;
+      reason = "corrector";
+    } else {
+      tier = 5;
+      reason = "other";
+    }
+    rest.push({ ...toRankKey(id, tier), reason });
+  }
+  rest.sort(rankCompare);
+  return {
+    candidates: [...stage1, ...rest],
+    excluded: [...excluded].sort((a, b) => a - b)
+  };
 }
 
 // src/shared/transcript-parser.ts
@@ -9153,12 +9295,6 @@ ${assistantText}` : assistantText;
     ...turn,
     assistantText: normalizeAssistantText(turn.assistantText)
   }));
-}
-
-// src/task-causality-era.ts
-var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = 1784711427;
-function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
-  return createdAtEpoch >= cutoffEpoch;
 }
 
 // src/shared/file-tree.ts
@@ -10898,79 +11034,7 @@ function milestoneMarker(turn, options = {}) {
   }
   return null;
 }
-var MILESTONE_LEGACY_TYPE_GRADE = {
-  decision: 3,
-  feature: 2,
-  refactor: 2,
-  bugfix: 2,
-  change: 1,
-  discovery: 1
-};
-var MILESTONE_LEGACY_GRADE_CAP = 3;
-var MILESTONE_SPINE_MIN_EFF_GRADE = 3;
-var MILESTONE_POOL_MIN_EFF_GRADE = 2;
-var MILESTONE_PULL_MAX_EFF_GRADE = 2;
-var MILESTONE_TIE_CITED_WEIGHT = 0.25;
-var MILESTONE_TIE_CITED_CAP = 2;
-var MILESTONE_TIE_INSIGHT_WEIGHT = 0.25;
-var MILESTONE_TIE_PURE_SPEC_WEIGHT = 0.15;
-var MILESTONE_TIE_BREAK_MAX = 0.9;
-var MILESTONE_PURE_SPEC_RE = /^docs\/(?:plans|specs|superpowers)\/.*\.md$/;
 var MILESTONE_VERSION_RE = /\b0\.\d+\.\d+\b/g;
-var MILESTONE_PULLED_LABEL_CAP = 60;
-function milestoneEffGrade(turn, taskCausalityEraCutoffEpoch) {
-  if (isTaskCausalityEra(turn.createdAtEpoch, taskCausalityEraCutoffEpoch)) {
-    const grade = turn.significanceGrade;
-    if (grade === null || grade === void 0) {
-      return 0;
-    }
-    return Math.max(0, Math.min(4, grade));
-  }
-  return legacyEffGrade(turn);
-}
-function legacyEffGrade(turn) {
-  const legacyType = turn.type[0] ?? "";
-  let grade = MILESTONE_LEGACY_TYPE_GRADE[legacyType] ?? 0;
-  if ((legacyType === "feature" || legacyType === "refactor" || legacyType === "change") && turn.filesModified.length === 0) {
-    grade = 0;
-  }
-  if (hasMilestoneInsight(turn)) {
-    grade += 1;
-  }
-  return Math.min(grade, MILESTONE_LEGACY_GRADE_CAP);
-}
-function hasMilestoneInsight(turn) {
-  return typeof turn.insight === "string" && turn.insight.trim() !== "" && turn.insight !== "[]";
-}
-function isPureSpecTurn(turn) {
-  return turn.filesModified.length > 0 && turn.filesModified.every((path2) => MILESTONE_PURE_SPEC_RE.test(path2));
-}
-function milestoneTieBreak(turn, citedBy = 0) {
-  const raw = MILESTONE_TIE_CITED_WEIGHT * Math.min(Math.max(citedBy, 0), MILESTONE_TIE_CITED_CAP) + (hasMilestoneInsight(turn) ? MILESTONE_TIE_INSIGHT_WEIGHT : 0) + (isPureSpecTurn(turn) ? MILESTONE_TIE_PURE_SPEC_WEIGHT : 0);
-  return Math.min(raw, MILESTONE_TIE_BREAK_MAX);
-}
-function inlineCitationFallback(turns) {
-  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
-  const effective = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    effective.set(turn.id, {
-      citedTurnIds: parseInlineCitations(turn.content).filter(
-        (id) => id !== turn.id && sessionTurnIds.has(id)
-      ),
-      edges: []
-    });
-  }
-  return effective;
-}
-function citationInDegree(citations) {
-  const inDegree = /* @__PURE__ */ new Map();
-  for (const entry of citations.values()) {
-    for (const citedTurnId of entry.citedTurnIds) {
-      inDegree.set(citedTurnId, (inDegree.get(citedTurnId) ?? 0) + 1);
-    }
-  }
-  return inDegree;
-}
 function extractMilestoneVersion(title) {
   if (!title) return null;
   const matches = [...title.matchAll(MILESTONE_VERSION_RE)];
@@ -11015,61 +11079,6 @@ function demotedOutcomePrompts(seq) {
     closeChain(chain);
   }
   return demoted;
-}
-function buildCorrectionGraph(turns, options = {}) {
-  const correctors = /* @__PURE__ */ new Set();
-  const supersededVictims = /* @__PURE__ */ new Set();
-  const supersedersByVictim = /* @__PURE__ */ new Map();
-  const byDbId = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    byDbId.set(turn.id, turn);
-  }
-  const citations = options.citations ?? inlineCitationFallback(turns);
-  for (const corrector of turns) {
-    const entry = citations.get(corrector.id);
-    if (entry === void 0) {
-      continue;
-    }
-    const supersededIds = /* @__PURE__ */ new Set();
-    const structuredTargets = /* @__PURE__ */ new Set();
-    for (const edge of entry.edges) {
-      structuredTargets.add(edge.citedTurnId);
-      if (edge.relation === "supersedes") {
-        supersededIds.add(edge.citedTurnId);
-      }
-    }
-    if (!isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
-      for (const citedTurnId of entry.citedTurnIds) {
-        if (structuredTargets.has(citedTurnId)) {
-          continue;
-        }
-        const cited = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
-        if (cited && milestoneMarker(cited) === "reversed") {
-          supersededIds.add(citedTurnId);
-        }
-      }
-    }
-    for (const citedTurnId of supersededIds) {
-      const victim = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
-      if (!victim || victim.sessionId !== corrector.sessionId || // Predecessor guard: a causal reference points backward.
-      victim.promptNumber >= corrector.promptNumber) {
-        continue;
-      }
-      correctors.add(corrector.id);
-      supersededVictims.add(victim.id);
-      const bucket = supersedersByVictim.get(victim.id) ?? [];
-      bucket.push(corrector);
-      supersedersByVictim.set(victim.id, bucket);
-    }
-  }
-  const supersededBy = /* @__PURE__ */ new Map();
-  for (const [victimId, superseders] of supersedersByVictim) {
-    supersededBy.set(
-      victimId,
-      [...superseders].sort((left, right) => left.promptNumber - right.promptNumber).map((turn) => turn.id)
-    );
-  }
-  return { correctors, supersededVictims, supersededBy };
 }
 function getCompactMetadata(tags) {
   let preTokens = 0;
@@ -11262,129 +11271,99 @@ function compareMilestoneRank(left, right) {
 function isTimelineExcludedTurn(turn) {
   return turn.wasRolledBack || turn.status === "skipped";
 }
+function buildElectedCitations(laneEdges, electedIds) {
+  const citedByTurn = /* @__PURE__ */ new Map();
+  for (const edge of laneEdges) {
+    if (edge.citingId === edge.citedId) continue;
+    if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
+    const bucket = citedByTurn.get(edge.citingId) ?? [];
+    if (!bucket.includes(edge.citedId)) {
+      bucket.push(edge.citedId);
+    }
+    citedByTurn.set(edge.citingId, bucket);
+  }
+  return citedByTurn;
+}
+function fetchExternalElectionTurns(db, laneEdges, windowIds) {
+  const externalIds = /* @__PURE__ */ new Set();
+  for (const edge of laneEdges) {
+    if (!windowIds.has(edge.citingId)) {
+      externalIds.add(edge.citingId);
+    }
+    if (!windowIds.has(edge.citedId)) {
+      externalIds.add(edge.citedId);
+    }
+  }
+  if (externalIds.size === 0) {
+    return [];
+  }
+  const ids = [...externalIds];
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = db.query(
+    `SELECT id, session_id AS sessionId, prompt_number AS promptNumber,
+              created_at_epoch AS createdAtEpoch, was_rolled_back AS wasRolledBack
+       FROM turns WHERE id IN (${placeholders})`
+  ).all(...ids);
+  return rows.map((row) => ({
+    id: row.id,
+    type: [],
+    order: [row.sessionId, row.promptNumber],
+    createdAtEpoch: row.createdAtEpoch,
+    wasRolledBack: row.wasRolledBack === 1,
+    eligible: false
+  }));
+}
 function selectMilestoneTurns(view) {
-  const eraCutoff = view.taskCausalityEraCutoffEpoch;
-  const rawUniverse = view.sessionTurns ?? view.windowTurns;
-  const universe = rawUniverse.filter((turn) => !isTimelineExcludedTurn(turn));
   const seq = sortTurnsForAnalysis(view.windowTurns).filter(
     (turn) => !isTimelineExcludedTurn(turn) && !turn.type.includes("compact")
   );
   if (seq.length === 0) {
-    return {
-      kept: [],
-      ranked: [],
-      pulled: [],
-      overflowByDay: [],
-      effGradeByTurnId: /* @__PURE__ */ new Map()
-    };
+    return { kept: [], ranked: [], overflowByDay: [] };
   }
-  const excludedIds = new Set(
-    rawUniverse.filter((turn) => isTimelineExcludedTurn(turn)).map((turn) => turn.id)
+  const laneEdges = view.laneEdges ?? [];
+  const electionTurns = seq.map((turn) => ({
+    id: turn.id,
+    type: turn.type,
+    order: [turn.sessionId, turn.promptNumber],
+    createdAtEpoch: turn.createdAtEpoch
+  }));
+  const { candidates } = electMilestones(
+    [...electionTurns, ...view.externalTurns ?? []],
+    laneEdges,
+    view.budget,
+    view.rolledBackCiterIds ?? []
   );
-  const rawCitations = view.citations ?? inlineCitationFallback(universe);
-  const citations = excludedIds.size === 0 ? rawCitations : new Map([...rawCitations].filter(([citerId]) => !excludedIds.has(citerId)));
-  const inDegree = citationInDegree(citations);
-  const universeById = new Map(universe.map((turn) => [turn.id, turn]));
-  const inWindowById = new Map(seq.map((turn) => [turn.id, turn]));
-  const graph = buildCorrectionGraph(universe, {
-    citations,
-    resolveCited: (id) => universeById.get(id),
-    taskCausalityEraCutoffEpoch: eraCutoff
-  });
-  const effGradeOf = (turn) => milestoneEffGrade(turn, eraCutoff);
-  const endpoints = /* @__PURE__ */ new Set([seq[0].id]);
-  const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
-  endpoints.add((lastTitled ?? seq[seq.length - 1]).id);
+  const windowIds = new Set(seq.map((turn) => turn.id));
+  const windowCandidates = candidates.filter((candidate) => windowIds.has(candidate.id));
   const demotedOutcomes = demotedOutcomePrompts(seq);
   const markerForSelection = (turn) => {
     const marker = milestoneMarker(turn);
     return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
   };
-  const isAlwaysKeep = (turn) => {
-    if (endpoints.has(turn.id)) {
-      return true;
-    }
-    if (graph.correctors.has(turn.id)) {
-      return true;
-    }
-    if (milestoneMarker(turn) === "reversed") {
-      return true;
-    }
-    return isTaskCausalityEra(turn.createdAtEpoch, eraCutoff) && effGradeOf(turn) === 4;
-  };
-  const promptNumbersOf = (turnIds) => turnIds.map((id) => universeById.get(id)?.promptNumber ?? inWindowById.get(id)?.promptNumber).filter((promptNumber) => promptNumber !== void 0);
-  const keptIds = /* @__PURE__ */ new Set();
-  const rows = [];
-  const poolRows = [];
-  for (const turn of seq) {
-    const effGrade = effGradeOf(turn);
-    const alwaysKeep = isAlwaysKeep(turn);
-    const spine = effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
-    if (!alwaysKeep && !spine && effGrade < MILESTONE_POOL_MIN_EFF_GRADE) {
-      continue;
-    }
-    const superseders = graph.supersededBy.get(turn.id);
-    const row = {
+  const turnById = new Map(seq.map((turn) => [turn.id, turn]));
+  const electedSlice = windowCandidates.slice(0, Math.max(0, view.budget));
+  const electedIds = new Set(electedSlice.map((candidate) => candidate.id));
+  const citedByTurn = buildElectedCitations(laneEdges, electedIds);
+  const antecedentsOf = (turnId) => [...citedByTurn.get(turnId) ?? []].sort((a, b) => turnById.get(a).promptNumber - turnById.get(b).promptNumber).map((id) => `T${turnById.get(id).promptNumber}`);
+  const rankedRows = windowCandidates.map((candidate) => {
+    const turn = turnById.get(candidate.id);
+    return {
       turn,
-      score: effGrade + milestoneTieBreak(turn, inDegree.get(turn.id) ?? 0),
-      effGrade,
-      alwaysKeep,
-      spine,
+      score: 0,
+      tier: candidate.tier,
       marker: markerForSelection(turn),
-      ...superseders ? { supersededBy: promptNumbersOf(superseders) } : {}
+      antecedents: antecedentsOf(turn.id)
     };
-    poolRows.push(row);
-    if (alwaysKeep || spine) {
-      keptIds.add(turn.id);
-      rows.push(row);
-    }
-  }
-  const ranked = [...poolRows].sort(compareMilestoneRank);
-  const pulled = [];
-  const pulledIds = /* @__PURE__ */ new Set();
-  const pulledByTurnId = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    const entry = citations.get(row.turn.id);
-    if (entry === void 0) {
-      continue;
-    }
-    for (const citedTurnId of entry.citedTurnIds) {
-      if (keptIds.has(citedTurnId)) {
-        continue;
-      }
-      const already = pulledByTurnId.get(citedTurnId);
-      if (already !== void 0) {
-        if (!already.citerPromptNumbers.includes(row.turn.promptNumber)) {
-          already.citerPromptNumbers.push(row.turn.promptNumber);
-        }
-        continue;
-      }
-      const cited = universeById.get(citedTurnId);
-      if (cited === void 0 || cited.type.includes("compact") || cited.sessionId !== row.turn.sessionId || // Predecessor guard: a causal reference points backward.
-      cited.promptNumber >= row.turn.promptNumber) {
-        continue;
-      }
-      const effGrade = effGradeOf(cited);
-      if (effGrade > MILESTONE_PULL_MAX_EFF_GRADE) {
-        continue;
-      }
-      pulledIds.add(citedTurnId);
-      const antecedent = {
-        turn: cited,
-        effGrade,
-        citedByPromptNumber: row.turn.promptNumber,
-        citerPromptNumbers: [row.turn.promptNumber],
-        label: pulledAntecedentLabel(cited),
-        supersededBy: promptNumbersOf(graph.supersededBy.get(citedTurnId) ?? [])
-      };
-      pulled.push(antecedent);
-      pulledByTurnId.set(citedTurnId, antecedent);
-    }
-  }
+  });
+  rankedRows.forEach((row, index) => {
+    row.score = rankedRows.length - index;
+  });
+  const kept = rankedRows.slice(0, Math.max(0, view.budget)).slice().sort((a, b) => a.turn.promptNumber - b.turn.promptNumber);
+  const keptIds = new Set(kept.map((row) => row.turn.id));
   const overflowByDay = [];
   const droppedByDay = /* @__PURE__ */ new Map();
   for (const turn of seq) {
-    if (keptIds.has(turn.id) || pulledIds.has(turn.id)) {
+    if (keptIds.has(turn.id)) {
       continue;
     }
     const day = formatLocalDate(turn.createdAtEpoch);
@@ -11402,18 +11381,7 @@ function selectMilestoneTurns(view) {
       labelEpoch: byPrompt[0].createdAtEpoch
     });
   }
-  const effGradeByTurnId = /* @__PURE__ */ new Map();
-  for (const turn of seq) {
-    effGradeByTurnId.set(turn.id, effGradeOf(turn));
-  }
-  return { kept: rows, ranked, pulled, overflowByDay, effGradeByTurnId };
-}
-function pulledAntecedentLabel(turn, signal) {
-  if (turn.title !== null && turn.title.trim() !== "") {
-    return turn.title;
-  }
-  const prompt = cleanPromptForLabel(turn.userPrompt);
-  return prompt === "" ? "(untitled)" : truncateText(prompt, { limit: MILESTONE_PULLED_LABEL_CAP, signal });
+  return { kept, ranked: rankedRows, overflowByDay };
 }
 function sortTurnsForAnalysis(turns) {
   return [...turns].sort((left, right) => {
@@ -11461,7 +11429,7 @@ function deriveTimelineBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
+function buildTimelineView(db, input, preloadedTurns) {
   const parsed = parseTimelineId(input.id);
   const viewKind = input.view ?? "turns";
   const session = getSession(db, parsed.sessionId);
@@ -11506,14 +11474,17 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
-  const citations = preloadedCitations ?? getSessionEffectiveCitations(db, session.id);
+  const milestoneBudget = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
+  const legacyWindowIds = new Set(legacyWindowTurns.map((turn) => turn.id));
+  const laneEdges = getRelationEdgesAmongTurns(db, [...legacyWindowIds]);
+  const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, legacyWindowIds);
+  const rolledBackCiterIds = getRolledBackCiterIds(db, [...legacyWindowIds]);
   const milestoneSelection = selectMilestoneTurns({
-    session,
     windowTurns: legacyWindowTurns,
-    windowSignals,
-    compactBoundaries,
-    sessionTurns: legacySessionTurns,
-    citations
+    laneEdges,
+    externalTurns: externalElectionTurns,
+    rolledBackCiterIds,
+    budget: milestoneBudget
   });
   const pagedTurns = viewKind === "turns" ? paginateItems(windowTurns, page, pageSize) : emptyPaginatedItems(windowTurns.length, pageSize);
   const milestoneTail = viewKind === "milestones" && input.milestoneTail === true;
@@ -11567,8 +11538,6 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     windowTurns,
     pageTurns: pagedTurns.items,
     pagedMilestones: pagedMilestones.items,
-    milestonePulled: viewKind === "milestones" ? milestoneSelection.pulled : [],
-    turnEffGrades: milestoneSelection.effGradeByTurnId,
     milestoneDayGroups,
     viewItemTotal,
     pageAnchorEpoch,
@@ -11799,7 +11768,7 @@ function initialUnitTrim(unit) {
   return {
     showDesc: true,
     descTokens: null,
-    pulledShown: Math.min(unit.pulled.length, MILESTONE_UNIT_PULLED_CAP),
+    antecedentsShown: Math.min(unit.milestone.antecedents.length, MILESTONE_UNIT_PULLED_CAP),
     titleTokens: null,
     promptTokens: null,
     showFiles: true
@@ -11822,12 +11791,11 @@ function renderUnitLines(unit, trim, titleCap, signal) {
     title = truncateToTokens(title, trim.titleTokens);
   }
   const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
-  const mainBackLink = milestone.supersededBy && milestone.supersededBy.length > 0 ? ` \u2192\u88ABT${milestone.supersededBy.join("/T")}\u63A8\u7FFB` : "";
   const markerGlyph = milestone.marker === null ? "" : `${glyph} `;
   const promptTail = prompt === "" ? "" : ` \xB7 "${prompt}"`;
   const stamp = `${formatLocalMonthDay(milestone.turn.createdAtEpoch)} ${formatLocalTime(milestone.turn.createdAtEpoch)}`;
   const lines = [
-    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${typeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}${mainBackLink}`.trimEnd()
+    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${typeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd()
   ];
   if (trim.showDesc) {
     const raw = milestoneDescText(milestone.turn);
@@ -11838,12 +11806,12 @@ function renderUnitLines(unit, trim, titleCap, signal) {
       }
     }
   }
-  const shown = unit.pulled.slice(0, trim.pulledShown);
-  const foldedPulled = unit.pulled.length - trim.pulledShown;
-  if (shown.length > 0 || foldedPulled > 0) {
+  const shown = milestone.antecedents.slice(0, trim.antecedentsShown);
+  const foldedAntecedents = milestone.antecedents.length - trim.antecedentsShown;
+  if (shown.length > 0 || foldedAntecedents > 0) {
     const addresses = [
-      ...shown.map((antecedent) => `T${antecedent.turn.promptNumber}`),
-      ...foldedPulled > 0 ? [`+${foldedPulled}`] : []
+      ...shown,
+      ...foldedAntecedents > 0 ? [`+${foldedAntecedents}`] : []
     ];
     lines.push(`${TIMELINE_FIELD_INDENT}\u21B3 ${addresses.join(", ")}`);
   }
@@ -11895,8 +11863,8 @@ function fitUnitTrim(unit, titleCap, cap, base, signal) {
   if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
-  while (trim.pulledShown > 0 && unitTokens(unit, trim, titleCap, signal) > cap) {
-    trim.pulledShown -= 1;
+  while (trim.antecedentsShown > 0 && unitTokens(unit, trim, titleCap, signal) > cap) {
+    trim.antecedentsShown -= 1;
   }
   if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
@@ -11956,52 +11924,14 @@ function tokensFromWeightTenths(tenths) {
   return Math.ceil(tenths * 12 / 100);
 }
 function createMilestoneBodyModel(view, titleCap, signal) {
-  const pagedPrompts = new Set(
-    view.pagedMilestones.map((milestone) => milestone.turn.promptNumber)
-  );
-  const milestoneByPrompt = new Map(
-    view.pagedMilestones.map((milestone) => [milestone.turn.promptNumber, milestone])
-  );
-  const mainRowTurnIds = new Set(
-    view.pagedMilestones.map((milestone) => milestone.turn.id)
-  );
-  const pullable = view.milestonePulled.filter(
-    (antecedent) => !mainRowTurnIds.has(antecedent.turn.id)
-  );
-  const pullOrder = new Map(
-    pullable.map((antecedent, index) => [antecedent, index])
-  );
-  const antecedentDates = new Map(
-    pullable.map(
-      (antecedent) => [antecedent, formatLocalDate(antecedent.turn.createdAtEpoch)]
-    )
-  );
-  const retainedPrompts = new Set(pagedPrompts);
   const removed = /* @__PURE__ */ new Set();
   const descOff = /* @__PURE__ */ new Set();
-  const homedPulled = /* @__PURE__ */ new Map();
   const unitEntries = /* @__PURE__ */ new Map();
   const sections = view.milestoneDayGroups.map((group) => ({
     date: group.date,
     labelEpoch: group.labelEpoch,
     group
   }));
-  const groupedDates = new Set(sections.map((section) => section.date));
-  const syntheticEpochs = /* @__PURE__ */ new Map();
-  for (const antecedent of pullable) {
-    const date7 = antecedentDates.get(antecedent);
-    if (groupedDates.has(date7)) {
-      continue;
-    }
-    const known = syntheticEpochs.get(date7);
-    if (known === void 0 || antecedent.turn.createdAtEpoch < known) {
-      syntheticEpochs.set(date7, antecedent.turn.createdAtEpoch);
-    }
-  }
-  for (const [date7, labelEpoch] of syntheticEpochs) {
-    sections.push({ date: date7, labelEpoch, group: null });
-  }
-  sections.sort((left, right) => left.labelEpoch - right.labelEpoch);
   const orderedStates = sections.map((section, index) => {
     const overflow = section.group?.overflow ?? null;
     return {
@@ -12017,9 +11947,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
       run: null
     };
   });
-  const stateByDate = new Map(
-    orderedStates.map((state) => [state.section.date, state])
-  );
   const stateOfMilestone = /* @__PURE__ */ new Map();
   for (const state of orderedStates) {
     for (const milestone of state.rows) {
@@ -12028,7 +11955,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
   }
   let totalTenths = 0;
   let priced = false;
-  let framed = false;
   function lineTenths(line) {
     return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
   }
@@ -12037,15 +11963,7 @@ function createMilestoneBodyModel(view, titleCap, signal) {
     if (cached3 !== void 0) {
       return cached3;
     }
-    const pulled = [...homedPulled.get(milestone.turn.promptNumber) ?? []].sort(
-      (left, right) => (pullOrder.get(left) ?? 0) - (pullOrder.get(right) ?? 0)
-    );
-    const lines = renderUnitFitted(
-      { milestone, pulled },
-      titleCap,
-      descOff.has(milestone),
-      signal
-    );
+    const lines = renderUnitFitted({ milestone }, titleCap, descOff.has(milestone), signal);
     const entry = {
       lines,
       tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0)
@@ -12154,47 +12072,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
     }
     priceRun(run);
   }
-  function noteHidden(state, promptNumber) {
-    state.hiddenCount += 1;
-    state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
-    state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
-    if (!framed) {
-      return;
-    }
-    const { run } = state;
-    if (run === null) {
-      refreshExpandedFrame(state);
-      return;
-    }
-    run.hidden += 1;
-    run.promptLo = Math.min(run.promptLo, promptNumber);
-    run.promptHi = Math.max(run.promptHi, promptNumber);
-    priceRun(run);
-  }
-  function homeAntecedent(antecedent) {
-    const home = antecedent.citerPromptNumbers.find(
-      (promptNumber) => retainedPrompts.has(promptNumber)
-    );
-    if (home !== void 0) {
-      homedPulled.set(home, [...homedPulled.get(home) ?? [], antecedent]);
-      const host = milestoneByPrompt.get(home);
-      if (host !== void 0) {
-        invalidateUnit(host);
-      }
-      return;
-    }
-    if (!antecedent.citerPromptNumbers.some((promptNumber) => pagedPrompts.has(promptNumber))) {
-      return;
-    }
-    const state = stateByDate.get(antecedentDates.get(antecedent));
-    if (state === void 0) {
-      return;
-    }
-    noteHidden(state, antecedent.turn.promptNumber);
-  }
-  for (const antecedent of pullable) {
-    homeAntecedent(antecedent);
-  }
   for (const state of orderedStates) {
     state.unitTenths = state.rows.reduce(
       (sum, milestone) => sum + unitEntryFor(milestone).tenths,
@@ -12210,7 +12087,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
       refreshExpandedFrame(state);
     }
   }
-  framed = true;
   totalTenths += NEWLINE_WEIGHT_TENTHS;
   return {
     disableDesc(milestone) {
@@ -12226,7 +12102,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
       }
       const promptNumber = milestone.turn.promptNumber;
       removed.add(milestone);
-      retainedPrompts.delete(promptNumber);
       const state = stateOfMilestone.get(milestone);
       if (state !== void 0) {
         const entry = unitEntryFor(milestone);
@@ -12244,11 +12119,6 @@ function createMilestoneBodyModel(view, titleCap, signal) {
         }
       }
       unitEntries.delete(milestone);
-      const orphaned = homedPulled.get(promptNumber) ?? [];
-      homedPulled.delete(promptNumber);
-      for (const antecedent of orphaned) {
-        homeAntecedent(antecedent);
-      }
     },
     weightTenths() {
       return totalTenths;
@@ -12306,9 +12176,6 @@ function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightTenths
     }
   }
   for (const milestone of milestoneDegradationOrder(view)) {
-    if (milestone.alwaysKeep) {
-      continue;
-    }
     body.removeUnit(milestone);
     if (fits()) {
       return result();
@@ -12559,55 +12426,63 @@ function fetchUserPrompts(db, turnIds) {
   }
   return result;
 }
-function compareEdgeSignalRank(left, right, signals) {
-  const leftSignal = signals.get(left.turnId);
-  const rightSignal = signals.get(right.turnId);
-  if (leftSignal.encodesCount !== rightSignal.encodesCount) {
-    return rightSignal.encodesCount - leftSignal.encodesCount;
-  }
-  if (leftSignal.refinesExcess.decision !== rightSignal.refinesExcess.decision) {
-    return rightSignal.refinesExcess.decision - leftSignal.refinesExcess.decision;
-  }
-  if (leftSignal.refinesExcess.delivery !== rightSignal.refinesExcess.delivery) {
-    return rightSignal.refinesExcess.delivery - leftSignal.refinesExcess.delivery;
-  }
-  if (left.createdAtEpoch !== right.createdAtEpoch) {
-    return right.createdAtEpoch - left.createdAtEpoch;
-  }
-  return right.turnId - left.turnId;
-}
-function selectSegmentMilestonesByEdgeSignals(db, members, pageSize, taskCausalityEraCutoffEpoch) {
+function selectSegmentMilestonesByEdgeSignals(db, members, pageSize, _taskCausalityEraCutoffEpoch) {
   const liveMembers = excludeTimelineHiddenMembers(db, members);
-  const eraEligible = liveMembers.filter(
-    (member) => isTaskCausalityEra(member.createdAtEpoch, taskCausalityEraCutoffEpoch)
-  );
-  if (eraEligible.length === 0) {
+  if (liveMembers.length === 0) {
     return { kept: [], demotedCount: 0 };
   }
-  const signals = getTurnEdgeSignals(db, eraEligible.map((member) => member.turnId));
-  const candidates = eraEligible.filter((member) => !signals.get(member.turnId).overridden);
-  const ranked = [...candidates].sort(
-    (left, right) => compareEdgeSignalRank(left, right, signals)
+  const admissionCap = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
+  const memberIds = new Set(liveMembers.map((member) => member.turnId));
+  const laneEdges = getRelationEdgesAmongTurns(db, [...memberIds]);
+  const electionTurns = liveMembers.map((member) => ({
+    id: member.turnId,
+    type: member.type,
+    order: [member.sessionId, member.promptNumber],
+    createdAtEpoch: member.createdAtEpoch
+  }));
+  const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, memberIds);
+  const rolledBackCiterIds = getRolledBackCiterIds(db, [...memberIds]);
+  const { candidates } = electMilestones(
+    [...electionTurns, ...externalElectionTurns],
+    laneEdges,
+    admissionCap,
+    rolledBackCiterIds
   );
-  const admitted = new Set(ranked.slice(0, Math.max(0, pageSize)).map((member) => member.turnId));
+  const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
+  const admittedList = windowCandidates.slice(0, Math.max(0, admissionCap));
+  const admittedIds = new Set(admittedList.map((candidate) => candidate.id));
   const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
-  const keptMembers = liveMembers.filter((member) => admitted.has(member.turnId));
-  const links = resolveTurnRowLinks(db, keptMembers);
-  const userPrompts = fetchUserPrompts(db, keptMembers.map((member) => member.turnId));
+  const keptMembers = liveMembers.filter((member) => admittedIds.has(member.turnId));
+  const orderedKeptMembers = [...keptMembers].sort(
+    (left, right) => chronologicalOrdinals.get(left.turnId) - chronologicalOrdinals.get(right.turnId)
+  );
+  const memberById = new Map(liveMembers.map((member) => [member.turnId, member]));
+  const citedByTurn = buildElectedCitations(laneEdges, admittedIds);
+  const userPrompts = fetchUserPrompts(db, orderedKeptMembers.map((member) => member.turnId));
   const sessionTitles = /* @__PURE__ */ new Map();
-  const kept = keptMembers.map((member) => {
+  const kept = orderedKeptMembers.map((member) => {
     if (!sessionTitles.has(member.sessionId)) {
       sessionTitles.set(member.sessionId, getSession(db, member.sessionId)?.title ?? null);
     }
+    const citedIds = [...citedByTurn.get(member.turnId) ?? []].sort((a, b) => {
+      const memberA = memberById.get(a);
+      const memberB = memberById.get(b);
+      return memberA.sessionId !== memberB.sessionId ? memberA.sessionId - memberB.sessionId : memberA.promptNumber - memberB.promptNumber;
+    });
+    const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
+      const cited = memberById.get(id);
+      return cited.sessionId === member.sessionId ? `T${cited.promptNumber}` : `S${cited.sessionId}/T${cited.promptNumber}`;
+    });
+    const folded = citedIds.length - shown.length;
     return {
       member,
       ordinal: chronologicalOrdinals.get(member.turnId),
-      antecedents: links.get(member.turnId)?.antecedents ?? [],
+      antecedents: folded > 0 ? [...shown, `+${folded}`] : shown,
       sessionTitle: sessionTitles.get(member.sessionId) ?? null,
       userPrompt: userPrompts.get(member.turnId) ?? null
     };
   });
-  return { kept, demotedCount: candidates.length - kept.length };
+  return { kept, demotedCount: windowCandidates.length - kept.length };
 }
 function renderSegmentMilestoneRow(row, titleCap, includeSessionPrefix, signal) {
   const { member } = row;
@@ -14643,11 +14518,10 @@ Turn note \u2014 three fields, three jobs:
 - insight \u2014 REUSABLE experience. A lesson still true once this turn is
             forgotten, in this project or beyond. Not a conclusion of this turn.
 
-Length tracks OUTPUT, not effort. A turn that produced nothing is a skip; one
-that produced a lot may run long; one that produced little must be terse.
-Process detail belongs to replay \u2014 a summary cannot hold it, and trying makes
-it hold nothing. Content leads with its conclusions: a reader's budget cuts
-the tail, so whatever merely supports a decision comes after the decision.
+Length tracks OUTPUT, not effort: nothing produced is a skip, little
+produced is terse. Process detail belongs to replay \u2014 a summary cannot hold
+it. Content leads with its conclusions: a reader's budget cuts the tail, so
+support comes after the decision.
 
 type \u2014 a closed vocabulary, one meaning per word:
 - discuss \u2014 exploring problems and options; understanding produced, no ruling
@@ -14679,10 +14553,9 @@ type \u2014 a closed vocabulary, one meaning per word:
   turn's phase is a SET \u2014 an edge is legal when any pairing is.
 - No word fits \u2192 leave it empty, never force one.
 - Ruling supplement: when the user's ruling or veto lands on this turn, keep
-  the words for what actually happened and ADD the decision phase \u2014 a
-  constraint formed or revised to be honored from now on \u2192 +design; an
-  existing conclusion corrected \u2192 +correction. The supplement never replaces
-  and is never invented: no ruling, no supplement.
+  the words for what happened and ADD the decision phase \u2014 a new or revised
+  commitment \u2192 +design; a corrected conclusion \u2192 +correction. Never replaces,
+  never invented: no ruling, no supplement.
 
 tags \u2014 nouns, naming things: project first, then subsystem/artifact; activity
 words belong to type. Lowercase-hyphenated; reuse existing tags first; on
@@ -14694,18 +14567,20 @@ THE INTERPRETATION PRINCIPLE: a tagged edge acts on a LANE; an untagged edge
 acts on the cited turn itself. Every word shares this one reading \u2014 there are
 no special cases.
 
-A LANE is a separable line of work inside one phase, under a segment,
-identified by an exact SET of tags scoped to that segment. Lanes never cross
-phases; only cross-phase relations connect lanes of different phases.
-{P}\u2192{P,c1} forks and {A}+{B}\u2192{A,B} merges are nothing but tag composition \u2014
-the machine knows only exact sets; parenthood and merging are human readings.
+A LANE is a separable sub-workflow inside one phase, under a segment,
+identified by an exact SET of tags scoped to that segment: a DAG of tagged
+edges over AT LEAST TWO nodes, every node's own tags containing the lane's.
+Lanes never cross phases; only cross-phase relations connect lanes of
+different phases. A lane may start from another lane's node \u2014 adding a tag
+to the parent's set opens a new branch, inheriting the exact set REOPENS a
+closed lane; the machine knows only exact sets, parenthood is narration.
 A lane's tag set is as SMALL as discrimination allows, and the segment's own
-tags never join it \u2014 they gate membership, not lanes. An isolated single-turn
-product needs no tag and joins no lane, and is still cited cross-phase as
-usual.
+tags never join it \u2014 they gate membership, not lanes. An isolated
+single-turn product needs no tag and joins no lane, and is still cited
+cross-phase as usual.
 
 Eight words. Same-phase words MAY carry lane tags, none must; cross-phase
-words never do \u2014 lanes are phase-local:
+words never do:
 \xB7 override \u2014 the cited's main result no longer applies; this node fully
   replaces it. Tagged: an in-lane correction \u2014 the lane reopens until a
   fresh declaration. Untagged: a global repudiation of the conclusion, and
@@ -14719,7 +14594,8 @@ words never do \u2014 lanes are phase-local:
   representative, and the outside reaches the indexed through it. Tagged:
   declares that lane CONVERGED \u2014 this node is its terminus and indexes the
   lane's core valid nodes. Untagged: free aggregation (a release indexing
-  the artifacts it ships). An indexed node is never also consumed.
+  the artifacts it ships). An indexed node is never also consumed,
+  unless both edges carry lane tags.
 \xB7 grounds  \u2014 this node stands or falls with the cited. Where a separate
   spec turn exists, THE SPEC carries the grounds and the other artifacts
   consume that carrier; without one, each artifact grounds the decision
@@ -14731,7 +14607,11 @@ Convergence never happens by silence: when a lane converges, its terminus
 declares it with a TAGGED indexes. All lane events \u2014 declarations,
 overrides, continuations \u2014 reduce in turn order; the latest declaration
 wins, and continuing past one is normal life (the next declaration
-supersedes it). SUBSET INVARIANT: every tag on an edge must already exist
+supersedes it). A lane whose LATEST node is its declared terminus is
+CLOSED \u2014 VALID while any of its indexed core lives, INVALID once all are
+dead (bury an abandoned line: repudiate, then declare over the wreck);
+unconverged lanes honestly stay OPEN.
+SUBSET INVARIANT: every tag on an edge must already exist
 on both endpoint turns' tags \u2014 written forward, a lane member's note
 carries its lane tag anyway; a violation is refused, naming the gap.
 
@@ -14742,8 +14622,9 @@ never enforces:
   to delivery.
 \xB7 Component emergence \u2014 distinct lanes come out as distinct components,
   never entangled by accident.
-\xB7 Minimality \u2014 paths from start to terminus stay few, within the phase and
-  in the cross-phase merged view alike.
+\xB7 Minimality \u2014 lanes meet through few edges aimed at each other's termini;
+  in-lane edges point to the past, and path counts are facts,
+  never targets.
 
 Axiom: a release indexes the artifacts it ships (untagged free aggregation)
 and consumes the previous release; the first release is the chain's legal
@@ -14765,23 +14646,20 @@ evidence is an EXTERNAL delivery citation of its terminus.
 ## Segments (membership and creation)
 
 - A turn belongs to the task segment its content serves \u2014 at most one; an
-  unrelated turn staying homeless is a legal state. When one turn serves
-  several workflows, membership still goes to the primary task its content
-  serves \u2014 the other ties are carried by relation edges.
+  unrelated turn staying homeless is a legal state. A turn serving several
+  workflows belongs to the primary one \u2014 the other ties are carried by
+  relation edges.
 - A segment's tags are hand-curated identity: a member turn carries ALL of
   them. Lane tags are separate and never include them.
 - (Settlement side) membership and creation authority equal the main agent's:
   segments may be created, turns reassigned across them; correct only OBVIOUS
   mismatches, leave doubt alone.
-  - Positive example: a turn entirely modifies segment A's module but is
-    assigned to B \u2192 reassign to A.
-  - Counterexample: the title relates to A but the content shows no service
-    to it \u2192 leave it.
+  - Reassign: a turn entirely modifying segment A's module sits in B.
+  - Leave: the title relates to A but the content shows no service to it.
 - Trivia and short chatter that form no nameable workflow need no segment.
-- When a segment seems needed, check the roster first \u2014 attach to a fitting
-  existing segment before creating a new one.
-- Create only when nothing fits; name it after the task's actual shape \u2014 an
-  opening guess anchors the segment to the wrong shape.
+- Check the roster first \u2014 attach to a fitting segment; create only when
+  nothing fits, named after the task's actual shape (an opening guess
+  anchors it wrong).
 
 ## Policy (when to read)
 
@@ -14918,7 +14796,16 @@ function renderNoteSettlementPrompt(context) {
     "2. RECONCILIATION (notes, type/tags, membership, edges), via the `note`",
     "   and `remember` tools \u2014 supply, correct, retract, as the procedure",
     "   above describes. Judge every one of them by the Memory Rubric's own",
-    "   sections; this prompt states only the call shape.",
+    "   sections; this prompt states only the call shape. Every annotation",
+    "   you meet follows the SAME rule on every window, backfill or check:",
+    "   MISSING (empty on a substantive turn) or NON-CONFORMING (stated,",
+    "   but in vocabulary this system no longer uses \u2014 for `type`,",
+    "   conformance means every word is a member of the closed vocabulary",
+    "   the Rubric defines above) is RE-ANNOTATED FROM SCRATCH \u2014 judged",
+    "   under the Memory Rubric exactly as a first writer would today;",
+    "   the old word being retired IS the nonconformity, not a mistake to",
+    "   correct. A CONFORMING annotation keeps the ordinary discipline",
+    "   instead: check it, correct the explicit, supplement what is missing, leave doubt alone.",
     "   - notes: `note` with `turn` plus `title`, `content` and/or `insight`.",
     "     A turn with no note yet takes `title` and `content` together (a",
     "     first note needs both); a field that already holds something needs",
@@ -49755,7 +49642,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the segment card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/T<m>"` (also `E<n>/T*`, `E<n>/T3..7`) addresses the segment\'s own members by their 1-based EVENT-ORDER position \u2014 a navigation handle only, never a citation (cite the rendered `[S<session>][T<prompt>]` address instead, since a late-settling member shifts the ordinal). `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); a segment card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a segment card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.',
-  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` (key chronological digest) \u2014 `phases` has retired. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
+  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then closed-valid lane termini and open lanes' last declarer, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list, and admission is single-page by construction \u2014 `phases` has retired. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
   // test, type's vocabulary, tags' noun order, the session's seven fields —
@@ -49973,10 +49860,10 @@ var noteInputShape = {
     "Addresses a decision this turn still holds and adds a piece TO \u2014 same phase. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
   indexes: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses the same-phase nodes this turn gathers and stands for \u2014 they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). Same phase is the whole check: no flow, membership or terminus condition. An indexed target is not also consumed. " + RELATION_TAG_FORM_LINE + " A tagged entry additionally DECLARES that lane's convergence (its terminus) \u2014 see grounds' own self-citation reading below. Judgment lives in the Memory Rubric."
+    "Addresses the same-phase nodes this turn gathers and stands for \u2014 they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). Same phase is the whole check: no flow, membership or terminus condition. An indexed target is not also consumed by an UNTAGGED edge; a tagged consume may sit beside a tagged indexes \u2014 lane structure and convergence declaration are separate facts." + RELATION_TAG_FORM_LINE + " A tagged entry additionally DECLARES that lane's convergence (its terminus) \u2014 see grounds' own self-citation reading below. Judgment lives in the Memory Rubric."
   ),
   consume: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow \u2014 never written beside an extends or indexes on the same pair, which already imply it under the deletion test. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+    "Addresses work this turn used, with no liability if it turns out wrong; indifferent to flow \u2014 never written beside an extends on the same pair, and never untagged beside an indexes (each already implies it); a TAGGED consume beside a tagged indexes is legal \u2014 the declaration does not carry the lane-structure fact." + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
   grounds: external_exports.array(relationTargetEntryShape).optional().describe(
     "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false \u2014 cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; may cite the citing turn itself only when this turn's own type carries a delivery-phase word (the implementer half \u2014 a decision-only turn cannot self-ground) AND, after this call's edges land, this turn is the CURRENT terminus of a lane it declared via a TAGGED indexes edge of its own (declared in this same call, either order, or already stored \u2014 a later override that reopens or repudiates that declaration means it no longer qualifies) \u2014 every other relation refuses a self target outright. " + RELATION_NO_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
@@ -50219,173 +50106,6 @@ var rememberInputSchema = external_exports.object(rememberInputShape).strict().s
   }
 });
 
-// src/shared/lane-interpretation.ts
-var DEFAULT_SEGMENT = "\0default";
-function compareOrderKey(a, b) {
-  return a[0] - b[0] || a[1] - b[1];
-}
-function canonicalTagSet(tags) {
-  return [...new Set(tags)].sort();
-}
-function laneToken(segment, tags) {
-  return JSON.stringify([segment, canonicalTagSet(tags)]);
-}
-function deriveLaneInterpretation(turns, edges) {
-  const segmentOf = /* @__PURE__ */ new Map();
-  const orderOf = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    segmentOf.set(turn.id, turn.segment ?? DEFAULT_SEGMENT);
-    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
-  }
-  const segmentFor = (id) => segmentOf.get(id) ?? DEFAULT_SEGMENT;
-  const orderFor = (id) => orderOf.get(id) ?? [0, id];
-  const groups = /* @__PURE__ */ new Map();
-  const warnings = [];
-  function addToGroup(segment, canon, edge) {
-    const token = laneToken(segment, canon);
-    let group = groups.get(token);
-    if (group === void 0) {
-      group = { segment, tagSet: [...canon], edges: [] };
-      groups.set(token, group);
-    }
-    group.edges.push(edge);
-    return token;
-  }
-  for (const edge of edges) {
-    const canon = canonicalTagSet(edge.tags);
-    if (canon.length === 0) continue;
-    const citingSegment = segmentFor(edge.citingId);
-    const citedSegment = segmentFor(edge.citedId);
-    addToGroup(citingSegment, canon, edge);
-    if (citedSegment !== citingSegment) {
-      addToGroup(citedSegment, canon, edge);
-      warnings.push({
-        citingId: edge.citingId,
-        citedId: edge.citedId,
-        tagSet: canon,
-        citingSegment,
-        citedSegment
-      });
-    }
-  }
-  const events = [];
-  function pushEvent(citingId, citedId, relation, token) {
-    events.push({ citingId, citedId, relation, token });
-  }
-  for (const edge of edges) {
-    if (edge.relation !== "indexes" && edge.relation !== "override") continue;
-    const canon = canonicalTagSet(edge.tags);
-    if (canon.length === 0) {
-      if (edge.relation === "override") {
-        pushEvent(edge.citingId, edge.citedId, "override", null);
-      }
-      continue;
-    }
-    const citingSegment = segmentFor(edge.citingId);
-    const citedSegment = segmentFor(edge.citedId);
-    const citingToken = laneToken(citingSegment, canon);
-    if (groups.has(citingToken)) {
-      pushEvent(edge.citingId, edge.citedId, edge.relation, citingToken);
-    }
-    if (citedSegment !== citingSegment) {
-      const citedToken = laneToken(citedSegment, canon);
-      if (groups.has(citedToken)) {
-        pushEvent(edge.citingId, edge.citedId, edge.relation, citedToken);
-      }
-    }
-  }
-  events.sort((a, b) => compareOrderKey(orderFor(a.citingId), orderFor(b.citingId)) || a.citingId - b.citingId);
-  const terminusOf = /* @__PURE__ */ new Map();
-  const everDeclared = /* @__PURE__ */ new Map();
-  const deadInLane = /* @__PURE__ */ new Map();
-  const latestEventTurn = /* @__PURE__ */ new Map();
-  for (const token of groups.keys()) {
-    terminusOf.set(token, null);
-    everDeclared.set(token, false);
-    deadInLane.set(token, /* @__PURE__ */ new Set());
-    latestEventTurn.set(token, null);
-  }
-  const globallyDead = /* @__PURE__ */ new Set();
-  let index = 0;
-  while (index < events.length) {
-    const citingId = events[index].citingId;
-    let end = index;
-    while (end < events.length && events[end].citingId === citingId) {
-      end += 1;
-    }
-    const batch = events.slice(index, end);
-    index = end;
-    for (const event of batch) {
-      if (event.relation !== "override") continue;
-      if (event.token === null) {
-        globallyDead.add(event.citedId);
-        for (const [token, terminus] of terminusOf) {
-          if (terminus === event.citedId) {
-            terminusOf.set(token, null);
-            latestEventTurn.set(token, citingId);
-          }
-        }
-      } else {
-        deadInLane.get(event.token).add(event.citedId);
-        if (terminusOf.get(event.token) === event.citedId) {
-          terminusOf.set(event.token, null);
-        }
-        latestEventTurn.set(event.token, citingId);
-      }
-    }
-    for (const event of batch) {
-      if (event.relation !== "indexes" || event.token === null) continue;
-      terminusOf.set(event.token, citingId);
-      everDeclared.set(event.token, true);
-      latestEventTurn.set(event.token, citingId);
-    }
-  }
-  for (const [token, group] of groups) {
-    const current = latestEventTurn.get(token) ?? null;
-    if (current === null) continue;
-    let bestId = current;
-    let bestOrder = orderFor(current);
-    for (const edge of group.edges) {
-      if (edge.relation === "indexes" || edge.relation === "override") continue;
-      const order = orderFor(edge.citingId);
-      const cmp = compareOrderKey(order, bestOrder);
-      if (cmp > 0 || cmp === 0 && edge.citingId > bestId) {
-        bestOrder = order;
-        bestId = edge.citingId;
-      }
-    }
-    latestEventTurn.set(token, bestId);
-  }
-  const tokens = [...groups.keys()].sort();
-  const lanes = [];
-  const laneByToken = /* @__PURE__ */ new Map();
-  for (const token of tokens) {
-    const group = groups.get(token);
-    const memberIds = /* @__PURE__ */ new Set();
-    for (const edge of group.edges) {
-      memberIds.add(edge.citingId);
-      memberIds.add(edge.citedId);
-    }
-    const dead = deadInLane.get(token);
-    const members = [...memberIds].sort((a, b) => a - b).map((id) => ({ id, dead: globallyDead.has(id) || dead.has(id) }));
-    const terminus = terminusOf.get(token) ?? null;
-    const state = terminus !== null ? "declared" : everDeclared.get(token) ? "reopened" : "undeclared";
-    const lane = {
-      key: { segment: group.segment, tagSet: group.tagSet },
-      members,
-      declaration: {
-        state,
-        terminus,
-        latestEventTurn: latestEventTurn.get(token) ?? null
-      },
-      taggedEdges: group.edges
-    };
-    lanes.push(lane);
-    laneByToken.set(token, lane);
-  }
-  return { lanes, laneByToken, warnings };
-}
-
 // src/db/lane-checker-load.ts
 function turnOrderKey(sessionId, promptNumber) {
   return [sessionId, promptNumber];
@@ -50508,6 +50228,23 @@ function loadComponentEdgesAmong(db, turnIds) {
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
   ).all(...turnIds, ...turnIds, ...LANE_COMPONENT_RELATIONS_SQL);
 }
+function loadOutOfVocabularyEdgesAmong(db, turnIds) {
+  if (turnIds.length === 0) {
+    return [];
+  }
+  const idPlaceholders = turnIds.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  return db.query(
+    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.citing_id IN (${idPlaceholders}) AND me.cited_id IN (${idPlaceholders})
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IS NOT NULL AND me.relation NOT IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+  ).all(...turnIds, ...turnIds, ...EDGE_RELATIONS);
+}
 function loadSessionIds(db, turnIds) {
   const ids = [...new Set(turnIds)];
   if (ids.length === 0) {
@@ -50562,7 +50299,7 @@ function loadLiveTurns(db, turnIds) {
   }
   const placeholders = ids.map(() => "?").join(",");
   const rows = db.query(
-    `SELECT id, type, session_id AS sessionId, prompt_number AS promptNumber
+    `SELECT id, type, session_id AS sessionId, prompt_number AS promptNumber, created_at_epoch AS createdAtEpoch
        FROM turns WHERE id IN (${placeholders}) AND ${liveTurnSql()}`
   ).all(...ids);
   return new Map(rows.map((row) => [row.id, row]));
@@ -50663,6 +50400,11 @@ function loadLaneCheckScope(db, scope) {
     allTurnIds.add(row.citingId);
     allTurnIds.add(row.citedId);
   }
+  const outOfVocabularyEdges = loadOutOfVocabularyEdgesAmong(db, [...allTurnIds]).map(toEdgeInput).sort((a, b) => {
+    if (a.citingId !== b.citingId) return a.citingId - b.citingId;
+    if (a.citedId !== b.citedId) return a.citedId - b.citedId;
+    return a.relation.localeCompare(b.relation);
+  });
   const turnRows = loadLiveTurns(db, [...allTurnIds]);
   const owningSegmentsForTurns = loadOwningSegments(db, [...allTurnIds]);
   const turns = [...turnRows.values()].map((row) => {
@@ -50670,7 +50412,8 @@ function loadLaneCheckScope(db, scope) {
     const input = {
       id: row.id,
       type: JSON.parse(row.type),
-      order: turnOrderKey(row.sessionId, row.promptNumber)
+      order: turnOrderKey(row.sessionId, row.promptNumber),
+      createdAtEpoch: row.createdAtEpoch
     };
     if (segmentId !== void 0) {
       input.segment = String(segmentId);
@@ -50682,7 +50425,7 @@ function loadLaneCheckScope(db, scope) {
     if (a.citedId !== b.citedId) return a.citedId - b.citedId;
     return a.relation.localeCompare(b.relation);
   });
-  return { turns, edges, involvedLaneKeys };
+  return { turns, edges, involvedLaneKeys, outOfVocabularyEdges };
 }
 
 // src/shared/tag-stripping.ts
@@ -52455,6 +52198,8 @@ function buildIsolatedEnv(workerEnv, capturedSessionEnv) {
 
 // src/shared/lane-checker.ts
 var STANCE_RELATION_WORDS = STANCE_RELATIONS;
+var EDGE_RELATION_WORDS = new Set(EDGE_RELATIONS);
+var MAX_VOCABULARY_REPORT_ENTRIES = 20;
 var LANE_COMPONENT_RELATIONS = /* @__PURE__ */ new Set([
   ...STANCE_RELATIONS,
   "consume",
@@ -52559,8 +52304,152 @@ function findForkJoinNodes(out) {
   joinNodes.sort((a, b) => a - b);
   return { forkNodes, joinNodes };
 }
-function checkLanes(turns, edges) {
-  const { lanes, warnings } = deriveLaneInterpretation(turns, edges);
+function tagSetEqualsExact(a, b) {
+  return a.length === b.length && a.every((tag, index) => tag === b[index]);
+}
+function computeInterfaces(lanes, allEdges) {
+  const memberSets = lanes.map((lane) => new Set(lane.members.map((member) => member.id)));
+  const componentEdges = allEdges.filter((edge) => LANE_COMPONENT_RELATIONS.has(edge.relation));
+  const pairs = [];
+  for (let i = 0; i < lanes.length; i += 1) {
+    for (let j = i + 1; j < lanes.length; j += 1) {
+      const laneA = lanes[i];
+      const laneB = lanes[j];
+      const membersA = memberSets[i];
+      const membersB = memberSets[j];
+      let count = 0;
+      for (const edge of componentEdges) {
+        const crosses = membersA.has(edge.citingId) && membersB.has(edge.citedId) || membersB.has(edge.citingId) && membersA.has(edge.citedId);
+        if (!crosses) continue;
+        const edgeTagSet = canonicalTagSet(edge.tags);
+        if (tagSetEqualsExact(edgeTagSet, laneA.key.tagSet) || tagSetEqualsExact(edgeTagSet, laneB.key.tagSet)) {
+          continue;
+        }
+        count += 1;
+      }
+      if (count > 0) {
+        pairs.push({ laneA: laneA.key, laneB: laneB.key, count });
+      }
+    }
+  }
+  return pairs;
+}
+function computeBypass(lanes, allEdges) {
+  const componentEdges = allEdges.filter((edge) => LANE_COMPONENT_RELATIONS.has(edge.relation));
+  const reports = [];
+  for (const lane of lanes) {
+    if (lane.declaration.state !== "declared" || lane.declaration.terminus === null) {
+      continue;
+    }
+    const terminus = lane.declaration.terminus;
+    const memberIds = new Set(lane.members.map((member) => member.id));
+    const bypassEdges = [];
+    for (const edge of componentEdges) {
+      if (memberIds.has(edge.citingId)) continue;
+      if (!memberIds.has(edge.citedId)) continue;
+      if (edge.citedId === terminus) continue;
+      bypassEdges.push({
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relation: edge.relation,
+        tags: canonicalTagSet(edge.tags)
+      });
+    }
+    bypassEdges.sort((a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation));
+    reports.push({ key: lane.key, count: bypassEdges.length, edges: bypassEdges });
+  }
+  return reports;
+}
+function computeTimeOrderViolations(turnById, allEdges) {
+  const orderFor = (id) => turnById.get(id)?.order ?? [0, id];
+  const violations = [];
+  for (const edge of allEdges) {
+    if (edge.citingId === edge.citedId) continue;
+    const citingOrder = orderFor(edge.citingId);
+    const citedOrder = orderFor(edge.citedId);
+    let violated;
+    if (citingOrder[0] === citedOrder[0]) {
+      violated = !(citingOrder[1] > citedOrder[1]);
+    } else {
+      const citingEpoch = turnById.get(edge.citingId)?.createdAtEpoch;
+      const citedEpoch = turnById.get(edge.citedId)?.createdAtEpoch;
+      if (citingEpoch === void 0 || citedEpoch === void 0) continue;
+      violated = citingEpoch < citedEpoch;
+    }
+    if (violated) {
+      violations.push({
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relation: edge.relation,
+        tags: canonicalTagSet(edge.tags)
+      });
+    }
+  }
+  violations.sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
+  );
+  return violations;
+}
+function computeTypeViolations(turns) {
+  const violations = [];
+  for (const turn of turns) {
+    if (turn.type.includes("compact")) {
+      continue;
+    }
+    const outsideVocabulary = turn.type.filter((word) => !isMemoryType(word));
+    if (turn.type.length === 0 || outsideVocabulary.length > 0) {
+      violations.push({ id: turn.id, types: turn.type, outsideVocabulary });
+    }
+  }
+  violations.sort((a, b) => a.id - b.id);
+  return { count: violations.length, entries: violations.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
+}
+function partitionEdgesByVocabulary(edges) {
+  const inVocabulary = [];
+  const outOfVocabulary = [];
+  for (const edge of edges) {
+    if (EDGE_RELATION_WORDS.has(edge.relation)) {
+      inVocabulary.push(edge);
+    } else {
+      outOfVocabulary.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
+    }
+  }
+  outOfVocabulary.sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
+  );
+  return {
+    inVocabulary,
+    outOfVocabulary: { count: outOfVocabulary.length, entries: outOfVocabulary.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) }
+  };
+}
+function mergeOutOfVocabularyEdges(fromEdges, known) {
+  if (known.length === 0) {
+    return fromEdges;
+  }
+  const seen = /* @__PURE__ */ new Map();
+  for (const entry of fromEdges.entries) {
+    seen.set(`${entry.citingId} ${entry.citedId} ${entry.relation}`, entry);
+  }
+  let total = fromEdges.count;
+  for (const edge of known) {
+    const key = `${edge.citingId} ${edge.citedId} ${edge.relation}`;
+    if (seen.has(key)) continue;
+    seen.set(key, { citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
+    total += 1;
+  }
+  const merged = [...seen.values()].sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
+  );
+  return { count: total, entries: merged.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
+}
+function checkLanes(turns, edges, knownOutOfVocabularyEdges = []) {
+  const { inVocabulary: vocabEdges, outOfVocabulary: outOfVocabularyFromEdges } = partitionEdgesByVocabulary(edges);
+  const outOfVocabularyEdges = mergeOutOfVocabularyEdges(
+    outOfVocabularyFromEdges,
+    knownOutOfVocabularyEdges
+  );
+  const { lanes, warnings } = deriveLaneInterpretation(turns, vocabEdges);
+  const laneStates = deriveLaneStates(lanes, turns);
   const turnById = /* @__PURE__ */ new Map();
   for (const turn of turns) {
     turnById.set(turn.id, turn);
@@ -52570,7 +52459,7 @@ function checkLanes(turns, edges) {
   for (const turn of turns) {
     uf.add(turn.id);
   }
-  for (const edge of edges) {
+  for (const edge of vocabEdges) {
     uf.add(edge.citingId);
     uf.add(edge.citedId);
     if (LANE_COMPONENT_RELATIONS.has(edge.relation) && segmentFor(edge.citingId) === segmentFor(edge.citedId)) {
@@ -52586,7 +52475,8 @@ function checkLanes(turns, edges) {
   for (const lane of lanes) {
     const memberIds = new Set(lane.members.map((member) => member.id));
     const thisLaneToken = laneToken(lane.key.segment, lane.key.tagSet);
-    laneStats.push(buildLaneStats(lane, memberIds, turnById, edges));
+    const laneState = laneStates.get(thisLaneToken);
+    laneStats.push(buildLaneStats(lane, laneState, memberIds, turnById, vocabEdges));
     for (const edge of lane.taggedEdges) {
       if (!STANCE_RELATION_WORDS.has(edge.relation)) continue;
       for (const nodeId of [edge.citedId, edge.citingId]) {
@@ -52630,7 +52520,7 @@ function checkLanes(turns, edges) {
       return { representative: sorted[0], memberIds: sorted };
     }).sort((a, b) => a.representative - b.representative);
     componentReports.push({ key: lane.key, componentCount: islands.length, islands });
-    pathReports.push(buildPathReport(lane, memberIds, edges, lanes));
+    pathReports.push(buildPathReport(lane, memberIds, vocabEdges, lanes));
   }
   const multiLaneComponents = [...componentLanes.entries()].filter(([, laneKeys]) => laneKeys.length > 1).map(([representative, laneKeys]) => {
     const nodeLaneMap = componentNodeLanes.get(representative) ?? /* @__PURE__ */ new Map();
@@ -52641,12 +52531,28 @@ function checkLanes(turns, edges) {
     }).sort((a, b) => a.id - b.id);
     return { representative, lanes: laneKeys, sharedNodes };
   }).sort((a, b) => a.representative - b.representative);
-  return { lanes: laneStats, components: componentReports, multiLaneComponents, paths: pathReports, warnings };
+  const interfaces = computeInterfaces(lanes, vocabEdges);
+  const bypass = computeBypass(lanes, vocabEdges);
+  const timeOrderViolations = computeTimeOrderViolations(turnById, vocabEdges);
+  return {
+    lanes: laneStats,
+    components: componentReports,
+    multiLaneComponents,
+    interfaces,
+    bypass,
+    paths: pathReports,
+    timeOrderViolations,
+    warnings,
+    vocabularyConformance: {
+      typeViolations: computeTypeViolations(turns),
+      outOfVocabularyEdges
+    }
+  };
 }
 function sameLaneKey(a, b) {
   return laneToken(a.segment, a.tagSet) === laneToken(b.segment, b.tagSet);
 }
-function buildLaneStats(lane, memberIds, turnById, allEdges) {
+function buildLaneStats(lane, laneState, memberIds, turnById, allEdges) {
   const phases = /* @__PURE__ */ new Set();
   for (const member of lane.members) {
     const turn = turnById.get(member.id);
@@ -52662,6 +52568,7 @@ function buildLaneStats(lane, memberIds, turnById, allEdges) {
     edgeCountsByRelation[edge.relation] = (edgeCountsByRelation[edge.relation] ?? 0) + 1;
   }
   const groundsFromNonMembers = [];
+  const usedFromNonMembers = [];
   const testimonyFromNonMembers = [];
   for (const edge of allEdges) {
     if (!memberIds.has(edge.citedId) || memberIds.has(edge.citingId)) {
@@ -52669,6 +52576,8 @@ function buildLaneStats(lane, memberIds, turnById, allEdges) {
     }
     if (edge.relation === "grounds") {
       groundsFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
+    } else if (edge.relation === "consume") {
+      usedFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
     } else if (edge.relation === "verifies" || edge.relation === "refutes") {
       testimonyFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
     }
@@ -52680,7 +52589,8 @@ function buildLaneStats(lane, memberIds, turnById, allEdges) {
     members: lane.members,
     edgeCountsByRelation,
     declaration: lane.declaration,
-    citedness: { groundsFromNonMembers, testimonyFromNonMembers },
+    state: laneState,
+    citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
     coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds }
   };
 }
@@ -52761,6 +52671,12 @@ function formatTagSet(key) {
 function formatMembers(members) {
   return members.map((member) => member.dead ? member.id + "(dead)" : String(member.id)).join(", ");
 }
+function formatLaneState(state) {
+  if (state.closure === "closed") {
+    return "closed-" + state.validity;
+  }
+  return state.lastDeclarer !== null ? "open (last declarer T" + state.lastDeclarer + ")" : "open";
+}
 function renderStatsReport(lane) {
   const lines = [];
   lines.push("Lane " + formatTagSet(lane.key) + " - phases: " + (lane.phases.join(",") || "(none)"));
@@ -52768,16 +52684,19 @@ function renderStatsReport(lane) {
   const edgeCounts = Object.entries(lane.edgeCountsByRelation).map(([relation, count]) => relation + "=" + count).join(" ");
   lines.push("  edges: " + (edgeCounts || "(none)"));
   lines.push(
-    "  declaration: " + lane.declaration.state + (lane.declaration.terminus !== null ? " (terminus " + lane.declaration.terminus + ")" : "") + (lane.declaration.latestEventTurn !== null ? " [last event T" + lane.declaration.latestEventTurn + "]" : "")
+    "  declaration: " + formatLaneState(lane.state) + (lane.declaration.terminus !== null ? " (terminus " + lane.declaration.terminus + ")" : "") + (lane.declaration.latestEventTurn !== null ? " [last event T" + lane.declaration.latestEventTurn + "]" : "")
   );
   const grounds = lane.citedness.groundsFromNonMembers.map(
+    (fact) => "T" + fact.citingId + "->T" + fact.citedId
+  );
+  const used = lane.citedness.usedFromNonMembers.map(
     (fact) => "T" + fact.citingId + "->T" + fact.citedId
   );
   const testimony = lane.citedness.testimonyFromNonMembers.map(
     (fact) => "T" + fact.citingId + " " + fact.relation + " T" + fact.citedId
   );
   lines.push(
-    "  cited from outside: grounds[" + (grounds.join(", ") || "-") + "] testimony[" + (testimony.join(", ") || "-") + "]"
+    "  cited from outside: grounds[" + (grounds.join(", ") || "-") + "] used[" + (used.join(", ") || "-") + "] testimony[" + (testimony.join(", ") || "-") + "]"
   );
   lines.push(
     "  coverage: " + lane.coverage.status + (lane.coverage.missingTurnIds.length > 0 ? " (missing: " + lane.coverage.missingTurnIds.join(",") + ")" : "")
@@ -52829,10 +52748,38 @@ function renderPathReport(path2) {
   }
   return lines;
 }
+function renderInterfacePair(pair) {
+  return "  " + formatTagSet(pair.laneA) + " <-> " + formatTagSet(pair.laneB) + ": " + pair.count;
+}
+function renderBypassReport(report) {
+  const lines = [];
+  lines.push("  Lane " + formatTagSet(report.key) + " - bypass: " + report.count);
+  for (const edge of report.edges) {
+    const tags = edge.tags.length > 0 ? " {" + edge.tags.join(",") + "}" : "";
+    lines.push("    T" + edge.citingId + " -> T" + edge.citedId + " (" + edge.relation + tags + ")");
+  }
+  return lines;
+}
+function renderTimeOrderViolation(violation) {
+  const tags = violation.tags.length > 0 ? " {" + violation.tags.join(",") + "}" : "";
+  return "  T" + violation.citingId + " -> T" + violation.citedId + " (" + violation.relation + tags + ")";
+}
 function renderSharedNodes(shared) {
   return shared.sharedNodes.map(
     (node) => "  shared T" + node.id + (node.designedShape ? " (designed fork/merge)" : " (judgment)") + ": " + node.citingLanesByStance.map(formatTagSet).join(", ")
   );
+}
+function renderTypeViolation(violation) {
+  if (violation.types.length === 0) {
+    return "  T" + violation.id + " - type: [] (empty)";
+  }
+  return "  T" + violation.id + " - type: [" + violation.types.join(",") + "] (outside vocabulary: " + violation.outsideVocabulary.join(",") + ")";
+}
+function renderOutOfVocabularyEdge(edge) {
+  return "  T" + edge.citingId + " -> T" + edge.citedId + " (" + edge.relation + ")";
+}
+function cappedCountSuffix(count, shown) {
+  return count > shown ? " (showing first " + shown + ")" : "";
 }
 function renderCrossSegmentWarning(warning) {
   return "\u26A0 T" + warning.citingId + "(" + warning.citingSegment + ") -> T" + warning.citedId + "(" + warning.citedSegment + ") {" + warning.tagSet.join(",") + "}";
@@ -52867,12 +52814,37 @@ function renderLaneCheckerReports(result) {
     }
   }
   sections.push("");
-  sections.push("## Report 4 -- start-to-terminus path counts");
+  sections.push("## Report 4a -- inter-lane interfaces + per-lane bypass (fewer/zero is the aspiration; nothing enforced)");
+  if (result.interfaces.length === 0) {
+    sections.push("(no inter-lane interfaces)");
+  } else {
+    for (const pair of result.interfaces) {
+      sections.push(renderInterfacePair(pair));
+    }
+  }
+  if (result.bypass.length === 0) {
+    sections.push("(no declared lanes)");
+  } else {
+    for (const report of result.bypass) {
+      sections.push(...renderBypassReport(report));
+    }
+  }
+  sections.push("");
+  sections.push("## Report 4b -- start-to-terminus path counts (fact, no target)");
   if (result.paths.length === 0) {
     sections.push("(no lanes in scope)");
   } else {
     for (const path2 of result.paths) {
       sections.push(...renderPathReport(path2));
+    }
+  }
+  sections.push("");
+  sections.push("## Report 4c -- time-order violations (the DAG guarantee)");
+  if (result.timeOrderViolations.length === 0) {
+    sections.push("(none)");
+  } else {
+    for (const violation of result.timeOrderViolations) {
+      sections.push(renderTimeOrderViolation(violation));
     }
   }
   sections.push("");
@@ -52883,6 +52855,30 @@ function renderLaneCheckerReports(result) {
     sections.push(result.warnings.length + " cross-segment tagged edge(s):");
     for (const warning of result.warnings) {
       sections.push(renderCrossSegmentWarning(warning));
+    }
+  }
+  sections.push("");
+  sections.push("## Vocabulary conformance -- MEMORY_TYPES/EDGE_RELATIONS closed-set check (reported, never enforced)");
+  const typeViolations = result.vocabularyConformance.typeViolations;
+  sections.push(
+    "types: " + typeViolations.count + cappedCountSuffix(typeViolations.count, typeViolations.entries.length)
+  );
+  if (typeViolations.entries.length === 0) {
+    sections.push("(none)");
+  } else {
+    for (const violation of typeViolations.entries) {
+      sections.push(renderTypeViolation(violation));
+    }
+  }
+  const outOfVocabularyEdges = result.vocabularyConformance.outOfVocabularyEdges;
+  sections.push(
+    "edges: " + outOfVocabularyEdges.count + cappedCountSuffix(outOfVocabularyEdges.count, outOfVocabularyEdges.entries.length)
+  );
+  if (outOfVocabularyEdges.entries.length === 0) {
+    sections.push("(none)");
+  } else {
+    for (const edge of outOfVocabularyEdges.entries) {
+      sections.push(renderOutOfVocabularyEdge(edge));
     }
   }
   return sections.join("\n");
@@ -53976,7 +53972,7 @@ var SETTLEMENT_ALLOWED_TOOLS = [
 ];
 var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s note, type/tags or edges, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the window or preceding-turns section) or `session` ("S<session>", this session). On `turn`: title/content/insight, type/tags and the edge fields, only for a turn shown in this prompt; omit to leave alone. A first note for a turn needs title and content together. A field that already holds something needs `mode.<field>: "write"` (the full replacement text or set) or the edit form `{ mode: "edit", oldString, newString }` for one exactly-matched span \u2014 the same rule, and the same words, the main agent\'s own `note` uses; a whole-field `write` over text this prompt showed only truncated is refused, and the edit form is the way through. Each field is checked and applied INDEPENDENTLY: if another writer (the main agent\'s own later note, or a prior settlement attempt) touched a field since this dispatch\'s context was read, that ONE field yields (reported in the receipt, not written) while the other still lands. override/narrows/extends/indexes/consume/grounds/verifies/refutes: address lists \u2014 the SAME eight relations and legality validator the main agent\'s own `note` tool uses. Each entry is a bare address (untagged \u2014 acts on the cited turn itself) or `{turn, tags}` (acts on that lane instead); every tag must already be on both this turn\'s and the target\'s own tags. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (wrong phase, an illegal tag, an illegal self-citation) is rejected, naming what is missing. Each has a retract\u2026 mirror (retractOverride \u2026) that deletes that edge; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own vocabulary above \u2014 this call only enforces phase domains, tag legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`.';
 var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = `WRITE a text-only task proposal, a membership correction, or a new segment \u2014 lands immediately, in this same call. action: "propose", "reassign" or "create". propose: addresses (one or more "S<session>/T<prompt>" turn addresses \u2014 a single homeless turn may open its own proposal, or name a cluster forming ONE coherent task) + title (a short suggested name) \u2014 stores a text-only suggestion for the user to confirm next session. Idempotent on the address SET (order-independent): repeating the same set (even after a retry) matches the earlier proposal instead of storing a second one. NEVER creates a segment and is never auto-adopted \u2014 do not propose an incoherent grab-bag. reassign: turns (one or more "S<session>/T<prompt>" addresses to correct) + id (any OPEN "E<n>", on this session's roster or not \u2014 a turn's right home is often a segment this session never attached) or id omitted to clear ownership (homeless). Correct a DISPLAYED mismatch; a closed segment, or an id naming nothing, is refused. create: title (the new segment's own name, written for the task's actual shape) + optional turns to seed as its members. The segment is attached to this session, so the next window sees it on the roster \u2014 check that roster first: joining an existing segment beats minting a new one. Never required \u2014 this window may finish without ever calling this tool.`;
-var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own scope (no parameters) and return its four reports as compact numbers and names \u2014 never a digraph, never a write. Report 1: per-lane statistics (members, edge counts, declaration state, who cites a member from outside). Report 2: whether each lane's members sit in one connected component (severed if not). Report 3: components several lanes' members share. Report 4: start-to-terminus path counts, plain and folded across cross-phase citations. Treat a finding as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never call this more than once, and never let its output alone justify a write without the usual Memory Rubric judgment.";
+var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own scope (no parameters) and return its four reports as compact numbers and names \u2014 never a digraph, never a write. Report 1: per-lane statistics (members, edge counts, a closed-valid/closed-invalid/open state, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). Report 2: whether each lane's members sit in one connected component (severed if not). Report 3: components several lanes' members share. Report 4, three blocks: inter-lane interface counts with terminus-bypass edges; start-to-terminus path counts, plain and folded across cross-phase citations (facts, no target); time-order violations (an edge citing the future). Also a vocabulary-conformance block: turns in scope whose type is empty or carries a word outside the closed activity vocabulary (phase-empty, nearly edge-illegal), and edges whose relation lies outside the eight-word relation vocabulary (e.g. the frozen-legacy supersedes) \u2014 reported only, never folded into any other report's counts. Treat a finding as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never call this more than once, and never let its output alone justify a write without the usual Memory Rubric judgment.";
 var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls.";
 function textResult5(text) {
   return { content: [{ type: "text", text }] };
@@ -54021,7 +54017,7 @@ function createNoteSettlementSdkQuery(options) {
     let laneCheckCalled = false;
     const server = createSdkMcpServerImpl({
       name: "mnemo",
-      version: "0.16.0",
+      version: "0.17.0",
       tools: [
         toolImpl(
           "recall",
@@ -54069,7 +54065,7 @@ function createNoteSettlementSdkQuery(options) {
               promptStart: request.windowStart,
               promptEnd: request.windowEnd
             });
-            const result = checkLanes(projection.turns, projection.edges);
+            const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
             return textResult5(renderLaneCheckerReports(result));
           }
         )
@@ -56547,7 +56543,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.16.0",
+        version: "0.17.0",
         tools: [
           toolImpl(
             "recall",
@@ -58243,6 +58239,696 @@ function finalizeUnreachableStrandedTurns(db, unreachableTurns, options) {
   return results;
 }
 
+// src/worker/console-reader.ts
+var import_bun_sqlite2 = require("bun:sqlite");
+var openConsoleReaderDatabase = (path2) => new import_bun_sqlite2.Database(path2, { readonly: true, create: false });
+function encodeSessionsCursor(epoch, id) {
+  return `${epoch}:${id}`;
+}
+function parseSessionsCursor(raw) {
+  const match = raw.match(/^(\d+):(\d+)$/);
+  if (!match) {
+    return null;
+  }
+  const epoch = Number(match[1]);
+  const id = Number(match[2]);
+  if (!Number.isSafeInteger(epoch) || !Number.isSafeInteger(id)) {
+    return null;
+  }
+  return { epoch, id };
+}
+function createConsoleReader(db, options = {}) {
+  const now = options.now ?? (() => Math.floor(Date.now() / 1e3));
+  return {
+    listSessionsPage({ cursor, limit }) {
+      const rows = db.query(
+        `SELECT
+             s.id AS id,
+             s.title AS title,
+             s.project AS project,
+             s.created_at_epoch AS createdAtEpoch,
+             (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id AND t.status != 'undone') AS turnCount
+           FROM sessions s
+           WHERE (?1 IS NULL)
+              OR (s.created_at_epoch < ?2)
+              OR (s.created_at_epoch = ?3 AND s.id < ?4)
+           ORDER BY s.created_at_epoch DESC, s.id DESC
+           LIMIT ?5`
+      ).all(
+        cursor?.epoch ?? null,
+        cursor?.epoch ?? null,
+        cursor?.epoch ?? null,
+        cursor?.id ?? null,
+        limit + 1
+      );
+      const hasMore = rows.length > limit;
+      const page = rows.slice(0, limit);
+      const last = page[page.length - 1];
+      return {
+        sessions: page.map((row) => ({
+          id: row.id,
+          title: row.title,
+          project: row.project,
+          turnCount: row.turnCount,
+          date: new Date(row.createdAtEpoch * 1e3).toISOString()
+        })),
+        nextCursor: hasMore && last ? encodeSessionsCursor(last.createdAtEpoch, last.id) : null
+      };
+    },
+    listAllSegmentCards() {
+      const segments = listSegmentsByActivity(db, Number.MAX_SAFE_INTEGER);
+      const counts = db.query(
+        `SELECT segment_id AS segmentId, COUNT(*) AS memberCount
+           FROM segment_members GROUP BY segment_id`
+      ).all();
+      const memberCountBySegmentId = new Map(
+        counts.map((row) => [row.segmentId, row.memberCount])
+      );
+      return segments.map((segment) => ({
+        id: segment.id,
+        title: segment.title,
+        status: segment.status,
+        tags: segment.tags,
+        type: segment.type,
+        memberCount: memberCountBySegmentId.get(segment.id) ?? 0
+      }));
+    },
+    findSession(sessionId) {
+      return getSession(db, sessionId);
+    },
+    getSessionMaxPromptNumber(sessionId) {
+      const row = db.query(
+        `SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?`
+      ).get(sessionId);
+      return row?.maxPromptNumber ?? null;
+    },
+    findSegment(segmentId) {
+      return getSegment(db, segmentId);
+    },
+    getSegmentCardDetail(segmentId) {
+      const segment = getSegment(db, segmentId);
+      if (!segment) {
+        return null;
+      }
+      const rows = db.query(
+        `SELECT t.session_id AS sessionId, t.prompt_number AS promptNumber
+           FROM segment_members sm
+           JOIN turns t ON t.id = sm.turn_id
+           WHERE sm.segment_id = ?
+           ORDER BY t.created_at_epoch ASC, t.id ASC`
+      ).all(segmentId);
+      return {
+        segment,
+        memberAddresses: rows.map(
+          (row) => `S${row.sessionId}/T${row.promptNumber}`
+        )
+      };
+    },
+    runLaneCheck(scope) {
+      const run = db.transaction(() => {
+        const asOf = new Date(now() * 1e3).toISOString();
+        const projection = loadLaneCheckScope(db, scope);
+        const result = checkLanes(projection.turns, projection.edges);
+        return {
+          result,
+          turns: projection.turns,
+          edges: projection.edges,
+          asOf
+        };
+      });
+      return run();
+    },
+    loadTurnDisplayFields(ids) {
+      const uniqueIds = [...new Set(ids)];
+      if (uniqueIds.length === 0) {
+        return /* @__PURE__ */ new Map();
+      }
+      const placeholders = uniqueIds.map(() => "?").join(",");
+      const rows = db.query(
+        `SELECT id, session_id AS sessionId, prompt_number AS promptNumber,
+                  title, user_prompt AS userPrompt, content
+           FROM turns WHERE id IN (${placeholders})`
+      ).all(...uniqueIds);
+      return new Map(
+        rows.map((row) => [
+          row.id,
+          {
+            sessionId: row.sessionId,
+            promptNumber: row.promptNumber,
+            title: row.title,
+            userPrompt: row.userPrompt,
+            content: row.content
+          }
+        ])
+      );
+    }
+  };
+}
+function createLazyConsoleReaderResolver(deps) {
+  let cached3;
+  return () => {
+    if (deps.consoleReaderImpl) {
+      return deps.consoleReaderImpl;
+    }
+    if (!cached3) {
+      try {
+        if (!deps.consoleDatabasePathImpl) {
+          throw new Error("console database path is not configured");
+        }
+        const open3 = deps.openConsoleReaderDatabaseImpl ?? openConsoleReaderDatabase;
+        cached3 = { reader: createConsoleReader(open3(deps.consoleDatabasePathImpl)) };
+      } catch (error49) {
+        cached3 = {
+          error: error49 instanceof Error ? error49 : new Error(String(error49))
+        };
+      }
+    }
+    if ("error" in cached3) {
+      throw cached3.error;
+    }
+    return cached3.reader;
+  };
+}
+
+// src/worker/console-api.ts
+var SESSIONS_PAGE_MAX = 50;
+var GRAPH_WINDOW_DEFAULT = 50;
+var GRAPH_WINDOW_MAX = 2e3;
+var EXCERPT_PROMPT_CP = 280;
+var EXCERPT_CONTENT_CP = 280;
+var GRAPH_EDGE_MAX = 1e3;
+var WIDEN_NODE_MAX = 2e3;
+var RESPONSE_BYTE_SOFT_MAX = 1e6;
+var ELECTION_PREVIEW_BUDGET = 30;
+function errorResult(status, code, message) {
+  return { status, body: { error: { code, message } } };
+}
+function byteLength(value) {
+  return new TextEncoder().encode(value).length;
+}
+function codePointExcerpt(text, maxCodePoints) {
+  if (!text) {
+    return "";
+  }
+  const codePoints = [...text];
+  return codePoints.length <= maxCodePoints ? text : codePoints.slice(0, maxCodePoints).join("");
+}
+function parseOptionalIntParam(url2, name) {
+  const raw = url2.searchParams.get(name);
+  if (raw === null) {
+    return { ok: true, value: void 0 };
+  }
+  if (!/^\d+$/.test(raw)) {
+    return { ok: false };
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    return { ok: false };
+  }
+  return { ok: true, value };
+}
+function buildMeta(input) {
+  return {
+    scope: input.scope,
+    counts: input.counts,
+    asOf: input.asOf,
+    workerBuildId: input.ctx.buildId,
+    stateCoverage: input.stateCoverage,
+    appliedBounds: input.appliedBounds,
+    electionCoverage: "full-snapshot"
+  };
+}
+function handleSessionsRoute(reader, url2, ctx) {
+  const limitParam = parseOptionalIntParam(url2, "limit");
+  if (!limitParam.ok || limitParam.value === 0) {
+    return errorResult(400, "bad_request", "limit must be a positive integer");
+  }
+  const requestedLimit = limitParam.value ?? SESSIONS_PAGE_MAX;
+  const appliedBounds = [];
+  let limit = requestedLimit;
+  if (requestedLimit > SESSIONS_PAGE_MAX) {
+    appliedBounds.push({ bound: "SESSIONS_PAGE_MAX", requested: requestedLimit, applied: SESSIONS_PAGE_MAX });
+    limit = SESSIONS_PAGE_MAX;
+  }
+  const cursorRaw = url2.searchParams.get("cursor");
+  let cursor = null;
+  if (cursorRaw !== null) {
+    const parsed = parseSessionsCursor(cursorRaw);
+    if (!parsed) {
+      return errorResult(400, "bad_request", "cursor is malformed");
+    }
+    cursor = parsed;
+  }
+  const page = reader.listSessionsPage({ cursor, limit });
+  return {
+    status: 200,
+    body: {
+      sessions: page.sessions,
+      ...page.nextCursor !== null ? { nextCursor: page.nextCursor } : {},
+      meta: buildMeta({
+        scope: { kind: "sessions", cursor: cursorRaw, limit },
+        counts: { turns: 0, edges: 0, lanes: 0 },
+        asOf: new Date(ctx.nowMs()).toISOString(),
+        ctx,
+        stateCoverage: "full",
+        appliedBounds
+      })
+    }
+  };
+}
+function handleSegmentsRoute(reader, _url3, ctx) {
+  const segments = reader.listAllSegmentCards();
+  return {
+    status: 200,
+    body: {
+      segments,
+      meta: buildMeta({
+        scope: { kind: "segments" },
+        counts: { turns: 0, edges: 0, lanes: 0 },
+        asOf: new Date(ctx.nowMs()).toISOString(),
+        ctx,
+        stateCoverage: "full",
+        appliedBounds: []
+      })
+    }
+  };
+}
+function handleSegmentCardRoute(reader, url2, ctx) {
+  const idParam = parseOptionalIntParam(url2, "id");
+  if (!idParam.ok || idParam.value === void 0) {
+    return errorResult(400, "bad_request", "id is required and must be a positive integer");
+  }
+  const detail = reader.getSegmentCardDetail(idParam.value);
+  if (!detail) {
+    return errorResult(404, "not_found", `no segment ${idParam.value}`);
+  }
+  return {
+    status: 200,
+    body: {
+      card: detail.segment,
+      members: detail.memberAddresses,
+      meta: buildMeta({
+        scope: { kind: "segment", segmentId: idParam.value },
+        // Not zero-filled like sessions/segments above: a segment card's own
+        // `members` ARE turns, so `counts.turns` reporting how many is the
+        // literal, non-fabricated reading of the field for this route.
+        counts: { turns: detail.memberAddresses.length, edges: 0, lanes: 0 },
+        asOf: new Date(ctx.nowMs()).toISOString(),
+        ctx,
+        stateCoverage: "full",
+        appliedBounds: []
+      })
+    }
+  };
+}
+function tokenFor(lane) {
+  return laneToken(lane.key.segment, lane.key.tagSet);
+}
+var LaneTokenUnionFind = class {
+  parent = /* @__PURE__ */ new Map();
+  add(token) {
+    if (!this.parent.has(token)) {
+      this.parent.set(token, token);
+    }
+  }
+  find(token) {
+    this.add(token);
+    let root2 = token;
+    while (this.parent.get(root2) !== root2) {
+      root2 = this.parent.get(root2);
+    }
+    let cursor = token;
+    while (cursor !== root2) {
+      const next = this.parent.get(cursor);
+      this.parent.set(cursor, root2);
+      cursor = next;
+    }
+    return root2;
+  }
+  union(a, b) {
+    const rootA = this.find(a);
+    const rootB = this.find(b);
+    if (rootA !== rootB) {
+      this.parent.set(rootA, rootB);
+    }
+  }
+};
+function computeMembershipComponentIds(lanes) {
+  const uf = new LaneTokenUnionFind();
+  for (const lane of lanes) {
+    uf.add(tokenFor(lane));
+  }
+  const laneTokensByMember = /* @__PURE__ */ new Map();
+  for (const lane of lanes) {
+    const token = tokenFor(lane);
+    for (const member of lane.members) {
+      const bucket = laneTokensByMember.get(member.id);
+      if (bucket) {
+        bucket.push(token);
+      } else {
+        laneTokensByMember.set(member.id, [token]);
+      }
+    }
+  }
+  for (const tokens of laneTokensByMember.values()) {
+    for (let index = 1; index < tokens.length; index += 1) {
+      uf.union(tokens[0], tokens[index]);
+    }
+  }
+  const tokensByRoot = /* @__PURE__ */ new Map();
+  for (const lane of lanes) {
+    const token = tokenFor(lane);
+    const root2 = uf.find(token);
+    const bucket = tokensByRoot.get(root2);
+    if (bucket) {
+      bucket.push(token);
+    } else {
+      tokensByRoot.set(root2, [token]);
+    }
+  }
+  const componentIdByRoot = /* @__PURE__ */ new Map();
+  for (const [root2, tokens] of tokensByRoot) {
+    componentIdByRoot.set(root2, [...tokens].sort()[0]);
+  }
+  const componentIdByToken = /* @__PURE__ */ new Map();
+  for (const lane of lanes) {
+    const token = tokenFor(lane);
+    componentIdByToken.set(token, componentIdByRoot.get(uf.find(token)));
+  }
+  return componentIdByToken;
+}
+function computePerTurnLaneFacts(lanes) {
+  const lanesByTurnId = /* @__PURE__ */ new Map();
+  const terminusTurnIds = /* @__PURE__ */ new Set();
+  const deadTurnIds = /* @__PURE__ */ new Set();
+  for (const lane of lanes) {
+    const token = tokenFor(lane);
+    if (lane.state.terminus !== null) {
+      terminusTurnIds.add(lane.state.terminus);
+    }
+    for (const member of lane.members) {
+      const bucket = lanesByTurnId.get(member.id);
+      if (bucket) {
+        bucket.push(token);
+      } else {
+        lanesByTurnId.set(member.id, [token]);
+      }
+      if (member.dead) {
+        deadTurnIds.add(member.id);
+      }
+    }
+  }
+  return { lanesByTurnId, terminusTurnIds, deadTurnIds };
+}
+function sortTurnsById(turns) {
+  return [...turns].sort((a, b) => a.id - b.id);
+}
+function sortEdgesForDisplay(edges) {
+  return [...edges].sort((a, b) => {
+    if (a.citingId !== b.citingId) return a.citingId - b.citingId;
+    if (a.citedId !== b.citedId) return a.citedId - b.citedId;
+    return a.relation.localeCompare(b.relation);
+  });
+}
+function resolveGraphScope(reader, url2, appliedBounds) {
+  const sessionParam = parseOptionalIntParam(url2, "session");
+  const segmentParam = parseOptionalIntParam(url2, "segment");
+  if (!sessionParam.ok || !segmentParam.ok) {
+    return { error: errorResult(400, "bad_request", "session and segment must be positive integers") };
+  }
+  const hasSession = sessionParam.value !== void 0;
+  const hasSegment = segmentParam.value !== void 0;
+  if (hasSession === hasSegment) {
+    return {
+      error: errorResult(
+        400,
+        "bad_request",
+        hasSession ? "session and segment are mutually exclusive" : "exactly one of session or segment is required"
+      )
+    };
+  }
+  if (hasSegment) {
+    const segmentId = segmentParam.value;
+    const segment = reader.findSegment(segmentId);
+    if (!segment) {
+      return { error: errorResult(404, "not_found", `no segment ${segmentId}`) };
+    }
+    return {
+      scope: { kind: "segment", segmentId },
+      scopeDescriptor: { kind: "segment", segmentId }
+    };
+  }
+  const sessionId = sessionParam.value;
+  const session = reader.findSession(sessionId);
+  if (!session) {
+    return { error: errorResult(404, "not_found", `no session ${sessionId}`) };
+  }
+  const fromParam = parseOptionalIntParam(url2, "from");
+  const toParam = parseOptionalIntParam(url2, "to");
+  if (!fromParam.ok || !toParam.ok) {
+    return { error: errorResult(400, "bad_request", "from and to must be positive integers") };
+  }
+  if (fromParam.value !== void 0 && toParam.value !== void 0 && fromParam.value > toParam.value) {
+    return { error: errorResult(400, "bad_request", "from must not be greater than to") };
+  }
+  const maxPromptNumber = () => reader.getSessionMaxPromptNumber(sessionId) ?? 0;
+  let to = toParam.value ?? maxPromptNumber();
+  let from = fromParam.value ?? Math.max(1, to - GRAPH_WINDOW_DEFAULT + 1);
+  if (from > to) {
+    from = to;
+  }
+  const requestedWidth = to - from + 1;
+  if (requestedWidth > GRAPH_WINDOW_MAX) {
+    appliedBounds.push({ bound: "GRAPH_WINDOW_MAX", requested: requestedWidth, applied: GRAPH_WINDOW_MAX });
+    from = to - GRAPH_WINDOW_MAX + 1;
+  }
+  return {
+    scope: { kind: "range", sessionId, promptStart: from, promptEnd: to },
+    scopeDescriptor: { kind: "range", sessionId, from, to }
+  };
+}
+function applyGraphCountBounds(sortedTurns, sortedEdges) {
+  const appliedBounds = [];
+  const turnsOverCap = sortedTurns.length > WIDEN_NODE_MAX;
+  if (turnsOverCap) {
+    appliedBounds.push({ bound: "WIDEN_NODE_MAX", requested: sortedTurns.length, applied: WIDEN_NODE_MAX });
+  }
+  const turns = turnsOverCap ? sortedTurns.slice(0, WIDEN_NODE_MAX) : sortedTurns;
+  const edgesOverCap = sortedEdges.length > GRAPH_EDGE_MAX;
+  if (edgesOverCap) {
+    appliedBounds.push({ bound: "GRAPH_EDGE_MAX", requested: sortedEdges.length, applied: GRAPH_EDGE_MAX });
+  }
+  const edges = edgesOverCap ? sortedEdges.slice(0, GRAPH_EDGE_MAX) : sortedEdges;
+  return { turns, edges, overCap: turnsOverCap || edgesOverCap, appliedBounds };
+}
+function envelopeBytes(turns, edges, lanes, laneCheckText, meta3) {
+  return byteLength(JSON.stringify({ turns, edges, lanes, laneCheckText, meta: meta3 }));
+}
+function applyGraphByteBound(input) {
+  const { lanes, laneCheckText, scope, asOf, ctx, preTrimAppliedBounds, preTrimStateCoverage } = input;
+  let turns = input.turns;
+  let edges = input.edges;
+  const noByteTrimMeta = buildMeta({
+    scope,
+    counts: { turns: turns.length, edges: edges.length, lanes: lanes.length },
+    asOf,
+    ctx,
+    stateCoverage: preTrimStateCoverage,
+    appliedBounds: preTrimAppliedBounds
+  });
+  const requestedBytes = envelopeBytes(turns, edges, lanes, laneCheckText, noByteTrimMeta);
+  if (requestedBytes <= RESPONSE_BYTE_SOFT_MAX) {
+    return { turns, edges, appliedBound: null, unfittable: false };
+  }
+  const appliedBound = {
+    bound: "RESPONSE_BYTE_SOFT_MAX",
+    requested: requestedBytes,
+    applied: RESPONSE_BYTE_SOFT_MAX
+  };
+  const finalAppliedBounds = [...preTrimAppliedBounds, appliedBound];
+  const metaFor = (t, e) => buildMeta({
+    scope,
+    counts: { turns: t.length, edges: e.length, lanes: lanes.length },
+    asOf,
+    ctx,
+    stateCoverage: "partial",
+    appliedBounds: finalAppliedBounds
+  });
+  let bytes = envelopeBytes(turns, edges, lanes, laneCheckText, metaFor(turns, edges));
+  while (bytes > RESPONSE_BYTE_SOFT_MAX && edges.length > 0) {
+    edges = edges.slice(0, -1);
+    bytes = envelopeBytes(turns, edges, lanes, laneCheckText, metaFor(turns, edges));
+  }
+  while (bytes > RESPONSE_BYTE_SOFT_MAX && turns.length > 0) {
+    turns = turns.slice(0, -1);
+    bytes = envelopeBytes(turns, edges, lanes, laneCheckText, metaFor(turns, edges));
+  }
+  return { turns, edges, appliedBound, unfittable: bytes > RESPONSE_BYTE_SOFT_MAX };
+}
+function buildUnfittableGraphResult(input) {
+  return {
+    status: 200,
+    body: {
+      turns: [],
+      edges: [],
+      lanes: [],
+      laneCheckText: "",
+      error: {
+        code: "graph_exceeds_byte_bound",
+        message: `graph scope exceeds RESPONSE_BYTE_SOFT_MAX (${RESPONSE_BYTE_SOFT_MAX} bytes) even with turns and edges fully trimmed; narrow the session range or choose a segment and retry`
+      },
+      meta: buildMeta({
+        scope: input.scope,
+        counts: { turns: 0, edges: 0, lanes: 0 },
+        asOf: input.asOf,
+        ctx: input.ctx,
+        stateCoverage: "partial",
+        appliedBounds: input.appliedBounds
+      })
+    }
+  };
+}
+function handleGraphRoute(reader, url2, ctx) {
+  const preLoadAppliedBounds = [];
+  const resolution = resolveGraphScope(reader, url2, preLoadAppliedBounds);
+  if ("error" in resolution) {
+    return resolution.error;
+  }
+  const { scope, scopeDescriptor } = resolution;
+  const run = reader.runLaneCheck(scope);
+  const laneCheckText = renderLaneCheckerReports(run.result);
+  const election = electMilestones(
+    run.turns,
+    run.edges,
+    ELECTION_PREVIEW_BUDGET
+  );
+  const tierByTurnId = new Map(election.candidates.map((candidate) => [candidate.id, candidate.tier]));
+  const membershipComponentIdByToken = computeMembershipComponentIds(run.result.lanes);
+  const { lanesByTurnId, terminusTurnIds, deadTurnIds } = computePerTurnLaneFacts(run.result.lanes);
+  const lanes = run.result.lanes.map((lane) => ({
+    segment: lane.key.segment,
+    tagSet: [...lane.key.tagSet],
+    state: {
+      closure: lane.state.closure,
+      validity: lane.state.validity,
+      terminus: lane.state.terminus,
+      lastDeclarer: lane.state.lastDeclarer
+    },
+    memberCount: lane.members.length,
+    phases: [...lane.phases],
+    declarationState: lane.declaration.state,
+    declarationTerminus: lane.declaration.terminus,
+    membershipComponentId: membershipComponentIdByToken.get(tokenFor(lane)),
+    token: tokenFor(lane)
+  }));
+  const segmentByTurnId = new Map(run.turns.map((turn) => [turn.id, turn.segment ?? DEFAULT_SEGMENT]));
+  const sortedTurns = sortTurnsById(run.turns);
+  const sortedEdges = sortEdgesForDisplay(run.edges);
+  const countBounded = applyGraphCountBounds(sortedTurns, sortedEdges);
+  const displayFields = reader.loadTurnDisplayFields(countBounded.turns.map((turn) => turn.id));
+  const countCappedTurnsPayload = countBounded.turns.map((turn) => {
+    const fields = displayFields.get(turn.id);
+    return {
+      id: turn.id,
+      sessionId: fields?.sessionId ?? turn.order?.[0] ?? 0,
+      promptNumber: fields?.promptNumber ?? turn.order?.[1] ?? 0,
+      title: fields?.title ?? null,
+      promptExcerpt: codePointExcerpt(fields?.userPrompt ?? null, EXCERPT_PROMPT_CP),
+      contentExcerpt: codePointExcerpt(fields?.content ?? null, EXCERPT_CONTENT_CP),
+      electionTier: tierByTurnId.get(turn.id) ?? null,
+      type: [...turn.type],
+      lanes: lanesByTurnId.get(turn.id) ?? [],
+      isTerminus: terminusTurnIds.has(turn.id),
+      isDead: deadTurnIds.has(turn.id)
+    };
+  });
+  const countCappedEdgesPayload = countBounded.edges.map((edge) => ({
+    citingId: edge.citingId,
+    citedId: edge.citedId,
+    relation: edge.relation,
+    tags: [...edge.tags],
+    laneToken: edge.tags.length > 0 ? laneToken(segmentByTurnId.get(edge.citingId) ?? DEFAULT_SEGMENT, edge.tags) : null
+  }));
+  const preByteAppliedBounds = [...preLoadAppliedBounds, ...countBounded.appliedBounds];
+  const byteBounded = applyGraphByteBound({
+    turns: countCappedTurnsPayload,
+    edges: countCappedEdgesPayload,
+    lanes,
+    laneCheckText,
+    scope: scopeDescriptor,
+    asOf: run.asOf,
+    ctx,
+    preTrimAppliedBounds: preByteAppliedBounds,
+    preTrimStateCoverage: countBounded.overCap ? "partial" : "full"
+  });
+  if (byteBounded.unfittable) {
+    return buildUnfittableGraphResult({
+      scope: scopeDescriptor,
+      asOf: run.asOf,
+      ctx,
+      appliedBounds: [...preByteAppliedBounds, byteBounded.appliedBound]
+    });
+  }
+  const retainedTurnIds = new Set(byteBounded.turns.map((turn) => turn.id));
+  const turnsPayload = byteBounded.turns;
+  const edgesPayload = byteBounded.edges.filter(
+    (edge) => retainedTurnIds.has(edge.citingId) && retainedTurnIds.has(edge.citedId)
+  );
+  const appliedBounds = [
+    ...preByteAppliedBounds,
+    ...byteBounded.appliedBound ? [byteBounded.appliedBound] : []
+  ];
+  const stateCoverage = countBounded.overCap || byteBounded.appliedBound !== null ? "partial" : "full";
+  return {
+    status: 200,
+    body: {
+      turns: turnsPayload,
+      edges: edgesPayload,
+      lanes,
+      laneCheckText,
+      meta: buildMeta({
+        scope: scopeDescriptor,
+        counts: { turns: turnsPayload.length, edges: edgesPayload.length, lanes: lanes.length },
+        asOf: run.asOf,
+        ctx,
+        stateCoverage,
+        appliedBounds
+      })
+    }
+  };
+}
+var CONSOLE_API_PREFIX = "/api/console/";
+function routeConsoleApiRequest(pathname, reader, url2, ctx) {
+  if (!pathname.startsWith(CONSOLE_API_PREFIX)) {
+    return null;
+  }
+  switch (pathname) {
+    case "/api/console/sessions":
+      return handleSessionsRoute(reader, url2, ctx);
+    case "/api/console/segments":
+      return handleSegmentsRoute(reader, url2, ctx);
+    case "/api/console/graph":
+      return handleGraphRoute(reader, url2, ctx);
+    case "/api/console/segment":
+      return handleSegmentCardRoute(reader, url2, ctx);
+    default:
+      return errorResult(404, "not_found", `unknown console API route ${pathname}`);
+  }
+}
+function toConsoleApiResponse(result) {
+  return new Response(JSON.stringify(result.body), {
+    status: result.status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "x-content-type-options": "nosniff",
+      "cache-control": "no-store"
+    }
+  });
+}
+
+// src/worker/console-shell.ts
+var CONSOLE_SHELL_HTML = '<!doctype html>\n<html lang="zh">\n<head>\n<meta charset="utf-8">\n<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; connect-src \'self\'">\n<title>claude-mnemo \xB7 memory console v2</title>\n<style>\n  :root {\n    --evidence:#3f8fd2; --decision:#e0a63a; --delivery:#59a86c; --none:#c3c9cf;\n    --t-research:#2b6fb5; --t-measure:#6db1e4;\n    --t-design:#d98f14; --t-discuss:#edc45c; --t-correction:#b25c1f;\n    --t-implement:#2f9e60; --t-fix:#157347; --t-refactor:#69bd8a;\n    --t-delegate:#3fa08f; --t-review:#7cb356; --t-ops:#9ab141;\n    --override:#d64541; --narrows:#d98e04; --extends:#3b82c4; --indexes:#8e5bb5;\n    --grounds:#2e9e6b; --consume:#a2a9b1; --verifies:#16a3a3; --refutes:#d6456e;\n    --ink:#2a2e33; --faint:#8a9199; --line:#e4e7ea; --bg:#fbfbfa; --panel:#ffffff;\n    --lane:#6b4d8f; --lane-bg:#f3eefa;\n  }\n  * { box-sizing:border-box; margin:0; }\n  html,body { height:100%; }\n  body { font:14px/1.55 -apple-system,"PingFang SC","Helvetica Neue",sans-serif; color:var(--ink); background:var(--bg); }\n  #app { display:flex; height:100vh; }\n\n  aside { width:252px; flex:none; background:var(--panel); border-right:1px solid var(--line); overflow-y:auto; padding-bottom:24px; }\n  .brand { padding:16px 16px 12px; font-size:15px; font-weight:600; }\n  .brand span { display:block; font-size:11px; font-weight:400; color:var(--faint); letter-spacing:.08em; text-transform:uppercase; margin-top:1px; }\n  .side-sec { font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--faint); padding:14px 16px 5px; }\n  .srow { padding:7px 14px 7px 16px; cursor:pointer; border-left:2px solid transparent; }\n  .srow:hover { background:#f5f6f7; }\n  .srow.active { border-left-color:var(--lane); background:#f7f5fa; }\n  .srow .rid { font-family:"SF Mono",Menlo,monospace; font-size:11.5px; color:var(--faint); }\n  .srow .rt { font-size:12.5px; line-height:1.35; margin:1px 0 2px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }\n  .srow .rm { font-size:11px; color:var(--faint); }\n  .sdot { width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:5px; }\n  .sdot.open { background:#59a86c; } .sdot.delivered { background:#c3c9cf; }\n  .srow .tagline { font-size:10.5px; color:var(--lane); margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }\n  .srow.more { color:var(--faint); text-align:center; font-size:12px; }\n  .srow.more:hover { color:var(--ink); }\n\n  main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }\n  #stoppedBanner, #partialBanner { display:none; flex:none; padding:7px 24px; font-size:12.5px; }\n  #stoppedBanner { background:#5c1f1f; color:#fbdede; display:none; align-items:center; gap:12px; }\n  #stoppedBanner button { background:#fff; color:#5c1f1f; border:none; border-radius:5px; padding:3px 12px; cursor:pointer; font-size:12px; font-weight:600; }\n  #partialBanner { background:#6b4d10; color:#fdecc8; }\n  header { padding:14px 24px 8px; flex:none; }\n  h1 { font-size:15px; font-weight:600; }\n  h1 span { color:var(--faint); font-weight:400; margin-left:10px; font-size:12.5px; }\n  #bar { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:center; padding:7px 24px 8px; border-bottom:1px solid var(--line); flex:none; }\n  #bar label { display:inline-flex; align-items:center; gap:5px; font-size:12.5px; cursor:pointer; user-select:none; }\n  #bar input[type=checkbox]{ accent-color:#555; }\n  .sw { width:14px; height:0; border-top:2.5px solid; display:inline-block; border-radius:2px; }\n  .sw.dash { border-top-style:dashed; }\n  .sep { width:1px; height:16px; background:var(--line); margin:0 2px; }\n  #search { margin-left:auto; border:1px solid var(--line); border-radius:6px; padding:4px 9px; font-size:12.5px; width:180px; background:var(--panel); }\n\n  #lanes { padding:8px 24px 4px; flex:none; }\n  #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }\n  #lanes .lt { font-size:11px; color:var(--faint); margin-right:4px; min-width:72px; }\n  .lchip { font-size:11px; font-family:"SF Mono",Menlo,monospace; padding:2.5px 9px; border-radius:10px; background:var(--lane-bg); color:var(--lane); border:1px solid transparent; cursor:pointer; user-select:none; }\n  .lchip:hover { border-color:var(--lane); }\n  .lchip.on { background:var(--lane); color:#fff; }\n  .lchip.openlane { background:transparent; border:1px dashed #c9b8dd; }\n  .lchip.openlane.on { background:var(--lane); color:#fff; border-style:solid; }\n  .lchip.invalid { text-decoration:line-through; opacity:.6; }\n  .lchip .term { opacity:.75; margin-left:4px; }\n\n  #phases { display:flex; flex-wrap:wrap; gap:4px 12px; padding:4px 24px 6px; font-size:12px; color:var(--faint); flex:none; border-bottom:1px solid var(--line); }\n  #phases .clu { display:inline-flex; gap:8px; align-items:center; padding:1px 8px; border:1px solid var(--line); border-radius:9px; }\n  #phases .clu b { font-weight:600; color:var(--ink); }\n  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:4px; vertical-align:-1px; }\n\n  #wrap { overflow-y:auto; overflow-x:hidden; flex:1; }\n  svg text { font-family:"SF Mono",Menlo,monospace; }\n  .rowlbl { font-size:11px; fill:#6b727a; font-weight:600; }\n  .rowtitle { font-size:11.5px; fill:#585f66; font-family:-apple-system,"PingFang SC",sans-serif; }\n  .rowtitle.none { fill:#b3bac0; }\n  rect.rowhit { fill:transparent; cursor:pointer; }\n  rect.rowhit:hover { fill:#f2f3f4; }\n  path.edge { fill:none; cursor:pointer; }\n  path.edge.plain { stroke-width:1.2; opacity:.55; }\n  path.edge.laned { stroke-width:2.2; opacity:.78; }\n  path.edge.off { opacity:.04; }\n  path.edge.gray:not(.hot) { stroke:#c9cdd1; opacity:.45; }\n  /* hot = focus emphasis: opacity only \u2014 stroke WIDTH is semantic (tagged\n     thick / untagged thin, always) and never changes with focus. */\n  path.edge.hot { opacity:.95; }\n  g.node { cursor:pointer; }\n  g.node.dim, text.dim, rect.dim { opacity:.3; }\n\n  #tip { position:fixed; pointer-events:none; background:#26292d; color:#f4f4f2; padding:6px 10px; border-radius:6px; font-size:12px; max-width:420px; display:none; z-index:20; line-height:1.45; }\n  #tip .t { color:#aab3bb; font-size:11px; }\n  #tip .lg { color:#cdb8e8; }\n  #panel { position:fixed; right:0; top:0; bottom:0; width:400px; background:var(--panel); border-left:1px solid var(--line); padding:20px 22px; overflow-y:auto; display:none; z-index:10; box-shadow:-6px 0 18px rgba(0,0,0,.04); }\n  #panel .addr { font-family:Menlo,monospace; font-size:12px; color:var(--faint); }\n  #panel h2 { font-size:14.5px; font-weight:600; margin:6px 0 10px; }\n  #panel .chips { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }\n  .chip { font-size:11px; padding:2px 8px; border-radius:9px; background:#eef0f2; color:#555; }\n  .chip.ph { color:#fff; }\n  .chip.lane { background:var(--lane-bg); color:var(--lane); font-family:"SF Mono",Menlo,monospace; }\n  #panel .sec { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); margin:14px 0 5px; }\n  #panel .content { font-size:13px; white-space:pre-wrap; }\n  #panel .prompt { font-size:12.5px; color:#555; white-space:pre-wrap; background:#f7f7f6; border-radius:6px; padding:8px 10px; }\n  #panel .erow { font-size:12.5px; font-family:Menlo,monospace; padding:2px 0; cursor:pointer; }\n  #panel .erow:hover { text-decoration:underline; }\n  #panel .erow .etags { color:var(--lane); font-size:11px; }\n  #panel .flowline { font-size:12.5px; color:var(--faint); }\n  #close { position:absolute; top:12px; right:14px; border:none; background:none; font-size:16px; color:var(--faint); cursor:pointer; }\n  #toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#26292d; color:#f2f2f0; font-size:12.5px; padding:8px 16px; border-radius:8px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:30; }\n  #selbadge { display:none; margin-left:12px; font-size:11.5px; font-family:"SF Mono",Menlo,monospace; background:#26292d; color:#f2f2f0; padding:2.5px 11px; border-radius:10px; cursor:pointer; vertical-align:1px; }\n  #selbadge:hover { background:#3a3e43; }\n</style>\n</head>\n<body>\n<div id="app">\n  <aside>\n    <div class="brand">claude-mnemo<span>memory console</span></div>\n    <div class="side-sec">\u4F1A\u8BDD</div>\n    <div id="sessions"></div>\n    <div class="side-sec">\u6BB5</div>\n    <div id="segments"></div>\n  </aside>\n  <main>\n    <div id="stoppedBanner"><span>worker \u65E0\u54CD\u5E94 \u2014 \u5F53\u524D\u5C55\u793A\u7684\u662F\u6700\u540E\u4E00\u6B21\u6210\u529F\u52A0\u8F7D\u7684\u5FEB\u7167</span><button id="stoppedRetry" type="button">\u91CD\u8BD5</button></div>\n    <div id="partialBanner"></div>\n    <header><h1><span id="scopeTitle"></span><span id="meta"></span><span id="selbadge"></span></h1></header>\n    <div id="bar"></div>\n    <div id="lanes"></div>\n    <div id="phases">\n      <span class="clu"><b>\u53D6\u8BC1</b>\n        <span><span class="dot" style="background:var(--t-research)"></span>research</span>\n        <span><span class="dot" style="background:var(--t-measure)"></span>measure</span>\n      </span>\n      <span class="clu"><b>\u51B3\u7B56</b>\n        <span><span class="dot" style="background:var(--t-design)"></span>design</span>\n        <span><span class="dot" style="background:var(--t-discuss)"></span>discuss</span>\n        <span><span class="dot" style="background:var(--t-correction)"></span>correction</span>\n      </span>\n      <span class="clu"><b>\u843D\u5730</b>\n        <span><span class="dot" style="background:var(--t-implement)"></span>implement</span>\n        <span><span class="dot" style="background:var(--t-fix)"></span>fix</span>\n        <span><span class="dot" style="background:var(--t-refactor)"></span>refactor</span>\n        <span><span class="dot" style="background:var(--t-delegate)"></span>delegate</span>\n        <span><span class="dot" style="background:var(--t-review)"></span>review</span>\n        <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>\n      </span>\n      <span>\u25CE \u5DF2\u5BA3\u544A\u7EC8\u70B9 \xB7 \u2715 \u88AB override \xB7 \u5B9E\u7EBF=\u540C\u76F8\u4F4D \xB7 \u865A\u7EBF=\u8DE8\u76F8\u4F4D \xB7 \u7C97=\u5E26 lane tag \xB7 \u7EC6=\u65E0 tag \xB7 \u805A\u7126=\u5355\u8FDE\u901A\u5206\u91CF:\u70B9\u8282\u70B9/\u82AF\u7247\u5207\u6362\u5230\u5176\u5206\u91CF(\u5206\u91CF\u5185 lane \u5168\u4EAE);\u540C\u5206\u91CF\u5185\u5148\u770B\u9762\u677F\u3001\u9762\u677F\u6240\u5728\u8282\u70B9\u518D\u70B9\u5373\u64A4\u9500;\u65E0 lane \u8282\u70B9\u4EAE\u5176\u76F4\u8FDE\u8FB9;\u7A7A\u767D\u5904/Esc \u6E05\u9664</span>\n    </div>\n    <div id="wrap"><svg id="svg"></svg></div>\n  </main>\n</div>\n<div id="tip"></div>\n<div id="panel"><button id="close">\u2715</button><div id="pbody"></div></div>\n<div id="toast"></div>\n<script>\nconst WORDS = ["override","narrows","extends","indexes","grounds","consume","verifies","refutes"];\nconst STRUCT = new Set(["narrows","extends","override"]);\n// line style encodes the PHASE axis: solid = same-phase, dashed = cross-phase.\n// Cross-phase words never carry lane tags (lanes are phase-local), so the\n// dash axis and the tag axis can never collide on one edge.\nconst DASH = new Set(["grounds","verifies","refutes"]);\nconst TYPE_ORDER = ["research","measure","design","discuss","correction","implement","fix","refactor","delegate","review","ops"];\n// Segment status is a closed, DB-CHECK-enforced set ("open"/"closed" \u2014\n// db/segments.ts SEGMENT_STATUSES); the CSS only ever shipped two dot\n// colors (open=green, "delivered"=grey \u2014 the prototype\'s own demo-data\n// vocabulary), so "closed" maps onto the existing grey bucket rather than\n// inventing a third visual state. Any future status value this map does not\n// know about falls back to the same grey bucket instead of leaking an\n// unmapped word into a class attribute (DOM rule: type words map through a\n// closed-set lookup before touching class/style).\nconst SEGMENT_STATUS_DOT = { open: "open", closed: "delivered" };\nconst css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();\nconst typeColor = t => TYPE_ORDER.includes(t) ? css("--t-"+t) : css("--none");\nconst sortTypes = ts => [...ts].sort((a,b)=>{const ia=TYPE_ORDER.indexOf(a),ib=TYPE_ORDER.indexOf(b);return (ia<0?99:ia)-(ib<0?99:ib);});\nconst esc = s => { const d=document.createElement("div"); d.textContent=s; return d.innerHTML; };\n// relation is a DB-CHECK-enforced closed set (memory_edges.relation), but a\n// style-attribute sink is still built from it below (turn-panel edge rows) \u2014\n// this is the same closed-set-lookup discipline the DOM rule asks for,\n// applied so the sink can never resolve to anything outside WORDS even if a\n// future schema value slips past the CHECK constraint in production data.\nconst relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";\n\n/* ---- mutable render state: reset on every graph load ---- */\nlet turns = [], edges = [], lanes = [];\nlet idx = new Map();\nlet laneByToken = new Map();\nlet turnsByLaneToken = new Map();\nlet edgeEls = [];\nlet nodeEls = new Map(), rowEls = new Map();\nconst laneChips = new Map();\nlet sessionsList = [], segmentsList = [];\n// nextCursor from the most recent /api/console/sessions page (peer finding\n// #10) \u2014 null once the last page has been loaded, or before the first load.\nlet sessionsNextCursor = null;\nlet sessionsLoadingMore = false;\nlet currentScope = null; // { kind: "session"|"segment", id }\nlet lastLoad = null; // retry hook for the worker-stopped banner\n\nlet selLanes = new Set();\nlet solo = null;\nlet sel = null;\nconst sameFocus = (toks) => selLanes.size===toks.length && toks.every(t=>selLanes.has(t));\nfunction clearFocus(){ selLanes = new Set(); solo = null; sel = null; panel.style.display="none"; }\n\n/* ---- fixed DOM refs ---- */\nconst sesBox = document.getElementById("sessions");\nconst segBox = document.getElementById("segments");\nconst bar = document.getElementById("bar");\nconst laneBox = document.getElementById("lanes");\nconst svg = document.getElementById("svg");\nconst wrap = document.getElementById("wrap");\nconst panel = document.getElementById("panel"), pbody = document.getElementById("pbody");\nconst selBadge = document.getElementById("selbadge");\nconst scopeTitleEl = document.getElementById("scopeTitle");\nconst metaEl = document.getElementById("meta");\nconst stoppedBanner = document.getElementById("stoppedBanner");\nconst partialBanner = document.getElementById("partialBanner");\nconst tipEl = document.getElementById("tip");\n\nscopeTitleEl.textContent = "\u52A0\u8F7D\u4E2D\u2026";\n\n/* ---- worker-stopped snapshot state (spec "Worker lifecycle"): no\n   heartbeat, no auto-retry loop \u2014 a fetch failure keeps the last rendered\n   snapshot on screen and offers exactly one manual retry action. ---- */\nfunction showStopped(retryFn){ lastLoad = retryFn; stoppedBanner.style.display = "flex"; }\nfunction hideStopped(){ stoppedBanner.style.display = "none"; }\ndocument.getElementById("stoppedRetry").addEventListener("click", () => { if (lastLoad) lastLoad(); });\n\nlet toastTimer = null;\nfunction toast(msg){\n  const el = document.getElementById("toast");\n  el.textContent = msg; el.style.opacity = 1; // textContent \u2014 DOM rule\'s own safe path\n  clearTimeout(toastTimer); toastTimer = setTimeout(()=>el.style.opacity=0, 2600);\n}\n\n/**\n * Distinguishes "the worker is unreachable" (network failure \u2014 the\n * lifecycle banner\'s own case) from "the worker answered with an\n * application error" (a well-formed 4xx/5xx envelope \u2014 retrying the exact\n * same request would just fail again identically, so a transient toast is\n * the honest signal, not a persistent banner claiming the worker is down).\n */\nasync function fetchJson(url){\n  let res;\n  try {\n    res = await fetch(url);\n  } catch (networkError) {\n    const err = new Error("network"); err.kind = "network"; throw err;\n  }\n  if (!res.ok) {\n    let body = null;\n    try { body = await res.json(); } catch {}\n    const err = new Error("http " + res.status);\n    err.kind = "http"; err.status = res.status; err.body = body;\n    throw err;\n  }\n  return res.json();\n}\n\n/* ---- sidebar: populated from /api/console/sessions + /api/console/segments ---- */\nasync function loadSidebar(){\n  try {\n    const [sessionsRes, segmentsRes] = await Promise.all([\n      fetchJson("/api/console/sessions"),\n      fetchJson("/api/console/segments"),\n    ]);\n    sessionsList = sessionsRes.sessions;\n    sessionsNextCursor = sessionsRes.nextCursor ?? null;\n    segmentsList = segmentsRes.segments;\n    renderSidebar();\n    hideStopped();\n  } catch (e) {\n    if (e.kind === "http") {\n      toast("\u52A0\u8F7D\u4F1A\u8BDD/\u6BB5\u5217\u8868\u5931\u8D25: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));\n    } else {\n      showStopped(loadSidebar);\n    }\n  }\n}\n\n/* ---- sessions load-more: page max is SESSIONS_PAGE_MAX server-side (peer\n   finding #10) \u2014 older sessions are unreachable without walking nextCursor. ---- */\nasync function loadMoreSessions(){\n  if (!sessionsNextCursor || sessionsLoadingMore) return;\n  sessionsLoadingMore = true;\n  try {\n    const res = await fetchJson("/api/console/sessions?cursor=" + encodeURIComponent(sessionsNextCursor));\n    sessionsList = sessionsList.concat(res.sessions);\n    sessionsNextCursor = res.nextCursor ?? null;\n    renderSidebar();\n  } catch (e) {\n    toast("\u52A0\u8F7D\u66F4\u591A\u4F1A\u8BDD\u5931\u8D25: " + (e.kind === "http" && e.body && e.body.error && e.body.error.message ? e.body.error.message : "\u7F51\u7EDC\u9519\u8BEF"));\n  } finally {\n    sessionsLoadingMore = false;\n  }\n}\n\nfunction renderSidebar(){\n  sesBox.innerHTML = "";\n  for (const s of sessionsList) {\n    const div = document.createElement("div");\n    div.className = "srow" + (currentScope && currentScope.kind==="session" && currentScope.id===s.id ? " active" : "");\n    div.innerHTML = `<div class="rid">S${s.id}</div><div class="rt">${esc(s.title || "(\u65E0\u6807\u9898)")}</div>\n      <div class="rm">${s.turnCount} turns \xB7 ${esc(s.date)}</div>`;\n    div.addEventListener("click", () => loadGraph({ session: s.id }));\n    sesBox.appendChild(div);\n  }\n  if (sessionsNextCursor) {\n    const more = document.createElement("div");\n    more.className = "srow more";\n    more.textContent = "\u66F4\u591A\u2026"; // textContent \u2014 a static app-authored label, not payload text\n    more.addEventListener("click", loadMoreSessions);\n    sesBox.appendChild(more);\n  }\n  segBox.innerHTML = "";\n  for (const g of segmentsList) {\n    const div = document.createElement("div");\n    div.className = "srow" + (currentScope && currentScope.kind==="segment" && currentScope.id===g.id ? " active" : "");\n    const dotClass = SEGMENT_STATUS_DOT[g.status] ?? "delivered";\n    div.innerHTML = `<div class="rid"><span class="sdot ${dotClass}"></span>E${g.id}</div>\n      <div class="rt">${esc(g.title)}</div>\n      <div class="rm">${g.memberCount} \u6210\u5458 \xB7 ${esc(g.status)}</div>\n      ${g.tags.length?`<div class="tagline">${g.tags.map(t=>"#"+esc(t)).join(" ")}</div>`:""}`;\n    div.addEventListener("click", () => loadGraph({ segment: g.id }));\n    segBox.appendChild(div);\n  }\n}\n\n/* ---- filter bar: built once \u2014 WORDS/DASH are a closed, app-authored set, never graph data ---- */\nconst on = Object.fromEntries(WORDS.map(w=>[w,true]));\nfor (const w of WORDS) {\n  const l = document.createElement("label");\n  l.innerHTML = `<input type="checkbox" checked data-w="${w}"><span class="sw ${DASH.has(w)?"dash":""}" style="border-color:var(--${w})"></span>${w}`;\n  bar.appendChild(l);\n}\nbar.insertAdjacentHTML("beforeend", `<span class="sep"></span><input id="search" placeholder="\u8DF3\u8F6C:T1010 \u6216\u6807\u9898\u5173\u952E\u8BCD \u23CE">`);\nbar.addEventListener("change", e => { if (e.target.dataset.w){ on[e.target.dataset.w]=e.target.checked; paintFilters(); }});\n\n/* ---- graph load: session or segment scope -> /api/console/graph ---- */\nasync function loadGraph(target){\n  const params = new URLSearchParams();\n  if (target.session !== undefined) params.set("session", target.session);\n  if (target.segment !== undefined) params.set("segment", target.segment);\n  const url = "/api/console/graph?" + params.toString();\n  try {\n    const data = await fetchJson(url);\n    currentScope = target.session !== undefined\n      ? { kind: "session", id: target.session }\n      : { kind: "segment", id: target.segment };\n    applyGraph(data);\n    hideStopped();\n    renderSidebar();\n  } catch (e) {\n    if (e.kind === "http") {\n      toast("\u52A0\u8F7D\u56FE\u6570\u636E\u5931\u8D25: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));\n    } else {\n      showStopped(() => loadGraph(target));\n    }\n  }\n}\n\nfunction applyGraph(data){\n  turns = data.turns; edges = data.edges; lanes = data.lanes;\n  idx = new Map(turns.map((t,i)=>[t.id,i]));\n  laneByToken = new Map(lanes.map(l=>[l.token,l]));\n  turnsByLaneToken = new Map();\n  for (const t of turns) {\n    for (const tok of t.lanes) {\n      if (!turnsByLaneToken.has(tok)) turnsByLaneToken.set(tok, []);\n      turnsByLaneToken.get(tok).push(t.id);\n    }\n  }\n  clearFocus();\n  renderHeader(data.meta);\n  renderLanes();\n  renderGraphSvg();\n  paintFilters();\n  syncBadge();\n}\n\nfunction renderHeader(meta){\n  let title = "";\n  if (meta.scope.kind === "range") title = `S${meta.scope.sessionId} \xB7 T${meta.scope.from}\u2013T${meta.scope.to}`;\n  else if (meta.scope.kind === "segment") title = `E${meta.scope.segmentId}`;\n  scopeTitleEl.textContent = title; // textContent \u2014 no markup ever reaches this sink\n  metaEl.textContent = ` ${turns.length} turns \xB7 ${edges.length} edges \xB7 ${lanes.length} lanes \xB7 ${meta.asOf}`;\n\n  if (meta.stateCoverage === "partial") {\n    const bounds = meta.appliedBounds.map(b => `${b.bound} ${b.requested}\u2192${b.applied}`).join(", ");\n    // No completeness claim, no "REAL states" framing (spec "Budgets and\n    // coverage"): this view is a truncated projection, plainly labeled.\n    partialBanner.textContent = "\u90E8\u5206\u7ED3\u679C(\u5DF2\u6309\u9884\u7B97\u622A\u65AD\uFF0C\u4E0D\u7B49\u4EF7\u4E8E\u5B8C\u6574 lane_check\uFF1Belection tier \u6309\u5B8C\u6574\u5FEB\u7167\u8BA1\u7B97\uFF0C\u4E0D\u53D7\u672C\u6B21\u622A\u65AD\u5F71\u54CD): " + bounds;\n    partialBanner.style.display = "block";\n  } else {\n    partialBanner.style.display = "none";\n  }\n}\n\n/* ---- lane strip: open first (live work), closed after ---- */\nfunction renderLanes(){\n  laneBox.innerHTML = "";\n  laneChips.clear();\n  const openLanes = lanes.filter(l=>l.state.closure!=="closed"), closedLanes = lanes.filter(l=>l.state.closure==="closed");\n  const g1 = document.createElement("div"); g1.className="lgroup";\n  g1.innerHTML = `<span class="lt">open (${openLanes.length})</span>`;\n  for (const l of openLanes) g1.appendChild(laneChip(l));\n  const g2 = document.createElement("div"); g2.className="lgroup";\n  g2.innerHTML = `<span class="lt">closed (${closedLanes.length})</span>`;\n  for (const l of closedLanes) g2.appendChild(laneChip(l));\n  if (openLanes.length) laneBox.appendChild(g1);\n  laneBox.appendChild(g2);\n}\nfunction laneChip(l){\n  const c = document.createElement("span");\n  const closed = l.state.closure === "closed";\n  const valid = l.state.validity === "valid";\n  c.className = "lchip" + (closed ? (valid ? "" : " invalid") : " openlane");\n  const term = closed ? `\u25CET${l.state.terminus}` : (l.state.terminus ? `\u2026\u25CET${l.state.terminus}` : "\u65E0\u5BA3\u544A");\n  c.innerHTML = `${esc(l.tagSet.join("+"))}<span class="term">${term}${closed && !valid ? " \u271D" : ""}</span>`;\n  c.addEventListener("click", () => {\n    const toks = lanesTouchingComponentForLane(l.token);\n    if (sameFocus(toks)) { clearFocus(); }\n    else {\n      selLanes = new Set(toks); solo = null;\n      if (sel!==null && !toks.some(t=>(turnsByLaneToken.get(t)||[]).includes(sel))) { sel=null; panel.style.display="none"; }\n      const anchor = anchorOf(l.token);\n      if (anchor != null && idx.has(anchor))\n        wrap.scrollTo({top: yOf(anchor)-innerHeight/2, behavior:"smooth"});\n    }\n    paintFilters();\n    syncBadge();\n  });\n  laneChips.set(l.token, c);\n  return c;\n}\n\n/* ---- vertical graph: one row per turn, arcs on the left rails ---- */\nconst ROW = 22, TOP = 16, NODE_X = 352, TEXT_X = 372;\nconst yOf = id => TOP + idx.get(id)*ROW + ROW/2;\nconst W = 1080;\nconst NS = "http://www.w3.org/2000/svg";\nconst mk = (n,a) => { const el=document.createElementNS(NS,n); for(const k in a) el.setAttribute(k,a[k]); return el; };\n\n// any blank click (svg background or the baseline) clears all focus. Attached\n// once \u2014 the listener checks the event target\'s tag generically, so it stays\n// correct across every renderGraphSvg() rebuild of svg\'s own children.\nsvg.addEventListener("click", e => {\n  if (e.target === svg || e.target.tagName === "line") { clearFocus(); paintFilters(); syncBadge(); }\n});\n\nfunction renderGraphSvg(){\n  svg.innerHTML = "";\n  edgeEls = []; nodeEls = new Map(); rowEls = new Map();\n  const H = TOP*2 + turns.length*ROW;\n  svg.setAttribute("width", W); svg.setAttribute("height", H);\n  svg.appendChild(mk("line",{x1:NODE_X,y1:TOP,x2:NODE_X,y2:H-TOP,stroke:"#eceef0"}));\n\n  // row hover/click layer sits UNDER the edges: the hover band may never mask\n  // an arc, and it doubles as a full-width row guide across the rail.\n  const bgg = mk("g",{}); svg.appendChild(bgg);\n  const eg = mk("g",{}); svg.appendChild(eg);\n  for (const e of edges) {\n    const y1=yOf(e.citingId), y2=yOf(e.citedId);\n    if (!Number.isFinite(y1)||!Number.isFinite(y2)) continue;\n    const span = Math.abs(idx.get(e.citingId)-idx.get(e.citedId));\n    const depth = STRUCT.has(e.relation)\n      ? Math.min(120, 16 + span*2.4)\n      : Math.min(330, 150 + span*1.9);\n    const p = mk("path",{class:"edge "+(e.tags.length?"laned":"plain"),\n      d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,stroke:css("--"+e.relation)});\n    if (DASH.has(e.relation)) p.setAttribute("stroke-dasharray","5 3");\n    p.dataset.r=e.relation; p.dataset.s=e.citingId; p.dataset.t=e.citedId;\n    p.dataset.lane = e.laneToken ?? "";\n    p.addEventListener("mousemove", ev=>tip(ev,\n      `T${e.citingId} \u2014${esc(e.relation)}\u2192 T${e.citedId}` +\n      (e.tags.length?` <span class="lg">{${esc(e.tags.join(","))}}</span>`:"")));\n    p.addEventListener("mouseleave", hideTip);\n    eg.appendChild(p); edgeEls.push(p);\n  }\n\n  const ng = mk("g",{}); svg.appendChild(ng);\n  for (const t of turns) {\n    const y = yOf(t.id);\n    // hit target covers node + text only \u2014 the arc rail stays BLANK, and blank\n    // clicks (svg background) clear all focus (T1386 ruling 2).\n    const hit = mk("rect",{class:"rowhit",x:NODE_X-10,y:y-ROW/2,width:W-(NODE_X-10),height:ROW});\n    hit.addEventListener("click", ()=>select(t.id));\n    bgg.appendChild(hit);\n\n    const g = mk("g",{class:"node",transform:`translate(${NODE_X},${y})`});\n    const tys = sortTypes(t.type.filter(x=>TYPE_ORDER.includes(x)));\n    const r = 5.5;\n    if (!tys.length) g.appendChild(mk("circle",{r,fill:css("--none")}));\n    else if (tys.length===1) g.appendChild(mk("circle",{r,fill:typeColor(tys[0])}));\n    else {\n      let a0 = -Math.PI/2;\n      for (const ty of tys) {\n        const a1 = a0 + 2*Math.PI/tys.length;\n        const large = (a1-a0)>Math.PI?1:0;\n        g.appendChild(mk("path",{d:`M 0 0 L ${r*Math.cos(a0)} ${r*Math.sin(a0)} A ${r} ${r} 0 ${large} 1 ${r*Math.cos(a1)} ${r*Math.sin(a1)} Z`,fill:typeColor(ty)}));\n        a0 = a1;\n      }\n    }\n    if (t.isTerminus) g.appendChild(mk("circle",{r:8.5,fill:"none",stroke:"#565c63","stroke-width":1.2}));\n    if (t.isDead) {\n      g.appendChild(mk("line",{x1:-7,y1:-7,x2:7,y2:7,stroke:css("--override"),"stroke-width":1.3}));\n      g.appendChild(mk("line",{x1:-7,y1:7,x2:7,y2:-7,stroke:css("--override"),"stroke-width":1.3}));\n    }\n    g.addEventListener("click", ()=>select(t.id));\n    ng.appendChild(g); nodeEls.set(t.id,g);\n\n    const lb = mk("text",{class:"rowlbl",x:TEXT_X,y:y+3.5});\n    lb.textContent = "T"+t.id;\n    const title = mk("text",{class:"rowtitle"+(t.title?"":" none"),x:TEXT_X+52,y:y+3.5});\n    const tt = t.title || "(\u65E0\u7B14\u8BB0)";\n    // Code-point slice, never `.slice()` \u2014 a UTF-16 code-unit slice cuts\n    // mid-surrogate-pair on non-BMP titles (peer finding #14b, matching the\n    // server\'s own codePointExcerpt for the prompt/content excerpt caps).\n    // `Array.from` iterates a string by code point.\n    const ttCp = Array.from(tt);\n    title.textContent = ttCp.length>62 ? ttCp.slice(0,62).join("")+"\u2026" : tt; // textContent \u2014 no esc() needed\n    ng.appendChild(lb); ng.appendChild(title);\n    rowEls.set(t.id,[hit,lb,title]);\n  }\n}\n\n/* ---- interactions ---- */\n// Server-computed connectivity (spec "Focus domain", peer #5): every lane\n// already carries membershipComponentId, so "the component touching a lane\n// or turn" is a lookup/filter over the payload, never a client-side graph\n// traversal.\nfunction lanesTouchingComponentForLane(token){\n  const lane = laneByToken.get(token);\n  if (!lane) return [];\n  return lanes.filter(l=>l.membershipComponentId===lane.membershipComponentId).map(l=>l.token);\n}\nfunction lanesTouchingComponentForTurn(turnId){\n  const t = turns[idx.get(turnId)];\n  if (!t || !t.lanes.length) return [];\n  const compIds = new Set(t.lanes.map(tok => laneByToken.get(tok)?.membershipComponentId).filter(Boolean));\n  return lanes.filter(l=>compIds.has(l.membershipComponentId)).map(l=>l.token);\n}\nfunction anchorOf(tok){\n  const l = laneByToken.get(tok);\n  if (!l) return null;\n  if (l.state.terminus != null) return l.state.terminus;\n  const members = turnsByLaneToken.get(tok) || [];\n  return members.length ? members[members.length-1] : null;\n}\nfunction paintFilters(){\n  const anyFocus = selLanes.size>0 || solo!==null;\n  for (const p of edgeEls){\n    p.classList.remove("off","gray","hot");\n    if (!on[p.dataset.r]) { p.classList.add("off"); continue; }\n    if (!anyFocus) continue;\n    const inComp = p.dataset.lane!=="" && selLanes.has(p.dataset.lane);\n    const soloDirect = solo!==null && (p.dataset.s==solo || p.dataset.t==solo);\n    if (inComp || soloDirect) p.classList.add("hot");\n    else p.classList.add("gray");\n  }\n  for (const [tok, el] of laneChips) el.classList.toggle("on", selLanes.has(tok));\n  const dimRow = (id, dim) => {\n    nodeEls.get(id).classList.toggle("dim", dim);\n    for (const el of rowEls.get(id)) el.classList.toggle("dim", dim);\n  };\n  if (!anyFocus){ for (const t of turns) dimRow(t.id,false); return; }\n  const keep = new Set();\n  for (const tok of selLanes) for (const m of (turnsByLaneToken.get(tok) || [])) keep.add(m);\n  if (solo!==null){\n    keep.add(solo);\n    for (const p of edgeEls) if (on[p.dataset.r]&&(p.dataset.s==solo||p.dataset.t==solo)){ keep.add(+p.dataset.s); keep.add(+p.dataset.t); }\n  }\n  if (sel!==null) keep.add(sel);\n  for (const t of turns) dimRow(t.id, !keep.has(t.id));\n}\nfunction syncBadge(){\n  if (selLanes.size===0 && solo===null && sel===null){ selBadge.style.display="none"; return; }\n  selBadge.textContent = (selLanes.size\n    ? `\u805A\u7126\u5206\u91CF:${selLanes.size} \u6761 lane${sel!==null ? ` \xB7 \u9762\u677F T${sel}` : ""}`\n    : solo!==null ? `\u805A\u7126 T${solo}(\u65E0 lane,\u4EAE\u76F4\u8FDE\u8FB9)` : `\u9762\u677F T${sel}`) + " \xB7 \u7A7A\u767D\u5904/Esc \u6E05\u9664";\n  selBadge.style.display = "inline-block";\n}\nselBadge.onclick = () => { clearFocus(); paintFilters(); syncBadge(); };\naddEventListener("keydown", e => { if (e.key==="Escape") selBadge.onclick(); });\n// ONE focus system: the lane multi-select. A node click is a REVERSIBLE\n// chip press: on an unfocused (or partially focused) node it adds the whole\n// component\'s lanes and opens the panel; on a FULLY focused node it removes\n// them again \u2014 the same refocus rule chip deselection uses. Laneless nodes\n// only toggle their panel.\n// Focus model (T1386): clicking a node SWITCHES focus to its component\n// (every lane in it lights, the previous component clears). On the\n// already-focused component the click is two-stage (T1385): open the panel\n// first; undo the focus only when the panel already shows this node.\n// Laneless nodes focus solo \u2014 their direct edges color.\nfunction select(id){\n  const toks = lanesTouchingComponentForTurn(id);\n  if (toks.length){\n    if (sameFocus(toks)){\n      if (sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }\n    } else { selLanes = new Set(toks); solo = null; }\n  } else {\n    if (solo === id && sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }\n    selLanes = new Set(); solo = id;\n  }\n  sel = id;\n  paintFilters();\n  syncBadge();\n  renderTurnPanel(id);\n}\nfunction renderTurnPanel(id){\n  const t = turns[idx.get(id)];\n  const outE = edges.filter(e=>e.citingId===id), inE = edges.filter(e=>e.citedId===id);\n  const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`\u2014${esc(e.relation)}\u2192 T${e.citedId}`:`T${e.citingId} \u2014${esc(e.relation)}\u2192`}${e.tags.length?` <span class="etags">{${esc(e.tags.join(","))}}</span>`:""}</div>`;\n  const laneChipsHtml = t.lanes.map(tok => {\n    const l = laneByToken.get(tok);\n    return `<span class="chip lane">${esc(l ? l.tagSet.join("+") : tok)}</span>`;\n  }).join("");\n  pbody.innerHTML =\n    `<div class="addr">S${t.sessionId}/T${t.promptNumber}</div><h2>${esc(t.title||"(\u65E0\u7B14\u8BB0)")}</h2>\n     <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}</div>\n     ${t.lanes.length?`<div class="flowline">\u6240\u5C5E lane:${laneChipsHtml}${t.isTerminus?" \xB7 \u25CE \u5DF2\u5BA3\u544A\u7EC8\u70B9":""}${t.isDead?" \xB7 \u2715 \u88AB override":""}</div>`:""}\n     ${t.promptExcerpt?`<div class="sec">prompt</div><div class="prompt">${esc(t.promptExcerpt)}</div>`:""}\n     <div class="sec">content</div><div class="content">${esc(t.contentExcerpt||"\u2014")}</div>\n     <div class="sec">\u51FA\u8FB9 ${outE.length}</div>${outE.map(e=>erow(e,"out")).join("")||"<div class=\'flowline\'>\u65E0</div>"}\n     <div class="sec">\u5165\u8FB9 ${inE.length}</div>${inE.map(e=>erow(e,"in")).join("")||"<div class=\'flowline\'>\u65E0</div>"}`;\n  panel.style.display="block";\n  pbody.querySelectorAll(".erow").forEach(el=>el.addEventListener("click",()=>jump(+el.dataset.j)));\n}\nfunction jump(id){\n  if (!idx.has(id)) return;\n  if (sel!==id) select(id);\n  wrap.scrollTo({top: yOf(id)-innerHeight/2, behavior:"smooth"});\n}\ndocument.getElementById("close").onclick = ()=>{ sel=null; paintFilters(); syncBadge(); panel.style.display="none"; };\ndocument.getElementById("search").addEventListener("keydown", e=>{\n  if (e.key!=="Enter") return;\n  const q = e.target.value.trim();\n  const m = q.match(/^T?(\\d+)$/i);\n  if (m && idx.has(+m[1])) return jump(+m[1]);\n  const hit = turns.find(t=>(t.title||"").toLowerCase().includes(q.toLowerCase()));\n  if (hit) jump(hit.id);\n});\nfunction tip(ev,html){ tipEl.innerHTML=html; tipEl.style.display="block"; tipEl.style.left=Math.min(ev.clientX+14,innerWidth-440)+"px"; tipEl.style.top=(ev.clientY+16)+"px"; }\nfunction hideTip(){ tipEl.style.display="none"; }\n\n/* ---- bootstrap ---- */\nasync function init(){\n  await loadSidebar();\n  if (sessionsList.length) {\n    await loadGraph({ session: sessionsList[0].id });\n  } else if (segmentsList.length) {\n    await loadGraph({ segment: segmentsList[0].id });\n  } else {\n    scopeTitleEl.textContent = "\u65E0\u4F1A\u8BDD";\n  }\n}\ninit();\n</script>\n</body>\n</html>\n';
+
 // src/worker/server.ts
 var WORKER_PORT = 37778;
 var STARTING_STALE_MS = 1e4;
@@ -58849,7 +59535,44 @@ function ensureWorkerPidFile(deps = {}) {
   }
   writeFileSyncImpl(pidPath, ownPid);
 }
+function asciiFold(value) {
+  return value.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
+}
+function evaluateRequestGate(headers, port) {
+  const loopbackHosts = [`127.0.0.1:${port}`, `localhost:${port}`];
+  const host = headers.get("host");
+  if (host === null || !loopbackHosts.includes(asciiFold(host))) {
+    return { allowed: false, reason: "host" };
+  }
+  const origin = headers.get("origin");
+  if (origin !== null) {
+    const loopbackOrigins = [
+      `http://127.0.0.1:${port}`,
+      `http://localhost:${port}`
+    ];
+    if (!loopbackOrigins.includes(asciiFold(origin))) {
+      return { allowed: false, reason: "origin" };
+    }
+  }
+  const secFetchSite = headers.get("sec-fetch-site");
+  if (secFetchSite !== null && secFetchSite !== "same-origin" && secFetchSite !== "none") {
+    return { allowed: false, reason: "sec-fetch-site" };
+  }
+  return { allowed: true };
+}
+function requestGateRejectionResponse(reason) {
+  return Response.json(
+    {
+      error: {
+        code: "forbidden",
+        message: `request rejected by the loopback request gate: ${reason}`
+      }
+    },
+    { status: 403 }
+  );
+}
 function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(deps.nowMs?.() ?? Date.now())) {
+  const port = deps.port ?? WORKER_PORT;
   const runtimeDb = deps.db ?? createDatabase();
   const sessionEnvRegistry = deps.sessionEnvRegistry ?? /* @__PURE__ */ new Map();
   const runtime = deps.scanAndDrainQueue || deps.handleTurnStopImpl || deps.handleFlushImpl || deps.handleCompactImpl || deps.recoverFromCrashImpl ? void 0 : createWorkerCore({
@@ -58880,6 +59603,7 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
   const registerSessionEnvImpl = deps.registerSessionEnvImpl ?? runtime?.registerSessionEnv;
   const clearSessionEnvImpl = deps.clearSessionEnvImpl ?? runtime?.clearSessionEnv;
   const drainSettleSessionImpl = deps.drainSettleSessionImpl;
+  const getConsoleReader = createLazyConsoleReaderResolver(deps);
   let wakeScanInFlight = null;
   let activeGlobalWork = 0;
   let resolveGlobalWork = null;
@@ -58926,10 +59650,17 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
     return new Response(null, { status: 200 });
   }
   return async (req) => {
-    state.lastHttpRequestAt = deps.nowMs?.() ?? Date.now();
+    const url2 = new URL(req.url);
+    const isConsoleRequest = url2.pathname === "/console" || url2.pathname.startsWith("/api/console/");
+    if (!isConsoleRequest) {
+      state.lastHttpRequestAt = deps.nowMs?.() ?? Date.now();
+    }
     state.activeRequests += 1;
     try {
-      const url2 = new URL(req.url);
+      const gateVerdict = evaluateRequestGate(req.headers, port);
+      if (!gateVerdict.allowed) {
+        return requestGateRejectionResponse(gateVerdict.reason);
+      }
       if (req.method === "GET" && url2.pathname === "/health") {
         return new Response(
           JSON.stringify({ ok: true, buildId: BUILD_ID, pid: process.pid }),
@@ -58938,6 +59669,44 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
             headers: { "content-type": "application/json" }
           }
         );
+      }
+      if (req.method === "GET" && url2.pathname === "/console") {
+        return new Response(CONSOLE_SHELL_HTML, {
+          status: 200,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "x-content-type-options": "nosniff",
+            "cache-control": "no-store"
+          }
+        });
+      }
+      if (req.method === "GET" && url2.pathname.startsWith("/api/console/")) {
+        let consoleReader;
+        try {
+          consoleReader = getConsoleReader();
+        } catch (error49) {
+          return toConsoleApiResponse({
+            status: 503,
+            body: {
+              error: {
+                code: "unavailable",
+                message: error49 instanceof Error ? error49.message : String(error49)
+              }
+            }
+          });
+        }
+        const consoleResult = routeConsoleApiRequest(
+          url2.pathname,
+          consoleReader,
+          url2,
+          {
+            buildId: BUILD_ID,
+            nowMs: deps.nowMs ?? Date.now
+          }
+        );
+        if (consoleResult) {
+          return toConsoleApiResponse(consoleResult);
+        }
       }
       if (req.method === "POST" && url2.pathname === "/wake") {
         return handleWake();
@@ -59349,7 +60118,16 @@ async function main(deps = {}) {
       // 503s.
       handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream,
       handleSettleImpl: deps.handleSettleImpl ?? core.settleBackfillWindow,
-      drainSettleSessionImpl: deps.drainSettleSessionImpl ?? ((sessionDbId) => core.noteSettlement.drainSession(sessionDbId))
+      drainSettleSessionImpl: deps.drainSettleSessionImpl ?? ((sessionDbId) => core.noteSettlement.drainSession(sessionDbId)),
+      // Console boot wiring (ticket 03): the console's own readonly
+      // connection targets the SAME file this primary connection opened —
+      // read from `db.filename` rather than re-resolving a path
+      // independently, so the two can never drift onto different files.
+      // `:memory:` (test-only; production always opens a real file) has no
+      // second connection to open at all — `undefined` here means the lazy
+      // resolver fails closed (503) unless a test also supplies
+      // `consoleReaderImpl` directly.
+      consoleDatabasePathImpl: deps.consoleDatabasePathImpl ?? (db.filename && db.filename !== ":memory:" ? db.filename : void 0)
     },
     serverState
   );
@@ -59423,6 +60201,7 @@ if (isDirectExecution()) {
   createWorkerFetchHandler,
   createWorkerServerState,
   ensureWorkerPidFile,
+  evaluateRequestGate,
   isProcessAlive,
   main,
   registerShutdownCleanup,
