@@ -1,5 +1,5 @@
 import type { LaneCheckScope } from "../db/lane-checker-load";
-import { laneToken } from "../shared/lane-interpretation";
+import { DEFAULT_SEGMENT, laneToken } from "../shared/lane-interpretation";
 import type { LaneEdgeInput, LaneStatsReport, LaneTurnInput } from "../shared/lane-checker";
 import { renderLaneCheckerReports } from "../shared/lane-checker-render";
 import { electMilestones, type MilestoneTurnInput } from "../shared/milestone-election";
@@ -117,6 +117,35 @@ export interface ConsoleGraphTurn {
   contentExcerpt: string;
   /** `electMilestones`' per-turn tier over this same projection (`ELECTION_PREVIEW_BUDGET`); `null` for a turn that left candidacy entirely (excluded, not merely low-ranked). */
   electionTier: number | null;
+  /** `LaneTurnInput.type` verbatim — already present on `run.turns`, no extra load. */
+  type: readonly string[];
+  /**
+   * Ticket 04 (shell-and-matrix) additive field: the `token` (see
+   * `ConsoleGraphLane.token`) of every lane this turn is a MEMBER of (dead
+   * members included, mirroring `Lane.members`' own "never dropped" rule) —
+   * the shell's own turn-detail panel and its focus/highlight machinery both
+   * need this, and "delete client-side lane derivation" (spec) means the
+   * server must ship the membership fact, never let the shell recompute it
+   * from edges. `[]` for a laneless turn, never omitted (contract's own
+   * "empty lists = []" rule, extended to this new field for consistency).
+   */
+  lanes: string[];
+  /**
+   * Ticket 04 additive field: true iff this turn IS `state.terminus` for at
+   * least one lane in `lanes` below — the shell's terminus ring on a node
+   * (and the panel's "◎ 已宣告终点" line) must come from the payload, not a
+   * client-side scan of `lanes[].state.terminus` against `id` (spec: "lanes/
+   * states/termini/dead flags ... come from the payload").
+   */
+  isTerminus: boolean;
+  /**
+   * Ticket 04 additive field: true iff this turn is `dead` in at least one
+   * lane it is a member of (`LaneMember.dead` — a global kill or an in-lane
+   * override; see `shared/lane-interpretation.ts`'s own "dead status is a
+   * final-state snapshot" note). Same "ship the fact, do not let the shell
+   * derive it" reasoning as `isTerminus`.
+   */
+  isDead: boolean;
 }
 
 export interface ConsoleGraphEdge {
@@ -124,6 +153,22 @@ export interface ConsoleGraphEdge {
   citedId: number;
   relation: string;
   tags: string[];
+  /**
+   * Ticket 04 additive field: the lane token this edge's own canonical tag
+   * set names in the CITING turn's segment (`null` for an untagged edge —
+   * untagged edges form no lane at all, `shared/lane-interpretation.ts`'s own
+   * "untagged: forms no lane" rule). The citing side is used as the edge's
+   * one "home" segment for this display field even on the rare cross-segment
+   * dual-appearance edge (`LaneCrossSegmentWarning`) — the shell's own
+   * highlight/dim logic only needs ONE token per edge to match against the
+   * focused component's lane tokens, and the citing side is the edge's own
+   * structural direction (`turn-phase.ts`'s "citing is always later"
+   * convention). Restores the prototype's own pre-fetch `e.laneToken` field
+   * (console-shell.html's `p.dataset.lane = e.tags.length ? e.laneToken :
+   * ""`) so the shell can set that dataset attribute directly from the
+   * payload instead of recomputing a lane token client-side.
+   */
+  laneToken: string | null;
 }
 
 /**
@@ -163,6 +208,17 @@ export interface ConsoleGraphLane {
   declarationState: string;
   declarationTerminus: number | null;
   membershipComponentId: string;
+  /**
+   * Ticket 04 additive field: this lane's own stable identity key —
+   * `laneToken(segment, tagSet)`, the same value already computed internally
+   * (`tokenFor`) for `membershipComponentId`'s own union-find, now shipped
+   * verbatim so the shell can build its `laneByToken` map directly from the
+   * payload instead of recomputing the token client-side (spec: "the shell
+   * renders; it derives nothing"). Distinct from `membershipComponentId`:
+   * `token` identifies THIS lane; `membershipComponentId` identifies the
+   * (possibly larger) group of lanes it belongs to.
+   */
+  token: string;
 }
 
 // --------------------------------------------------------------- helpers ---
@@ -422,6 +478,44 @@ function computeMembershipComponentIds(
   return componentIdByToken;
 }
 
+/**
+ * Ticket 04 (shell-and-matrix): the three per-turn facts the shell renders
+ * (`ConsoleGraphTurn.lanes`/`isTerminus`/`isDead` — see each field's own
+ * doc) computed ONCE from `run.result.lanes`, the SAME single projection
+ * (spec "One projection") `computeMembershipComponentIds` already reads.
+ * Deliberately over the FULL (untruncated) lane set, mirroring that
+ * function: a turn's own lane-membership/terminus/dead status is a fact
+ * about the lane structure, independent of which OTHER turns a later
+ * post-load bound happens to truncate out of the response.
+ */
+function computePerTurnLaneFacts(lanes: readonly LaneStatsReport[]): {
+  lanesByTurnId: Map<number, string[]>;
+  terminusTurnIds: Set<number>;
+  deadTurnIds: Set<number>;
+} {
+  const lanesByTurnId = new Map<number, string[]>();
+  const terminusTurnIds = new Set<number>();
+  const deadTurnIds = new Set<number>();
+  for (const lane of lanes) {
+    const token = tokenFor(lane);
+    if (lane.state.terminus !== null) {
+      terminusTurnIds.add(lane.state.terminus);
+    }
+    for (const member of lane.members) {
+      const bucket = lanesByTurnId.get(member.id);
+      if (bucket) {
+        bucket.push(token);
+      } else {
+        lanesByTurnId.set(member.id, [token]);
+      }
+      if (member.dead) {
+        deadTurnIds.add(member.id);
+      }
+    }
+  }
+  return { lanesByTurnId, terminusTurnIds, deadTurnIds };
+}
+
 function sortTurnsById(turns: readonly LaneTurnInput[]): LaneTurnInput[] {
   return [...turns].sort((a, b) => a.id - b.id);
 }
@@ -629,6 +723,7 @@ export function handleGraphRoute(
   const tierByTurnId = new Map(election.candidates.map((candidate) => [candidate.id, candidate.tier]));
 
   const membershipComponentIdByToken = computeMembershipComponentIds(run.result.lanes);
+  const { lanesByTurnId, terminusTurnIds, deadTurnIds } = computePerTurnLaneFacts(run.result.lanes);
   const lanes: ConsoleGraphLane[] = run.result.lanes.map((lane) => ({
     segment: lane.key.segment,
     tagSet: [...lane.key.tagSet],
@@ -643,7 +738,14 @@ export function handleGraphRoute(
     declarationState: lane.declaration.state,
     declarationTerminus: lane.declaration.terminus,
     membershipComponentId: membershipComponentIdByToken.get(tokenFor(lane))!,
+    token: tokenFor(lane),
   }));
+
+  // Every live turn's own segment (defaulting the same way `LaneTurnInput`
+  // itself does) — the one extra fact `ConsoleGraphEdge.laneToken` needs
+  // beyond what `run.edges` already carries, over the SAME `run.turns` this
+  // handler already has in hand (no new reader call).
+  const segmentByTurnId = new Map(run.turns.map((turn) => [turn.id, turn.segment ?? DEFAULT_SEGMENT]));
 
   const sortedTurns = sortTurnsById(run.turns);
   const sortedEdges = sortEdgesForDisplay(run.edges);
@@ -663,6 +765,10 @@ export function handleGraphRoute(
       promptExcerpt: codePointExcerpt(fields?.userPrompt ?? null, EXCERPT_PROMPT_CP),
       contentExcerpt: codePointExcerpt(fields?.content ?? null, EXCERPT_CONTENT_CP),
       electionTier: tierByTurnId.get(turn.id) ?? null,
+      type: [...turn.type],
+      lanes: lanesByTurnId.get(turn.id) ?? [],
+      isTerminus: terminusTurnIds.has(turn.id),
+      isDead: deadTurnIds.has(turn.id),
     };
   });
   const countCappedEdgesPayload: ConsoleGraphEdge[] = countBounded.edges.map((edge) => ({
@@ -670,6 +776,10 @@ export function handleGraphRoute(
     citedId: edge.citedId,
     relation: edge.relation,
     tags: [...edge.tags],
+    laneToken:
+      edge.tags.length > 0
+        ? laneToken(segmentByTurnId.get(edge.citingId) ?? DEFAULT_SEGMENT, edge.tags)
+        : null,
   }));
 
   // BYTE cap second, on the fully-built display payload — see

@@ -158,7 +158,7 @@ describe("console routes through createWorkerFetchHandler", () => {
     expect(second.status).toBe(503);
   });
 
-  test("GET /console (no consumer yet, ticket 04's territory) still 404s — a pre-console worker's own documented symptom", async () => {
+  test("GET /console serves the shell (text/html, no-store, nosniff) — ticket 04", async () => {
     const handler = createWorkerFetchHandler({
       db,
       port: TEST_PORT,
@@ -169,7 +169,40 @@ describe("console routes through createWorkerFetchHandler", () => {
         headers: { host: `127.0.0.1:${TEST_PORT}` },
       }),
     );
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = await response.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain("Content-Security-Policy");
+  });
+
+  test("GET /console never opens the console reader — it serves a static constant, no ConsoleReader dependency at all", async () => {
+    // No consoleReaderImpl AND no consoleDatabasePathImpl: /api/console/*
+    // would 503 here (asserted elsewhere in this file), but /console must
+    // still serve — it is not a console-API route and reads no reader.
+    const handler = createWorkerFetchHandler({ db, port: TEST_PORT });
+    const response = await handler(
+      new Request(`http://127.0.0.1:${TEST_PORT}/console`, {
+        headers: { host: `127.0.0.1:${TEST_PORT}` },
+      }),
+    );
+    expect(response.status).toBe(200);
+  });
+
+  test("the DNS-rebinding gate still applies to /console (one shared gate)", async () => {
+    const handler = createWorkerFetchHandler({
+      db,
+      port: TEST_PORT,
+      consoleReaderImpl: createConsoleReader(db),
+    });
+    const response = await handler(
+      new Request(`http://127.0.0.1:${TEST_PORT}/console`, {
+        headers: { host: "attacker.example" },
+      }),
+    );
+    expect(response.status).toBe(403);
   });
 });
 
@@ -214,6 +247,7 @@ describe("console requests never touch the session registry or the hard-exit mac
     });
 
     for (const path of [
+      "/console",
       "/api/console/sessions",
       "/api/console/segments",
       "/api/console/graph?session=1",

@@ -75,6 +75,7 @@ import {
   type OpenConsoleReaderDatabase,
 } from "./console-reader";
 import { routeConsoleApiRequest, toConsoleApiResponse } from "./console-api";
+import { CONSOLE_SHELL_HTML } from "./console-shell";
 
 const WORKER_PORT = 37778;
 const STARTING_STALE_MS = 10_000;
@@ -1410,6 +1411,26 @@ export function createWorkerFetchHandler(
             headers: { "content-type": "application/json" },
           },
         );
+      }
+
+      // The console shell (memory-console spec; ticket 04). A static,
+      // version-controlled constant (`console-shell.ts`, generated from the
+      // canonical `console-shell.html` — see `scripts/generate-console-
+      // shell.ts`) served verbatim: no runtime file read, no template
+      // substitution. Same "never extends the worker's life" property as the
+      // `/api/console/*` block below — this branch touches neither
+      // `sessionEnvRegistry` nor `deps.hardExitTimerImpl` either. A
+      // pre-ticket-04 worker has no such route at all and 404s here (the
+      // release note names that symptom).
+      if (req.method === "GET" && url.pathname === "/console") {
+        return new Response(CONSOLE_SHELL_HTML, {
+          status: 200,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "x-content-type-options": "nosniff",
+            "cache-control": "no-store",
+          },
+        });
       }
 
       // Console API (memory-console spec; ticket 03). Read-only, structurally
