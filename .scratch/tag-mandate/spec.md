@@ -200,6 +200,45 @@ graph-state write rejections).
   only — sharper rubric wording on the extends/consume boundary rides along,
   no mechanism.
 
+## Production-campaign amendments (T1440-T1451 — the REAL annotation's lessons)
+
+The T1-100 real annotation (Opus via live tools, two peer rounds, zero
+retractions in round 2) surfaced lessons the trials could not. Each lands in
+exactly one home:
+
+**Rubric (law — the rubric text ticket must budget for these):**
+- R1 *Dead node = global override only, stated:* a TAGGED override's victim
+  stays a live node — it may even serve as a closed lane's surviving core
+  (the T32→T31 pattern: a 2-node lane's terminus indexes the very node it
+  overrode, since self-indexes is barred). Today this is load-bearing
+  unwritten inference.
+- R2 *The consume/grounds phase asymmetry the gate already enforces:* an
+  evidence-phase product cited from a decision turn takes `grounds`, never
+  `consume` (the validator refuses; the rubric text reads the opposite way).
+- R3 *Completion vs correction, the extends/narrows boundary sentence:* "a
+  blocker satisfied by doing the work is completion (extends), not a
+  correction of the blocking judgment (narrows); narrows requires part of
+  the cited CLAIM to be withdrawn" (peer's T60→T54 / T65→T63 ruling).
+- R4 *The phase-split idiom, named:* one real arc running decision→delivery
+  is TWO lanes (one per phase) hinged by cross-phase grounds/consume — the
+  grade-hierarchy + task-causality-grading pattern. The most repeated
+  friction of the campaign; a named idiom beats each writer rediscovering it.
+
+**Settlement checklist (procedure):**
+- C1 *Ops/status turns stay laneless:* one-off state records and polling
+  turns (watchdog armed, backgrounded, restarted) carry no lane result —
+  never lane them, and never use one as semantic glue between real nodes
+  (the corrected claim must be restated by a real node, as T48 narrowing
+  T45's own "reliable pattern" restatement showed).
+- C2 *Convergence = open questions closed:* a thread whose own flagged
+  unknowns stay unaddressed remains OPEN no matter how it tails off
+  (skillopt); explicit resolved/converged language, completed verification,
+  release, or downstream adoption close it. There is NO primary-source
+  threshold — the test is whether the thread's own questions got answered.
+- C3 *Mechanics:* retract + tagged re-add compose reliably in one call
+  (~30 production uses); relation-only calls need no prose; write member
+  tags before edges.
+
 ## Trial record (T1417-T1424)
 
 A Sonnet subagent (production settlement model) re-annotated T1-100 under
