@@ -164,8 +164,17 @@ const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
  */
 const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "Run the lane checker over THIS window's own scope (no parameters) and " +
-  "return its four reports as compact numbers and names — never a digraph, " +
-  "never a write. Report 1: per-lane statistics (members, edge counts, a " +
+  "return its findings as compact numbers and names — never a digraph, " +
+  "never a write. The output splits in two. ERRORS come first: states the " +
+  "grammar forbids, each naming the turn it is ANCHORED at — an untagged " +
+  "extends/narrows (E1), a relation word outside the eight-word vocabulary " +
+  "(E2), an empty or out-of-vocabulary turn type (E3), a tagged edge whose " +
+  "tags are missing from an endpoint turn's own tags (E4). Commit refuses " +
+  "while any error anchored inside your writable range remains, so repair " +
+  "those (retag, retract and re-add, or re-type) and re-run. An error " +
+  "anchored OUTSIDE your range is another window's work — leave it. " +
+  "Everything after the ERRORS block is WARNINGS: aspirational facts, " +
+  "never enforced. Report 1: per-lane statistics (members, edge counts, a " +
   "closed-valid/closed-invalid/open state, who cites a member from outside " +
   "— grounds, consume-class use, or testimony; a lane cited only by " +
   "consume is still ADOPTED, not unused). Report 2: whether " +
@@ -174,12 +183,7 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "blocks: inter-lane interface counts with terminus-bypass edges; " +
   "start-to-terminus path counts, plain and folded across cross-phase " +
   "citations (facts, no target); time-order violations (an edge citing " +
-  "the future). Also a vocabulary-conformance block: turns in scope whose " +
-  "type is empty or carries a word outside the closed activity vocabulary " +
-  "(phase-empty, nearly edge-illegal), and edges whose relation lies " +
-  "outside the eight-word relation vocabulary (e.g. the frozen-legacy " +
-  "supersedes) — reported only, never folded into any other report's " +
-  "counts. Treat a finding as a CANDIDATE for the same supply/correct/ " +
+  "the future). Treat a WARNING as a CANDIDATE for the same supply/correct/ " +
   "propose judgment every other duty above uses — never call this more " +
   "than once, and never let its output alone justify a write without the " +
   "usual Memory Rubric judgment.";

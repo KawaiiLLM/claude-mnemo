@@ -158,6 +158,62 @@
  * is now enforced structurally rather than merely asserted in prose: it
  * only ever sees the filtered set. Each list is capped at
  * `MAX_VOCABULARY_REPORT_ENTRIES`; `count` is always the true total.
+ *
+ * ## ERRORS vs WARNINGS (tag-mandate ticket 03, spec "Error classes")
+ *
+ * Every finding above is a WARNING — the three principles' aspirational
+ * facts (connectivity, entanglement, minimality, time-order, undeclared
+ * lanes, terminus citedness). None of their computations changed with this
+ * ticket; they were reclassified, not rewritten.
+ *
+ * `errors` is the new, separate list: states the GRAMMAR FORBIDS. Four
+ * classes ship here (E5, lane shape, is ticket 04):
+ *
+ *   - **E1** an `extends`/`narrows` row carrying NO lane tags. Those two
+ *     words' semantics IS continuation of a line of work, so using either
+ *     means naming the line; the write gate refuses fresh ones, stock
+ *     repairs at settlement.
+ *   - **E2** an out-of-vocabulary relation word (e.g. the frozen-legacy
+ *     `supersedes`). Same raw facts `vocabularyConformance.outOfVocabularyEdges`
+ *     reports — classed, not recomputed.
+ *   - **E3** an EMPTY or out-of-vocabulary turn `type`. Same raw facts
+ *     `vocabularyConformance.typeViolations` reports, exemptions carried
+ *     over intact: compact markers are skipped here, and legally-SKIPPED /
+ *     rolled-back turns never reach this module at all (`db/turn-liveness.ts`'s
+ *     `liveTurnSql`, applied by every query in `db/lane-checker-load.ts` — the
+ *     exemption is structural at the loader, not a predicate restated here).
+ *   - **E4** a tagged edge whose tag set is not a subset of BOTH endpoint
+ *     turns' own `tags` — the subset invariant `turn-phase.ts`'s Gate B
+ *     enforces at write time, checked again over STOCK because a later tag
+ *     EDIT on an endpoint turn can orphan a row the gate once passed.
+ *
+ * ### The ANCHOR (spec "Anchoring and repairability") — the load-bearing field
+ *
+ * Every error instance carries `anchorId`: an EDGE error anchors at its
+ * CITING turn, a TYPE error at the turn itself. The settlement commit gate
+ * (ticket 05) counts only instances anchored inside the window's writable
+ * scope, so an error anchored outside blocks its OWN window and never this
+ * one — without that scoping one bad out-of-window edge would pin a window
+ * on a permanently failing commit. Two properties make the anchor
+ * trustworthy and MUST hold through any change here:
+ *
+ *   1. `anchorId` is always a turn id the repairing agent can address —
+ *      never an edge row id, never a lane token — and for an edge error it
+ *      is the CITING side, because retract/re-add is the citing turn's own
+ *      power.
+ *   2. `errors` is UNCAPPED. Every other list in this module caps its
+ *      entries for display; a capped ERROR list would let an instance past
+ *      the commit gate simply by sorting late, and the window would commit
+ *      dirty. The RENDER caps; the data never does.
+ *
+ * ### Turn tags (E4's second input)
+ *
+ * `LaneCheckerTurnInput` widens `LaneTurnInput` with the turn's own stored
+ * `tags`. It is OPTIONAL and the two absent-ish values mean different
+ * things: `undefined` = not loaded, so E4 yields NO verdict for any edge
+ * touching the turn (report 4(c)'s own "never fabricate a verdict" posture);
+ * `[]` = the turn genuinely carries no tags, so every tagged edge touching
+ * it IS an E4 violation.
  */
 
 import { EDGE_RELATIONS, STANCE_RELATIONS } from "./turn-phase";
@@ -189,6 +245,17 @@ const EDGE_RELATION_WORDS: ReadonlySet<string> = new Set(EDGE_RELATIONS);
 
 /** Capped-list bound for `vocabularyConformance`'s two fact lists — `count` on each is always the true total even when `entries` is capped. */
 const MAX_VOCABULARY_REPORT_ENTRIES = 20;
+
+/**
+ * The words whose semantics IS continuation of a line of work, so the words
+ * the mandate forbids an untagged form of (E1). Today's answer set is
+ * `STANCE_RELATIONS` (narrows/extends) exactly, but it gets its own name for
+ * the same reason `turn-phase.ts` names `TAGGABLE_RELATIONS` apart from
+ * `SAME_PHASE_RELATIONS`: "which words build a branch" and "which words must
+ * name their lane" are independent questions that happen to share an answer,
+ * and a reader of E1 should not have to know that coincidence holds.
+ */
+const MANDATED_LANE_RELATIONS: ReadonlySet<string> = STANCE_RELATIONS;
 
 export type {
   LaneClosure,
@@ -385,6 +452,90 @@ export interface LaneVocabularyConformance {
   };
 }
 
+// ------------------------------------------------------ Errors (E1-E4)
+
+/**
+ * One taggable input turn, widened with the turn's OWN stored tag set —
+ * `LaneTurnInput` (the pure interpretation core's input) carries `type` but
+ * never `tags`, and E4's subset invariant needs both endpoints' tags. Every
+ * existing caller that hands over plain `LaneTurnInput`s still typechecks
+ * (the field is optional) and simply gets no E4 verdicts.
+ */
+export interface LaneCheckerTurnInput extends LaneTurnInput {
+  /**
+   * The turn's own stored tags, canonical. `undefined` means NOT LOADED — E4
+   * yields no verdict for any edge touching this turn, the same "never
+   * fabricate completeness" posture report 1's `coverage` and report 4(c)'s
+   * cross-session comparison both take. `[]` means the turn genuinely
+   * carries no tags, which is a real E4 verdict for every tagged edge
+   * touching it.
+   */
+  tags?: readonly string[];
+}
+
+/** The four classes this ticket ships. E5 (lane shape) is ticket 04 and is deliberately absent from this union until then. */
+export type LaneErrorClass = "E1" | "E2" | "E3" | "E4";
+
+interface LaneErrorAnchor {
+  /**
+   * The turn this instance anchors at — an EDGE error anchors at its CITING
+   * turn, a TYPE error at the turn itself (module header, "The ANCHOR").
+   * The commit gate filters by THIS field alone and never needs per-class
+   * knowledge to do it.
+   */
+  anchorId: number;
+}
+
+/** E1 — an `extends`/`narrows` row carrying no lane tags. Anchor: the citing turn (retract + tagged re-add is its own power). */
+export interface LaneUntaggedContinuationError extends LaneErrorAnchor {
+  class: "E1";
+  citingId: number;
+  citedId: number;
+  /** `narrows` or `extends` — the only two words this class can ever name. */
+  relation: string;
+}
+
+/** E2 — an out-of-vocabulary relation word (e.g. frozen-legacy `supersedes`). Anchor: the citing turn. Same rows `vocabularyConformance.outOfVocabularyEdges` carries, classed rather than recomputed. */
+export interface LaneOutOfVocabularyRelationError extends LaneErrorAnchor {
+  class: "E2";
+  citingId: number;
+  citedId: number;
+  relation: string;
+}
+
+/** E3 — an EMPTY or out-of-vocabulary turn `type`. Anchor: the turn itself (so `anchorId === id`, kept as two fields because the gate reads only `anchorId`). Same rows `vocabularyConformance.typeViolations` carries. */
+export interface LaneTypeVocabularyError extends LaneErrorAnchor {
+  class: "E3";
+  id: number;
+  types: readonly string[];
+  /** `[]` when the sole violation is emptiness. */
+  outsideVocabulary: readonly string[];
+}
+
+/** One (tag, endpoint) pair that fails E4 — the same per-pair shape `turn-phase.ts`'s Gate B rejection message names, so a tag missing from BOTH endpoints appears twice, once per side. */
+export interface LaneSubsetInvariantMiss {
+  tag: string;
+  endpoint: "citing" | "cited";
+}
+
+/** E4 — a tagged edge whose tag set is not a subset of both endpoints' own tags. Anchor: the citing turn. */
+export interface LaneSubsetInvariantError extends LaneErrorAnchor {
+  class: "E4";
+  citingId: number;
+  citedId: number;
+  relation: string;
+  /** The edge's own canonical tag set. */
+  tags: readonly string[];
+  /** Non-empty by construction — ascending by endpoint then tag. */
+  missing: readonly LaneSubsetInvariantMiss[];
+}
+
+export type LaneCheckerError =
+  | LaneUntaggedContinuationError
+  | LaneOutOfVocabularyRelationError
+  | LaneTypeVocabularyError
+  | LaneSubsetInvariantError;
+
 // -------------------------------------------------------------------------
 
 export interface LaneCheckerResult {
@@ -401,8 +552,21 @@ export interface LaneCheckerResult {
   timeOrderViolations: LaneTimeOrderViolation[];
   /** Every cross-segment tagged edge in scope — legal, warned, never rejected (round-4 review #5). Passed through from `deriveLaneInterpretation` unchanged. */
   warnings: readonly LaneCrossSegmentWarning[];
-  /** Semantic-conformance ticket 02 — see module header. */
+  /**
+   * Semantic-conformance ticket 02 — see module header. Still computed and
+   * capped exactly as before; tag-mandate ticket 03 made it the RAW SOURCE
+   * the E2/E3 halves of `errors` are classed from (uncapped) rather than a
+   * report of its own, so the two never disagree about a fact.
+   */
   vocabularyConformance: LaneVocabularyConformance;
+  /**
+   * Tag-mandate ticket 03 — states the grammar forbids, E1-E4, sorted by
+   * `anchorId` then class then endpoints. UNCAPPED on purpose (module
+   * header, "The ANCHOR"): the settlement commit gate filters this list by
+   * `anchorId` against the window's writable scope, so a display cap here
+   * would let an instance past the gate by sorting late.
+   */
+  errors: readonly LaneCheckerError[];
 }
 
 /** Union-find, path-compressed — local to one `checkLanes` call, shared across reports 2/3. */
@@ -663,10 +827,15 @@ function computeTimeOrderViolations(
 /**
  * Turns among `turns` whose `type` is EMPTY or carries a word outside
  * `MEMORY_TYPES` (semantic-conformance ticket 02, module header). Ascending
- * by id, capped to `MAX_VOCABULARY_REPORT_ENTRIES` — `count` is the true
- * total regardless of the cap.
+ * by id, UNCAPPED — `checkLanes` caps its own `vocabularyConformance` copy
+ * for display, while E3 reads this full list (module header, "The ANCHOR":
+ * a capped error list would let an instance past the commit gate).
+ *
+ * The computation itself is byte-for-byte the one ticket 02 shipped, cap
+ * aside: tag-mandate ticket 03 reclassifies these facts, it does not
+ * recompute them.
  */
-function computeTypeViolations(turns: readonly LaneTurnInput[]): LaneVocabularyConformance["typeViolations"] {
+function computeTypeViolations(turns: readonly LaneCheckerTurnInput[]): LaneTypeConformanceViolation[] {
   const violations: LaneTypeConformanceViolation[] = [];
   for (const turn of turns) {
     // Compact MARKER rows are exempt (acceptance ruling on ticket 02's
@@ -674,6 +843,11 @@ function computeTypeViolations(turns: readonly LaneTurnInput[]): LaneVocabularyC
     // settlement facade refuses every write addressed at one ("is a compact
     // marker, not a turn"), so listing them would be permanent,
     // non-actionable noise in every window that contains a /compact.
+    //
+    // The OTHER exemption the spec names — legally-skipped turns — needs no
+    // predicate here: `db/turn-liveness.ts`'s `liveTurnSql` keeps a skipped
+    // (or rolled-back) turn out of every query in `db/lane-checker-load.ts`,
+    // so such a turn never reaches this module's `turns` argument at all.
     if (turn.type.includes("compact")) {
       continue;
     }
@@ -683,7 +857,12 @@ function computeTypeViolations(turns: readonly LaneTurnInput[]): LaneVocabularyC
     }
   }
   violations.sort((a, b) => a.id - b.id);
-  return { count: violations.length, entries: violations.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
+  return violations;
+}
+
+/** `{ count, entries }` from one uncapped, already-sorted fact list — the shared shape both `vocabularyConformance` halves use, `count` always the TRUE total. */
+function cappedFactList<T>(all: readonly T[]): { count: number; entries: readonly T[] } {
+  return { count: all.length, entries: all.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
 }
 
 /**
@@ -698,7 +877,7 @@ function computeTypeViolations(turns: readonly LaneTurnInput[]): LaneVocabularyC
  */
 function partitionEdgesByVocabulary(
   edges: readonly LaneEdgeInput[],
-): { inVocabulary: LaneEdgeInput[]; outOfVocabulary: LaneVocabularyConformance["outOfVocabularyEdges"] } {
+): { inVocabulary: LaneEdgeInput[]; outOfVocabulary: LaneOutOfVocabularyEdge[] } {
   const inVocabulary: LaneEdgeInput[] = [];
   const outOfVocabulary: LaneOutOfVocabularyEdge[] = [];
   for (const edge of edges) {
@@ -711,43 +890,120 @@ function partitionEdgesByVocabulary(
   outOfVocabulary.sort(
     (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation),
   );
-  return {
-    inVocabulary,
-    outOfVocabulary: { count: outOfVocabulary.length, entries: outOfVocabulary.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) },
-  };
+  return { inVocabulary, outOfVocabulary };
 }
 
 /**
  * Combine the out-of-vocabulary edges caught defensively inside `edges`
  * itself with the loader's own separately-supplied `knownOutOfVocabularyEdges`
- * (`checkLanes`'s third parameter) into one capped, deduplicated, sorted
+ * (`checkLanes`'s third parameter) into one deduplicated, sorted, UNCAPPED
  * fact list — a caller may legitimately supply the same edge through both
- * channels (unlikely, but never double-counted).
+ * channels (unlikely, but never double-counted). `checkLanes` caps its own
+ * `vocabularyConformance` copy for display; E2 reads this full list.
  */
 function mergeOutOfVocabularyEdges(
-  fromEdges: LaneVocabularyConformance["outOfVocabularyEdges"],
+  fromEdges: readonly LaneOutOfVocabularyEdge[],
   known: readonly LaneEdgeInput[],
-): LaneVocabularyConformance["outOfVocabularyEdges"] {
+): LaneOutOfVocabularyEdge[] {
   if (known.length === 0) {
-    return fromEdges;
+    return [...fromEdges];
   }
   const seen = new Map<string, LaneOutOfVocabularyEdge>();
-  for (const entry of fromEdges.entries) {
+  for (const entry of fromEdges) {
     seen.set(`${entry.citingId} ${entry.citedId} ${entry.relation}`, entry);
   }
-  // `fromEdges.count` may exceed `fromEdges.entries.length` (already capped)
-  // — recompute the true total from the UNCAPPED count, not the capped list.
-  let total = fromEdges.count;
   for (const edge of known) {
     const key = `${edge.citingId} ${edge.citedId} ${edge.relation}`;
     if (seen.has(key)) continue;
     seen.set(key, { citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
-    total += 1;
   }
-  const merged = [...seen.values()].sort(
+  return [...seen.values()].sort(
     (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation),
   );
-  return { count: total, entries: merged.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
+}
+
+/**
+ * E1 (module header): every `extends`/`narrows` row among the IN-VOCABULARY
+ * edges whose own canonical tag set is empty. Anchored at the citing turn —
+ * the side that owns the retract + tagged re-add repair. Reads `vocabEdges`
+ * rather than the raw argument so a row is never double-classed: an
+ * out-of-vocabulary relation is E2 and only E2, whatever it looks like.
+ */
+function computeUntaggedContinuationErrors(edges: readonly LaneEdgeInput[]): LaneUntaggedContinuationError[] {
+  const errors: LaneUntaggedContinuationError[] = [];
+  for (const edge of edges) {
+    if (!MANDATED_LANE_RELATIONS.has(edge.relation)) continue;
+    if (canonicalTagSet(edge.tags).length > 0) continue;
+    errors.push({
+      class: "E1",
+      anchorId: edge.citingId,
+      citingId: edge.citingId,
+      citedId: edge.citedId,
+      relation: edge.relation,
+    });
+  }
+  return errors;
+}
+
+/**
+ * E4 (module header): every tagged IN-VOCABULARY edge whose tag set is not a
+ * subset of BOTH endpoint turns' own `tags`. The per-(tag, endpoint) `missing`
+ * shape mirrors `turn-phase.ts`'s Gate B rejection detail exactly — a tag
+ * absent from both sides is named twice, once per endpoint, so an agent
+ * repairing one side does not discover the second gap only on a retry.
+ *
+ * A turn whose `tags` is `undefined` (not loaded, or an endpoint missing
+ * from `turns` entirely) yields NO verdict for its side of the edge: the
+ * same "never fabricate a verdict" posture report 4(c) takes for a missing
+ * epoch. `[]` is a real, loaded, empty tag set and DOES violate.
+ */
+function computeSubsetInvariantErrors(
+  turnById: ReadonlyMap<number, LaneCheckerTurnInput>,
+  edges: readonly LaneEdgeInput[],
+): LaneSubsetInvariantError[] {
+  const errors: LaneSubsetInvariantError[] = [];
+  for (const edge of edges) {
+    const tags = canonicalTagSet(edge.tags);
+    if (tags.length === 0) continue;
+    const citingTags = turnById.get(edge.citingId)?.tags;
+    const citedTags = turnById.get(edge.citedId)?.tags;
+    const missing: LaneSubsetInvariantMiss[] = [];
+    for (const tag of tags) {
+      if (citingTags !== undefined && !citingTags.includes(tag)) {
+        missing.push({ tag, endpoint: "citing" });
+      }
+      if (citedTags !== undefined && !citedTags.includes(tag)) {
+        missing.push({ tag, endpoint: "cited" });
+      }
+    }
+    if (missing.length === 0) continue;
+    missing.sort((a, b) => a.endpoint.localeCompare(b.endpoint) || a.tag.localeCompare(b.tag));
+    errors.push({
+      class: "E4",
+      anchorId: edge.citingId,
+      citingId: edge.citingId,
+      citedId: edge.citedId,
+      relation: edge.relation,
+      tags,
+      missing,
+    });
+  }
+  return errors;
+}
+
+/** Endpoint/identity tie-break shared by every error class, after `anchorId` and `class` — deterministic output for a byte-comparable render. */
+function compareErrors(a: LaneCheckerError, b: LaneCheckerError): number {
+  if (a.anchorId !== b.anchorId) return a.anchorId - b.anchorId;
+  if (a.class !== b.class) return a.class.localeCompare(b.class);
+  const citedA = a.class === "E3" ? a.id : a.citedId;
+  const citedB = b.class === "E3" ? b.id : b.citedId;
+  if (citedA !== citedB) return citedA - citedB;
+  const relationA = a.class === "E3" ? "" : a.relation;
+  const relationB = b.class === "E3" ? "" : b.relation;
+  if (relationA !== relationB) return relationA.localeCompare(relationB);
+  const tagsA = a.class === "E4" ? a.tags.join(",") : "";
+  const tagsB = b.class === "E4" ? b.tags.join(",") : "";
+  return tagsA.localeCompare(tagsB);
 }
 
 /**
@@ -772,7 +1028,7 @@ function mergeOutOfVocabularyEdges(
  * arrive through this parameter instead.
  */
 export function checkLanes(
-  turns: readonly LaneTurnInput[],
+  turns: readonly LaneCheckerTurnInput[],
   edges: readonly LaneEdgeInput[],
   knownOutOfVocabularyEdges: readonly LaneEdgeInput[] = [],
 ): LaneCheckerResult {
@@ -781,16 +1037,21 @@ export function checkLanes(
   // an out-of-vocabulary relation can never reach `deriveLaneInterpretation`
   // or any of reports 2/3/4's own graph builders, whatever tags it carries.
   const { inVocabulary: vocabEdges, outOfVocabulary: outOfVocabularyFromEdges } = partitionEdgesByVocabulary(edges);
+  // Both fact lists are UNCAPPED here — `vocabularyConformance` below caps
+  // its own display copy, while the E2/E3 halves of `errors` read these
+  // (module header, "The ANCHOR": a capped error list would let an instance
+  // past the commit gate by sorting late).
   const outOfVocabularyEdges = mergeOutOfVocabularyEdges(
     outOfVocabularyFromEdges,
     knownOutOfVocabularyEdges,
   );
+  const typeViolations = computeTypeViolations(turns);
   const { lanes, warnings } = deriveLaneInterpretation(turns, vocabEdges);
   // Ticket 04: the ONE `deriveLaneStates` call for this whole run — every
   // lane's report-1 `state` field below is a lookup into this map, never a
   // fresh derivation (module header "Report 1 gains a state line").
   const laneStates = deriveLaneStates(lanes, turns);
-  const turnById = new Map<number, LaneTurnInput>();
+  const turnById = new Map<number, LaneCheckerTurnInput>();
   for (const turn of turns) {
     turnById.set(turn.id, turn);
   }
@@ -916,6 +1177,33 @@ export function checkLanes(
   const bypass = computeBypass(lanes, vocabEdges);
   const timeOrderViolations = computeTimeOrderViolations(turnById, vocabEdges);
 
+  // ---- ERRORS (tag-mandate ticket 03, module header). E2/E3 are the SAME
+  // uncapped fact lists `vocabularyConformance` caps for display, classed
+  // rather than recomputed; E1/E4 are this ticket's own two computations.
+  // The list stays uncapped — the commit gate filters it by `anchorId`. ----
+  const errors: LaneCheckerError[] = [
+    ...computeUntaggedContinuationErrors(vocabEdges),
+    ...outOfVocabularyEdges.map(
+      (edge): LaneOutOfVocabularyRelationError => ({
+        class: "E2",
+        anchorId: edge.citingId,
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relation: edge.relation,
+      }),
+    ),
+    ...typeViolations.map(
+      (violation): LaneTypeVocabularyError => ({
+        class: "E3",
+        anchorId: violation.id,
+        id: violation.id,
+        types: violation.types,
+        outsideVocabulary: violation.outsideVocabulary,
+      }),
+    ),
+    ...computeSubsetInvariantErrors(turnById, vocabEdges),
+  ].sort(compareErrors);
+
   return {
     lanes: laneStats,
     components: componentReports,
@@ -926,9 +1214,10 @@ export function checkLanes(
     timeOrderViolations,
     warnings,
     vocabularyConformance: {
-      typeViolations: computeTypeViolations(turns),
-      outOfVocabularyEdges,
+      typeViolations: cappedFactList(typeViolations),
+      outOfVocabularyEdges: cappedFactList(outOfVocabularyEdges),
     },
+    errors,
   };
 }
 

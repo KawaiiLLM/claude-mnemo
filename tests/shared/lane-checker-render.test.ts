@@ -39,6 +39,7 @@ function emptyResult(): LaneCheckerResult {
     timeOrderViolations: [],
     warnings: [],
     vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+    errors: [],
   };
 }
 
@@ -86,6 +87,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       timeOrderViolations: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      errors: [],
     };
 
     const text = renderLaneCheckerReports(result);
@@ -181,6 +183,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       timeOrderViolations: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      errors: [],
     };
 
     const text = renderLaneCheckerReports(result);
@@ -216,6 +219,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       timeOrderViolations: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      errors: [],
     };
 
     const text = renderLaneCheckerReports(result);
@@ -260,6 +264,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       ],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      errors: [],
     };
 
     const text = renderLaneCheckerReports(result);
@@ -332,48 +337,75 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(withoutWarnings).toContain("(none)");
   });
 
-  // semantic-conformance ticket 02 — printed exactly what the typed result
-  // carries, same "no derivation" discipline every other block in this file
-  // proves: a nonsense-but-legal `LaneCheckerResult` still renders faithfully.
-  test("vocabulary-conformance prints ids/words for both lists, and an explicit clean marker when neither has anything", () => {
-    const withViolations: LaneCheckerResult = {
+  // tag-mandate ticket 03 — printed exactly what the typed result carries,
+  // same "no derivation" discipline every other block in this file proves: a
+  // nonsense-but-legal `LaneCheckerResult` still renders faithfully.
+  test("the ERRORS block prints one line per instance, each leading with its class and its ANCHOR turn", () => {
+    const withErrors: LaneCheckerResult = {
       ...emptyResult(),
-      vocabularyConformance: {
-        typeViolations: {
-          count: 3,
-          entries: [
-            { id: 10, types: [], outsideVocabulary: [] },
-            { id: 11, types: ["bugfix"], outsideVocabulary: ["bugfix"] },
+      errors: [
+        { class: "E1", anchorId: 5, citingId: 5, citedId: 4, relation: "extends" },
+        { class: "E2", anchorId: 20, citingId: 20, citedId: 19, relation: "supersedes" },
+        { class: "E3", anchorId: 10, id: 10, types: [], outsideVocabulary: [] },
+        { class: "E3", anchorId: 11, id: 11, types: ["bugfix"], outsideVocabulary: ["bugfix"] },
+        {
+          class: "E4",
+          anchorId: 31,
+          citingId: 31,
+          citedId: 30,
+          relation: "narrows",
+          tags: ["a", "b"],
+          missing: [
+            { tag: "b", endpoint: "cited" },
+            { tag: "b", endpoint: "citing" },
           ],
         },
-        outOfVocabularyEdges: {
-          count: 1,
-          entries: [{ citingId: 20, citedId: 19, relation: "supersedes" }],
-        },
-      },
+      ],
     };
-    const text = renderLaneCheckerReports(withViolations);
-    expect(text).toContain("## Vocabulary conformance");
-    // count (3) differs from the capped list actually shown (2 entries) --
-    // the renderer must say so, never silently print only the shorter list.
-    expect(text).toContain("types: 3 (showing first 2)");
-    expect(text).toContain("T10 - type: [] (empty)");
-    expect(text).toContain("T11 - type: [bugfix] (outside vocabulary: bugfix)");
-    expect(text).toContain("edges: 1");
-    expect(text).not.toContain("edges: 1 (showing");
-    expect(text).toContain("T20 -> T19 (supersedes)");
-
-    const clean = renderLaneCheckerReports(emptyResult());
-    const tail = clean.slice(clean.indexOf("## Vocabulary conformance"));
-    expect(tail).toBe(
-      [
-        "## Vocabulary conformance -- MEMORY_TYPES/EDGE_RELATIONS closed-set check (reported, never enforced)",
-        "types: 0",
-        "(none)",
-        "edges: 0",
-        "(none)",
-      ].join("\n"),
+    const text = renderLaneCheckerReports(withErrors);
+    expect(text).toContain(
+      "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
     );
+    expect(text).toContain("5 error(s)");
+    expect(text).toContain("[E1] anchor T5 -- T5 --extends--> T4 carries no lane tags");
+    expect(text).toContain("[E2] anchor T20 -- T20 --supersedes--> T19: relation is outside the eight-word vocabulary");
+    expect(text).toContain("[E3] anchor T10 -- T10 type: [] (empty)");
+    expect(text).toContain("[E3] anchor T11 -- T11 type: [bugfix] (outside vocabulary: bugfix)");
+    expect(text).toContain(
+      '[E4] anchor T31 -- T31 --narrows--> T30 {a,b}: "b" missing from the cited turn\'s tags; ' +
+        '"b" missing from the citing turn\'s tags',
+    );
+    // The errors block LEADS: a reader (and the commit-gate-facing agent)
+    // must not have to scroll past the aspirational reports to find must-fix.
+    expect(text.indexOf("## ERRORS")).toBe(0);
+    expect(text.indexOf("## ERRORS")).toBeLessThan(text.indexOf("## WARNINGS"));
+    expect(text.indexOf("## WARNINGS")).toBeLessThan(text.indexOf("## Report 1"));
+  });
+
+  test("an error-free result says so explicitly, and the retired vocabulary-conformance section prints nowhere", () => {
+    const clean = renderLaneCheckerReports(emptyResult());
+    const lines = clean.split("\n");
+    expect(lines[0]).toBe(
+      "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
+    );
+    expect(lines[1]).toBe("(none)");
+    // The facts are error classes E2/E3 now — the old "reported, never
+    // enforced" section would contradict the commit gate that refuses on them.
+    expect(clean).not.toContain("Vocabulary conformance");
+  });
+
+  test("the printed error list caps while the count line states the TRUE total (the data itself never caps)", () => {
+    const many: LaneCheckerResult["errors"] = Array.from({ length: 60 }, (_, index) => ({
+      class: "E1" as const,
+      anchorId: index + 1,
+      citingId: index + 1,
+      citedId: 0,
+      relation: "extends",
+    }));
+    const text = renderLaneCheckerReports({ ...emptyResult(), errors: many });
+    expect(text).toContain("60 error(s) (showing first 50)");
+    expect(text).toContain("[E1] anchor T50 --");
+    expect(text).not.toContain("[E1] anchor T51 --");
   });
 });
 
@@ -415,6 +447,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       ],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      errors: [],
     };
 
     const digraph = renderLaneDigraph(result);
@@ -457,6 +490,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       ],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      errors: [],
     };
 
     const digraph = renderLaneDigraph(result);
@@ -496,6 +530,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       paths: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      errors: [],
     };
 
     const digraph = renderLaneDigraph(result);
@@ -534,6 +569,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       paths: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      errors: [],
     };
 
     const digraph = renderLaneDigraph(result);
@@ -579,6 +615,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       ],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      errors: [],
     };
 
     expect(() => renderLaneCheckerReports(result)).not.toThrow();
@@ -588,5 +625,83 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     // as a plain member glyph -- the renderer never "fixes" the mismatch.
     const digraph = renderLaneDigraph(result);
     expect(digraph.split("\n").find((line) => line.includes("T1"))).toContain("●");
+  });
+
+  // tag-mandate ticket 03 — the digraph is the CLI's own surface, so it
+  // carries the same split: an ERRORS block first, then the lane listing.
+  test("the digraph leads with an ERRORS block and marks each anchored MEMBER inline", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      lanes: [
+        {
+          key: LANE_KEY,
+          phases: [],
+          members: [
+            { id: 1, dead: false },
+            { id: 2, dead: false },
+          ],
+          edgeCountsByRelation: {},
+          declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+          state: { key: LANE_KEY, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+          coverage: { status: "whole", missingTurnIds: [] },
+        },
+      ],
+      errors: [
+        { class: "E3", anchorId: 1, id: 1, types: [], outsideVocabulary: [] },
+        {
+          class: "E4",
+          anchorId: 1,
+          citingId: 1,
+          citedId: 2,
+          relation: "extends",
+          tags: ["a"],
+          missing: [{ tag: "a", endpoint: "cited" }],
+        },
+        // Anchored at a turn that is NO lane's member — exactly the case the
+        // inline marks alone would hide, and the reason the block exists.
+        { class: "E1", anchorId: 77, citingId: 77, citedId: 70, relation: "narrows" },
+      ],
+    };
+
+    const digraph = renderLaneDigraph(result);
+    const lines = digraph.split("\n");
+    expect(lines[0]).toBe("ERRORS (3)");
+    expect(digraph).toContain("[E1] anchor T77 -- T77 --narrows--> T70");
+    // T1 anchors two distinct classes; both appear on its member line, and
+    // the bracket keeps ✗ unmistakable for the dead-node ✕.
+    expect(lines.find((line) => line.includes("● T1"))).toContain("✗[E3,E4]");
+    expect(lines.find((line) => line.includes("● T2"))).not.toContain("✗");
+    // T77 is not a member, so it appears ONLY in the block.
+    expect(lines.filter((line) => line.includes("T77"))).toHaveLength(1);
+  });
+
+  test("an error-free digraph still states the count, so an empty block is never ambiguous with a missing one", () => {
+    const digraph = renderLaneDigraph(emptyResult());
+    expect(digraph.split("\n")[0]).toBe("ERRORS (0)");
+    expect(digraph).toContain("(no lanes in scope)");
+  });
+
+  test("error lines obey the same 100-column bound as every other digraph line", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      errors: [
+        {
+          class: "E4",
+          anchorId: 1,
+          citingId: 1,
+          citedId: 2,
+          relation: "extends",
+          tags: Array.from({ length: 20 }, (_, index) => "a-very-long-lane-tag-" + index),
+          missing: Array.from({ length: 20 }, (_, index) => ({
+            tag: "a-very-long-lane-tag-" + index,
+            endpoint: "cited" as const,
+          })),
+        },
+      ],
+    };
+    for (const line of renderLaneDigraph(result).split("\n")) {
+      expect(line.length).toBeLessThanOrEqual(100);
+    }
   });
 });

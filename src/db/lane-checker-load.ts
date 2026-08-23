@@ -1,12 +1,12 @@
 import type { Database } from "bun:sqlite";
 
+import type { LaneCheckerTurnInput } from "../shared/lane-checker";
 import {
   canonicalTagSet,
   DEFAULT_SEGMENT,
   laneToken,
   type LaneEdgeInput,
   type LaneKey,
-  type LaneTurnInput,
 } from "../shared/lane-interpretation";
 import { EDGE_RELATIONS, STANCE_RELATIONS } from "../shared/turn-phase";
 import { liveTurnSql } from "./turn-liveness";
@@ -74,6 +74,16 @@ import { liveTurnSql } from "./turn-liveness";
  * true graph is one component) — no hop-count approximation remains
  * anywhere in report 2's graph.
  *
+ * SKIP/ROLLBACK EXEMPTION (tag-mandate ticket 03). Error class E3 (empty or
+ * out-of-vocabulary turn `type`) must not fire on a legally-SKIPPED turn.
+ * That exemption needs no predicate in the checker: LAW 8 above is what
+ * enforces it — `liveTurnSql` gates every query in this file, on the turn
+ * table AND on both endpoints of every edge, so a `status = 'skipped'` (or
+ * `was_rolled_back = 1`) turn never enters `turns` and can never be
+ * classed. Any future load path added here that bypasses `liveTurnSql`
+ * silently re-admits skipped turns as E3 errors and, through the commit
+ * gate, would block a window on rows its agent is not even shown.
+ *
  * COVERAGE (requirement 1's other half). The core's own report 1
  * (`LaneStatsReport.coverage`) is the honest signal: it is populated
  * whenever a lane member id appears as a tagged edge's endpoint with no
@@ -89,7 +99,16 @@ export type LaneCheckScope =
   | { kind: "lanes"; laneKeys: readonly LaneKey[] };
 
 export interface LaneCheckProjection {
-  turns: LaneTurnInput[];
+  /**
+   * `LaneCheckerTurnInput`, not the bare `LaneTurnInput` the pure
+   * interpretation core takes: the extra field is the turn's own `tags`,
+   * which error class E4 (the subset invariant over stock) needs on BOTH
+   * endpoints of every tagged edge. This is the ONE type-only import this
+   * file takes from `shared/lane-checker.ts` — it adds no runtime
+   * dependency (the import is erased), which is what the peer-not-wrapper
+   * stance below is actually protecting.
+   */
+  turns: LaneCheckerTurnInput[];
   edges: LaneEdgeInput[];
   /** The lanes this projection widened to cover — informational only, never fed back into the core (the core re-derives lanes from `turns`/`edges` itself). */
   involvedLaneKeys: LaneKey[];
@@ -109,6 +128,8 @@ export interface LaneCheckProjection {
 interface TurnLiteRow {
   id: number;
   type: string;
+  /** `turns.tags` verbatim — a nullable JSON array column. tag-mandate ticket 03: the E4 subset invariant's second input. */
+  tags: string | null;
   sessionId: number;
   promptNumber: number;
   /** rubric-v10 ticket 08: plumbed straight onto `LaneTurnInput.createdAtEpoch` — the ONLY reader is `lane-checker.ts`'s report-4(c) time-order check, for the cross-session half of that comparison (`order`'s `[session_id, prompt_number]` tuple is never compared across sessions — a `session_id` carries no wall-clock meaning relative to another session's). */
@@ -430,11 +451,43 @@ function loadLiveTurns(db: Database, turnIds: readonly number[]): Map<number, Tu
   const placeholders = ids.map(() => "?").join(",");
   const rows = db
     .query<TurnLiteRow, number[]>(
-      `SELECT id, type, session_id AS sessionId, prompt_number AS promptNumber, created_at_epoch AS createdAtEpoch
+      `SELECT id, type, tags, session_id AS sessionId, prompt_number AS promptNumber, created_at_epoch AS createdAtEpoch
        FROM turns WHERE id IN (${placeholders}) AND ${liveTurnSql()}`,
     )
     .all(...ids);
   return new Map(rows.map((row) => [row.id, row]));
+}
+
+/**
+ * `turns.tags` -> the checker's `LaneCheckerTurnInput.tags` (tag-mandate
+ * ticket 03, E4). The three cases are deliberately NOT collapsed:
+ *
+ *   - `NULL` -> `[]`. The column is nullable with no default, so a turn
+ *     written before it carried tags, or written with none, reads NULL —
+ *     that IS "this turn carries no tags", a real E4 verdict for every
+ *     tagged edge touching it, not an unknown.
+ *   - a valid JSON array -> its canonical set.
+ *   - anything else (malformed JSON, a JSON non-array — `turns.tags` has no
+ *     `json_valid` CHECK, so both are storable; see `db/schema.ts`'s own
+ *     note) -> `undefined`, i.e. NOT LOADED, so the checker issues no E4
+ *     verdict for this turn's side of any edge. A parse failure is
+ *     ignorance, and ignorance must never manufacture an error the commit
+ *     gate would then refuse a window over.
+ */
+function parseTurnTags(raw: string | null): readonly string[] | undefined {
+  if (raw === null) {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    return undefined;
+  }
+  return canonicalTagSet(parsed as string[]);
 }
 
 function toEdgeInput(row: EdgeLiteRow): LaneEdgeInput {
@@ -590,10 +643,10 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   const turnRows = loadLiveTurns(db, [...allTurnIds]);
   const owningSegmentsForTurns = loadOwningSegments(db, [...allTurnIds]);
 
-  const turns: LaneTurnInput[] = [...turnRows.values()]
+  const turns: LaneCheckerTurnInput[] = [...turnRows.values()]
     .map((row) => {
       const segmentId = owningSegmentsForTurns.get(row.id);
-      const input: LaneTurnInput = {
+      const input: LaneCheckerTurnInput = {
         id: row.id,
         type: JSON.parse(row.type) as string[],
         order: turnOrderKey(row.sessionId, row.promptNumber),
@@ -601,6 +654,12 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
       };
       if (segmentId !== undefined) {
         input.segment = String(segmentId);
+      }
+      // Omitted (rather than set to `[]`) only when the stored value is
+      // unparseable — see `parseTurnTags`: absent means "no E4 verdict".
+      const tags = parseTurnTags(row.tags);
+      if (tags !== undefined) {
+        input.tags = tags;
       }
       return input;
     })

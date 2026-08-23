@@ -141,6 +141,9 @@ function emptyLaneCheckRun(overrides: Partial<ConsoleLaneCheckRun> = {}): Consol
       timeOrderViolations: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      // tag-mandate ticket 03 — same reason as the field above: the renderer
+      // reads `errors` unconditionally, so every hand-built result needs it.
+      errors: [],
     },
     turns: [],
     edges: [],

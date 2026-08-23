@@ -61,14 +61,26 @@ function seedSession(label = "lane-load"): number {
 function insertTurn(
   sessionId: number,
   promptNumber: number,
-  options: { type?: string[]; wasRolledBack?: boolean; status?: string } = {},
+  options: {
+    type?: string[];
+    wasRolledBack?: boolean;
+    status?: string;
+    /** tag-mandate ticket 03: `turns.tags` verbatim. `undefined` leaves the column NULL (the pre-tag-era shape); a raw string lets a test store the malformed JSON the column has no CHECK against. */
+    tags?: string[] | string;
+  } = {},
 ): number {
+  const tags =
+    options.tags === undefined
+      ? null
+      : typeof options.tags === "string"
+        ? options.tags
+        : JSON.stringify(options.tags);
   return db
-    .query<{ id: number }, [number, number, string, string, number, string, number, string]>(
+    .query<{ id: number }, [number, number, string, string, number, string, number, string, string | null]>(
       `INSERT INTO turns (
          session_id, prompt_number, status, user_prompt, assistant_response,
-         tool_call_count, created_at_epoch, was_rolled_back, type
-       ) VALUES (?, ?, ?, 'p', 'r', 1, ?, ?, ?)
+         tool_call_count, created_at_epoch, was_rolled_back, type, tags
+       ) VALUES (?, ?, ?, 'p', 'r', 1, ?, ?, ?, ?)
        RETURNING id`,
     )
     .get(
@@ -78,6 +90,7 @@ function insertTurn(
       NOW + promptNumber,
       options.wasRolledBack ? 1 : 0,
       JSON.stringify(options.type ?? ["design"]),
+      tags,
     )!.id;
 }
 
@@ -731,5 +744,94 @@ describe("out-of-vocabulary edges (semantic-conformance ticket 02): the loader s
       count: 1,
       entries: [{ id: t1, types: ["bugfix"], outsideVocabulary: ["bugfix"] }],
     });
+  });
+});
+
+// ---------------------------------- tag-mandate ticket 03: turn tags + the skip exemption
+
+/**
+ * LOAD-BEARING PROPERTY (tag-mandate ticket 03). Error class E3 (empty or
+ * out-of-vocabulary turn `type`) must never fire on a legally-SKIPPED or
+ * rolled-back turn, and error class E4 (the subset invariant over stock)
+ * needs each turn's own `tags` on BOTH endpoints of every tagged edge.
+ *
+ * Both properties live HERE, not in the checker: the exemption is LAW 8
+ * (`liveTurnSql` on every query in `db/lane-checker-load.ts`, both turn rows
+ * and both endpoints of every edge), and the tags are a column only this
+ * adapter reads. A future load path that bypasses `liveTurnSql` would
+ * silently re-admit skipped turns as commit-blocking errors anchored at rows
+ * the agent is never even shown.
+ */
+describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns never do", () => {
+  test("a turn's own tags ride the projection, so the subset invariant (E4) is judged rather than skipped", () => {
+    const sessionId = seedSession();
+    const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
+    const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
+    tagEdge(t2, t1, "extends", ["ownership"]);
+    tagEdge(t2, t1, "indexes", ["ownership"]);
+
+    const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 2 });
+    expect(projection.turns.map((turn) => turn.tags)).toEqual([["ownership"], ["ownership"]]);
+    expect(checkLanes(projection.turns, projection.edges).errors).toEqual([]);
+  });
+
+  test("an endpoint whose tags no longer carry the edge's tag is an E4 error anchored at the citing turn — the tag-EDIT orphan the write gate cannot catch", () => {
+    const sessionId = seedSession();
+    const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
+    const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
+    tagEdge(t2, t1, "extends", ["ownership"]);
+    tagEdge(t2, t1, "indexes", ["ownership"]);
+    // The edit the write gate can never see: the CITED endpoint drops the tag
+    // long after the edge that depends on it landed.
+    db.query(`UPDATE turns SET tags = '[]' WHERE id = ?`).run(t1);
+
+    const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 2 });
+    const errors = checkLanes(projection.turns, projection.edges).errors;
+    expect(errors.map((error) => `${error.class}@${error.anchorId}`)).toEqual([`E4@${t2}`, `E4@${t2}`]);
+  });
+
+  test("a NULL tags column reads as the empty set (a real verdict), a malformed one as not-loaded (no verdict)", () => {
+    const sessionId = seedSession();
+    const nullTags = insertTurn(sessionId, 1); // column left NULL
+    const malformed = insertTurn(sessionId, 2, { tags: "{not json array" });
+
+    const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 2 });
+    const byId = new Map(projection.turns.map((turn) => [turn.id, turn]));
+    expect(byId.get(nullTags)!.tags).toEqual([]);
+    expect(byId.get(malformed)!.tags).toBeUndefined();
+  });
+
+  test("a legally-SKIPPED turn with an empty type never reaches the checker, so it can never raise E3", () => {
+    const sessionId = seedSession();
+    const live = insertTurn(sessionId, 1, { type: [] }); // same defect, live
+    const skipped = insertTurn(sessionId, 2, { type: [], status: "skipped" });
+    const rolledBack = insertTurn(sessionId, 3, { type: [], wasRolledBack: true });
+
+    const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 3 });
+    const loadedIds = projection.turns.map((turn) => turn.id);
+    expect(loadedIds).toContain(live);
+    expect(loadedIds).not.toContain(skipped);
+    expect(loadedIds).not.toContain(rolledBack);
+
+    // The exemption is doing real work: the identical defect on the LIVE turn
+    // is an error, so the two dormant rows are excluded by liveness alone.
+    const errors = checkLanes(projection.turns, projection.edges).errors;
+    expect(errors.map((error) => `${error.class}@${error.anchorId}`)).toEqual([`E3@${live}`]);
+  });
+
+  test("an untagged extends among the loaded edges is an E1 error anchored at its citing turn", () => {
+    const sessionId = seedSession();
+    const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
+    const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
+    const t3 = insertTurn(sessionId, 3, { tags: ["ownership"] });
+    tagEdge(t2, t1, "extends", ["ownership"]);
+    tagEdge(t2, t1, "indexes", ["ownership"]);
+    tagEdge(t3, t2, "extends", []); // the stock defect the mandate forces open
+
+    const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 3 });
+    const errors = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges).errors;
+    expect(errors).toEqual([
+      { class: "E1", anchorId: t3, citingId: t3, citedId: t2, relation: "extends" },
+    ]);
   });
 });

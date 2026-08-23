@@ -5,6 +5,8 @@ import { describe, expect, test } from "bun:test";
 import {
   checkLanes,
   DEFAULT_SEGMENT,
+  type LaneCheckerError,
+  type LaneCheckerTurnInput,
   type LaneEdgeInput,
   type LaneTurnInput,
 } from "../../src/shared/lane-checker";
@@ -38,6 +40,7 @@ function findPath(result: ReturnType<typeof checkLanes>, tagSet: string[]) {
 interface FixtureTurn {
   id: number;
   type: string[];
+  /** The turn's OWN tags — fed to the checker (tag-mandate ticket 03) so error class E4's subset invariant is genuinely exercised against the golden corpus rather than skipped for want of an input. */
   tags: string[];
   title: string;
 }
@@ -61,7 +64,11 @@ const fixture: Fixture = JSON.parse(
     "utf8",
   ),
 );
-const fixtureTurns: LaneTurnInput[] = fixture.turns.map((t) => ({ id: t.id, type: t.type }));
+const fixtureTurns: LaneCheckerTurnInput[] = fixture.turns.map((t) => ({
+  id: t.id,
+  type: t.type,
+  tags: t.tags,
+}));
 const fixtureEdges: LaneEdgeInput[] = fixture.edges.map((e) => ({
   citingId: e.citingId,
   relation: e.relation,
@@ -272,6 +279,21 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   // 992->989. None of these are grounds/testimony, so the OLD report (no
   // `used[]`) rendered these lanes' "cited from outside" line as if they
   // were never cited by consume at all.
+  // tag-mandate ticket 03's acceptance bar: the hand-judged golden corpus
+  // CONFORMS, so the error side must be empty on it — every tagged edge's
+  // set sits inside both endpoints' own tags (E4), no extends/narrows is
+  // untagged (E1), every relation is one of the eight (E2), and every turn's
+  // type is in vocabulary once compact markers are exempt (E3). Any
+  // discrepancy here is a STOP-AND-REPORT, never a golden adjustment.
+  test("the golden fixture reports ZERO errors — it conforms", () => {
+    expect(result.errors).toEqual([]);
+    // Not vacuous: the fixture really does carry tagged edges and turn tags
+    // for E4 to judge, and stance edges for E1 to judge.
+    expect(fixtureEdges.some((e) => e.tags.length > 0)).toBe(true);
+    expect(fixtureTurns.every((t) => (t.tags ?? []).length >= 0)).toBe(true);
+    expect(fixtureEdges.some((e) => e.relation === "extends" || e.relation === "narrows")).toBe(true);
+  });
+
   test("report 1 golden — used[] lists the fixture's real external consume citations", () => {
     const ownership = findLaneStats(result, ["ownership"]);
     expect(ownership?.citedness.usedFromNonMembers).toEqual([{ citingId: 902, citedId: 900 }]);
@@ -401,7 +423,12 @@ describe("vocabulary conformance — reported, never enforced (semantic-conforma
     );
   });
 
-  test("the rendered text names ids and offending words for both lists, and prints an explicit clean marker when there is nothing to report", () => {
+  // tag-mandate ticket 03 reclassified these two fact lists into error
+  // classes E3/E2: the raw computation (and the capped `vocabularyConformance`
+  // field every test above asserts on) is untouched, but the RENDER now
+  // surfaces them in the leading ERRORS block instead of a trailing
+  // "reported, never enforced" section that the commit gate would contradict.
+  test("the rendered text names ids and offending words in the ERRORS block, and prints an explicit clean marker when there is nothing to report", () => {
     const turns = [design(740, ["bugfix"]), design(741)];
     const edges = [
       edge(741, "extends", 740, ["vc6"]),
@@ -410,19 +437,17 @@ describe("vocabulary conformance — reported, never enforced (semantic-conforma
     ];
     const result = checkLanes(turns, edges);
     const text = renderLaneCheckerReports(result);
-    expect(text).toContain("## Vocabulary conformance");
-    expect(text).toContain("types: 1");
-    expect(text).toContain("T740 - type: [bugfix] (outside vocabulary: bugfix)");
-    expect(text).toContain("edges: 1");
-    expect(text).toContain("T741 -> T740 (supersedes)");
+    expect(text).not.toContain("## Vocabulary conformance");
+    expect(text).toContain("2 error(s)");
+    expect(text).toContain("[E3] anchor T740 -- T740 type: [bugfix] (outside vocabulary: bugfix)");
+    expect(text).toContain("[E2] anchor T741 -- T741 --supersedes--> T740");
 
     const cleanResult = checkLanes(
       [design(750), design(751)],
       [edge(751, "extends", 750, ["vc7"]), edge(751, "indexes", 750, ["vc7"])],
     );
     const cleanText = renderLaneCheckerReports(cleanResult);
-    const vocabTail = cleanText.slice(cleanText.indexOf("## Vocabulary conformance"));
-    expect(vocabTail).toBe(["## Vocabulary conformance -- MEMORY_TYPES/EDGE_RELATIONS closed-set check (reported, never enforced)", "types: 0", "(none)", "edges: 0", "(none)"].join("\n"));
+    expect(cleanText.split("\n")[1]).toBe("(none)");
   });
 });
 
@@ -1095,49 +1120,38 @@ describe("reports 2/3/4 are byte-stable across the ticket 04 report-1-only chang
   test("the golden fixture's report 2/3/4 text (## Report 2 through Cross-segment warnings) is byte-identical to the pre-ticket-04 baseline", () => {
     const result = checkLanes(fixtureTurns, fixtureEdges);
     const text = renderLaneCheckerReports(result);
-    const tail = text.slice(
-      text.indexOf("## Report 2"),
-      text.indexOf("## Vocabulary conformance"),
-    );
-    // Trailing newlines trimmed (the blank-line separator before the new
-    // "## Vocabulary conformance" section): the baseline has no trailing
-    // newline of its own.
+    // tag-mandate ticket 03 retired the trailing "## Vocabulary conformance"
+    // section (those facts are error classes E2/E3 now and print in the
+    // leading ERRORS block), so the warning side now ENDS at the
+    // cross-segment warnings — the baseline's own last line, unchanged.
+    const tail = text.slice(text.indexOf("## Report 2"));
     expect(tail.replace(/\n+$/, "")).toBe(REPORT_2_ONWARD_BASELINE);
   });
 
-  // semantic-conformance ticket 02 — appended after "## Cross-segment
-  // warnings", captured by running the real implementation against the SAME
-  // golden fixture (this file's own methodology throughout), not
-  // hand-guessed (`/tmp/dump-vocab-tail.ts`-style probe).
-  //
-  // The worker's stop-and-report found T907/T944 (PreCompact marker rows,
-  // `type: ["compact"]`) flagged under a literal closed-set reading. The
-  // acceptance RULING exempts compact markers: they are infrastructure, not
-  // annotations — the settlement facade refuses every write addressed at one
-  // ("is a compact marker, not a turn"), so flagging them is permanent,
-  // non-actionable noise in every window that holds a /compact. With the
-  // exemption the golden fixture reads fully conforming, matching the
-  // ticket's original expectation.
-  test("the golden fixture is fully conforming once compact markers are exempt; no out-of-vocabulary edges are present", () => {
+  // semantic-conformance ticket 02's acceptance, carried forward through
+  // ticket 03's reclassification: the SAME facts, now read off the errors
+  // side. The worker's stop-and-report found T907/T944 (PreCompact marker
+  // rows, `type: ["compact"]`) flagged under a literal closed-set reading.
+  // The acceptance RULING exempts compact markers: they are infrastructure,
+  // not annotations — the settlement facade refuses every write addressed at
+  // one ("is a compact marker, not a turn"), so flagging them is permanent,
+  // non-actionable noise in every window that holds a /compact.
+  test("the golden fixture is fully conforming once compact markers are exempt; the errors block leads with (none)", () => {
     const result = checkLanes(fixtureTurns, fixtureEdges);
     const text = renderLaneCheckerReports(result);
-    const tail = text.slice(text.indexOf("## Cross-segment warnings"));
-    expect(tail).toBe(
-      [
-        "## Cross-segment warnings",
-        "(none)",
-        "",
-        "## Vocabulary conformance -- MEMORY_TYPES/EDGE_RELATIONS closed-set check (reported, never enforced)",
-        "types: 0",
-        "(none)",
-        "edges: 0",
-        "(none)",
-      ].join("\n"),
-    );
+    expect(text.startsWith(
+      "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains\n" +
+        "(none)\n",
+    )).toBe(true);
+    expect(text.endsWith("## Cross-segment warnings\n(none)")).toBe(true);
+    expect(text).not.toContain("Vocabulary conformance");
     expect(result.vocabularyConformance).toEqual({
       typeViolations: { count: 0, entries: [] },
       outOfVocabularyEdges: { count: 0, entries: [] },
     });
+    // The fixture really does contain compact markers — the exemption is
+    // doing work, not passing vacuously.
+    expect(fixtureTurns.filter((t) => t.type.includes("compact")).map((t) => t.id)).toEqual([907, 944]);
   });
   test("a compact marker row is exempt from type conformance even though 'compact' is outside MEMORY_TYPES", () => {
     const result = checkLanes(
@@ -1151,5 +1165,248 @@ describe("reports 2/3/4 are byte-stable across the ticket 04 report-1-only chang
       count: 1,
       entries: [{ id: 2, types: ["discovery"], outsideVocabulary: ["discovery"] }],
     });
+  });
+});
+
+// ------------------------------------------------ tag-mandate ticket 03: the error classes E1-E4
+
+/**
+ * The ERROR side of the checker's error/warning split. Every test below
+ * probes the same two things per class: that the defect is DETECTED, and
+ * that its ANCHOR lands on the turn the settlement commit gate (ticket 05)
+ * will scope by — an EDGE error at its citing turn, a TYPE error at the turn
+ * itself.
+ *
+ * The "in-scope / out-of-scope anchor variant" pairs are what pin the
+ * anchoring RULE rather than merely the anchor value: the checker itself has
+ * no notion of a window (scoping is the gate's job), so each pair wires the
+ * SAME defect with its anchor once inside and once outside a declared
+ * writable set, and asserts the gate's own one-line filter reaches opposite
+ * verdicts. Without the rule, one bad out-of-window row would pin a window on
+ * a permanently failing commit — the terminal-state trap the spec's
+ * "Anchoring and repairability" section exists to prevent.
+ */
+describe("errors E1-E4 — detection and anchoring", () => {
+  /** The commit gate's whole filter, in one line — ticket 05 implements exactly this over the window's immutable writable set. */
+  const anchoredIn = (errors: readonly LaneCheckerError[], writable: readonly number[]) =>
+    errors.filter((error) => writable.includes(error.anchorId));
+
+  const tagged = (id: number, tags: string[], type: string[] = ["design"]): LaneCheckerTurnInput => ({
+    id,
+    type,
+    tags,
+  });
+
+  // ---- E1: untagged extends/narrows ----
+
+  test("E1 — an untagged extends is an error anchored at its CITING turn; the tagged form is clean", () => {
+    const turns = [tagged(10, ["lane-a"]), tagged(11, ["lane-a"])];
+    const untagged = checkLanes(turns, [edge(11, "extends", 10, [])]);
+    expect(untagged.errors).toEqual([
+      { class: "E1", anchorId: 11, citingId: 11, citedId: 10, relation: "extends" },
+    ]);
+
+    const taggedForm = checkLanes(turns, [edge(11, "extends", 10, ["lane-a"])]);
+    expect(taggedForm.errors).toEqual([]);
+  });
+
+  test("E1 — narrows is mandated too, and the six other words keep their legitimate bare form", () => {
+    const turns = [tagged(20, []), tagged(21, [])];
+    const narrows = checkLanes(turns, [edge(21, "narrows", 20, [])]);
+    expect(narrows.errors.map((e) => e.class)).toEqual(["E1"]);
+
+    for (const word of ["override", "consume", "indexes", "grounds", "verifies", "refutes"]) {
+      const bare = checkLanes(turns, [edge(21, word, 20, [])]);
+      expect(bare.errors).toEqual([]);
+    }
+  });
+
+  test("E1 — in-scope vs out-of-scope anchor variants: the same defect blocks only the window that can repair it", () => {
+    const turns = [tagged(30, []), tagged(31, []), tagged(40, []), tagged(41, [])];
+    const writable = [40, 41]; // this window owns T40/T41 only
+
+    const outOfScope = checkLanes(turns, [edge(31, "extends", 30, [])]);
+    expect(outOfScope.errors).toHaveLength(1);
+    expect(anchoredIn(outOfScope.errors, writable)).toEqual([]);
+
+    const inScope = checkLanes(turns, [edge(41, "extends", 40, [])]);
+    expect(anchoredIn(inScope.errors, writable)).toHaveLength(1);
+  });
+
+  test("E1 — an untagged extends whose CITED turn is out of scope still anchors in scope, so the window can repair it", () => {
+    // The declared-lookback rule (spec, settlement surface) exists precisely
+    // so the far endpoint is writable too; the ANCHOR itself never moves to
+    // the cited side, or the citing window could never act on its own row.
+    const turns = [tagged(50, []), tagged(51, [])];
+    const result = checkLanes(turns, [edge(51, "narrows", 50, [])]);
+    expect(result.errors[0]!.anchorId).toBe(51);
+  });
+
+  // ---- E2: out-of-vocabulary relation words ----
+
+  test("E2 — a frozen-legacy supersedes is an error anchored at its citing turn, via either input channel", () => {
+    const turns = [tagged(60, []), tagged(61, [])];
+    const inline = checkLanes(turns, [edge(61, "supersedes", 60, [])]);
+    expect(inline.errors).toEqual([
+      { class: "E2", anchorId: 61, citingId: 61, citedId: 60, relation: "supersedes" },
+    ]);
+
+    // The loader's own dedicated channel (`checkLanes`'s third argument)
+    // produces the identical error — one classification, two supply routes.
+    const viaLoaderChannel = checkLanes(turns, [], [edge(61, "supersedes", 60, [])]);
+    expect(viaLoaderChannel.errors).toEqual(inline.errors);
+  });
+
+  test("E2 — in-scope vs out-of-scope anchor variants", () => {
+    const turns = [tagged(70, []), tagged(71, []), tagged(80, []), tagged(81, [])];
+    const writable = [80, 81];
+    expect(anchoredIn(checkLanes(turns, [edge(71, "supersedes", 70, [])]).errors, writable)).toEqual([]);
+    expect(anchoredIn(checkLanes(turns, [edge(81, "supersedes", 80, [])]).errors, writable)).toHaveLength(1);
+  });
+
+  // ---- E3: empty / out-of-vocabulary turn types ----
+
+  test("E3 — an empty type and an out-of-vocabulary type both anchor at the turn itself", () => {
+    const result = checkLanes([tagged(90, [], []), tagged(91, [], ["bugfix"]), tagged(92, [], ["design"])], []);
+    expect(result.errors).toEqual([
+      { class: "E3", anchorId: 90, id: 90, types: [], outsideVocabulary: [] },
+      { class: "E3", anchorId: 91, id: 91, types: ["bugfix"], outsideVocabulary: ["bugfix"] },
+    ]);
+  });
+
+  test("E3 exemption — a compact MARKER row is never an error, however many windows contain one", () => {
+    const result = checkLanes([tagged(100, [], ["compact"]), tagged(101, [], ["design"])], []);
+    expect(result.errors).toEqual([]);
+  });
+
+  test("E3 exemption — a legally-SKIPPED turn cannot reach this module at all (the exemption is the loader's law-8 gate)", () => {
+    // Stated as an absence: `LaneCheckerTurnInput` carries no status field,
+    // so there is nothing here that COULD re-admit a skipped turn. The
+    // exemption is pinned where it actually lives, in
+    // `tests/db/lane-checker-load.test.ts`; this test exists so a future
+    // reader looking for a skip predicate in the checker finds the pointer
+    // instead of adding one.
+    const asIfSkipped = checkLanes([tagged(110, [], [])], []);
+    expect(asIfSkipped.errors).toHaveLength(1); // it WOULD be an error if it ever arrived
+    expect(Object.keys(asIfSkipped.errors[0]!)).not.toContain("status");
+  });
+
+  test("E3 — in-scope vs out-of-scope anchor variants", () => {
+    const turns = [tagged(120, [], []), tagged(130, [], [])];
+    const errors = checkLanes(turns, []).errors;
+    expect(anchoredIn(errors, [130]).map((e) => e.anchorId)).toEqual([130]);
+    expect(anchoredIn(errors, [120]).map((e) => e.anchorId)).toEqual([120]);
+  });
+
+  // ---- E4: the subset invariant over stock ----
+
+  test("E4 — a tag missing from an endpoint's own tags is named per (tag, endpoint), anchored at the citing turn", () => {
+    const turns = [tagged(140, ["a"]), tagged(141, ["a", "b"])];
+    const result = checkLanes(turns, [edge(141, "extends", 140, ["a", "b"])]);
+    expect(result.errors).toEqual([
+      {
+        class: "E4",
+        anchorId: 141,
+        citingId: 141,
+        citedId: 140,
+        relation: "extends",
+        tags: ["a", "b"],
+        missing: [{ tag: "b", endpoint: "cited" }],
+      },
+    ]);
+  });
+
+  test("E4 — a tag missing from BOTH endpoints is named twice, once per side (the write gate's own rejection shape)", () => {
+    const turns = [tagged(150, ["a"]), tagged(151, ["a"])];
+    const result = checkLanes(turns, [edge(151, "consume", 150, ["a", "z"])]);
+    expect(result.errors).toHaveLength(1);
+    const error = result.errors[0]!;
+    expect(error.class === "E4" && error.missing).toEqual([
+      { tag: "z", endpoint: "cited" },
+      { tag: "z", endpoint: "citing" },
+    ]);
+  });
+
+  test("E4 — an endpoint whose tags were never LOADED yields no verdict; an endpoint with an empty loaded set does", () => {
+    // `undefined` (not loaded) vs `[]` (loaded, genuinely tagless) — the one
+    // distinction that separates "cannot judge" from "judged, and it fails".
+    const notLoaded = checkLanes(
+      [{ id: 160, type: ["design"] }, { id: 161, type: ["design"] }],
+      [edge(161, "extends", 160, ["a"])],
+    );
+    expect(notLoaded.errors).toEqual([]);
+
+    const loadedEmpty = checkLanes([tagged(170, []), tagged(171, [])], [edge(171, "extends", 170, ["a"])]);
+    expect(loadedEmpty.errors.map((e) => e.class)).toEqual(["E4"]);
+
+    // Half-loaded: only the side that HAS tags is judged.
+    const halfLoaded = checkLanes(
+      [tagged(180, []), { id: 181, type: ["design"] }],
+      [edge(181, "extends", 180, ["a"])],
+    );
+    const error = halfLoaded.errors[0]!;
+    expect(error.class === "E4" && error.missing).toEqual([{ tag: "a", endpoint: "cited" }]);
+  });
+
+  test("E4 — in-scope vs out-of-scope anchor variants", () => {
+    const turns = [tagged(190, []), tagged(191, []), tagged(200, []), tagged(201, [])];
+    const writable = [200, 201];
+    expect(anchoredIn(checkLanes(turns, [edge(191, "extends", 190, ["a"])]).errors, writable)).toEqual([]);
+    expect(
+      anchoredIn(checkLanes(turns, [edge(201, "extends", 200, ["a"])]).errors, writable).map((e) => e.class),
+    ).toEqual(["E4"]);
+  });
+
+  // ---- cross-class properties ----
+
+  test("an out-of-vocabulary relation is classed E2 and E2 ONLY, never also E1/E4", () => {
+    // `supersedes` is partitioned out before any graph computation, so it can
+    // never be double-classed by the two edge checks that read the
+    // in-vocabulary set. A tagged one is the sharp case: its tags are absent
+    // from both (tagless) endpoints, so E4 would fire if it were admitted.
+    const result = checkLanes([tagged(210, []), tagged(211, [])], [edge(211, "supersedes", 210, ["a"])]);
+    expect(result.errors.map((e) => e.class)).toEqual(["E2"]);
+  });
+
+  test("errors sort by anchor, then class — one deterministic order for both surfaces", () => {
+    const turns = [tagged(220, [], []), tagged(221, ["a"]), tagged(222, [])];
+    const result = checkLanes(turns, [
+      edge(222, "extends", 221, []), // E1 @ 222
+      edge(222, "consume", 221, ["a"]), // E4 @ 222 (222 lacks "a")
+      edge(221, "supersedes", 220, []), // E2 @ 221
+    ]);
+    expect(result.errors.map((e) => `${e.anchorId}:${e.class}`)).toEqual([
+      "220:E3",
+      "221:E2",
+      "222:E1",
+      "222:E4",
+    ]);
+  });
+
+  test("the errors LIST is uncapped even where the fact lists it is classed from are capped", () => {
+    // LOAD-BEARING: the commit gate filters this list by anchor. A display
+    // cap here would let an instance past the gate simply by sorting late,
+    // and the window would commit dirty.
+    // 60 > MAX_ERROR_RENDER_ENTRIES (50): the one cap value a refactor would
+    // plausibly copy into the data path must itself go red here.
+    const turns = Array.from({ length: 60 }, (_, index) => tagged(300 + index, [], ["bugfix"]));
+    const result = checkLanes(turns, []);
+    expect(result.errors).toHaveLength(60);
+    expect(result.vocabularyConformance.typeViolations.count).toBe(60);
+    expect(result.vocabularyConformance.typeViolations.entries).toHaveLength(20); // capped, as before
+    expect(result.errors.at(-1)!.anchorId).toBe(359);
+  });
+
+  test("the warning side's own computations are untouched by the split", () => {
+    // A fixture that is simultaneously error-bearing and lane-bearing: the
+    // reports still report exactly what they always did.
+    const turns = [tagged(400, ["L"], ["design"]), tagged(401, ["L"], ["design"])];
+    const edges = [edge(401, "extends", 400, ["L"]), edge(401, "indexes", 400, ["L"]), edge(401, "supersedes", 400, [])];
+    const result = checkLanes(turns, edges);
+    expect(result.errors.map((e) => e.class)).toEqual(["E2"]);
+    const stats = findLaneStats(result, ["L"]);
+    expect(stats?.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
+    expect(stats?.state.closure).toBe("closed");
+    expect(findPath(result, ["L"])?.pathCount).toBe(1);
   });
 });

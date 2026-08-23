@@ -1,17 +1,17 @@
 import type {
   LaneBypassReport,
+  LaneCheckerError,
   LaneCheckerResult,
   LaneComponentReport,
   LaneCrossSegmentWarning,
+  LaneErrorClass,
   LaneFoldedPaths,
   LaneInterfacePair,
   LaneMember,
-  LaneOutOfVocabularyEdge,
   LanePathReport,
   LaneState,
   LaneStatsReport,
   LaneTimeOrderViolation,
-  LaneTypeConformanceViolation,
 } from "./lane-checker";
 import { DEFAULT_SEGMENT, laneToken, type LaneKey } from "./lane-interpretation";
 
@@ -30,14 +30,31 @@ import { DEFAULT_SEGMENT, laneToken, type LaneKey } from "./lane-interpretation"
  *
  *   - `renderLaneCheckerReports` - the compact numeric prose. Both surfaces
  *     use it: the settlement tool returns exactly this (requirement 3: "NO
- *     digraph"), and the CLI prints it ahead of the digraph. Also carries
- *     the vocabulary-conformance fact block (semantic-conformance ticket 02)
- *     as its own trailing section, past "Cross-segment warnings" — a numeric
- *     fact like every report above it, so it belongs on the same compact
- *     surface, never the digraph.
+ *     digraph"), and the CLI prints it ahead of the digraph.
  *   - `renderLaneDigraph` - the git-log-graph-style text digraph
  *     (requirement 2). CLI-only, per the spec's own "digraph rendering is
  *     human/CLI-only; agents receive the numeric reports."
+ *
+ * ## The error/warning split (tag-mandate ticket 03)
+ *
+ * Both surfaces lead with an ERRORS block — states the grammar forbids,
+ * E1-E4, each naming its ANCHOR turn — visually separated from everything
+ * below it, which is the WARNING side (the three principles' aspirational
+ * facts, reports 1-4 and the cross-segment warnings, unchanged).
+ *
+ * The old trailing "## Vocabulary conformance" section is GONE, not merely
+ * moved: its two fact lists ARE error classes E2 and E3 now, and its own
+ * header sentence ("reported, never enforced") stopped being true the
+ * moment the commit gate started refusing on them. `LaneCheckerResult` still
+ * carries the capped `vocabularyConformance` field as the raw source those
+ * classes are read from — this file simply no longer prints it twice.
+ *
+ * The errors block is the one place a DISPLAY cap is applied that the data
+ * does not have (`MAX_ERROR_RENDER_ENTRIES`): `result.errors` is uncapped
+ * precisely so the commit gate can trust it, while a settlement window with
+ * hundreds of stock violations must not blow the text budget. The count line
+ * always states the TRUE total, and the next `lane_check` after a repair
+ * round surfaces the remainder.
  */
 
 function formatTagSet(key: LaneKey): string {
@@ -211,29 +228,81 @@ function renderSharedNodes(shared: LaneCheckerResult["multiLaneComponents"][numb
   );
 }
 
-/** One line per `LaneTypeConformanceViolation` (semantic-conformance ticket 02) — the empty case and the outside-vocabulary case read distinctly, never the same string with an empty word list. */
-function renderTypeViolation(violation: LaneTypeConformanceViolation): string {
-  if (violation.types.length === 0) {
-    return "  T" + violation.id + " - type: [] (empty)";
-  }
-  return (
-    "  T" +
-    violation.id +
-    " - type: [" +
-    violation.types.join(",") +
-    "] (outside vocabulary: " +
-    violation.outsideVocabulary.join(",") +
-    ")"
-  );
-}
+/**
+ * How many error instances either surface prints. `LaneCheckerResult.errors`
+ * itself is UNCAPPED (the commit gate filters it by anchor and must see
+ * every instance) — this bound exists only so a window over badly
+ * non-conforming stock cannot blow the settlement text budget. Higher than
+ * the fact lists' own cap: an error is work the reader must actually do, so
+ * a longer list earns its bytes.
+ */
+const MAX_ERROR_RENDER_ENTRIES = 50;
 
-function renderOutOfVocabularyEdge(edge: LaneOutOfVocabularyEdge): string {
-  return "  T" + edge.citingId + " -> T" + edge.citedId + " (" + edge.relation + ")";
-}
-
-/** `count` vs a possibly-capped `entries` list — the same "(showing first N of count)" suffix both `vocabularyConformance` sub-blocks use. */
+/** `count` vs a possibly-capped printed list — the "(showing first N of count)" suffix. */
 function cappedCountSuffix(count: number, shown: number): string {
   return count > shown ? " (showing first " + shown + ")" : "";
+}
+
+function renderEdgeArrow(citingId: number, relation: string, citedId: number): string {
+  return "T" + citingId + " --" + relation + "--> T" + citedId;
+}
+
+/**
+ * One line per error instance, ALWAYS leading with its class and its ANCHOR
+ * turn — the anchor is what the commit gate scopes by, so a reader deciding
+ * "is this mine to fix" must not have to infer it from the endpoints.
+ */
+function renderLaneError(error: LaneCheckerError): string {
+  const head = "  [" + error.class + "] anchor T" + error.anchorId + " -- ";
+  switch (error.class) {
+    case "E1":
+      return (
+        head +
+        renderEdgeArrow(error.citingId, error.relation, error.citedId) +
+        " carries no lane tags; extends/narrows must name their line" +
+        " (tag the edge; both endpoints carry the tag)"
+      );
+    case "E2":
+      return (
+        head +
+        renderEdgeArrow(error.citingId, error.relation, error.citedId) +
+        ": relation is outside the eight-word vocabulary"
+      );
+    case "E3":
+      return (
+        head +
+        (error.types.length === 0
+          ? "T" + error.id + " type: [] (empty)"
+          : "T" +
+            error.id +
+            " type: [" +
+            error.types.join(",") +
+            "] (outside vocabulary: " +
+            error.outsideVocabulary.join(",") +
+            ")")
+      );
+    case "E4":
+      return (
+        head +
+        renderEdgeArrow(error.citingId, error.relation, error.citedId) +
+        " {" +
+        error.tags.join(",") +
+        "}: " +
+        error.missing
+          .map((miss) => '"' + miss.tag + "\" missing from the " + miss.endpoint + " turn's tags")
+          .join("; ")
+      );
+  }
+}
+
+/**
+ * The capped instance lines both surfaces print, identically formatted so
+ * the CLI's digraph and the settlement text never describe one error two
+ * ways. The COUNT line is each surface's own (the digraph folds it into its
+ * heading), which is why this returns instances only.
+ */
+function errorInstanceLines(errors: readonly LaneCheckerError[]): string[] {
+  return errors.slice(0, MAX_ERROR_RENDER_ENTRIES).map(renderLaneError);
 }
 
 function renderCrossSegmentWarning(warning: LaneCrossSegmentWarning): string {
@@ -261,6 +330,23 @@ function renderCrossSegmentWarning(warning: LaneCrossSegmentWarning): string {
 export function renderLaneCheckerReports(result: LaneCheckerResult): string {
   const sections: string[] = [];
 
+  sections.push(
+    "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
+  );
+  const shownErrors = errorInstanceLines(result.errors);
+  if (result.errors.length === 0) {
+    sections.push("(none)");
+  } else {
+    sections.push(
+      result.errors.length + " error(s)" + cappedCountSuffix(result.errors.length, shownErrors.length),
+    );
+    sections.push(...shownErrors);
+  }
+
+  sections.push("");
+  sections.push("## WARNINGS -- the three principles' facts below; aspirations, never enforced");
+
+  sections.push("");
   sections.push("## Report 1 -- lane statistics");
   if (result.lanes.length === 0) {
     sections.push("(no lanes in scope)");
@@ -339,33 +425,9 @@ export function renderLaneCheckerReports(result: LaneCheckerResult): string {
     }
   }
 
-  sections.push("");
-  sections.push("## Vocabulary conformance -- MEMORY_TYPES/EDGE_RELATIONS closed-set check (reported, never enforced)");
-  const typeViolations = result.vocabularyConformance.typeViolations;
-  sections.push(
-    "types: " + typeViolations.count + cappedCountSuffix(typeViolations.count, typeViolations.entries.length),
-  );
-  if (typeViolations.entries.length === 0) {
-    sections.push("(none)");
-  } else {
-    for (const violation of typeViolations.entries) {
-      sections.push(renderTypeViolation(violation));
-    }
-  }
-  const outOfVocabularyEdges = result.vocabularyConformance.outOfVocabularyEdges;
-  sections.push(
-    "edges: " +
-      outOfVocabularyEdges.count +
-      cappedCountSuffix(outOfVocabularyEdges.count, outOfVocabularyEdges.entries.length),
-  );
-  if (outOfVocabularyEdges.entries.length === 0) {
-    sections.push("(none)");
-  } else {
-    for (const edge of outOfVocabularyEdges.entries) {
-      sections.push(renderOutOfVocabularyEdge(edge));
-    }
-  }
-
+  // No trailing "## Vocabulary conformance" section: those two fact lists
+  // are error classes E2/E3 now and print in the ERRORS block above (this
+  // module's own header, "The error/warning split").
   return sections.join("\n");
 }
 
@@ -381,8 +443,24 @@ function glyphFor(kind: DigraphGlyph): string {
   return "●"; // member
 }
 
-const FINDING_GLYPH = "⚠"; // finding
+const FINDING_GLYPH = "⚠"; // warning-side finding
 const CROSSING_ARROW = "⇐"; // reference-line crossing
+/** Error mark, ALWAYS followed by its bracketed class list — the bracket is what keeps it unmistakable for the dead-node `✕`, whose glyph is near-identical in many terminal fonts. */
+const ERROR_GLYPH = "✗";
+
+/** Anchor turn id -> the distinct error classes anchored there, ascending — the digraph's per-member mark, and the reason an anchor is DATA and not prose. */
+function errorClassesByAnchor(errors: readonly LaneCheckerError[]): Map<number, LaneErrorClass[]> {
+  const byAnchor = new Map<number, Set<LaneErrorClass>>();
+  for (const error of errors) {
+    let bucket = byAnchor.get(error.anchorId);
+    if (bucket === undefined) {
+      bucket = new Set();
+      byAnchor.set(error.anchorId, bucket);
+    }
+    bucket.add(error.class);
+  }
+  return new Map([...byAnchor.entries()].map(([id, set]) => [id, [...set].sort()]));
+}
 
 /** True when a lane member or terminus has a report-2/4 finding worth flagging. */
 function findingTurnIds(result: LaneCheckerResult): Set<number> {
@@ -428,10 +506,30 @@ function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
  *
  * CLI-only, per the spec's own "digraph rendering is human/CLI-only" -
  * `note-settlement-sdk-query.ts`'s `lane_check` tool never calls this.
+ *
+ * Tag-mandate ticket 03: an ERRORS block leads, listing every instance with
+ * its anchor, and each anchored LANE MEMBER additionally carries an inline
+ * `✗[E1,...]` mark. The block is what makes the listing complete — an error
+ * can anchor at a turn that is no lane's member at all (an untagged
+ * extends/narrows forms no lane by construction, and a type error needs no
+ * edge whatsoever), so the inline marks alone would silently hide exactly
+ * the class of error this ticket exists to surface.
  */
 export function renderLaneDigraph(result: LaneCheckerResult): string {
   const flagged = findingTurnIds(result);
+  const errorClasses = errorClassesByAnchor(result.errors);
   const lines: string[] = [];
+
+  const shownErrors = errorInstanceLines(result.errors);
+  lines.push(
+    truncateToColumns(
+      "ERRORS (" + result.errors.length + ")" + cappedCountSuffix(result.errors.length, shownErrors.length),
+    ),
+  );
+  for (const line of shownErrors) {
+    lines.push(truncateToColumns(line));
+  }
+  lines.push("");
 
   for (const lane of result.lanes) {
     const path = result.paths.find((entry) => sameLaneKey(entry.key, lane.key));
@@ -454,11 +552,15 @@ export function renderLaneDigraph(result: LaneCheckerResult): string {
     for (const member of lane.members) {
       const kind: DigraphGlyph = member.dead ? "dead" : member.id === terminus ? "terminus" : "member";
       const glyph = glyphFor(kind);
+      const anchored = errorClasses.get(member.id);
+      // Errors precede warnings on the line for the same reason they precede
+      // them in the report: must-fix before should-consider.
+      const errorMark = anchored ? " " + ERROR_GLYPH + "[" + anchored.join(",") + "]" : "";
       const flag = flagged.has(member.id) ? " " + FINDING_GLYPH : "";
       const crossing = seenElsewhere.has(member.id)
         ? " " + CROSSING_ARROW + " see T" + member.id + " in another lane"
         : "";
-      lines.push(truncateToColumns("  " + glyph + " T" + member.id + flag + crossing));
+      lines.push(truncateToColumns("  " + glyph + " T" + member.id + errorMark + flag + crossing));
     }
   }
 

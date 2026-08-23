@@ -352,10 +352,18 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       expect(description).toContain("closed-valid/closed-invalid/open");
       expect(description).toContain("consume-class use");
       expect(description).toContain("still ADOPTED, not unused");
-      // semantic-conformance ticket 02: the one added clause naming the new
-      // vocabulary-conformance facts, so the agent knows to read them.
-      expect(description).toContain("vocabulary-conformance");
-      expect(description).toContain("supersedes");
+      // tag-mandate ticket 03 (superseding semantic-conformance ticket 02's
+      // "vocabulary-conformance" clause): the facts are error classes now, so
+      // the description must teach the ERROR/WARNING split, name the four
+      // classes, and — the part that keeps a window from deadlocking — say
+      // that only errors anchored inside the writable range are the agent's.
+      expect(description).toContain("ERRORS");
+      expect(description).toContain("WARNINGS");
+      expect(description).toContain("ANCHORED");
+      for (const errorClass of ["(E1)", "(E2)", "(E3)", "(E4)"]) {
+        expect(description).toContain(errorClass);
+      }
+      expect(description).toContain("anchored OUTSIDE your range is another window's work");
     } finally {
       db?.close();
     }
@@ -473,9 +481,17 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
             content: Array<{ text: string }>;
           };
           const text = laneCheckReceipt.content[0]!.text;
-          expect(text).toContain("## Vocabulary conformance");
-          expect(text).toContain(`T${t1} - type: [bugfix] (outside vocabulary: bugfix)`);
-          expect(text).toContain(`T${t2} -> T${t1} (supersedes)`);
+          // tag-mandate ticket 03: the same two facts, now classed as errors
+          // with their anchors, in the leading ERRORS block. The tagged edges
+          // this fixture writes go straight through `writeMemoryEdges`,
+          // bypassing the write gate, so they ALSO stand as genuine E4 stock
+          // violations (neither endpoint turn carries `vocab-fixture` in its
+          // own `tags`) — the exact orphan shape the checker exists to catch.
+          expect(text).toContain("## ERRORS");
+          expect(text).not.toContain("## Vocabulary conformance");
+          expect(text).toContain(`[E3] anchor T${t1} -- T${t1} type: [bugfix] (outside vocabulary: bugfix)`);
+          expect(text).toContain(`[E2] anchor T${t2} -- T${t2} --supersedes--> T${t1}`);
+          expect(text).toContain(`[E4] anchor T${t2} -- T${t2} --extends--> T${t1} {vocab-fixture}`);
           // Never admitted: the lane's own edge tally in report 1 is exactly
           // the extends+indexes pair.
           expect(text).toContain("extends=1");

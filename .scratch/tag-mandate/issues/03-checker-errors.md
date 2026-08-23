@@ -22,7 +22,7 @@ repairability".
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: anchor flip → 3 red; data-cap 50 SURVIVED the worker pin → test strengthened to 60 then red; fabricated-verdict → 3 red)
 
 - [ ] Unit fixtures per class, each with an in-scope and out-of-scope
       anchor variant; exemption fixtures (compact, legal skip)
