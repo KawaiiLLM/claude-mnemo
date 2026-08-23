@@ -109,24 +109,31 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     // Lane identity: exact SET, segment-scoped; hierarchy is narration; lane
     // tags minimal and never the segment's own; single-turn products exempt.
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "A LANE is a separable line of work inside one phase, under a segment,\n" +
-        "identified by an exact SET of tags scoped to that segment.",
+      "A LANE is a separable sub-workflow inside one phase, under a segment,\n" +
+        "identified by an exact SET of tags scoped to that segment: a DAG of tagged\n" +
+        "edges over AT LEAST TWO nodes, every node's own tags containing the lane's.",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "the machine knows only exact sets; parenthood and merging are human readings.",
+      "the machine knows only exact sets, parenthood is narration.",
+    );
+    // T1360: fork by adding a tag, reopen by inheriting the exact set.
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "adding a tag\nto the parent's set opens a new branch, inheriting the exact set REOPENS a\nclosed lane",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "A lane's tag set is as SMALL as discrimination allows, and the segment's own\n" +
         "tags never join it — they gate membership, not lanes.",
     );
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "An isolated single-turn\nproduct needs no tag and joins no lane",
+      "An isolated\nsingle-turn product needs no tag and joins no lane",
     );
 
     // The word list header carries the whole taggability split in one line.
+    // The "lanes are phase-local" tail dropped in the T1360 budget pass — the
+    // lane paragraph itself states phase-locality.
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "Eight words. Same-phase words MAY carry lane tags, none must; cross-phase\n" +
-        "words never do — lanes are phase-local:",
+        "words never do:",
     );
     // override's two readings ARE the interpretation principle applied — a
     // compression that drops either loses reopen or global repudiation.
@@ -347,13 +354,12 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "Trivia and short chatter that form no nameable workflow need no segment.",
     );
+    // Compressed for the T1360 lane-definition budget pass; the two semantics
+    // (reuse-before-new, name by actual shape not opening guess) survive.
     expect(MEMORY_RUBRIC_TEXT).toContain(
-      "check the roster first — attach to a fitting\n" +
-        "  existing segment before creating a new one.",
-    );
-    expect(MEMORY_RUBRIC_TEXT).toContain(
-      "name it after the task's actual shape — an\n" +
-        "  opening guess anchors the segment to the wrong shape.",
+      "Check the roster first — attach to a fitting segment; create only when\n" +
+        "  nothing fits, named after the task's actual shape (an opening guess\n" +
+        "  anchors it wrong).",
     );
   });
 
@@ -440,11 +446,10 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
       "- insight — REUSABLE experience. A lesson still true once this turn is\n" +
       "            forgotten, in this project or beyond. Not a conclusion of this turn.\n" +
       "\n" +
-      "Length tracks OUTPUT, not effort. A turn that produced nothing is a skip; one\n" +
-      "that produced a lot may run long; one that produced little must be terse.\n" +
-      "Process detail belongs to replay — a summary cannot hold it, and trying makes\n" +
-      "it hold nothing. Content leads with its conclusions: a reader's budget cuts\n" +
-      "the tail, so whatever merely supports a decision comes after the decision.";
+      "Length tracks OUTPUT, not effort: nothing produced is a skip, little\n" +
+      "produced is terse. Process detail belongs to replay — a summary cannot hold\n" +
+      "it. Content leads with its conclusions: a reader's budget cuts the tail, so\n" +
+      "support comes after the decision.";
 
     expect(MEMORY_RUBRIC_TEXT).toContain(fieldsOpening);
 

@@ -1,6 +1,9 @@
 # §Relations v10 — English text (author: main agent, per T1315 ruling; source: the user-confirmed Chinese draft of T1313)
 
-Status: ready to land with ticket 03. Replaces §Relations of the rubric wholesale; Fields/Segments/Policy unchanged.
+Status: LANDED with rubric-v10 ticket 03 (0.16.0). HISTORICAL SPLICE SOURCE —
+the living text is `src/shared/memory-rubric.ts` and amendments land THERE
+(T1343 principle-3 re-aim, T1345 untagged-only dedup, T1360 lane definition
+v2 all applied to the live rubric; this file stops tracking).
 
 ---
 
@@ -21,7 +24,7 @@ single-turn product (a stray discussion) needs no tag and joins no lane,
 and is still cited cross-phase as usual.
 
 Eight words. Same-phase words MAY carry lane tags, none must; cross-phase
-words never do — lanes are phase-local:
+words never do:
 · override — the cited's main result no longer applies; this node fully
   replaces it. Tagged: an in-lane correction — the lane reopens until a
   fresh declaration. Untagged: a global repudiation of the conclusion, and
@@ -47,7 +50,11 @@ Convergence never happens by silence: when a lane converges, its terminus
 declares it with a TAGGED indexes. All lane events — declarations,
 overrides, continuations — reduce in turn order; the latest declaration
 wins, and continuing past one is normal life (the next declaration
-supersedes it). SUBSET INVARIANT: every tag on an edge must already exist
+supersedes it). A lane whose LATEST node is its declared terminus is
+CLOSED — VALID while any of its indexed core lives, INVALID once all are
+dead (bury an abandoned line: repudiate, then declare over the wreck);
+unconverged lanes honestly stay OPEN.
+SUBSET INVARIANT: every tag on an edge must already exist
 on both endpoint turns' tags — written forward, a lane member's note
 carries its lane tag anyway; a violation is refused, naming the gap.
 

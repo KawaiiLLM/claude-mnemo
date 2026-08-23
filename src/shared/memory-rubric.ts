@@ -280,6 +280,17 @@ import { createHash } from "node:crypto";
  * so on a tagged pair the two are independent assertions. The extends half
  * of the ban is untouched: extends subsumes consume on both readers.
  * Budget after: 9471 rendered chars, 29 under the cap.
+ *
+ * Still v10 (user ruling [S15069/T1360], milestone-election ticket 01): the
+ * lane definition formalizes — a DAG of tagged edges over AT LEAST TWO nodes
+ * (single-node lanes do not exist; the floated self-indexes closure was
+ * withdrawn), fork by adding a tag, REOPEN a closed lane by inheriting the
+ * exact set; and the lane states enter: CLOSED (latest node is the declared
+ * terminus) splitting into VALID/INVALID by core survival, unconverged lanes
+ * staying OPEN. Paid for by compressions that keep every guarded semantic:
+ * Fields' length paragraph, ruling-supplement, segment examples and the
+ * roster/create bullets, plus the redundant "lanes are phase-local" tail.
+ * Budget after: 9435 rendered chars, 65 under the cap.
  */
 export const MEMORY_RUBRIC_VERSION = "v10";
 
@@ -295,11 +306,10 @@ Turn note — three fields, three jobs:
 - insight — REUSABLE experience. A lesson still true once this turn is
             forgotten, in this project or beyond. Not a conclusion of this turn.
 
-Length tracks OUTPUT, not effort. A turn that produced nothing is a skip; one
-that produced a lot may run long; one that produced little must be terse.
-Process detail belongs to replay — a summary cannot hold it, and trying makes
-it hold nothing. Content leads with its conclusions: a reader's budget cuts
-the tail, so whatever merely supports a decision comes after the decision.
+Length tracks OUTPUT, not effort: nothing produced is a skip, little
+produced is terse. Process detail belongs to replay — a summary cannot hold
+it. Content leads with its conclusions: a reader's budget cuts the tail, so
+support comes after the decision.
 
 type — a closed vocabulary, one meaning per word:
 - discuss — exploring problems and options; understanding produced, no ruling
@@ -331,10 +341,9 @@ type — a closed vocabulary, one meaning per word:
   turn's phase is a SET — an edge is legal when any pairing is.
 - No word fits → leave it empty, never force one.
 - Ruling supplement: when the user's ruling or veto lands on this turn, keep
-  the words for what actually happened and ADD the decision phase — a
-  constraint formed or revised to be honored from now on → +design; an
-  existing conclusion corrected → +correction. The supplement never replaces
-  and is never invented: no ruling, no supplement.
+  the words for what happened and ADD the decision phase — a new or revised
+  commitment → +design; a corrected conclusion → +correction. Never replaces,
+  never invented: no ruling, no supplement.
 
 tags — nouns, naming things: project first, then subsystem/artifact; activity
 words belong to type. Lowercase-hyphenated; reuse existing tags first; on
@@ -346,18 +355,20 @@ THE INTERPRETATION PRINCIPLE: a tagged edge acts on a LANE; an untagged edge
 acts on the cited turn itself. Every word shares this one reading — there are
 no special cases.
 
-A LANE is a separable line of work inside one phase, under a segment,
-identified by an exact SET of tags scoped to that segment. Lanes never cross
-phases; only cross-phase relations connect lanes of different phases.
-{P}→{P,c1} forks and {A}+{B}→{A,B} merges are nothing but tag composition —
-the machine knows only exact sets; parenthood and merging are human readings.
+A LANE is a separable sub-workflow inside one phase, under a segment,
+identified by an exact SET of tags scoped to that segment: a DAG of tagged
+edges over AT LEAST TWO nodes, every node's own tags containing the lane's.
+Lanes never cross phases; only cross-phase relations connect lanes of
+different phases. A lane may start from another lane's node — adding a tag
+to the parent's set opens a new branch, inheriting the exact set REOPENS a
+closed lane; the machine knows only exact sets, parenthood is narration.
 A lane's tag set is as SMALL as discrimination allows, and the segment's own
-tags never join it — they gate membership, not lanes. An isolated single-turn
-product needs no tag and joins no lane, and is still cited cross-phase as
-usual.
+tags never join it — they gate membership, not lanes. An isolated
+single-turn product needs no tag and joins no lane, and is still cited
+cross-phase as usual.
 
 Eight words. Same-phase words MAY carry lane tags, none must; cross-phase
-words never do — lanes are phase-local:
+words never do:
 · override — the cited's main result no longer applies; this node fully
   replaces it. Tagged: an in-lane correction — the lane reopens until a
   fresh declaration. Untagged: a global repudiation of the conclusion, and
@@ -384,7 +395,11 @@ Convergence never happens by silence: when a lane converges, its terminus
 declares it with a TAGGED indexes. All lane events — declarations,
 overrides, continuations — reduce in turn order; the latest declaration
 wins, and continuing past one is normal life (the next declaration
-supersedes it). SUBSET INVARIANT: every tag on an edge must already exist
+supersedes it). A lane whose LATEST node is its declared terminus is
+CLOSED — VALID while any of its indexed core lives, INVALID once all are
+dead (bury an abandoned line: repudiate, then declare over the wreck);
+unconverged lanes honestly stay OPEN.
+SUBSET INVARIANT: every tag on an edge must already exist
 on both endpoint turns' tags — written forward, a lane member's note
 carries its lane tag anyway; a violation is refused, naming the gap.
 
@@ -419,23 +434,20 @@ evidence is an EXTERNAL delivery citation of its terminus.
 ## Segments (membership and creation)
 
 - A turn belongs to the task segment its content serves — at most one; an
-  unrelated turn staying homeless is a legal state. When one turn serves
-  several workflows, membership still goes to the primary task its content
-  serves — the other ties are carried by relation edges.
+  unrelated turn staying homeless is a legal state. A turn serving several
+  workflows belongs to the primary one — the other ties are carried by
+  relation edges.
 - A segment's tags are hand-curated identity: a member turn carries ALL of
   them. Lane tags are separate and never include them.
 - (Settlement side) membership and creation authority equal the main agent's:
   segments may be created, turns reassigned across them; correct only OBVIOUS
   mismatches, leave doubt alone.
-  - Positive example: a turn entirely modifies segment A's module but is
-    assigned to B → reassign to A.
-  - Counterexample: the title relates to A but the content shows no service
-    to it → leave it.
+  - Reassign: a turn entirely modifying segment A's module sits in B.
+  - Leave: the title relates to A but the content shows no service to it.
 - Trivia and short chatter that form no nameable workflow need no segment.
-- When a segment seems needed, check the roster first — attach to a fitting
-  existing segment before creating a new one.
-- Create only when nothing fits; name it after the task's actual shape — an
-  opening guess anchors the segment to the wrong shape.
+- Check the roster first — attach to a fitting segment; create only when
+  nothing fits, named after the task's actual shape (an opening guess
+  anchors it wrong).
 
 ## Policy (when to read)
 
