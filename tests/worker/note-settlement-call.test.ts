@@ -8,6 +8,7 @@ import { upsertShadowNote, getShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import {
   claimNextNoteSettlementJob,
+  computeSettlementWritableTurnIds,
   enqueueNoteSettlementWindows,
   getNoteSettlementCursor,
   getNoteSettlementJob,
@@ -17,8 +18,13 @@ import {
 import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { listOpenSegments } from "../../src/db/segments";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
-import { buildNoteSettlementContext } from "../../src/worker/note-settlement-context";
+import {
+  buildNoteSettlementContext,
+  resolveSettlementWritableSet,
+  type NoteSettlementContext,
+} from "../../src/worker/note-settlement-context";
 import { renderNoteSettlementPrompt } from "../../src/worker/note-settlement-prompt";
+import { recallMemory } from "../../src/mcp/recall";
 import {
   classifySettlementFailure,
   createNoteSettlementDispatch,
@@ -35,7 +41,7 @@ import {
   evaluateSettlementTurnWrite,
   type SettlementTurnFacadeContext,
 } from "../../src/worker/note-settlement-turn-facade";
-import { sessionWriterId, stampField } from "../../src/db/write-gate";
+import { claimWriterId, sessionWriterId, stampField } from "../../src/db/write-gate";
 import {
   SETTLEMENT_ENABLED_CONFIG,
   SETTLEMENT_ERA_CUTOFF_EPOCH,
@@ -265,42 +271,51 @@ function dispatchWith(
   });
 }
 
+/** The dispatch's own render path (tag-mandate ticket 06) — see the identical helper in note-settlement-prompt.test.ts. */
+function renderPromptFor(context: NoteSettlementContext): string {
+  const writableTurnIds = computeSettlementWritableTurnIds(db, context.reviewableTurnIds);
+  return renderNoteSettlementPrompt(
+    context,
+    resolveSettlementWritableSet(db, context, writableTurnIds),
+  );
+}
+
 describe("settlement context assembly", () => {
-  test("a window with no gap at all is empty of hole/kind machinery — that concept retired with duty 2 (ticket 05)", () => {
+  test("a window turn is an ADDRESS and nothing else (ticket 06: the rendering fields retired with the rendering)", () => {
     const fixture = seedFourTurnWindow();
     const context = buildNoteSettlementContext(db, fixture.job, {
       nowEpoch: NOW,
     })!;
 
     for (const turn of context.windowTurns) {
+      // Duty 2's retired hole/raw-material machinery (ticket 05)…
       expect(turn).not.toHaveProperty("kind");
       expect(turn).not.toHaveProperty("rawMaterial");
+      // …and the push channel's own carrier fields (ticket 06). The context
+      // is a scope declaration now; every fact about a turn reaches the agent
+      // through its own `recall`.
+      expect(turn).not.toHaveProperty("collapsedRendering");
+      expect(turn).not.toHaveProperty("note");
+      expect(turn).not.toHaveProperty("gapSeconds");
+      expect(turn).not.toHaveProperty("filesModified");
+      expect(Object.keys(turn).sort()).toEqual([
+        "promptNumber",
+        "ref",
+        "sessionId",
+        "turnId",
+      ]);
     }
     expect(context).not.toHaveProperty("interiorHoles");
 
-    const prompt = renderNoteSettlementPrompt(context);
-    const window = prompt.slice(prompt.indexOf("## Turns"));
-    // The old fact line's "kind=" and the raw-material annotation are gone.
-    expect(window).not.toContain("kind=");
-    expect(window).not.toContain("raw>");
-    // The window's notes are still the material for turns that have one.
-    expect(window).toContain("implement+settlement: lease fence");
-  });
-
-  test("the window's rendered line carries no drafted type or tag", () => {
-    const fixture = seedFourTurnWindow();
-    const context = buildNoteSettlementContext(db, fixture.job, {
-      nowEpoch: NOW,
-    })!;
-
-    const t1 = context.windowTurns.find((turn) => turn.promptNumber === 1)!;
-    expect(t1).not.toHaveProperty("typeDraft");
-    expect(t1).not.toHaveProperty("tagDraft");
-
-    const prompt = renderNoteSettlementPrompt(context);
-    const window = prompt.slice(prompt.indexOf("## Turns"));
-    expect(window).not.toContain("type_draft=");
-    expect(window).not.toContain("tag_draft=");
+    const prompt = renderPromptFor(context);
+    expect(prompt).not.toContain("## Turns");
+    // The retired fact line's own vocabulary, pinned absent at the prompt.
+    expect(prompt).not.toContain("kind=");
+    expect(prompt).not.toContain("raw>");
+    expect(prompt).not.toContain("type_draft=");
+    expect(prompt).not.toContain("tag_draft=");
+    expect(prompt).not.toContain("files_modified=");
+    expect(prompt).not.toContain("(note reconstructed by an earlier settlement pass)");
   });
 
   test("duty 1 (grading) and duty 2 (reconstruction) left the prompt entirely; only proposals and relations remain (ticket 05)", () => {
@@ -308,7 +323,7 @@ describe("settlement context assembly", () => {
     const context = buildNoteSettlementContext(db, fixture.job, {
       nowEpoch: NOW,
     })!;
-    const prompt = renderNoteSettlementPrompt(context);
+    const prompt = renderPromptFor(context);
 
     // The old absolute rubric AND the election-ranking rubric that replaced
     // it are both gone from the prompt now — settlement no longer grades at
@@ -350,12 +365,22 @@ describe("settlement context assembly", () => {
   // own, so a prompt still teaching the fence would teach a refusal the code
   // no longer performs — the worst kind of drift, since the model would
   // silently stop attempting legal work.
-  test("the relation half is a rubric pointer, not a restated ladder", () => {
+  //
+  // TAG-MANDATE TICKET 06: the bullet is authored prose now (Block B), and
+  // it made ONE deliberate reversal of ticket 08's framing — the relation
+  // WORD is no longer a bare pointer at the rubric, because the trial showed
+  // a pointer alone produced zero lanes. Step 4's discriminator is in the
+  // bullet, so the "pointer, not a ladder" assertions become the opposite
+  // pin: the discriminator is present, and the RETIRED ladder is still
+  // absent. What is unchanged is that judgment vocabulary lives in one place
+  // — the bullet's step 4 is now that place for the relation WORD, and the
+  // rubric remains it for everything else.
+  test("the relation half carries step 4's discriminator, and no retired ladder or fence", () => {
     const fixture = seedFourTurnWindow();
     const context = buildNoteSettlementContext(db, fixture.job, {
       nowEpoch: NOW,
     })!;
-    const prompt = renderNoteSettlementPrompt(context);
+    const prompt = renderPromptFor(context);
 
     // The retired four-question ladder must not survive anywhere in the
     // prompt, not merely be absent from duty 2's own text.
@@ -367,16 +392,20 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain('"used"');
     expect(prompt).not.toContain('"built on"');
 
-    // The pointer + phase-rejection facts a rubric pointer cannot itself
-    // state, plus the decoupling the fence's deletion left in its place.
-    expect(prompt).toContain("Which relation, if any, is the Memory Rubric's");
-    expect(prompt).toContain("no prose citation and no pre-existing link");
-    expect(prompt).toContain("One pair may carry several relations at once");
-    expect(prompt).toContain("rejected, naming what is missing");
+    // Step 4, the authored discriminator — every word mapped to the state of
+    // the CITED CLAIM, plus the three non-evidences the trial mistook for
+    // extends.
+    expect(prompt).toContain("4. THE WORD comes from the cited CLAIM");
+    expect(prompt).toContain("still fully valid and built");
+    expect(prompt).toContain("upon = extends; partly withdrawn or re-scoped = narrows; replaced");
+    expect(prompt).toContain("outright = override; merely used, same phase = consume; an evidence");
+    expect(prompt).toContain("Shared topic,");
+    expect(prompt).toContain("adjacency, or preserving lane shape are never extends evidence");
+    expect(prompt).toContain("One pair may carry several");
+    expect(prompt).toContain("relations at once; a call carrying nothing but relations is valid.");
     expect(prompt).toContain(
-      "note`'s override/narrows/extends/indexes/consume/grounds/verifies/refutes fields",
+      "`note`'s override/narrows/extends/consume/indexes/grounds/\n     verifies/refutes fields",
     );
-    expect(prompt).toContain("retractOverride/");
 
     // The retired fence's own wording, pinned ABSENT — the rule is gone, so
     // the sentences that taught it must not survive anywhere in the prompt.
@@ -387,15 +416,24 @@ describe("settlement context assembly", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Ticket 04 (edge-mechanism-revision D6, "同门同要求"): the REAL context build
-// is what earns settlement its complete-read grant. Ticket 07 left this as a
-// recorded gap — the render recorded no field completeness, so opting the gate
-// in would have refused every correction of a non-empty field. These two tests
-// run the actual render, not a hand-recorded fixture, so the wiring cannot rot
-// into a stub that always says "complete".
+// TAG-MANDATE TICKET 06 (spec "Settlement surface"): THE GRANT UNIFICATION.
+//
+// This describe REPLACES ticket 04's pair, which pinned the opposite rule —
+// the context render earning settlement its own read grant and complete-read
+// fact. Under pull that channel is gone: the build shows the agent no turn,
+// so it licenses no turn write, and the licence comes from the agent's own
+// `recall` (the identical `recordReadGrants`/`recordFieldCompleteness` seam,
+// the identical `claimWriterId` identity — no settlement carve-out anywhere
+// in the gate).
+//
+// The tests run the REAL context build and a REAL `recallMemory` call, never
+// a hand-recorded grant fixture, so the wiring cannot rot into a stub. The
+// registered-tool half of the same property — that the SDK server's `recall`
+// really passes this identity — is pinned in note-settlement-sdk-query.ts's
+// own suite.
 // ---------------------------------------------------------------------------
 
-describe("the context render earns (or withholds) the complete-read grant", () => {
+describe("ticket 06 — the context build grants only the session; recall earns the rest", () => {
   function settleContextFor(sessionDbId: number, job: NoteSettlementJob) {
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
     return {
@@ -410,14 +448,123 @@ describe("the context render earns (or withholds) the complete-read grant", () =
     };
   }
 
-  test("a note that fits the per-turn budget renders whole, and settlement may rewrite it", () => {
+  function grantRows(writer: string, entityType: "turn" | "session"): number {
+    return (
+      db
+        .query<{ count: number }, [string, string]>(
+          "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ? AND entity_type = ?",
+        )
+        .get(writer, entityType)?.count ?? 0
+    );
+  }
+
+  test("the build records the SESSION grant and not one turn grant or completeness fact", () => {
     const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1, {
-      note: { title: "a short title", content: "A short conclusion." },
-    });
+    seedTurn(sessionDbId, 1, { note: { title: "a short title", content: "A short conclusion." } });
+    seedTurn(sessionDbId, 2, { note: { title: "another", content: "More." } });
+    const job = claimWindow(sessionDbId, 2, 2);
+    const writer = claimWriterId(job.id, job.claimGeneration);
+
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    // The window and its lookback are in SCOPE…
+    expect(context.reviewableTurnIds.size).toBe(2);
+    // …and neither is READ. Scope and licence came apart.
+    expect(grantRows(writer, "turn")).toBe(0);
+    expect(grantRows(writer, "session")).toBe(1);
+    const completeness = db
+      .query<{ count: number }, [string]>(
+        "SELECT COUNT(*) AS count FROM write_gate_field_completeness WHERE writer = ?",
+      )
+      .get(writer)?.count;
+    expect(completeness).toBe(0);
+  });
+
+  /**
+   * A note the agent's own `recall` actually SHOWS — i.e. promoted onto the
+   * turn row, which is where an era-turn's agent-written note lives
+   * (`promoteTurnFromNote`). The distinction is load-bearing for the two
+   * tests below: recall renders the TURN ROW's title/content, so a note that
+   * exists only in `shadow_notes` is not what a completeness fact from a
+   * recall is a fact about.
+   */
+  function seedPromotedNote(turnId: number, title: string, content: string): void {
+    db.query<unknown, [string, string, number]>(
+      "UPDATE turns SET title = ?, content = ? WHERE id = ?",
+    ).run(title, content, turnId);
+    upsertShadowNote(db, { turnId, title, content, nowEpoch: NOW - 900 });
+  }
+
+  test("a whole-field rewrite over another writer's text is refused until the agent recalls the turn itself", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    seedPromotedNote(t1, "a short title", "A short conclusion.");
     // Another writer owns the field — without a foreign stamp the gate admits
-    // on rule 3 and never consults completeness at all.
+    // on rule 3 and never consults a grant at all.
     stampField(db, "turn", t1, "content", sessionWriterId(sessionDbId), NOW - 900);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const { facade } = settleContextFor(sessionDbId, job);
+    const write = {
+      turn: `S${sessionDbId}/T1`,
+      content: "In hindsight: what this turn actually settled.",
+      mode: { content: "write" as const },
+    };
+
+    const refused = evaluateSettlementTurnWrite(db, facade, write, NOW + 1, { apply: true });
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.message).toContain("has not been read this session");
+
+    // THE AGENT'S OWN READ — the same call its `recall` tool makes, under the
+    // same claim identity the facade checks against.
+    recallMemory(db, {
+      id: `S${sessionDbId}/T1`,
+      turn: 4_000,
+      readerId: claimWriterId(job.id, job.claimGeneration),
+      now: () => NOW + 2,
+    });
+
+    const admitted = evaluateSettlementTurnWrite(db, facade, write, NOW + 3, { apply: true });
+    expect(admitted.ok).toBe(true);
+    expect(getShadowNote(db, t1)!.content).toBe(
+      "In hindsight: what this turn actually settled.",
+    );
+  });
+
+  test("a recall that TRUNCATED the field still refuses the whole-field rewrite, in the gate's own words", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    seedPromotedNote(
+      t1,
+      "a title",
+      Array.from({ length: 400 }, (_unused, i) => `sentence${i}`).join(" "),
+    );
+    stampField(db, "turn", t1, "content", sessionWriterId(sessionDbId), NOW - 900);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const { facade } = settleContextFor(sessionDbId, job);
+    const writer = claimWriterId(job.id, job.claimGeneration);
+    const write = {
+      turn: `S${sessionDbId}/T1`,
+      content: "a whole new content, over text I never saw whole",
+      mode: { content: "write" as const },
+    };
+
+    // A read at the DEFAULT per-item budget: it grants the turn, but cuts the
+    // body — so the grant exists and the completeness fact says `false`.
+    recallMemory(db, { id: `S${sessionDbId}/T1`, readerId: writer, now: () => NOW + 1 });
+    const refused = evaluateSettlementTurnWrite(db, facade, write, NOW + 2, { apply: true });
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.message).toContain("was not delivered in full");
+
+    // Step 0's own remedy: re-read with a bigger `turn` budget, then write.
+    recallMemory(db, { id: `S${sessionDbId}/T1`, turn: 50_000, readerId: writer, now: () => NOW + 3 });
+    expect(evaluateSettlementTurnWrite(db, facade, write, NOW + 4, { apply: true }).ok).toBe(true);
+  });
+
+  test("the session narrative still writes — its grant is the one the build keeps", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    // Another writer owns the session's content, so the gate must consult a
+    // grant rather than admitting on the never-written rule.
+    stampField(db, "session", sessionDbId, "content", sessionWriterId(sessionDbId), NOW - 900);
     const job = claimWindow(sessionDbId, 1, 1);
     const { facade } = settleContextFor(sessionDbId, job);
 
@@ -425,8 +572,8 @@ describe("the context render earns (or withholds) the complete-read grant", () =
       db,
       facade,
       {
-        turn: `S${sessionDbId}/T1`,
-        content: "In hindsight: what this turn actually settled.",
+        session: `S${sessionDbId}`,
+        content: "This window: the pull turn landed.",
         mode: { content: "write" },
       },
       NOW + 1,
@@ -434,40 +581,6 @@ describe("the context render earns (or withholds) the complete-read grant", () =
     );
 
     expect(result.ok).toBe(true);
-    expect(getShadowNote(db, t1)!.content).toBe(
-      "In hindsight: what this turn actually settled.",
-    );
-  });
-
-  test("a note the render had to cut short refuses the whole-field rewrite, in the gate's own words", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1, {
-      note: {
-        title: "a title",
-        // Far past the per-item token budget the settlement prompt renders
-        // turns at, so `formatTurnCompact` cuts the body and records
-        // `complete: false` for content.
-        content: Array.from({ length: 400 }, (_unused, i) => `sentence${i}`).join(" "),
-      },
-    });
-    stampField(db, "turn", t1, "content", sessionWriterId(sessionDbId), NOW - 900);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const { facade } = settleContextFor(sessionDbId, job);
-
-    const result = evaluateSettlementTurnWrite(
-      db,
-      facade,
-      {
-        turn: `S${sessionDbId}/T1`,
-        content: "a whole new content, over text I never saw whole",
-        mode: { content: "write" },
-      },
-      NOW + 1,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain("was not delivered in full");
   });
 });
 
@@ -813,9 +926,21 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const secondJob = claimWindow(fixture.sessionDbId, 5, 8);
 
     const secondOutcome = await dispatchWith(
-      queryThatStages((engine) => {
+      queryThatStages((engine, request) => {
         // T1's tag turned out wrong — corrected now that its real scale is
-        // visible.
+        // visible. Tag-mandate ticket 06: the FIRST window's claim wrote
+        // those fields, so this run is a different writer and must earn its
+        // own grant — the prompt's Step-0 coverage pass, here as the one
+        // `recall` the correction depends on. Without it the write is
+        // refused with "has not been read this session", which is the pull
+        // architecture working, not a regression.
+        recallMemory(db, {
+          id: "S1/T1",
+          filter: { fields: ["metadata", "content", "relations"] },
+          turn: 4_000,
+          readerId: claimWriterId(request.jobId, request.claimGeneration),
+          now: () => NOW,
+        });
         engine.writeNote({
           turn: "S1/T1",
           type: ["design"],

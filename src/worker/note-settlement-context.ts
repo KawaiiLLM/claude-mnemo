@@ -3,24 +3,15 @@ import type { Database } from "bun:sqlite";
 import type { NoteSettlementJob } from "../db/note-settlement";
 import { listAttachedSegments } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
-import { getShadowNote, type ShadowNoteRecord } from "../db/shadow-notes";
-import { getTurnsForSession } from "../db/turns";
+import { getTurnById, getTurnsForSession } from "../db/turns";
 import {
   claimWriterId,
-  recordFieldCompleteness,
-  recordReadGrants,
+  recordReadGrant,
   snapshotWriteGateSequence,
-  type FieldCompletenessEntry,
-  type ReadGrantEntry,
 } from "../db/write-gate";
 import { renderSessionMilestoneInjection } from "../hooks/milestone-injection";
 import { formatTurnAddress } from "../hooks/note-reminder";
-import { buildCollapsedTurnsForSession, recallMemory } from "../mcp/recall";
-import {
-  createTruncationSignal,
-  formatTurnCompact,
-  type FormattedTurn,
-} from "../mcp/format";
+import { recallMemory } from "../mcp/recall";
 
 /**
  * Settlement context assembly (ownership-and-note-cadence spec, ticket 05).
@@ -62,6 +53,31 @@ import {
  * the caller and stated in the prompt's own header), not a prompt-side
  * rendering boundary. Lookback size now SCALES with the window: it defaults
  * to the window's own turn count rather than a fixed constant.
+ *
+ * TAG-MANDATE TICKET 06'S PULL TURN (spec "Settlement surface", ruling
+ * [S15069/T1452]): this module no longer builds a RENDERING of anything but
+ * the session narrative. Gone with the prompt's `## Turns` section:
+ * `buildCollapsedTurnsForSession` + `formatTurnCompact` over every window and
+ * lookback turn, the per-turn shadow-note read that fed it, and — the part
+ * that is a CONTRACT change rather than a saving — the read grants and
+ * field-completeness facts that render used to record.
+ *
+ * Why the grants had to go with it: "rendering IS authorization" was a rule
+ * about a render the AGENT could see. Under pull the agent reads through its
+ * own `recall` calls, which record grants at the identical seam under the
+ * identical `claimWriterId` identity, so a grant left behind here would
+ * license a whole-field overwrite of text this run never actually looked at
+ * — precisely the failure `requireCompleteRead` exists to prevent. The
+ * session-summary render is the ONE survivor, and it is deliberately narrowed
+ * (`readerId: null` plus one explicit grant below) so that it licenses the
+ * session narrative it actually shows in full and NOTHING else: left
+ * unnarrowed, a 200K-budget `recallMemory("S<n>")` records a
+ * `complete: true` fact for every turn row it lists, which is the same
+ * unearned licence by another route.
+ *
+ * `NoteSettlementWindowTurn` keeps only what the remaining readers need — the
+ * writable-set address list (`resolveSettlementWritableSet`), the dispatch's
+ * "is this window empty" check, and `reviewableTurnIds`.
  */
 
 export interface NoteSettlementWindowTurn {
@@ -70,26 +86,6 @@ export interface NoteSettlementWindowTurn {
   promptNumber: number;
   /** `S<session>/T<prompt>` — the only address the model ever sees. */
   ref: string;
-  note: ShadowNoteRecord | null;
-  /**
-   * The turn as RECALL renders it — same builder, same renderer, one
-   * one-line-plus-desc shape whether this turn is lookback or window
-   * (ticket 04: the two are rendered identically).
-   *
-   * When the turn has a note, the note's own title and content are what that
-   * view renders: for an agent-written note on an era turn they are already
-   * the turn record's title/content (`promoteTurnFromNote`), and for a note
-   * only `shadow_notes` carries — a reconstruction an earlier settlement pass
-   * wrote, which is deliberately never promoted — substituting them is what
-   * keeps that note visible without a second renderer to show it in.
-   */
-  collapsedRendering: string;
-  createdAtEpoch: number;
-  toolCallCount: number | null;
-  filesModified: string[];
-  wasRolledBack: boolean;
-  /** Seconds since the previous window turn — the silence signal. */
-  gapSeconds: number | null;
 }
 
 /**
@@ -111,10 +107,11 @@ export interface NoteSettlementContext {
   windowTurns: NoteSettlementWindowTurn[];
   /**
    * The lookback turns immediately preceding the window, same shape as
-   * `windowTurns` and rendered exactly the same way (ticket 04, [S15069/T963]:
-   * "统一渲染、统一可纠" — no difference for the model between a prior turn
-   * and a window turn). Count defaults to the window's own size; see
-   * `BuildNoteSettlementContextOptions.priorTurns`.
+   * `windowTurns` and equally writable (ticket 04, [S15069/T963]: "统一渲染、
+   * 统一可纠" — no difference for the model between a prior turn and a window
+   * turn; tag-mandate ticket 06 kept the equality and dropped the rendering
+   * both halves of it used to mean). Count defaults to the window's own size;
+   * see `BuildNoteSettlementContextOptions.priorTurns`.
    */
   priorTurns: NoteSettlementWindowTurn[];
   /**
@@ -131,8 +128,9 @@ export interface NoteSettlementContext {
   segmentRoster: NoteSettlementSegmentRosterEntry[];
   milestoneRendering: string;
   /**
-   * Turn ids THIS prompt put in front of the model — window plus the rendered
-   * lookback — and therefore the only turns its review may revise.
+   * Window plus declared lookback — the BASE of this run's writable set
+   * (`db/note-settlement.ts`'s `computeSettlementWritableTurnIds` closes it
+   * over in-scope edges' external endpoints on top of this).
    *
    * The session-lifetime exposure ledger is deliberately not the gate here.
    * That ledger answers "was this id ever legal to cite", which is right for a
@@ -140,6 +138,12 @@ export interface NoteSettlementContext {
    * verdict is destructive — it overwrites type and tags — so an
    * address the model could only have produced from its own imagination must
    * not resolve onto a real row from some earlier window.
+   *
+   * Tag-mandate ticket 06: the name is now the only trace of "rendered".
+   * Nothing here is rendered any more, and the scope this set defines is a
+   * WRITE scope — reading is unrestricted (Block A: "Turns outside the set may
+   * be read freely whenever they help"), so a turn's absence from it bounds
+   * what may be written, never what may be seen.
    */
   reviewableTurnIds: Set<number>;
   /**
@@ -216,74 +220,17 @@ export function buildNoteSettlementContext(
   // filters above, strictly less than every window record's.
   const combinedRecords = [...priorRecords, ...windowRecords];
 
-  const notes = new Map<number, ShadowNoteRecord | null>();
-  for (const turn of combinedRecords) {
-    notes.set(turn.id, getShadowNote(db, turn.id));
-  }
-
-  // ONE collapsed build for the whole session: recall's own builder, feeding
-  // both groups below. Two calls would be two reads of the same rows at two
-  // instants — and, more to the point, ticket 04 unifies the two groups into
-  // one rendering, so there is only one function left to feed.
-  const collapsedTurns = new Map<number, FormattedTurn>(
-    buildCollapsedTurnsForSession(db, job.sessionId).map((turn) => [
-      turn.promptNumber,
-      turn,
-    ]),
-  );
-
-  // ONE pass over prior turns THEN window turns, so the gap signal carries
-  // across the boundary between them (ticket 04: no rendering distinction
-  // between the two groups, so the silence signal should not reset at the
-  // boundary either) — then split back into the two exposed fields, which
-  // remain separate ONLY because `windowTurns` still answers "does this job's
-  // own window have anything to settle" for the dispatch/facade layer.
-  // Ticket 04 (edge-mechanism-revision D6, "同门同要求"): the render's own
-  // per-field completeness, collected here and flushed at the bottom of this
-  // function. Settlement writes turn prose again, under the SAME gate the main
-  // agent obeys — including `requireCompleteRead`, which asks whether the read
-  // that authorized the write showed the field WHOLE. Ticket 07 recorded this
-  // as a deliberate gap ("settlement's context render never records field
-  // completeness, so opting in today would reject every correction of a
-  // non-empty field"); this closes it at the render, which is the only place
-  // that knows what it actually delivered. `formatTurnCompact` -> `renderNode`
-  // already pushes one entry per gated field per turn, `complete` = whether
-  // this node's body survived the per-item token budget uncut, so a note that
-  // fits renders whole and is rewritable, and one that overruns the budget is
-  // refused a whole-field `write` and told to use `edit` — exactly what the
-  // main agent gets from a truncated recall.
-  const renderSignal = createTruncationSignal();
-  const renderedTurns: NoteSettlementWindowTurn[] = [];
-  let previousCreatedAt: number | null = null;
-  for (const turn of combinedRecords) {
-    const note = notes.get(turn.id) ?? null;
-    const collapsedView = collapsedTurns.get(turn.promptNumber);
-
-    renderedTurns.push({
-      turnId: turn.id,
-      sessionId: turn.sessionId,
-      promptNumber: turn.promptNumber,
-      ref: formatTurnAddress(turn),
-      note,
-      collapsedRendering: collapsedView
-        ? formatTurnCompact(
-            note
-              ? { ...collapsedView, title: note.title, content: note.content }
-              : collapsedView,
-            { sessionId: job.sessionId, signal: renderSignal },
-          )
-        : "",
-      createdAtEpoch: turn.createdAtEpoch,
-      toolCallCount: turn.toolCallCount,
-      filesModified: turn.filesModified,
-      wasRolledBack: turn.wasRolledBack,
-      gapSeconds:
-        previousCreatedAt === null
-          ? null
-          : Math.max(0, turn.createdAtEpoch - previousCreatedAt),
-    });
-    previousCreatedAt = turn.createdAtEpoch;
-  }
+  // Tag-mandate ticket 06: an ADDRESS list, nothing more. The collapsed
+  // build, the per-turn shadow-note read, the truncation signal and the gap
+  // computation all retired with the `## Turns` section they existed to
+  // render — a settlement context is a scope declaration now, and every fact
+  // about a turn reaches the agent through its own `recall`.
+  const renderedTurns: NoteSettlementWindowTurn[] = combinedRecords.map((turn) => ({
+    turnId: turn.id,
+    sessionId: turn.sessionId,
+    promptNumber: turn.promptNumber,
+    ref: formatTurnAddress(turn),
+  }));
 
   const priorTurns = renderedTurns.filter(
     (turn) => turn.promptNumber < job.windowStart,
@@ -320,85 +267,113 @@ export function buildNoteSettlementContext(
     // per-field char cut underneath) — every field-level char cap is gone
     // now, so `turn` (the one surviving token budget, applied uniformly to
     // every rendered node kind — see `format.ts`'s `renderNode`) is the only
-    // knife left to raise. `readerId` doubles as the read-grant recording
-    // seam: this render is what licenses the facade's gated session write
-    // below.
+    // knife left to raise.
+    //
+    // `readerId: null` (tag-mandate ticket 06) — deliberately NOT the claim
+    // writer. This render's licence is recorded by hand below, for the SESSION
+    // entity alone. Handing recall the writer id instead would additionally
+    // grant, and mark `complete: true`, every TURN row this session card
+    // lists, at the 200K budget: an unearned whole-field write licence over
+    // turns this run has not read, which is exactly the push-channel grant
+    // this ticket retires. Recall's own seam skips session entities
+    // (read-write-contract ticket 01: no main-agent session writer exists), so
+    // nothing is lost by silencing it here.
     sessionStateRendering: recallMemory(db, {
       id: `S${job.sessionId}`,
       turn: SETTLEMENT_FULL_RENDER_BUDGET,
-      readerId: claimWriterId(job.id, job.claimGeneration),
+      readerId: null,
       now: () => options.nowEpoch,
     }),
     reviewableTurnIds: new Set(renderedTurns.map((turn) => turn.turnId)),
     builtAtEpoch: options.nowEpoch,
   };
 
-  // Ticket 05 (read-write-contract spec: "结算 context 构建记录读授权 for
-  // EVERY rendered turn (prior + window uniformly)... under the claim writer
-  // identity — the recording seam from ticket 01"). Rendering IS
-  // authorization (spec: "渲染即授权"), the same rule every other render path
-  // (recall/timeline) already follows via `recordReadGrants` — this is
-  // settlement's own render pass calling the identical seam, under its own
-  // per-claim writer identity rather than a session's. Recorded for every
-  // turn THIS prompt showed (`renderedTurns` = priorTurns + windowTurns,
-  // ticket 04's unified rendering), one batch, one sequence snapshot — the
-  // write gate's own `checkFieldGate` is what a settlement write later
-  // consumes this grant against (worker/note-settlement-turn-facade.ts).
-  {
-    const writer = claimWriterId(job.id, job.claimGeneration);
-    const entries: ReadGrantEntry[] = renderedTurns.map((turn) => ({
-      entityType: "turn",
-      entityId: turn.turnId,
-    }));
-    // The SESSION entity too (the stitch): the full-document summary render
-    // above is what licenses the gated narrative write — recorded here
-    // explicitly because recall's own seam deliberately skips session
-    // entities (ticket 01's scoping: no main-agent session writer exists;
-    // settlement is the one writer, and this is its render pass).
-    entries.push({ entityType: "session", entityId: job.sessionId });
-    recordReadGrants(db, writer, entries, options.nowEpoch, sequence);
-
-    // Ticket 04: the completeness half of the same render pass, under the same
-    // writer and the same pre-render sequence. Two sources, because the prompt
-    // renders a turn from two places:
-    //
-    //   - `renderSignal`, what `formatTurnCompact` delivered for title/content
-    //     AND, since ticket 12 (edge-mechanism-revision spec) put `metadata`
-    //     into `DEFAULT_TURN_RENDER_FIELDS` — the same default set
-    //     `formatTurnCompact` renders at — `type`/`tags` too: the compact
-    //     render now shows the metadata line they ride on, so it earns a
-    //     genuine completeness entry for both the same way title/content
-    //     already did. Ticket 12 stops here on purpose (visibility only): the
-    //     write gate's `requireCompleteRead` is deliberately NOT extended to
-    //     consume this for settlement's own type/tags writes yet — that stays
-    //     the facade's call for a later ticket;
-    //   - `insight`, which recall's collapsed view has no slot for and the
-    //     PROMPT therefore renders itself, in full and never truncated
-    //     (`renderWindowTurn`, worker/note-settlement-prompt.ts). Recorded
-    //     complete only when there is an insight to show, so a field this pass
-    //     never put on screen never counts as read.
-    //
-    // ORDER IS LOAD-BEARING: the session-summary render above
-    // (`recallMemory`, with `readerId` set) flushes ITS own completeness for
-    // every turn row it lists, at the sole-writer 200K budget — which would
-    // otherwise tell the gate that every turn's content was seen whole, even
-    // the ones the per-turn render below cut at 150 tokens. `recordFieldCompleteness`
-    // is last-wins, and this call runs after it, so what the SETTLEMENT
-    // rendering actually delivered is the fact that stands. Mutation-checked:
-    // neutering this call lets a truncated note be whole-overwritten.
-    const completeness: FieldCompletenessEntry[] = [
-      ...(renderSignal.fieldCompleteness ?? []),
-      ...renderedTurns
-        .filter((turn) => (turn.note?.insight ?? "").trim() !== "")
-        .map((turn) => ({
-          entityType: "turn" as const,
-          entityId: turn.turnId,
-          field: "insight",
-          complete: true,
-        })),
-    ];
-    recordFieldCompleteness(db, writer, completeness, options.nowEpoch, sequence);
-  }
+  // THE ONE SURVIVING GRANT (tag-mandate ticket 06). Ticket 05's
+  // "记录读授权 for EVERY rendered turn" batch is GONE with the rendering it
+  // licensed, and so is ticket 04's per-field completeness flush: under pull
+  // this build shows the agent no turn, so it may license no turn write.
+  // What remains is the SESSION entity, whose narrative this build genuinely
+  // does render in full, at the sole-writer budget, straight into the prompt
+  // — duty 3's `note(session=…)` write consumes exactly this grant
+  // (`worker/note-settlement-turn-facade.ts`, `checkFieldGate` on
+  // entity_type='session'), and nothing else in the system records it,
+  // because recall's own seam deliberately skips session entities.
+  //
+  // No completeness fact accompanies it, and none is needed: the session
+  // write path calls `checkFieldGate` WITHOUT `requireCompleteRead`, so the
+  // grant alone is the whole licence. Adding one would be inventing a
+  // requirement no caller checks.
+  //
+  // MUTATION-CHECKED, both directions: deleting this call refuses every
+  // session-narrative write with "has not been read this session"; widening
+  // it back to the turn ids re-opens the unearned-overwrite hole the pull
+  // turn closed.
+  recordReadGrant(
+    db,
+    claimWriterId(job.id, job.claimGeneration),
+    "session",
+    job.sessionId,
+    options.nowEpoch,
+    sequence,
+  );
 
   return context;
+}
+
+/**
+ * The IMMUTABLE WRITABLE SET, resolved from turn ids to the ADDRESSES the
+ * prompt declares and every write call takes (tag-mandate ticket 06).
+ *
+ * Two groups, because the prompt labels two: this job's own WINDOW, and the
+ * declared LOOKBACK — everything else the set holds. That remainder is the
+ * rendered-lookback turns plus `computeSettlementWritableTurnIds`' own
+ * deadlock-guard closure (the external endpoints of in-scope anchored edges),
+ * deliberately NOT split further: from the agent's side the two are one
+ * "equally writable" region, and a third label would invite the reading that
+ * one of them is somehow less writable than the other.
+ *
+ * Closure ids are the only ones needing a database lookup — they are, by
+ * definition, turns this context never listed. A row that has vanished
+ * between the closure computation and this call degrades to `turn #<id>`
+ * rather than dropping out of the printed set: a set that silently printed
+ * fewer addresses than the gate enforces would be the exact fork the spec's
+ * "immutable and declared" clause forbids.
+ */
+export interface SettlementWritableSet {
+  /** This job's own window turns, ascending by prompt number. */
+  window: string[];
+  /** Everything else in the writable set, ascending by [session, prompt]. */
+  lookback: string[];
+}
+
+export function resolveSettlementWritableSet(
+  db: Database,
+  context: NoteSettlementContext,
+  writableTurnIds: ReadonlySet<number>,
+): SettlementWritableSet {
+  const windowIds = new Set(context.windowTurns.map((turn) => turn.turnId));
+  const known = new Map<number, NoteSettlementWindowTurn>(
+    [...context.priorTurns, ...context.windowTurns].map((turn) => [turn.turnId, turn]),
+  );
+
+  const window = context.windowTurns
+    .filter((turn) => writableTurnIds.has(turn.turnId))
+    .map((turn) => turn.ref);
+
+  const lookback = [...writableTurnIds]
+    .filter((id) => !windowIds.has(id))
+    .map((id) => {
+      const rendered = known.get(id);
+      if (rendered) {
+        return { sessionId: rendered.sessionId, promptNumber: rendered.promptNumber, ref: rendered.ref };
+      }
+      const turn = getTurnById(db, id);
+      return turn
+        ? { sessionId: turn.sessionId, promptNumber: turn.promptNumber, ref: formatTurnAddress(turn) }
+        : { sessionId: Number.MAX_SAFE_INTEGER, promptNumber: id, ref: `turn #${id}` };
+    })
+    .sort((a, b) => a.sessionId - b.sessionId || a.promptNumber - b.promptNumber)
+    .map((entry) => entry.ref);
+
+  return { window, lookback };
 }

@@ -1,8 +1,7 @@
 import { renderMemoryRubricBlock } from "../shared/memory-rubric";
-import { EDGE_RELATIONS, RELATION_FIELD_NAME } from "../shared/turn-phase";
 import type {
   NoteSettlementContext,
-  NoteSettlementWindowTurn,
+  SettlementWritableSet,
 } from "./note-settlement-context";
 
 /**
@@ -126,9 +125,48 @@ import type {
  * (`src/shared/type-vocabulary.ts`'s `MEMORY_TYPES`); this duty NAMES that
  * vocabulary as the conformance test without restating it — the word list
  * and its meanings stay the Rubric's own, one copy, pointer discipline
- * intact. Edges carry no analogous debt: `EDGE_RELATIONS` already drives
- * every relation word this prompt offers, so a retired relation word is
- * never among the call shapes offered here in the first place.
+ * intact. Edges carry no analogous debt: the relation words this prompt
+ * offers are exactly `EDGE_RELATIONS`' own, so a retired relation word is
+ * never among the call shapes offered here in the first place. (Tag-mandate
+ * ticket 06: the edges bullet states that word list as authored PROSE now
+ * rather than deriving it from the constant — see the pull-turn note below,
+ * and the standing risk it names.)
+ *
+ * TAG-MANDATE TICKET 06'S PULL TURN (spec "Settlement surface", ruling
+ * [S15069/T1452]): the PUSHED window rendering is GONE. `renderWindowTurn`,
+ * the `## Turns` section it fed, and every "shown below" / "the rendering
+ * below" phrase that pointed at it are deleted together. What replaces them
+ * is a declaration, not a payload: the IMMUTABLE WRITABLE SET (ticket 05's
+ * `computeSettlementWritableTurnIds`, resolved to addresses by
+ * `resolveSettlementWritableSet`) printed as two labelled address lists, and
+ * a Step-0 COVERAGE contract telling the agent to page that whole set through
+ * its own `recall`. Three consequences, all of them simplifications:
+ *
+ *   - READ-GRANT LICENSING UNIFIES. The context build no longer records a
+ *     grant (or a completeness fact) for a turn merely because this prompt
+ *     rendered it — that channel retired with the rendering
+ *     (`note-settlement-context.ts`). The agent's OWN `recall` calls license
+ *     its writes now, through the same `recordReadGrants`/
+ *     `recordFieldCompleteness` seam every other reader uses and under the
+ *     same `claimWriterId` identity the write facade checks against. One
+ *     grant rule for every writer, no settlement carve-out.
+ *   - `timeline` LICENSES NOTHING. It navigates; the settlement SDK server
+ *     registers it with no reader identity at all, which is exactly the
+ *     property Step 0's own sentence states.
+ *   - THE PROMPT IS A CONTRACT, NOT A CORPUS. What is left is the rubric, the
+ *     duties, the writable set, the roster pointer and the commit contract.
+ *     The session summary survives (duty 3 edits it, and settlement is its
+ *     sole writer); segment cards and turn content are recalled on demand.
+ *
+ * The three prose blocks this ticket introduced — the Procedure's scope /
+ * Step-0 framing, the duties' edges bullet, and the commit paragraph's gate
+ * sentence — were authored by the main agent personally (user ruling T1452,
+ * `.scratch/tag-mandate/issues/06-prompt-text.md`) and are integrated
+ * VERBATIM; only their leading indentation is adjusted, to seat them in the
+ * list they replace. Do not paraphrase them. The one thing that authorship
+ * costs: the edges bullet's relation-word list and its `retract<Relation>`
+ * mirrors are literal prose there, so a change to `EDGE_RELATIONS` no longer
+ * reaches this bullet for free — it has to be re-authored.
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -139,42 +177,50 @@ export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
   "JSON or any other structured payload.";
 
 /**
- * A window turn: recall's collapsed view of it, plus the facts settlement
- * needs beyond that view.
- *
- * The annotation line RESTATES the address in `[S<session>/T<prompt>]` form
- * on purpose. Recall labels a turn `[S15][T7]`, and this window's turns are
- * the ones the model has to address in every `remember`/`note` call, under a
- * schema that takes exactly one address shape. Keeping the qualified form in
- * front of it costs one bracket pair per turn and removes the only
- * behavioural risk of routing this section through recall's renderer.
+ * How many addresses share one printed line. The writable set is a
+ * DECLARATION the agent has to page through, not prose — a 50-turn window
+ * would be 50 lines of one address each, which reads as a wall and costs
+ * bytes for nothing. Ten per line keeps a 50-turn set at five lines and still
+ * lets a reader scan for a specific address.
  */
-function renderWindowTurn(turn: NoteSettlementWindowTurn): string {
-  const lines: string[] = [];
-  if (turn.collapsedRendering) {
-    lines.push(turn.collapsedRendering);
-  }
-  const facts = [
-    `[${turn.ref}]`,
-    turn.filesModified.length > 0
-      ? `files_modified=${turn.filesModified.slice(0, 6).join(",")}`
-      : null,
-    turn.gapSeconds === null ? null : `gap=${turn.gapSeconds}s`,
-    turn.wasRolledBack ? "rolled_back" : null,
-  ].filter((fact): fact is string => fact !== null);
-  lines.push(`    ${facts.join(" ")}`);
+const WRITABLE_SET_ADDRESSES_PER_LINE = 10;
 
-  if (turn.note) {
-    // Recall's view carries the note's title and content; `insight` and the
-    // note's ORIGIN are settlement-only facts it has no slot for.
-    if (turn.note.insight) {
-      lines.push(`    insight: ${turn.note.insight}`);
-    }
-    if (turn.note.writerOrigin === "settlement") {
-      lines.push("    (note reconstructed by an earlier settlement pass)");
-    }
+function renderAddressList(addresses: readonly string[], indent: string): string {
+  if (addresses.length === 0) {
+    return `${indent}(none)`;
   }
-  return lines.join("\n");
+  const rows: string[] = [];
+  for (
+    let offset = 0;
+    offset < addresses.length;
+    offset += WRITABLE_SET_ADDRESSES_PER_LINE
+  ) {
+    rows.push(
+      indent + addresses.slice(offset, offset + WRITABLE_SET_ADDRESSES_PER_LINE).join(", "),
+    );
+  }
+  return rows.join("\n");
+}
+
+/**
+ * The IMMUTABLE WRITABLE SET, printed (tag-mandate ticket 06; spec: "the
+ * writable set is IMMUTABLE and declared"). Two visibly labelled groups, in
+ * the order the agent works them: this job's own window first, then the
+ * declared lookback — the rendered lookback plus the deadlock-guard closure,
+ * which is one undifferentiated "also writable" region from the agent's side
+ * (whether an address got there by lookback or by being an in-scope edge's
+ * external endpoint changes nothing it may do with it).
+ *
+ * ADDRESSES, never row ids: this list is what every `note`/`remember` call
+ * addresses against, and a `turns.id` is not a thing the model can type.
+ */
+function renderWritableSet(set: SettlementWritableSet): string {
+  return [
+    `  window — settle these (${set.window.length}):`,
+    renderAddressList(set.window, "    "),
+    `  declared lookback — equally writable (${set.lookback.length}):`,
+    renderAddressList(set.lookback, "    "),
+  ].join("\n");
 }
 
 /**
@@ -192,13 +238,18 @@ function renderSegmentRoster(context: NoteSettlementContext): string {
     .join("\n");
 }
 
+/**
+ * `writableSet` is REQUIRED (tag-mandate ticket 06): under pull it is the only
+ * scope statement the agent gets, so a caller that forgot it would render a
+ * prompt with no scope at all rather than one that merely reads oddly. The
+ * dispatch resolves it from the same `computeSettlementWritableTurnIds` value
+ * it hands the write facade and the commit gate — one set, three readers.
+ */
 export function renderNoteSettlementPrompt(
   context: NoteSettlementContext,
+  writableSet: SettlementWritableSet,
 ): string {
   const { job } = context;
-  // Chronological: `priorTurns` is entirely lower prompt numbers than
-  // `windowTurns` by construction (see `buildNoteSettlementContext`).
-  const allTurns = [...context.priorTurns, ...context.windowTurns];
 
   const sections: string[] = [
     `# Settlement window S${job.sessionId}/T${job.windowStart}-T${job.windowEnd} (trigger: ${job.triggerType})`,
@@ -215,9 +266,9 @@ export function renderNoteSettlementPrompt(
     "## Your task",
     "",
     "You are the HINDSIGHT pass over this window. Check or rebuild the notes",
-    "and the edges of the turns shown below: you can see how each turn's",
-    "claims actually turned out, which decision a later turn overturned and",
-    "which arc a turn belongs to — none of which the writing side could know",
+    "and the edges of the turns in your writable set: you can see how each",
+    "turn's claims actually turned out, which decision a later turn overturned",
+    "and which arc a turn belongs to — none of which the writing side could know",
     "at the time. A backfill window carries turns nobody has settled before,",
     "so treat it as a rebuild FROM ZERO rather than a review of existing",
     "work; an ordinary window is mostly already written, and there the same",
@@ -228,14 +279,39 @@ export function renderNoteSettlementPrompt(
     "You hold the main agent's own write surface, in hindsight: the same",
     "`note` and `remember` tools, the same field vocabulary, the same `mode`",
     "vocabulary, the same Memory Rubric above, plus one tool it does not have",
-    "(`commit`). Every turn rendered below is yours to correct — its title,",
-    "content and insight, its type and tags, its segment membership and its",
-    "edges in both directions (declare one, retract a false one). Two limits,",
-    "both mechanical: a turn this prompt did not show you is out of reach, and",
-    "a field another writer changed after this prompt was built is refused",
-    "with a message saying so — re-read it with `recall` and decide again.",
+    "(`commit`). Every turn in your writable set is yours to correct — its",
+    "title, content and insight, its type and tags, its segment membership and",
+    "its edges in both directions (declare one, retract a false one). Two",
+    "limits, both mechanical: a turn outside that set is out of reach, and a",
+    "field another writer changed since you read it is refused with a message",
+    "saying so — re-read it with `recall` and decide again.",
     "",
     "## Procedure",
+    "",
+    // ------------------------------------------------------------------
+    // BLOCK A, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
+    // text.md). Replaces the window-rendering framing this section used to
+    // open with. Do not paraphrase; `{WRITABLE_SET}` is the one hole the
+    // plumbing fills.
+    // ------------------------------------------------------------------
+    "Your scope is the WRITABLE SET printed below: the window's turns plus the",
+    "declared lookback. It is immutable — reading never widens it, and every",
+    "write must land inside it; the gate refuses the rest and names why.",
+    "",
+    "STEP 0 — COVERAGE, before any judgment: page through EVERY turn of the",
+    "writable set with `recall` (ranges — `recall(id=\"S<s>/T<a>..T<b>\",",
+    "filter={fields:[\"metadata\",\"content\",\"relations\"]})`) until you have seen",
+    "each turn's type and tags, enough content to judge it, and its existing",
+    "relations. A truncated field is re-read with a bigger `turn` budget, never",
+    "skipped. `timeline` helps navigate; it substitutes for none of this",
+    "reading and licenses nothing. Reading is also your write license: a",
+    "whole-field `write` over another writer's text requires your own",
+    "untruncated read of that field. Turns outside the set may be read freely",
+    "whenever they help.",
+    "",
+    "WRITABLE SET:",
+    renderWritableSet(writableSet),
+    // ------------------------------------------------------------- end A --
     "",
     "Reconcile what is stored with what the window actually shows, in three",
     "moves: SUPPLY what is missing (a turn with no note, an arc with no",
@@ -297,9 +373,9 @@ export function renderNoteSettlementPrompt(
     "     `mode.<field>: \"write\"` (supply the finished text) or the edit form",
     "     `{ mode: \"edit\", oldString, newString }` to change one",
     "     exactly-matched span. A whole-field `write` over another writer's",
-    "     text is refused unless this prompt showed you that field in full —",
-    "     if the rendering below was cut short, use the edit form or re-read",
-    "     the turn with a bigger `turn` budget first.",
+    "     text is refused unless your OWN read delivered that field in full —",
+    "     if it came back cut short, use the edit form or recall the turn",
+    "     again with a bigger `turn` budget first.",
     "   - type/tags: `note` with `turn` plus `type` and/or `tags`. A field",
     "     that already holds something needs `mode.<field>: \"write\"` and the",
     "     FULL replacement set — the same tools, the same mode vocabulary the",
@@ -313,18 +389,61 @@ export function renderNoteSettlementPrompt(
     "     the roster first, though: joining an existing segment beats opening",
     "     a new one. Judge with the Memory Rubric's Segments section: correct a",
     "     DISPLAYED mismatch, leave a merely-uncertain case alone.",
-    `   - edges: \`note\`'s ${EDGE_RELATIONS.map((relation) => RELATION_FIELD_NAME[relation]).join("/")} fields, and`,
-    `     ${EDGE_RELATIONS.map((relation) => `retract${RELATION_FIELD_NAME[relation].charAt(0).toUpperCase()}${RELATION_FIELD_NAME[relation].slice(1)}`).join("/")}`,
-    "     to delete one. Same eight relations, same legality validator",
-    "     and same address form the main agent's own `note` uses; an edge",
-    "     needs no prose citation and no pre-existing link between the two",
-    "     turns — declare it on its own, on any two addresses shown below.",
-    "     One pair may carry several relations at once.",
-    "     Which relation, if any, is the Memory Rubric's own Relations checklist",
-    "     above; a structurally illegal call (wrong phase, an illegal",
-    "     self-citation) is rejected, naming what is missing. A retraction",
-    "     naming an edge this turn does not carry is rejected too, and",
-    "     deletes nothing.",
+    // ------------------------------------------------------------------
+    // BLOCK B, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
+    // text.md), re-indented by three spaces to sit in duty 2's own list.
+    // Replaces the derived-from-`EDGE_RELATIONS` edges bullet wholesale:
+    // the entry FORMS (bare vs `{turn, tags}`), the tag mandate and its
+    // subset invariant, and the seven-step lane procedure. Do not
+    // paraphrase.
+    // ------------------------------------------------------------------
+    "   - edges: `note`'s override/narrows/extends/consume/indexes/grounds/",
+    "     verifies/refutes fields. An entry is a bare address (\"S15069/T7\") —",
+    "     an UNTAGGED edge acting on the cited turn itself — or a tagged entry",
+    "     `{ \"turn\": \"S15069/T7\", \"tags\": [\"lane-tag\"] }` acting on the named",
+    "     LANE. extends/narrows accept ONLY the tagged form: continuation names",
+    "     its line. An edge's tags must already sit on BOTH endpoint turns' own",
+    "     tags — write the member turns' tags first, then the edge. The",
+    "     `retract<Relation>` mirrors delete one row each and still accept bare",
+    "     addresses (legacy rows stay deletable). One pair may carry several",
+    "     relations at once; a call carrying nothing but relations is valid.",
+    "     Work lanes in this order:",
+    "     1. THREADS from content. A run of two or more same-phase turns where",
+    "        one supplements or corrects another IS a lane — found from what the",
+    "        turns say and their explicit predecessor language, independently of",
+    "        the edge stock: a missing edge is work to add, never evidence the",
+    "        thread is absent. A turn that only records state or polls joins no",
+    "        lane; an ops turn that proposes, adopts or corrects a reusable",
+    "        proposition joins the lane of that proposition.",
+    "     2. NAME each thread with the smallest discriminating tag set, after",
+    "        the scope question: does this exact set name the SAME sub-result at",
+    "        both endpoints, one connected component, one phase? Reuse an",
+    "        existing noun only then; otherwise mint one. Never the segment's",
+    "        own tags. One exact set names one lane; a decision→delivery arc is",
+    "        TWO lanes, hinged by untagged cross-phase `grounds`.",
+    "     3. TAG the members (full-set rewrite, keeping their existing nouns),",
+    "        then wire the edges.",
+    "     4. THE WORD comes from the cited CLAIM: still fully valid and built",
+    "        upon = extends; partly withdrawn or re-scoped = narrows; replaced",
+    "        outright = override; merely used, same phase = consume; an evidence",
+    "        product cited from another phase takes `grounds`. Shared topic,",
+    "        adjacency, or preserving lane shape are never extends evidence —",
+    "        and a blocker satisfied by doing the work is completion (extends),",
+    "        not a correction of the blocking judgment (narrows).",
+    "     5. Keep each lane one source, one sink. Diamonds — parallel paths that",
+    "        re-merge — are fine; a fork the lane never re-joins is not: open a",
+    "        BRANCH instead, a proper-superset tag set rooted at the parent node.",
+    "     6. DECLARE convergence from content: explicit resolved/locked/converged",
+    "        language, a completed verification, a release, or downstream",
+    "        adoption closes a thread — its last node writes a TAGGED `indexes`",
+    "        citing the lane's surviving core. Work merely stopping stays OPEN,",
+    "        and the absence of an existing declaration is never evidence either",
+    "        way: producing the declaration is your job.",
+    "     7. REPAIR stock: an untagged extends/narrows row inside your writable",
+    "        set is illegal. Retag it into its lane when it really is",
+    "        continuation (member tags first), or retract it and rewrite with the",
+    "        word step 4 actually supports.",
+    // ------------------------------------------------------------- end B --
     "   - `type` and `tags` are the two fields that yield INDEPENDENTLY: if",
     "     another writer touched one of them since this dispatch started,",
     "     that one field is reported back to you unwritten while the other",
@@ -357,6 +476,19 @@ export function renderNoteSettlementPrompt(
     "   is still valid and marks the window durably COMPLETE. Skipping it",
     "   leaves your writes standing but the window itself gets retried later",
     "   — always call it, even after a window where you wrote nothing.",
+    // ------------------------------------------------------------------
+    // BLOCK C, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
+    // text.md), appended to the commit paragraph and re-indented by three
+    // spaces to stay inside duty 4. The commit GATE's own contract — the
+    // one fact a caller must hold at the moment of calling. Do not
+    // paraphrase.
+    // ------------------------------------------------------------------
+    "   `commit` is REFUSED while any ERROR `lane_check` reports anchors inside",
+    "   your writable set — the refusal lists exactly the rows to repair, and a",
+    "   refusal costs no attempt. Call `lane_check` early to see the list before",
+    "   you are done; its WARNINGS inform judgment and never block. Errors",
+    "   anchored outside your set belong to other windows and never block you.",
+    // ------------------------------------------------------------- end C --
     "",
     "## Segment roster (this session's attached segments — id/title only)",
     "",
@@ -370,13 +502,9 @@ export function renderNoteSettlementPrompt(
     "",
     context.milestoneRendering || "(no milestones)",
     "",
-    "## Turns (chronological — lookback context and this window's own turns, " +
-      "rendered identically; this window's own bounds are the S/T range in " +
-      "the header above, everything shown here is equally citable and " +
-      "correctable)",
-    "",
-    allTurns.length > 0 ? allTurns.map(renderWindowTurn).join("\n") : "(none)",
-    "",
+    // Tag-mandate ticket 06: the "## Turns" section that used to stand here —
+    // every writable turn rendered in full, the PUSH channel — is gone. The
+    // writable set above declares WHICH turns; `recall` delivers them.
     "## Output",
     "",
     "Make your `remember`/`note` tool calls as you decide them, throughout this " +

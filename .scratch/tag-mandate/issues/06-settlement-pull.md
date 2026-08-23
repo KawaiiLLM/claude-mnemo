@@ -24,7 +24,7 @@ completeness bar), 02 (the gate must hold the mandate the prompt
 teaches), 05 (the commit contract the prompt names). The prompt text file
 from the main agent is a fourth, human-side gate.
 
-**Status:** ready-for-agent (dispatch gated by the delegator)
+**Status:** done (mutation-verified: one-word paraphrase SURVIVED the sampled pins → durable verbatim guard added reading the authored file, then red; recall readerId neutered → 2 red; closure-only ids dropped from the printed set → 1 red. Accepted-with-note: the recall-handler readerId duplication carries a commented fold-back; the shadow-note blind-overwrite hole is a named follow-up)
 
 - [ ] Window rendering gone; prompt carries the writable set verbatim;
       grants unify (the special rendering-grant path deleted with tests

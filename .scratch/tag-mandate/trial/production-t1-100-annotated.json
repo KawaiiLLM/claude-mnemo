@@ -1,0 +1,1805 @@
+{
+ "note": "PRODUCTION state after the landed annotation (T1444 snapshot). Content excerpts live in window-t1-100.json (its tags column is STALE — use this file's tags).",
+ "turns": [
+  {
+   "prompt": 1,
+   "title": "Dispatched async research on SkillOpt and ByteDance EdgeBench papers",
+   "type": [
+    "delegate"
+   ],
+   "tags": [
+    "skillopt",
+    "edgebench"
+   ]
+  },
+  {
+   "prompt": 2,
+   "title": "SkillOpt research findings: Microsoft paper on skills as trainable params",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "skillopt"
+   ]
+  },
+  {
+   "prompt": 3,
+   "title": "EdgeBench research findings: ByteDance's post-deployment learning benchmark",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "edgebench",
+    "skillopt"
+   ]
+  },
+  {
+   "prompt": 4,
+   "title": null,
+   "type": [],
+   "tags": []
+  },
+  {
+   "prompt": 5,
+   "title": "Analyzed Kimi-K3 bilibili video: benchmarks and self-evolution game demo",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "kimi-k3",
+    "skillopt"
+   ]
+  },
+  {
+   "prompt": 6,
+   "title": "Explained self-evolution framework principle from Kimi-K3 video screenshot",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "skillopt"
+   ]
+  },
+  {
+   "prompt": 7,
+   "title": "Clarified EdgeBench is a measurement harness, not a self-evolution mechanism",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "edgebench"
+   ]
+  },
+  {
+   "prompt": 8,
+   "title": "Identified mnemo's missing verification loop for self-evolution",
+   "type": [
+    "discuss"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 9,
+   "title": "Refined verification-gap analysis: attribution/hit-tracking is the real bottleneck",
+   "type": [
+    "discuss"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 10,
+   "title": "Converged on minimal self-evolution plan: refutation-only rule notes",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 11,
+   "title": "Diary audit: reflections already rule-quality but undeduped and unread",
+   "type": [
+    "research",
+    "measure"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 12,
+   "title": "Resolved rule-injection strategy: full-inject small corpus, graduate hooks",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 13,
+   "title": "Turn-view extraction validated: correction arcs findable via ⚖️+short-gap",
+   "type": [
+    "research",
+    "measure"
+   ],
+   "tags": [
+    "self-evolution",
+    "hook-injection",
+    "trajectory-data"
+   ]
+  },
+  {
+   "prompt": 14,
+   "title": "Confirmed hook injection feasible: closes design's last open question",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "self-evolution",
+    "hook-injection"
+   ]
+  },
+  {
+   "prompt": 15,
+   "title": "Trajectory quality check on S11231 finds line-pointer bug + confirms sufficiency",
+   "type": [
+    "research",
+    "measure"
+   ],
+   "tags": [
+    "self-evolution",
+    "extraction-bug",
+    "trajectory-data"
+   ]
+  },
+  {
+   "prompt": 16,
+   "title": "Confirmed mnemo DB has full-fidelity trajectory data, line bug is cosmetic",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "self-evolution",
+    "extraction-bug",
+    "trajectory-data"
+   ]
+  },
+  {
+   "prompt": 17,
+   "title": "Clarified response vs transcript: self-refuted hypotheses live in transcript",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "self-evolution",
+    "trajectory-data"
+   ]
+  },
+  {
+   "prompt": 18,
+   "title": "Decided: keep replay as raw-axis skill, add dream-agent in-process accessor",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 19,
+   "title": "Implemented turn-detail.sh: budgeted CLI accessor for turn/observation data",
+   "type": [
+    "implement"
+   ],
+   "tags": [
+    "self-evolution",
+    "turn-detail-cli"
+   ]
+  },
+  {
+   "prompt": 20,
+   "title": "Dispatched Codex to review and stress-test turn-detail.sh",
+   "type": [
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution",
+    "turn-detail-cli"
+   ]
+  },
+  {
+   "prompt": 21,
+   "title": "Locked rules-table schema + static dispatcher, solving hit-tracking for free",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 22,
+   "title": "Fixed turn-detail.sh bugs found by Codex review (ARG_MAX crash, edge cases)",
+   "type": [
+    "fix"
+   ],
+   "tags": [
+    "self-evolution",
+    "turn-detail-cli"
+   ]
+  },
+  {
+   "prompt": 23,
+   "title": "Merged turn-detail.sh into mnemo-replay skill, updated docs and release guard",
+   "type": [
+    "implement"
+   ],
+   "tags": [
+    "self-evolution",
+    "turn-detail-cli"
+   ]
+  },
+  {
+   "prompt": 24,
+   "title": "Detailed rules/rule_events schema: tombstones and append-only event log",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 25,
+   "title": "Added PostToolUse dispatcher, converged v1 scope with tombstone red line",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 26,
+   "title": "Grill-me interview exposes undefined 'confirmed' criterion in rule design",
+   "type": [
+    "discuss"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 27,
+   "title": "Resolved usefulness criterion: positive-effect-only, deferred calibration",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 28,
+   "title": "Locked rule scope field; proposed sidecar file for hit-write hot path",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 29,
+   "title": "Confirmed sidecar hit-write path; demanded pre-registered kill gate",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 30,
+   "title": "Added propose_rule/submit_judgment tools, mechanizing tombstone dedup",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "prompt": 31,
+   "title": "Published rule-notebook spec.md as ready-for-agent",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution",
+    "rolled-back",
+    "spec-v1-review"
+   ]
+  },
+  {
+   "prompt": 32,
+   "title": "GPT review demotes spec to draft; fixes epoch bug, closes 6 protocols",
+   "type": [
+    "correction",
+    "fix"
+   ],
+   "tags": [
+    "self-evolution",
+    "correction",
+    "spec-v1-review"
+   ]
+  },
+  {
+   "prompt": 33,
+   "title": "Converged spec v2 into nine dependency-ordered implementation tickets",
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "self-evolution",
+    "ticket-breakdown"
+   ]
+  },
+  {
+   "prompt": 34,
+   "title": "Refined ticket boundary: move experience-doc retirement from 09 to 08",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution",
+    "ticket-breakdown"
+   ]
+  },
+  {
+   "prompt": 35,
+   "title": "Published 9 implementation tickets, dispatched Codex on ticket 01",
+   "type": [
+    "ops",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 36,
+   "title": "Ticket 01 completed and verified; ticket 02 dispatched",
+   "type": [
+    "review",
+    "delegate",
+    "fix"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 37,
+   "title": "Ticket 02 implementation still running, moved to background",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 38,
+   "title": "Ticket 02 verified complete; set up watchdog, dispatched ticket 03",
+   "type": [
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 39,
+   "title": "Ticket 03 verified: PreToolUse dispatcher p95 0.536ms, well under budget",
+   "type": [
+    "review",
+    "measure",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 40,
+   "title": "Ticket 05 backgrounded as expected, watchdog covering it",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 41,
+   "title": "Restarted killed watchdog for ticket 05, task still healthy",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 42,
+   "title": "Ticket 05 verified complete, fixed race bug from ticket 03, dispatched 06",
+   "type": [
+    "review",
+    "fix",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 43,
+   "title": "Ticket 06 backgrounded as expected, watchdog covering it",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 44,
+   "title": "Ticket 06 verified complete; discovered watchdog-timing pattern",
+   "type": [
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 45,
+   "title": "Ticket 07 backgrounded, watchdog armed per new reliable pattern",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 46,
+   "title": "Ticket 07 verified complete; ticket 08 (nightly orchestration) dispatched",
+   "type": [
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 47,
+   "title": "Ticket 08 backgrounded, watchdog armed",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 48,
+   "title": "Restarted killed watchdog for ticket 08, task still healthy",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 49,
+   "title": "Ticket 08 verified: nightly closed loop wired, experience.md retired",
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "self-evolution",
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 50,
+   "title": "Ticket 04 backgrounded, watchdog armed",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 51,
+   "title": "/compact",
+   "type": [
+    "compact"
+   ],
+   "tags": [
+    "compact:pre_tokens=0",
+    "compact:trigger=manual"
+   ]
+  },
+  {
+   "prompt": 52,
+   "title": "All 9 tickets complete; rule-ledger pipeline done, staged-commit plan proposed",
+   "type": [
+    "review",
+    "design"
+   ],
+   "tags": [
+    "rule-ledger-tickets",
+    "commit-plan"
+   ]
+  },
+  {
+   "prompt": 53,
+   "title": null,
+   "type": [],
+   "tags": []
+  },
+  {
+   "prompt": 54,
+   "title": "Pre-merge GPT review finds 2 real bugs, blocks commit, fix dispatched",
+   "type": [
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "blocked",
+    "rule-ledger-tickets",
+    "commit-plan"
+   ]
+  },
+  {
+   "prompt": 55,
+   "title": "Confirmed digest injection uses new independent 500-token budget",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 56,
+   "title": "Detected zombie Codex fix task, cleaned up and resubmitted",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 57,
+   "title": "Confirmed resubmitted fix task alive, monitoring re-armed",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 58,
+   "title": null,
+   "type": [],
+   "tags": []
+  },
+  {
+   "prompt": 59,
+   "title": null,
+   "type": [],
+   "tags": []
+  },
+  {
+   "prompt": 60,
+   "title": "Both pre-merge bugs fixed and verified; commit blocker cleared",
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "rule-ledger-tickets",
+    "commit-plan"
+   ]
+  },
+  {
+   "prompt": 61,
+   "title": "Rule-ledger feature staged-committed and released as 0.7.0",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "rule-ledger-tickets",
+    "commit-plan"
+   ]
+  },
+  {
+   "prompt": 62,
+   "title": "Root cause found: test isolation leak, not 0.6.6 bug, corrupted real diary",
+   "type": [
+    "research",
+    "correction"
+   ],
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "prompt": 63,
+   "title": "Code fix implemented and self-verified; data repair still blocked pending approval",
+   "type": [
+    "fix",
+    "review"
+   ],
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "prompt": 64,
+   "title": "Test-isolation code fix verified: no more writes to real data root",
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "prompt": 65,
+   "title": "User approved; all 5 real-data repair actions executed and verified",
+   "type": [
+    "ops",
+    "review"
+   ],
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "prompt": 66,
+   "title": "Test-isolation fix released as 0.7.1; incident fully closed",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "prompt": 67,
+   "title": "0.7.1 production audit finds healthy but unproven rules",
+   "type": [
+    "research",
+    "measure"
+   ],
+   "tags": [
+    "runtime-validation"
+   ]
+  },
+  {
+   "prompt": 68,
+   "title": "Recent turn grades reveal persistent high-score drift",
+   "type": [
+    "measure"
+   ],
+   "tags": [
+    "milestone-scoring",
+    "rolled-back",
+    "grade-drift"
+   ]
+  },
+  {
+   "prompt": 69,
+   "title": "Hundred-turn audit rejects systemic score-drift conclusion",
+   "type": [
+    "measure",
+    "correction"
+   ],
+   "tags": [
+    "milestone-scoring",
+    "audit",
+    "correction",
+    "rolled-back",
+    "grade-drift"
+   ]
+  },
+  {
+   "prompt": 70,
+   "title": "Re-prime context exposes unbounded duplicated milestone injection",
+   "type": [
+    "measure",
+    "research"
+   ],
+   "tags": [
+    "milestone-scoring",
+    "audit",
+    "milestone-injection"
+   ]
+  },
+  {
+   "prompt": 71,
+   "title": "Baseline mismatch traced to session-shape and sampling scope",
+   "type": [
+    "research",
+    "correction"
+   ],
+   "tags": [
+    "milestone-scoring",
+    "grade-drift"
+   ]
+  },
+  {
+   "prompt": 72,
+   "title": "User redefines grades around task-level causality",
+   "type": [
+    "design",
+    "correction"
+   ],
+   "tags": [
+    "final-decision",
+    "milestone-scoring",
+    "milestone-injection",
+    "recall-efficiency"
+   ]
+  },
+  {
+   "prompt": 73,
+   "title": "Blind Sonnet re-grade of S15385 validates new rubric, finds G4-inflation gap",
+   "type": [
+    "measure"
+   ],
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 74,
+   "title": "Locked subtask-granularity clause, closing the task-centric rubric semantics",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "grade-hierarchy",
+    "rolled-back"
+   ]
+  },
+  {
+   "prompt": 75,
+   "title": "Converged rubric+re-prime+milestone work into one spec, ready for tickets",
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "grade-hierarchy",
+    "rolled-back"
+   ]
+  },
+  {
+   "prompt": 76,
+   "title": "GPT review found real spec gaps; reverting spec [T8438] to draft",
+   "type": [
+    "correction"
+   ],
+   "tags": [
+    "correction",
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 77,
+   "title": "Simplified rubric: dropped 2nd-level subtask, used turn-density anchors; spec rev2 ready",
+   "type": [
+    "design",
+    "correction"
+   ],
+   "tags": [
+    "correction",
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 78,
+   "title": "Closed 2nd GPT review round: spec rev3, bridge-G4, arc citation protocol locked",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "final-decision",
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 79,
+   "title": "Split rev3 spec into 7 dependency-ordered implementation tickets",
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 80,
+   "title": "Published 7 tickets, dispatched Codex to implement 01-06 in background",
+   "type": [
+    "ops",
+    "delegate"
+   ],
+   "tags": [
+    "grade-hierarchy",
+    "task-causality-grading"
+   ]
+  },
+  {
+   "prompt": 81,
+   "title": "Set up background poller to await Codex ticket-implementation completion",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 82,
+   "title": "Codex delivered tickets 01-06; independently verified all pass",
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "grade-hierarchy",
+    "task-causality-grading"
+   ]
+  },
+  {
+   "prompt": 83,
+   "title": "Fixed 2 review-caught bugs, committed grading rework (43951e1)",
+   "type": [
+    "fix",
+    "ops"
+   ],
+   "tags": [
+    "grade-hierarchy",
+    "task-causality-grading"
+   ]
+  },
+  {
+   "prompt": 84,
+   "title": "Shipped 0.8.0: task-causality grading live, cutoff locked, pushed",
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "grade-hierarchy",
+    "task-causality-grading"
+   ]
+  },
+  {
+   "prompt": 85,
+   "title": "Verified async-tool-turn-liveness spec premises against live CC source",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 86,
+   "title": "Split async-tool-liveness spec into 5 dependency-ordered tickets",
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 87,
+   "title": "Published 5 liveness tickets, dispatched Codex to implement in background",
+   "type": [
+    "ops",
+    "delegate"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 88,
+   "title": "Set up background poller to await Codex ticket-implementation completion",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 89,
+   "title": "Codex still verifying liveness tickets; poller re-armed for round 2",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 90,
+   "title": "Codex nearing completion; all 5 tickets' checks green, poller round 3",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 91,
+   "title": "Codex finishing implementation, writing its own memory; poller round 4",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 92,
+   "title": "Codex delivered all 5 liveness tickets; independently verified full pass",
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 93,
+   "title": "Codex review finds 2 real P1 concurrency bugs, fix dispatched",
+   "type": [
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 94,
+   "title": "Codex fix in progress, self-reviewing regression test validity",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 95,
+   "title": "Fixed 2 P1 concurrency bugs, committed async-tool-liveness work (9d19762)",
+   "type": [
+    "fix",
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 96,
+   "title": "Shipped 0.8.1: async-tool-liveness release, pushed to main",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 97,
+   "title": "Production audit confirms 0.8.1 repair; isolates compact and legacy-queue debt",
+   "type": [
+    "research",
+    "measure"
+   ],
+   "tags": [
+    "async-tool-turn-liveness",
+    "task-causality-grading",
+    "worker-health"
+   ]
+  },
+  {
+   "prompt": 98,
+   "title": "Dream token audit confirms cache reuse, exposes duplicate run and model drift",
+   "type": [
+    "measure"
+   ],
+   "tags": [
+    "dream-agent",
+    "token-usage",
+    "rolled-back",
+    "model-routing"
+   ]
+  },
+  {
+   "prompt": 99,
+   "title": "Confirmed Dream Sol routing is intentional alias resolution",
+   "type": [
+    "research",
+    "correction"
+   ],
+   "tags": [
+    "dream-agent",
+    "model-routing"
+   ]
+  },
+  {
+   "prompt": 100,
+   "title": "Forensic trace finds historical Dream trigger provenance not persisted",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "dream-agent",
+    "model-routing"
+   ]
+  }
+ ],
+ "edges": [
+  {
+   "citing": 3,
+   "cited": 2,
+   "relation": "extends",
+   "tags": [
+    "skillopt"
+   ]
+  },
+  {
+   "citing": 5,
+   "cited": 3,
+   "relation": "extends",
+   "tags": [
+    "skillopt"
+   ]
+  },
+  {
+   "citing": 6,
+   "cited": 5,
+   "relation": "extends",
+   "tags": [
+    "skillopt"
+   ]
+  },
+  {
+   "citing": 7,
+   "cited": 3,
+   "relation": "indexes",
+   "tags": [
+    "edgebench"
+   ]
+  },
+  {
+   "citing": 7,
+   "cited": 3,
+   "relation": "narrows",
+   "tags": [
+    "edgebench"
+   ]
+  },
+  {
+   "citing": 9,
+   "cited": 8,
+   "relation": "narrows",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 10,
+   "cited": 9,
+   "relation": "narrows",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 12,
+   "cited": 10,
+   "relation": "extends",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 14,
+   "cited": 13,
+   "relation": "extends",
+   "tags": [
+    "hook-injection"
+   ]
+  },
+  {
+   "citing": 15,
+   "cited": 13,
+   "relation": "extends",
+   "tags": [
+    "trajectory-data"
+   ]
+  },
+  {
+   "citing": 16,
+   "cited": 15,
+   "relation": "narrows",
+   "tags": [
+    "trajectory-data"
+   ]
+  },
+  {
+   "citing": 17,
+   "cited": 16,
+   "relation": "extends",
+   "tags": [
+    "trajectory-data"
+   ]
+  },
+  {
+   "citing": 18,
+   "cited": 17,
+   "relation": "grounds",
+   "tags": []
+  },
+  {
+   "citing": 19,
+   "cited": 18,
+   "relation": "grounds",
+   "tags": []
+  },
+  {
+   "citing": 20,
+   "cited": 19,
+   "relation": "consume",
+   "tags": [
+    "turn-detail-cli"
+   ]
+  },
+  {
+   "citing": 21,
+   "cited": 12,
+   "relation": "extends",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 22,
+   "cited": 19,
+   "relation": "narrows",
+   "tags": [
+    "turn-detail-cli"
+   ]
+  },
+  {
+   "citing": 22,
+   "cited": 20,
+   "relation": "consume",
+   "tags": [
+    "turn-detail-cli"
+   ]
+  },
+  {
+   "citing": 23,
+   "cited": 19,
+   "relation": "indexes",
+   "tags": [
+    "turn-detail-cli"
+   ]
+  },
+  {
+   "citing": 23,
+   "cited": 22,
+   "relation": "extends",
+   "tags": [
+    "turn-detail-cli"
+   ]
+  },
+  {
+   "citing": 23,
+   "cited": 22,
+   "relation": "indexes",
+   "tags": [
+    "turn-detail-cli"
+   ]
+  },
+  {
+   "citing": 24,
+   "cited": 21,
+   "relation": "extends",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 25,
+   "cited": 21,
+   "relation": "narrows",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 25,
+   "cited": 24,
+   "relation": "extends",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 26,
+   "cited": 25,
+   "relation": "narrows",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 27,
+   "cited": 26,
+   "relation": "narrows",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 28,
+   "cited": 27,
+   "relation": "extends",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 29,
+   "cited": 28,
+   "relation": "extends",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 30,
+   "cited": 10,
+   "relation": "indexes",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 30,
+   "cited": 12,
+   "relation": "indexes",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 30,
+   "cited": 21,
+   "relation": "indexes",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 30,
+   "cited": 24,
+   "relation": "indexes",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 30,
+   "cited": 25,
+   "relation": "indexes",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 30,
+   "cited": 27,
+   "relation": "indexes",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 30,
+   "cited": 28,
+   "relation": "indexes",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 30,
+   "cited": 29,
+   "relation": "indexes",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 30,
+   "cited": 29,
+   "relation": "narrows",
+   "tags": [
+    "rule-ledger-design"
+   ]
+  },
+  {
+   "citing": 31,
+   "cited": 30,
+   "relation": "grounds",
+   "tags": []
+  },
+  {
+   "citing": 32,
+   "cited": 31,
+   "relation": "indexes",
+   "tags": [
+    "spec-v1-review"
+   ]
+  },
+  {
+   "citing": 32,
+   "cited": 31,
+   "relation": "override",
+   "tags": [
+    "spec-v1-review"
+   ]
+  },
+  {
+   "citing": 33,
+   "cited": 32,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 34,
+   "cited": 33,
+   "relation": "indexes",
+   "tags": [
+    "ticket-breakdown"
+   ]
+  },
+  {
+   "citing": 34,
+   "cited": 33,
+   "relation": "narrows",
+   "tags": [
+    "ticket-breakdown"
+   ]
+  },
+  {
+   "citing": 35,
+   "cited": 34,
+   "relation": "grounds",
+   "tags": []
+  },
+  {
+   "citing": 36,
+   "cited": 35,
+   "relation": "consume",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 38,
+   "cited": 36,
+   "relation": "consume",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 39,
+   "cited": 38,
+   "relation": "consume",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 42,
+   "cited": 39,
+   "relation": "consume",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 44,
+   "cited": 42,
+   "relation": "consume",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 46,
+   "cited": 44,
+   "relation": "consume",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 49,
+   "cited": 46,
+   "relation": "consume",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 52,
+   "cited": 49,
+   "relation": "consume",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 54,
+   "cited": 52,
+   "relation": "narrows",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 60,
+   "cited": 54,
+   "relation": "extends",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 61,
+   "cited": 52,
+   "relation": "indexes",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 61,
+   "cited": 60,
+   "relation": "indexes",
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "citing": 64,
+   "cited": 63,
+   "relation": "extends",
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "citing": 65,
+   "cited": 63,
+   "relation": "extends",
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "citing": 66,
+   "cited": 61,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 66,
+   "cited": 63,
+   "relation": "indexes",
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "citing": 66,
+   "cited": 64,
+   "relation": "indexes",
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "citing": 66,
+   "cited": 65,
+   "relation": "indexes",
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "citing": 69,
+   "cited": 68,
+   "relation": "narrows",
+   "tags": [
+    "grade-drift"
+   ]
+  },
+  {
+   "citing": 71,
+   "cited": 68,
+   "relation": "indexes",
+   "tags": [
+    "grade-drift"
+   ]
+  },
+  {
+   "citing": 71,
+   "cited": 69,
+   "relation": "extends",
+   "tags": [
+    "grade-drift"
+   ]
+  },
+  {
+   "citing": 71,
+   "cited": 69,
+   "relation": "indexes",
+   "tags": [
+    "grade-drift"
+   ]
+  },
+  {
+   "citing": 72,
+   "cited": 69,
+   "relation": "override",
+   "tags": []
+  },
+  {
+   "citing": 75,
+   "cited": 74,
+   "relation": "extends",
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "citing": 76,
+   "cited": 75,
+   "relation": "override",
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "citing": 77,
+   "cited": 74,
+   "relation": "narrows",
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "citing": 78,
+   "cited": 76,
+   "relation": "narrows",
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "citing": 78,
+   "cited": 77,
+   "relation": "extends",
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "citing": 79,
+   "cited": 74,
+   "relation": "indexes",
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "citing": 79,
+   "cited": 77,
+   "relation": "indexes",
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "citing": 79,
+   "cited": 78,
+   "relation": "consume",
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "citing": 79,
+   "cited": 78,
+   "relation": "indexes",
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "citing": 82,
+   "cited": 80,
+   "relation": "consume",
+   "tags": [
+    "task-causality-grading"
+   ]
+  },
+  {
+   "citing": 83,
+   "cited": 82,
+   "relation": "narrows",
+   "tags": [
+    "task-causality-grading"
+   ]
+  },
+  {
+   "citing": 84,
+   "cited": 66,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 84,
+   "cited": 82,
+   "relation": "indexes",
+   "tags": [
+    "task-causality-grading"
+   ]
+  },
+  {
+   "citing": 84,
+   "cited": 83,
+   "relation": "indexes",
+   "tags": [
+    "task-causality-grading"
+   ]
+  },
+  {
+   "citing": 87,
+   "cited": 86,
+   "relation": "extends",
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "citing": 92,
+   "cited": 87,
+   "relation": "consume",
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "citing": 93,
+   "cited": 92,
+   "relation": "narrows",
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "citing": 95,
+   "cited": 93,
+   "relation": "extends",
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "citing": 96,
+   "cited": 84,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 96,
+   "cited": 92,
+   "relation": "indexes",
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "citing": 96,
+   "cited": 95,
+   "relation": "indexes",
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "citing": 99,
+   "cited": 98,
+   "relation": "override",
+   "tags": [
+    "model-routing"
+   ]
+  },
+  {
+   "citing": 100,
+   "cited": 99,
+   "relation": "narrows",
+   "tags": [
+    "model-routing"
+   ]
+  }
+ ]
+}

@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import type { LaneCheckerResult } from "../../src/shared/lane-checker";
-import { renderLaneCheckerReports, renderLaneDigraph } from "../../src/shared/lane-checker-render";
+import {
+  buildLaneAnchorAddresses,
+  renderLaneCheckerReports,
+  renderLaneDigraph,
+} from "../../src/shared/lane-checker-render";
 import { DEFAULT_SEGMENT } from "../../src/shared/lane-interpretation";
 
 /**
@@ -444,6 +448,65 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("60 error(s) (showing first 50)");
     expect(text).toContain("[E1] anchor T50 --");
     expect(text).not.toContain("[E1] anchor T51 --");
+  });
+
+  /**
+   * TAG-MANDATE TICKET 06 — the ANCHOR is spelled for whoever is reading.
+   * An agent repairs through `S<session>/T<prompt>` and cannot type a
+   * `turns.id` into any tool, so the settlement surface passes the
+   * projection's turns and gets addresses; the CLI and the console pass
+   * nothing and keep the row ids their own readers navigate by.
+   *
+   * The addresses come off `LaneTurnInput.order` — the `[session_id,
+   * prompt_number]` tuple `db/lane-checker-load.ts` already fills — so this
+   * module still derives nothing and queries nothing (the file header's own
+   * requirement 4).
+   */
+  describe("error anchors print as addresses when the caller supplies the projection's turns", () => {
+    const errors: LaneCheckerResult["errors"] = [
+      { class: "E1", anchorId: 5, citingId: 5, citedId: 4, relation: "extends" },
+      {
+        class: "E5",
+        anchorId: 7,
+        key: { segment: DEFAULT_SEGMENT, tagSet: ["L"] },
+        role: "sink",
+        nodeId: 7,
+        canonicalId: 9,
+      },
+    ];
+
+    test("addresses replace the bare ids in the anchor position, and nowhere else on the line", () => {
+      const addresses = buildLaneAnchorAddresses([
+        { id: 5, type: ["design"], order: [15069, 332] },
+        { id: 7, type: ["design"], order: [15069, 401] },
+      ]);
+      const text = renderLaneCheckerReports({ ...emptyResult(), errors }, addresses);
+
+      expect(text).toContain("[E1] anchor S15069/T332 -- T5 --extends--> T4 carries no lane tags");
+      // The E5 line's CANONICAL node stays a bare id: it is graph structure
+      // the reader is being pointed at, not a second repair target, and the
+      // repair sentence the settlement gate prints
+      // (`note-settlement-sdk-query.ts`) is the surface that addresses both.
+      expect(text).toContain("[E5] anchor S15069/T401 -- lane default:{L} has a second sink: T7 dangles beside T9");
+    });
+
+    test("a turn missing from the projection, and the no-addresses caller, both keep the bare id", () => {
+      // Only turn 5 is known: 7 was never in the projection (a hand-built
+      // fixture, or a row that vanished between load and render).
+      const partial = buildLaneAnchorAddresses([{ id: 5, type: ["design"], order: [15069, 332] }]);
+      const text = renderLaneCheckerReports({ ...emptyResult(), errors }, partial);
+      expect(text).toContain("[E1] anchor S15069/T332 --");
+      expect(text).toContain("[E5] anchor T7 --");
+
+      // A turn with no `order` contributes no entry at all.
+      expect(buildLaneAnchorAddresses([{ id: 5, type: ["design"] }]).size).toBe(0);
+
+      // And the CLI/console call shape is byte-identical to before.
+      const bare = renderLaneCheckerReports({ ...emptyResult(), errors });
+      expect(bare).toContain("[E1] anchor T5 --");
+      expect(bare).toContain("[E5] anchor T7 --");
+      expect(bare).toBe(renderLaneCheckerReports({ ...emptyResult(), errors }, new Map()));
+    });
   });
 });
 

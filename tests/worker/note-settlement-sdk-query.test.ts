@@ -12,9 +12,15 @@ import {
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
+import { claimWriterId, sessionWriterId, stampField } from "../../src/db/write-gate";
+import { getOutgoingEdges } from "../../src/db/memory-edges";
 import { noteInputShape, settlementNoteInputShape } from "../../src/mcp/definitions";
-import { createNoteSettlementSdkQuery } from "../../src/worker/note-settlement-sdk-query";
+import {
+  createNoteSettlementSdkQuery,
+  SETTLEMENT_ALLOWED_TOOLS,
+} from "../../src/worker/note-settlement-sdk-query";
 import { settlementTurnWriteInputShape } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
@@ -361,7 +367,11 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       expect(description).toContain("ERRORS");
       expect(description).toContain("WARNINGS");
       expect(description).toContain("ANCHORED");
-      for (const errorClass of ["(E1)", "(E2)", "(E3)", "(E4)"]) {
+      // Tag-mandate ticket 06: E5 (lane shape, ticket 04) joined the list.
+      // This description and `commit`'s both enumerated E1-E4 as a CLOSED
+      // list after E5 shipped, so an agent meeting an E5 refusal was told
+      // about a class the surface denied existed.
+      for (const errorClass of ["(E1)", "(E2)", "(E3)", "(E4)", "(E5)"]) {
         expect(description).toContain(errorClass);
       }
       expect(description).toContain("anchored OUTSIDE your range is another window's work");
@@ -490,9 +500,18 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
           // own `tags`) — the exact orphan shape the checker exists to catch.
           expect(text).toContain("## ERRORS");
           expect(text).not.toContain("## Vocabulary conformance");
-          expect(text).toContain(`[E3] anchor T${t1} -- T${t1} type: [bugfix] (outside vocabulary: bugfix)`);
-          expect(text).toContain(`[E2] anchor T${t2} -- T${t2} --supersedes--> T${t1}`);
-          expect(text).toContain(`[E4] anchor T${t2} -- T${t2} --extends--> T${t1} {vocab-fixture}`);
+          // Tag-mandate ticket 06: the ANCHOR is an ADDRESS on this surface —
+          // the settlement agent repairs through `S<session>/T<prompt>` and
+          // cannot type a `turns.id` into `note`. The arrow's own endpoints
+          // stay bare ids (graph structure, not repair targets), which is why
+          // both spellings appear on one line.
+          expect(text).toContain(
+            `[E3] anchor S${sessionDbId}/T1 -- T${t1} type: [bugfix] (outside vocabulary: bugfix)`,
+          );
+          expect(text).toContain(`[E2] anchor S${sessionDbId}/T2 -- T${t2} --supersedes--> T${t1}`);
+          expect(text).toContain(
+            `[E4] anchor S${sessionDbId}/T2 -- T${t2} --extends--> T${t1} {vocab-fixture}`,
+          );
           // Never admitted: the lane's own edge tally in report 1 is exactly
           // the extends+indexes pair.
           expect(text).toContain("extends=1");
@@ -997,6 +1016,611 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
       expect(getTurnById(db, t1)!.type).toEqual(["design"]);
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TAG-MANDATE TICKET 06 — SETTLEMENT GOES PULL.
+//
+// With the window rendering retired, `recall` is the agent's ONLY view of turn
+// content and of existing edges, and its own calls are what license its
+// writes. Everything below is proved at the ACTUAL registered handler — the
+// discipline the rest of this file already uses — because each property is a
+// claim about the tool the model calls, and a test against a helper would
+// prove only that the helper computes.
+// ---------------------------------------------------------------------------
+
+/**
+ * One turn, typed and optionally tagged/noted. A `title`/`content` pair is
+ * written to BOTH the turn row and `shadow_notes` — the shape an era turn
+ * carries once the main agent's own `note` has promoted it
+ * (`promoteTurnFromNote`), and the only shape recall actually renders.
+ */
+function insertTypedTurn(
+  db: Database,
+  sessionDbId: number,
+  promptNumber: number,
+  options: { type?: string; tags?: string; title?: string; content?: string } = {},
+): number {
+  const turnId = db
+    .query<{ id: number }, [number, number, string, string, number, string, string, string | null, string | null]>(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, user_prompt, assistant_response,
+         tool_call_count, created_at_epoch, type, tags, title, content
+       ) VALUES (?, ?, 'active', ?, ?, 3, ?, ?, ?, ?, ?)
+       RETURNING id`,
+    )
+    .get(
+      sessionDbId,
+      promptNumber,
+      `prompt ${promptNumber}`,
+      `response ${promptNumber}`,
+      NOW - 900 + promptNumber,
+      options.type ?? '["design"]',
+      options.tags ?? "[]",
+      options.title ?? null,
+      options.content ?? null,
+    )!.id;
+  if (options.title !== undefined && options.content !== undefined) {
+    upsertShadowNote(db, {
+      turnId,
+      title: options.title,
+      content: options.content,
+      nowEpoch: NOW - 500,
+    });
+  }
+  return turnId;
+}
+
+function seedPullSession(db: Database, contentSessionId: string): number {
+  return upsertSession(db, {
+    contentSessionId,
+    project: `/tmp/project-${contentSessionId}`,
+    title: contentSessionId,
+    content: null,
+    insight: null,
+    createdAtEpoch: NOW - 10_000,
+    updatedAtEpoch: NOW - 10_000,
+    completedAtEpoch: null,
+  }).id;
+}
+
+function claimWindow(
+  db: Database,
+  sessionDbId: number,
+  windowStart: number,
+  windowEnd: number,
+): NoteSettlementJob {
+  enqueueNoteSettlementWindows(
+    db,
+    [{ sessionId: sessionDbId, windowStart, windowEnd, triggerType: "consecutive" }],
+    NOW,
+    SETTLEMENT_ERA_CUTOFF_EPOCH,
+  );
+  const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+  if (!job) {
+    throw new Error("fixture failed to claim a settlement job");
+  }
+  return job;
+}
+
+describe("ticket 06 — the read tools the pull architecture depends on", () => {
+  test("the allowlist handed to the SDK includes recall and timeline, at the real query seam", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+
+      const { toolImpl } = captureToolImpl();
+      const seenCalls: Array<{ options: Record<string, unknown> }> = [];
+      const queryImpl = mock((call: { options: Record<string, unknown> }) => {
+        seenCalls.push(call);
+        return (async function* () {
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })();
+      });
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      });
+
+      // The SDK's OWN option, not the module constant read back at itself:
+      // an allowlist that dropped `recall` would leave the agent unable to
+      // see a single turn it is asked to settle.
+      const allowed = seenCalls[0]?.options.allowedTools as string[];
+      expect(allowed).toContain("mcp__mnemo__recall");
+      expect(allowed).toContain("mcp__mnemo__timeline");
+      expect(allowed).toEqual([...SETTLEMENT_ALLOWED_TOOLS]);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("the registered recall renders the `relations` field — the pull agent's only view of existing edges", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const sessionDbId = seedPullSession(db, "settlement-pull-relations");
+      const t1 = insertTypedTurn(db, sessionDbId, 1, { tags: '["lane"]' });
+      const t2 = insertTypedTurn(db, sessionDbId, 2, { tags: '["lane"]' });
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: t2 },
+            cited: { kind: "turn", id: t1 },
+            relation: "extends",
+            provenance: "asserted",
+            tags: ["lane"],
+          },
+        ],
+        NOW,
+      );
+      const job = claimWindow(db, sessionDbId, 1, 2);
+      const capturedDb = db;
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const receipt = (await handlers.get("recall")!({
+            id: `S${sessionDbId}/T1..T2`,
+            filter: { fields: ["metadata", "content", "relations"] },
+            turn: 4_000,
+          })) as { content: Array<{ text: string }> };
+          const text = receipt.content[0]!.text;
+
+          // Both directions, the relation word, the counterpart address and
+          // the canonical tag set — the completeness bar edge-read-surface
+          // ticket 01 was accepted against.
+          expect(text).toContain("→ extends T1 {lane}");
+          expect(text).toContain("← extends from T2 {lane}");
+          // And the range selector really paged BOTH turns.
+          expect(text).toContain("[T1]");
+          expect(text).toContain("[T2]");
+
+          // A recall that did NOT ask for relations must not pay for them.
+          const without = (await handlers.get("recall")!({
+            id: `S${sessionDbId}/T2`,
+            turn: 4_000,
+          })) as { content: Array<{ text: string }> };
+          expect(without.content[0]!.text).not.toContain("→ extends");
+
+          expect(capturedDb).toBeDefined();
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1, t2]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 2,
+      });
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+/**
+ * THE GRANT UNIFICATION, at the registered handlers (ticket 06's checkbox 1,
+ * "grants unify"). The property in one sentence: a whole-field `write` over
+ * ANOTHER writer's text is refused until this run's own `recall` has
+ * delivered that field, and the recall that licenses it is the ordinary
+ * registered tool, carrying no settlement-specific privilege.
+ *
+ * The negative half is the load-bearing one — a test that only proved the
+ * write succeeds after a recall would also pass if the gate were simply off.
+ */
+describe("ticket 06 — a recall through the registered tool is what licenses a write", () => {
+  function seedForeignOwnedNote(db: Database): {
+    sessionDbId: number;
+    t1: number;
+    t2: number;
+    job: NoteSettlementJob;
+  } {
+    const sessionDbId = seedPullSession(db, "settlement-pull-grant");
+    const t1 = insertTypedTurn(db, sessionDbId, 1, {
+      title: "the main agent's own title",
+      content: "The main agent's own conclusion.",
+    });
+    const t2 = insertTypedTurn(db, sessionDbId, 2, {
+      title: "another turn the run never reads",
+      content: "Also the main agent's.",
+    });
+    // The main agent owns both fields, so the gate must consult a read grant
+    // rather than admitting on the never-written rule.
+    stampField(db, "turn", t1, "content", sessionWriterId(sessionDbId), NOW - 500);
+    stampField(db, "turn", t2, "content", sessionWriterId(sessionDbId), NOW - 500);
+    return { sessionDbId, t1, t2, job: claimWindow(db, sessionDbId, 1, 2) };
+  }
+
+  test("recall first, then the whole-field write lands; the turn never recalled is still refused", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, t1, t2, job } = seedForeignOwnedNote(db);
+      const capturedDb = db;
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          // NEGATIVE FIRST: no read of T1 yet, so the gate names the remedy.
+          const refused = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T1`,
+            content: "In hindsight: what this turn actually settled.",
+            mode: { content: "write" },
+          })) as { content: Array<{ text: string }> };
+          expect(refused.content[0]!.text).toContain("has not been read this session");
+          expect(getTurnById(capturedDb, t1)!.content).toBe("The main agent's own conclusion.");
+
+          // Step 0's coverage read, through the registered tool.
+          await handlers.get("recall")!({
+            id: `S${sessionDbId}/T1`,
+            filter: { fields: ["metadata", "content", "relations"] },
+            turn: 4_000,
+          });
+
+          const landed = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T1`,
+            content: "In hindsight: what this turn actually settled.",
+            mode: { content: "write" },
+          })) as { content: Array<{ text: string }> };
+          expect(landed.content[0]!.text).toContain("Landed");
+
+          // T2 was never recalled, and the grant on T1 does not spread to it.
+          const stillRefused = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T2`,
+            content: "a rewrite of text this run never read",
+            mode: { content: "write" },
+          })) as { content: Array<{ text: string }> };
+          expect(stillRefused.content[0]!.text).toContain("has not been read this session");
+          expect(getTurnById(capturedDb, t2)!.content).toBe("Also the main agent's.");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1, t2]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 2,
+      });
+
+      // The write landed under THIS run's claim identity — the same string
+      // the recall recorded its grant under. Settlement prose lands in
+      // `shadow_notes` and is deliberately never promoted onto the turn row,
+      // so that is where the new text is.
+      expect(getShadowNote(db, t1)!.content).toBe(
+        "In hindsight: what this turn actually settled.",
+      );
+      const grant = db
+        .query<{ count: number }, [string, number]>(
+          "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ? AND entity_type = 'turn' AND entity_id = ?",
+        )
+        .get(claimWriterId(job.id, job.claimGeneration), t1);
+      expect(grant?.count).toBe(1);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("timeline licenses nothing — it navigates, and records no grant at all", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, t1, t2, job } = seedForeignOwnedNote(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          await handlers.get("timeline")!({ id: `S${sessionDbId}` });
+
+          const refused = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T1`,
+            content: "a rewrite licensed by a timeline call",
+            mode: { content: "write" },
+          })) as { content: Array<{ text: string }> };
+          expect(refused.content[0]!.text).toContain("has not been read this session");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1, t2]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 2,
+      });
+
+      const grants = db
+        .query<{ count: number }, [string]>(
+          "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ?",
+        )
+        .get(claimWriterId(job.id, job.claimGeneration));
+      expect(grants?.count).toBe(0);
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+/**
+ * THE END-TO-END PULL RUN (ticket 06's checkbox 3). One settlement against a
+ * fixture database, driven entirely through the registered handlers: the
+ * agent pages its whole writable set with a RANGE recall (checklist Step 0),
+ * tags both lane members, wires the tagged edge the mandate requires, and
+ * commits clean. Nothing here is stubbed except the model's own turn-taking.
+ */
+describe("ticket 06 — a full pull run: range-recall the window, tag the lane, commit clean", () => {
+  test("coverage read, member tags, a tagged extends, and a clean commit", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const sessionDbId = seedPullSession(db, "settlement-pull-e2e");
+      const t1 = insertTypedTurn(db, sessionDbId, 1, {
+        title: "design+gate: the writable set is immutable",
+        content: "Decided the set is computed before the run.",
+      });
+      const t2 = insertTypedTurn(db, sessionDbId, 2, {
+        title: "design+gate: the set closes over cited endpoints",
+        content: "Extended it with the deadlock-guard closure.",
+      });
+      const job = claimWindow(db, sessionDbId, 1, 2);
+      const writableTurnIds = computeSettlementWritableTurnIds(db, [t1, t2]);
+      const capturedDb = db;
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          // STEP 0 — COVERAGE. One range call pages the whole writable set,
+          // exactly the shape the prompt teaches.
+          const coverage = (await handlers.get("recall")!({
+            id: `S${sessionDbId}/T1..T2`,
+            filter: { fields: ["metadata", "content", "relations"] },
+            turn: 4_000,
+          })) as { content: Array<{ text: string }> };
+          const text = coverage.content[0]!.text;
+          // Both turns' CONTENT, from one call. (This fixture DB records no
+          // era cutoff, so recall labels each turn with its user prompt
+          // rather than its title — the same legacy path the shared handler
+          // takes, since both resolve the cutoff from the database.)
+          expect(text).toContain("Decided the set is computed before the run.");
+          expect(text).toContain("Extended it with the deadlock-guard closure.");
+          // TEACHABILITY, the ticket's own coverage-contract clause: ONE
+          // range call really did grant EVERY turn of the writable set, so
+          // "page through every turn" is an instruction the agent can
+          // actually follow in bounded calls rather than one per turn.
+          const granted = capturedDb
+            .query<{ entityId: number }, [string]>(
+              "SELECT entity_id AS entityId FROM write_gate_reads WHERE writer = ? AND entity_type = 'turn'",
+            )
+            .all(claimWriterId(job.id, job.claimGeneration))
+            .map((row) => row.entityId)
+            .sort((a, b) => a - b);
+          expect(granted).toEqual([...writableTurnIds].sort((a, b) => a - b));
+
+          // The lane: member tags FIRST (the subset invariant), then the edge.
+          for (const promptNumber of [1, 2]) {
+            const tagged = (await handlers.get("note")!({
+              turn: `S${sessionDbId}/T${promptNumber}`,
+              tags: ["writable-set"],
+            })) as { content: Array<{ text: string }> };
+            expect(tagged.content[0]!.text).toContain("Landed");
+          }
+
+          const edge = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T2`,
+            extends: [{ turn: `S${sessionDbId}/T1`, tags: ["writable-set"] }],
+          })) as { content: Array<{ text: string }> };
+          expect(edge.content[0]!.text).toContain("Landed");
+
+          // The gate sees a legal lane: no E1 (the edge carries its tags), no
+          // E4 (both endpoints carry them), no E3 (both turns are typed).
+          const committed = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(committed.content[0]!.text).toContain("Committed");
+          expect(committed.content[0]!.text).not.toContain("Commit refused");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds,
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 2,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      expect(getTurnById(db, t1)!.tags).toEqual(["writable-set"]);
+      const edges = getOutgoingEdges(db, { kind: "turn", id: t2 }).filter(
+        (row) => row.relation === "extends",
+      );
+      expect(edges).toHaveLength(1);
+      expect(edges[0]!.tags).toEqual(["writable-set"]);
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+/**
+ * E5's own repair sentence (ticket 06's drift fix). Before this, E5 fell
+ * through `describeCommitGateError`'s `default:` branch and reached the agent
+ * as "[E5] S1/T2: see `lane_check` for this instance." — an anchor with no
+ * move, on a class the tool descriptions did not even admit existed.
+ */
+describe("ticket 06 — an E5 commit refusal names the repair, not just the anchor", () => {
+  test("the refusal states the two shapes and names the canonical node", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const sessionDbId = seedPullSession(db, "settlement-pull-e5");
+      // One lane {shape}, one source (T1), TWO sinks (T2 and T3 both cite T1
+      // and are cited by nothing) — the lane-shape law's own violation.
+      const t1 = insertTypedTurn(db, sessionDbId, 1, { tags: '["shape"]' });
+      const t2 = insertTypedTurn(db, sessionDbId, 2, { tags: '["shape"]' });
+      const t3 = insertTypedTurn(db, sessionDbId, 3, { tags: '["shape"]' });
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: t2 },
+            cited: { kind: "turn", id: t1 },
+            relation: "extends",
+            provenance: "asserted",
+            tags: ["shape"],
+          },
+          {
+            citing: { kind: "turn", id: t3 },
+            cited: { kind: "turn", id: t1 },
+            relation: "extends",
+            provenance: "asserted",
+            tags: ["shape"],
+          },
+        ],
+        NOW,
+      );
+      const job = claimWindow(db, sessionDbId, 1, 3);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const refused = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const text = refused.content[0]!.text;
+          expect(text).toContain("Commit refused");
+          expect(text).toContain("[E5]");
+          expect(text).toContain("has a second sink");
+          expect(text).toContain("a lane has exactly one start and one end");
+          expect(text).toContain("Retag this chain into a lane of its own");
+          expect(text).toContain("bridge it to the lane's real start/end");
+          // Both the anchor AND the canonical node are ADDRESSES: the repair
+          // is a choice between two shapes, and neither is decidable without
+          // knowing which node the lane already runs to.
+          expect(text).toContain(`S${sessionDbId}/T2`);
+          expect(text).toContain(`S${sessionDbId}/T3`);
+          // Never the bare fallback the default branch used to produce.
+          expect(text).not.toContain("see `lane_check` for this instance");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1, t2, t3]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 3,
+      });
     } finally {
       db?.close();
     }

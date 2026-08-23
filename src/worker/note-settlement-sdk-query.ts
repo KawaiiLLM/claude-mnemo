@@ -11,12 +11,24 @@ import {
   timelineInputShape,
   workerRecallInputShape,
 } from "../mcp/definitions";
-import { createDatabaseBackedHandlers } from "../mcp/handlers";
+import {
+  createDatabaseBackedHandlers,
+  textResult as plainTextResult,
+  WORKER_TOOL_RESULT_MAX_CHARS,
+  WORKER_TOOL_RESULT_TRUNCATION_HINT,
+} from "../mcp/handlers";
+import { recallMemory, type RecallInput } from "../mcp/recall";
+import { stripPrivateTags } from "../shared/tag-stripping";
+import { resolveEraCutoff } from "../db/era";
+import { claimWriterId } from "../db/write-gate";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
 import { getTurnById } from "../db/turns";
 import { checkLanes, type LaneCheckerError } from "../shared/lane-checker";
-import { renderLaneCheckerReports } from "../shared/lane-checker-render";
+import {
+  buildLaneAnchorAddresses,
+  renderLaneCheckerReports,
+} from "../shared/lane-checker-render";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type {
   NoteSettlementQuery,
@@ -41,12 +53,26 @@ import {
  * The worker hosts no model of its own, so every settlement is a spawned child
  * that exits when the window is decided — no resident session, no resume
  * pointer, no stall watchdog, which is the whole reason the previous extraction
- * architecture was retired. The window's material arrives in the prompt; the two
- * read tools exist only for the drill-down the spec allows ("不足时自行 recall
- * 下钻，与任何读者同权"), and are the same handlers every other reader uses.
+ * architecture was retired.
+ *
+ * TAG-MANDATE TICKET 06 (spec "Settlement surface", ruling [S15069/T1452]):
+ * the window's material no longer arrives in the prompt. `recall` is now the
+ * agent's ONLY view of turn content and of existing edges, so the two read
+ * tools stopped being a drill-down convenience and became the channel. That
+ * promotion is why `recall` is registered below with an explicit reader
+ * identity while `timeline` is not — see `SETTLEMENT_ALLOWED_TOOLS` and the
+ * recall registration itself.
  */
 
-const SETTLEMENT_ALLOWED_TOOLS = [
+/**
+ * The child's whole tool surface. `recall` and `timeline` are LOAD-BEARING
+ * members under pull, not conveniences: with the window rendering retired,
+ * an allowlist that dropped `recall` would leave the agent unable to see a
+ * single turn it is asked to settle (spec: "the settlement SDK agent's tool
+ * allowlist verifiably includes recall"). Pinned by test at the real
+ * `queryImpl` seam.
+ */
+export const SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__recall",
   "mcp__mnemo__timeline",
   "mcp__mnemo__note",
@@ -83,16 +109,17 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "session's narrative — lands immediately, in this same call. Hindsight " +
   "work: supply what is missing, correct what is wrong, retract what is " +
   "false, judged by the Memory Rubric in the prompt. " +
-  "Exactly one of `turn` (\"S<session>/T<prompt>\", from the window or " +
-  "preceding-turns section) or `session` (\"S<session>\", this session). " +
+  "Exactly one of `turn` (\"S<session>/T<prompt>\", from the writable set " +
+  "this prompt declares) or `session` (\"S<session>\", this session). " +
   "On `turn`: title/content/insight, type/tags and the edge fields, only " +
-  "for a turn shown in this prompt; omit to leave alone. A first note for a " +
+  "for a turn in that writable set; omit to leave alone. A first note for a " +
   "turn needs title and content together. A field that already holds " +
   "something needs `mode.<field>: \"write\"` (the full replacement text or " +
   "set) or the edit form `{ mode: \"edit\", oldString, newString }` for one " +
   "exactly-matched span — the same rule, and the same words, the main " +
-  "agent's own `note` uses; a whole-field `write` over text this prompt " +
-  "showed only truncated is refused, and the edit form is the way through. " +
+  "agent's own `note` uses; a whole-field `write` over text your own " +
+  "`recall` delivered only truncated is refused, and the edit form is the " +
+  "way through. " +
   "Each field is checked and applied " +
   "INDEPENDENTLY: if another writer (the main agent's own later note, or a " +
   "prior settlement attempt) touched a field since this dispatch's context " +
@@ -170,7 +197,8 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "grammar forbids, each naming the turn it is ANCHORED at — an untagged " +
   "extends/narrows (E1), a relation word outside the eight-word vocabulary " +
   "(E2), an empty or out-of-vocabulary turn type (E3), a tagged edge whose " +
-  "tags are missing from an endpoint turn's own tags (E4). Commit refuses " +
+  "tags are missing from an endpoint turn's own tags (E4), a lane with a " +
+  "second start or a second end (E5). Commit refuses " +
   "while any error anchored inside your writable range remains, so repair " +
   "those (retag, retract and re-add, or re-type) and re-run. An error " +
   "anchored OUTSIDE your range is another window's work — leave it. " +
@@ -212,7 +240,8 @@ const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "turn inside your writable set — an untagged extends/narrows (E1), a " +
   "relation word outside the eight (E2), an empty or out-of-vocabulary turn " +
   "type (E3), a tagged edge whose tags are missing from an endpoint turn's " +
-  "own tags (E4). The refusal lists every one with its address and the move " +
+  "own tags (E4), a lane with a second start or a second end (E5). " +
+  "The refusal lists every one with its address and the move " +
   "that clears it; repair them and call `commit` again — a refusal costs " +
   "you nothing and is not a failed attempt. Errors anchored OUTSIDE your " +
   "writable set are another window's work and never block you. " +
@@ -235,6 +264,30 @@ export interface CreateNoteSettlementSdkQueryOptions {
 
 function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
+}
+
+/**
+ * The worker-audience result envelope, byte-for-byte what
+ * `createDatabaseBackedHandlers` wraps its own read results in: private tags
+ * stripped, then a hard char cap with a paging hint. Restated here (rather
+ * than reached through that factory) only because the settlement `recall`
+ * below needs a per-REQUEST reader identity the shared factory has no seam
+ * for, and the factory's own wrapper is a closure inside it. If a
+ * `resolveReaderId` option ever lands on `createDatabaseBackedHandlers`, this
+ * function and the recall registration below both fold back into it.
+ */
+function workerReadResult(text: string) {
+  const stripped = stripPrivateTags(text);
+  if (stripped.length <= WORKER_TOOL_RESULT_MAX_CHARS) {
+    return plainTextResult(stripped);
+  }
+  const contentLimit = Math.max(
+    0,
+    WORKER_TOOL_RESULT_MAX_CHARS - WORKER_TOOL_RESULT_TRUNCATION_HINT.length,
+  );
+  return plainTextResult(
+    stripped.slice(0, contentLimit) + WORKER_TOOL_RESULT_TRUNCATION_HINT,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +317,15 @@ function checkWindowLanes(db: Database, scope: SettlementWindowScope) {
     promptStart: scope.windowStart,
     promptEnd: scope.windowEnd,
   });
-  return checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+  return {
+    result: checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges),
+    // Tag-mandate ticket 06: the projection's OWN turns, carried out so the
+    // report can spell an anchor as an address. Returned from here rather
+    // than re-loaded by the caller for the same reason the result is — one
+    // projection, one set of facts, no chance of the addresses describing a
+    // different load than the verdict.
+    turns: projection.turns,
+  };
 }
 
 /**
@@ -312,12 +373,27 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
           .map((miss) => `"${miss.tag}" missing from the ${miss.endpoint} turn's own tags`)
           .join(", ")}. Add the tag to that turn, or retract the edge.`
       );
+    case "E5":
+      // The repair is a CHOICE between two shapes, so the line names the
+      // canonical node this one dangles beside — neither move is decidable
+      // without knowing which node the lane already runs from/to
+      // (`shared/lane-checker-render.ts` says the same thing for the same
+      // reason). Tag-mandate ticket 06 gave this class its own case: it used
+      // to fall through to the bare default below, which handed the agent an
+      // anchor and no move at all — a refusal it could not act on.
+      return (
+        `[E5] ${anchor}: lane {${error.key.tagSet.join(",")}} has a second ${error.role} — ` +
+        `this turn dangles beside ${turnAddressFor(db, error.canonicalId)}, and a lane has exactly ` +
+        "one start and one end. Retag this chain into a lane of its own (a proper-superset tag " +
+        "set is the BRANCH idiom), or bridge it to the lane's real start/end with an edge the " +
+        "content actually supports."
+      );
     default: {
-      // Exhaustive over `LaneErrorClass` today. A class added to the checker
-      // (E5, lane shape, is ticket 04) must gain a line here rather than
-      // reach the agent as an unexplained refusal — this is the compile-time
-      // reminder, and the runtime fallback keeps the anchor actionable even
-      // if one ever slips through.
+      // Exhaustive over `LaneErrorClass` today (E1-E5). A class added to the
+      // checker must gain a line here rather than reach the agent as an
+      // unexplained refusal — this is the compile-time reminder, and the
+      // runtime fallback keeps the anchor actionable even if one ever slips
+      // through.
       const unclassed = error as { class: string };
       return `[${unclassed.class}] ${anchor}: see \`lane_check\` for this instance.`;
     }
@@ -353,7 +429,7 @@ export function evaluateSettlementCommitGate(
   db: Database,
   scope: SettlementWindowScope & { writableTurnIds: ReadonlySet<number> },
 ): string | null {
-  const result = checkWindowLanes(db, scope);
+  const { result } = checkWindowLanes(db, scope);
   const blocking = result.errors.filter((error) => scope.writableTurnIds.has(error.anchorId));
   if (blocking.length === 0) {
     return null;
@@ -427,6 +503,15 @@ export function createNoteSettlementSdkQuery(
       reviewableTurnIds: request.writableTurnIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
     };
+    // ONE identity for this run's reads AND its writes (tag-mandate ticket
+    // 06). The write facades derive the same string from the same two numbers
+    // (`claimWriterId`, the pinned encoding in `db/write-gate.ts`); deriving
+    // it once here and handing it to `recall` is what closes the loop the
+    // retired context render used to close from the other side. Per request,
+    // like everything else on this closure: a lapsed claim and its successor
+    // are different writers, so the successor inherits none of the lapsed
+    // run's read grants.
+    const settlementReaderId = claimWriterId(request.jobId, request.claimGeneration);
     const writes = createSettlementDirectWriteEngine({
       db: options.db,
       context: turnFacadeContext,
@@ -458,16 +543,56 @@ export function createNoteSettlementSdkQuery(
       name: "mnemo",
       version: "0.17.0",
       tools: [
+        // RECALL, UNDER THIS RUN'S OWN WRITER IDENTITY (tag-mandate ticket
+        // 06). This is the grant unification: `readerId` is the SAME
+        // `claim:<job>:<generation>` string the write facade checks
+        // `checkFieldGate` against, so a turn the agent recalls is a turn it
+        // may then write — through `recordReadGrants`/
+        // `recordFieldCompleteness`, the identical seam every other reader
+        // uses, with no settlement carve-out anywhere in the gate. The
+        // completeness half is what makes a whole-field `write` over another
+        // writer's text possible at all now that no render licenses it: a
+        // recall that delivered the field WHOLE records `complete: true`, and
+        // a truncated one records `false` and sends the agent back for a
+        // bigger `turn` budget — Block A's own Step-0 sentence, enforced.
+        //
+        // Deliberately NOT routed through `handlers.recall`: that factory
+        // derives its reader identity from a caller SESSION
+        // (`sessionWriterId`), which settlement is not, and it is built once
+        // per module call while a job identity exists only per request. Every
+        // other argument is passed exactly as that factory passes it —
+        // `includeDbTurnIds` true (worker audience), the same era cutoff, the
+        // same input keys — so the two surfaces differ in the reader identity
+        // and in nothing else.
         toolImpl(
           "recall",
           MNEMO_TOOL_DESCRIPTIONS.recall,
           workerRecallInputShape,
           async (args: Record<string, unknown>) =>
-            textResult(
-              (await handlers.recall?.(args))?.content[0]?.text ??
-                "recall unavailable",
+            workerReadResult(
+              recallMemory(options.db, {
+                id: args.id as string | undefined,
+                query: args.query as string | undefined,
+                filter: args.filter as RecallInput["filter"],
+                page: args.page as number | undefined,
+                pageSize: args.pageSize as number | undefined,
+                pageBudget: args.pageBudget as number | undefined,
+                turn: args.turn as number | undefined,
+                includeDbTurnIds: true,
+                eraCutoffEpoch: resolveEraCutoff(options.db),
+                readerId: settlementReaderId,
+                ...(options.now ? { now: options.now } : {}),
+              }),
             ),
         ),
+        // TIMELINE, WITH NO READER IDENTITY — and that absence is the
+        // feature. Block A tells the agent "`timeline` helps navigate; it
+        // substitutes for none of this reading and licenses nothing", and
+        // this registration is what makes that true rather than merely
+        // asserted: the shared handler resolves no caller session here, so
+        // `readerId` is null and `mcp/timeline.ts` records no grant at all.
+        // A navigational view that licensed writes would let an agent skip
+        // Step 0's coverage entirely.
         toolImpl(
           "timeline",
           MNEMO_TOOL_DESCRIPTIONS.timeline,
@@ -532,15 +657,17 @@ export function createNoteSettlementSdkQuery(
             // The SAME pass the commit gate runs (ticket 05) — see
             // `checkWindowLanes`: the preview and the verdict are one
             // projection, so the list this prints cannot differ from the
-            // list `commit` judges.
+            // list `commit` judges. Ticket 06 additionally hands the render
+            // that projection's turns, so an anchor prints as
+            // `S<session>/T<prompt>` — the address the repair call itself
+            // takes, matching the commit refusal's own vocabulary.
+            const { result, turns } = checkWindowLanes(options.db, {
+              sessionId: request.sessionId,
+              windowStart: request.windowStart,
+              windowEnd: request.windowEnd,
+            });
             return textResult(
-              renderLaneCheckerReports(
-                checkWindowLanes(options.db, {
-                  sessionId: request.sessionId,
-                  windowStart: request.windowStart,
-                  windowEnd: request.windowEnd,
-                }),
-              ),
+              renderLaneCheckerReports(result, buildLaneAnchorAddresses(turns)),
             );
           },
         ),

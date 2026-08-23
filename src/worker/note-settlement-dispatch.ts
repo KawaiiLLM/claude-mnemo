@@ -13,6 +13,7 @@ import { DEFAULT_CONFIG, DEFAULT_NOTE_SETTLEMENT_MODEL } from "../shared/config"
 import { classifyWorkerError } from "./error-classifier";
 import {
   buildNoteSettlementContext,
+  resolveSettlementWritableSet,
   type NoteSettlementContext,
 } from "./note-settlement-context";
 import type { NoteSettlementCommitCounts } from "./note-settlement-direct-write";
@@ -329,11 +330,17 @@ export function createNoteSettlementDispatch(
       db,
       context.reviewableTurnIds,
     );
+    // Tag-mandate ticket 06: the SAME set, in the address vocabulary the
+    // prompt declares and every write call takes. Resolved from
+    // `writableTurnIds` itself rather than re-derived from the context, so
+    // the printed declaration and the enforced set can never disagree — the
+    // fork the spec's "immutable and declared" clause exists to forbid.
+    const writableSet = resolveSettlementWritableSet(db, context, writableTurnIds);
 
     let queryResult: NoteSettlementQueryResult;
     try {
       queryResult = await options.runQuery({
-        prompt: renderNoteSettlementPrompt(context),
+        prompt: renderNoteSettlementPrompt(context, writableSet),
         systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
         model,
         maxThinkingTokens: config.noteSettlementMaxThinkingTokens,

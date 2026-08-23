@@ -13,7 +13,12 @@ import type {
   LaneStatsReport,
   LaneTimeOrderViolation,
 } from "./lane-checker";
-import { DEFAULT_SEGMENT, laneToken, type LaneKey } from "./lane-interpretation";
+import {
+  DEFAULT_SEGMENT,
+  laneToken,
+  type LaneKey,
+  type LaneTurnInput,
+} from "./lane-interpretation";
 
 /**
  * The lane checker's two renderers (rubric-v10 ticket 06). Both consume
@@ -248,12 +253,52 @@ function renderEdgeArrow(citingId: number, relation: string, citedId: number): s
 }
 
 /**
+ * Turn id -> `S<session>/T<prompt>`, built from the SAME projection turns the
+ * checker was run over (tag-mandate ticket 06).
+ *
+ * `LaneTurnInput.order` is the `[session_id, prompt_number]` tuple
+ * `db/lane-checker-load.ts` fills for every turn it loads, so the address is
+ * read straight off the input the checker already consumed — this module
+ * derives nothing and queries nothing, exactly as its header requires. A turn
+ * without an `order` (a hand-built fixture) contributes no entry and its
+ * anchors keep printing the bare row id.
+ */
+export type LaneAnchorAddresses = ReadonlyMap<number, string>;
+
+export function buildLaneAnchorAddresses(
+  turns: readonly LaneTurnInput[],
+): LaneAnchorAddresses {
+  const addresses = new Map<number, string>();
+  for (const turn of turns) {
+    if (turn.order) {
+      addresses.set(turn.id, "S" + turn.order[0] + "/T" + turn.order[1]);
+    }
+  }
+  return addresses;
+}
+
+/**
+ * The ANCHOR, in the vocabulary of whoever is reading. An agent repairs
+ * through `S<session>/T<prompt>` addresses and cannot type a `turns.id` into
+ * any tool, so a settlement-facing report that printed the row id would name
+ * a row the reader has no way to act on. Falls back to the bare id when the
+ * caller supplied no addresses (the CLI and the console, whose readers do work
+ * in row ids) or when this particular turn was not in the projection.
+ */
+function formatAnchor(anchorId: number, addresses: LaneAnchorAddresses | undefined): string {
+  return addresses?.get(anchorId) ?? "T" + anchorId;
+}
+
+/**
  * One line per error instance, ALWAYS leading with its class and its ANCHOR
  * turn — the anchor is what the commit gate scopes by, so a reader deciding
  * "is this mine to fix" must not have to infer it from the endpoints.
  */
-function renderLaneError(error: LaneCheckerError): string {
-  const head = "  [" + error.class + "] anchor T" + error.anchorId + " -- ";
+function renderLaneError(
+  error: LaneCheckerError,
+  addresses?: LaneAnchorAddresses,
+): string {
+  const head = "  [" + error.class + "] anchor " + formatAnchor(error.anchorId, addresses) + " -- ";
   switch (error.class) {
     case "E1":
       return (
@@ -319,8 +364,13 @@ function renderLaneError(error: LaneCheckerError): string {
  * ways. The COUNT line is each surface's own (the digraph folds it into its
  * heading), which is why this returns instances only.
  */
-function errorInstanceLines(errors: readonly LaneCheckerError[]): string[] {
-  return errors.slice(0, MAX_ERROR_RENDER_ENTRIES).map(renderLaneError);
+function errorInstanceLines(
+  errors: readonly LaneCheckerError[],
+  addresses?: LaneAnchorAddresses,
+): string[] {
+  return errors
+    .slice(0, MAX_ERROR_RENDER_ENTRIES)
+    .map((error) => renderLaneError(error, addresses));
 }
 
 function renderCrossSegmentWarning(warning: LaneCrossSegmentWarning): string {
@@ -344,14 +394,26 @@ function renderCrossSegmentWarning(warning: LaneCrossSegmentWarning): string {
  * this is exactly what `note-settlement-sdk-query.ts`'s `lane_check` tool
  * hands back to the settlement model (requirement 3), and what the CLI
  * prints ahead of its own digraph.
+ *
+ * `anchorAddresses` (tag-mandate ticket 06) is OPTIONAL by design, not by
+ * laziness: it changes only how an ERROR ANCHOR is spelled, and the two
+ * surfaces want different spellings. The settlement tool passes the
+ * projection's turns so every anchor prints as an address the agent can type
+ * into `note`; the CLI and the console pass nothing and keep the row ids their
+ * own readers navigate by. Nothing else in the report is affected — endpoints
+ * inside an error's arrow stay bare ids on both surfaces, because they are
+ * read as graph structure, not as repair targets.
  */
-export function renderLaneCheckerReports(result: LaneCheckerResult): string {
+export function renderLaneCheckerReports(
+  result: LaneCheckerResult,
+  anchorAddresses?: LaneAnchorAddresses,
+): string {
   const sections: string[] = [];
 
   sections.push(
     "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
   );
-  const shownErrors = errorInstanceLines(result.errors);
+  const shownErrors = errorInstanceLines(result.errors, anchorAddresses);
   if (result.errors.length === 0) {
     sections.push("(none)");
   } else {
