@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>claude-mnemo · memory console v2</title>
+<style>
+  :root {
+    --evidence:#3f8fd2; --decision:#e0a63a; --delivery:#59a86c; --none:#c3c9cf;
+    --t-research:#2b6fb5; --t-measure:#6db1e4;
+    --t-design:#d98f14; --t-discuss:#edc45c; --t-correction:#b25c1f;
+    --t-implement:#2f9e60; --t-fix:#157347; --t-refactor:#69bd8a;
+    --t-delegate:#3fa08f; --t-review:#7cb356; --t-ops:#9ab141;
+    --override:#d64541; --narrows:#d98e04; --extends:#3b82c4; --indexes:#8e5bb5;
+    --grounds:#2e9e6b; --consume:#a2a9b1; --verifies:#16a3a3; --refutes:#d6456e;
+    --ink:#2a2e33; --faint:#8a9199; --line:#e4e7ea; --bg:#fbfbfa; --panel:#ffffff;
+    --lane:#6b4d8f; --lane-bg:#f3eefa;
+  }
+  * { box-sizing:border-box; margin:0; }
+  html,body { height:100%; }
+  body { font:14px/1.55 -apple-system,"PingFang SC","Helvetica Neue",sans-serif; color:var(--ink); background:var(--bg); }
+  #app { display:flex; height:100vh; }
+
+  aside { width:252px; flex:none; background:var(--panel); border-right:1px solid var(--line); overflow-y:auto; padding-bottom:24px; }
+  .brand { padding:16px 16px 12px; font-size:15px; font-weight:600; }
+  .brand span { display:block; font-size:11px; font-weight:400; color:var(--faint); letter-spacing:.08em; text-transform:uppercase; margin-top:1px; }
+  .side-sec { font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--faint); padding:14px 16px 5px; }
+  .srow { padding:7px 14px 7px 16px; cursor:pointer; border-left:2px solid transparent; }
+  .srow:hover { background:#f5f6f7; }
+  .srow.active { border-left-color:var(--lane); background:#f7f5fa; }
+  .srow .rid { font-family:"SF Mono",Menlo,monospace; font-size:11.5px; color:var(--faint); }
+  .srow .rt { font-size:12.5px; line-height:1.35; margin:1px 0 2px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .srow .rm { font-size:11px; color:var(--faint); }
+  .sdot { width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:5px; }
+  .sdot.open { background:#59a86c; } .sdot.delivered { background:#c3c9cf; }
+  .srow .tagline { font-size:10.5px; color:var(--lane); margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+  main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
+  header { padding:14px 24px 8px; flex:none; }
+  h1 { font-size:15px; font-weight:600; }
+  h1 span { color:var(--faint); font-weight:400; margin-left:10px; font-size:12.5px; }
+  #bar { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:center; padding:7px 24px 8px; border-bottom:1px solid var(--line); flex:none; }
+  #bar label { display:inline-flex; align-items:center; gap:5px; font-size:12.5px; cursor:pointer; user-select:none; }
+  #bar input[type=checkbox]{ accent-color:#555; }
+  .sw { width:14px; height:0; border-top:2.5px solid; display:inline-block; border-radius:2px; }
+  .sw.dash { border-top-style:dashed; }
+  .sep { width:1px; height:16px; background:var(--line); margin:0 2px; }
+  #search { margin-left:auto; border:1px solid var(--line); border-radius:6px; padding:4px 9px; font-size:12.5px; width:180px; background:var(--panel); }
+
+  #lanes { padding:8px 24px 4px; flex:none; }
+  #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }
+  #lanes .lt { font-size:11px; color:var(--faint); margin-right:4px; min-width:72px; }
+  .lchip { font-size:11px; font-family:"SF Mono",Menlo,monospace; padding:2.5px 9px; border-radius:10px; background:var(--lane-bg); color:var(--lane); border:1px solid transparent; cursor:pointer; user-select:none; }
+  .lchip:hover { border-color:var(--lane); }
+  .lchip.on { background:var(--lane); color:#fff; }
+  .lchip.openlane { background:transparent; border:1px dashed #c9b8dd; }
+  .lchip.openlane.on { background:var(--lane); color:#fff; border-style:solid; }
+  .lchip.invalid { text-decoration:line-through; opacity:.6; }
+  .lchip .term { opacity:.75; margin-left:4px; }
+
+  #phases { display:flex; flex-wrap:wrap; gap:4px 12px; padding:4px 24px 6px; font-size:12px; color:var(--faint); flex:none; border-bottom:1px solid var(--line); }
+  #phases .clu { display:inline-flex; gap:8px; align-items:center; padding:1px 8px; border:1px solid var(--line); border-radius:9px; }
+  #phases .clu b { font-weight:600; color:var(--ink); }
+  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:4px; vertical-align:-1px; }
+
+  #wrap { overflow-y:auto; overflow-x:hidden; flex:1; }
+  svg text { font-family:"SF Mono",Menlo,monospace; }
+  .rowlbl { font-size:11px; fill:#6b727a; font-weight:600; }
+  .rowtitle { font-size:11.5px; fill:#585f66; font-family:-apple-system,"PingFang SC",sans-serif; }
+  .rowtitle.none { fill:#b3bac0; }
+  rect.rowhit { fill:transparent; cursor:pointer; }
+  rect.rowhit:hover { fill:#f2f3f4; }
+  path.edge { fill:none; cursor:pointer; }
+  path.edge.plain { stroke-width:1.2; opacity:.55; }
+  path.edge.laned { stroke-width:2.2; opacity:.78; }
+  path.edge.off { opacity:.04; }
+  path.edge.gray:not(.hot) { stroke:#c9cdd1; opacity:.45; }
+  /* hot = focus emphasis: opacity only — stroke WIDTH is semantic (tagged
+     thick / untagged thin, always) and never changes with focus. */
+  path.edge.hot { opacity:.95; }
+  g.node { cursor:pointer; }
+  g.node.dim, text.dim, rect.dim { opacity:.3; }
+
+  #tip { position:fixed; pointer-events:none; background:#26292d; color:#f4f4f2; padding:6px 10px; border-radius:6px; font-size:12px; max-width:420px; display:none; z-index:20; line-height:1.45; }
+  #tip .t { color:#aab3bb; font-size:11px; }
+  #tip .lg { color:#cdb8e8; }
+  #panel { position:fixed; right:0; top:0; bottom:0; width:400px; background:var(--panel); border-left:1px solid var(--line); padding:20px 22px; overflow-y:auto; display:none; z-index:10; box-shadow:-6px 0 18px rgba(0,0,0,.04); }
+  #panel .addr { font-family:Menlo,monospace; font-size:12px; color:var(--faint); }
+  #panel h2 { font-size:14.5px; font-weight:600; margin:6px 0 10px; }
+  #panel .chips { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }
+  .chip { font-size:11px; padding:2px 8px; border-radius:9px; background:#eef0f2; color:#555; }
+  .chip.ph { color:#fff; }
+  .chip.lane { background:var(--lane-bg); color:var(--lane); font-family:"SF Mono",Menlo,monospace; }
+  #panel .sec { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); margin:14px 0 5px; }
+  #panel .content { font-size:13px; white-space:pre-wrap; }
+  #panel .prompt { font-size:12.5px; color:#555; white-space:pre-wrap; background:#f7f7f6; border-radius:6px; padding:8px 10px; }
+  #panel .erow { font-size:12.5px; font-family:Menlo,monospace; padding:2px 0; cursor:pointer; }
+  #panel .erow:hover { text-decoration:underline; }
+  #panel .erow .etags { color:var(--lane); font-size:11px; }
+  #panel .flowline { font-size:12.5px; color:var(--faint); }
+  #close { position:absolute; top:12px; right:14px; border:none; background:none; font-size:16px; color:var(--faint); cursor:pointer; }
+  #toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#26292d; color:#f2f2f0; font-size:12.5px; padding:8px 16px; border-radius:8px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:30; }
+  #selbadge { display:none; margin-left:12px; font-size:11.5px; font-family:"SF Mono",Menlo,monospace; background:#26292d; color:#f2f2f0; padding:2.5px 11px; border-radius:10px; cursor:pointer; vertical-align:1px; }
+  #selbadge:hover { background:#3a3e43; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside>
+    <div class="brand">claude-mnemo<span>memory console</span></div>
+    <div class="side-sec">会话</div>
+    <div id="sessions"></div>
+    <div class="side-sec">段</div>
+    <div id="segments"></div>
+  </aside>
+  <main>
+    <header><h1 id="scopeTitle">S15069 · T900–T1001<span id="meta"></span><span id="selbadge"></span></h1></header>
+    <div id="bar"></div>
+    <div id="lanes"></div>
+    <div id="phases">
+      <span class="clu"><b>取证</b>
+        <span><span class="dot" style="background:var(--t-research)"></span>research</span>
+        <span><span class="dot" style="background:var(--t-measure)"></span>measure</span>
+      </span>
+      <span class="clu"><b>决策</b>
+        <span><span class="dot" style="background:var(--t-design)"></span>design</span>
+        <span><span class="dot" style="background:var(--t-discuss)"></span>discuss</span>
+        <span><span class="dot" style="background:var(--t-correction)"></span>correction</span>
+      </span>
+      <span class="clu"><b>落地</b>
+        <span><span class="dot" style="background:var(--t-implement)"></span>implement</span>
+        <span><span class="dot" style="background:var(--t-fix)"></span>fix</span>
+        <span><span class="dot" style="background:var(--t-refactor)"></span>refactor</span>
+        <span><span class="dot" style="background:var(--t-delegate)"></span>delegate</span>
+        <span><span class="dot" style="background:var(--t-review)"></span>review</span>
+        <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>
+      </span>
+      <span>◎ 已宣告终点 · ✕ 被 override · 实线=同相位 · 虚线=跨相位 · 粗=带 lane tag · 细=无 tag · 聚焦=单连通分量:点节点/芯片切换到其分量(分量内 lane 全亮);同分量内先看面板、面板所在节点再点即撤销;无 lane 节点亮其直连边;空白处/Esc 清除</span>
+    </div>
+    <div id="wrap"><svg id="svg"></svg></div>
+  </main>
+</div>
+<div id="tip"></div>
+<div id="panel"><button id="close">✕</button><div id="pbody"></div></div>
+<div id="toast"></div>
+<script>
+const DATA = __DATA__;
+const WORDS = ["override","narrows","extends","indexes","grounds","consume","verifies","refutes"];
+const STRUCT = new Set(["narrows","extends","override"]);
+// line style encodes the PHASE axis: solid = same-phase, dashed = cross-phase.
+// Cross-phase words never carry lane tags (lanes are phase-local), so the
+// dash axis and the tag axis can never collide on one edge.
+const DASH = new Set(["grounds","verifies","refutes"]);
+const TYPE_ORDER = ["research","measure","design","discuss","correction","implement","fix","refactor","delegate","review","ops"];
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const typeColor = t => TYPE_ORDER.includes(t) ? css("--t-"+t) : css("--none");
+const sortTypes = ts => [...ts].sort((a,b)=>{const ia=TYPE_ORDER.indexOf(a),ib=TYPE_ORDER.indexOf(b);return (ia<0?99:ia)-(ib<0?99:ib);});
+const esc = s => { const d=document.createElement("div"); d.textContent=s; return d.innerHTML; };
+
+const turns = DATA.turns, edges = DATA.edges, lanes = DATA.lanes;
+const idx = new Map(turns.map((t,i)=>[t.id,i]));
+const laneByToken = new Map(lanes.map(l=>[l.token,l]));
+document.getElementById("meta").textContent =
+  ` ${turns.length} turns · ${edges.length} edges · ${lanes.length} lanes · ${DATA.meta.generated}`;
+
+/* ---- sidebar ---- */
+const sesBox = document.getElementById("sessions");
+for (const s of DATA.sessions) {
+  const div = document.createElement("div");
+  div.className = "srow" + (s.id===DATA.meta.sessionId ? " active" : "");
+  div.innerHTML = `<div class="rid">S${s.id}</div><div class="rt">${esc(s.title)}</div>
+    <div class="rm">${s.turns} turns · ${s.date}</div>`;
+  div.onclick = () => { if (s.id!==DATA.meta.sessionId) toast("模板为静态内嵌数据 — live 版由 worker HTTP 接口按会话供数"); };
+  sesBox.appendChild(div);
+}
+const segBox = document.getElementById("segments");
+for (const g of DATA.segments) {
+  const div = document.createElement("div");
+  div.className = "srow" + (g.id===60 ? " active" : "");
+  div.innerHTML = `<div class="rid"><span class="sdot ${g.status}"></span>E${g.id}</div>
+    <div class="rt">${esc(g.title)}</div>
+    <div class="rm">${g.members} 成员 · ${g.status}</div>
+    ${g.tags.length?`<div class="tagline">${g.tags.map(t=>"#"+esc(t)).join(" ")}</div>`:""}`;
+  div.onclick = () => showSegment(g);
+  segBox.appendChild(div);
+}
+
+/* ---- filter bar ---- */
+const bar = document.getElementById("bar");
+const on = Object.fromEntries(WORDS.map(w=>[w,true]));
+for (const w of WORDS) {
+  const l = document.createElement("label");
+  l.innerHTML = `<input type="checkbox" checked data-w="${w}"><span class="sw ${DASH.has(w)?"dash":""}" style="border-color:var(--${w})"></span>${w}`;
+  bar.appendChild(l);
+}
+bar.insertAdjacentHTML("beforeend", `<span class="sep"></span><input id="search" placeholder="跳转:T1010 或标题关键词 ⏎">`);
+bar.addEventListener("change", e => { if (e.target.dataset.w){ on[e.target.dataset.w]=e.target.checked; paintFilters(); }});
+
+/* ---- lane strip: open first (live work), closed after ---- */
+const laneBox = document.getElementById("lanes");
+// ONE focused COMPONENT at a time — no lane multi-select. selLanes always
+// holds exactly the lane tokens of one membership component (selecting any
+// lane auto-lights every lane connected to it), or none. solo = a laneless
+// node under focus: its direct edges color instead of lane edges.
+let selLanes = new Set();
+let solo = null;
+const laneChips = new Map();
+const sameFocus = (toks) => selLanes.size===toks.length && toks.every(t=>selLanes.has(t));
+function clearFocus(){ selLanes = new Set(); solo = null; sel = null; panel.style.display="none"; }
+function laneChip(l){
+  const c = document.createElement("span");
+  c.className = "lchip" + (l.closed ? (l.valid ? "" : " invalid") : " openlane");
+  const term = l.closed ? `◎T${l.terminus}` : (l.terminus ? `…◎T${l.terminus}` : "无宣告");
+  c.innerHTML = `${esc(l.tags.join("+"))}<span class="term">${term}${l.closed && !l.valid ? " ✝" : ""}</span>`;
+  c.onclick = () => {
+    const toks = lanesTouchingComponent(l.members[0]);
+    if (sameFocus(toks)) { clearFocus(); }
+    else {
+      selLanes = new Set(toks); solo = null;
+      if (sel!==null && !toks.some(t=>laneByToken.get(t).members.includes(sel))) { sel=null; panel.style.display="none"; }
+      const anchor = anchorOf(l.token);
+      if (anchor != null && idx.has(anchor))
+        document.getElementById("wrap").scrollTo({top: yOf(anchor)-innerHeight/2, behavior:"smooth"});
+    }
+    paintFilters();
+    syncBadge();
+  };
+  laneChips.set(l.token, c);
+  return c;
+}
+const openLanes = lanes.filter(l=>!l.closed), closedLanes = lanes.filter(l=>l.closed);
+const g1 = document.createElement("div"); g1.className="lgroup";
+g1.innerHTML = `<span class="lt">open (${openLanes.length})</span>`;
+for (const l of openLanes) g1.appendChild(laneChip(l));
+const g2 = document.createElement("div"); g2.className="lgroup";
+g2.innerHTML = `<span class="lt">closed (${closedLanes.length})</span>`;
+for (const l of closedLanes) g2.appendChild(laneChip(l));
+if (openLanes.length) laneBox.appendChild(g1);
+laneBox.appendChild(g2);
+
+/* ---- vertical graph: one row per turn, arcs on the left rails ---- */
+const ROW = 22, TOP = 16, NODE_X = 352, TEXT_X = 372;
+const yOf = id => TOP + idx.get(id)*ROW + ROW/2;
+const svg = document.getElementById("svg");
+const W = 1080, H = TOP*2 + turns.length*ROW;
+svg.setAttribute("width", W); svg.setAttribute("height", H);
+const NS = "http://www.w3.org/2000/svg";
+const mk = (n,a) => { const el=document.createElementNS(NS,n); for(const k in a) el.setAttribute(k,a[k]); return el; };
+svg.appendChild(mk("line",{x1:NODE_X,y1:TOP,x2:NODE_X,y2:H-TOP,stroke:"#eceef0"}));
+// any blank click (svg background or the baseline) clears all focus.
+svg.addEventListener("click", e => {
+  if (e.target === svg || e.target.tagName === "line") { clearFocus(); paintFilters(); syncBadge(); }
+});
+
+// row hover/click layer sits UNDER the edges: the hover band may never mask
+// an arc, and it doubles as a full-width row guide across the rail.
+const bgg = mk("g",{}); svg.appendChild(bgg);
+const eg = mk("g",{}); svg.appendChild(eg);
+const edgeEls = [];
+for (const e of edges) {
+  const y1=yOf(e.citingId), y2=yOf(e.citedId);
+  if (!Number.isFinite(y1)||!Number.isFinite(y2)) continue;
+  const span = Math.abs(idx.get(e.citingId)-idx.get(e.citedId));
+  const depth = STRUCT.has(e.relation)
+    ? Math.min(120, 16 + span*2.4)
+    : Math.min(330, 150 + span*1.9);
+  const p = mk("path",{class:"edge "+(e.tags.length?"laned":"plain"),
+    d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,stroke:css("--"+e.relation)});
+  if (DASH.has(e.relation)) p.setAttribute("stroke-dasharray","5 3");
+  p.dataset.r=e.relation; p.dataset.s=e.citingId; p.dataset.t=e.citedId;
+  p.dataset.lane = e.tags.length ? e.laneToken : "";
+  p.addEventListener("mousemove", ev=>tip(ev,
+    `T${e.citingId} —${e.relation}→ T${e.citedId}` +
+    (e.tags.length?` <span class="lg">{${e.tags.join(",")}}</span>`:"")));
+  p.addEventListener("mouseleave", hideTip);
+  eg.appendChild(p); edgeEls.push(p);
+}
+
+const ng = mk("g",{}); svg.appendChild(ng);
+const nodeEls = new Map(), rowEls = new Map();
+for (const t of turns) {
+  const y = yOf(t.id);
+  // hit target covers node + text only — the arc rail stays BLANK, and blank
+  // clicks (svg background) clear all focus (T1386 ruling 2).
+  const hit = mk("rect",{class:"rowhit",x:NODE_X-10,y:y-ROW/2,width:W-(NODE_X-10),height:ROW});
+  hit.addEventListener("click", ()=>select(t.id));
+  bgg.appendChild(hit);
+
+  const g = mk("g",{class:"node",transform:`translate(${NODE_X},${y})`});
+  const tys = sortTypes(t.type.filter(x=>TYPE_ORDER.includes(x)));
+  const r = 5.5;
+  if (!tys.length) g.appendChild(mk("circle",{r,fill:css("--none")}));
+  else if (tys.length===1) g.appendChild(mk("circle",{r,fill:typeColor(tys[0])}));
+  else {
+    let a0 = -Math.PI/2;
+    for (const ty of tys) {
+      const a1 = a0 + 2*Math.PI/tys.length;
+      const large = (a1-a0)>Math.PI?1:0;
+      g.appendChild(mk("path",{d:`M 0 0 L ${r*Math.cos(a0)} ${r*Math.sin(a0)} A ${r} ${r} 0 ${large} 1 ${r*Math.cos(a1)} ${r*Math.sin(a1)} Z`,fill:typeColor(ty)}));
+      a0 = a1;
+    }
+  }
+  if (t.isTerminus) g.appendChild(mk("circle",{r:8.5,fill:"none",stroke:"#565c63","stroke-width":1.2}));
+  if (t.isDead) {
+    g.appendChild(mk("line",{x1:-7,y1:-7,x2:7,y2:7,stroke:css("--override"),"stroke-width":1.3}));
+    g.appendChild(mk("line",{x1:-7,y1:7,x2:7,y2:-7,stroke:css("--override"),"stroke-width":1.3}));
+  }
+  g.addEventListener("click", ()=>select(t.id));
+  ng.appendChild(g); nodeEls.set(t.id,g);
+
+  const lb = mk("text",{class:"rowlbl",x:TEXT_X,y:y+3.5});
+  lb.textContent = "T"+t.id;
+  const title = mk("text",{class:"rowtitle"+(t.title?"":" none"),x:TEXT_X+52,y:y+3.5});
+  const tt = t.title || "(无笔记)";
+  title.textContent = tt.length>62 ? tt.slice(0,62)+"…" : tt;
+  ng.appendChild(lb); ng.appendChild(title);
+  rowEls.set(t.id,[hit,lb,title]);
+}
+
+/* ---- interactions ---- */
+let sel = null;
+// adjacency over TAGGED edges only — the lane-connectivity graph. Focus mode
+// colors the focused node's whole lane component (tag edges are phase-local,
+// so the component never leaks across phases by construction).
+const tagAdj = new Map();
+for (const e of edges) {
+  if (!e.tags.length) continue;
+  if (!tagAdj.has(e.citingId)) tagAdj.set(e.citingId, new Set());
+  if (!tagAdj.has(e.citedId)) tagAdj.set(e.citedId, new Set());
+  tagAdj.get(e.citingId).add(e.citedId);
+  tagAdj.get(e.citedId).add(e.citingId);
+}
+function laneComponentOf(id){
+  const seen = new Set();
+  if (!tagAdj.has(id)) return seen;
+  const q = [id]; seen.add(id);
+  while (q.length) {
+    for (const nb of tagAdj.get(q.pop()) ?? []) {
+      if (!seen.has(nb)) { seen.add(nb); q.push(nb); }
+    }
+  }
+  return seen;
+}
+function paintFilters(){
+  const anyFocus = selLanes.size>0 || solo!==null;
+  for (const p of edgeEls){
+    p.classList.remove("off","gray","hot");
+    if (!on[p.dataset.r]) { p.classList.add("off"); continue; }
+    if (!anyFocus) continue;
+    const inComp = p.dataset.lane!=="" && selLanes.has(p.dataset.lane);
+    const soloDirect = solo!==null && (p.dataset.s==solo || p.dataset.t==solo);
+    if (inComp || soloDirect) p.classList.add("hot");
+    else p.classList.add("gray");
+  }
+  for (const [tok, el] of laneChips) el.classList.toggle("on", selLanes.has(tok));
+  const dimRow = (id, dim) => {
+    nodeEls.get(id).classList.toggle("dim", dim);
+    for (const el of rowEls.get(id)) el.classList.toggle("dim", dim);
+  };
+  if (!anyFocus){ for (const t of turns) dimRow(t.id,false); return; }
+  const keep = new Set();
+  for (const tok of selLanes) for (const m of laneByToken.get(tok).members) keep.add(m);
+  if (solo!==null){
+    keep.add(solo);
+    for (const p of edgeEls) if (on[p.dataset.r]&&(p.dataset.s==solo||p.dataset.t==solo)){ keep.add(+p.dataset.s); keep.add(+p.dataset.t); }
+  }
+  if (sel!==null) keep.add(sel);
+  for (const t of turns) dimRow(t.id, !keep.has(t.id));
+}
+const panel = document.getElementById("panel"), pbody = document.getElementById("pbody");
+const selBadge = document.getElementById("selbadge");
+function syncBadge(){
+  if (selLanes.size===0 && solo===null && sel===null){ selBadge.style.display="none"; return; }
+  selBadge.textContent = (selLanes.size
+    ? `聚焦分量:${selLanes.size} 条 lane${sel!==null ? ` · 面板 T${sel}` : ""}`
+    : solo!==null ? `聚焦 T${solo}(无 lane,亮直连边)` : `面板 T${sel}`) + " · 空白处/Esc 清除";
+  selBadge.style.display = "inline-block";
+}
+selBadge.onclick = () => { clearFocus(); paintFilters(); syncBadge(); };
+addEventListener("keydown", e => { if (e.key==="Escape") selBadge.onclick(); });
+function anchorOf(tok){
+  const l = laneByToken.get(tok);
+  return l.terminus ?? l.members[l.members.length-1];
+}
+function lanesTouchingComponent(id){
+  const comp = laneComponentOf(id);
+  const toks = [];
+  for (const [tok, l] of laneByToken) if (l.members.some(m=>comp.has(m))) toks.push(tok);
+  return toks;
+}
+// ONE focus system: the lane multi-select. A node click is a REVERSIBLE
+// chip press: on an unfocused (or partially focused) node it adds the whole
+// component's lanes and opens the panel; on a FULLY focused node it removes
+// them again — the same refocus rule chip deselection uses. Laneless nodes
+// only toggle their panel.
+// Focus model (T1386): clicking a node SWITCHES focus to its component
+// (every lane in it lights, the previous component clears). On the
+// already-focused component the click is two-stage (T1385): open the panel
+// first; undo the focus only when the panel already shows this node.
+// Laneless nodes focus solo — their direct edges color.
+function select(id){
+  const toks = lanesTouchingComponent(id);
+  if (toks.length){
+    if (sameFocus(toks)){
+      if (sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }
+    } else { selLanes = new Set(toks); solo = null; }
+  } else {
+    if (solo === id && sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }
+    selLanes = new Set(); solo = id;
+  }
+  sel = id;
+  paintFilters();
+  syncBadge();
+  renderTurnPanel(id);
+}
+function renderTurnPanel(id){
+  const t = turns[idx.get(id)];
+  const outE = edges.filter(e=>e.citingId===id), inE = edges.filter(e=>e.citedId===id);
+  const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:var(--${e.relation})">${dir==="out"?`—${e.relation}→ T${e.citedId}`:`T${e.citingId} —${e.relation}→`}${e.tags.length?` <span class="etags">{${esc(e.tags.join(","))}}</span>`:""}</div>`;
+  pbody.innerHTML =
+    `<div class="addr">S${DATA.meta.sessionId}/T${id}</div><h2>${esc(t.title||"(无笔记)")}</h2>
+     <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}${t.tags.map(x=>`<span class="chip" style="background:#f3eefa;color:#6b4d8f">#${esc(x)}</span>`).join("")}</div>
+     ${t.lanes.length?`<div class="flowline">所属 lane:${t.lanes.map(l=>`<span class="chip lane">${esc(l)}</span>`).join(" ")}${t.isTerminus?" · ◎ 已宣告终点":""}${t.isDead?" · ✕ 被 override":""}</div>`:""}
+     ${t.prompt?`<div class="sec">prompt</div><div class="prompt">${esc(t.prompt)}</div>`:""}
+     <div class="sec">content</div><div class="content">${esc(t.content||"—")}</div>
+     <div class="sec">出边 ${outE.length}</div>${outE.map(e=>erow(e,"out")).join("")||"<div class='flowline'>无</div>"}
+     <div class="sec">入边 ${inE.length}</div>${inE.map(e=>erow(e,"in")).join("")||"<div class='flowline'>无</div>"}`;
+  panel.style.display="block";
+  pbody.querySelectorAll(".erow").forEach(el=>el.addEventListener("click",()=>jump(+el.dataset.j)));
+}
+function showSegment(g){
+  sel = null; paintFilters();
+  pbody.innerHTML =
+    `<div class="addr">E${g.id} · ${g.status}</div><h2>${esc(g.title)}</h2>
+     <div class="chips">${g.type.map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}${g.tags.map(x=>`<span class="chip" style="background:#f3eefa;color:#6b4d8f">#${esc(x)}</span>`).join("")}</div>
+     <div class="flowline">${g.members} 个成员 turn</div>
+     <div class="sec">live 版</div>
+     <div class="content">worker HTTP 接口将供:段卡片全字段、成员清单跳转、lane-check 四报告。</div>`;
+  panel.style.display="block";
+}
+function jump(id){
+  if (!idx.has(id)) return;
+  if (sel!==id) select(id);
+  document.getElementById("wrap").scrollTo({top: yOf(id)-innerHeight/2, behavior:"smooth"});
+}
+document.getElementById("close").onclick = ()=>{ sel=null; paintFilters(); syncBadge(); panel.style.display="none"; };
+document.getElementById("search").addEventListener("keydown", e=>{
+  if (e.key!=="Enter") return;
+  const q = e.target.value.trim();
+  const m = q.match(/^T?(\d+)$/i);
+  if (m && idx.has(+m[1])) return jump(+m[1]);
+  const hit = turns.find(t=>(t.title||"").toLowerCase().includes(q.toLowerCase()));
+  if (hit) jump(hit.id);
+});
+const tipEl = document.getElementById("tip");
+function tip(ev,html){ tipEl.innerHTML=html; tipEl.style.display="block"; tipEl.style.left=Math.min(ev.clientX+14,innerWidth-440)+"px"; tipEl.style.top=(ev.clientY+16)+"px"; }
+function hideTip(){ tipEl.style.display="none"; }
+let toastTimer = null;
+function toast(msg){
+  const el = document.getElementById("toast");
+  el.textContent = msg; el.style.opacity = 1;
+  clearTimeout(toastTimer); toastTimer = setTimeout(()=>el.style.opacity=0, 2600);
+}
+paintFilters();
+</script>
+</body>
+</html>
