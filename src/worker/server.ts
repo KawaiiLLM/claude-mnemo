@@ -1187,6 +1187,20 @@ export type RequestGateVerdict =
   | { allowed: false; reason: RequestGateRejectionReason };
 
 /**
+ * ASCII case-fold, deliberately NOT `.toLowerCase()`/`.toLocaleLowerCase()`
+ * (peer finding #13): `Host`/`Origin` are ASCII hostnames and URL schemes,
+ * and folding only `A`-`Z` sidesteps any locale-dependent surprise (e.g. the
+ * Turkish-I problem) a full Unicode case fold could introduce, for a
+ * comparison that only ever needs to treat `LOCALHOST` and `localhost` as
+ * the same token. This never widens what the gate accepts — it normalizes
+ * the case of what a real client sent before comparing it against the SAME
+ * two loopback strings the gate already allowed.
+ */
+function asciiFold(value: string): string {
+  return value.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
+}
+
+/**
  * The DNS-rebinding gate (memory-console spec, "Security posture"; ticket
  * 02). A pure function of the request's own headers and the port this server
  * is actually bound to — no `Request`/`URL` object, no server state — so the
@@ -1195,15 +1209,17 @@ export type RequestGateVerdict =
  *
  * Three independent checks, each violating the loopback-only contract in a
  * different way an attacker can reach it:
- *   - `Host` must equal the bound loopback host:port. This is the DNS-
- *     rebinding defense itself: a browser that resolved a hostile domain to
+ *   - `Host` must equal the bound loopback host:port, ASCII case-folded
+ *     first (peer finding #13 — `LOCALHOST:<port>` is the same token as
+ *     `localhost:<port>`, not a different one). This is the DNS-rebinding
+ *     defense itself: a browser that resolved a hostile domain to
  *     127.0.0.1 still sends that domain's name as `Host`, not "127.0.0.1" —
  *     so an exact match here is the one thing DNS control cannot forge.
  *   - `Origin`, when a browser sends one (any cross-origin fetch, and most
- *     same-origin POSTs), must equal the loopback origin — belt-and-braces
- *     against a same-`Host` request that a compromised loopback-adjacent
- *     process still shouldn't be allowed to forge without the browser's own
- *     origin tag agreeing.
+ *     same-origin POSTs), must equal the loopback origin (same case-fold) —
+ *     belt-and-braces against a same-`Host` request that a compromised
+ *     loopback-adjacent process still shouldn't be allowed to forge without
+ *     the browser's own origin tag agreeing.
  *   - `Sec-Fetch-Site`, when the browser sends one (it does not on older
  *     browsers or non-fetch clients — hence `none` and absence are both
  *     accepted, never treated as a violation on their own), must say the
@@ -1221,7 +1237,7 @@ export function evaluateRequestGate(
   const loopbackHosts = [`127.0.0.1:${port}`, `localhost:${port}`];
 
   const host = headers.get("host");
-  if (host === null || !loopbackHosts.includes(host)) {
+  if (host === null || !loopbackHosts.includes(asciiFold(host))) {
     return { allowed: false, reason: "host" };
   }
 
@@ -1231,7 +1247,7 @@ export function evaluateRequestGate(
       `http://127.0.0.1:${port}`,
       `http://localhost:${port}`,
     ];
-    if (!loopbackOrigins.includes(origin)) {
+    if (!loopbackOrigins.includes(asciiFold(origin))) {
       return { allowed: false, reason: "origin" };
     }
   }
@@ -1388,7 +1404,22 @@ export function createWorkerFetchHandler(
   }
 
   return async (req: Request): Promise<Response> => {
-    state.lastHttpRequestAt = deps.nowMs?.() ?? Date.now();
+    const url = new URL(req.url);
+    // Idle-lease exemption (peer finding #8): browsing the console must
+    // never keep the worker resident. `/console` and every `/api/console/*`
+    // request leave `lastHttpRequestAt` untouched; every other route still
+    // refreshes it, so the generic 30-minute idle shutdown below
+    // (`checkForIdleWorkerShutdown`, the only reader of this field) keeps
+    // firing on schedule even under continuous console polling. The
+    // SEPARATE 70s hard-exit timer is keyed off `sessionEnvRegistry`
+    // emptying out, never this timestamp, and is already untouched by
+    // construction — the console branches below reference neither
+    // `sessionEnvRegistry` nor `deps.hardExitTimerImpl`.
+    const isConsoleRequest =
+      url.pathname === "/console" || url.pathname.startsWith("/api/console/");
+    if (!isConsoleRequest) {
+      state.lastHttpRequestAt = deps.nowMs?.() ?? Date.now();
+    }
     state.activeRequests += 1;
 
     try {
@@ -1400,8 +1431,6 @@ export function createWorkerFetchHandler(
       if (!gateVerdict.allowed) {
         return requestGateRejectionResponse(gateVerdict.reason);
       }
-
-      const url = new URL(req.url);
 
       if (req.method === "GET" && url.pathname === "/health") {
         return new Response(

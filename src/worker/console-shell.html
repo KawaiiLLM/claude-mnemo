@@ -34,6 +34,8 @@
   .sdot { width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:5px; }
   .sdot.open { background:#59a86c; } .sdot.delivered { background:#c3c9cf; }
   .srow .tagline { font-size:10.5px; color:var(--lane); margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .srow.more { color:var(--faint); text-align:center; font-size:12px; }
+  .srow.more:hover { color:var(--ink); }
 
   main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
   #stoppedBanner, #partialBanner { display:none; flex:none; padding:7px 24px; font-size:12.5px; }
@@ -186,6 +188,10 @@ let edgeEls = [];
 let nodeEls = new Map(), rowEls = new Map();
 const laneChips = new Map();
 let sessionsList = [], segmentsList = [];
+// nextCursor from the most recent /api/console/sessions page (peer finding
+// #10) — null once the last page has been loaded, or before the first load.
+let sessionsNextCursor = null;
+let sessionsLoadingMore = false;
 let currentScope = null; // { kind: "session"|"segment", id }
 let lastLoad = null; // retry hook for the worker-stopped banner
 
@@ -258,6 +264,7 @@ async function loadSidebar(){
       fetchJson("/api/console/segments"),
     ]);
     sessionsList = sessionsRes.sessions;
+    sessionsNextCursor = sessionsRes.nextCursor ?? null;
     segmentsList = segmentsRes.segments;
     renderSidebar();
     hideStopped();
@@ -270,6 +277,23 @@ async function loadSidebar(){
   }
 }
 
+/* ---- sessions load-more: page max is SESSIONS_PAGE_MAX server-side (peer
+   finding #10) — older sessions are unreachable without walking nextCursor. ---- */
+async function loadMoreSessions(){
+  if (!sessionsNextCursor || sessionsLoadingMore) return;
+  sessionsLoadingMore = true;
+  try {
+    const res = await fetchJson("/api/console/sessions?cursor=" + encodeURIComponent(sessionsNextCursor));
+    sessionsList = sessionsList.concat(res.sessions);
+    sessionsNextCursor = res.nextCursor ?? null;
+    renderSidebar();
+  } catch (e) {
+    toast("加载更多会话失败: " + (e.kind === "http" && e.body && e.body.error && e.body.error.message ? e.body.error.message : "网络错误"));
+  } finally {
+    sessionsLoadingMore = false;
+  }
+}
+
 function renderSidebar(){
   sesBox.innerHTML = "";
   for (const s of sessionsList) {
@@ -279,6 +303,13 @@ function renderSidebar(){
       <div class="rm">${s.turnCount} turns · ${esc(s.date)}</div>`;
     div.addEventListener("click", () => loadGraph({ session: s.id }));
     sesBox.appendChild(div);
+  }
+  if (sessionsNextCursor) {
+    const more = document.createElement("div");
+    more.className = "srow more";
+    more.textContent = "更多…"; // textContent — a static app-authored label, not payload text
+    more.addEventListener("click", loadMoreSessions);
+    sesBox.appendChild(more);
   }
   segBox.innerHTML = "";
   for (const g of segmentsList) {
@@ -481,7 +512,12 @@ function renderGraphSvg(){
     lb.textContent = "T"+t.id;
     const title = mk("text",{class:"rowtitle"+(t.title?"":" none"),x:TEXT_X+52,y:y+3.5});
     const tt = t.title || "(无笔记)";
-    title.textContent = tt.length>62 ? tt.slice(0,62)+"…" : tt; // textContent — no esc() needed
+    // Code-point slice, never `.slice()` — a UTF-16 code-unit slice cuts
+    // mid-surrogate-pair on non-BMP titles (peer finding #14b, matching the
+    // server's own codePointExcerpt for the prompt/content excerpt caps).
+    // `Array.from` iterates a string by code point.
+    const ttCp = Array.from(tt);
+    title.textContent = ttCp.length>62 ? ttCp.slice(0,62).join("")+"…" : tt; // textContent — no esc() needed
     ng.appendChild(lb); ng.appendChild(title);
     rowEls.set(t.id,[hit,lb,title]);
   }

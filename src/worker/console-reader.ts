@@ -148,7 +148,18 @@ export function parseSessionsCursor(
   if (!match) {
     return null;
   }
-  return { epoch: Number(match[1]), id: Number(match[2]) };
+  const epoch = Number(match[1]);
+  const id = Number(match[2]);
+  // A digit run beyond Number.MAX_SAFE_INTEGER (or long enough to parse to
+  // Infinity) cannot round-trip through the JS Number this value is compared
+  // and bound as without silent precision loss — treated as malformed
+  // (peer finding #13), same as any other shape this regex would reject,
+  // rather than handed to SQLite as a value that no longer matches the
+  // digits the client actually sent.
+  if (!Number.isSafeInteger(epoch) || !Number.isSafeInteger(id)) {
+    return null;
+  }
+  return { epoch, id };
 }
 
 export interface CreateConsoleReaderOptions {

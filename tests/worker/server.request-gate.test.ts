@@ -45,6 +45,30 @@ describe("evaluateRequestGate (pure function: headers + port -> verdict)", () =>
     ).toEqual({ allowed: false, reason: "host" });
   });
 
+  test("Host: ASCII case-fold (peer finding #13) — LOCALHOST/mixed-case forms of the SAME two loopback names pass; folding never widens the allowlist", () => {
+    for (const host of [
+      `LOCALHOST:${TEST_PORT}`,
+      `LocalHost:${TEST_PORT}`,
+      `127.0.0.1:${TEST_PORT}`.toUpperCase(), // the IPv4 literal itself has no letters to fold; exercised for completeness
+    ]) {
+      expect(evaluateRequestGate(new Headers({ host }), TEST_PORT)).toEqual({
+        allowed: true,
+      });
+    }
+
+    // Case-folding compares against the SAME two strings, never a wider set:
+    // a foreign host is rejected in every case, not just lowercase.
+    for (const host of [
+      `EVIL.EXAMPLE:${TEST_PORT}`,
+      `Attacker.Example:${TEST_PORT}`,
+    ]) {
+      expect(evaluateRequestGate(new Headers({ host }), TEST_PORT)).toEqual({
+        allowed: false,
+        reason: "host",
+      });
+    }
+  });
+
   test("Origin: absent passes, exact loopback origin passes, any other origin is rejected as 'origin'", () => {
     expect(
       evaluateRequestGate(new Headers({ host: `127.0.0.1:${TEST_PORT}` }), TEST_PORT),
@@ -75,6 +99,30 @@ describe("evaluateRequestGate (pure function: headers + port -> verdict)", () =>
         ),
       ).toEqual({ allowed: false, reason: "origin" });
     }
+  });
+
+  test("Origin: ASCII case-fold (peer finding #13) — an uppercase scheme/host origin folds to the SAME loopback origin; folding never widens the allowlist", () => {
+    for (const origin of [
+      `HTTP://LOCALHOST:${TEST_PORT}`,
+      `http://LOCALHOST:${TEST_PORT}`,
+    ]) {
+      expect(
+        evaluateRequestGate(
+          new Headers({ host: `127.0.0.1:${TEST_PORT}`, origin }),
+          TEST_PORT,
+        ),
+      ).toEqual({ allowed: true });
+    }
+
+    expect(
+      evaluateRequestGate(
+        new Headers({
+          host: `127.0.0.1:${TEST_PORT}`,
+          origin: "HTTP://EVIL.EXAMPLE.COM",
+        }),
+        TEST_PORT,
+      ),
+    ).toEqual({ allowed: false, reason: "origin" });
   });
 
   test("Sec-Fetch-Site: absent/same-origin/none pass, cross-site (and same-site) are rejected as 'sec-fetch-site'", () => {
@@ -141,6 +189,16 @@ describe("the gate through the REAL fetch handler, before any route dispatch", (
       name: "valid localhost host form",
       headers: { host: `localhost:${TEST_PORT}` },
       allowed: true,
+    },
+    {
+      name: "case-folded LOCALHOST host form (peer finding #13)",
+      headers: { host: `LOCALHOST:${TEST_PORT}` },
+      allowed: true,
+    },
+    {
+      name: "case-folded host, foreign in any case is still rejected",
+      headers: { host: `ATTACKER.EXAMPLE:${TEST_PORT}` },
+      allowed: false,
     },
     {
       name: "valid host + exact loopback Origin + same-origin Sec-Fetch-Site",

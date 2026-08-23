@@ -4,7 +4,11 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { createWorkerFetchHandler, type HardExitTimer } from "../../src/worker/server";
+import {
+  createWorkerFetchHandler,
+  createWorkerServerState,
+  type HardExitTimer,
+} from "../../src/worker/server";
 import { createConsoleReader, type ConsoleReader } from "../../src/worker/console-reader";
 import type { CapturedSessionEnv } from "../../src/mnemosyne/env";
 
@@ -266,5 +270,51 @@ describe("console requests never touch the session registry or the hard-exit mac
     expect(scanAndDrainQueueCalls).toBe(0);
     expect(sessionEnvRegistry.size).toBe(1);
     expect(sessionEnvRegistry.has("pre-existing-session")).toBe(true);
+  });
+
+  test("a console request leaves the idle-lease timestamp unchanged; an ordinary route still refreshes it (peer finding #8)", async () => {
+    let clockMs = 1_000_000;
+    const nowMs = () => clockMs;
+    const state = createWorkerServerState(nowMs());
+    const handler = createWorkerFetchHandler(
+      {
+        db,
+        port: TEST_PORT,
+        nowMs,
+        consoleReaderImpl: createConsoleReader(db),
+        handleFlushImpl: async () => {},
+      },
+      state,
+    );
+
+    const initialLease = state.lastHttpRequestAt;
+
+    for (const path of [
+      "/console",
+      "/api/console/sessions",
+      "/api/console/segments",
+      "/api/console/graph?session=1",
+    ]) {
+      clockMs += 5_000;
+      // eslint-disable-next-line no-await-in-loop
+      await handler(
+        new Request(`http://127.0.0.1:${TEST_PORT}${path}`, {
+          headers: { host: `127.0.0.1:${TEST_PORT}` },
+        }),
+      );
+      expect(state.lastHttpRequestAt).toBe(initialLease);
+    }
+
+    // Sanity: the lease mechanism itself is live — a NON-console route still
+    // bumps it, proving the exemption above is scoped to console paths only,
+    // not a broken/no-op lease.
+    clockMs += 5_000;
+    await handler(
+      new Request(`http://127.0.0.1:${TEST_PORT}/health`, {
+        headers: { host: `127.0.0.1:${TEST_PORT}` },
+      }),
+    );
+    expect(state.lastHttpRequestAt).toBe(clockMs);
+    expect(state.lastHttpRequestAt).not.toBe(initialLease);
   });
 });

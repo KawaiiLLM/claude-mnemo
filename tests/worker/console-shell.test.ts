@@ -77,44 +77,147 @@ describe("console-shell.html DOM rule", () => {
     );
   });
 
-  test("every dynamic innerHTML sink that carries payload-sourced text wraps it in esc(), or the sink is a pure clear (`= \"\"`)", () => {
-    // Inventory every `X.innerHTML = ...` / `X.innerHTML=...` assignment
-    // site — a regression here (a NEW sink added without this test being
-    // updated) fails LOUD by drifting this count, rather than silently
-    // passing an unreviewed site.
+  test("no bare innerHTML clear sink is left unaccounted for (sanity floor, not the security pin below)", () => {
+    // A loose sanity check that the sink inventory itself hasn't shrunk —
+    // NOT the security guard (that's the per-field suite below, which pins
+    // each payload-sourced sink individually rather than just counting
+    // sites). Kept so a wholesale removal of rendering code is still noticed
+    // here too.
     const sinkLines = html
       .split("\n")
-      .map((line, i) => ({ line, i }))
-      .filter(({ line }) => /\.innerHTML\s*=/.test(line) && !/tipEl\.innerHTML/.test(line));
-    // Nine sites: sesBox/segBox clears (2), a session row, a segment row, the
-    // filter-bar checkbox label, the two lane-group headers, a lane chip, and
-    // the turn panel (pbody, whose template spans multiple lines — matched
-    // once at its `pbody.innerHTML =` line). `svg.innerHTML = ""` is the
-    // tenth and is a pure clear.
+      .filter((line) => /\.innerHTML\s*=/.test(line) && !/tipEl\.innerHTML/.test(line));
     expect(sinkLines.length).toBeGreaterThanOrEqual(9);
-
-    for (const { line, i } of sinkLines) {
-      const isPureClear = /\.innerHTML\s*=\s*"";?\s*$/.test(line);
-      if (isPureClear) continue;
-      // Every non-clear sink observed in this file assigns from a template
-      // literal on the SAME or a following line; collect a small window so a
-      // multi-line template (the turn panel, the segment row) is captured
-      // whole rather than judged one line at a time.
-      const windowText = html.split("\n").slice(i, i + 8).join("\n");
-      // Any interpolation of a KNOWN free-text/DB-sourced identifier must be
-      // wrapped in esc(...) immediately, or must route through esc via a
-      // named local (laneChipsHtml, dotClass) that this suite checks by
-      // hand below. This loop specifically guards the common regression: a
-      // bare `${s.title}` / `${g.title}` / `${e.relation}` / `${e.tags...}`
-      // / `${t.title}` / `${t.promptExcerpt}` / `${t.contentExcerpt}` with NO
-      // esc() wrapping anywhere in the same template.
-      const bareDangerousField =
-        /\$\{(?:s|g|t)\.(?:title|status|date)(?!\s*\)|\.\w)\}/.test(windowText) ||
-        /\$\{e\.relation\}/.test(windowText) ||
-        /\$\{e\.tags\.join/.test(windowText);
-      expect(bareDangerousField).toBe(false);
-    }
   });
+
+  /**
+   * Per-field escaping invariants (peer finding #9). The sink-COUNT test
+   * this replaces stayed green even after `esc()` was silently dropped from
+   * a currently-safe field (e.g. `${esc(t.contentExcerpt)}` ->
+   * `${t.contentExcerpt}`): the number of `.innerHTML =` assignment SITES
+   * never changes when only the argument inside one changes, so a counter
+   * has no teeth against that regression. Every payload-sourced field the
+   * shell renders is enumerated below by its EXACT escaped interpolation
+   * site (titles, an excerpt pair, tags, lane tokens, relation words, and
+   * status) and each gets two independent tests:
+   *   - presence of the escaped form AND absence of the bare (unescaped)
+   *     interpolation — the absence half is what actually has teeth;
+   *   - a literal esc-removal mutation (the exact edit a regression would
+   *     make) is performed on an in-memory copy of the source and its result
+   *     is proven to be the vulnerable bare form the presence/absence pair
+   *     above would have to catch — demonstrating the pin has teeth rather
+   *     than merely asserting it does.
+   */
+  const FIELD_SINKS: ReadonlyArray<{
+    name: string;
+    escaped: string;
+    bare: string;
+  }> = [
+    {
+      name: "session title (sidebar row)",
+      escaped: '${esc(s.title || "(无标题)")}',
+      bare: '${s.title || "(无标题)"}',
+    },
+    {
+      name: "session date (sidebar row)",
+      escaped: "${esc(s.date)}",
+      bare: "${s.date}",
+    },
+    {
+      name: "segment title (sidebar row)",
+      escaped: "${esc(g.title)}",
+      bare: "${g.title}",
+    },
+    {
+      name: "segment status (sidebar row)",
+      escaped: "${esc(g.status)}",
+      bare: "${g.status}",
+    },
+    {
+      name: "segment tags (sidebar row)",
+      escaped: 'g.tags.map(t=>"#"+esc(t))',
+      bare: 'g.tags.map(t=>"#"+t)',
+    },
+    {
+      name: "lane tagSet (lane chip)",
+      escaped: '${esc(l.tagSet.join("+"))}',
+      bare: '${l.tagSet.join("+")}',
+    },
+    {
+      name: "edge relation (tooltip)",
+      escaped: "T${e.citingId} —${esc(e.relation)}→ T${e.citedId}",
+      bare: "T${e.citingId} —${e.relation}→ T${e.citedId}",
+    },
+    {
+      name: "edge tags (tooltip)",
+      escaped: '<span class="lg">{${esc(e.tags.join(","))}}</span>',
+      bare: '<span class="lg">{${e.tags.join(",")}}</span>',
+    },
+    {
+      name: "edge relation (panel erow, out)",
+      escaped: "`—${esc(e.relation)}→ T${e.citedId}`",
+      bare: "`—${e.relation}→ T${e.citedId}`",
+    },
+    {
+      name: "edge relation (panel erow, in)",
+      escaped: "`T${e.citingId} —${esc(e.relation)}→`",
+      bare: "`T${e.citingId} —${e.relation}→`",
+    },
+    {
+      name: "edge tags (panel erow)",
+      escaped: '<span class="etags">{${esc(e.tags.join(","))}}</span>',
+      bare: '<span class="etags">{${e.tags.join(",")}}</span>',
+    },
+    {
+      name: "lane tagSet/token (panel lane chips)",
+      escaped: '${esc(l ? l.tagSet.join("+") : tok)}',
+      bare: '${l ? l.tagSet.join("+") : tok}',
+    },
+    {
+      name: "turn title (panel h2)",
+      escaped: '<h2>${esc(t.title||"(无笔记)")}</h2>',
+      bare: '<h2>${t.title||"(无笔记)"}</h2>',
+    },
+    {
+      name: "turn type words (panel chips)",
+      escaped:
+        '<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>',
+      bare: '<span class="chip ph" style="background:${typeColor(x)}">${x}</span>',
+    },
+    {
+      name: "prompt excerpt (panel)",
+      escaped: '<div class="prompt">${esc(t.promptExcerpt)}</div>',
+      bare: '<div class="prompt">${t.promptExcerpt}</div>',
+    },
+    {
+      name: "content excerpt (panel)",
+      escaped: '<div class="content">${esc(t.contentExcerpt||"—")}</div>',
+      bare: '<div class="content">${t.contentExcerpt||"—"}</div>',
+    },
+  ];
+
+  for (const field of FIELD_SINKS) {
+    describe(`field: ${field.name}`, () => {
+      test("escaped interpolation present, unescaped interpolation absent", () => {
+        expect(html).toContain(field.escaped);
+        expect(html).not.toContain(field.bare);
+      });
+
+      test("an esc-removal mutation on this field alone is caught (teeth check)", () => {
+        // Perform the exact edit a regression would make: drop esc() from
+        // JUST this field, leaving every other field untouched. If the
+        // absence assertion above has real teeth, the mutated source must
+        // now contain the bare form it is supposed to reject.
+        expect(html).toContain(field.escaped);
+        const mutated = html.replace(field.escaped, field.bare);
+        expect(mutated).not.toBe(html);
+        expect(mutated).toContain(field.bare);
+        // And the field's OWN escaped form is gone from the mutated copy —
+        // proving the replace targeted this field's site, not some other
+        // occurrence.
+        expect(mutated.includes(field.escaped)).toBe(false);
+      });
+    });
+  }
 
   test("the edge tooltip (tip()) escapes relation and tags — the twin sink to the panel's erow, patched to match it", () => {
     const tooltipBlock = html.slice(html.indexOf('addEventListener("mousemove"'), html.indexOf('addEventListener("mouseleave"'));
@@ -165,5 +268,44 @@ describe("console-shell.html behavior-matrix wiring spot checks", () => {
     expect(html).toContain("function clearFocus(){");
     expect(html).toContain('e.key==="Escape"');
     expect(html).toContain("scrollTo({top:");
+  });
+
+  test("sessions sidebar wires load-more through nextCursor (peer finding #10) — page one alone is not the whole story", () => {
+    expect(html).toContain("let sessionsNextCursor = null;");
+    expect(html).toContain("sessionsNextCursor = sessionsRes.nextCursor ?? null;");
+    expect(html).toContain("async function loadMoreSessions(){");
+    expect(html).toContain('"/api/console/sessions?cursor=" + encodeURIComponent(sessionsNextCursor)');
+    // The row only renders when there IS a next page, and re-fetching
+    // concatenates onto the existing list rather than replacing it.
+    expect(html).toContain("if (sessionsNextCursor) {");
+    expect(html).toContain("sessionsList = sessionsList.concat(res.sessions);");
+  });
+
+  test("title truncation slices by code point, never a raw UTF-16 .slice() (peer finding #14b — no split surrogate pairs)", () => {
+    expect(html).toContain("const ttCp = Array.from(tt);");
+    expect(html).toContain("ttCp.length>62 ? ttCp.slice(0,62).join(\"\")");
+    expect(html).not.toMatch(/tt\.slice\(0,\s*62\)/);
+  });
+
+  test("behavioral proof: the code-point truncation algorithm never splits a surrogate pair at the 62-boundary", () => {
+    // The shell's exact expression, reimplemented here to prove the
+    // ALGORITHM behaves correctly — the source-text test above only pins
+    // that this expression is present, not that it does the right thing.
+    const nonBmp = "\u{1D306}"; // one code point, encoded as a UTF-16 surrogate pair
+    const title = "a".repeat(61) + nonBmp + "b".repeat(10);
+
+    const ttCp = Array.from(title);
+    const truncated = ttCp.length > 62 ? ttCp.slice(0, 62).join("") + "…" : title;
+    expect(truncated).toBe("a".repeat(61) + nonBmp + "…");
+
+    // The OLD UTF-16 code-unit slice this replaces DOES split the pair at
+    // this exact boundary — proving the fix is not a no-op for the case it
+    // targets.
+    const oldUnsafeTruncation =
+      title.length > 62 ? title.slice(0, 62) + "…" : title;
+    expect(oldUnsafeTruncation).not.toBe("a".repeat(61) + nonBmp + "…");
+    const lastUnit = oldUnsafeTruncation.charCodeAt(61);
+    expect(lastUnit).toBeGreaterThanOrEqual(0xd800);
+    expect(lastUnit).toBeLessThanOrEqual(0xdbff);
   });
 });

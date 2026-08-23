@@ -136,6 +136,20 @@ describe("sessions cursor codec", () => {
       expect(parseSessionsCursor(bad)).toBeNull();
     }
   });
+
+  test("rejects a digit run beyond Number.MAX_SAFE_INTEGER — malformed, not silently truncated or handed to SQLite (peer finding #13)", () => {
+    const tooLarge = String(Number.MAX_SAFE_INTEGER + 1); // 9007199254740992
+    expect(parseSessionsCursor(`${tooLarge}:1`)).toBeNull();
+    expect(parseSessionsCursor(`1:${tooLarge}`)).toBeNull();
+    // A digit run long enough to parse to Infinity is the same failure mode.
+    expect(parseSessionsCursor("9".repeat(400) + ":1")).toBeNull();
+    // The boundary itself is still accepted — this is a strictly-greater-than
+    // rejection, not an off-by-one narrowing of the legal range.
+    expect(parseSessionsCursor(`${Number.MAX_SAFE_INTEGER}:1`)).toEqual({
+      epoch: Number.MAX_SAFE_INTEGER,
+      id: 1,
+    });
+  });
 });
 
 describe("ConsoleReader query surface (in-memory schema)", () => {
