@@ -637,3 +637,99 @@ describe("homeless-lane fixpoint component widening (round-5 review #12)", () =>
     expect(result.components[0]!.componentCount).toBe(2);
   });
 });
+
+describe("out-of-vocabulary edges (semantic-conformance ticket 02): the loader surfaces a frozen-legacy relation as a fact, never widening the graph", () => {
+  test("a supersedes edge between two turns already in scope reaches the checker's vocabulary-conformance report, never the lane's own edge tally", () => {
+    const sessionId = seedSession();
+    const t1 = insertTurn(sessionId, 1);
+    const t2 = insertTurn(sessionId, 2);
+    tagEdge(t2, t1, "extends", ["ownership"]);
+    tagEdge(t2, t1, "indexes", ["ownership"]);
+    tagEdge(t2, t1, "supersedes", []); // frozen-legacy, never in EDGE_RELATIONS
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+    // None of the OTHER passes ever surface `supersedes` on their own (they
+    // filter to specific IN-vocabulary relation lists, or require tags,
+    // which a frozen-legacy relation never carries), and it is deliberately
+    // kept off `projection.edges` itself (that field's own doc comment) —
+    // this projection carries it ONLY on its own separate field.
+    expect(projection.outOfVocabularyEdges).toEqual([{ citingId: t2, citedId: t1, relation: "supersedes", tags: [] }]);
+    expect(
+      projection.edges.some((edge) => edge.citingId === t2 && edge.citedId === t1 && edge.relation === "supersedes"),
+    ).toBe(false);
+    assertNoDanglingEdges(projection);
+
+    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+    expect(result.vocabularyConformance.outOfVocabularyEdges).toEqual({
+      count: 1,
+      entries: [{ citingId: t2, citedId: t1, relation: "supersedes" }],
+    });
+    // Never admitted: the lane's own tagged-edge tally is exactly the
+    // extends+indexes pair, no `supersedes` key at all.
+    expect(result.lanes[0]!.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
+  });
+
+  test("a supersedes edge touching a turn OUTSIDE the loaded scope is never surfaced — the pass never widens beyond turns already in scope", () => {
+    const sessionId = seedSession();
+    const t1 = insertTurn(sessionId, 1);
+    const t2 = insertTurn(sessionId, 2);
+    const outside = insertTurn(sessionId, 3); // never referenced by any tagged edge
+    tagEdge(t2, t1, "extends", ["ownership"]);
+    tagEdge(t2, t1, "indexes", ["ownership"]);
+    tagEdge(outside, t1, "supersedes", []); // touches `outside`, which is never in scope
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+    expect(projection.turns.map((turn) => turn.id)).not.toContain(outside);
+    expect(projection.outOfVocabularyEdges).toEqual([]);
+
+    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+    expect(result.vocabularyConformance.outOfVocabularyEdges).toEqual({ count: 0, entries: [] });
+  });
+
+  // NB (pre-existing, out of this ticket's scope): a TAGGED out-of-vocabulary
+  // relation (e.g. a hypothetically tagged `supersedes`) is NOT excluded from
+  // `projection.edges` — the DISCOVER/WIDEN passes above (`loadTaggedEdges
+  // Touching`/`loadEdgesForExactTagSet`) admit ANY relation carrying a
+  // non-empty tag, with no relation-word filter of their own; only an
+  // UNTAGGED out-of-vocabulary edge is naturally absent from `edges` today
+  // (no pass here ever selects it). `checkLanes` itself is unaffected either
+  // way — it partitions its own `edges` argument regardless of source (see
+  // `shared/lane-checker.test.ts`'s "a TAGGED supersedes edge still never
+  // joins the lane" case) — but `mcp/note.ts`'s Gate C terminus check reduces
+  // `projection.edges` directly with `deriveLaneInterpretation`, with no such
+  // partition of its own, so a tagged legacy-relation edge would still reach
+  // it. In practice this is inert: `supersedes` predates the tag model and is
+  // documented as always-untagged. Not fixed here — closing it would mean
+  // teaching DISCOVER/WIDEN a relation-word filter, a wider change than this
+  // ticket's "report, don't enforce" scope; flagged for a follow-up ticket.
+
+  test("a legacy-typed turn already in scope reaches the checker's type-violation report through the SAME loaded projection — no separate loader query needed for this half", () => {
+    const sessionId = seedSession();
+    const t1 = insertTurn(sessionId, 1, { type: ["bugfix"] });
+    const t2 = insertTurn(sessionId, 2, { type: ["design"] });
+    tagEdge(t2, t1, "extends", ["ownership"]);
+    tagEdge(t2, t1, "indexes", ["ownership"]);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+    const result = checkLanes(projection.turns, projection.edges);
+    expect(result.vocabularyConformance.typeViolations).toEqual({
+      count: 1,
+      entries: [{ id: t1, types: ["bugfix"], outsideVocabulary: ["bugfix"] }],
+    });
+  });
+});

@@ -204,7 +204,7 @@ export function runLaneCheckCli(
   const db = openDb(databasePath);
   try {
     const projection = loadLaneCheckScope(db, options.scope);
-    const result = checkLanes(projection.turns, projection.edges);
+    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
 
     io.stdout(renderLaneCheckerReports(result));
     if (options.digraph) {

@@ -174,7 +174,12 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "blocks: inter-lane interface counts with terminus-bypass edges; " +
   "start-to-terminus path counts, plain and folded across cross-phase " +
   "citations (facts, no target); time-order violations (an edge citing " +
-  "the future). Treat a finding as a CANDIDATE for the same supply/correct/ " +
+  "the future). Also a vocabulary-conformance block: turns in scope whose " +
+  "type is empty or carries a word outside the closed activity vocabulary " +
+  "(phase-empty, nearly edge-illegal), and edges whose relation lies " +
+  "outside the eight-word relation vocabulary (e.g. the frozen-legacy " +
+  "supersedes) — reported only, never folded into any other report's " +
+  "counts. Treat a finding as a CANDIDATE for the same supply/correct/ " +
   "propose judgment every other duty above uses — never call this more " +
   "than once, and never let its output alone justify a write without the " +
   "usual Memory Rubric judgment.";
@@ -337,7 +342,7 @@ export function createNoteSettlementSdkQuery(
               promptStart: request.windowStart,
               promptEnd: request.windowEnd,
             });
-            const result = checkLanes(projection.turns, projection.edges);
+            const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
             return textResult(renderLaneCheckerReports(result));
           },
         ),

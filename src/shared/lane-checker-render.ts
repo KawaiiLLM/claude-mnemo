@@ -6,10 +6,12 @@ import type {
   LaneFoldedPaths,
   LaneInterfacePair,
   LaneMember,
+  LaneOutOfVocabularyEdge,
   LanePathReport,
   LaneState,
   LaneStatsReport,
   LaneTimeOrderViolation,
+  LaneTypeConformanceViolation,
 } from "./lane-checker";
 import { DEFAULT_SEGMENT, laneToken, type LaneKey } from "./lane-interpretation";
 
@@ -28,7 +30,11 @@ import { DEFAULT_SEGMENT, laneToken, type LaneKey } from "./lane-interpretation"
  *
  *   - `renderLaneCheckerReports` - the compact numeric prose. Both surfaces
  *     use it: the settlement tool returns exactly this (requirement 3: "NO
- *     digraph"), and the CLI prints it ahead of the digraph.
+ *     digraph"), and the CLI prints it ahead of the digraph. Also carries
+ *     the vocabulary-conformance fact block (semantic-conformance ticket 02)
+ *     as its own trailing section, past "Cross-segment warnings" — a numeric
+ *     fact like every report above it, so it belongs on the same compact
+ *     surface, never the digraph.
  *   - `renderLaneDigraph` - the git-log-graph-style text digraph
  *     (requirement 2). CLI-only, per the spec's own "digraph rendering is
  *     human/CLI-only; agents receive the numeric reports."
@@ -205,6 +211,31 @@ function renderSharedNodes(shared: LaneCheckerResult["multiLaneComponents"][numb
   );
 }
 
+/** One line per `LaneTypeConformanceViolation` (semantic-conformance ticket 02) — the empty case and the outside-vocabulary case read distinctly, never the same string with an empty word list. */
+function renderTypeViolation(violation: LaneTypeConformanceViolation): string {
+  if (violation.types.length === 0) {
+    return "  T" + violation.id + " - type: [] (empty)";
+  }
+  return (
+    "  T" +
+    violation.id +
+    " - type: [" +
+    violation.types.join(",") +
+    "] (outside vocabulary: " +
+    violation.outsideVocabulary.join(",") +
+    ")"
+  );
+}
+
+function renderOutOfVocabularyEdge(edge: LaneOutOfVocabularyEdge): string {
+  return "  T" + edge.citingId + " -> T" + edge.citedId + " (" + edge.relation + ")";
+}
+
+/** `count` vs a possibly-capped `entries` list — the same "(showing first N of count)" suffix both `vocabularyConformance` sub-blocks use. */
+function cappedCountSuffix(count: number, shown: number): string {
+  return count > shown ? " (showing first " + shown + ")" : "";
+}
+
 function renderCrossSegmentWarning(warning: LaneCrossSegmentWarning): string {
   return (
     "⚠ T" +
@@ -305,6 +336,33 @@ export function renderLaneCheckerReports(result: LaneCheckerResult): string {
     sections.push(result.warnings.length + " cross-segment tagged edge(s):");
     for (const warning of result.warnings) {
       sections.push(renderCrossSegmentWarning(warning));
+    }
+  }
+
+  sections.push("");
+  sections.push("## Vocabulary conformance -- MEMORY_TYPES/EDGE_RELATIONS closed-set check (reported, never enforced)");
+  const typeViolations = result.vocabularyConformance.typeViolations;
+  sections.push(
+    "types: " + typeViolations.count + cappedCountSuffix(typeViolations.count, typeViolations.entries.length),
+  );
+  if (typeViolations.entries.length === 0) {
+    sections.push("(none)");
+  } else {
+    for (const violation of typeViolations.entries) {
+      sections.push(renderTypeViolation(violation));
+    }
+  }
+  const outOfVocabularyEdges = result.vocabularyConformance.outOfVocabularyEdges;
+  sections.push(
+    "edges: " +
+      outOfVocabularyEdges.count +
+      cappedCountSuffix(outOfVocabularyEdges.count, outOfVocabularyEdges.entries.length),
+  );
+  if (outOfVocabularyEdges.entries.length === 0) {
+    sections.push("(none)");
+  } else {
+    for (const edge of outOfVocabularyEdges.entries) {
+      sections.push(renderOutOfVocabularyEdge(edge));
     }
   }
 

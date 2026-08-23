@@ -120,6 +120,15 @@ function makeFakeReader(overrides: Partial<ConsoleReader> = {}): ConsoleReader {
   };
 }
 
+// semantic-conformance ticket 02 — every hand-built `LaneCheckerResult`
+// fixture in this file needs this field now that `renderLaneCheckerReports`
+// reads it unconditionally; the clean (no-violation) shape is reused
+// everywhere a fixture has nothing to say about vocabulary conformance.
+const EMPTY_VOCABULARY_CONFORMANCE = {
+  typeViolations: { count: 0, entries: [] },
+  outOfVocabularyEdges: { count: 0, entries: [] },
+} as const;
+
 function emptyLaneCheckRun(overrides: Partial<ConsoleLaneCheckRun> = {}): ConsoleLaneCheckRun {
   return {
     result: {
@@ -131,6 +140,7 @@ function emptyLaneCheckRun(overrides: Partial<ConsoleLaneCheckRun> = {}): Consol
       paths: [],
       timeOrderViolations: [],
       warnings: [],
+      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
     },
     turns: [],
     edges: [],

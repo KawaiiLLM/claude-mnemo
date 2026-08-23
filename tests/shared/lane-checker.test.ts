@@ -299,6 +299,133 @@ describe("cited-ness self-cite exclusion", () => {
   });
 });
 
+// -------------------------------- semantic-conformance ticket 02: vocabulary conformance
+
+describe("vocabulary conformance — reported, never enforced (semantic-conformance ticket 02)", () => {
+  test("a legacy-typed turn (a word outside MEMORY_TYPES) is reported with its id and the offending word", () => {
+    const turns = [design(700, ["bugfix"]), design(701)];
+    const edges = [edge(701, "extends", 700, ["vc1"]), edge(701, "indexes", 700, ["vc1"])];
+    const result = checkLanes(turns, edges);
+    expect(result.vocabularyConformance.typeViolations).toEqual({
+      count: 1,
+      entries: [{ id: 700, types: ["bugfix"], outsideVocabulary: ["bugfix"] }],
+    });
+  });
+
+  test("an empty-typed turn is reported with its id and no offending word", () => {
+    const turns = [design(710, []), design(711)];
+    const edges = [edge(711, "extends", 710, ["vc2"]), edge(711, "indexes", 710, ["vc2"])];
+    const result = checkLanes(turns, edges);
+    expect(result.vocabularyConformance.typeViolations).toEqual({
+      count: 1,
+      entries: [{ id: 710, types: [], outsideVocabulary: [] }],
+    });
+  });
+
+  test("a partially-legacy turn (one recognized word, one not) reports only the offending word in outsideVocabulary", () => {
+    const turns = [design(715, ["design", "chat"]), design(716)];
+    const edges = [edge(716, "extends", 715, ["vc2b"]), edge(716, "indexes", 715, ["vc2b"])];
+    const result = checkLanes(turns, edges);
+    const entry = result.vocabularyConformance.typeViolations.entries.find((v) => v.id === 715);
+    expect(entry).toEqual({ id: 715, types: ["design", "chat"], outsideVocabulary: ["chat"] });
+  });
+
+  test("a supersedes edge is reported by citing/cited/relation and never enters the lane's own graph facts", () => {
+    const turns = [design(720), design(721)];
+    const edges = [
+      edge(721, "extends", 720, ["vc3"]),
+      edge(721, "indexes", 720, ["vc3"]),
+      edge(721, "supersedes", 720, []),
+    ];
+    const result = checkLanes(turns, edges);
+    expect(result.vocabularyConformance.outOfVocabularyEdges).toEqual({
+      count: 1,
+      entries: [{ citingId: 721, citedId: 720, relation: "supersedes" }],
+    });
+    // Never admitted: report 1's own edge tally for the lane excludes it
+    // entirely (not even an `edgeCountsByRelation.supersedes` key), and
+    // report 4's path graph is unaffected (still exactly the extends+indexes
+    // shape) — proof this is reported, not folded into any graph computation.
+    const stats = findLaneStats(result, ["vc3"]);
+    expect(stats?.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
+    const path = findPath(result, ["vc3"]);
+    expect(path?.pathCount).toBe(1);
+  });
+
+  // A supersedes edge that (hypothetically) carried the SAME tag set as a
+  // real lane would, if admitted, be silently absorbed into that lane's own
+  // `taggedEdges`/membership by `deriveLaneInterpretation`'s tag-only
+  // grouping (module header, "no per-word special case") — proving the
+  // partition in `checkLanes` runs BEFORE that grouping, not merely that an
+  // untagged supersedes edge happens to fall outside every other filter.
+  test("a TAGGED supersedes edge still never joins the lane it would otherwise tag into", () => {
+    const turns = [design(722), design(723), design(724)];
+    const edges = [
+      edge(723, "extends", 722, ["vc3b"]),
+      edge(723, "indexes", 722, ["vc3b"]),
+      edge(724, "supersedes", 723, ["vc3b"]), // same tag set as the real lane
+    ];
+    const result = checkLanes(turns, edges);
+    const stats = findLaneStats(result, ["vc3b"]);
+    // 724 never becomes a member: the supersedes edge was diverted before
+    // `deriveLaneInterpretation` ever grouped it in.
+    expect(stats?.members.map((m) => m.id)).toEqual([722, 723]);
+    expect(stats?.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
+    expect(result.vocabularyConformance.outOfVocabularyEdges.entries).toEqual([
+      { citingId: 724, citedId: 723, relation: "supersedes" },
+    ]);
+  });
+
+  test("a fully-conforming fixture reports clean on both counts", () => {
+    const turns = [design(730), design(731)];
+    const edges = [edge(731, "extends", 730, ["vc4"]), edge(731, "indexes", 730, ["vc4"])];
+    const result = checkLanes(turns, edges);
+    expect(result.vocabularyConformance).toEqual({
+      typeViolations: { count: 0, entries: [] },
+      outOfVocabularyEdges: { count: 0, entries: [] },
+    });
+  });
+
+  test("both lists are capped, but count always reports the true total", () => {
+    const legacyTurns = Array.from({ length: 25 }, (_, i) => design(800 + i, ["bugfix"]));
+    const anchor = design(900, ["design"]);
+    const edges = [edge(900, "extends", 800, ["vc5"]), edge(900, "indexes", 800, ["vc5"])];
+    const result = checkLanes([...legacyTurns, anchor], edges);
+    const tv = result.vocabularyConformance.typeViolations;
+    expect(tv.count).toBe(25);
+    expect(tv.entries.length).toBeLessThan(25);
+    expect(tv.entries.length).toBeGreaterThan(0);
+    // Ascending by id, and the capped list is a genuine PREFIX of the total.
+    expect(tv.entries.map((v) => v.id)).toEqual(
+      legacyTurns.slice(0, tv.entries.length).map((t) => t.id),
+    );
+  });
+
+  test("the rendered text names ids and offending words for both lists, and prints an explicit clean marker when there is nothing to report", () => {
+    const turns = [design(740, ["bugfix"]), design(741)];
+    const edges = [
+      edge(741, "extends", 740, ["vc6"]),
+      edge(741, "indexes", 740, ["vc6"]),
+      edge(741, "supersedes", 740, []),
+    ];
+    const result = checkLanes(turns, edges);
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("## Vocabulary conformance");
+    expect(text).toContain("types: 1");
+    expect(text).toContain("T740 - type: [bugfix] (outside vocabulary: bugfix)");
+    expect(text).toContain("edges: 1");
+    expect(text).toContain("T741 -> T740 (supersedes)");
+
+    const cleanResult = checkLanes(
+      [design(750), design(751)],
+      [edge(751, "extends", 750, ["vc7"]), edge(751, "indexes", 750, ["vc7"])],
+    );
+    const cleanText = renderLaneCheckerReports(cleanResult);
+    const vocabTail = cleanText.slice(cleanText.indexOf("## Vocabulary conformance"));
+    expect(vocabTail).toBe(["## Vocabulary conformance -- MEMORY_TYPES/EDGE_RELATIONS closed-set check (reported, never enforced)", "types: 0", "(none)", "edges: 0", "(none)"].join("\n"));
+  });
+});
+
 describe("partial-input coverage", () => {
   test("a lane whose edges reach a turn missing from the input is reported WHOLE (members/terminus/path all computed) with coverage flagged partial", () => {
     const turns = [design(601)]; // 602 deliberately absent
@@ -965,10 +1092,64 @@ describe("reports 2/3/4 are byte-stable across the ticket 04 report-1-only chang
     "(none)",
   ].join("\n");
 
-  test("the golden fixture's report 2/3/4 text (## Report 2 onward) is byte-identical to the pre-ticket-04 baseline", () => {
+  test("the golden fixture's report 2/3/4 text (## Report 2 through Cross-segment warnings) is byte-identical to the pre-ticket-04 baseline", () => {
     const result = checkLanes(fixtureTurns, fixtureEdges);
     const text = renderLaneCheckerReports(result);
-    const tail = text.slice(text.indexOf("## Report 2"));
-    expect(tail).toBe(REPORT_2_ONWARD_BASELINE);
+    const tail = text.slice(
+      text.indexOf("## Report 2"),
+      text.indexOf("## Vocabulary conformance"),
+    );
+    // Trailing newlines trimmed (the blank-line separator before the new
+    // "## Vocabulary conformance" section): the baseline has no trailing
+    // newline of its own.
+    expect(tail.replace(/\n+$/, "")).toBe(REPORT_2_ONWARD_BASELINE);
+  });
+
+  // semantic-conformance ticket 02 — appended after "## Cross-segment
+  // warnings", captured by running the real implementation against the SAME
+  // golden fixture (this file's own methodology throughout), not
+  // hand-guessed (`/tmp/dump-vocab-tail.ts`-style probe).
+  //
+  // The worker's stop-and-report found T907/T944 (PreCompact marker rows,
+  // `type: ["compact"]`) flagged under a literal closed-set reading. The
+  // acceptance RULING exempts compact markers: they are infrastructure, not
+  // annotations — the settlement facade refuses every write addressed at one
+  // ("is a compact marker, not a turn"), so flagging them is permanent,
+  // non-actionable noise in every window that holds a /compact. With the
+  // exemption the golden fixture reads fully conforming, matching the
+  // ticket's original expectation.
+  test("the golden fixture is fully conforming once compact markers are exempt; no out-of-vocabulary edges are present", () => {
+    const result = checkLanes(fixtureTurns, fixtureEdges);
+    const text = renderLaneCheckerReports(result);
+    const tail = text.slice(text.indexOf("## Cross-segment warnings"));
+    expect(tail).toBe(
+      [
+        "## Cross-segment warnings",
+        "(none)",
+        "",
+        "## Vocabulary conformance -- MEMORY_TYPES/EDGE_RELATIONS closed-set check (reported, never enforced)",
+        "types: 0",
+        "(none)",
+        "edges: 0",
+        "(none)",
+      ].join("\n"),
+    );
+    expect(result.vocabularyConformance).toEqual({
+      typeViolations: { count: 0, entries: [] },
+      outOfVocabularyEdges: { count: 0, entries: [] },
+    });
+  });
+  test("a compact marker row is exempt from type conformance even though 'compact' is outside MEMORY_TYPES", () => {
+    const result = checkLanes(
+      [
+        { id: 1, type: ["compact"] },
+        { id: 2, type: ["discovery"] },
+      ],
+      [],
+    );
+    expect(result.vocabularyConformance.typeViolations).toEqual({
+      count: 1,
+      entries: [{ id: 2, types: ["discovery"], outsideVocabulary: ["discovery"] }],
+    });
   });
 });

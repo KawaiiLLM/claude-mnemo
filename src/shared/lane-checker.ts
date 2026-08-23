@@ -135,9 +135,33 @@
  * "cited from outside" line, reading as unadopted when it was not — a
  * member's own IN-LANE consume edges (both endpoints members) and any
  * testimony relation never enter this field.
+ *
+ * ## Vocabulary conformance (semantic-conformance ticket 02) — reported, never enforced
+ *
+ * `checkLanes` gains one more fact block, `vocabularyConformance`, computed
+ * from the SAME two inputs and touching nothing above: turns among the
+ * loaded scope whose `type` is EMPTY or contains a word outside the closed
+ * `MEMORY_TYPES` vocabulary (`shared/type-vocabulary.ts`) — the phase-empty,
+ * nearly edge-illegal condition a title-typo or a pre-migration legacy word
+ * produces — and edges among the loaded turns whose `relation` lies outside
+ * the eight-word `EDGE_RELATIONS` vocabulary (`shared/turn-phase.ts`), e.g.
+ * the frozen-legacy `supersedes` (`db/citations.ts`'s `CITATION_RELATIONS`
+ * carries a ninth word this module's own write vocabulary never did). Both
+ * halves are reported, never enforced, like every other fact this module
+ * produces. The edge half is NEVER ADMITTED into any graph/report
+ * computation above: `checkLanes` partitions its own `edges` argument by
+ * `EDGE_RELATIONS` membership FIRST, before `deriveLaneInterpretation` or
+ * any of reports 2/3/4's own graph builders ever see it — an out-of-
+ * vocabulary edge cannot join a lane, cross a component, or count toward a
+ * path, whatever tags it happens to carry. This is also why report 4(c)'s
+ * own "ALL EIGHT relation words" domain (this module's own header, above)
+ * is now enforced structurally rather than merely asserted in prose: it
+ * only ever sees the filtered set. Each list is capped at
+ * `MAX_VOCABULARY_REPORT_ENTRIES`; `count` is always the true total.
  */
 
-import { STANCE_RELATIONS } from "./turn-phase";
+import { EDGE_RELATIONS, STANCE_RELATIONS } from "./turn-phase";
+import { isMemoryType } from "./type-vocabulary";
 import {
   canonicalTagSet,
   DEFAULT_SEGMENT,
@@ -159,6 +183,12 @@ import { phasesForTypes } from "./turn-phase";
 
 /** `STANCE_RELATIONS` widened to `ReadonlySet<string>` so it can test a plain `LaneEdgeInput.relation` without a cast at each call site. */
 const STANCE_RELATION_WORDS: ReadonlySet<string> = STANCE_RELATIONS;
+
+/** `EDGE_RELATIONS` (the eight-word write vocabulary) widened to `ReadonlySet<string>` — the ONE gate `checkLanes` partitions its raw `edges` argument through before any graph computation ever sees it (semantic-conformance ticket 02, module header). */
+const EDGE_RELATION_WORDS: ReadonlySet<string> = new Set(EDGE_RELATIONS);
+
+/** Capped-list bound for `vocabularyConformance`'s two fact lists — `count` on each is always the true total even when `entries` is capped. */
+const MAX_VOCABULARY_REPORT_ENTRIES = 20;
 
 export type {
   LaneClosure,
@@ -324,6 +354,37 @@ export interface LaneTimeOrderViolation {
   tags: readonly string[];
 }
 
+// --------------------------------------------------- Vocabulary conformance
+
+/** One turn among the loaded scope whose `type` is EMPTY or contains a word outside `MEMORY_TYPES` (semantic-conformance ticket 02, module header). */
+export interface LaneTypeConformanceViolation {
+  id: number;
+  /** The turn's own type list, exactly as loaded — `[]` for the empty case. */
+  types: readonly string[];
+  /** The subset of `types` outside `MEMORY_TYPES` — `[]` when the sole violation is emptiness (a non-empty list of only recognized words is never a violation). */
+  outsideVocabulary: readonly string[];
+}
+
+/** One edge among the loaded turns whose `relation` lies outside `EDGE_RELATIONS` (semantic-conformance ticket 02, module header) — reported only, never a graph input. */
+export interface LaneOutOfVocabularyEdge {
+  citingId: number;
+  citedId: number;
+  relation: string;
+}
+
+export interface LaneVocabularyConformance {
+  /** Capped list, `count` always the true total — see `MAX_VOCABULARY_REPORT_ENTRIES`. */
+  typeViolations: {
+    count: number;
+    entries: readonly LaneTypeConformanceViolation[];
+  };
+  /** Capped list, `count` always the true total — see `MAX_VOCABULARY_REPORT_ENTRIES`. Never admitted into any graph/report computation above (module header). */
+  outOfVocabularyEdges: {
+    count: number;
+    entries: readonly LaneOutOfVocabularyEdge[];
+  };
+}
+
 // -------------------------------------------------------------------------
 
 export interface LaneCheckerResult {
@@ -340,6 +401,8 @@ export interface LaneCheckerResult {
   timeOrderViolations: LaneTimeOrderViolation[];
   /** Every cross-segment tagged edge in scope — legal, warned, never rejected (round-4 review #5). Passed through from `deriveLaneInterpretation` unchanged. */
   warnings: readonly LaneCrossSegmentWarning[];
+  /** Semantic-conformance ticket 02 — see module header. */
+  vocabularyConformance: LaneVocabularyConformance;
 }
 
 /** Union-find, path-compressed — local to one `checkLanes` call, shared across reports 2/3. */
@@ -598,16 +661,131 @@ function computeTimeOrderViolations(
 }
 
 /**
- * Run all four reports over one turn/edge set. Pure: no database, no I/O, no
- * write path imported — the DB adapter (ticket 06) is the only place this
- * touches storage, by translating rows into `LaneTurnInput`/`LaneEdgeInput`
- * and calling this function.
+ * Turns among `turns` whose `type` is EMPTY or carries a word outside
+ * `MEMORY_TYPES` (semantic-conformance ticket 02, module header). Ascending
+ * by id, capped to `MAX_VOCABULARY_REPORT_ENTRIES` — `count` is the true
+ * total regardless of the cap.
+ */
+function computeTypeViolations(turns: readonly LaneTurnInput[]): LaneVocabularyConformance["typeViolations"] {
+  const violations: LaneTypeConformanceViolation[] = [];
+  for (const turn of turns) {
+    // Compact MARKER rows are exempt (acceptance ruling on ticket 02's
+    // stop-and-report): they are infrastructure, not annotations — the
+    // settlement facade refuses every write addressed at one ("is a compact
+    // marker, not a turn"), so listing them would be permanent,
+    // non-actionable noise in every window that contains a /compact.
+    if (turn.type.includes("compact")) {
+      continue;
+    }
+    const outsideVocabulary = turn.type.filter((word) => !isMemoryType(word));
+    if (turn.type.length === 0 || outsideVocabulary.length > 0) {
+      violations.push({ id: turn.id, types: turn.type, outsideVocabulary });
+    }
+  }
+  violations.sort((a, b) => a.id - b.id);
+  return { count: violations.length, entries: violations.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
+}
+
+/**
+ * The ONE gate (semantic-conformance ticket 02, module header): every edge
+ * `checkLanes` receives is sorted here, BEFORE `deriveLaneInterpretation` or
+ * any of reports 2/3/4's own graph builders ever run, into the in-vocabulary
+ * set (passed on to every graph computation exactly as before) and the
+ * out-of-vocabulary set (reported only — `computeTypeViolations`'s edge
+ * counterpart, never passed to any of those builders). This is what makes
+ * "never admitted" structural rather than a convention each graph builder
+ * would otherwise have to separately honour.
+ */
+function partitionEdgesByVocabulary(
+  edges: readonly LaneEdgeInput[],
+): { inVocabulary: LaneEdgeInput[]; outOfVocabulary: LaneVocabularyConformance["outOfVocabularyEdges"] } {
+  const inVocabulary: LaneEdgeInput[] = [];
+  const outOfVocabulary: LaneOutOfVocabularyEdge[] = [];
+  for (const edge of edges) {
+    if (EDGE_RELATION_WORDS.has(edge.relation)) {
+      inVocabulary.push(edge);
+    } else {
+      outOfVocabulary.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
+    }
+  }
+  outOfVocabulary.sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation),
+  );
+  return {
+    inVocabulary,
+    outOfVocabulary: { count: outOfVocabulary.length, entries: outOfVocabulary.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) },
+  };
+}
+
+/**
+ * Combine the out-of-vocabulary edges caught defensively inside `edges`
+ * itself with the loader's own separately-supplied `knownOutOfVocabularyEdges`
+ * (`checkLanes`'s third parameter) into one capped, deduplicated, sorted
+ * fact list — a caller may legitimately supply the same edge through both
+ * channels (unlikely, but never double-counted).
+ */
+function mergeOutOfVocabularyEdges(
+  fromEdges: LaneVocabularyConformance["outOfVocabularyEdges"],
+  known: readonly LaneEdgeInput[],
+): LaneVocabularyConformance["outOfVocabularyEdges"] {
+  if (known.length === 0) {
+    return fromEdges;
+  }
+  const seen = new Map<string, LaneOutOfVocabularyEdge>();
+  for (const entry of fromEdges.entries) {
+    seen.set(`${entry.citingId} ${entry.citedId} ${entry.relation}`, entry);
+  }
+  // `fromEdges.count` may exceed `fromEdges.entries.length` (already capped)
+  // — recompute the true total from the UNCAPPED count, not the capped list.
+  let total = fromEdges.count;
+  for (const edge of known) {
+    const key = `${edge.citingId} ${edge.citedId} ${edge.relation}`;
+    if (seen.has(key)) continue;
+    seen.set(key, { citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
+    total += 1;
+  }
+  const merged = [...seen.values()].sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation),
+  );
+  return { count: total, entries: merged.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
+}
+
+/**
+ * Run all four reports (plus the vocabulary-conformance fact block,
+ * semantic-conformance ticket 02) over one turn/edge set. Pure: no database,
+ * no I/O, no write path imported — the DB adapter (ticket 06) is the only
+ * place this touches storage, by translating rows into
+ * `LaneTurnInput`/`LaneEdgeInput` and calling this function.
+ *
+ * `knownOutOfVocabularyEdges` (semantic-conformance ticket 02) is a SEPARATE
+ * third argument, not folded into `edges`, on purpose: `db/lane-checker-
+ * load.ts`'s `LaneCheckProjection` carries these on their own field too, so
+ * a consumer that reduces `projection.edges` directly with
+ * `deriveLaneInterpretation` (`mcp/note.ts`'s Gate C self-`grounds`
+ * terminus check is the one other reader of that field in this codebase)
+ * never sees an out-of-vocabulary relation at all, whatever tags it happens
+ * to carry — merging it into the shared `edges` array would have widened
+ * THAT caller's own graph re-derivation too, not just this function's.
+ * `edges` itself is still partitioned defensively below (any out-of-
+ * vocabulary relation a caller passes there is caught and reported, never
+ * silently admitted), but the loader's own dedicated pass is expected to
+ * arrive through this parameter instead.
  */
 export function checkLanes(
   turns: readonly LaneTurnInput[],
   edges: readonly LaneEdgeInput[],
+  knownOutOfVocabularyEdges: readonly LaneEdgeInput[] = [],
 ): LaneCheckerResult {
-  const { lanes, warnings } = deriveLaneInterpretation(turns, edges);
+  // Partition FIRST (module header, "Vocabulary conformance"): every graph
+  // computation below reads `vocabEdges`, never the raw `edges` parameter —
+  // an out-of-vocabulary relation can never reach `deriveLaneInterpretation`
+  // or any of reports 2/3/4's own graph builders, whatever tags it carries.
+  const { inVocabulary: vocabEdges, outOfVocabulary: outOfVocabularyFromEdges } = partitionEdgesByVocabulary(edges);
+  const outOfVocabularyEdges = mergeOutOfVocabularyEdges(
+    outOfVocabularyFromEdges,
+    knownOutOfVocabularyEdges,
+  );
+  const { lanes, warnings } = deriveLaneInterpretation(turns, vocabEdges);
   // Ticket 04: the ONE `deriveLaneStates` call for this whole run — every
   // lane's report-1 `state` field below is a lookup into this map, never a
   // fresh derivation (module header "Report 1 gains a state line").
@@ -631,7 +809,7 @@ export function checkLanes(
   for (const turn of turns) {
     uf.add(turn.id);
   }
-  for (const edge of edges) {
+  for (const edge of vocabEdges) {
     uf.add(edge.citingId);
     uf.add(edge.citedId);
     if (LANE_COMPONENT_RELATIONS.has(edge.relation) && segmentFor(edge.citingId) === segmentFor(edge.citedId)) {
@@ -657,7 +835,7 @@ export function checkLanes(
     const laneState = laneStates.get(thisLaneToken)!;
 
     // ---- Report 1 ----
-    laneStats.push(buildLaneStats(lane, laneState, memberIds, turnById, edges));
+    laneStats.push(buildLaneStats(lane, laneState, memberIds, turnById, vocabEdges));
 
     for (const edge of lane.taggedEdges) {
       if (!STANCE_RELATION_WORDS.has(edge.relation)) continue;
@@ -715,7 +893,7 @@ export function checkLanes(
     componentReports.push({ key: lane.key, componentCount: islands.length, islands });
 
     // ---- Report 4 ----
-    pathReports.push(buildPathReport(lane, memberIds, edges, lanes));
+    pathReports.push(buildPathReport(lane, memberIds, vocabEdges, lanes));
   }
 
   const multiLaneComponents: MultiLaneComponent[] = [...componentLanes.entries()]
@@ -734,9 +912,9 @@ export function checkLanes(
     })
     .sort((a, b) => a.representative - b.representative);
 
-  const interfaces = computeInterfaces(lanes, edges);
-  const bypass = computeBypass(lanes, edges);
-  const timeOrderViolations = computeTimeOrderViolations(turnById, edges);
+  const interfaces = computeInterfaces(lanes, vocabEdges);
+  const bypass = computeBypass(lanes, vocabEdges);
+  const timeOrderViolations = computeTimeOrderViolations(turnById, vocabEdges);
 
   return {
     lanes: laneStats,
@@ -747,6 +925,10 @@ export function checkLanes(
     paths: pathReports,
     timeOrderViolations,
     warnings,
+    vocabularyConformance: {
+      typeViolations: computeTypeViolations(turns),
+      outOfVocabularyEdges,
+    },
   };
 }
 

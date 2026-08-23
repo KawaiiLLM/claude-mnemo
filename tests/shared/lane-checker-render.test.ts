@@ -19,6 +19,15 @@ import { DEFAULT_SEGMENT } from "../../src/shared/lane-interpretation";
 
 const LANE_KEY = { segment: "42", tagSet: ["ownership"] };
 
+// semantic-conformance ticket 02 — every hand-built `LaneCheckerResult`
+// fixture in this file needs this field now that the renderer reads it
+// unconditionally; the clean (no-violation) shape is reused everywhere a
+// fixture has nothing to say about vocabulary conformance.
+const EMPTY_VOCABULARY_CONFORMANCE: LaneCheckerResult["vocabularyConformance"] = {
+  typeViolations: { count: 0, entries: [] },
+  outOfVocabularyEdges: { count: 0, entries: [] },
+};
+
 function emptyResult(): LaneCheckerResult {
   return {
     lanes: [],
@@ -29,6 +38,7 @@ function emptyResult(): LaneCheckerResult {
     paths: [],
     timeOrderViolations: [],
     warnings: [],
+    vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
   };
 }
 
@@ -75,6 +85,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       paths: [],
       timeOrderViolations: [],
       warnings: [],
+      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
     };
 
     const text = renderLaneCheckerReports(result);
@@ -169,6 +180,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       paths: [],
       timeOrderViolations: [],
       warnings: [],
+      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
     };
 
     const text = renderLaneCheckerReports(result);
@@ -203,6 +215,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       paths: [],
       timeOrderViolations: [],
       warnings: [],
+      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
     };
 
     const text = renderLaneCheckerReports(result);
@@ -246,6 +259,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
         },
       ],
       warnings: [],
+      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
     };
 
     const text = renderLaneCheckerReports(result);
@@ -317,6 +331,50 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(withoutWarnings).toContain("## Cross-segment warnings");
     expect(withoutWarnings).toContain("(none)");
   });
+
+  // semantic-conformance ticket 02 — printed exactly what the typed result
+  // carries, same "no derivation" discipline every other block in this file
+  // proves: a nonsense-but-legal `LaneCheckerResult` still renders faithfully.
+  test("vocabulary-conformance prints ids/words for both lists, and an explicit clean marker when neither has anything", () => {
+    const withViolations: LaneCheckerResult = {
+      ...emptyResult(),
+      vocabularyConformance: {
+        typeViolations: {
+          count: 3,
+          entries: [
+            { id: 10, types: [], outsideVocabulary: [] },
+            { id: 11, types: ["bugfix"], outsideVocabulary: ["bugfix"] },
+          ],
+        },
+        outOfVocabularyEdges: {
+          count: 1,
+          entries: [{ citingId: 20, citedId: 19, relation: "supersedes" }],
+        },
+      },
+    };
+    const text = renderLaneCheckerReports(withViolations);
+    expect(text).toContain("## Vocabulary conformance");
+    // count (3) differs from the capped list actually shown (2 entries) --
+    // the renderer must say so, never silently print only the shorter list.
+    expect(text).toContain("types: 3 (showing first 2)");
+    expect(text).toContain("T10 - type: [] (empty)");
+    expect(text).toContain("T11 - type: [bugfix] (outside vocabulary: bugfix)");
+    expect(text).toContain("edges: 1");
+    expect(text).not.toContain("edges: 1 (showing");
+    expect(text).toContain("T20 -> T19 (supersedes)");
+
+    const clean = renderLaneCheckerReports(emptyResult());
+    const tail = clean.slice(clean.indexOf("## Vocabulary conformance"));
+    expect(tail).toBe(
+      [
+        "## Vocabulary conformance -- MEMORY_TYPES/EDGE_RELATIONS closed-set check (reported, never enforced)",
+        "types: 0",
+        "(none)",
+        "edges: 0",
+        "(none)",
+      ].join("\n"),
+    );
+  });
 });
 
 describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
@@ -356,6 +414,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         },
       ],
       warnings: [],
+      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
     };
 
     const digraph = renderLaneDigraph(result);
@@ -397,6 +456,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         },
       ],
       warnings: [],
+      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
     };
 
     const digraph = renderLaneDigraph(result);
@@ -435,6 +495,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       timeOrderViolations: [],
       paths: [],
       warnings: [],
+      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
     };
 
     const digraph = renderLaneDigraph(result);
@@ -472,6 +533,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       timeOrderViolations: [],
       paths: [],
       warnings: [],
+      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
     };
 
     const digraph = renderLaneDigraph(result);
@@ -516,6 +578,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         },
       ],
       warnings: [],
+      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
     };
 
     expect(() => renderLaneCheckerReports(result)).not.toThrow();

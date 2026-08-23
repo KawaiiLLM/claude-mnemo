@@ -93,6 +93,17 @@ export interface LaneCheckProjection {
   edges: LaneEdgeInput[];
   /** The lanes this projection widened to cover — informational only, never fed back into the core (the core re-derives lanes from `turns`/`edges` itself). */
   involvedLaneKeys: LaneKey[];
+  /**
+   * Semantic-conformance ticket 02: edges among `turns` whose relation lies
+   * outside `EDGE_RELATIONS` (e.g. the frozen-legacy `supersedes`) — a
+   * SEPARATE field, deliberately never merged into `edges` above. Feed this
+   * to `checkLanes`'s own third parameter, never straight into
+   * `deriveLaneInterpretation`: `mcp/note.ts`'s Gate C self-`grounds`
+   * terminus check reduces `projection.edges` directly with that function,
+   * and merging an out-of-vocabulary relation into the shared `edges` array
+   * would have widened THAT caller's graph too, not just the checker's own.
+   */
+  outOfVocabularyEdges: LaneEdgeInput[];
 }
 
 interface TurnLiteRow {
@@ -302,6 +313,41 @@ function loadComponentEdgesAmong(db: Database, turnIds: readonly number[]): Edge
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
     .all(...turnIds, ...turnIds, ...LANE_COMPONENT_RELATIONS_SQL);
+}
+
+/**
+ * Every live relation-carrying edge with BOTH endpoints inside `turnIds`
+ * whose `relation` lies OUTSIDE `EDGE_RELATIONS` (semantic-conformance
+ * ticket 02) — e.g. the frozen-legacy `supersedes`, still storable
+ * (`db/citations.ts`'s `CITATION_RELATIONS` carries a ninth word this
+ * module's own write vocabulary never did) but never surfaced by any of
+ * this file's other passes, which all filter to specific IN-vocabulary
+ * relation lists (or require `tags != '[]'`, and a frozen-legacy relation
+ * predates the tag model and is never tagged). Scoped to turns ALREADY in
+ * `turnIds` — never a reason to widen the loaded turn set further, since
+ * these rows are reported as a bare fact by the checker, not resolved into
+ * lane membership. `loadLaneCheckScope` calls this with the FINAL
+ * `allTurnIds` set, so both endpoints are guaranteed already present among
+ * the turns this projection returns — no dangling-edge risk.
+ */
+function loadOutOfVocabularyEdgesAmong(db: Database, turnIds: readonly number[]): EdgeLiteRow[] {
+  if (turnIds.length === 0) {
+    return [];
+  }
+  const idPlaceholders = turnIds.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  return db
+    .query<EdgeLiteRow, (number | string)[]>(
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.citing_id IN (${idPlaceholders}) AND me.cited_id IN (${idPlaceholders})
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IS NOT NULL AND me.relation NOT IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
+    )
+    .all(...turnIds, ...turnIds, ...EDGE_RELATIONS);
 }
 
 /** Every DISTINCT session id the given turns belong to — the session bound `widenComponentClosure` (round-5 review #12) stays inside. */
@@ -523,6 +569,24 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     allTurnIds.add(row.citedId);
   }
 
+  // OUT-OF-VOCABULARY EDGES (semantic-conformance ticket 02): both endpoints
+  // are already members of `allTurnIds` by the query's own WHERE clause, so
+  // this cannot introduce a new turn id. Kept on its OWN field — never
+  // merged into `edgeMap`/`edges` — so `mcp/note.ts`'s Gate C self-`grounds`
+  // terminus check, the one OTHER reader of `projection.edges` in this
+  // codebase, never has its own `deriveLaneInterpretation` re-derivation
+  // widened by a relation it was never scoped to see (`LaneCheckProjection`'s
+  // own doc comment). `checkLanes` (`shared/lane-checker.ts`) is what keeps
+  // these OUT of every graph computation once they DO reach it, through its
+  // own third parameter.
+  const outOfVocabularyEdges = loadOutOfVocabularyEdgesAmong(db, [...allTurnIds])
+    .map(toEdgeInput)
+    .sort((a, b) => {
+      if (a.citingId !== b.citingId) return a.citingId - b.citingId;
+      if (a.citedId !== b.citedId) return a.citedId - b.citedId;
+      return a.relation.localeCompare(b.relation);
+    });
+
   const turnRows = loadLiveTurns(db, [...allTurnIds]);
   const owningSegmentsForTurns = loadOwningSegments(db, [...allTurnIds]);
 
@@ -548,7 +612,7 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     return a.relation.localeCompare(b.relation);
   });
 
-  return { turns, edges, involvedLaneKeys };
+  return { turns, edges, involvedLaneKeys, outOfVocabularyEdges };
 }
 
 // Re-exported so a consumer (the CLI, the settlement tool) that only needs
