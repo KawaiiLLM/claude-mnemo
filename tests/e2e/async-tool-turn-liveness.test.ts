@@ -70,7 +70,13 @@ describe("async tool attribution production-blockade regression", () => {
       workerState,
     );
     const workerFetch: typeof fetch = async (input, init) => {
-      const response = await workerRequestHandler(new Request(input, init));
+      const request = new Request(input, init);
+      // ticket 02's request gate requires an exact loopback Host header on
+      // every route now; a real network client (worker/client.ts, this
+      // test's own subject) never sets one itself -- the transport layer
+      // does, which this in-process fetch shim stands in for.
+      request.headers.set("host", "127.0.0.1:37778");
+      const response = await workerRequestHandler(request);
       await workerState.globalScanInFlight;
       return response;
     };

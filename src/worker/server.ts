@@ -165,6 +165,8 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   ) => void;
   recoverFromCrashImpl?: () => void;
   now?: () => number;
+  /** The server's own bound port; defaults to `WORKER_PORT`. Threaded through so the request gate below checks against the port actually listening, not a hardcoded assumption. */
+  port?: number;
   pidPath?: string;
   startingPath?: string;
   existsSyncImpl?: typeof existsSync;
@@ -1156,10 +1158,100 @@ export function ensureWorkerPidFile(deps: WorkerServerDeps = {}): void {
   writeFileSyncImpl(pidPath, ownPid);
 }
 
+/** Why a request was refused by {@link evaluateRequestGate}. */
+export type RequestGateRejectionReason = "host" | "origin" | "sec-fetch-site";
+
+export type RequestGateVerdict =
+  | { allowed: true }
+  | { allowed: false; reason: RequestGateRejectionReason };
+
+/**
+ * The DNS-rebinding gate (memory-console spec, "Security posture"; ticket
+ * 02). A pure function of the request's own headers and the port this server
+ * is actually bound to — no `Request`/`URL` object, no server state — so the
+ * gate matrix can hit it directly AND the fetch handler below can apply the
+ * identical verdict to every route, before any dispatch.
+ *
+ * Three independent checks, each violating the loopback-only contract in a
+ * different way an attacker can reach it:
+ *   - `Host` must equal the bound loopback host:port. This is the DNS-
+ *     rebinding defense itself: a browser that resolved a hostile domain to
+ *     127.0.0.1 still sends that domain's name as `Host`, not "127.0.0.1" —
+ *     so an exact match here is the one thing DNS control cannot forge.
+ *   - `Origin`, when a browser sends one (any cross-origin fetch, and most
+ *     same-origin POSTs), must equal the loopback origin — belt-and-braces
+ *     against a same-`Host` request that a compromised loopback-adjacent
+ *     process still shouldn't be allowed to forge without the browser's own
+ *     origin tag agreeing.
+ *   - `Sec-Fetch-Site`, when the browser sends one (it does not on older
+ *     browsers or non-fetch clients — hence `none` and absence are both
+ *     accepted, never treated as a violation on their own), must say the
+ *     request did not cross an origin boundary.
+ *
+ * Absent `Host` is a REJECTION, not a pass-through: every real HTTP/1.1
+ * request carries one (it is not optional at the wire level), so an absent
+ * value here only ever means a synthetic, non-network `Request` — a shape a
+ * genuine browser or loopback client never produces.
+ */
+export function evaluateRequestGate(
+  headers: Headers,
+  port: number,
+): RequestGateVerdict {
+  const loopbackHosts = [`127.0.0.1:${port}`, `localhost:${port}`];
+
+  const host = headers.get("host");
+  if (host === null || !loopbackHosts.includes(host)) {
+    return { allowed: false, reason: "host" };
+  }
+
+  const origin = headers.get("origin");
+  if (origin !== null) {
+    const loopbackOrigins = [
+      `http://127.0.0.1:${port}`,
+      `http://localhost:${port}`,
+    ];
+    if (!loopbackOrigins.includes(origin)) {
+      return { allowed: false, reason: "origin" };
+    }
+  }
+
+  const secFetchSite = headers.get("sec-fetch-site");
+  if (
+    secFetchSite !== null &&
+    secFetchSite !== "same-origin" &&
+    secFetchSite !== "none"
+  ) {
+    return { allowed: false, reason: "sec-fetch-site" };
+  }
+
+  return { allowed: true };
+}
+
+/**
+ * Terse JSON error envelope for a gate rejection — the same `{ error: {
+ * code, message } }` shape the console API contract uses elsewhere, adopted
+ * here first since the gate ships ahead of any console route. Deliberately
+ * NEVER sets `Access-Control-Allow-Origin` (spec: "No `Access-Control-Allow-
+ * Origin` header, ever") — omission is the whole point, not an oversight to
+ * double-check per response.
+ */
+function requestGateRejectionResponse(reason: RequestGateRejectionReason): Response {
+  return Response.json(
+    {
+      error: {
+        code: "forbidden",
+        message: `request rejected by the loopback request gate: ${reason}`,
+      },
+    },
+    { status: 403 },
+  );
+}
+
 export function createWorkerFetchHandler(
   deps: WorkerServerDeps = {},
   state: WorkerServerState = createWorkerServerState(deps.nowMs?.() ?? Date.now()),
 ): (req: Request) => Promise<Response> {
+  const port = deps.port ?? WORKER_PORT;
   const runtimeDb = deps.db ?? createDatabase();
   const sessionEnvRegistry =
     deps.sessionEnvRegistry ?? new Map<string, CapturedSessionEnv>();
@@ -1276,6 +1368,15 @@ export function createWorkerFetchHandler(
     state.activeRequests += 1;
 
     try {
+      // Before ALL route dispatch (memory-console spec, "Security posture";
+      // ticket 02) — covers every existing route below and every console
+      // route ticket 03 adds, from one shared gate rather than a per-route
+      // check that a new route could forget to add.
+      const gateVerdict = evaluateRequestGate(req.headers, port);
+      if (!gateVerdict.allowed) {
+        return requestGateRejectionResponse(gateVerdict.reason);
+      }
+
       const url = new URL(req.url);
 
       if (req.method === "GET" && url.pathname === "/health") {

@@ -68,6 +68,10 @@ function settle(
   return handler(
     new Request("http://127.0.0.1:37778/settle", {
       method: "POST",
+      // ticket 02's request gate requires an exact loopback Host header on
+      // every route now; a synthetic in-process Request (unlike a real
+      // network fetch) does not set one on its own.
+      headers: { host: "127.0.0.1:37778" },
       body: JSON.stringify(body),
     }),
   );

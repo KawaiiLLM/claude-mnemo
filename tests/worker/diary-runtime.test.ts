@@ -994,6 +994,10 @@ describe("createDiaryRuntime", () => {
       const response = await fetchHandler!(
         new Request("http://127.0.0.1:37778/trigger", {
           method: "POST",
+          // ticket 02's request gate requires an exact loopback Host header
+          // on every route now; a synthetic in-process Request (unlike a
+          // real network fetch) does not set one on its own.
+          headers: { host: "127.0.0.1:37778" },
           body: JSON.stringify({
             action: "turn-stop",
             content_session_id: "dream-main-turn-stop",
