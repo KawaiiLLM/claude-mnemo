@@ -32,7 +32,7 @@ the shell's partial banner line if #11's mention requires it (regenerate +
 byte guard). NOT server.ts/console-shell interactions beyond that line
 (R3 owns them).
 
-**Status:** blocked (dispatch after semantic-conformance 02 lands)
+**Status:** in-flight (worker dispatched after 342b9a3)
 
 - [ ] Reviewer's #2 repro pinned: the final envelope byte length is what the
       bound governs; unfittable envelope → bounded error, no false claim

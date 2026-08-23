@@ -59,7 +59,7 @@ order-fallback seam), their test files, plugin/skills/mnemo-timeline/SKILL.md.
 NOT lane-checker*/console-* (sibling workers). Golden nine must stay green —
 a change there is STOP-AND-REPORT.
 
-**Status:** ready-for-agent
+**Status:** done (6fc134b; mutation-verified: eligibility filter → 1 red, epoch fallback → 2 red, citer query → 2 red S+E, E-view clamp → 1 red; golden nine untouched)
 
 - [ ] Both #1 counterexamples pinned as tests and green post-fix; golden nine
       unchanged
