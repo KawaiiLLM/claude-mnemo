@@ -376,3 +376,109 @@ describe("edgeless-window degradation to recency — no special-cased branch, an
     expect(result.candidates.map((c) => c.id)).toEqual([3, 2, 1]);
   });
 });
+
+// ------------------------------------------------ pre-release repairs — R1
+
+describe("R1 #1(a) — an edge-only external endpoint never seats and never steals a stage-1 budget slot (pinned counterexample)", () => {
+  test("window {T1,T2,T3} budget 2; T1 writes untagged indexes T2 (release); external T90/T91 (never in turns[]) each write untagged indexes T3 — correct election is {T1,T2}, not {T1,T3}", () => {
+    const turns = [turn(1), turn(2), turn(3)];
+    const edges = [
+      edge(1, "indexes", 2, []), // T1: tier-1 release, indexes T2
+      edge(90, "indexes", 3, []), // external T90: untagged indexes T3
+      edge(91, "indexes", 3, []), // external T91: untagged indexes T3
+    ];
+    const result = electMilestones(turns, edges, 2);
+
+    // T90/T91 are graph nodes only — never candidates, never excluded (they
+    // were never eligible to begin with).
+    expect(tierOf(result, 90)).toBeUndefined();
+    expect(tierOf(result, 91)).toBeUndefined();
+    expect(result.excluded).not.toContain(90);
+    expect(result.excluded).not.toContain(91);
+
+    // T1 is the sole real tier-1 candidate and is elected; T2 (indexed by
+    // the now-elected T1) becomes tier 3. T3's only indexers are external
+    // and can never be "elected" (they never enter stage 1 at all), so T3
+    // gets no tier-3 seat and falls to tier 5 — though its in-degree still
+    // counts both external edges, proving they stayed graph nodes.
+    expect(tierOf(result, 1)?.tier).toBe(1);
+    expect(tierOf(result, 2)?.tier).toBe(3);
+    expect(tierOf(result, 2)?.reason).toBe("indexed-by-elected");
+    expect(tierOf(result, 3)?.tier).toBe(5);
+    expect(tierOf(result, 3)?.inDegree).toBe(2);
+
+    expect(result.candidates.slice(0, 2).map((c) => c.id)).toEqual([1, 2]);
+  });
+});
+
+describe("R1 #1(b) — an external node's REAL order (never the [0,id] fallback) decides which declaration wins a lane (pinned counterexample)", () => {
+  test("window member T2 (real order [5,10]) declares lane {x}; external LATER T99, supplied with its REAL order [5,20] and eligible:false, re-declares — T2's declaration is superseded (loses its tier-2 seat) and T99 seats nowhere (external)", () => {
+    const turns = [
+      turn(1),
+      turn(2, { order: [5, 10] }),
+      turn(99, { order: [5, 20], eligible: false }),
+    ];
+    const edges = [
+      edge(2, "indexes", 1, ["x"]),
+      edge(99, "indexes", 1, ["x"]),
+    ];
+    const result = electMilestones(turns, edges, 5);
+    expect(tierOf(result, 2)?.tier).not.toBe(2);
+    expect(tierOf(result, 99)).toBeUndefined();
+  });
+
+  test("contrast — WITHOUT T99 supplied at all (the adapter omitting the external-metadata fetch), the [0,id] fallback collapses T99 into session '0', which sorts before any real session, so T2 WRONGLY keeps the terminus", () => {
+    const turns = [turn(1), turn(2, { order: [5, 10] })]; // T99 never supplied
+    const edges = [
+      edge(2, "indexes", 1, ["x"]),
+      edge(99, "indexes", 1, ["x"]), // T99 touches the graph only via this edge
+    ];
+    const result = electMilestones(turns, edges, 5);
+    // This is the documented caveat, not a fix: the CORE'S eligibility
+    // boundary alone cannot recover a real order the caller never supplied
+    // — `mcp/timeline.ts`'s `fetchExternalElectionTurns` is what closes
+    // this gap in production (R1 #1's adapter half).
+    expect(tierOf(result, 2)?.tier).toBe(2);
+    expect(tierOf(result, 2)?.reason).toBe("closed-valid-terminus");
+  });
+});
+
+describe("R1 #6 — cross-session rank tie-break falls back to createdAtEpoch, not the [sessionId, promptNumber] tuple (pinned counterexample)", () => {
+  test("same lane, S1/T1 epoch=200 vs S2/T1 epoch=100, budget 1 — S1/T1 is truly LATER (bigger epoch) and must win despite the SMALLER session id", () => {
+    const turns: MilestoneTurnInput[] = [
+      { id: 1, type: ["design"], order: [1, 1], createdAtEpoch: 200 }, // S1/T1
+      { id: 2, type: ["design"], order: [2, 1], createdAtEpoch: 100 }, // S2/T1 — bigger session id, but EARLIER by epoch
+    ];
+    const result = electMilestones(turns, [], 1);
+    // Both tier 5, zero degree: the order tie-break alone decides, and it
+    // must read wall-clock epoch across sessions, not the tuple's
+    // session-id half (the exact trap `lane-checker.ts`'s report-4(c)
+    // `computeTimeOrderViolations` already avoids).
+    expect(result.candidates.map((c) => c.id)).toEqual([1, 2]);
+  });
+
+  test("same-session pairs are unaffected — the tuple alone still decides, epoch never consulted", () => {
+    const turns: MilestoneTurnInput[] = [
+      { id: 1, type: ["design"], order: [1, 1], createdAtEpoch: 999 }, // huge epoch, but SAME session, EARLIER prompt
+      { id: 2, type: ["design"], order: [1, 2], createdAtEpoch: 1 },
+    ];
+    const result = electMilestones(turns, [], 1);
+    expect(result.candidates.map((c) => c.id)).toEqual([2, 1]);
+  });
+});
+
+describe("R1 #7 — rolledBackCiterIds: the adapter-supplied fact for a citer of a rolled-back turn that getRelationEdgesAmongTurns structurally cannot surface as an edge", () => {
+  test("an id in rolledBackCiterIds tiers 4 (corrector) even with zero edges naming it at all", () => {
+    const turns = [turn(1), turn(2)];
+    const result = electMilestones(turns, [], 5, [2]);
+    expect(tierOf(result, 2)?.tier).toBe(4);
+    expect(tierOf(result, 2)?.reason).toBe("corrector");
+  });
+
+  test("'highest wins' still applies: an id in rolledBackCiterIds that independently earns a higher tier is NOT demoted to corrector", () => {
+    const turns = [turn(1), turn(2)];
+    const edges = [edge(2, "indexes", 1, [])]; // untagged indexes -> tier-1 release
+    const result = electMilestones(turns, edges, 5, [2]);
+    expect(tierOf(result, 2)?.tier).toBe(1);
+  });
+});

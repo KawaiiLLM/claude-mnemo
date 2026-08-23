@@ -11,12 +11,16 @@ import { buildTimelineView, renderTimeline, timelineQuery } from "../../src/mcp/
 /**
  * Milestone rows nest under each segment line on the era side of an `S<n>`
  * view (ticket 03's own mechanism). Ticket 12 (`会话视图里程碑并轨`) unified
- * this admission rule onto the SAME lexicographic edge-signal selector the
- * standalone `E<n>` route uses (`selectSegmentMilestonesByEdgeSignals`,
- * ticket 09) — replacing the old state-citation/token-budget rule this file
- * used to exercise (`selectSegmentMilestoneRows`, retired along with its own
- * dedicated unit tests in tests/mcp/timeline.segment-views.test.ts). Key
- * order and edge-free degradation are proven directly against the pure
+ * this admission rule onto the SAME selector the standalone `E<n>` route
+ * uses (`selectSegmentMilestonesByEdgeSignals`, ticket 09) — replacing the
+ * old state-citation/token-budget rule this file used to exercise
+ * (`selectSegmentMilestoneRows`, retired along with its own dedicated unit
+ * tests in tests/mcp/timeline.segment-views.test.ts). That selector's own
+ * ranking is, since milestone-election spec ticket 03, `shared/milestone-election.ts`'s
+ * `electMilestones` — ticket 09's original lexicographic edge-signal rule is
+ * itself retired (tests/mcp/timeline.election-retirement.test.ts's
+ * grep-guards); only the selector's NAME survived that rewrite. Key order
+ * and edge-free degradation are proven directly against the pure
  * function in that file; this file proves the WIRING — that the `S<n>`
  * nested route reaches the identical selection a standalone `E<n>` call
  * would for the same segment, `pageSize` and era boundary.
@@ -168,7 +172,7 @@ function seedSegmentMilestoneFixture(db: Database): {
   return { sessionId, ids };
 }
 
-describe("milestone rows nest under segment lines, lexicographic edge-signal admission", () => {
+describe("milestone rows nest under segment lines, election-based admission", () => {
   let db: Database;
   let sessionId: number;
   let ids: Record<string, number>;
@@ -213,7 +217,7 @@ describe("milestone rows nest under segment lines, lexicographic edge-signal adm
     expect(t21).toBeGreaterThan(t20);
   });
 
-  test("admission: edge-signal-ranked members appear; an overridden member is excluded outright", () => {
+  test("admission: election-ranked members appear; an overridden member is excluded outright", () => {
     const output = renderArc();
 
     expect(output).toContain("bootstrap the arc"); // encoded

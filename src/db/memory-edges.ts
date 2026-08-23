@@ -758,6 +758,52 @@ export function getRelationEdgesAmongTurns(
 }
 
 /**
+ * Pre-release repair R1 #7: ids among `citingTurnIds` that cite (any of
+ * `EDGE_RELATIONS`, any tag state) a turn currently `was_rolled_back = 1` —
+ * the fact `getRelationEdgesAmongTurns` structurally CANNOT surface, because
+ * its own live-turn-scoped SQL requires BOTH endpoints live and a
+ * rolled-back cited turn fails that outright by design (it is meant to
+ * vanish from the live edge feed). `shared/milestone-election.ts`'s
+ * `electMilestones` already honors this fact for its tier-④ corrector rule
+ * ("a node that cites, any relation, a turn with `wasRolledBack: true`") —
+ * this is the adapter-side query that actually feeds it (its own
+ * `rolledBackCiterIds` parameter), separate from the ordinary `laneEdges`
+ * feed on purpose: folding it into that feed would mean re-admitting a
+ * rolled-back node as a graph endpoint, which is exactly what the live-scope
+ * filter exists to prevent.
+ *
+ * `citingTurnIds` is the caller's own candidate/window set (already known
+ * live) — this never widens who MAY become a corrector, only supplies the
+ * fact for those who already could be. Ascending, deduped via `DISTINCT`.
+ */
+export function getRolledBackCiterIds(
+  db: Database,
+  citingTurnIds: readonly number[],
+): number[] {
+  const ids = [...new Set(citingTurnIds)];
+  if (ids.length === 0) {
+    return [];
+  }
+  const idPlaceholders = ids.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  return db
+    .query<{ citingId: number }, (number | string)[]>(
+      `SELECT DISTINCT me.citing_id AS citingId
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.citing_id IN (${idPlaceholders})
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")}
+         AND td.was_rolled_back = 1
+       ORDER BY me.citing_id ASC`,
+    )
+    .all(...ids, ...EDGE_RELATIONS)
+    .map((row) => row.citingId);
+}
+
+/**
  * rubric-v10 ticket 01: rows currently carrying `tag` — a QUERY-only lookup
  * through `memory_edge_tags`, ordered by edge row id for determinism. Never a
  * second semantics source: every row it names is re-read from

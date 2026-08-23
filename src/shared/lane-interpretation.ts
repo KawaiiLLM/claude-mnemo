@@ -137,6 +137,35 @@ export function compareOrderKey(a: LaneOrderKey, b: LaneOrderKey): number {
   return a[0] - b[0] || a[1] - b[1];
 }
 
+/**
+ * `compareOrderKey`, but safe for a pair that may sit in DIFFERENT sessions
+ * (pre-release repair R1 #6). A same-session pair (`order[0]` equal) still
+ * compares the `[major, minor]` tuple directly — both halves are meaningful
+ * there. A CROSS-session pair falls back to `createdAtEpoch` instead of the
+ * tuple's `order[0]` (session-id) half, which carries no wall-clock meaning
+ * relative to another session (this module's own doc comment on
+ * `LaneTurnInput.createdAtEpoch`) — the exact "tuple-order trap"
+ * `lane-checker.ts`'s report-4(c) `computeTimeOrderViolations` already
+ * avoids for its own judgement; this is the same fix applied to an ORDERING
+ * comparator rather than a violation check. If either side's epoch is
+ * missing, the tuple compare is the only signal available and is used as a
+ * last resort — a caller building a total order (the election's rank
+ * tie-break) still needs a deterministic answer, unlike report 4(c)'s own
+ * "no fabricated verdict" posture, which can afford to skip a pair outright.
+ */
+export function compareOrderKeyAcrossSessions(
+  a: { order: LaneOrderKey; createdAtEpoch?: number },
+  b: { order: LaneOrderKey; createdAtEpoch?: number },
+): number {
+  if (a.order[0] === b.order[0]) {
+    return compareOrderKey(a.order, b.order);
+  }
+  if (a.createdAtEpoch !== undefined && b.createdAtEpoch !== undefined) {
+    return a.createdAtEpoch - b.createdAtEpoch;
+  }
+  return compareOrderKey(a.order, b.order);
+}
+
 /** One edge assertion row (ticket 01's shape): `tags` is the row's own IMMUTABLE canonical tag set, `[]` for untagged. `citingId` is always the LATER turn (`turn-phase.ts`'s direction convention). */
 export interface LaneEdgeInput {
   citingId: number;
@@ -491,11 +520,18 @@ export function deriveLaneInterpretation(
  *     lane). Provably equals `declaration.terminus` whenever the lane is
  *     currently declared: the reduction's "latest wins" rule means the
  *     order-maximal declaration is always the standing terminus unless a
- *     LATER override reopened it, and a later override can only ever
- *     target the order-maximal declaration (any still-later `indexes`
- *     event would simply re-declare over it first) — so the two fields
- *     diverge only for a reopened lane, where `lastDeclarer` recovers the
- *     pre-override winner `declaration.terminus` no longer names.
+ *     later override RETARGETS it specifically. An override is free to
+ *     target anything — a non-terminus member, an already-superseded
+ *     earlier declaration, a plain continuation node with no declaration
+ *     behind it at all — and stays perfectly legal without reopening
+ *     anything: the reduction only nulls `terminusOf` when the override's
+ *     own `citedId` equals the CURRENT terminus (the guard at this
+ *     function's own reduction pass, `terminusOf.get(event.token) ===
+ *     event.citedId`), so an override elsewhere in the lane leaves
+ *     `declaration.terminus` untouched. The two fields diverge only in that
+ *     one narrower case — an override that DOES target the terminus and
+ *     reopens the lane — where `lastDeclarer` recovers the pre-override
+ *     winner `declaration.terminus` no longer names.
  */
 
 export type LaneClosure = "closed" | "open";

@@ -19,13 +19,17 @@ import {
  * the pure admission function (`selectSegmentMilestonesByEdgeSignals`) both
  * views share with the S<n> era spine's nested rows (ticket 12 — see
  * tests/mcp/timeline.era-milestones.test.ts, which covers that function's
- * lexicographic key order directly; this file exercises it through the
- * `E<n>` route).
+ * ranking directly; this file exercises it through the
+ * `E<n>` route). Ticket 09's lexicographic edge-signal rule this function
+ * used to run has since been superseded outright by `shared/milestone-election.ts`'s
+ * `electMilestones` (milestone-election spec, ticket 03) — see
+ * tests/mcp/timeline.election-retirement.test.ts's own grep-guards.
  *
  * TICKET 06 (ownership-and-note-cadence spec, "选举机器拆除"): the election
  * A/B-tier half of the OLD state-citation admission rule (`election_tier`,
  * `src/election.ts`) was already dead code before ticket 09 replaced the
- * whole rule with the lexicographic edge-signal one below. The old
+ * whole rule with the (then-current, now itself superseded per above)
+ * lexicographic edge-signal one below. The old
  * state-citation/token-budget mechanism itself (`selectSegmentMilestoneRows`)
  * and its own dedicated unit tests retired in ticket 12, once its last
  * production caller (the S<n> era spine's nested rows) moved onto this same
@@ -130,16 +134,20 @@ describe("timeline(id=\"E<n>\") segment views", () => {
     expect(output).toContain("timeline error");
   });
 
-  // Ticket 09 (read-write-contract spec, "里程碑"): the standalone `E<n>`
-  // milestones view's admission rule is LEXICOGRAPHIC over
+  // Ticket 09 (read-write-contract spec, "里程碑") introduced the standalone
+  // `E<n>` milestones view's admission rule as a lexicographic ranking over
   // `getTurnEdgeSignals` (`selectSegmentMilestonesByEdgeSignals`), filling
   // `pageSize` — replacing the old state-citation/token-budget rule these
-  // tests used to assert. Ticket 12 unified the `S<n>` session view's own
-  // nested per-segment rows onto this SAME function (see
+  // tests used to assert. Milestone-election spec ticket 03 then superseded
+  // THAT rule too: `selectSegmentMilestonesByEdgeSignals` now delegates the
+  // whole ranking to `shared/milestone-election.ts`'s `electMilestones` (see
+  // tests/mcp/timeline.election-retirement.test.ts's grep-guards) — its name
+  // is the one thing that did not change. Ticket 12 unified the `S<n>`
+  // session view's own nested per-segment rows onto this SAME function (see
   // tests/mcp/timeline.era-milestones.test.ts's dual-assertion test), so
   // what this describe block proves through the `E<n>` route now holds for
   // both routes.
-  describe("milestones view (lexicographic edge-signal selection)", () => {
+  describe("milestones view (election-based selection)", () => {
     test("minimal row: no grade label, no prompt excerpt, no antecedent counters; the corrector flag survives", () => {
       const t1 = makeTurn(1, { title: "first member" });
       const t2 = makeTurn(2, { title: "corrects an earlier approach" });
@@ -234,9 +242,13 @@ describe("timeline(id=\"E<n>\") segment views", () => {
     test("in-degree ranks desc within a tier, filling pageSize with the most-cited turns first (milestone-election spec, ticket 03)", () => {
       // Milestone-election spec: in-degree is counted only among the edges
       // `electMilestones` is fed — for the segment route that is edges among
-      // this SEGMENT's own members (`getRelationEdgesAmongTurns`), so every
-      // citer here is itself a member (an outside citer's edge is out of
-      // scope, unlike the retired `getTurnEdgeSignals`'s whole-DB scan).
+      // this SEGMENT's own members plus real metadata for any external
+      // endpoint an OR-scoped edge reaches (`getRelationEdgesAmongTurns`,
+      // R1 #1's `fetchExternalElectionTurns`) — so every CITER counted here
+      // is itself a member; an external citer's edge still contributes to
+      // the CITED member's own in-degree, but the external citer never
+      // seats (unlike the retired `getTurnEdgeSignals`'s whole-DB scan,
+      // which had no such distinction at all).
       const strong = makeTurn(1, { title: "strongly cited" });
       const weak = makeTurn(2, { title: "weakly cited" });
       const none = makeTurn(3, { title: "not cited" });

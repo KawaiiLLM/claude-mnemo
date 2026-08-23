@@ -44,7 +44,7 @@ timeline(id="E47", view="milestones")      # the same segment, milestone-selecte
 | `view` | no | `turns` (default) or `milestones` |
 | `filter` | no | The same structured grammar `recall` uses — `{type, tag, session, time, file}` — AND-composed with the `id` selector's range to narrow which turns the current view considers |
 | `page` | no | 1-indexed page number. Default `1`. |
-| `pageSize` | no | Items per page for the selected view. Default `30`. For the `milestones` view this is also the admission cap — how many turns the selection keeps, not a page slice of something larger. |
+| `pageSize` | no | Items per page for the selected view. Default `30`. For the `milestones` view this is also the admission cap — how many turns the selection keeps, not a page slice of something larger — but never more than 30: both the session and segment routes clamp the election's own budget to `min(pageSize, 30)`, so a caller-supplied `pageSize` above 30 raises pagination, never admission. |
 | `pageBudget` | no | Token ceiling for the `turns` view's page. Plays no role in `milestones` admission — that is `pageSize`'s job. |
 
 `id` selects the candidate turns; `view` selects the body; `filter`/`page`/`pageSize` control which of those candidates render. The layers are orthogonal — `id="S42/T1..100"` with `pageSize=30` keeps all 100 turns as candidates and renders page 1 of the default `turns` view.

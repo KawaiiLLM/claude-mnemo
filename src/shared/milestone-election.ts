@@ -10,8 +10,24 @@
  *
  * ## The election, in one pass over the spec's five steps
  *
- * 1. **Candidacy exclusion** (uniform): a rolled-back turn
- *    (`MilestoneTurnInput.wasRolledBack`), a skipped turn
+ * 0. **Eligibility boundary** (R1 #1, pre-release repair — a gate BEFORE
+ *    step 1, not part of it): a node may only ever become a candidate if it
+ *    is present in the supplied `turns[]` with `eligible !== false`. An edge
+ *    endpoint absent from `turns[]` altogether, or present but explicitly
+ *    marked `eligible: false` (the adapters' channel for an EXTERNAL node —
+ *    one an OR-scoped edge touches without being a window member itself,
+ *    `db/memory-edges.ts`'s `getRelationEdgesAmongTurns` doc comment), is a
+ *    GRAPH node but never a CANDIDATE: its own edges still contribute to
+ *    every other node's in-/out-degree, it still participates in
+ *    `deriveLaneInterpretation`'s reduction (with its REAL `order`/
+ *    `createdAtEpoch` whenever the caller supplies them — never a fabricated
+ *    `[0, id]`), and it can still exclude another node outright (an external
+ *    `override`/`refutes` writer). It just never itself seats, never counts
+ *    toward the tier-③ stage-1 budget, and never seeds the elected boundary
+ *    tier ③ reads. Every other numbered step below operates ONLY on this
+ *    eligible pool.
+ * 1. **Candidacy exclusion** (uniform, within the eligible pool): a
+ *    rolled-back turn (`MilestoneTurnInput.wasRolledBack`), a skipped turn
  *    (`MilestoneTurnInput.skipped`), or any node that is the CITED end of an
  *    `override` or `refutes` edge — ANY tag state, tagged or untagged —
  *    leaves candidacy entirely. Recovery is edge retraction, not this
@@ -50,8 +66,10 @@
  *    break by the LATER turn (`LaneOrderKey` compare, never raw `id` alone —
  *    same backfill-safety discipline `lane-interpretation.ts` already
  *    established).
- * 4. **Return shape**: the FULL ordered candidacy (every non-excluded node
- *    touched by `turns`/`edges`), in ELECTION RANK order — tier ascending,
+ * 4. **Return shape**: the FULL ordered candidacy (every ELIGIBLE,
+ *    non-excluded node — step 0's boundary; a graph-only or explicitly
+ *    ineligible node never appears here, however much it shaped the ranking
+ *    that produced it), in ELECTION RANK order — tier ascending,
  *    then the within-tier rule above. This is NOT display/time order; a
  *    caller wanting the spec's step-5 "elected rows render in time order"
  *    takes `candidates.slice(0, displayBudget)` and re-sorts that slice by
@@ -70,7 +88,7 @@
 
 import {
   canonicalTagSet,
-  compareOrderKey,
+  compareOrderKeyAcrossSessions,
   deriveLaneInterpretation,
   deriveLaneStates,
   type LaneEdgeInput,
@@ -88,10 +106,23 @@ export type { LaneEdgeInput } from "./lane-interpretation";
  * dependency (same reasoning `lane-interpretation.ts`'s own header gives for
  * `canonicalTagSet`). Both default to `false`/absent when omitted — a plain
  * fixture that never marks either simply has nothing rolled back or skipped.
+ *
+ * R1 #1 (pre-release repair) adds `eligible`, the eligibility-boundary
+ * switch (module header, step 0): `false` marks a GRAPH-ONLY entry — real
+ * metadata for an edge endpoint the caller's own window does not contain (an
+ * EXTERNAL node an OR-scoped edge touches, `db/memory-edges.ts`'s
+ * `getRelationEdgesAmongTurns` doc comment). Such an entry still feeds
+ * `orderOf`/`rolledBackOf`, still participates in
+ * `deriveLaneInterpretation`'s reduction with its REAL `order`/
+ * `createdAtEpoch` (never the `[0, id]` fallback), and its own edges still
+ * count toward every other node's degree — it is simply never a candidate.
+ * Omitted or `true` = eligible, the default every caller that predates this
+ * field gets automatically.
  */
 export interface MilestoneTurnInput extends LaneTurnInput {
   wasRolledBack?: boolean;
   skipped?: boolean;
+  eligible?: boolean;
 }
 
 /** The five identity tiers, ascending — tier 1 is the highest ("lexicographic, highest wins"). */
@@ -115,14 +146,19 @@ export interface MilestoneCandidate {
   /** Out-degree, all eight relation words, self-edges included. */
   outDegree: number;
   order: LaneOrderKey;
+  /** `MilestoneTurnInput.createdAtEpoch`, informational — also what `rankCompare` falls back to for a cross-session `order` tie (R1 #6). `undefined` when the caller never supplied it. */
+  epoch: number | undefined;
 }
 
 export interface MilestoneElectionResult {
   /**
-   * Every non-excluded node touched by `turns`/`edges`, in ELECTION RANK
-   * order (tier ascending, then the within-tier rule) — NOT display/time
-   * order. Budget cutting and time-order display are the renderer's job
-   * (ticket 03); this array is never truncated to `budget`.
+   * Every ELIGIBLE, non-excluded node (module header step 0: a `turns[]`
+   * entry with `eligible !== false`), in ELECTION RANK order (tier
+   * ascending, then the within-tier rule) — NOT display/time order. A
+   * graph-only or explicitly ineligible node never appears here, however
+   * much it shaped the ranking that produced it (R1 #1). Budget cutting and
+   * time-order display are the renderer's job (ticket 03); this array is
+   * never truncated to `budget`.
    */
   candidates: readonly MilestoneCandidate[];
   /** Node ids that left candidacy entirely (step 1) — ascending. */
@@ -144,15 +180,29 @@ interface RankKey {
   inDegree: number;
   outDegree: number;
   order: LaneOrderKey;
+  /** R1 #6: carried alongside `order` so the tie-break can fall back to wall-clock time for a cross-session pair — see `rankCompare`. */
+  epoch: number | undefined;
   id: number;
 }
 
-/** Tier ascending, then in-degree desc, then out-degree desc, then the LATER turn wins, then id desc as a final deterministic fallback. */
+/**
+ * Tier ascending, then in-degree desc, then out-degree desc, then the LATER
+ * turn wins, then id desc as a final deterministic fallback. R1 #6: the
+ * order tie-break itself is cross-session-aware — `compareOrderKeyAcrossSessions`
+ * falls back to `createdAtEpoch` for a pair from different sessions (the
+ * `order[0]` session-id half carries no wall-clock meaning across sessions,
+ * the same "tuple-order trap" `lane-checker.ts`'s report-4(c)
+ * `computeTimeOrderViolations` already avoids) rather than the raw tuple
+ * `compareOrderKey` alone would use.
+ */
 function rankCompare(a: RankKey, b: RankKey): number {
   if (a.tier !== b.tier) return a.tier - b.tier;
   if (a.inDegree !== b.inDegree) return b.inDegree - a.inDegree;
   if (a.outDegree !== b.outDegree) return b.outDegree - a.outDegree;
-  const orderCmp = compareOrderKey(b.order, a.order); // later order sorts first
+  const orderCmp = compareOrderKeyAcrossSessions(
+    { order: b.order, createdAtEpoch: b.epoch },
+    { order: a.order, createdAtEpoch: a.epoch },
+  ); // later order sorts first
   if (orderCmp !== 0) return orderCmp;
   return b.id - a.id;
 }
@@ -161,27 +211,45 @@ function rankCompare(a: RankKey, b: RankKey): number {
  * Run the election over one turn/edge set. `budget` bounds the tier-③
  * two-stage fill's "elected ①②" boundary only (point 2 above) — it never
  * truncates the returned `candidates` array.
+ *
+ * `rolledBackCiterIds` (R1 #7, optional, default none): ids — already known
+ * to be real, eligible turns — that cite (any relation) a rolled-back turn
+ * whose own edge `getRelationEdgesAmongTurns` never surfaces into `edges` at
+ * all (its live-turn-scoped SQL requires BOTH endpoints live, and a
+ * rolled-back cited turn fails that outright). This is the adapter's own
+ * separate channel (`db/memory-edges.ts`'s `getRolledBackCiterIds`) for a
+ * fact `edges` structurally cannot carry. Every id here becomes a tier-④
+ * corrector outright, exactly as if its own citing edge had been visible.
  */
 export function electMilestones(
   turns: readonly MilestoneTurnInput[],
   edges: readonly LaneEdgeInput[],
   budget: number,
+  rolledBackCiterIds: readonly number[] = [],
 ): MilestoneElectionResult {
   const orderOf = new Map<number, LaneOrderKey>();
   const rolledBackOf = new Map<number, boolean>();
+  const epochOf = new Map<number, number>();
   for (const turn of turns) {
     orderOf.set(turn.id, turn.order ?? [0, turn.id]);
     rolledBackOf.set(turn.id, turn.wasRolledBack === true);
+    if (turn.createdAtEpoch !== undefined) {
+      epochOf.set(turn.id, turn.createdAtEpoch);
+    }
   }
   const orderFor = (id: number): LaneOrderKey => orderOf.get(id) ?? [0, id];
+  const epochFor = (id: number): number | undefined => epochOf.get(id);
 
-  const allIds = new Set<number>();
+  // ---- step 0: eligibility boundary (R1 #1) — candidates are drawn
+  // exclusively from `turns[]` entries with `eligible !== false`; an edge
+  // endpoint absent from `turns[]`, or explicitly marked ineligible, is a
+  // graph node (feeds the maps above and the degree/reduction passes below)
+  // but never a candidate. ----
+  const eligibleIds = new Set<number>();
   for (const turn of turns) {
-    allIds.add(turn.id);
-  }
-  for (const edge of edges) {
-    allIds.add(edge.citingId);
-    allIds.add(edge.citedId);
+    if (turn.eligible !== false) {
+      eligibleIds.add(turn.id);
+    }
   }
 
   // ---- step 1: candidacy exclusion ----
@@ -230,13 +298,17 @@ export function electMilestones(
     }
   }
 
-  const candidateIds = [...allIds].filter((id) => !excluded.has(id));
+  // R1 #1: `eligibleIds`, never `allIds` (the old union with every edge
+  // endpoint) — an edge-only or explicitly ineligible node must never reach
+  // this list, however qualified its tier signal looks.
+  const candidateIds = [...eligibleIds].filter((id) => !excluded.has(id));
 
   const toRankKey = (id: number, tier: MilestoneTier): RankKey => ({
     tier,
     inDegree: inDegree.get(id) ?? 0,
     outDegree: outDegree.get(id) ?? 0,
     order: orderFor(id),
+    epoch: epochFor(id),
     id,
   });
 
@@ -277,6 +349,12 @@ export function electMilestones(
     if (rolledBackOf.get(edge.citedId) === true) {
       correctors.add(edge.citingId);
     }
+  }
+  // R1 #7: the adapter's own separate fetch for the fact `edges` cannot
+  // structurally carry (see this function's own doc comment) — folded in
+  // exactly like an edge-derived corrector, no tier distinction.
+  for (const id of rolledBackCiterIds) {
+    correctors.add(id);
   }
 
   const stage1Ids = new Set(stage1.map((c) => c.id));

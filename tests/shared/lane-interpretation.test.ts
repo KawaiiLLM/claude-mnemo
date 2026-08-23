@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  compareOrderKeyAcrossSessions,
   DEFAULT_SEGMENT,
   deriveLaneInterpretation,
   deriveLaneStates,
@@ -219,6 +220,28 @@ describe("order key is a lexicographically-compared tuple, never a scalar encodi
     // proof is the companion DB-adapter test where id order is INVERTED
     // relative to true (session, prompt) order.
     expect(lane?.declaration.terminus).toBe(3);
+  });
+});
+
+describe("compareOrderKeyAcrossSessions — the tuple's session-id half never stands in for wall-clock time (pre-release repair R1 #6)", () => {
+  test("cross-session pair: falls back to createdAtEpoch, ignoring order[0] entirely", () => {
+    const earlierSessionLaterEpoch = { order: [1, 1] as const, createdAtEpoch: 200 };
+    const laterSessionEarlierEpoch = { order: [2, 1] as const, createdAtEpoch: 100 };
+    expect(
+      compareOrderKeyAcrossSessions(earlierSessionLaterEpoch, laterSessionEarlierEpoch),
+    ).toBeGreaterThan(0);
+  });
+
+  test("same-session pair: compares the tuple directly, epoch never consulted even when wildly different", () => {
+    const a = { order: [1, 1] as const, createdAtEpoch: 999 };
+    const b = { order: [1, 2] as const, createdAtEpoch: 1 };
+    expect(compareOrderKeyAcrossSessions(a, b)).toBeLessThan(0);
+  });
+
+  test("cross-session pair with a missing epoch on either side: falls back to the tuple compare as a last resort (never silently equal)", () => {
+    const withEpoch = { order: [1, 5] as const, createdAtEpoch: 100 };
+    const withoutEpoch = { order: [2, 1] as const };
+    expect(compareOrderKeyAcrossSessions(withEpoch, withoutEpoch)).toBeLessThan(0);
   });
 });
 

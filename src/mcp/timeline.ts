@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { parseInlineCitations } from "../db/citations";
-import { getRelationEdgesAmongTurns } from "../db/memory-edges";
+import { getRelationEdgesAmongTurns, getRolledBackCiterIds } from "../db/memory-edges";
 import {
   getSegmentMembershipForTurns,
   listOrphanAnchorTurns,
@@ -185,8 +185,9 @@ export interface TimelineView {
   /**
    * Ticket 05/12: the era spine's NESTED per-segment milestone selection —
    * computed EAGERLY here (`buildTimelineView` has `db`), via the same
-   * lexicographic edge-signal rule (`selectSegmentMilestonesByEdgeSignals`)
-   * the standalone `E<n>` route uses, so the render-time step
+   * election-based selection (`selectSegmentMilestonesByEdgeSignals`, now
+   * `shared/milestone-election.ts`'s `electMilestones` under the hood —
+   * milestone-election spec, ticket 03) the standalone `E<n>` route uses, so the render-time step
    * (`renderEraMilestoneLines`) stays a pure function of `TimelineView` the
    * way every other render step is. Keyed by segment id; only entries for
    * segments in `segmentSpine`. Empty with no era cutoff.
@@ -1300,6 +1301,68 @@ function buildElectedCitations(
 }
 
 /**
+ * R1 #1 (pre-release repair): real `order`/`createdAtEpoch`/`wasRolledBack`
+ * for every id `laneEdges` touches OUTSIDE `windowIds` — an EXTERNAL node an
+ * OR-scoped edge reaches without being a window member itself
+ * (`getRelationEdgesAmongTurns`'s own doc comment: "an override/refutes
+ * writer OUTSIDE turnIds must still be able to exclude a member"). Returned
+ * as `eligible: false` entries for `electMilestones`'s `turns[]` — real
+ * graph metadata (so `deriveLaneInterpretation`'s reduction and the rank
+ * tie-break read the external node's TRUE position instead of the `[0, id]`
+ * fallback a missing entry would force) that can never itself seat (the
+ * eligibility boundary, milestone-election.ts module header step 0).
+ *
+ * A second, separate batch fetch by id — deliberately: `laneEdges` and
+ * `windowTurns`/`liveMembers` are two different query scopes (one OR-scoped
+ * over edges, one the caller's own resolved membership), and no single query
+ * already in this file returns both at once.
+ */
+function fetchExternalElectionTurns(
+  db: Database,
+  laneEdges: readonly LaneEdgeInput[],
+  windowIds: ReadonlySet<number>,
+): MilestoneTurnInput[] {
+  const externalIds = new Set<number>();
+  for (const edge of laneEdges) {
+    if (!windowIds.has(edge.citingId)) {
+      externalIds.add(edge.citingId);
+    }
+    if (!windowIds.has(edge.citedId)) {
+      externalIds.add(edge.citedId);
+    }
+  }
+  if (externalIds.size === 0) {
+    return [];
+  }
+  const ids = [...externalIds];
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = db
+    .query<
+      {
+        id: number;
+        sessionId: number;
+        promptNumber: number;
+        createdAtEpoch: number;
+        wasRolledBack: number;
+      },
+      number[]
+    >(
+      `SELECT id, session_id AS sessionId, prompt_number AS promptNumber,
+              created_at_epoch AS createdAtEpoch, was_rolled_back AS wasRolledBack
+       FROM turns WHERE id IN (${placeholders})`,
+    )
+    .all(...ids);
+  return rows.map((row) => ({
+    id: row.id,
+    type: [] as string[],
+    order: [row.sessionId, row.promptNumber] as const,
+    createdAtEpoch: row.createdAtEpoch,
+    wasRolledBack: row.wasRolledBack === 1,
+    eligible: false,
+  }));
+}
+
+/**
  * The session-view milestone selection (milestone-election spec, ticket 03).
  * Delegates the whole election to `shared/milestone-election.ts`'s
  * `electMilestones` — the always-keep/effGrade/era-gate/pull-through chain
@@ -1316,11 +1379,24 @@ function buildElectedCitations(
  *     `pageSize`), decoupled from any later PAGINATION of `kept`.
  *   ③ `↳`: `buildElectedCitations` restricted to the `kept` set — a cited
  *     turn survives on a row's `↳` line only if it ALSO made the cut.
+ *
+ * R1 #1/#7 (pre-release repair): `externalTurns` and `rolledBackCiterIds`
+ * are the caller's own two DB-backed facts this function stays free of —
+ * real `order`/`createdAtEpoch`/`wasRolledBack` for an edge endpoint outside
+ * `windowTurns` (`eligible: false` graph-only entries `electMilestones`
+ * folds into its reduction/degree passes but never seats), and the set of
+ * window ids that cite a rolled-back turn `laneEdges` itself cannot carry.
+ * Both default to empty, so a caller that predates R1 (still just
+ * `windowTurns`/`laneEdges`/`budget`) gets exactly the old behavior.
  */
 export function selectMilestoneTurns(view: {
   windowTurns: TurnRecord[];
   /** Tagged + untagged turn↔turn edges among (at least) `windowTurns`' own ids — `db/memory-edges.ts`'s `getRelationEdgesAmongTurns`, precomputed by the caller so this function stays a pure, DB-free selection (the same seam `citations` used to be). */
   laneEdges?: readonly LaneEdgeInput[];
+  /** R1 #1: graph-only (`eligible: false`) metadata for `laneEdges` endpoints OUTSIDE `windowTurns` — see this function's own doc comment. */
+  externalTurns?: readonly MilestoneTurnInput[];
+  /** R1 #7: window ids that cite a rolled-back turn — `db/memory-edges.ts`'s `getRolledBackCiterIds`, fed straight through to `electMilestones`. */
+  rolledBackCiterIds?: readonly number[];
   /** The election's own budget (see this function's own doc comment) — bounds `kept`, and (via `electMilestones`) tier ③'s two-stage fill. */
   budget: number;
 }): MilestoneSelection {
@@ -1338,8 +1414,14 @@ export function selectMilestoneTurns(view: {
     id: turn.id,
     type: turn.type,
     order: [turn.sessionId, turn.promptNumber] as const,
+    createdAtEpoch: turn.createdAtEpoch,
   }));
-  const { candidates } = electMilestones(electionTurns, laneEdges, view.budget);
+  const { candidates } = electMilestones(
+    [...electionTurns, ...(view.externalTurns ?? [])],
+    laneEdges,
+    view.budget,
+    view.rolledBackCiterIds ?? [],
+  );
   const windowIds = new Set(seq.map((turn) => turn.id));
   // The election's own return spans every node its `laneEdges` touched; a
   // caller-supplied `laneEdges` scoped to `windowIds` (the documented
@@ -1599,13 +1681,17 @@ export function buildTimelineView(
   // fixture: budget 9) still gets it, since the clamp only ever lowers, never
   // raises, an explicit small `pageSize`.
   const milestoneBudget = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
-  const laneEdges = getRelationEdgesAmongTurns(
-    db,
-    legacyWindowTurns.map((turn) => turn.id),
-  );
+  const legacyWindowIds = new Set(legacyWindowTurns.map((turn) => turn.id));
+  const laneEdges = getRelationEdgesAmongTurns(db, [...legacyWindowIds]);
+  // R1 #1/#7 (pre-release repair): the two DB-backed facts `selectMilestoneTurns`
+  // itself stays free of — see that function's own doc comment.
+  const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, legacyWindowIds);
+  const rolledBackCiterIds = getRolledBackCiterIds(db, [...legacyWindowIds]);
   const milestoneSelection = selectMilestoneTurns({
     windowTurns: legacyWindowTurns,
     laneEdges,
+    externalTurns: externalElectionTurns,
+    rolledBackCiterIds,
     budget: milestoneBudget,
   });
   // `windowTurns` is already exclusion-filtered above (ticket 06), so no
@@ -1653,9 +1739,9 @@ export function buildTimelineView(
       )
     : [];
   // Ticket 05/12: each spine segment's NESTED milestone rows — selected
-  // eagerly here (this function has `db`) via the SAME lexicographic
-  // edge-signal rule (`selectSegmentMilestonesByEdgeSignals`) the standalone
-  // `E<n>` route uses (ticket 09), so a given fixture selects identically
+  // eagerly here (this function has `db`) via the SAME election-based
+  // selection (`selectSegmentMilestonesByEdgeSignals`, milestone-election
+  // spec ticket 03) the standalone `E<n>` route uses, so a given fixture selects identically
   // through either route (this ticket's own acceptance criterion) and
   // render-time stays pure. One extra read per segment in the spine; the
   // spine itself is "a few dozen" rows (segment-spine.ts), so this is not a
@@ -3282,7 +3368,7 @@ function resolveTurnRowLinks(
 
 /**
  * Ticket 06 (view-render-repair, ruling [S15069/T1084]): drops a rolled-back
- * or skipped member before ordinal numbering, era eligibility or edge-signal
+ * or skipped member before ordinal numbering, era eligibility or election
  * ranking ever sees it. `RankedSegmentMember.status` already carries the
  * skip half; the DB rewind flag (`turns.was_rolled_back`) does not ride on
  * the rank-facts query at all — `segment-rank.ts`'s own `isRolledBack` is a
@@ -3375,10 +3461,13 @@ export interface SegmentMilestoneEdgeSelection {
 /**
  * The segment-view milestone selection (milestone-election spec, ticket 03).
  * `pageSize` is BOTH the election's own budget (`electMilestones`'s tier-③
- * two-stage-fill boundary) and the hard admission cut — unlike
- * `selectMilestoneTurns`'s own S-view call site, every caller of this
- * function already passes a bounded `pageSize` (never an unbounded
- * sentinel), so no separate clamp is needed here.
+ * two-stage-fill boundary) and the hard admission cut. R1 #5 (pre-release
+ * repair): `pageSize` is clamped to `DEFAULT_TIMELINE_PAGE_SIZE` here, the
+ * same cap `buildTimelineView`'s own S-view call site applies to
+ * `selectMilestoneTurns` — the earlier claim that "every caller already
+ * passes a bounded `pageSize`" did not hold (the standalone `E<n>` route
+ * forwards `input.pageSize` straight through, unclamped, so an explicit
+ * `pageSize` above the default over-admitted).
  */
 export function selectSegmentMilestonesByEdgeSignals(
   db: Database,
@@ -3396,21 +3485,29 @@ export function selectSegmentMilestonesByEdgeSignals(
     return { kept: [], demotedCount: 0 };
   }
 
-  const laneEdges = getRelationEdgesAmongTurns(
-    db,
-    liveMembers.map((member) => member.turnId),
-  );
+  const admissionCap = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
+  const memberIds = new Set(liveMembers.map((member) => member.turnId));
+  const laneEdges = getRelationEdgesAmongTurns(db, [...memberIds]);
   const electionTurns: MilestoneTurnInput[] = liveMembers.map((member) => ({
     id: member.turnId,
     type: member.type,
     order: [member.sessionId, member.promptNumber] as const,
+    createdAtEpoch: member.createdAtEpoch,
   }));
-  const { candidates } = electMilestones(electionTurns, laneEdges, pageSize);
-  const memberIds = new Set(liveMembers.map((member) => member.turnId));
+  // R1 #1/#7 (pre-release repair): the same two DB-backed facts the S-view
+  // call site supplies — see `fetchExternalElectionTurns`'s own doc comment.
+  const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, memberIds);
+  const rolledBackCiterIds = getRolledBackCiterIds(db, [...memberIds]);
+  const { candidates } = electMilestones(
+    [...electionTurns, ...externalElectionTurns],
+    laneEdges,
+    admissionCap,
+    rolledBackCiterIds,
+  );
   // The correctness guarantee (not an optimization) — see the identical
   // filter in `selectMilestoneTurns`.
   const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
-  const admittedList = windowCandidates.slice(0, Math.max(0, pageSize));
+  const admittedList = windowCandidates.slice(0, Math.max(0, admissionCap));
   const admittedIds = new Set(admittedList.map((candidate) => candidate.id));
 
   const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
@@ -3594,7 +3691,7 @@ export function renderTimeline(
   // can trigger the navigation legend.
   const signal = createTruncationSignal();
   // Segment-nested milestone rows (ticket 05/12): already selected and
-  // bounded (edge-signal ranking, `pageSize`-capped) in `buildTimelineView`,
+  // bounded (election ranking, `pageSize`-capped) in `buildTimelineView`,
   // so this is already the fully-fitted render — no further degradation pass
   // needed here, and `options.pageBudget` plays no role any more (see its
   // doc comment). Empty whenever there is no era cutoff or no admitted era
