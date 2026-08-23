@@ -388,7 +388,7 @@ function renderHeader(meta){
     const bounds = meta.appliedBounds.map(b => `${b.bound} ${b.requested}→${b.applied}`).join(", ");
     // No completeness claim, no "REAL states" framing (spec "Budgets and
     // coverage"): this view is a truncated projection, plainly labeled.
-    partialBanner.textContent = "部分结果(已按预算截断，不等价于完整 lane_check): " + bounds;
+    partialBanner.textContent = "部分结果(已按预算截断，不等价于完整 lane_check；election tier 按完整快照计算，不受本次截断影响): " + bounds;
     partialBanner.style.display = "block";
   } else {
     partialBanner.style.display = "none";

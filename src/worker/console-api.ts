@@ -96,6 +96,20 @@ export interface ConsoleMeta {
   workerBuildId: string;
   stateCoverage: "full" | "partial";
   appliedBounds: ConsoleAppliedBound[];
+  /**
+   * Ticket R2 #11: election tiers (`ConsoleGraphTurn.electionTier`) are
+   * computed by `electMilestones` over the FULL projection (`run.turns`/
+   * `run.edges`), strictly BEFORE any post-load turn/edge trimming — a
+   * visible turn's tier can be granted by a hidden (trimmed-out) turn or
+   * edge the response itself never ships. This field names that fact
+   * explicitly rather than leaving it implicit: always `"full-snapshot"`
+   * today (there is no other election scope this worker computes yet).
+   * Constant across every route, including the three that carry no
+   * election tiers at all (sessions/segments/segment) — one uniform field
+   * on the shared `ConsoleMeta` shape is simpler than a graph-route-only
+   * one, and cheap since it never varies.
+   */
+  electionCoverage: "full-snapshot";
 }
 
 export interface ConsoleApiResult {
@@ -275,6 +289,7 @@ function buildMeta(input: {
     workerBuildId: input.ctx.buildId,
     stateCoverage: input.stateCoverage,
     appliedBounds: input.appliedBounds,
+    electionCoverage: "full-snapshot",
   };
 }
 
@@ -650,47 +665,163 @@ function applyGraphCountBounds(
 }
 
 /**
- * The POST-load boundary rule's BYTE half: `JSON.stringify({turns, edges,
- * lanes, laneCheckText}).length` (byte length) <= RESPONSE_BYTE_SOFT_MAX,
- * else truncate turns/edges further as a stable prefix. Runs on the
- * ALREADY-BUILT display payload (`ConsoleGraphTurn[]`/`ConsoleGraphEdge[]`,
- * title/excerpts resolved) — the byte cap exists to bound what actually goes
- * over the wire, and title/excerpt/tag bytes are most of that weight
- * (ticket 01's own measurement: turns dominate the payload). Measuring a
- * cheaper stand-in shape would let a real response through that is bigger
- * than what the stand-in measured.
+ * Measures the bytes of the REAL envelope this route ships for a given
+ * (turns, edges) pair — `{turns, edges, lanes, laneCheckText, meta}`, meta
+ * included. Ticket R2 #2: the reviewer's repro measured a cheaper stand-in
+ * (`{turns, edges, lanes, laneCheckText}` alone, no `meta`) that read
+ * 999,797 bytes internally while the real wire response — `meta` appended
+ * AFTER that measurement — was 1,000,001 bytes. This helper is the one place
+ * that measures what actually goes over the wire, so that gap cannot recur.
  */
-function applyGraphByteBound(
-  turnsPayload: ConsoleGraphTurn[],
-  edgesPayload: ConsoleGraphEdge[],
+function envelopeBytes(
+  turns: ConsoleGraphTurn[],
+  edges: ConsoleGraphEdge[],
   lanes: ConsoleGraphLane[],
   laneCheckText: string,
-): { turns: ConsoleGraphTurn[]; edges: ConsoleGraphEdge[]; appliedBound: ConsoleAppliedBound | null } {
-  let turns = turnsPayload;
-  let edges = edgesPayload;
-  let bytes = byteLength(JSON.stringify({ turns, edges, lanes, laneCheckText }));
-  if (bytes <= RESPONSE_BYTE_SOFT_MAX) {
-    return { turns, edges, appliedBound: null };
+  meta: ConsoleMeta,
+): number {
+  return byteLength(JSON.stringify({ turns, edges, lanes, laneCheckText, meta }));
+}
+
+/**
+ * The POST-load boundary rule's BYTE half, ticket R2 #2 repair: measures the
+ * FINAL serialized envelope (meta included — see `envelopeBytes`'s own doc,
+ * never the `{turns,edges,lanes,laneCheckText}` stand-in the reviewer's
+ * repro caught) and truncates turns/edges further as a stable prefix (edges
+ * first, then turns — the same discipline `applyGraphCountBounds` uses),
+ * one item at a time, because bytes (unlike counts) cannot be pre-computed
+ * per item without re-serializing.
+ *
+ * Chicken-and-egg (ticket R2 #2): `meta.appliedBounds` itself changes the
+ * byte count once a `RESPONSE_BYTE_SOFT_MAX` entry is added to it, and
+ * `meta.counts` changes on every trim step. This does NOT chase a true
+ * fixed point over `meta`'s own encoded size — the ticket's own allowance
+ * ("measure with the final meta included conservatively, document the
+ * approach") is what this takes: the INITIAL fits-or-not check measures with
+ * the byte-bound entry ABSENT (it is not yet known one is needed). The
+ * instant a trim is confirmed necessary, the byte-bound entry and
+ * `stateCoverage: "partial"` are fixed for the REST of this call — every
+ * subsequent measurement (through to the eventual response) uses that SAME
+ * final `appliedBounds` array; only `counts.turns`/`counts.edges` vary
+ * step to step, a cheap two-integer diff, never a second pass over the
+ * byte-bound entry's own encoding. The one deliberately approximate number
+ * is that entry's own `requested` field: the bytes of the PRE-trim envelope
+ * measured WITHOUT the entry describing itself (informational provenance —
+ * "how big before cutting started" — not a value the bound's own
+ * enforcement depends on).
+ *
+ * If turns AND edges both trim to empty and the envelope STILL exceeds the
+ * bound (`unfittable: true`) — lanes/laneCheckText are large enough on their
+ * own to blow it (ticket R2 #2's 600KB-lane-tag repro: turns/edges fully
+ * trimmed, ~2.4MB shipped while claiming `applied: 1MB`) — the caller must
+ * NOT ship `{turns: [], edges: [], lanes, laneCheckText}` (still oversized):
+ * `handleGraphRoute` switches to the refusal-with-summary envelope instead
+ * (`buildUnfittableGraphResult`; spec "Budgets and coverage": "413-style 200
+ * envelope naming the bound").
+ */
+function applyGraphByteBound(input: {
+  turns: ConsoleGraphTurn[];
+  edges: ConsoleGraphEdge[];
+  lanes: ConsoleGraphLane[];
+  laneCheckText: string;
+  scope: unknown;
+  asOf: string;
+  ctx: ConsoleRequestContext;
+  preTrimAppliedBounds: ConsoleAppliedBound[];
+  preTrimStateCoverage: "full" | "partial";
+}): { turns: ConsoleGraphTurn[]; edges: ConsoleGraphEdge[]; appliedBound: ConsoleAppliedBound | null; unfittable: boolean } {
+  const { lanes, laneCheckText, scope, asOf, ctx, preTrimAppliedBounds, preTrimStateCoverage } = input;
+  let turns = input.turns;
+  let edges = input.edges;
+
+  const noByteTrimMeta = buildMeta({
+    scope,
+    counts: { turns: turns.length, edges: edges.length, lanes: lanes.length },
+    asOf,
+    ctx,
+    stateCoverage: preTrimStateCoverage,
+    appliedBounds: preTrimAppliedBounds,
+  });
+  const requestedBytes = envelopeBytes(turns, edges, lanes, laneCheckText, noByteTrimMeta);
+  if (requestedBytes <= RESPONSE_BYTE_SOFT_MAX) {
+    return { turns, edges, appliedBound: null, unfittable: false };
   }
 
-  const requestedBytes = bytes;
-  // Trim from the END of each already-sorted array — a stable prefix, the
-  // same discipline the count-based caps use, just applied one item at a
-  // time because bytes (unlike counts) cannot be pre-computed per item
-  // without re-serializing.
+  const appliedBound: ConsoleAppliedBound = {
+    bound: "RESPONSE_BYTE_SOFT_MAX",
+    requested: requestedBytes,
+    applied: RESPONSE_BYTE_SOFT_MAX,
+  };
+  const finalAppliedBounds = [...preTrimAppliedBounds, appliedBound];
+  const metaFor = (t: ConsoleGraphTurn[], e: ConsoleGraphEdge[]): ConsoleMeta =>
+    buildMeta({
+      scope,
+      counts: { turns: t.length, edges: e.length, lanes: lanes.length },
+      asOf,
+      ctx,
+      stateCoverage: "partial",
+      appliedBounds: finalAppliedBounds,
+    });
+
+  // Trim from the END of each already-sorted array — a stable prefix, one
+  // item at a time, re-measuring the FULL envelope (meta included) at every
+  // step.
+  let bytes = envelopeBytes(turns, edges, lanes, laneCheckText, metaFor(turns, edges));
   while (bytes > RESPONSE_BYTE_SOFT_MAX && edges.length > 0) {
     edges = edges.slice(0, -1);
-    bytes = byteLength(JSON.stringify({ turns, edges, lanes, laneCheckText }));
+    bytes = envelopeBytes(turns, edges, lanes, laneCheckText, metaFor(turns, edges));
   }
   while (bytes > RESPONSE_BYTE_SOFT_MAX && turns.length > 0) {
     turns = turns.slice(0, -1);
-    bytes = byteLength(JSON.stringify({ turns, edges, lanes, laneCheckText }));
+    bytes = envelopeBytes(turns, edges, lanes, laneCheckText, metaFor(turns, edges));
   }
 
+  return { turns, edges, appliedBound, unfittable: bytes > RESPONSE_BYTE_SOFT_MAX };
+}
+
+/**
+ * Ticket R2 #2's refusal-with-summary path (spec "Budgets and coverage": a
+ * scope the budgets cannot hold returns EITHER a refusal-with-summary
+ * ("413-style 200 envelope naming the bound") OR a partial graph — this is
+ * the first arm). Reached only when `applyGraphByteBound` trimmed turns AND
+ * edges to nothing and the envelope STILL exceeds `RESPONSE_BYTE_SOFT_MAX`:
+ * lanes/laneCheckText alone are big enough to blow the bound. Ships the
+ * contract's own four keys, never omitted, just emptied (`turns: [] edges:
+ * [] lanes: [] laneCheckText: ""`) plus an `error` field naming the bound —
+ * never the oversized lanes/laneCheckText themselves, which is exactly the
+ * "payload larger than the bound carrying an applied-bound claim" ticket R2
+ * rules out. `counts` reports the emptied arrays' own lengths (0/0/0) —
+ * same "counts is the literal length of what this response actually
+ * carries" convention every other route in this file already follows
+ * (see `handleSegmentCardRoute`'s own doc on that point).
+ */
+function buildUnfittableGraphResult(input: {
+  scope: unknown;
+  asOf: string;
+  ctx: ConsoleRequestContext;
+  appliedBounds: ConsoleAppliedBound[];
+}): ConsoleApiResult {
   return {
-    turns,
-    edges,
-    appliedBound: { bound: "RESPONSE_BYTE_SOFT_MAX", requested: requestedBytes, applied: RESPONSE_BYTE_SOFT_MAX },
+    status: 200,
+    body: {
+      turns: [],
+      edges: [],
+      lanes: [],
+      laneCheckText: "",
+      error: {
+        code: "graph_exceeds_byte_bound",
+        message:
+          `graph scope exceeds RESPONSE_BYTE_SOFT_MAX (${RESPONSE_BYTE_SOFT_MAX} bytes) even with turns and edges fully trimmed; narrow the session range or choose a segment and retry`,
+      },
+      meta: buildMeta({
+        scope: input.scope,
+        counts: { turns: 0, edges: 0, lanes: 0 },
+        asOf: input.asOf,
+        ctx: input.ctx,
+        stateCoverage: "partial",
+        appliedBounds: input.appliedBounds,
+      }),
+    },
   };
 }
 
@@ -783,14 +914,47 @@ export function handleGraphRoute(
   }));
 
   // BYTE cap second, on the fully-built display payload — see
-  // `applyGraphByteBound`'s own doc for why it must measure the REAL shape.
-  const byteBounded = applyGraphByteBound(countCappedTurnsPayload, countCappedEdgesPayload, lanes, laneCheckText);
+  // `applyGraphByteBound`'s own doc for why it must measure the FINAL
+  // envelope (meta included), never a `{turns,edges,lanes,laneCheckText}`
+  // stand-in (ticket R2 #2).
+  const preByteAppliedBounds = [...preLoadAppliedBounds, ...countBounded.appliedBounds];
+  const byteBounded = applyGraphByteBound({
+    turns: countCappedTurnsPayload,
+    edges: countCappedEdgesPayload,
+    lanes,
+    laneCheckText,
+    scope: scopeDescriptor,
+    asOf: run.asOf,
+    ctx,
+    preTrimAppliedBounds: preByteAppliedBounds,
+    preTrimStateCoverage: countBounded.overCap ? "partial" : "full",
+  });
+
+  if (byteBounded.unfittable) {
+    return buildUnfittableGraphResult({
+      scope: scopeDescriptor,
+      asOf: run.asOf,
+      ctx,
+      appliedBounds: [...preByteAppliedBounds, byteBounded.appliedBound!],
+    });
+  }
+
+  // Ticket R2 #3: endpoint-closed projection. Count caps and byte trims
+  // each independently truncate turns/edges (a turn beyond WIDEN_NODE_MAX
+  // can drop while the edge naming it survives GRAPH_EDGE_MAX untouched —
+  // the reviewer's 2001-turn repro) — this is the ONE place, after every
+  // trim path above has run, that restores the invariant: every returned
+  // edge's both endpoints exist among returned turns. Filtering here only
+  // ever REMOVES edges, so it cannot push the envelope back over the byte
+  // bound `applyGraphByteBound` already confirmed above.
+  const retainedTurnIds = new Set(byteBounded.turns.map((turn) => turn.id));
   const turnsPayload = byteBounded.turns;
-  const edgesPayload = byteBounded.edges;
+  const edgesPayload = byteBounded.edges.filter(
+    (edge) => retainedTurnIds.has(edge.citingId) && retainedTurnIds.has(edge.citedId),
+  );
 
   const appliedBounds = [
-    ...preLoadAppliedBounds,
-    ...countBounded.appliedBounds,
+    ...preByteAppliedBounds,
     ...(byteBounded.appliedBound ? [byteBounded.appliedBound] : []),
   ];
   // A pre-load `GRAPH_WINDOW_MAX` clamp alone (no post-load overage) still

@@ -149,6 +149,15 @@ function emptyLaneCheckRun(overrides: Partial<ConsoleLaneCheckRun> = {}): Consol
   };
 }
 
+/** Ticket R2 #3's invariant, callable from any test: every returned edge's both endpoints exist among returned turns. */
+function expectEdgesEndpointClosed(body: any): void {
+  const turnIds = new Set(body.turns.map((t: any) => t.id));
+  for (const edge of body.edges) {
+    expect(turnIds.has(edge.citingId)).toBe(true);
+    expect(turnIds.has(edge.citedId)).toBe(true);
+  }
+}
+
 // ------------------------------------------------------------- sessions ----
 
 describe("GET /api/console/sessions", () => {
@@ -171,6 +180,8 @@ describe("GET /api/console/sessions", () => {
       stateCoverage: "full",
       appliedBounds: [],
       counts: { turns: 0, edges: 0, lanes: 0 },
+      // R2 #11: constant across every route, not just the graph route.
+      electionCoverage: "full-snapshot",
     });
   });
 
@@ -269,6 +280,7 @@ describe("GET /api/console/segments", () => {
     expect(body.segments[0].type).toEqual([]);
     expect(body.meta.stateCoverage).toBe("full");
     expect(body.meta.appliedBounds).toEqual([]);
+    expect(body.meta.electionCoverage).toBe("full-snapshot"); // R2 #11
   });
 });
 
@@ -317,6 +329,7 @@ describe("GET /api/console/segment", () => {
     expect(body.card).toEqual(detail.segment);
     expect(body.members).toEqual(["S1/T1", "S1/T2"]);
     expect(body.meta.counts).toEqual({ turns: 2, edges: 0, lanes: 0 });
+    expect(body.meta.electionCoverage).toBe("full-snapshot"); // R2 #11
   });
 });
 
@@ -447,6 +460,7 @@ describe("GET /api/console/graph — scope resolution and defaults", () => {
       applied: GRAPH_WINDOW_MAX,
     });
     expect(body.meta.stateCoverage).toBe("full");
+    expect(body.meta.electionCoverage).toBe("full-snapshot"); // R2 #11
   });
 
   test("segment scope skips from/to entirely", () => {
@@ -662,6 +676,12 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
       requested: WIDEN_NODE_MAX + 10,
       applied: WIDEN_NODE_MAX,
     });
+    expectEdgesEndpointClosed(body);
+    // R2 #11: still "full-snapshot" under trimming — election tiers were
+    // computed on the FULL projection before this response's own truncation
+    // ran, so the field's meaning does not change just because the response
+    // became partial.
+    expect(body.meta.electionCoverage).toBe("full-snapshot");
   });
 
   test("widened edges over GRAPH_EDGE_MAX -> truncated, partial", () => {
@@ -685,6 +705,7 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
       requested: GRAPH_EDGE_MAX + 20,
       applied: GRAPH_EDGE_MAX,
     });
+    expectEdgesEndpointClosed(body);
   });
 
   test("oversized serialized bytes (huge excerpts, counts within cap) -> byte-trimmed, partial, RESPONSE_BYTE_SOFT_MAX named", () => {
@@ -710,12 +731,151 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     const byteBound = body.meta.appliedBounds.find((b: any) => b.bound === "RESPONSE_BYTE_SOFT_MAX");
     expect(byteBound).toBeDefined();
     expect(byteBound.applied).toBe(RESPONSE_BYTE_SOFT_MAX);
-    // The truncated response itself must actually respect the cap — a
-    // truncation that trims but still overshoots would defeat the whole
-    // point of the bound.
-    expect(new TextEncoder().encode(JSON.stringify(body)).length).toBeLessThanOrEqual(
-      RESPONSE_BYTE_SOFT_MAX + 5_000, // slack for meta/lanes/laneCheckText overhead added AFTER the trim loop measured
+    // R2 #2: the trim loop now measures the FINAL envelope (meta included),
+    // not a {turns,edges,lanes,laneCheckText} stand-in — so the actually
+    // shipped bytes must respect the cap with NO slack. Before the fix, the
+    // reviewer's repro showed the stand-in read 999,797 bytes internally
+    // while the real (meta-appended) response was 1,000,001 — this
+    // assertion, with the slack removed, is exactly what would have caught
+    // that gap.
+    expect(new TextEncoder().encode(JSON.stringify(body)).length).toBeLessThanOrEqual(RESPONSE_BYTE_SOFT_MAX);
+    expectEdgesEndpointClosed(body);
+  });
+
+  test("R2 #2: an untrimmable lane (no turns/edges left to cut) still over the byte bound triggers the refusal-with-summary envelope — never a payload larger than RESPONSE_BYTE_SOFT_MAX carrying an applied-bound claim", () => {
+    // Reviewer's 600KB-lane-tag repro, generalized: a single lane whose own
+    // tagSet is huge enough that `lanes` + `laneCheckText` (both render the
+    // tag) alone exceed RESPONSE_BYTE_SOFT_MAX, with zero turns/edges to
+    // trim in the first place.
+    const hugeTag = "t".repeat(1_400_000);
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () =>
+        emptyLaneCheckRun({
+          turns: [],
+          edges: [],
+          result: {
+            ...emptyLaneCheckRun().result,
+            lanes: [
+              {
+                key: { segment: "E1", tagSet: [hugeTag] },
+                phases: [],
+                members: [],
+                edgeCountsByRelation: {},
+                declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+                state: { key: { segment: "E1", tagSet: [hugeTag] }, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+                citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+                coverage: { status: "whole", missingTurnIds: [] },
+              },
+            ],
+          },
+        }),
+      loadTurnDisplayFields: () => new Map(),
+    });
+    const result = handleGraphRoute(
+      reader,
+      new URL("http://x/api/console/graph?session=1&from=1&to=1"),
+      CTX,
     );
+    expect(result.status).toBe(200);
+    const body = result.body as any;
+    // The core invariant R2 #2 rules out: whatever ships must actually
+    // respect RESPONSE_BYTE_SOFT_MAX — the reviewer's repro shipped ~2.4MB
+    // while claiming applied=1MB.
+    expect(new TextEncoder().encode(JSON.stringify(body)).length).toBeLessThanOrEqual(RESPONSE_BYTE_SOFT_MAX);
+    expect(body.turns).toEqual([]);
+    expect(body.edges).toEqual([]);
+    expect(body.lanes).toEqual([]);
+    expect(body.laneCheckText).toBe("");
+    expect(body.error).toBeDefined();
+    expect(body.error.code).toBeDefined();
+    expect(body.error.message).toContain("RESPONSE_BYTE_SOFT_MAX");
+    expect(body.meta.stateCoverage).toBe("partial");
+    const byteBound2 = body.meta.appliedBounds.find((b: any) => b.bound === "RESPONSE_BYTE_SOFT_MAX");
+    expect(byteBound2).toBeDefined();
+    expect(byteBound2.applied).toBe(RESPONSE_BYTE_SOFT_MAX);
+  });
+
+  test("R2 #2 acceptance pin: edge-granularity trim exits within one edge of the bound — only a meta-inclusive measurement keeps the real envelope under RESPONSE_BYTE_SOFT_MAX", () => {
+    // The lane tag renders 3x into `lanes` (key + state.key) and 1x into
+    // `laneCheckText` (calibrated), parking ~960KB of untrimmable payload
+    // just under the bound; 1000 small edges (~76B each) supply the overage,
+    // so the byte-trim loop converges inside the EDGE loop and exits within
+    // ONE edge's bytes of the bound. A measurement that omits `meta` (~300B)
+    // then ships an envelope over the bound by construction — the reviewer's
+    // 999,797-internal vs 1,000,001-real gap, reconstructed
+    // deterministically instead of hoping a turn-granularity fixture
+    // happens to land in the ~300B knife-edge (calibrated: the meta-less
+    // stand-in ships 1,000,252 bytes here).
+    const bigTag = "t".repeat(240_000);
+    const turns = turnsOfCount(5);
+    const edges = edgesOfCount(1000, 5);
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () =>
+        emptyLaneCheckRun({
+          turns,
+          edges,
+          result: {
+            ...emptyLaneCheckRun().result,
+            lanes: [
+              {
+                key: { segment: "E1", tagSet: [bigTag] },
+                phases: [],
+                members: [],
+                edgeCountsByRelation: {},
+                declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+                state: { key: { segment: "E1", tagSet: [bigTag] }, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+                citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+                coverage: { status: "whole", missingTurnIds: [] },
+              },
+            ],
+          },
+        }),
+      loadTurnDisplayFields: () => new Map(),
+    });
+    const result = handleGraphRoute(
+      reader,
+      new URL("http://x/api/console/graph?session=1&from=1&to=1"),
+      CTX,
+    );
+    const body = result.body as any;
+    // Knife-edge preconditions: the trim really converged inside the edge
+    // loop — turns intact, edges partially cut. If either fails, the fixture
+    // sizes drifted and the test must be retuned, not deleted.
+    expect(body.turns).toHaveLength(5);
+    expect(body.edges.length).toBeGreaterThan(0);
+    expect(body.edges.length).toBeLessThan(1000);
+    const byteBound = body.meta.appliedBounds.find((b: any) => b.bound === "RESPONSE_BYTE_SOFT_MAX");
+    expect(byteBound).toBeDefined();
+    // The teeth: the ACTUAL serialized response respects the cap with zero
+    // slack allowance.
+    expect(new TextEncoder().encode(JSON.stringify(body)).length).toBeLessThanOrEqual(RESPONSE_BYTE_SOFT_MAX);
+    expectEdgesEndpointClosed(body);
+  });
+
+  test("R2 #3: a turn dropped by WIDEN_NODE_MAX leaves its own edge dangling — filtered out, never shipped with a missing endpoint (reviewer's 2001-turn repro)", () => {
+    const turns = turnsOfCount(WIDEN_NODE_MAX + 1); // 2001 turns, ids 1..2001
+    const danglingEdge = { citingId: 1, citedId: WIDEN_NODE_MAX + 1, relation: "consume", tags: [] as string[] };
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      getSessionMaxPromptNumber: () => 1,
+      runLaneCheck: () => emptyLaneCheckRun({ turns, edges: [danglingEdge] }),
+      loadTurnDisplayFields: () => new Map(),
+    });
+    const result = handleGraphRoute(
+      reader,
+      new URL("http://x/api/console/graph?session=1&from=1&to=1"),
+      CTX,
+    );
+    const body = result.body as any;
+    expect(body.turns).toHaveLength(WIDEN_NODE_MAX);
+    expect(body.turns.some((t: any) => t.id === WIDEN_NODE_MAX + 1)).toBe(false);
+    // T2001 (the edge's own citedId) was trimmed out — the edge naming it
+    // must not survive.
+    expect(body.edges).toEqual([]);
+    expect(body.meta.counts.edges).toBe(0);
+    expectEdgesEndpointClosed(body);
   });
 
   test("promptExcerpt/contentExcerpt are cut BY CODE POINT, never mid-surrogate-pair", () => {

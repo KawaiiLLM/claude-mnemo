@@ -1,5 +1,4 @@
-# R2 — Console bounds integrity (peer findings #2 #3 #11) — HOLD until
-# semantic-conformance 02 lands (shared test-file surface)
+# R2 — Console bounds integrity (peer findings #2 #3 #11)
 
 **#2 (P1) The byte bound is not the wire bound, and some fields are
 untrimmable.** applyGraphByteBound measures {turns, edges, lanes,
@@ -32,10 +31,31 @@ the shell's partial banner line if #11's mention requires it (regenerate +
 byte guard). NOT server.ts/console-shell interactions beyond that line
 (R3 owns them).
 
-**Status:** in-flight (worker dispatched after 342b9a3)
+**Status:** done
 
-- [ ] Reviewer's #2 repro pinned: the final envelope byte length is what the
+Notes: `applyGraphByteBound` now measures `{turns, edges, lanes, laneCheckText,
+meta}` at every trim step (edges first, then turns), fixing `appliedBounds`/
+`stateCoverage` for the rest of the call the instant a trim is confirmed
+necessary rather than chasing a true fixed point over meta's own encoded size
+(ticket's own documented allowance). When turns and edges both trim to empty
+and the envelope still exceeds the bound, `handleGraphRoute` returns
+`buildUnfittableGraphResult` — a 200 with `turns/edges/lanes: []`,
+`laneCheckText: ""`, an `error` field naming `RESPONSE_BYTE_SOFT_MAX`, and
+`meta.appliedBounds` carrying the byte-bound entry — never the oversized
+lanes/laneCheckText. #3's endpoint-closed filter runs once, unconditionally,
+as the last step after both count and byte trims (byte-trimming in this
+codebase always empties `edges` before it ever touches `turns`, so the ONLY
+source of dangling edges is the independent count caps — verified by
+tracing the loop order, not assumed). `electionCoverage: "full-snapshot"` is
+now a constant field on `ConsoleMeta`, emitted by `buildMeta` for all four
+routes (not graph-only) since it costs nothing to keep uniform. Shell banner
+regenerated via `bun scripts/generate-console-shell.ts`. The
+semantic-conformance-02 `vocabularyConformance` stub fallout was already
+present in `console-api.test.ts` at dispatch time (commit 342b9a3) — no
+action needed there.
+
+- [x] Reviewer's #2 repro pinned: the final envelope byte length is what the
       bound governs; unfittable envelope → bounded error, no false claim
-- [ ] #3 invariant pinned: endpoint-closed edges after every trim path
-- [ ] electionCoverage in meta + schema tests; shell banner regenerated
-- [ ] Targeted suites + typecheck green; control-byte scan clean
+- [x] #3 invariant pinned: endpoint-closed edges after every trim path
+- [x] electionCoverage in meta + schema tests; shell banner regenerated
+- [x] Targeted suites + typecheck green; control-byte scan clean
