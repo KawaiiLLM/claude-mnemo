@@ -1,0 +1,1545 @@
+{
+ "session": "S15069",
+ "window": "T1-100",
+ "segment": "E60 claude-mnemo standing container",
+ "turns": [
+  {
+   "prompt": 1,
+   "title": "Dispatched async research on SkillOpt and ByteDance EdgeBench papers",
+   "content": "User requested /offload research on two topics: SkillOpt and ByteDance's EdgeBench paper. Launched two independent Opus-level offload-worker subagents to investigate origin, motivation, methods, and key results, each requiring sourced URLs for all claims.",
+   "insight": "",
+   "type": [
+    "delegate"
+   ],
+   "tags": [
+    "skillopt",
+    "edgebench"
+   ]
+  },
+  {
+   "prompt": 2,
+   "title": "SkillOpt research findings: Microsoft paper on skills as trainable params",
+   "content": "Subagent [T8184] returned SkillOpt findings: MSR arXiv:2605.23904 preprint treats skill docs (SKILL.md-style) as external trainable params, edited by a bounded optimizer only on validation gains; wins/ties all baselines across 52 combos incl. Claude Code harness. Flagged unverified: affiliation (MSRA unconfirmed), benchmark list/transfer numbers only from search-engine summaries, not primary-sourced.",
+   "insight": "",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "skillopt"
+   ]
+  },
+  {
+   "prompt": 3,
+   "title": "EdgeBench research findings: ByteDance's post-deployment learning benchmark",
+   "content": "Subagent [T8184] returned EdgeBench findings: ByteDance Seed's arXiv:2607.05155 benchmarks post-deployment agent learning (not edge-device inference, a naming trap) across 134 real tasks with dual feedback loops; found log-sigmoid scaling law (R²=0.998) and ~8x learning-speed growth in 221 days. Synthesized with SkillOpt [T8185] as complementary engine/instrument pair for agent self-improvement.",
+   "insight": "",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "edgebench",
+    "skillopt"
+   ]
+  },
+  {
+   "prompt": 4,
+   "title": "",
+   "content": "",
+   "insight": "",
+   "type": [],
+   "tags": []
+  },
+  {
+   "prompt": 5,
+   "title": "Analyzed Kimi-K3 bilibili video: benchmarks and self-evolution game demo",
+   "content": "Fetched full subtitles/summary for a bilibili video reviewing Kimi-K3: coding/agent benchmarks (vector DB HNSW impl, delivery-agent sim) plus a self-evolution experiment where K3 learns Oil Tycoon via reflect-and-verify loop over 200+ games. Corrected bilibili's auto-summary, which mislabeled the uploader's own 43,730 score as the AI's. Connected the demo to SkillOpt/EdgeBench [T8185][T8186] as a folk illustration of skill-optimization + environment-learning-curve research.",
+   "insight": "",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "kimi-k3",
+    "skillopt"
+   ]
+  },
+  {
+   "prompt": 6,
+   "title": "Explained self-evolution framework principle from Kimi-K3 video screenshot",
+   "content": "User shared a screenshot of the framework's internal files (games.jsonl/hypotheses.json/iterations.jsonl); explained it as a falsifiable-hypothesis loop (Reflexion+Voyager hybrid) where antiCheat gates generalizable causal rules vs memorized ones, structurally mirroring SkillOpt's [T8185] held-out-validation accept criterion.",
+   "insight": "",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "skillopt"
+   ]
+  },
+  {
+   "prompt": 7,
+   "title": "Clarified EdgeBench is a measurement harness, not a self-evolution mechanism",
+   "content": "Fetched ByteDance-Seed/EdgeBench README to verify. Confirmed EdgeBench [T8186] provides only benchmark+SForge harness (dual-container isolation, iterative submission, best-so-far scoring) with no built-in learning mechanism; learning is entirely up to the tested agent's scaffold. Distinguished single-run (12-72h) learning curves from cross-episode memory accumulation seen in the video framework [T8189]; noted SForge's custom-scaffold hook as a potential testbed for external memory systems.",
+   "insight": "",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "edgebench"
+   ]
+  },
+  {
+   "prompt": 8,
+   "title": "Identified mnemo's missing verification loop for self-evolution",
+   "content": "Mapped mnemo's architecture against the collect/induce/verify/promote loop from the video framework [T8189] and EdgeBench [T8190]: mnemo covers collection (full turn logging), induction (feedback memories), and promotion (SessionStart injection) but lacks a verification stage — feedback memories have no provisional/confirmed/refuted lifecycle or violation tracking. Proposed minimal fix building on existing milestone-corrector-promotion and dream-agent regrade mechanisms as verification hosts.",
+   "insight": "",
+   "type": [
+    "discuss"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 9,
+   "title": "Refined verification-gap analysis: attribution/hit-tracking is the real bottleneck",
+   "content": "Critiqued user's four-point mapping onto [T8191]'s framework: corrected that SQLite raw storage (not memory extraction) is the collection layer, and that structured-experience form already exists (feedback memories) but lacks a systematic nightly induction pipeline. Key redirect: replay isn't feasible/needed (no resettable env), but no hit/reference tracking exists, so dream-agent review can only detect violations, not attribute usefulness. Concluded the two prerequisite gaps to build first are trajectory outcome labeling and injection hit-tracking, before any rule lifecycle/gated promotion can work.",
+   "insight": "",
+   "type": [
+    "discuss"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 10,
+   "title": "Converged on minimal self-evolution plan: refutation-only rule notes",
+   "content": "Verified via timeline on S14663/S14733 that turn-level trajectories are flattened into single-line conclusions (strategy-level extractable, operation-level needs replay dig). Resolved four open questions from [T8192]: MEMORY.md decoupling confirmed sound (replace experience doc with dream-agent-maintained structured rule notes, no new injection channel needed); push-triggered tips are real but small-scale (cite own MEMORY.md violated tips); usefulness-judging is infeasible without hit-tracking but misleading-detection is feasible now via existing correction/rolled-back tags. Converged plan: dream agent nightly produces rule notes with refutation-only lifecycle (kill on violation, don't requi…",
+   "insight": "",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 11,
+   "title": "Diary audit: reflections already rule-quality but undeduped and unread",
+   "content": "Grepped all 22 diary entries' 反思 sections. Found reflections already have claim+evidence+confidence form (with [S/T] citations), refuting concern that dream agent can't judge usefulness. Real pathology: same rules reinvented independently up to 6 times (e.g. traceable-evidence-beats-abstract-claims across 06-29→07-11) with no identity/dedup/lifecycle, and the whole channel is write-only — no injection surfaces reflections at all. Redirects the plan from [T8198]: scope shrinks from 'build a rule generator' to 'build a ledger' (dedup + confirm/revisit existing reflections), with ~20 rules ready to migrate day one.",
+   "insight": "",
+   "type": [
+    "research",
+    "measure"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 12,
+   "title": "Resolved rule-injection strategy: full-inject small corpus, graduate hooks",
+   "content": "Split \"injection condition\" from \"applicability condition\": tool-observable rules (timeouts, version bumps) can be precisely hook-triggered; cognitive-state-triggered rules (the most valuable ones) can't be machine-matched at all. Resolved that at the small scale mnemo operates at (dozens of rules), full-corpus injection is sufficient — no conditional push needed, matching happens via the reader recognizing sharp trigger phrasing. Added a new lifecycle exit: confirmed rules with observable triggers should graduate out of memory into hooks/CI rather than stay pushed, complementing the refutation-based exit from [T8198].",
+   "insight": "",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 13,
+   "title": "Turn-view extraction validated: correction arcs findable via ⚖️+short-gap",
+   "content": "Dispatched a sonnet subagent to research hook injection feasibility (still pending) and used mnemo recall/timeline turn views on S13090 (persona-design session) to test lesson extraction. Found three correction arcs identifiable from surface signals alone (⚖️ markers, short-gap chains, escalating prompt wording), confirming selective dig-in [proposed in T8200] only needs 6-7 of 38 turns. Also found precedent evidence that the full session→diary→CLAUDE.md promotion chain already worked once manually (naming-convention lesson), validating the target pipeline design.",
+   "insight": "",
+   "type": [
+    "research",
+    "measure"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 14,
+   "title": "Confirmed hook injection feasible: closes design's last open question",
+   "content": "Subagent [T8206] verified against claude-code-main source (docs proved unreliable, mismatched schema in 3 places) that PreToolUse/PostToolUse/UserPromptSubmit/etc all support additionalContext injection (Claude-visible, user-invisible) and PreToolUse can hard-block via permissionDecision deny. Key upgrade over [T8204]: UserPromptSubmit enables per-turn keyword-matched push for B-layer (task-type) rules, more optimistic than the prior \"treat B like C\" fallback. Converges the full three-layer design: A→hook deny/additionalContext, B→UserPromptSubmit keyword push, C→small full-corpus injection — push mechanism no longer an unknown, only the rule ledger itself remains to design.",
+   "insight": "",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 15,
+   "title": "Trajectory quality check on S11231 finds line-pointer bug + confirms sufficiency",
+   "content": "Checked a worker-orchestrated design session (S11231, 583 turns) for extraction quality, complementing S13090 [T8206]. Confirmed correction arcs and failures (🔴87) are preserved verbatim without being sanitized, closing the \"is trajectory quality sufficient for rule induction\" question across both session types (document-design and orchestration). Found a real data bug: line-number pointers for several task-notification turns are non-monotonic/duplicated (e.g. T569 shares L15186 with T549 two hours earlier), meaning replay dig-in for those turns may read the wrong location — flagged for a ticket. Also noted visual-reference evidence (referenced images) isn't captured in trajectories, a gap f…",
+   "insight": "",
+   "type": [
+    "research",
+    "measure"
+   ],
+   "tags": [
+    "self-evolution",
+    "extraction-bug"
+   ]
+  },
+  {
+   "prompt": 16,
+   "title": "Confirmed mnemo DB has full-fidelity trajectory data, line bug is cosmetic",
+   "content": "Queried the sqlite schema directly to resolve [T8210]'s line-pointer concern: confirmed transcript_line_start is only a JSONL fallback pointer, unrelated to DB content integrity — prompt/response/tool I/O are stored independently per turn, unaffected by the bug. Critically, discovered observations.tool_input/tool_result store full untruncated I/O per call even for turns the extractor marked 'skipped', so no trajectory data is lost regardless of extraction summarization. Resolves the design's foundational data-sufficiency question: dream agent's selective dig-in can be built as a plain turns+observations join, with only a truncation budget needed for large tool_result blobs; the line-number b…",
+   "insight": "",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "self-evolution",
+    "extraction-bug"
+   ]
+  },
+  {
+   "prompt": 17,
+   "title": "Clarified response vs transcript: self-refuted hypotheses live in transcript",
+   "content": "Queried DB to distinguish assistant_response (final text block delivered to user) from assistant_transcript (all text blocks concatenated, including inter-tool narration). Found via S11231/T446 example that the most inductively valuable material — self-falsified hypotheses and reasoning (\"实测证伪...\") — often lives only in transcript, not response, refining the dig-in strategy from [T8212] to prioritize transcript. Confirmed observations.tool_name covers all tool types including Skill/Agent/MCP calls, with the caveat that Agent dispatches only record prompt+summary, not the subagent's internal tool sequence.",
+   "insight": "",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 18,
+   "title": "Decided: keep replay as raw-axis skill, add dream-agent in-process accessor",
+   "content": "Recalled the original skill-vs-tool rationale for replay (raw axis, avoids re-mediating what recall/timeline already provide) and confirmed it still holds — this session's own forensics (line-pointer audit, transcript/response comparison [T8214]) required arbitrary SQL that no fixed-schema tool could express. Decided the dig-in interface the rule ledger actually needs belongs not in replay/MCP but as a new in-process query module inside the dream-agent runtime (same-process DB access, no MCP indirection), returning prompt+transcript+observations per turn with built-in truncation. Also flagged two skill-doc fixes: add a schema cheat-sheet (prompt_number not turn_no) and warn that transcript_l…",
+   "insight": "",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 19,
+   "title": "Implemented turn-detail.sh: budgeted CLI accessor for turn/observation data",
+   "content": "Built scripts/turn-detail.sh implementing the in-process/CLI accessor decided in [T8215]: readonly sqlite query by (session, prompt_number) returning turn metadata+full text plus per-call observations, capped by default (--cap/--full/--no-obs/--tool filters). Verified against known values (T446 lengths, T573's 674KB Read truncated correctly with accurate result_len reported, --tool LIKE filter, missing-turn error handling). Designed as the shared accessor for both interactive forensics and dream-agent dig-in, using DB keys only (no reliance on unreliable transcript_line_start).",
+   "insight": "",
+   "type": [
+    "implement"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 20,
+   "title": "Dispatched Codex to review and stress-test turn-detail.sh",
+   "content": "Launched a codex-rescue subagent to actually run and review turn-detail.sh [T8217] across ~6 parameter combos (large results, invalid args, missing turns), covering correctness/interface/robustness, read-only constraint enforced.",
+   "insight": "",
+   "type": [
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 21,
+   "title": "Locked rules-table schema + static dispatcher, solving hit-tracking for free",
+   "content": "Locked the core architecture for the self-evolving rule ledger: single DB table `rules` (claim/rationale/trigger_spec/mode/status/evidence/violations) as the one source of truth, with pushability (A/B/C) demoted from a storage category to a derived routing field. Two static, never-modified dispatchers (PreToolUse + UserPromptSubmit) read a compiled trigger index so rule changes never touch settings.json. Safety boundaries: trigger_spec restricted to a declarative vocabulary (no dream-agent-generated executable code), auto-produced rules capped at 'remind' (enforce/deny requires manual promotion), injection throttled per-session/per-turn. Critically, the dispatcher's hit-logging (rule_id + se…",
+   "insight": "",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 22,
+   "title": "Fixed turn-detail.sh bugs found by Codex review (ARG_MAX crash, edge cases)",
+   "content": "Codex review [T8219] of turn-detail.sh [T8217] found real bugs: --full crashed on large observations (674KB via --argjson hit ARG_MAX), --no-obs didn't actually omit the key, --cap 0 silently treated as unlimited, and --full+--cap order-dependent behavior. Fixed all four (switched to tempfile+--slurpfile, proper key omission, cap validation ≥1, explicit conflict rejection), added jq/sqlite3 preflight checks and WAL lock timeout. Kept response=\"\"/transcript=null distinction as intentional (interrupted vs uncaptured). Verified all 6 scenarios pass including the 674KB case.",
+   "insight": "",
+   "type": [
+    "fix"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 23,
+   "title": "Merged turn-detail.sh into mnemo-replay skill, updated docs and release guard",
+   "content": "Moved turn-detail.sh [T8217][T8221] from scripts/ into plugin/scripts/ alongside replay-parse.cjs so it ships with the plugin per [T8215]'s design. Rewrote mnemo-replay SKILL.md to lead with the script (four example invocations, *_len-before---full budget habit) with raw SQL as fallback, and baked in today's hard-won facts: transcript-only hypothesis-reversal content, NULL vs '' semantics, DB-keys-only location (transcript_line_start unreliable). Added turn-detail.sh to release-artifacts.test.ts git-tracking list; guard test passes 7/7. Changes staged, not committed.",
+   "insight": "",
+   "type": [
+    "implement"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 24,
+   "title": "Detailed rules/rule_events schema: tombstones and append-only event log",
+   "content": "Elaborated the concrete field-level schema for the `rules` table locked in [T8220]: id/name/claim/rationale/scope/trigger_kind/trigger_spec/mode/status/graduated_to/evidence/timestamps. Added two new design decisions: refuted/retired rows are tombstones (not deleted) so dream agent's dedup check spans the whole corpus including dead rules, preventing re-invention of rejected rules; and a separate append-only `rule_events` table (hit/violation/support/status_change) rather than a JSON column, since dispatcher (runtime) and dream agent (nightly) write concurrently and appending avoids overwrite races.",
+   "insight": "",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 25,
+   "title": "Added PostToolUse dispatcher, converged v1 scope with tombstone red line",
+   "content": "Corrected an oversight in [T8220]'s three-dispatcher design: added PostToolUse as a third route for diagnostic-type rules (condition only knowable from tool_result, e.g. ECONNRESET pattern), completing UserPromptSubmit/PreToolUse/PostToolUse to cover intent/action/result trigger types; added result_pattern to trigger_spec vocabulary with header-only scanning for cost. Confirmed user's simplified v1 scope (mode fixed to remind, no enforce/graduation) and specified the mechanism for locating hit turns: hooks lack prompt_number, so hits log (rule_id, session_id, timestamp) and dream agent joins against turns.created_at_epoch nightly. Locked one non-negotiable even in v1: refuted/replaced rows m…",
+   "insight": "",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 26,
+   "title": "Grill-me interview exposes undefined 'confirmed' criterion in rule design",
+   "content": "Ran /grill-me on the just-finalized rule system design [T8220][T8225]. First question exposed a real gap: only 'refuted' has a clear truth condition (violation), but 'confirmed' (usefulness) has none — pushed on whether hit-without-violation counts as usefulness proof given counterfactual-unknowability, compliance≠benefit, and dream-agent self-evaluation risk (citing the pre-0.6.3 grading drift precedent). Proposed reframing v1's 'confirmed' as mere unrefuted-survival (N days + M hits, zero violations) rather than proven usefulness, pending user's N/M thresholds.",
+   "insight": "",
+   "type": [
+    "discuss"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 27,
+   "title": "Resolved usefulness criterion: positive-effect-only, deferred calibration",
+   "content": "Resolved the 'confirmed' gap from [T8226]: compliance alone doesn't count as usefulness, only demonstrated positive effect does; rather than pre-defining promotion/demotion thresholds, dream agent freely labels+counts each hit's judgment with an open vocabulary, and hard rules get calibrated post-launch from the count distribution. Schema implication: rule_events.kind becomes an open label with a mandatory reason string (audit trail for later calibration). Grilling continued to a second open question: whether rules need a project-scope field to prevent cross-project noise contaminating the very counts calibration depends on.",
+   "insight": "",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 28,
+   "title": "Locked rule scope field; proposed sidecar file for hit-write hot path",
+   "content": "Resolved [T8229]'s scoping question: added `scope` field to rules (global or specific project dir), with per-session quota computed over the union of global + current-project candidate rules. Continued grilling into hit-write path: since dispatchers run synchronously in the hot path and mnemo DB has active writers (extraction worker), direct SQLite writes risk either latency (busy-timeout) or silent hit-count loss (timeout=0) — exactly the data the whole usefulness-calibration plan [T8229] depends on. Recommended sidecar JSONL append-file (zero-lock, microsecond writes) ingested into DB nightly by dream agent, mirroring the existing staged-commit diary pattern; proposed p95 ≤50ms hook latenc…",
+   "insight": "",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 29,
+   "title": "Confirmed sidecar hit-write path; demanded pre-registered kill gate",
+   "content": "User confirmed the sidecar-file hit-write design from [T8230] (p95≤50ms hook budget, over-budget matching gets cut). Continued grilling: applied the user's own research discipline (pre-register kill criteria before trying a new direction) to the rule system itself, treating it as an unproven hypothesis (\"injecting historical lessons improves live agent behavior\"). Proposed locking, before launch: a 14-content-day observation window, three kill triggers (positive-hit rate below threshold, no rule ever accumulating a second corroborating hit, ≥2 misleading-injection incidents unfixable by tightening trigger), and scoping kill to the push mechanism only (induction/ledger survives even if push f…",
+   "insight": "",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 30,
+   "title": "Added propose_rule/submit_judgment tools, mechanizing tombstone dedup",
+   "content": "Kill gate from [T8231] deferred as an open item per user. Adopted user's proposal for a dream-agent commit tool, designed as two structured write tools mirroring `remember` as the sole memory write path: propose_rule (claim/rationale/scope/trigger_spec/evidence, with tombstone-dedup enforced mechanically inside the tool rather than via prompt discipline — the [T8225] no-reinvention red line becomes structurally impossible to violate) and submit_judgment (rule_id/hit_ref/label/rationale/adjustment, feeding rule_events). Converged the full grill-me arc into a 5-item decision table (usefulness criterion, scope, hit-write path, kill gate deferred, new write tools) on top of the pre-grilling arch…",
+   "insight": "",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 31,
+   "title": "Published rule-notebook spec.md as ready-for-agent",
+   "content": "Ran /to-spec to consolidate the full grill-me-hardened design [T8220][T8225][T8229][T8230][T8231][T8232] into .scratch/rule-notebook/spec.md, marked ready-for-agent. Confirmed test seam reuses existing hook-command contract seam + dream tool-function seam (no new e2e) via AskUserQuestion. Spec covers problem/solution, 18 user stories across four roles, all implementation decisions (schema, dispatchers, sidecar hit path, propose_rule/submit_judgment tools), testing decisions, and 7 out-of-scope items with the deferred kill-gate risk noted in Further Notes.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution",
+    "rolled-back"
+   ]
+  },
+  {
+   "prompt": 32,
+   "title": "GPT review demotes spec to draft; fixes epoch bug, closes 6 protocols",
+   "content": "External GPT review found the [T8233] ready-for-agent spec actually left key semantics undefined (trigger-spec algorithm, rule_events lifecycle, sidecar race conditions, turn-locator reliability, dream tool surface, hook-output seam) and caught two factual errors: created_at_epoch is seconds not milliseconds (turn-detail.sh's /1000 rendered 1970 dates) and writeHookResult hardcodes hookEventName to SessionStart, so PreToolUse/PostToolUse aren't actually wired yet. Verified all six findings against source/DB — all confirmed true. Fixed the epoch bug in turn-detail.sh. Rewrote spec to v2 closing all six protocols (discriminated trigger union with no-regex v1, unified rule_events schema with id…",
+   "insight": "",
+   "type": [
+    "correction",
+    "fix"
+   ],
+   "tags": [
+    "self-evolution",
+    "correction"
+   ]
+  },
+  {
+   "prompt": 33,
+   "title": "Converged spec v2 into nine dependency-ordered implementation tickets",
+   "content": "Ran /to-tickets on the v2 spec [T8239], decomposing it via tracer-bullet slicing into 9 tickets: hook-output contract prefactor, dual-table schema+renderer, a PreToolUse tracer-bullet end-to-end slice, UserPromptSubmit/PostToolUse dispatchers, sidecar ingestion+turn resolver, propose_rule/submit_judgment write tools, list_rule_hits/read_turn_detail read tools, dream nightly orchestration, and C-layer digest+experience-doc retirement — with an explicit dependency graph and initial parallel frontier (tickets 01+02). Pending user confirmation on ticket granularity and blocking edges before publishing to .scratch/rule-notebook/issues/.",
+   "insight": "",
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 34,
+   "title": "Refined ticket boundary: move experience-doc retirement from 09 to 08",
+   "content": "User pointed out experience.md was never actually injected, just maintained incidentally, confirming spec v2's earlier correction [T8239] that injection is pure-addition not replacement. Refined the ticket 09/08 split from [T8240]: moved \"retire experience doc\" into ticket 08 (dream nightly orchestration, since it already rewrites the nightly output prompt/commit list) so ticket 09 becomes pure-addition (digest render + new SessionStart block + 500-token budget) with no retirement semantics. Dependency edges unchanged (09 still only depends on 02).",
+   "insight": "",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 35,
+   "title": "Published 9 implementation tickets, dispatched Codex on ticket 01",
+   "content": "Wrote all 9 tickets from [T8240][T8241] to .scratch/rule-notebook/issues/01-09.md, each with end-to-end behavior, blocking edges, and acceptance checklists, status ready-for-agent (09 slimmed to pure-addition per [T8241]). Dispatched a codex-rescue subagent in write mode to implement ticket 01 (hook output contract parameterization) with explicit discipline: no git writes, don't touch other uncommitted worktree changes, supervisor verifies via git status + tests before acceptance. Marks the transition from design/ticketing to actual implementation kickoff.",
+   "insight": "",
+   "type": [
+    "ops",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 36,
+   "title": "Ticket 01 completed and verified; ticket 02 dispatched",
+   "content": "Codex completed ticket 01 [T8243] (hook output contract parameterized for UserPromptSubmit/PreToolUse/PostToolUse), 18/18 hook tests pass, no unauthorized git writes. Found and fixed a latent test bug: an existing sync-output test's fixture was actually a Stop event but asserted hardcoded \"SessionStart\" — parameterization exposed the mismatch, corrected to \"Stop\". Rebuilt stale .cjs bundle Codex correctly avoided touching. Dispatched ticket 02 (dual-table schema + store + trigger index renderer + eviction algorithm), which unlocks 03/06/09 in parallel once done.",
+   "insight": "",
+   "type": [
+    "review",
+    "delegate",
+    "fix"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 37,
+   "title": "Ticket 02 implementation still running, moved to background",
+   "content": "Codex's ticket 02 [T8245] implementation exceeded 600s foreground wait and was auto-backgrounded; relaying status, not a zombie report since it included a live task ID and log path. Will verify once completion notification arrives.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 38,
+   "title": "Ticket 02 verified complete; set up watchdog, dispatched ticket 03",
+   "content": "Verified ticket 02 (rules/rule_events schema, store, trigger-index renderer, eviction algorithm) from [T8245]: 23/23 tests pass, tsc clean, no unauthorized files touched beyond schema/store/renderer/tests plus allowed stale-bundle rebuild. Dispatched ticket 03 (PreToolUse dispatcher end-to-end tracer bullet). Set up a proper watchdog after noticing no background monitoring existed, self-caught a status-query mistake (misrouted a query as a new task due to a flag-as-prompt bug), confirmed it was harmless read-only, and let it expire rather than fight the permission classifier.",
+   "insight": "",
+   "type": [
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 39,
+   "title": "Ticket 03 verified: PreToolUse dispatcher p95 0.536ms, well under budget",
+   "content": "Verified ticket 03 (PreToolUse tracer-bullet dispatcher) from [T8247]: 8/8 dispatcher tests pass, hooks.json registered, no unauthorized deletions, full suite 1080/1080. Measured p95 latency 0.536ms against the [T8230] 50ms budget — nearly two orders of magnitude of margin, confirming the sidecar+in-memory-index hot-path design is viable. Dispatched ticket 05 (sidecar ingestion + hit-turn resolver) with watchdog monitoring set up. Frontier: 04/06/09 unlocked but sequencing single-threaded through 05→06→07→08 to avoid worktree conflicts; suggested a staged commit after 05 lands.",
+   "insight": "",
+   "type": [
+    "review",
+    "measure",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 40,
+   "title": "Ticket 05 backgrounded as expected, watchdog covering it",
+   "content": "Ticket 05 [T8248] forwarding agent returned a background task ID as anticipated by the watchdog design; no action needed, waiting for completion or staleness signal.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 41,
+   "title": "Restarted killed watchdog for ticket 05, task still healthy",
+   "content": "Watchdog monitoring ticket 05 [T8249] was killed but the underlying Codex task was confirmed healthy (running, verifying phase). Restarted the watchdog pointed at the exact job log path instead of guessing the newest file.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 42,
+   "title": "Ticket 05 verified complete, fixed race bug from ticket 03, dispatched 06",
+   "content": "Verified ticket 05 (sidecar ingest + hit-turn resolver) from [T8248]: 11/11 targeted tests, full suite 1091/1091, five-step crash-safe protocol covers both crash windows (mid-transaction and post-commit-pre-checkpoint). Bonus find: fixed a real concurrency race in ticket 03's dispatcher [T8248] (writer holding stale inode during rotate), now sharing the cross-process lock with append. Dispatched ticket 06 (dream write path: propose_rule/submit_judgment with tombstone dedup and idempotency keys), the semantically heaviest remaining ticket. Progress: 01/02/03/05 done, 06 in progress, 04/07/08/09 remain; staged commit still pending user decision.",
+   "insight": "",
+   "type": [
+    "review",
+    "fix",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 43,
+   "title": "Ticket 06 backgrounded as expected, watchdog covering it",
+   "content": "Ticket 06 [T8251] forwarding agent returned a background task ID as anticipated; watchdog will lock onto its log after 120s delay, no action needed.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 44,
+   "title": "Ticket 06 verified complete; discovered watchdog-timing pattern",
+   "content": "Verified ticket 06 (propose_rule/submit_judgment dream write tools) from [T8252]: 10/10 tests, dedup/tombstone/idempotency paths all covered, similarity threshold 0.72 (Sørensen-Dice trigram) documented as an unlcalibrated empirical value per spec's count-first philosophy. Dispatched ticket 07 (dream read path). Discovered a watchdog reliability pattern: monitors spawned in the dispatch turn get killed by turn-boundary cleanup, but ones spawned in the notification-forwarding turn survive — adjusted strategy to always arm watchdogs on the notification turn. Progress: 01/02/03/05/06 done, 07 in progress, 04/08/09 remain.",
+   "insight": "",
+   "type": [
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 45,
+   "title": "Ticket 07 backgrounded, watchdog armed per new reliable pattern",
+   "content": "Ticket 07 [T8253] running in background; watchdog armed on the notification-forwarding turn per the survival pattern discovered in [T8253], pointed directly at its log.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 46,
+   "title": "Ticket 07 verified complete; ticket 08 (nightly orchestration) dispatched",
+   "content": "Verified ticket 07 (dream read path: list_rule_hits/read_turn_detail) from [T8254]: 4/4 targeted tests, full suite 1106/1106, no spec deviations, no unauthorized git changes. Dispatched ticket 08 (dream nightly orchestration: induction+review prompts, index re-render on commit, sidecar ingest wiring, experience doc retirement) — the closing piece of the loop. Progress: 01/02/03/05/06/07 done, 08 in progress, only 04 (remaining dispatchers) and 09 (digest block) left.",
+   "insight": "",
+   "type": [
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 47,
+   "title": "Ticket 08 backgrounded, watchdog armed",
+   "content": "Ticket 08 [T8255] running in background as task-mrtltnny-f8990s; watchdog armed, waiting for completion.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 48,
+   "title": "Restarted killed watchdog for ticket 08, task still healthy",
+   "content": "Watchdog monitoring ticket 08 [T8256] was killed again but task confirmed healthy (running, verifying phase). Restarted monitoring.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 49,
+   "title": "Ticket 08 verified: nightly closed loop wired, experience.md retired",
+   "content": "Verified ticket 08 (dream nightly orchestration) from [T8257]: 12/12 tests, sidecar pre-ingest, judgment-completeness guard, post-commit index recompile all wired; experience.md fully retired (0 references in dream-staging.ts, only a read-only legacy migration adapter remains), no spec deviations. This completes the closing piece of the self-evolution loop [T8255] first envisioned back at [T8191]/[T8220] — induction, trigger indexing, injection, and nightly review are now all connected end-to-end. Dispatched ticket 04 (remaining dispatchers), the second-to-last ticket, leaving only 09.",
+   "insight": "",
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 50,
+   "title": "Ticket 04 backgrounded, watchdog armed",
+   "content": "Ticket 04 [T8258] running in background as task-mrtmut8i-m8ho8g; watchdog armed, waiting.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "self-evolution"
+   ]
+  },
+  {
+   "prompt": 51,
+   "title": "/compact",
+   "content": "",
+   "insight": "",
+   "type": [
+    "compact"
+   ],
+   "tags": [
+    "compact:pre_tokens=0",
+    "compact:trigger=manual"
+   ]
+  },
+  {
+   "prompt": 52,
+   "title": "All 9 tickets complete; rule-ledger pipeline done, staged-commit plan proposed",
+   "content": "Verified ticket 09 (SessionStart digest block) from [T8260]: new src/rules/digest.ts with scope-aware filtering, confirmed-priority stable sort, deterministic truncation, isolated 500-token budget; 8/8 targeted tests, full suite 1123/1123, tsc clean, no git writes. All 9 tickets now done, full closed loop wired end-to-end. Proposed a 5-stage dependency-ordered commit plan (raw-axis CLI, rules base layer, dispatchers+sidecar, dream loop, digest+docs) awaiting user approval before any git writes.",
+   "insight": "- entire rule-ledger arc (9 tickets) now implementation-complete\n- next gate is user approval of commit staging, not more coding\n- spec still draft; upgrade decision deferred to user",
+   "type": [
+    "review",
+    "design"
+   ],
+   "tags": [
+    "rule-ledger-tickets",
+    "commit-plan"
+   ]
+  },
+  {
+   "prompt": 53,
+   "title": "",
+   "content": "",
+   "insight": "",
+   "type": [],
+   "tags": []
+  },
+  {
+   "prompt": 54,
+   "title": "Pre-merge GPT review finds 2 real bugs, blocks commit, fix dispatched",
+   "content": "External GPT review of the completed rule-ledger pipeline [T8261] found two high-severity pre-merge bugs: (1) submitJudgment lacks uniqueness on source_event_id, letting one hit receive conflicting judgments and corrupt calibration data; (2) read_turn_detail's cap only bounds observations, not the three turn-body fields, so 200k-char fields hit 600k+ JSON that the SDK silently truncates at 100k chars, hiding data. Typecheck/tests still green (1123/138 pass) but merge is blocked until fixed. Dispatched a fix ticket to Codex (task-mru4dab3-lchtpb) with concrete remediation: partial unique index + idempotent/conflict-explicit judgment writes, and default char cap + truncation metadata on turn b…",
+   "insight": "- staged-commit plan [T8261] paused pending this fix\n- real bugs found post \"complete\" status, not just review theater",
+   "type": [
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "blocked",
+    "rule-ledger-tickets",
+    "commit-plan"
+   ]
+  },
+  {
+   "prompt": 55,
+   "title": "Confirmed digest injection uses new independent 500-token budget",
+   "content": "Answered user's question about C-layer digest budget by grepping source: confirmed existing SessionStart blocks (session state, persona, recent-sessions+diary, milestones) each use independent 2000-token budgets, while the new rule digest [T8261] uses its own separate RULE_DIGEST_TOKEN_BUDGET=500, chosen deliberately small since C-layer rules are few and terse.",
+   "insight": "",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 56,
+   "title": "Detected zombie Codex fix task, cleaned up and resubmitted",
+   "content": "The dispatched review-fix task [T8273] (task-mru4dab3-lchtpb) went zombie: process dead, log silent 20min post-start, no file changes. Had the original forwarding agent clean up and resubmit the identical fix prompt in the background; re-arming monitoring pending new task id.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 57,
+   "title": "Confirmed resubmitted fix task alive, monitoring re-armed",
+   "content": "New fix task task-mru4tdqa-9eqdcl [T8276] confirmed streaming logs normally; watchdog re-armed. Zombie task's cancel step couldn't complete due to forwarding agent permission limits but was harmless since its process was already dead.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "rule-ledger-tickets"
+   ]
+  },
+  {
+   "prompt": 58,
+   "title": "",
+   "content": "",
+   "insight": "",
+   "type": [],
+   "tags": []
+  },
+  {
+   "prompt": 59,
+   "title": "",
+   "content": "",
+   "insight": "",
+   "type": [],
+   "tags": []
+  },
+  {
+   "prompt": 60,
+   "title": "Both pre-merge bugs fixed and verified; commit blocker cleared",
+   "content": "Verified the fix for [T8273]'s two merge-blocking bugs: judgment uniqueness now enforced via partial unique index (source_event_id WHERE event_kind='judgment') plus pre-write conflict check returning explicit conflict status instead of double-writing; turn-body fields now default-capped at 1500 chars with explicit truncated flags, real lengths, and new text_cap/text_offset pagination (≤25k cap, ~75k/page) to stay under the SDK's 100k hard truncation. 33/33 targeted tests, full suite 1124/1124, tsc clean, no git writes. Merge blocker cleared; 5-stage commit plan [T8261] unchanged, both fixes slot into their existing stages, still awaiting user approval.",
+   "insight": "- resolves [T8273]'s blocker; commit path reopened\n- fix task itself had a zombie-restart hiccup [T8276][T8277], now moot",
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "rule-ledger-tickets",
+    "commit-plan"
+   ]
+  },
+  {
+   "prompt": 61,
+   "title": "Rule-ledger feature staged-committed and released as 0.7.0",
+   "content": "Executed the 5-stage commit plan [T8261] exactly as proposed: 5 feature commits (turn-detail.sh CLI, rules schema/store/trigger-index, three dispatchers+sidecar, dream nightly loop, C-layer digest+docs) plus a release commit bumping 0.6.6→0.7.0 across all 7 version-string sites, verified via full grep. Rebuilt and re-ran full suite (1124/1124 pass) before pushing 6 commits to main (3ffae2f..a1f66dd). Noted plugin requires /plugin update + cold restart before the new dispatchers/dream loop actually activate.",
+   "insight": "- entire rule-ledger arc (research→spec→9 tickets→review fixes) lands as 0.7.0\n- feature inert until plugin reload picks up new code",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "rule-ledger-tickets",
+    "commit-plan"
+   ]
+  },
+  {
+   "prompt": 62,
+   "title": "Root cause found: test isolation leak, not 0.6.6 bug, corrupted real diary",
+   "content": "Root-caused the \"quiet day\" diary bug [T8285 slice1-2]: NOT a runtime defect in 0.6.6. server.test.ts's main-assembly test never injects dataRoot/config/clock, so it ran a real reconcileDreamBacklog against the real ~/.claude-mnemo using an empty test DB — the empty DB made 07-20 look materialless, took the quiet-day path, and commitNight wrote a fake 2026-07-20.md + polluted INDEX + advanced the real last-successful marker to 07-20 (suppressing the real worker's future re-dream) into the REAL data root. This leak has existed since 0.6.5 but only manifested now because it's the first test run after the 4am boundary before the actual dream ran. Also found a stuck provisional turn 8111 (since …",
+   "insight": "- test isolation leaks can corrupt real user data via unmocked homedir()\n- leak dormant since 0.6.5, only triggered by post-4am test run timing\n- fix plan: data repair (reversible via snapshots) + preload-pinned HOME for tests",
+   "type": [
+    "research",
+    "correction"
+   ],
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "prompt": 63,
+   "title": "Code fix implemented and self-verified; data repair still blocked pending approval",
+   "content": "User asked to fix [T8285]'s findings via subagent. Data-repair subagent was blocked by the permission classifier pending itemized user confirmation on 5 concrete real-data actions (reset last-successful.json, restore experience.md, delete fake snapshot dir, delete fake diary/2026-07-20.md + INDEX line, mark provisional turn 8111 skipped). In parallel, implemented and self-verified the test-isolation code fix directly: added tests/support/sandbox-home.preload.ts overriding node:os homedir() via mock.module (env.HOME alone insufficient since Bun caches homedir() at startup), added bunfig.toml preload wiring, injected dataRoot into all main() test call sites in server.test.ts via mkMainDataRoot…",
+   "insight": "",
+   "type": [
+    "fix",
+    "review"
+   ],
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "prompt": 64,
+   "title": "Test-isolation code fix verified: no more writes to real data root",
+   "content": "Verified [T8289]'s code fix for the test-isolation leak: full suite 1124/1124 pass, and running server.test.ts under a probe HOME now produces zero writes to that HOME's .claude-mnemo (previously it would leak). Root mechanism confirmed: Bun caches os.homedir() at process start so runtime env.HOME edits don't help; the preload uses mock.module(\"node:os\") to override homedir() before any test loads. Also found the finish-trigger test had been silently reading the real dream history to pass (explaining why it broke under sandboxed HOME) — fixed by injecting an empty processDiaryItem like sibling tests. Changes (sandbox-home.preload.ts, bunfig.toml, 6 main() call sites, 2 paths.test.ts expectat…",
+   "insight": "- main() already had a dataRoot injection seam, tests just never used it\n- Bun caches homedir() at startup; must override the os module, not env.HOME\n- a second test was silently depending on real user data to pass",
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "prompt": 65,
+   "title": "User approved; all 5 real-data repair actions executed and verified",
+   "content": "User approved (\"可以\") the itemized data-repair plan from [T8285][T8289]. Executed and verified all 5 actions against real ~/.claude-mnemo: restored experience.md from pre-leak snapshot (byte-identical), reset last-successful.json to 2026-07-19, deleted the fake history snapshot dir and fake diary/2026-07-20.md, removed the corresponding INDEX.md line, and marked stuck provisional turn 8111 as skipped in the DB. All 5 acceptance checks passed with no out-of-scope changes. Archived the incident as a durable project memory note (project_test_home_sandbox.md) linked from MEMORY.md. Only remaining open item: whether to commit and release the verified test-isolation fix as 0.7.1.",
+   "insight": "- data corruption from [T8285] fully reversed via snapshot-backed repair\n- incident distilled into a durable project memory note for future reference",
+   "type": [
+    "ops",
+    "review"
+   ],
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "prompt": 66,
+   "title": "Test-isolation fix released as 0.7.1; incident fully closed",
+   "content": "Shipped [T8290]'s verified test-isolation fix as release 0.7.1: commit 90932ec (sandbox HOME preload + dataRoot injection + dynamic paths.test.ts expectations) plus release commit 430a0bb, version bumped across all 7 sites, full suite 1124/1124 pass, pushed to main (a1f66dd..430a0bb). Closes the whole incident loop from [T8285]: data repaired, leak root-caused and fixed, regression guard in place. Both 0.7.0 and 0.7.1 await plugin update + cold restart to activate; the real 2026-07-20 diary will auto-regenerate on the next session's end-event.",
+   "insight": "- incident fully closed: repair + root-cause fix + regression guard, all shipped\n- real diary auto-heals next session end-event, no manual trigger needed",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "dream-diary-bug"
+   ]
+  },
+  {
+   "prompt": 67,
+   "title": "0.7.1 production audit finds healthy but unproven rules",
+   "content": "Completed read-only runtime audit: installed and active worker matches 0.7.1/430a0bb, health endpoint and observation processing are live, and 2026-07-20 diary is settled. Rules/rule_events and trigger index are deployed but empty; 07-21 diary awaits an end-event. Noted an unexplained six-start burst and legacy observation backlog.",
+   "insight": "- 0.7.1 is live and serving requests\n- Empty rules are expected before first new dream\n- Monitor restart burst and old queue backlog",
+   "type": [
+    "research",
+    "measure"
+   ],
+   "tags": [
+    "runtime-validation"
+   ]
+  },
+  {
+   "prompt": 68,
+   "title": "Recent turn grades reveal persistent high-score drift",
+   "content": "Queried live turn scoring distribution: last 100 scored turns are G4 2%, G3 27%, G2 33%, G1 25%, G0 13%; 200/500-turn windows confirm the pattern. Grade 4 is contained, but Grade 3 remains roughly 3.4× its 8% calibration baseline; post-0.7.1 sample is only five turns.",
+   "insight": "- Grade 3 inflation is the primary drift\n- Grade 4 calibration remains controlled\n- New-worker sample is too small to judge",
+   "type": [
+    "measure"
+   ],
+   "tags": [
+    "milestone-scoring",
+    "rolled-back"
+   ]
+  },
+  {
+   "prompt": 69,
+   "title": "Hundred-turn audit rejects systemic score-drift conclusion",
+   "content": "Completed the 100-turn audit and overturned the simple drift inference from [T8418]: 88/100 grades hold, with only 9 clear errors and 3 adjacent disputes; G3+ falls just 29→28. The real issue is inconsistent G2/G3 boundary handling, compound-turn undergrading, and missing rollback regrades—not score quotas. No rows changed.",
+   "insight": "- Never normalize grades to a global baseline\n- G3 needs explicit before/after route change\n- Lint rolled-back turns for paired regrades",
+   "type": [
+    "measure",
+    "correction"
+   ],
+   "tags": [
+    "milestone-scoring",
+    "audit",
+    "correction",
+    "rolled-back"
+   ]
+  },
+  {
+   "prompt": 70,
+   "title": "Re-prime context exposes unbounded duplicated milestone injection",
+   "content": "Completed production rendering audit: the extractor receives current summary + a 16-item milestone timeline + a 30-turn DB-id index on re-prime. Contrary to the 2,000-token SessionStart hook, this path bypasses its budget and is currently 12,616 tokens (2,101 milestones, 7,994 recent index), duplicating routine context.",
+   "insight": "- Re-prime and SessionStart use different budgets\n- Current re-prime payload is 12.6K tokens\n- Corrector/victim milestone behavior is working",
+   "type": [
+    "measure",
+    "research"
+   ],
+   "tags": [
+    "milestone-scoring",
+    "audit",
+    "milestone-injection"
+   ]
+  },
+  {
+   "prompt": 71,
+   "title": "Baseline mismatch traced to session-shape and sampling scope",
+   "content": "Explained why grade distributions diverge after [T8420]: the 8/25/45/20 calibration came from a routine-heavy S1730 window, while the reviewed cohort is 79% two research-intensive sessions and was cross-session mixed rather than per-session. Review corrections move G3 only 27%→26%; workload shape, not systemic inflation, drives the gap.",
+   "insight": "- Baseline is an S1730 reference, not a prior\n- Compare within sessions, not mixed cohorts\n- Keep semantic checks; avoid percentage anchoring",
+   "type": [
+    "research",
+    "correction"
+   ],
+   "tags": [
+    "milestone-scoring"
+   ]
+  },
+  {
+   "prompt": 72,
+   "title": "User redefines grades around task-level causality",
+   "content": "User rejected the action-level rubric and locked a task-centric hierarchy: G4 is a task’s motive/re-foundation, G3 changes task design principles, G2 preserves durable conclusions or full deliveries, G1 is routine execution, and G0 lacks future value. Also required recall/re-prime reduction; this overturns [T8420]'s prior audit framing.",
+   "insight": "- Grade task causality, not local next actions\n- G2 holds durable technical findings and releases\n- Recall must locate cheaply, then read by ID",
+   "type": [
+    "design",
+    "correction"
+   ],
+   "tags": [
+    "final-decision",
+    "milestone-scoring",
+    "milestone-injection",
+    "recall-efficiency"
+   ]
+  },
+  {
+   "prompt": 73,
+   "title": "Blind Sonnet re-grade of S15385 validates new rubric, finds G4-inflation gap",
+   "content": "Ran a blind experiment: had Sonnet re-grade all 52 turns of KawaiiLLM session S15385 from raw content only, using the task-centric rubric from [T8428]. 25/52 grades changed (15 down, 10 up); troubleshooting chains correctly dropped G3→G2, polling dropped to G0, hidden durable findings rose to G2 — matching predicted direction exactly. But Sonnet produced 4 G4s (one per perceived subtask) vs the intended 1-2, revealing the rubric lacks a \"subtask granularity\" definition needed before formal rewrite.",
+   "insight": "- Rubric mechanics work: troubleshooting→G2, polling→G0, hidden finds→G2 up\n- Gap: no subtask-granularity clause, causes G4 inflation\n- Fix: one G4 per task arc unless motive/success-criteria rewritten",
+   "type": [
+    "measure"
+   ],
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 74,
+   "title": "Locked subtask-granularity clause, closing the task-centric rubric semantics",
+   "content": "User defined the missing granularity rule from [T8434]: primary sub-task = expected to span 50+ turns (gets G4 at origin, ≤1-2 per arc); secondary sub-task = under 50 turns, gets G3 at origin. Applied to S15069 itself: all turns so far still belong to its single first primary sub-task. This closes the rubric fully, including the G3 boundary rule (secondary-subtask design changes are G3 only if they propagate up to affect the primary task's evaluation method/principles, else capped G2) — ready to implement in query-session.ts.",
+   "insight": "- Granularity anchor: 50+ turns primary(G4)/under-50 secondary(G3)\n- 2nd-level design change is G3 only if it reaches 1st-level eval method\n- Extractor must judge by expected scope at proposal time, not final count",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "grade-hierarchy",
+    "rolled-back"
+   ]
+  },
+  {
+   "prompt": 75,
+   "title": "Converged rubric+re-prime+milestone work into one spec, ready for tickets",
+   "content": "Wrote .scratch/task-causality-grading/spec.md, merging four change surfaces (rubric rewrite, percentage-free calibration, re-prime payload rebuild ~12.6K→3-4K tokens, milestone pool alignment) into one feature for concept integrity, since [T8436]'s rubric requires task-level reasoning that re-prime must mirror. Explicitly excludes backfill, recall-discipline code changes, SessionStart 2K budgeter, and schema changes. Status ready-for-agent.",
+   "insight": "- Bundled 4 surfaces into 1 feature: rubric needs re-prime to match its structure\n- G4 uniqueness rule tightened: only fundamental redefinition opens a 2nd G4\n- Calibration keeps session's own distribution table, drops external baseline",
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "grade-hierarchy",
+    "rolled-back"
+   ]
+  },
+  {
+   "prompt": 76,
+   "title": "GPT review found real spec gaps; reverting spec [T8438] to draft",
+   "content": "Evaluated external GPT feedback on the grading spec: accepted 4/5 points, most importantly that the \"no-backfill + new milestone pool rules\" combo silently regresses old-era timelines, and that milestone skeleton reuse of existing paginated queries could drop early G4s. Reverting spec status from ready-for-agent to draft to add an era-cutoff protocol, tighten 2nd-level subtask boundary (must decompose task goal/eval, not just unblock execution), fix G0/knowledge-answer wording, and rewrite skeleton data sourcing/budget order.",
+   "insight": "- 2nd-level subtask must decompose task goal/eval, not just unblock work\n- Need era-cutoff constant: old turns keep legacy grading semantics\n- Skeleton must read full session turns by grade, not paginated milestone view",
+   "type": [
+    "correction"
+   ],
+   "tags": [
+    "correction",
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 77,
+   "title": "Simplified rubric: dropped 2nd-level subtask, used turn-density anchors; spec rev2 ready",
+   "content": "User rejected the 2nd-level-subtask concept from [T8436] as overcomplicated, replacing it with a simpler rule: G3 = any milestone within the 1st-level arc that changes task design or task conclusion, with turn-density anchors (~1 G4/50+ turns, ~1 G3/10+ turns) as a calibration sanity check, not a quota. Folded in era-cutoff protocol and skeleton data-source fixes from [T8443], wrote spec rev2, restored status to ready-for-agent.",
+   "insight": "- G3 = design/conclusion-changing milestone in 1st-level arc, no 2nd tier\n- Density anchors (50+/G4, 10+/G3) are a warning signal, not a quota\n- Skeleton budget fixed at 4000 tokens, degrade order: state→G4→G3→legacy→index→pointer",
+   "type": [
+    "design",
+    "correction"
+   ],
+   "tags": [
+    "correction",
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 78,
+   "title": "Closed 2nd GPT review round: spec rev3, bridge-G4, arc citation protocol locked",
+   "content": "Closed all 4 remaining gaps from a second GPT review of the grading spec: replaced the unworkable \"regrade repairs legacy era\" idea from [T8443] with a bridge-G4 rule (first post-cutoff turn summarizing an arc's motive founds it, legacy turns never promoted); added a citation-based arc-assignment protocol for G4/G3 grouping; converted the G3 density number into a code-side conditional alarm instead of a standing prompt quota; and fixed intra-class truncation order for the 4000-token skeleton budget. Explicitly rejected GPT's proposal to couple re-foundation with rolled-back — evolved motive keeps both G4s legitimate, rollback stays evidence-gated. Spec rev3 stays ready-for-agent.",
+   "insight": "- regrade changes grade only, never created_at_epoch → can't fix legacy era\n- Bridge-G4: first post-cutoff turn summarizing arc motive founds it\n- Density number moved from prompt quota to code-side violation-only alarm\n- Re-foundation ≠ rollback: ev…",
+   "type": [
+    "design"
+   ],
+   "tags": [
+    "final-decision",
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 79,
+   "title": "Split rev3 spec into 7 dependency-ordered implementation tickets",
+   "content": "Broke the finalized grading spec [T8450] into 7 tickets: 01 era-cutoff constant (foundation), 02 rubric rewrite, 03 calibration/density-alarm (02/03 unblocked, parallel), 04 milestone pool era-gating (blocked by 01), 05 arc-grouping skeleton builder (blocked by 01), 06 re-prime payload switch (blocked by 05), 07 pre-ship offline validation + cutoff-epoch fixing (blocked by 02-06). Flagged 05 as largest/splittable and 07 as a merged pair, pending confirmation before publishing to issues/.",
+   "insight": "",
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 80,
+   "title": "Published 7 tickets, dispatched Codex to implement 01-06 in background",
+   "content": "Wrote all 7 ticket files from [T8451] to .scratch/task-causality-grading/issues/, then launched a background codex:codex-rescue subagent to implement tickets 01-06 in dependency order, running bun test after each, with constraints (no schema changes, no git-state mutations, no real data root, ticket 07 reserved for manual validation). Awaiting completion notification for review.",
+   "insight": "",
+   "type": [
+    "ops",
+    "delegate"
+   ],
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 81,
+   "title": "Set up background poller to await Codex ticket-implementation completion",
+   "content": "Codex subagent [T8452] handed off to background task-mrvszxl7-vseig1; launched a background bash poller (30s interval, 33min cap) to detect completion and fall back to log-mtime/workspace-diff verification on timeout.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 82,
+   "title": "Codex delivered tickets 01-06; independently verified all pass",
+   "content": "Codex [T8452] completed tickets 01-06 in 25min; independently verified via full bun test (1135 pass/0 fail, +11 new tests) and source inspection: era-cutoff module with placeholder MAX_SAFE_INTEGER constant, new deletion-test G3 rubric with no leftover percentage baseline, code-side density alarm, and renderCurrentSessionOutput delegating to a new task-skeleton builder replacing the old full-timeline+30-turn-index re-prime. Workspace clean of regressions, nothing committed. Ticket 07 (offline validation + cutoff fixing + release) deferred to release time.",
+   "insight": "",
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 83,
+   "title": "Fixed 2 review-caught bugs, committed grading rework (43951e1)",
+   "content": "Ran /codex:review on [T8461]'s working tree; it caught 2 real P2 bugs in task-skeleton.ts (legacy anchors losing casualty marker; compressed anchor text not counting as omission, so timeline pointer could be missing). Fixed both with regression tests, rebuilt artifacts (stale-bundle guard correctly caught the pre-rebuild diff), full suite 1137/1137 green, and committed to main as 43951e1 (25 files, +1604/-308): spec, 7 tickets, task-skeleton.ts, task-causality-era.ts, and all rubric/re-prime changes. Cutoff epoch still a placeholder (MAX_SAFE_INTEGER) so production behavior is unchanged until ticket 07.",
+   "insight": "- Pre-merge review caught 2 real bugs again, same pattern as 0.7.0\n- Stale-bundle guard test correctly blocked unrebuilt .cjs artifacts\n- Cutoff placeholder keeps all turns legacy until release-time fixing",
+   "type": [
+    "fix",
+    "ops"
+   ],
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 84,
+   "title": "Shipped 0.8.0: task-causality grading live, cutoff locked, pushed",
+   "content": "Completed ticket 07 and released 0.8.0: locked TASK_CAUSALITY_ERA_CUTOFF_EPOCH to the release timestamp (1784711427, legacy grades below this stay unmixed), bumped version at all 6 sites, rebuilt artifacts, full suite green, committed and pushed as bc8b6e1. Wrote durable engineering-memory notes (project_task_causality_grading.md + MEMORY.md entry) capturing the new rubric, cutoff value, and blind-validation methodology (production rubric must be embedded verbatim in any offline grading brief, per [T8467] round-1 divergence root cause).",
+   "insight": "- Slim re-prime payload needed 2 rubric clarifications to match full-context grading\n- Eval-validity fixes protecting a pre-registered gate = G3 (worked example)\n- \"Still healthy\" polls always G0 even with an on-track number\n- Round-1 divergence was …",
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "grade-hierarchy"
+   ]
+  },
+  {
+   "prompt": 85,
+   "title": "Verified async-tool-turn-liveness spec premises against live CC source",
+   "content": "Read new ready-for-agent spec.md (async attribution/turn-liveness fix, origin S14912) and cross-checked its core payload assumption against Claude Code's own hooks.ts source: confirmed agent_id (not agent_type) is the correct sidechain discriminator, validating the spec's key design decision. Surfaced two accepted non-blocking tradeoffs (delegated-turn recall thinning, rare late-hook drop) before dispatching to tickets.",
+   "insight": "- agent_id presence, not agent_type, distinguishes sidechain calls\n- spec's dream-guard-untouched design confirmed sound",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 86,
+   "title": "Split async-tool-liveness spec into 5 dependency-ordered tickets",
+   "content": "After confirming via code inspection that no agentId field exists yet on the adapter and PostToolUse currently attaches unconditionally, broke the validated spec [T8475] into 5 tickets across two frontiers: sidechain ownership filter, terminal-owner queue hygiene, stranded-turn liveness repair, end-event orchestration, and a production-fixture regression capstone.",
+   "insight": "",
+   "type": [
+    "design",
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 87,
+   "title": "Published 5 liveness tickets, dispatched Codex to implement in background",
+   "content": "User approved the ticket breakdown [T8477]; wrote all 5 ticket files to .scratch/async-tool-turn-liveness/issues/ and forwarded implementation to a background codex:codex-rescue subagent following dependency order (01/02 → 03 → 04 → 05), full test suite required before completion.",
+   "insight": "",
+   "type": [
+    "ops",
+    "delegate"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 88,
+   "title": "Set up background poller to await Codex ticket-implementation completion",
+   "content": "Codex subagent [T8480] handed off to background task-mrvvz5jv-ge51zx; launched a 30s-interval background bash poller to detect completion of the 5 liveness tickets.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 89,
+   "title": "Codex still verifying liveness tickets; poller re-armed for round 2",
+   "content": "Checked Codex task [T8481] status: still running in verifying phase, hit a failing test run, iterating on fix. Re-armed background poller for a second round.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 90,
+   "title": "Codex nearing completion; all 5 tickets' checks green, poller round 3",
+   "content": "Checked Codex task [T8481] status: all 5 tickets' acceptance items now checked including full test pass, still iterating final fixes on the PostToolUse handler. Re-armed poller for a third round.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 91,
+   "title": "Codex finishing implementation, writing its own memory; poller round 4",
+   "content": "Checked Codex task [T8481] status: implementation and tests done, now writing its own working-memory notes as final step. Re-armed poller for a fourth round before starting acceptance verification.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 92,
+   "title": "Codex delivered all 5 liveness tickets; independently verified full pass",
+   "content": "Codex [T8481] completed all 5 tickets in 29m48s: new src/worker/turn-liveness.ts stranded-repair module plus 3 new test files including an e2e regression fixture, spanning hooks adapter, PostToolUse/Stop handlers, and worker coordination. Independently verified full test suite: 1172 pass/0 fail (+35 vs baseline). Background review launched next.",
+   "insight": "",
+   "type": [
+    "review"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 93,
+   "title": "Codex review finds 2 real P1 concurrency bugs, fix dispatched",
+   "content": "Independent Codex review of [T8490]'s working tree confirmed ownership/queue-hygiene tickets clean but found 2 real P1 concurrency bugs in the orchestration layer: PreCompact-window triggering sessions excluded from repair drain, and turn-stop bypassing global serialization causing stranded observations. Fix dispatched back to Codex with required regression tests.",
+   "insight": "",
+   "type": [
+    "review",
+    "delegate"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 94,
+   "title": "Codex fix in progress, self-reviewing regression test validity",
+   "content": "Checked Codex fix-task [T8491] status: implementation done, self-reviewing whether the regression tests actually prove the cross-round flush race rather than passing superficially. Poller re-armed.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 95,
+   "title": "Fixed 2 P1 concurrency bugs, committed async-tool-liveness work (9d19762)",
+   "content": "Codex fixed both P1 concurrency bugs from [T8491] (turn-stop now shares global drain serializer; PreCompact sessions included in repair drain), each with a new timing regression test. Verified full suite: 1174 pass/0 fail (+37 vs baseline). Committed all 5 tickets as 9d19762 (26 files). Work complete pending release/version-bump decision, same activation path as 0.8.0.",
+   "insight": "",
+   "type": [
+    "fix",
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 96,
+   "title": "Shipped 0.8.1: async-tool-liveness release, pushed to main",
+   "content": "Released the verified async-tool-liveness fix [T8497] as 0.8.1: bumped version at all 6 sites, rebuilt bundle, full suite 1174 pass/0 fail, committed and pushed (f8c7a67, on top of feature commit 9d19762). Wrote durable engineering-memory notes (agent_id discriminator, drain-serializer invariant, recall-sparsity tradeoff). Pending /plugin reload to activate; first post-deploy end event expected to auto-clear the 3 stranded 07-21 turns and unblock dream.",
+   "insight": "",
+   "type": [
+    "ops"
+   ],
+   "tags": [
+    "async-tool-turn-liveness"
+   ]
+  },
+  {
+   "prompt": 97,
+   "title": "Production audit confirms 0.8.1 repair; isolates compact and legacy-queue debt",
+   "content": "Completed read-only live audit of 0.8.1 after [T8499]: worker healthy and actual plugin version loaded; three stranded 07-21 turns terminalized, diary settled/generated, no terminal-owner queue pollution, and this turn confirms sidechain tool observations do not leak into the root. Post-cutoff grading (193/193) and rule events are active. Isolated two unrelated follow-ups: a 120s compact timeout and 52 historical active/provisional queue rows.",
+   "insight": "- 0.8.1 liveness repair works in production\n- Compact timeout and legacy queue debt remain",
+   "type": [
+    "research",
+    "measure"
+   ],
+   "tags": [
+    "async-tool-turn-liveness",
+    "task-causality-grading",
+    "worker-health"
+   ]
+  },
+  {
+   "prompt": 98,
+   "title": "Dream token audit confirms cache reuse, exposes duplicate run and model drift",
+   "content": "Completed read-only Dream token audit: three settled runs used 1.95M input-category tokens across 37 requests, with 88.74% cache reads and no trim/retry/rebuild loop. Found a separate successful 07-22 full run (10 Opus requests; ~838K extra input-category tokens, 21.9K output) before the final run, and runtime model routing to gpt-5.6-sol despite an Opus source default. Counted unique message/request IDs to avoid tool/thinking duplication.",
+   "insight": "- Per-run prompt-cache reuse is healthy\n- Trace duplicate 07-22 run and model-route drift",
+   "type": [
+    "measure"
+   ],
+   "tags": [
+    "dream-agent",
+    "token-usage",
+    "rolled-back"
+   ]
+  },
+  {
+   "prompt": 99,
+   "title": "Confirmed Dream Sol routing is intentional alias resolution",
+   "content": "Completed the model-route trace and overturned the configuration-drift inference from [T8719]: Dream deliberately requests tier alias opus, inherits the diary-triggering session's captured environment, and claudex maps ANTHROPIC_DEFAULT_OPUS_MODEL to gpt-5.6-sol via CPA. The earlier 07-22 real-Opus run came from an official-Claude triggering environment. This 0.6.4 portability design avoids CPA literal-Opus 502s; only the duplicate 07-22 run remains unexplained.",
+   "insight": "- Dream requests alias opus, not literal Opus 4.8\n- Sol follows intended CPA session-env routing",
+   "type": [
+    "research",
+    "correction"
+   ],
+   "tags": [
+    "dream-agent",
+    "model-routing"
+   ]
+  },
+  {
+   "prompt": 100,
+   "title": "Forensic trace finds historical Dream trigger provenance not persisted",
+   "content": "User challenged the claudex-trigger attribution from [T8726]. Read-only forensics established that Dream queue rows do not persist the triggering session, and historical candidate root sessions are absent from mnemo's sessions table; neither model output nor lack of a fallback warning can prove which environment launched a run. Authorized transcript correlation and a parent-agent trace are underway; prior trigger-source attribution is now unproven.",
+   "insight": "- Dream claims lack a persistent trigger-session link\n- No fallback warning does not prove usable captured env",
+   "type": [
+    "research"
+   ],
+   "tags": [
+    "dream-agent",
+    "model-routing"
+   ]
+  }
+ ],
+ "edges": [
+  {
+   "citing": 7,
+   "cited": 3,
+   "relation": "narrows",
+   "tags": []
+  },
+  {
+   "citing": 9,
+   "cited": 8,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 10,
+   "cited": 9,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 12,
+   "cited": 10,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 18,
+   "cited": 12,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 19,
+   "cited": 18,
+   "relation": "grounds",
+   "tags": []
+  },
+  {
+   "citing": 20,
+   "cited": 19,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 21,
+   "cited": 18,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 22,
+   "cited": 20,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 23,
+   "cited": 22,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 24,
+   "cited": 21,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 25,
+   "cited": 24,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 26,
+   "cited": 25,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 27,
+   "cited": 26,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 28,
+   "cited": 27,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 29,
+   "cited": 28,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 30,
+   "cited": 29,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 31,
+   "cited": 30,
+   "relation": "grounds",
+   "tags": []
+  },
+  {
+   "citing": 32,
+   "cited": 31,
+   "relation": "narrows",
+   "tags": []
+  },
+  {
+   "citing": 32,
+   "cited": 31,
+   "relation": "override",
+   "tags": []
+  },
+  {
+   "citing": 33,
+   "cited": 32,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 34,
+   "cited": 33,
+   "relation": "extends",
+   "tags": []
+  },
+  {
+   "citing": 35,
+   "cited": 34,
+   "relation": "grounds",
+   "tags": []
+  },
+  {
+   "citing": 36,
+   "cited": 35,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 38,
+   "cited": 36,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 39,
+   "cited": 38,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 42,
+   "cited": 39,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 44,
+   "cited": 42,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 46,
+   "cited": 44,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 49,
+   "cited": 46,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 61,
+   "cited": 52,
+   "relation": "indexes",
+   "tags": []
+  },
+  {
+   "citing": 61,
+   "cited": 60,
+   "relation": "indexes",
+   "tags": []
+  },
+  {
+   "citing": 66,
+   "cited": 61,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 66,
+   "cited": 63,
+   "relation": "indexes",
+   "tags": []
+  },
+  {
+   "citing": 66,
+   "cited": 65,
+   "relation": "indexes",
+   "tags": []
+  },
+  {
+   "citing": 69,
+   "cited": 68,
+   "relation": "override",
+   "tags": []
+  },
+  {
+   "citing": 71,
+   "cited": 69,
+   "relation": "override",
+   "tags": []
+  },
+  {
+   "citing": 72,
+   "cited": 69,
+   "relation": "override",
+   "tags": []
+  },
+  {
+   "citing": 75,
+   "cited": 74,
+   "relation": "override",
+   "tags": []
+  },
+  {
+   "citing": 76,
+   "cited": 75,
+   "relation": "override",
+   "tags": []
+  },
+  {
+   "citing": 77,
+   "cited": 74,
+   "relation": "override",
+   "tags": []
+  },
+  {
+   "citing": 84,
+   "cited": 66,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 84,
+   "cited": 83,
+   "relation": "indexes",
+   "tags": []
+  },
+  {
+   "citing": 96,
+   "cited": 84,
+   "relation": "consume",
+   "tags": []
+  },
+  {
+   "citing": 96,
+   "cited": 95,
+   "relation": "indexes",
+   "tags": []
+  },
+  {
+   "citing": 99,
+   "cited": 98,
+   "relation": "override",
+   "tags": []
+  },
+  {
+   "citing": 100,
+   "cited": 99,
+   "relation": "narrows",
+   "tags": []
+  }
+ ]
+}

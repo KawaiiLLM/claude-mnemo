@@ -1,0 +1,107 @@
+{
+  "turnTags": {
+    "8": ["self-evolution", "rule-ledger-design"],
+    "9": ["self-evolution", "rule-ledger-design"],
+    "10": ["self-evolution", "rule-ledger-design"],
+    "12": ["self-evolution", "rule-ledger-design"],
+    "18": ["self-evolution", "rule-ledger-design"],
+    "21": ["self-evolution", "rule-ledger-design"],
+    "24": ["self-evolution", "rule-ledger-design"],
+    "25": ["self-evolution", "rule-ledger-design"],
+    "26": ["self-evolution", "rule-ledger-design"],
+    "27": ["self-evolution", "rule-ledger-design"],
+    "28": ["self-evolution", "rule-ledger-design"],
+    "29": ["self-evolution", "rule-ledger-design"],
+    "30": ["self-evolution", "rule-ledger-design"],
+    "22": ["self-evolution", "turn-detail-cli"],
+    "23": ["self-evolution", "turn-detail-cli"],
+    "31": ["self-evolution", "rolled-back", "spec-v1-review"],
+    "32": ["self-evolution", "correction", "spec-v1-review"],
+    "33": ["self-evolution", "ticket-breakdown"],
+    "34": ["self-evolution", "ticket-breakdown"]
+  },
+  "edgeOps": {
+    "retag": [
+      { "citing": 7, "cited": 3, "relation": "narrows", "tags": ["edgebench"] },
+      { "citing": 9, "cited": 8, "relation": "extends", "tags": ["rule-ledger-design"] },
+      { "citing": 10, "cited": 9, "relation": "extends", "tags": ["rule-ledger-design"] },
+      { "citing": 12, "cited": 10, "relation": "extends", "tags": ["rule-ledger-design"] },
+      { "citing": 18, "cited": 12, "relation": "extends", "tags": ["rule-ledger-design"] },
+      { "citing": 21, "cited": 18, "relation": "extends", "tags": ["rule-ledger-design"] },
+      { "citing": 24, "cited": 21, "relation": "extends", "tags": ["rule-ledger-design"] },
+      { "citing": 25, "cited": 24, "relation": "extends", "tags": ["rule-ledger-design"] },
+      { "citing": 27, "cited": 26, "relation": "extends", "tags": ["rule-ledger-design"] },
+      { "citing": 28, "cited": 27, "relation": "extends", "tags": ["rule-ledger-design"] },
+      { "citing": 29, "cited": 28, "relation": "extends", "tags": ["rule-ledger-design"] },
+      { "citing": 30, "cited": 29, "relation": "extends", "tags": ["rule-ledger-design"] },
+      { "citing": 23, "cited": 22, "relation": "extends", "tags": ["turn-detail-cli"] },
+      { "citing": 32, "cited": 31, "relation": "narrows", "tags": ["spec-v1-review"] },
+      { "citing": 34, "cited": 33, "relation": "extends", "tags": ["ticket-breakdown"] },
+      { "citing": 99, "cited": 98, "relation": "override", "tags": ["dream-agent"] },
+      { "citing": 100, "cited": 99, "relation": "narrows", "tags": ["dream-agent"] }
+    ],
+    "retract": [
+      { "citing": 26, "cited": 25, "relation": "extends", "reason": "T26 exposes an undefined gap in T25's 'confirmed' criterion rather than supplementing an intact conclusion; narrows is the accurate word, not extends." }
+    ],
+    "add": [
+      { "citing": 26, "cited": 25, "relation": "narrows", "tags": ["rule-ledger-design"] }
+    ]
+  },
+  "lanes": [
+    {
+      "tags": ["edgebench"],
+      "members": [3, 7],
+      "source": 3,
+      "sink": 7,
+      "declared": false,
+      "terminus": 7,
+      "reading": "T7 narrows T3's EdgeBench+SkillOpt synthesis: EdgeBench is a measurement harness only, no built-in learning mechanism."
+    },
+    {
+      "tags": ["rule-ledger-design"],
+      "members": [8, 9, 10, 12, 18, 21, 24, 25, 26, 27, 28, 29, 30],
+      "source": 8,
+      "sink": 30,
+      "declared": false,
+      "terminus": 30,
+      "reading": "The self-evolution decision arc: verification-gap diagnosis to refutation-lifecycle plan to injection strategy to rules/rule_events schema to grill-me-hardened dispatcher/tombstone/scope/kill-gate design, ending at the propose_rule/submit_judgment tool decision."
+    },
+    {
+      "tags": ["turn-detail-cli"],
+      "members": [22, 23],
+      "source": 22,
+      "sink": 23,
+      "declared": false,
+      "terminus": 23,
+      "reading": "T23 merges the Codex-reviewed turn-detail.sh bugfixes from T22 into the mnemo-replay skill and release-artifacts guard."
+    },
+    {
+      "tags": ["spec-v1-review"],
+      "members": [31, 32],
+      "source": 31,
+      "sink": 32,
+      "declared": false,
+      "terminus": 32,
+      "reading": "T32's GPT review narrows T31's ready-for-agent spec: undefined semantics and two factual bugs (epoch units, hook wiring) corrected."
+    },
+    {
+      "tags": ["ticket-breakdown"],
+      "members": [33, 34],
+      "source": 33,
+      "sink": 34,
+      "declared": false,
+      "terminus": 34,
+      "reading": "T34 refines the ticket 08/09 boundary carved by T33's initial 9-ticket decomposition of the v2 spec."
+    },
+    {
+      "tags": ["dream-agent"],
+      "members": [98, 99, 100],
+      "source": 98,
+      "sink": 100,
+      "declared": false,
+      "terminus": 100,
+      "reading": "T99 overrides T98's model-drift inference (Sol routing is intentional alias resolution); T100 then narrows T99's own trigger-attribution claim as unproven."
+    }
+  ],
+  "report": "SCOPE OF WORK: repaired all 17 untagged extends/narrows in the given 47-edge stock; formed 6 lanes to host them; left the other 30 edges (consume/grounds/override/indexes) untouched since none are extends/narrows and none read as in-lane corrections needing an upgrade to tagged form, except one override (99->98) I opted to tag to complete a lane. No new edges were added beyond the one retract+add swap (26->25 extends became narrows) and the one override retag (99->98).\n\nTHREADS FOUND, 6 lanes:\n1. edgebench {3,7} - EdgeBench-specific correction inside the T1-7 research burst.\n2. rule-ledger-design {8,9,10,12,18,21,24,25,26,27,28,29,30} - the entire decision-phase self-evolution design arc (13 nodes, one straight chain, no branching in the given stock).\n3. turn-detail-cli {22,23} - the accessor-script delivery sub-thread, disjoint in phase from #2.\n4. spec-v1-review {31,32} - GPT review correcting the v1 spec.\n5. ticket-breakdown {33,34} - ticket-boundary refinement.\n6. dream-agent {98,99,100} - the model-routing provenance investigation closing the window.\nAll 6 stayed undeclared/OPEN: no tagged `indexes` citing any lane's terminus exists inside T1-100. This is honest, not an omission - see the indexes note below.\n\nKEY JUDGMENT CALLS:\n- Minted 4 new lane tags (rule-ledger-design, turn-detail-cli, spec-v1-review, ticket-breakdown) instead of reusing the pervasive topic tag 'self-evolution' that already sits on ~40 turns across both decision and delivery phase. Reusing it as a lane tag would let a second, disconnected tagged component (e.g. the {22,23} turn-detail-cli pair, or the {31,32}/{33,34} pairs) collide under the same tag-set name, which breaks single-source/single-sink for 'the self-evolution lane' as a whole (multiple components = multiple sources/sinks under one nominal identity). I DID reuse 'edgebench' and 'dream-agent' because those two strings are narrowly scoped to exactly their lane's members already - legitimate reuse per checklist step 2, no collision risk.\n- Converted 26->25 from extends to narrows (retract+add): T26's content is 'exposes undefined confirmed criterion', i.e. a gap in T25's design, not a supplement of an intact conclusion - narrows fits the rubric's own test ('part of the cited's result no longer applies') better than extends.\n- Retagged 99->98 (override, previously legally untagged) to fold it into the dream-agent lane alongside 100->99 (narrows): T98/T99/T100 read as one continuous evidence-phase thread (audit -> correction -> further correction of that correction), satisfying checklist step 1's continuation test even though override doesn't mandate tagging.\n- Deliberately left 31->30 (grounds), 33->32 (consume), 35->34 (grounds) untagged even though their multi-type endpoints (T32=[correction,fix], T33=[design,ops]) make a same-phase pairing technically available. Tagging them would have chained rule-ledger-design/spec-v1-review/ticket-breakdown into ONE lane bridging T31 (delivery-only, ops) to T34 (decision-only, design) through nodes that are phase-flexible only in the middle - which I read as the lane itself crossing phases (forbidden), even though each individual edge is phase-legal in isolation. Produced 3 small lanes instead of 1 large one; flagged as ambiguous below.\n- Left the 6 pre-existing untagged `indexes` edges (61->52, 61->60, 66->63, 66->65, 84->83, 96->95) untouched. Each is a release turn (0.7.0, 0.7.1, 0.8.0, 0.8.1) indexing the tickets/fixes it shipped - this is exactly the rubric's own untagged reading ('a release indexing the artifacts it ships'), not a lane-closing declaration, since the ticket-dispatch consume chains they cite (35->36->38->39->42->44->46->49, etc.) were never wired into a tagged lane by the original settlement and I chose not to retroactively invent one (see below).\n- Considered but did NOT add a lane for T13->T14->T15->T16->T17, an evidence-phase feasibility-verification chain (hook injection, trajectory quality, response-vs-transcript) with zero edges in the given 47 despite unambiguous prose continuation ('resolves T15's concern', 'complementing S13090', etc.). Near-miss reason: T14 answers a question dispatched inside T13 but never reconnects to the T15->T16->T17 sub-chain, which would leave a dangling parallel head unless split into two separate 2-node lanes sharing T13 as a double source - legal per 'any node may serve as start of multiple lanes' but speculative, since I'd be inferring citation targets from prose the original settlement chose not to record as edges. Flagging as a real finding rather than acting on it, given the trial's emphasis on repairing given stock over wholesale graph invention.\n- Left all 6 override chains in the milestone-scoring/grade-hierarchy sagas (69->68, 71->69, 72->69, 75->74, 76->75, 77->74) exactly as given: none are extends/narrows so none are mandatory repairs, and each reads as a full/global repudiation of its predecessor (title pattern: 'X rejects/overturns Y'), matching the untagged override reading, not an in-lane correction.\n\nRUBRIC/CHECKLIST AMBIGUITIES (prompt-effect findings):\n1. 'Lanes never cross phases' vs the multi-type rule 'an edge is legal when any pairing is' genuinely conflict for turns whose type SET spans phases (T32=[correction,fix], T33=[design,ops]). Each edge touching them is phase-legal via some pairing, but chaining several such edges together can bridge two phase-locked endpoints (T31 delivery-only, T34 decision-only) without any single edge individually violating anything. The text never states whether a lane's phase is fixed once (checked against the whole chain) or satisfied edge-by-edge; I resolved conservatively (no chain bridges two single-type-locked endpoints) but a stricter or looser implementer could reasonably do otherwise, and the result would look structurally different (1 lane vs. 3).\n2. Nothing in the rubric states whether an identical tag-set string may legitimately name two DIFFERENT lanes so long as they're disconnected and single-phase individually. I inferred lane identity = tagged-edge connected component (not 'every turn carrying this string'), which permits reuse as long as no second disconnected component ever gets the same tag - but this took real inference; a naive reading of 'identified by an exact SET of tags' could just as easily assume tag-set uniqueness across the whole segment, which the given data (self-evolution on ~40 turns of mixed phase) would then make almost impossible to satisfy without minting many more tags than I did.\n3. extends-vs-narrows is underspecified for iterative, correction-heavy design conversations. In the grill-me arc (T26-T30), several turns besides T26 arguably reject or replace the immediately-preceding turn's tentative proposal rather than purely supplementing the arc (e.g. T27's 'positive-effect-only' criterion directly supersedes T26's own proposed 'unrefuted-survival' framing). The checklist gives a mechanical retag-or-retract choice but no test distinguishing 'corrects the previous turn's specific claim' from 'supplements the arc as a whole'; I applied the latter, coarser reading by default and converted only the clearest case (T26, an outright exposed gap), which is defensible but not the only defensible reading - a stricter pass could plausibly convert 2-3 more edges to narrows/override.\n4. Checklist step 1 ('a thread of two or more same-phase turns... IS a lane, the mandate forbids leaving it unnamed') and the acceptance-criteria's silence on additions pull in different directions when a thread is prose-obvious but entirely absent from the given edge stock (T13-17 case above). It's unclear whether the trial wants exhaustive thread discovery (implying I should have invented those edges) or bounded repair of what's given (implying invention is optional/out of scope). I chose the bounded reading and documented the gap instead of closing it."
+}
