@@ -7,10 +7,12 @@ import {
   hasTaggedTerminusDeclaration,
   isRelationLegalForPhases,
   isTaggableRelation,
+  isTagMandatoryRelation,
   isTurnEdgeRelation,
   phasesForTypes,
   RELATION_FIELD_NAME,
   RELATION_PHASE_REQUIREMENT,
+  TAG_MANDATORY_RELATIONS,
   TAGGABLE_RELATIONS,
   TURN_PHASES,
   TYPE_PHASE,
@@ -18,6 +20,7 @@ import {
   type TurnEdgeRelation,
   type TurnPhase,
 } from "../../src/shared/turn-phase";
+import { containsToolCallSyntax } from "../../src/shared/tool-call-syntax";
 import { MEMORY_TYPES } from "../../src/shared/type-vocabulary";
 
 /**
@@ -306,9 +309,12 @@ describe("RELATION_PHASE_REQUIREMENT — table shape (flow-relations spec: three
 // `mcp/note.ts`'s end-to-end tests (`tests/mcp/note.test.ts`) observe
 // through the tool.
 describe("validateRelationTarget — the shared judgment, called directly", () => {
+  // tag-mandate ("Write gate"): `override` rather than `extends` here — the
+  // tag mandate took `extends`' untagged form away, so the plainest "legal
+  // target" example is now a word that still has one.
   test("a legal turn target is admitted", () => {
     const result = validateRelationTarget({
-      relation: "extends",
+      relation: "override",
       citingPhases: new Set(["decision"]),
       targetKind: "turn",
       citedPhases: new Set(["decision"]),
@@ -515,7 +521,11 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       }
     });
 
-    test("an untagged entry is always legal, whatever the relation — nothing to check", () => {
+    // tag-mandate ("Write gate") narrowed this from "whatever the relation":
+    // six of the eight words still have an untagged form with nothing for
+    // Gate B to check; `extends`/`narrows` lost theirs (see the tag-mandate
+    // describe below).
+    test("an untagged entry is legal for a word the mandate does not reach — nothing to check", () => {
       const result = validateRelationTarget({
         relation: "grounds",
         citingPhases: new Set(["decision"]),
@@ -622,6 +632,159 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.reason).toBe("phase-illegal");
+      }
+    });
+  });
+
+  // tag-mandate spec ("Write gate"): `extends`/`narrows` lose their untagged
+  // ASSERTION form — the word-level check, no graph state, one edit site both
+  // write paths inherit. The end-to-end halves live in tests/mcp/note.test.ts
+  // (main agent) and tests/worker/note-settlement-turn-facade.test.ts
+  // (settlement); this block is the shared judgment on its own.
+  describe("the tag mandate — extends/narrows must name their lane", () => {
+    /** One legal phase pair per word, so a bare-form check below tests TAGS and not phases. */
+    const LEGAL_PAIR: Record<
+      TurnEdgeRelation,
+      { citing: TurnPhase; cited: TurnPhase }
+    > = {
+      override: { citing: "decision", cited: "decision" },
+      narrows: { citing: "decision", cited: "decision" },
+      extends: { citing: "decision", cited: "decision" },
+      indexes: { citing: "decision", cited: "decision" },
+      consume: { citing: "decision", cited: "decision" },
+      grounds: { citing: "decision", cited: "delivery" },
+      verifies: { citing: "evidence", cited: "decision" },
+      refutes: { citing: "evidence", cited: "decision" },
+    };
+
+    const bare = (relation: TurnEdgeRelation) =>
+      validateRelationTarget({
+        relation,
+        citingPhases: new Set([LEGAL_PAIR[relation].citing]),
+        citedPhases: new Set([LEGAL_PAIR[relation].cited]),
+        targetKind: "turn",
+      });
+
+    test("TAG_MANDATORY_RELATIONS is exactly narrows/extends, and every member is taggable", () => {
+      expect([...TAG_MANDATORY_RELATIONS].sort()).toEqual(["extends", "narrows"]);
+      // A word cannot be REQUIRED to carry what it may not carry: the mandate
+      // set is a strict subset of the taggable set, not an overlapping one.
+      for (const relation of TAG_MANDATORY_RELATIONS) {
+        expect(isTaggableRelation(relation)).toBe(true);
+      }
+      for (const relation of EDGE_RELATIONS) {
+        expect(isTagMandatoryRelation(relation)).toBe(
+          relation === "extends" || relation === "narrows",
+        );
+      }
+    });
+
+    for (const relation of ["extends", "narrows"] as const) {
+      test(`a bare ${relation} assertion is refused as tag-required`, () => {
+        const result = bare(relation);
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.reason).toBe("tag-required");
+        }
+      });
+
+      test(`a tagged ${relation} whose set is on both endpoints is admitted`, () => {
+        const result = validateRelationTarget({
+          relation,
+          citingPhases: new Set<TurnPhase>(["decision"]),
+          citedPhases: new Set<TurnPhase>(["decision"]),
+          targetKind: "turn",
+          tags: ["lane-a"],
+          citingTurnTags: new Set(["lane-a"]),
+          citedTurnTags: new Set(["lane-a"]),
+        });
+        expect(result).toEqual({ ok: true });
+      });
+    }
+
+    // The mandate is exactly two words wide: every other bare form has a
+    // legitimate reading the spec names (override = global repudiation,
+    // consume = use, indexes = free aggregation, grounds = dependency,
+    // verifies/refutes = testimony) and keeps working untouched.
+    test("the other six words' bare forms are unaffected", () => {
+      for (const relation of EDGE_RELATIONS) {
+        if (isTagMandatoryRelation(relation)) {
+          continue;
+        }
+        expect(bare(relation)).toEqual({ ok: true });
+      }
+    });
+
+    test("the rejection teaches: it names the mandate and the subset requirement", () => {
+      const result = bare("extends");
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        return;
+      }
+      // The mandate, in the spec's own words.
+      expect(result.detail).toContain("continuation names its lane");
+      expect(result.detail).toContain("extends");
+      expect(result.detail).toContain("narrows");
+      // The subset requirement: tag the edge, and BOTH endpoints carry it.
+      expect(result.detail).toContain("tags");
+      expect(result.detail).toContain("cited turn");
+      expect(result.detail).toContain("subset invariant");
+      // And the one thing that did NOT change, so a caller holding a legacy
+      // untagged row is not left thinking it is now undeletable.
+      expect(result.detail).toContain("retractExtends");
+    });
+
+    // RED LINE (write-gate-hardening ticket 01, tests/shared/tool-call-
+    // syntax.test.ts's own closing test): a rejection returns straight into
+    // the caller's context, so a message quoting call markup would plant the
+    // exemplar the guard exists to break. Asserted with the guard itself
+    // rather than by reading the string.
+    test("no mandate rejection reproduces tool-call markup", () => {
+      for (const relation of ["extends", "narrows"] as const) {
+        const result = bare(relation);
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(containsToolCallSyntax(result.detail)).toBe(false);
+        }
+      }
+    });
+
+    // Gate order: the mandate is the LAST thing checked, so a call that is
+    // wrong in an earlier way is told about that instead — the writer's more
+    // direct lever first.
+    test("an earlier gate still wins: a segment target and a self-reference report their own reasons", () => {
+      const segment = validateRelationTarget({
+        relation: "extends",
+        citingPhases: new Set<TurnPhase>(["decision"]),
+        citedPhases: new Set<TurnPhase>(),
+        targetKind: "segment",
+      });
+      expect(segment.ok).toBe(false);
+      if (!segment.ok) {
+        expect(segment.reason).toBe("segment-target");
+      }
+
+      const self = validateRelationTarget({
+        relation: "extends",
+        citingPhases: new Set<TurnPhase>(["decision"]),
+        citedPhases: new Set<TurnPhase>(["decision"]),
+        targetKind: "turn",
+        isSelfReference: true,
+      });
+      expect(self.ok).toBe(false);
+      if (!self.ok) {
+        expect(self.reason).toBe("self-not-grounds");
+      }
+
+      const phaseIllegal = validateRelationTarget({
+        relation: "extends",
+        citingPhases: new Set<TurnPhase>(["decision"]),
+        citedPhases: new Set<TurnPhase>(["delivery"]),
+        targetKind: "turn",
+      });
+      expect(phaseIllegal.ok).toBe(false);
+      if (!phaseIllegal.ok) {
+        expect(phaseIllegal.reason).toBe("phase-illegal");
       }
     });
   });

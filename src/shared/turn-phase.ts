@@ -114,7 +114,8 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * carry a lane-tag set; the three CROSS-PHASE words (grounds/verifies/
  * refutes) never do — lanes are phase-local, so a cross-phase word tagging
  * one would assert lane membership across a phase boundary the model does not
- * define. A non-empty tag set is legal only when EVERY tag it carries already
+ * define. Two of the five MUST carry one — see the mandate below. A non-empty
+ * tag set is legal only when EVERY tag it carries already
  * exists on BOTH endpoint turns' own stored `tags` (the subset invariant) —
  * violation is rejected here, naming which tag and which endpoint is missing
  * it. This module does not canonicalize the tag set itself (no DB-layer
@@ -122,6 +123,31 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * leaving canonicalization to the write primitive) — callers pass an
  * already-canonical set, the same "caller pre-computes, this module only
  * judges" contract `citingPhases`/`citedPhases` already have.
+ *
+ * ## The tag mandate (tag-mandate spec, "Write gate")
+ *
+ * `extends` and `narrows` LOSE their untagged form: a new assertion carrying
+ * either word and no tags is refused here. They are the only two words whose
+ * semantics IS continuation of a line of work, so using one means naming the
+ * line — continuation names its lane. The other six keep their legitimate
+ * bare uses (override = global repudiation, consume = use, indexes = free
+ * aggregation, grounds = dependency, verifies/refutes = testimony).
+ *
+ * Three boundaries the mandate deliberately does NOT cross:
+ *
+ *   - WORD-LEVEL ONLY. The check reads this edge's own relation and tag set,
+ *     nothing about the graph — legality-of-state (an untagged row already in
+ *     stock, a lane with two sources) belongs to the checker/commit ladder,
+ *     which is what preserves the indexes-amendment ruling that retired
+ *     graph-state write rejections.
+ *   - ASSERTIONS ONLY. `retractExtends`/`retractNarrows` never reach this
+ *     function (`mcp/note.ts`'s retraction path and the settlement facade's
+ *     both skip legality outright — an edge that has BECOME illegal is
+ *     exactly one a writer must still be able to remove), so legacy untagged
+ *     rows stay deletable by their bare address.
+ *   - NO CARVE-OUTS BY WRITER. Both write paths (main agent `note`,
+ *     settlement facade) call `validateRelationTarget`, so the mandate lands
+ *     on both from this one edit site.
  */
 
 export const TURN_PHASES = ["evidence", "decision", "delivery"] as const;
@@ -251,6 +277,29 @@ export function isTaggableRelation(relation: TurnEdgeRelation): boolean {
  * exists anywhere in the tree.
  */
 export const STANCE_RELATIONS: ReadonlySet<TurnEdgeRelation> = new Set(["narrows", "extends"]);
+
+/**
+ * The tag mandate (tag-mandate spec, "Write gate"): the words whose ASSERTION
+ * form REQUIRES a non-empty lane-tag set — a strict subset of
+ * `TAGGABLE_RELATIONS` (a word cannot be required to carry what it may not
+ * carry).
+ *
+ * A direct ALIAS of `STANCE_RELATIONS`, not a hand-kept copy — and the
+ * opposite call from `TAGGABLE_RELATIONS`' own deliberate non-aliasing of
+ * `SAME_PHASE_RELATIONS`. There the two questions ("what phase domain" vs
+ * "may this carry a tag") are conceptually independent and their answer sets
+ * coincide by accident, so two names guard against a reader assuming the
+ * identity holds. Here the identity IS the mandate's justification: the
+ * stance words are the two whose meaning is continuation of a line of work,
+ * and naming the line is what continuing one means. A third stance word
+ * admitted tomorrow inherits the mandate by construction, which is the
+ * correct outcome rather than a drift to catch.
+ */
+export const TAG_MANDATORY_RELATIONS: ReadonlySet<TurnEdgeRelation> = STANCE_RELATIONS;
+
+export function isTagMandatoryRelation(relation: TurnEdgeRelation): boolean {
+  return TAG_MANDATORY_RELATIONS.has(relation);
+}
 
 /** `verifies`/`refutes`: the SOURCE must be evidence-phase; the target decision- or delivery-phase — never evidence ([S15069/T1215]). */
 const EVIDENCE_SOURCE_RELATIONS: readonly TurnEdgeRelation[] = ["verifies", "refutes"];
@@ -382,6 +431,28 @@ const TAG_NOT_TAGGABLE_DETAIL =
   "carries no lane tags — only override/narrows/extends/consume/indexes (same-phase words) may";
 
 /**
+ * The tag mandate's rejection — the teacher, per the spec's "Write gate": it
+ * names the MANDATE (continuation names its lane) and the SUBSET requirement
+ * (tag the edge; both endpoints carry the tag), so the correct tagged form is
+ * one retry away rather than one rubric lookup away.
+ *
+ * RED LINE (the write-gate-hardening precedent, `shared/tool-call-syntax.ts`):
+ * this string never reproduces angle-bracket markup. It returns straight into
+ * the caller's own context, where any quoted call syntax becomes one more
+ * exemplar for the attractor that produces malformed calls — so the entry
+ * form is described in prose and by its field names, never shown as markup.
+ * `containsToolCallSyntax` over this detail must be false, pinned by test.
+ */
+const TAG_REQUIRED_DETAIL =
+  "carries no lane tags, and `extends`/`narrows` have no untagged form — continuation names its " +
+  "lane: these two words mean this turn continues a line of work, so the edge has to say WHICH line. " +
+  "Send the tagged entry form instead of a bare address (an object carrying `turn` plus a non-empty " +
+  "`tags` list), and tag the edge with a set BOTH endpoints already carry — every tag on the edge must " +
+  "be on this turn's own tags AND on the cited turn's, the same subset invariant every tagged edge " +
+  "obeys. Retraction is unaffected: `retractNarrows`/`retractExtends` still take bare addresses, so an " +
+  "untagged row already in stock stays deletable";
+
+/**
  * rubric-v10 ticket 02 (Gate B): builds the "tag X missing from the Y turn's
  * tags" clause, one entry per (tag, endpoint) that fails the subset
  * invariant — both endpoints are checked for every tag, so a tag missing
@@ -419,9 +490,10 @@ export interface RelationTargetValidationInput {
   isSelfReference?: boolean;
   /**
    * rubric-v10 ticket 02 (Gate B): this edge's own lane-tag set, already
-   * canonicalized by the caller. Omitted or empty means untagged, which is
-   * always legal regardless of `relation`'s taggability — Gate B has nothing
-   * to check when there is no tag to check.
+   * canonicalized by the caller. Omitted or empty means untagged — legal for
+   * six of the eight words (Gate B has nothing to check when there is no tag
+   * to check), REFUSED for `extends`/`narrows` since the tag mandate
+   * (`TAG_MANDATORY_RELATIONS`) took their untagged form away.
    */
   tags?: readonly string[];
   /** rubric-v10 ticket 02 (Gate B): the citing turn's own stored `tags`, canonicalized. Required only when `tags` is non-empty. */
@@ -438,6 +510,8 @@ export type RelationTargetRejectionReason =
   | "self-not-delivery"
   | "tag-not-taggable"
   | "tag-missing"
+  /** tag-mandate spec ("Write gate"): a NEW `extends`/`narrows` assertion carrying no lane tags. Assertions only — the retraction mirrors never reach this validator. */
+  | "tag-required"
   /** rubric-v10 ticket 02 (Gate C): only `checkSelfGroundsTerminus` ever returns this — a self-`grounds` with no CURRENT tagged-indexes terminus in the post-transaction graph. */
   | "self-not-terminus";
 
@@ -455,10 +529,19 @@ const SEGMENT_TARGET_DETAIL =
  * self-reference branch or the ordinary phase-pair branch (a self-`grounds`
  * carrying tags is exactly as illegal as an ordinary `grounds` carrying them
  * — `grounds` is never taggable either way).
+ *
+ * tag-mandate spec ("Write gate"): the EMPTY case stopped being uniformly
+ * legal here. An untagged `extends`/`narrows` is refused, every other word's
+ * bare form passes untouched. The check is word-level and reads nothing but
+ * this call's own relation and tag set, so it holds identically for both
+ * write paths and needs no graph read.
  */
 function checkTagLegality(input: RelationTargetValidationInput): RelationTargetValidationResult {
   const tags = input.tags ?? [];
   if (tags.length === 0) {
+    if (isTagMandatoryRelation(input.relation)) {
+      return { ok: false, reason: "tag-required", detail: TAG_REQUIRED_DETAIL };
+    }
     return { ok: true };
   }
   if (!isTaggableRelation(input.relation)) {
@@ -497,7 +580,11 @@ function checkTagLegality(input: RelationTargetValidationInput): RelationTargetV
  * phase; self-`grounds`' actual terminus condition is Gate C, checked
  * post-transaction, not here), then Gate B tag legality — run LAST and
  * regardless of which phase branch was taken, since a phase-legal edge can
- * still carry an illegal tag.
+ * still carry an illegal tag (or, under the tag mandate, no tag at all where
+ * one is required). Gate B running last is why a phase-illegal untagged
+ * `extends` reports its PHASE problem first: the writer's own type is the
+ * more direct lever, and a caller told to tag an edge it may not write at
+ * all would be sent to fix the wrong thing.
  */
 export function validateRelationTarget(
   input: RelationTargetValidationInput,

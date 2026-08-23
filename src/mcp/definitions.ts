@@ -348,6 +348,27 @@ const RELATION_TAG_FORM_LINE =
 const RELATION_NO_TAG_FORM_LINE =
   "Entries are bare addresses only — cross-phase words never carry lane tags.";
 
+// The tag mandate (tag-mandate spec, "Write gate" / "The mandate reaches
+// every teaching surface"): `extends`/`narrows` lose their untagged form, so
+// their ASSERTION describes say tagged-form-only rather than offering the
+// bare address as an equal option. They are the two words whose semantics IS
+// continuation of a line of work — using one means naming the line — which is
+// why the mandate falls on exactly these two and no other. Same register as
+// `RELATION_TAG_FORM_LINE`: the subset invariant is a mechanical admission
+// test stated here, while WHICH tag names the line stays the Memory Rubric's
+// business.
+//
+// The `retractNarrows`/`retractExtends` mirrors deliberately do NOT take this
+// line — they keep `RETRACTION_TAG_FORM_LINE` — because a legacy untagged row
+// must stay deletable by its bare address, and a shared describe rewrite
+// captioning the retraction mirrors would say the opposite of what the write
+// gate does.
+const RELATION_MANDATORY_TAG_FORM_LINE =
+  "Each entry MUST be the tagged `{turn, tags}` form with a NON-EMPTY tag set — a bare " +
+  "address is refused: continuation names its lane, so this edge says which line of work " +
+  "it continues. Every tag must already be on both this turn's and the target's own tags, " +
+  "or the call rejects naming the gap.";
+
 // rubric-v10 ticket 02: the retraction mirrors' own one-sentence note —
 // identical across all eight, since the form is uniform regardless of which
 // word it retracts.
@@ -457,14 +478,14 @@ export const noteInputShape = {
     .optional()
     .describe(
       "Addresses a decision this turn still holds but cuts a piece OUT of — same phase. " +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+        RELATION_MANDATORY_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
   extends: z
     .array(relationTargetEntryShape)
     .optional()
     .describe(
       "Addresses a decision this turn still holds and adds a piece TO — same phase. " +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+        RELATION_MANDATORY_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
   indexes: z
     .array(relationTargetEntryShape)
@@ -986,3 +1007,4 @@ export const rememberInputSchema = z
       });
     }
   });
+

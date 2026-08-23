@@ -264,13 +264,13 @@ describe("a rejected direct write leaves no partial state (one transaction per c
       now: () => NOW,
     });
 
-    // implement = delivery-only: extends demands a decision-phase citing
-    // turn, so the relation half rejects. Ticket 04 moved every rejection
-    // AHEAD of the first mutation inside `evaluateSettlementTurnWrite`, so
-    // this now holds twice over — the evaluator writes nothing, and the
-    // engine's own per-call transaction would have rolled it back anyway.
-    // The assertion is kept as the outer guard: whichever layer changes, no
-    // partial state.
+    // implement = delivery-only and T1 carries no type at all: `extends` is
+    // same-phase, so no legal pairing exists and the relation half rejects.
+    // Ticket 04 moved every rejection AHEAD of the first mutation inside
+    // `evaluateSettlementTurnWrite`, so this now holds twice over — the
+    // evaluator writes nothing, and the engine's own per-call transaction
+    // would have rolled it back anyway. The assertion is kept as the outer
+    // guard: whichever layer changes, no partial state.
     const receipt = engine.writeNote({
       turn: "S" + sessionDbId + "/T2",
       type: ["implement"],
@@ -278,6 +278,12 @@ describe("a rejected direct write leaves no partial state (one transaction per c
     });
 
     expect(receipt.content[0]!.text).toContain("Parameter error");
+    // tag-mandate ("Write gate"): this entry is ALSO tagless, and the gate
+    // order is what decides which rejection the caller reads — Gate A (phase)
+    // runs before Gate B (tags), so the reason stays the phase one. Pinned so
+    // that a future reordering cannot silently repoint this test at the
+    // mandate and leave the phase pairing untested.
+    expect(receipt.content[0]!.text).toContain("delivery-phase");
     expect(getTurnById(db, t2)!.type).toEqual([]);
     const stamp = db
       .query("SELECT writer FROM write_gate_stamps WHERE entity_type = 'turn' AND entity_id = ? AND field = 'type'")

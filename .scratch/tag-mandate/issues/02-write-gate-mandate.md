@@ -22,7 +22,7 @@ Details ruled:
 overlap on the tool definitions file) — the delegator dispatches this
 ticket when that lands.
 
-**Status:** ready-for-agent (dispatch gated by the delegator)
+**Status:** done (mutation-verified: mandate branch disabled → 8 red across three layers; bare-example injection → guard red)
 
 - [ ] Bare extends/narrows assertion refused on both write paths with the
       teaching message; tagged form passes; all other words' bare forms

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { getOutgoingEdges } from "../../src/db/memory-edges";
+import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -749,8 +749,12 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const t2 = seedTurn(sessionDbId, 2);
     // T1 decision-phase, T2 delivery+decision: legal for `grounds` (no
     // restriction) and for `extends` (decision -> decision).
-    updateTurnById(db, t1, { type: ["design"] });
-    updateTurnById(db, t2, { type: ["implement", "correction"] });
+    // tag-mandate ("Write gate"): the extends half must name a lane both
+    // endpoints carry; the `grounds` half stays BARE, which is also the
+    // point — the mandate falls on extends/narrows alone, and a cross-phase
+    // word may not carry a tag at all.
+    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
+    updateTurnById(db, t2, { type: ["implement", "correction"], tags: ["lane-a"] });
     const job = claimWindow(sessionDbId, 1, 2);
 
     const result = write(
@@ -758,7 +762,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       {
         turn: `S${sessionDbId}/T2`,
         grounds: [`S${sessionDbId}/T1`],
-        extends: [`S${sessionDbId}/T1`],
+        extends: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }],
       },
       NOW,
     );
@@ -780,12 +784,20 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t3 = seedTurn(sessionDbId, 3);
-    updateTurnById(db, t1, { type: ["design"] });
-    updateTurnById(db, t3, { type: ["correction"] });
+    // tag-mandate: the setup extends names a lane both endpoints carry, and
+    // its receipt is asserted — a setup call that silently stopped landing
+    // would leave the `indexes` assertion below reading an empty branch.
+    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
+    updateTurnById(db, t3, { type: ["correction"], tags: ["lane-a"] });
     const job = claimWindow(sessionDbId, 1, 3);
     const context = baseContext(job, { reviewableTurnIds: new Set([t3]) });
 
-    write(context, { turn: `S${sessionDbId}/T3`, extends: [`S${sessionDbId}/T1`] }, NOW);
+    const branch = write(
+      context,
+      { turn: `S${sessionDbId}/T3`, extends: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
+      NOW,
+    );
+    expect(resultText(branch)).toContain("1 relation");
     const result = write(
       context,
       { turn: `S${sessionDbId}/T3`, indexes: [`S${sessionDbId}/T1`] },
@@ -805,16 +817,20 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const t1 = seedTurn(sessionDbId, 1);
     const t3 = seedTurn(sessionDbId, 3);
     const t4 = seedTurn(sessionDbId, 4);
-    updateTurnById(db, t1, { type: ["design"] });
-    updateTurnById(db, t3, { type: ["correction"] });
+    // tag-mandate: same as the test above — the branch is a real lane, and
+    // the override that kills it below stays UNTAGGED (a global repudiation,
+    // which keeps its bare form).
+    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
+    updateTurnById(db, t3, { type: ["correction"], tags: ["lane-a"] });
     updateTurnById(db, t4, { type: ["design"] });
     const job = claimWindow(sessionDbId, 1, 4);
 
-    write(
+    const branch = write(
       baseContext(job, { reviewableTurnIds: new Set([t3]) }),
-      { turn: `S${sessionDbId}/T3`, extends: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T3`, extends: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
       NOW,
     );
+    expect(resultText(branch)).toContain("1 relation");
     write(
       baseContext(job, { reviewableTurnIds: new Set([t4]) }),
       { turn: `S${sessionDbId}/T4`, override: [`S${sessionDbId}/T3`] },
@@ -905,6 +921,112 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     );
     expect(resultText(selfLoop)).toContain("may ever cite the citing turn itself");
     expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
+  });
+
+  // tag-mandate spec ("Write gate"): ONE rule, no carve-outs — the settlement
+  // facade inherits the mandate from the same `validateRelationTarget` the
+  // main agent's `note` calls, so this block is the mirror of
+  // tests/mcp/note.test.ts's "the tag mandate" describe. Kept as a real
+  // end-to-end pin rather than a prose claim of sameness: the two paths build
+  // their validator input independently (the facade reads the citing turn's
+  // tags through its own type/tags-correction yield rules), so only an
+  // exercised call proves the mandate reaches this one.
+  describe("the tag mandate reaches settlement too (tag-mandate spec, Write gate)", () => {
+    test("a bare extends through the facade is refused with the teaching message, nothing stored", () => {
+      const sessionDbId = seedSession();
+      const t1 = seedTurn(sessionDbId, 1);
+      const t2 = seedTurn(sessionDbId, 2);
+      // Both endpoints already carry the lane, so ONLY the missing tag on the
+      // edge itself can be refusing this call.
+      updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
+      updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
+      const job = claimWindow(sessionDbId, 1, 2);
+      const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
+
+      const result = write(
+        context,
+        { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] },
+        NOW,
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("continuation names its lane");
+      expect(resultText(result)).toContain("subset invariant");
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+
+      // The tagged form of the identical call lands.
+      const tagged = write(
+        context,
+        { turn: `S${sessionDbId}/T2`, extends: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
+        NOW + 1,
+      );
+      expect(resultText(tagged)).toContain("1 relation");
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })[0]?.tags).toEqual(["lane-a"]);
+    });
+
+    test("a bare narrows through the facade is refused the same way", () => {
+      const sessionDbId = seedSession();
+      const t1 = seedTurn(sessionDbId, 1);
+      const t2 = seedTurn(sessionDbId, 2);
+      updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
+      updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
+      const job = claimWindow(sessionDbId, 1, 2);
+
+      const result = write(
+        baseContext(job, { reviewableTurnIds: new Set([t2]) }),
+        { turn: `S${sessionDbId}/T2`, narrows: [`S${sessionDbId}/T1`] },
+        NOW,
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("continuation names its lane");
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+    });
+
+    // The assertion/retraction split: settlement is the writer that MEETS the
+    // untagged stock (a window over ancient turns), so its retraction mirrors
+    // are the ones that must keep working on bare addresses.
+    test("retractExtends/retractNarrows through the facade still take bare addresses", () => {
+      const sessionDbId = seedSession();
+      const t1 = seedTurn(sessionDbId, 1);
+      const t2 = seedTurn(sessionDbId, 2);
+      updateTurnById(db, t1, { type: ["design"] });
+      updateTurnById(db, t2, { type: ["design"] });
+      // Legacy stock: seeded through the storage primitive, because the write
+      // gate above now refuses to mint an untagged stance edge at all.
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: t2 },
+            cited: { kind: "turn", id: t1 },
+            relation: "extends",
+            provenance: "judged",
+          },
+          {
+            citing: { kind: "turn", id: t2 },
+            cited: { kind: "turn", id: t1 },
+            relation: "narrows",
+            provenance: "judged",
+          },
+        ],
+        NOW - 500,
+      );
+      const job = claimWindow(sessionDbId, 1, 2);
+
+      const result = write(
+        baseContext(job, { reviewableTurnIds: new Set([t2]) }),
+        {
+          turn: `S${sessionDbId}/T2`,
+          retractExtends: [`S${sessionDbId}/T1`],
+          retractNarrows: [`S${sessionDbId}/T1`],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toContain("2 relation");
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+    });
   });
 
   // rubric-v10 ticket 02 ("自引用", Gate C); round-4 review #1 hardened it:
@@ -1129,13 +1251,20 @@ describe("grounds mid-flow warning retirement (rubric-v10 ticket 02)", () => {
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
     const t3 = seedTurn(sessionDbId, 3);
-    updateTurnById(db, t1, { type: ["design"] });
-    updateTurnById(db, t2, { type: ["design"] });
+    // tag-mandate: the chain is a real lane; the `grounds` under test stays
+    // bare (cross-phase words never carry lane tags).
+    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
+    updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
     updateTurnById(db, t3, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 3);
     const context = baseContext(job, { reviewableTurnIds: new Set([t2, t3]) });
 
-    write(context, { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] }, NOW);
+    const chain = write(
+      context,
+      { turn: `S${sessionDbId}/T2`, extends: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
+      NOW,
+    );
+    expect(resultText(chain)).toContain("1 relation");
 
     const result = write(
       context,

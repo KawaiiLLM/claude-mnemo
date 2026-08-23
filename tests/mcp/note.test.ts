@@ -1863,14 +1863,23 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
   // (the decision cage retires with the flow model) — legal on evidence-
   // evidence AND delivery-delivery now too, same breadth override already
   // had (mirrors override's own test above, turn for turn).
+  // tag-mandate spec ("Write gate"): narrows/extends have no untagged form
+  // any more, so every assertion below carries a lane tag both endpoints hold
+  // — the subset invariant, satisfied deliberately rather than by weakening
+  // the gate. The PHASE half is what these two tests still isolate: Gate A
+  // runs before Gate B, so the illegal case still reports its phase problem,
+  // not the mandate.
   test("narrows: same phase on either end (widened off decision-only); illegal when the phases mismatch", () => {
     setType(earlierTurnId, ["research"]);
     setType(anotherEarlierTurnId, ["implement"]);
     setType(targetTurnId, ["measure"]);
+    setTags(earlierTurnId, ["lane-a"]);
+    setTags(anotherEarlierTurnId, ["lane-a"]);
+    setTags(targetTurnId, ["lane-a"]);
 
     const evidenceLegal = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, narrows: [`S${sessionId}/T1`] },
+      { turn: `S${sessionId}/T3`, narrows: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
     expect(resultText(evidenceLegal)).toContain("Attached 1 relation(s).");
@@ -1878,7 +1887,7 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     setType(targetTurnId, ["ops"]);
     const deliveryLegal = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, narrows: [`S${sessionId}/T2`] },
+      { turn: `S${sessionId}/T3`, narrows: [{ turn: `S${sessionId}/T2`, tags: ["lane-a"] }] },
       { now: () => 910, env: {}, eraCutoffEpoch: 1 },
     );
     expect(resultText(deliveryLegal)).toContain("Attached 1 relation(s).");
@@ -1886,7 +1895,7 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     setType(targetTurnId, ["design"]);
     const illegal = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, narrows: [`S${sessionId}/T1`] },
+      { turn: `S${sessionId}/T3`, narrows: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
       { now: () => 920, env: {}, eraCutoffEpoch: 1 },
     );
     expect(resultText(illegal)).toStartWith("Parameter error:");
@@ -1897,10 +1906,13 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     setType(earlierTurnId, ["research"]);
     setType(anotherEarlierTurnId, ["implement"]);
     setType(targetTurnId, ["measure"]);
+    setTags(earlierTurnId, ["lane-a"]);
+    setTags(anotherEarlierTurnId, ["lane-a"]);
+    setTags(targetTurnId, ["lane-a"]);
 
     const evidenceLegal = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, extends: [`S${sessionId}/T1`] },
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
     expect(resultText(evidenceLegal)).toContain("Attached 1 relation(s).");
@@ -1908,7 +1920,7 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     setType(targetTurnId, ["ops"]);
     const deliveryLegal = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, extends: [`S${sessionId}/T2`] },
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T2`, tags: ["lane-a"] }] },
       { now: () => 910, env: {}, eraCutoffEpoch: 1 },
     );
     expect(resultText(deliveryLegal)).toContain("Attached 1 relation(s).");
@@ -1916,7 +1928,7 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     setType(targetTurnId, ["design"]);
     const illegal = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, extends: [`S${sessionId}/T1`] },
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
       { now: () => 920, env: {}, eraCutoffEpoch: 1 },
     );
     expect(resultText(illegal)).toStartWith("Parameter error:");
@@ -2050,10 +2062,16 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     // with ITS OWN target, here delivery).
     setType(anotherEarlierTurnId, ["design", "implement"]);
     setType(targetTurnId, ["correction"]);
+    // tag-mandate: the extends half needs a lane both its endpoints carry.
+    // The consume half below stays BARE on purpose — the mandate falls on
+    // extends/narrows alone, and this test is one of the places that proves
+    // another word's untagged form still lands.
+    setTags(anotherEarlierTurnId, ["lane-a"]);
+    setTags(targetTurnId, ["lane-a"]);
 
     const extendsResult = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, extends: [`S${sessionId}/T2`] },
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T2`, tags: ["lane-a"] }] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
     expect(resultText(extendsResult)).toContain("Attached 1 relation(s).");
@@ -2100,12 +2118,19 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
       setType(earlierTurnId, ["design"]);
       setType(anotherEarlierTurnId, ["design"]);
       setType(targetTurnId, ["implement"]);
+      // tag-mandate: the chain this scenario needs is built with a real lane
+      // now. The setup call is ASSERTED rather than fire-and-forget — an
+      // extends that silently stopped landing would leave the `grounds`
+      // assertion below testing an empty graph.
+      setTags(earlierTurnId, ["lane-a"]);
+      setTags(anotherEarlierTurnId, ["lane-a"]);
 
-      noteTool(
+      const chain = noteTool(
         db,
-        { turn: `S${sessionId}/T2`, extends: [`S${sessionId}/T1`] },
+        { turn: `S${sessionId}/T2`, extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
         { now: () => 890, env: {}, eraCutoffEpoch: 1 },
       );
+      expect(resultText(chain)).toContain("Attached 1 relation(s).");
 
       const result = noteTool(
         db,
@@ -2332,6 +2357,127 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
     expect(remaining).toHaveLength(1);
     expect(remaining[0]?.tags).toEqual([]);
   });
+
+  // tag-mandate spec ("Write gate"): the MAIN AGENT half of the one-rule,
+  // no-carve-outs gate. The settlement half is the mirror block in
+  // tests/worker/note-settlement-turn-facade.test.ts; the shared judgment
+  // itself is tests/shared/turn-phase.test.ts.
+  describe("the tag mandate (tag-mandate spec, Write gate)", () => {
+    test("a bare extends is refused with the teaching message, and nothing is stored", () => {
+      setTags(earlierTurnId, ["lane-a"]);
+      setTags(targetTurnId, ["lane-a"]);
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, extends: [`S${sessionId}/T1`] },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain(`extends "S${sessionId}/T1"`);
+      expect(resultText(result)).toContain("continuation names its lane");
+      expect(resultText(result)).toContain("subset invariant");
+      // Mutation-critical: the tags are ALREADY on both endpoints here, so
+      // nothing but the mandate itself can be refusing this call — and if it
+      // were disabled, the untagged edge would silently land.
+      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+    });
+
+    test("a bare narrows is refused the same way", () => {
+      setTags(earlierTurnId, ["lane-a"]);
+      setTags(targetTurnId, ["lane-a"]);
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, narrows: [`S${sessionId}/T1`] },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain(`narrows "S${sessionId}/T1"`);
+      expect(resultText(result)).toContain("continuation names its lane");
+      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+    });
+
+    test("the tagged form of the same call lands", () => {
+      setTags(earlierTurnId, ["lane-a"]);
+      setTags(targetTurnId, ["lane-a"]);
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+      expect(edges).toHaveLength(1);
+      expect(edges[0]?.relation).toBe("extends");
+      expect(edges[0]?.tags).toEqual(["lane-a"]);
+    });
+
+    // The mandate is two words wide. Every other same-phase word's bare form
+    // is a legitimate reading the spec names, and the cross-phase words never
+    // had a tagged form to lose.
+    test("the other words' bare forms still land through the same tool", () => {
+      const bareCalls: Array<Record<string, unknown>> = [
+        { override: [`S${sessionId}/T1`] },
+        { indexes: [`S${sessionId}/T1`] },
+        { consume: [`S${sessionId}/T1`] },
+      ];
+      let clock = 900;
+      for (const call of bareCalls) {
+        const result = noteTool(
+          db,
+          { turn: `S${sessionId}/T3`, ...call },
+          { now: () => (clock += 10), env: {}, eraCutoffEpoch: 1 },
+        );
+        expect(resultText(result)).toContain("Attached 1 relation(s).");
+      }
+      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(3);
+    });
+
+    // The assertion/retraction split (spec, peer round T1455): legacy
+    // untagged rows must stay DELETABLE by their bare address, or the stock
+    // the mandate exists to clean up becomes unrepairable. The row below is
+    // seeded through the storage primitive precisely because the write gate
+    // now refuses to mint one.
+    test("retractExtends/retractNarrows still accept a bare address — legacy untagged stock stays deletable", () => {
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: targetTurnId },
+            cited: { kind: "turn", id: earlierTurnId },
+            relation: "extends",
+            provenance: "asserted",
+          },
+          {
+            citing: { kind: "turn", id: targetTurnId },
+            cited: { kind: "turn", id: earlierTurnId },
+            relation: "narrows",
+            provenance: "asserted",
+          },
+        ],
+        800,
+      );
+      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(2);
+
+      const result = noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T3`,
+          retractExtends: [`S${sessionId}/T1`],
+          retractNarrows: [`S${sessionId}/T1`],
+        },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain("Retracted 2 relation(s).");
+      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+    });
+  });
 });
 
 // Indexes-rescope spec (ticket 01, `.scratch/indexes-rescope/spec.md`'s law
@@ -2354,6 +2500,13 @@ describe("note tool indexes (indexes-rescope spec, ticket 01: no graph-state gat
   function setType(turnId: number, types: readonly string[]): void {
     db.query<unknown, [string, number]>("UPDATE turns SET type = ? WHERE id = ?").run(
       JSON.stringify(types),
+      turnId,
+    );
+  }
+
+  function setTags(turnId: number, tags: readonly string[]): void {
+    db.query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?").run(
+      JSON.stringify(tags),
       turnId,
     );
   }
@@ -2383,13 +2536,20 @@ describe("note tool indexes (indexes-rescope spec, ticket 01: no graph-state gat
     setType(earlierTurnId, ["design"]);
     setType(anotherEarlierTurnId, ["design"]);
     setType(targetTurnId, ["correction"]);
+    // tag-mandate ("Write gate"): the branch below is a real lane now — the
+    // setup extends carries {lane-a} and both its endpoints hold it.
+    setTags(earlierTurnId, ["lane-a"]);
+    setTags(targetTurnId, ["lane-a"]);
 
-    // T3 extends T1 — T3 becomes the branch's settlement, T1 its mid-flow member.
-    noteTool(
+    // T3 extends T1 — T3 becomes the branch's settlement, T1 its mid-flow
+    // member. Asserted, not fire-and-forget: every test in this block reads
+    // a graph this one call builds.
+    const branch = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, extends: [`S${sessionId}/T1`] },
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
       { now: () => 890, env: {}, eraCutoffEpoch: 1 },
     );
+    expect(resultText(branch)).toContain("Attached 1 relation(s).");
   });
 
   afterEach(() => {
@@ -2551,6 +2711,13 @@ describe("note tool relation retraction (edge-mechanism-revision D3, ticket 02)"
     );
   }
 
+  function setTags(turnId: number, tags: readonly string[]): void {
+    db.query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?").run(
+      JSON.stringify(tags),
+      turnId,
+    );
+  }
+
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
@@ -2574,6 +2741,11 @@ describe("note tool relation retraction (edge-mechanism-revision D3, ticket 02)"
     targetTurnId = insertTurn.get(sessionId, 3, "The turn being noted", 110)!.id;
     setType(earlierTurnId, ["design"]);
     setType(targetTurnId, ["measure", "correction"]);
+    // tag-mandate ("Write gate"): both turns carry the lane the tagged
+    // extends in this block asserts — the subset invariant, pre-satisfied so
+    // the retraction tests exercise retraction rather than tag legality.
+    setTags(earlierTurnId, ["lane-a"]);
+    setTags(targetTurnId, ["lane-a"]);
   });
 
   afterEach(() => {
@@ -2647,7 +2819,7 @@ describe("note tool relation retraction (edge-mechanism-revision D3, ticket 02)"
       {
         turn: `S${sessionId}/T3`,
         retractOverride: [`S${sessionId}/T1`],
-        extends: [`S${sessionId}/T1`],
+        extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }],
       },
       { now: () => 950, env: {}, eraCutoffEpoch: 1 },
     );
