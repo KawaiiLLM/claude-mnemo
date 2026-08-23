@@ -54,12 +54,19 @@ import {
  * carries the capped `vocabularyConformance` field as the raw source those
  * classes are read from — this file simply no longer prints it twice.
  *
- * The errors block is the one place a DISPLAY cap is applied that the data
- * does not have (`MAX_ERROR_RENDER_ENTRIES`): `result.errors` is uncapped
- * precisely so the commit gate can trust it, while a settlement window with
- * hundreds of stock violations must not blow the text budget. The count line
- * always states the TRUE total, and the next `lane_check` after a repair
- * round surfaces the remainder.
+ * The two surfaces differ on ONE thing beyond the anchor spelling — whether
+ * the error list is capped (peer round T1466, finding P2-8):
+ *
+ *   - `renderLaneCheckerReports` prints EVERY instance. This is the render
+ *     the settlement `lane_check` tool returns, and the commit gate judges
+ *     the same uncapped `result.errors` list — a cap here would break the
+ *     "the tool shows you exactly what the gate will refuse on" contract the
+ *     moment a window carries more errors than the cap, leaving an agent
+ *     repairing an invisible remainder it was never shown.
+ *   - `renderLaneDigraph` (CLI-only, human-read, column-truncated anyway)
+ *     keeps `MAX_ERROR_RENDER_ENTRIES` with its true-total count line: its
+ *     reader can re-run the check, and its output is a picture rather than a
+ *     work list.
  */
 
 function formatTagSet(key: LaneKey): string {
@@ -234,12 +241,10 @@ function renderSharedNodes(shared: LaneCheckerResult["multiLaneComponents"][numb
 }
 
 /**
- * How many error instances either surface prints. `LaneCheckerResult.errors`
- * itself is UNCAPPED (the commit gate filters it by anchor and must see
- * every instance) — this bound exists only so a window over badly
- * non-conforming stock cannot blow the settlement text budget. Higher than
- * the fact lists' own cap: an error is work the reader must actually do, so
- * a longer list earns its bytes.
+ * How many error instances the CLI DIGRAPH prints (peer round T1466, finding
+ * P2-8 — the settlement prose render above it is uncapped). Higher than the
+ * fact lists' own cap: an error is work the reader must actually do, so a
+ * longer list earns its bytes.
  */
 const MAX_ERROR_RENDER_ENTRIES = 50;
 
@@ -342,6 +347,13 @@ function renderLaneError(
       // two shapes ("retag this chain into its own lane" vs "bridge it to the
       // lane's real start/end") and neither is decidable without knowing
       // which node the lane already runs from/to.
+      //
+      // T1466: the anchor is the EDGE-OWNING CITER, which for a dangling
+      // SOURCE is a different turn from the dangling node itself. The line
+      // says so explicitly in that case — otherwise a reader sees an anchor
+      // that appears nowhere in the sentence and cannot tell whether the
+      // report or the anchor is wrong. A dangling SINK anchors at itself, so
+      // the clause is absent and that line is unchanged.
       return (
         head +
         "lane " +
@@ -353,24 +365,30 @@ function renderLaneError(
         " dangles beside T" +
         error.canonicalId +
         "; a lane has exactly one start and one end" +
-        " (retag one chain, or bridge them)"
+        " (retag one chain, or bridge them" +
+        (error.anchorId !== error.nodeId ? "; the anchor owns the in-lane edge into T" + error.nodeId : "") +
+        ")"
       );
   }
 }
 
 /**
- * The capped instance lines both surfaces print, identically formatted so
- * the CLI's digraph and the settlement text never describe one error two
- * ways. The COUNT line is each surface's own (the digraph folds it into its
- * heading), which is why this returns instances only.
+ * The instance lines both surfaces print, identically formatted so the CLI's
+ * digraph and the settlement text never describe one error two ways. The
+ * COUNT line is each surface's own (the digraph folds it into its heading),
+ * which is why this returns instances only.
+ *
+ * `limit` is the ONLY difference between the two callers (finding P2-8): the
+ * settlement prose passes none and prints every instance the commit gate
+ * judges; the CLI digraph passes `MAX_ERROR_RENDER_ENTRIES`.
  */
 function errorInstanceLines(
   errors: readonly LaneCheckerError[],
   addresses?: LaneAnchorAddresses,
+  limit?: number,
 ): string[] {
-  return errors
-    .slice(0, MAX_ERROR_RENDER_ENTRIES)
-    .map((error) => renderLaneError(error, addresses));
+  const shown = limit === undefined ? errors : errors.slice(0, limit);
+  return shown.map((error) => renderLaneError(error, addresses));
 }
 
 function renderCrossSegmentWarning(warning: LaneCrossSegmentWarning): string {
@@ -413,6 +431,11 @@ export function renderLaneCheckerReports(
   sections.push(
     "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
   );
+  // UNCAPPED (finding P2-8): this is the render the settlement `lane_check`
+  // returns, and the commit gate judges the same list — every instance the
+  // gate can refuse on must be visible here. `cappedCountSuffix` therefore
+  // always yields "" on this surface; it is kept so the two renders share
+  // one count-line shape.
   const shownErrors = errorInstanceLines(result.errors, anchorAddresses);
   if (result.errors.length === 0) {
     sections.push("(none)");
@@ -600,7 +623,9 @@ export function renderLaneDigraph(result: LaneCheckerResult): string {
   const errorClasses = errorClassesByAnchor(result.errors);
   const lines: string[] = [];
 
-  const shownErrors = errorInstanceLines(result.errors);
+  // CLI-only surface: the cap stays here (finding P2-8) — the count line
+  // states the true total and this reader can re-run the check.
+  const shownErrors = errorInstanceLines(result.errors, undefined, MAX_ERROR_RENDER_ENTRIES);
   lines.push(
     truncateToColumns(
       "ERRORS (" + result.errors.length + ")" + cappedCountSuffix(result.errors.length, shownErrors.length),

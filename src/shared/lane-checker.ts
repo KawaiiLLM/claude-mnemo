@@ -188,8 +188,10 @@
  *     EDIT on an endpoint turn can orphan a row the gate once passed.
  *   - **E5** a LANE (one segment, one exact tag set) with more than one
  *     SOURCE or more than one SINK — the spec's lane-shape law is "exactly
- *     ONE start and ONE end". One instance per EXTRA source/sink, anchored
- *     at that node. Diamonds (parallel paths that re-merge) produce nothing:
+ *     ONE start and ONE end". One instance per EXTRA source/sink, NAMING
+ *     that node and anchored at the turn that owns an in-lane edge touching
+ *     it (T1466 — see "The ANCHOR" below).
+ *     Diamonds (parallel paths that re-merge) produce nothing:
  *     a diamond's branches share the one start and the one end. See "Lane
  *     shape (E5)" below for the direction convention, the edge domain, and
  *     the canonical-vs-extra rule.
@@ -197,8 +199,9 @@
  * ### The ANCHOR (spec "Anchoring and repairability") — the load-bearing field
  *
  * Every error instance carries `anchorId`: an EDGE error anchors at its
- * CITING turn, a TYPE error at the turn itself, a SHAPE error at the
- * violating extra source/sink node. The settlement commit gate
+ * CITING turn, a TYPE error at the turn itself, a SHAPE error at the turn
+ * that OWNS an in-lane edge touching the violating node (T1466 — an extra
+ * SINK at itself, an extra SOURCE at its earliest in-lane citer). The settlement commit gate
  * (ticket 05) counts only instances anchored inside the window's writable
  * scope, so an error anchored outside blocks its OWN window and never this
  * one — without that scoping one bad out-of-window edge would pin a window
@@ -208,8 +211,17 @@
  *   1. `anchorId` is always a turn id the repairing agent can address —
  *      never an edge row id, never a lane token — and for an edge error it
  *      is the CITING side, because retract/re-add is the citing turn's own
- *      power. For E5 it is the DANGLING node itself, whose own tags/edges
- *      are what the repair (retag one chain, or bridge them) changes.
+ *      power. E5 follows the SAME principle (T1466 ruling, peer round
+ *      finding P1-3): the anchor is the EDGE-OWNING CITER. An extra SINK
+ *      cites in-lane, so it owns its own row and anchors at itself; an extra
+ *      SOURCE owns no outgoing row at all (that is what makes it a source),
+ *      so the only retractable/retaggable row touching it belongs to a
+ *      citer, and the instance anchors at the deterministic EARLIEST citing
+ *      side among its incoming in-lane edges. Anchoring an extra source at
+ *      the node itself — as this class first shipped — named a turn with no
+ *      repair power, which is a permanent commit deadlock whenever the
+ *      citing side is outside the window's writable set. `nodeId` still
+ *      names the dangling node; only `anchorId` moved.
  *   2. `errors` is UNCAPPED. Every other list in this module caps its
  *      entries for display; a capped ERROR list would let an instance past
  *      the commit gate simply by sorting late, and the window would commit
@@ -585,16 +597,18 @@ export type LaneShapeRole = "source" | "sink";
 
 /**
  * E5 — a lane with more than one source or more than one sink, one instance
- * per EXTRA node. Anchor: the violating node itself (so `anchorId ===
- * nodeId`, kept as two fields for the same reason E3 keeps `id` — the commit
- * gate reads only `anchorId` and needs no per-class knowledge).
+ * per EXTRA node. Anchor (T1466): the turn that OWNS an in-lane edge touching
+ * the violating node — the node itself for an extra SINK (it cites), and the
+ * earliest in-lane citer for an extra SOURCE (which has no outgoing row of
+ * its own). `nodeId` and `anchorId` are therefore genuinely different fields
+ * for the source role, and the commit gate still reads only `anchorId`.
  */
 export interface LaneShapeError extends LaneErrorAnchor {
   class: "E5";
   /** The lane whose shape this violates — a node dangling in ONE lane is silent about every other lane it belongs to. */
   key: LaneKey;
   role: LaneShapeRole;
-  /** The extra source/sink. */
+  /** The extra source/sink — the DANGLING node, which for role `source` is NOT the anchor (see above). */
   nodeId: number;
   /** The source/sink this one is extra TO: the lane's earliest source, or its latest sink (module header, "CANONICAL vs EXTRA"). Never equal to `nodeId`. */
   canonicalId: number;
@@ -1068,7 +1082,9 @@ function computeSubsetInvariantErrors(
  * (sinks / ends), each over the lane's OWN tagged edges across all eight
  * relation words. More than one of either is a violation of the "exactly one
  * start and one end" law, and every source past the EARLIEST — and every
- * sink before the LATEST — is one instance, anchored at that node.
+ * sink before the LATEST — is one instance, anchored at the EDGE-OWNING
+ * CITER (see "The ANCHOR" and the T1466 ruling below, not the dangling node
+ * as first shipped).
  *
  * A diamond yields exactly one of each by construction (its parallel
  * branches share the start they fork from and the end they re-merge into),
@@ -1092,9 +1108,18 @@ function computeLaneShapeErrors(
   for (const lane of lanes) {
     const cites = new Set<number>(); // has an outgoing in-lane edge
     const cited = new Set<number>(); // has an incoming in-lane edge
+    // Every in-lane edge that LANDS on a node, by its citing side — the
+    // repair-power lookup an extra SOURCE's anchor is chosen from (T1466).
+    const citersInto = new Map<number, number[]>();
     for (const edge of lane.taggedEdges) {
       cites.add(edge.citingId);
       cited.add(edge.citedId);
+      const bucket = citersInto.get(edge.citedId);
+      if (bucket === undefined) {
+        citersInto.set(edge.citedId, [edge.citingId]);
+      } else if (!bucket.includes(edge.citingId)) {
+        bucket.push(edge.citingId);
+      }
     }
     const memberIds = lane.members.map((member) => member.id);
     const sources = memberIds.filter((id) => !cites.has(id)).sort(byOrderThenId);
@@ -1104,11 +1129,21 @@ function computeLaneShapeErrors(
       // Canonical = EARLIEST; every later source dangles.
       const canonicalId = sources[0]!;
       for (const nodeId of sources.slice(1)) {
-        errors.push({ class: "E5", anchorId: nodeId, key: lane.key, role: "source", nodeId, canonicalId });
+        errors.push({
+          class: "E5",
+          anchorId: anchorForExtraSource(nodeId, citersInto, byOrderThenId),
+          key: lane.key,
+          role: "source",
+          nodeId,
+          canonicalId,
+        });
       }
     }
     if (sinks.length > 1) {
-      // Canonical = LATEST; every earlier sink dangles.
+      // Canonical = LATEST; every earlier sink dangles. An extra SINK cites
+      // by definition (it has an outgoing in-lane edge — that is what makes
+      // it a sink under this module's direction convention), so it owns its
+      // own repairable row and anchors at itself.
       const canonicalId = sinks[sinks.length - 1]!;
       for (const nodeId of sinks.slice(0, -1)) {
         errors.push({ class: "E5", anchorId: nodeId, key: lane.key, role: "sink", nodeId, canonicalId });
@@ -1116,6 +1151,33 @@ function computeLaneShapeErrors(
     }
   }
   return errors;
+}
+
+/**
+ * The T1466 ruling's anchor for an extra SOURCE: the DETERMINISTIC EARLIEST
+ * citing side among the node's incoming in-lane edges. A source has no
+ * outgoing row of its own — the only deletable/retaggable row touching it
+ * belongs to whoever cites it — so anchoring at the node itself would name a
+ * turn with no repair power at all, the one thing the anchor field exists to
+ * guarantee (module header, "The ANCHOR"). "Earliest" is the same
+ * `byOrderThenId` comparator the canonical choice uses, so the pick is
+ * stable across runs and across id-vs-order divergence.
+ *
+ * The fallback (no incoming edge at all) is unreachable by construction — a
+ * lane's members ARE its tagged edges' endpoints, so a member with no
+ * outgoing edge necessarily has an incoming one — and is kept only so a
+ * future domain change cannot silently produce an instance with no anchor.
+ */
+function anchorForExtraSource(
+  nodeId: number,
+  citersInto: ReadonlyMap<number, readonly number[]>,
+  byOrderThenId: (a: number, b: number) => number,
+): number {
+  const citers = citersInto.get(nodeId);
+  if (citers === undefined || citers.length === 0) {
+    return nodeId;
+  }
+  return [...citers].sort(byOrderThenId)[0]!;
 }
 
 /** Endpoint/identity tie-break shared by every error class, after `anchorId` and `class` — deterministic output for a byte-comparable render. */

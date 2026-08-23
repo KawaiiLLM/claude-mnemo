@@ -1455,6 +1455,14 @@ describe("errors E1-E4 — detection and anchoring", () => {
  *      report 4(b)'s stance+consume graph strands those nodes and fires on
  *      conforming lanes — including the golden corpus's own `{write-gate}`.
  *   5. A diamond is legal expression and produces NOTHING.
+ *   6. The ANCHOR is the EDGE-OWNING CITER (T1466, peer round finding P1-3),
+ *      never the dangling node merely for dangling: an extra SINK cites, so
+ *      it anchors at itself; an extra SOURCE owns no outgoing row, so it
+ *      anchors at the EARLIEST citing side (by order key) among its incoming
+ *      in-lane edges. Move it back to the node and a window holding only the
+ *      dangling source is refused over a row it cannot write — the deadlock
+ *      the anchor field exists to prevent. `nodeId` keeps naming the
+ *      dangling node either way.
  */
 describe("errors E5 — lane shape: one start, one end", () => {
   /** The commit gate's whole filter, in one line — identical to the E1-E4 block's. */
@@ -1501,7 +1509,10 @@ describe("errors E5 — lane shape: one start, one end", () => {
       },
       {
         class: "E5",
-        anchorId: 503,
+        // T1466: the dangling SOURCE is T503, but T503 owns no outgoing row
+        // — the repairable edge into it belongs to T504, so that is the
+        // anchor. `nodeId` still names T503.
+        anchorId: 504,
         key: { segment: DEFAULT_SEGMENT, tagSet: ["L"] },
         role: "source",
         nodeId: 503,
@@ -1520,11 +1531,20 @@ describe("errors E5 — lane shape: one start, one end", () => {
       edge(531, "extends", 530, ["L"]),
     ]);
     expect(shapeErrors(result)).toHaveLength(4);
-    expect(shapeErrors(result).map((e) => `${e.anchorId}:${e.class === "E5" ? e.role : ""}`)).toEqual([
-      "511:sink",
-      "520:source",
-      "521:sink",
-      "530:source",
+    // The four instances NAME nodes 511(sink), 520(source), 521(sink),
+    // 530(source); their anchors are the edge-owning citers (T1466), so the
+    // two source instances anchor at 521 and 531 respectively. T521 carries
+    // two instances at once — its own dangling-sink one and the one for the
+    // source it cites — which the shared comparator orders by `nodeId`.
+    expect(
+      shapeErrors(result).map((e) =>
+        e.class === "E5" ? `${e.anchorId}:${e.role}(T${e.nodeId})` : "",
+      ),
+    ).toEqual([
+      "511:sink(T511)",
+      "521:source(T520)",
+      "521:sink(T521)",
+      "531:source(T530)",
     ]);
   });
 
@@ -1536,8 +1556,11 @@ describe("errors E5 — lane shape: one start, one end", () => {
     ]);
     const sources = shapeErrors(result).filter((e) => e.class === "E5" && e.role === "source");
     const sinks = shapeErrors(result).filter((e) => e.class === "E5" && e.role === "sink");
-    // Sources are 540 and 550; the EARLIEST (540) is the lane's real start.
-    expect(sources.map((e) => e.anchorId)).toEqual([550]);
+    // Sources are 540 and 550; the EARLIEST (540) is the lane's real start,
+    // so 550 is the instance — named as `nodeId`, anchored at its citer 551
+    // (T1466).
+    expect(sources.map((e) => (e.class === "E5" ? e.nodeId : 0))).toEqual([550]);
+    expect(sources.map((e) => e.anchorId)).toEqual([551]);
     expect(sources.every((e) => e.class === "E5" && e.canonicalId === 540)).toBe(true);
     // Sinks are 541 and 551; the LATEST (551) is the lane's real end.
     expect(sinks.map((e) => e.anchorId)).toEqual([541]);
@@ -1636,7 +1659,10 @@ describe("errors E5 — lane shape: one start, one end", () => {
       edge(613, "extends", 612, ["M"]),
     ]);
     expect(shapeErrors(result).map((e) => e.class === "E5" && e.key.tagSet.join(","))).toEqual(["L", "L"]);
-    expect(shapeErrors(result).map((e) => e.anchorId)).toEqual([611, 612]);
+    // Nodes 611 (extra sink) and 612 (extra source); the source's anchor is
+    // its in-lane citer T613 (T1466).
+    expect(shapeErrors(result).map((e) => (e.class === "E5" ? e.nodeId : 0))).toEqual([611, 612]);
+    expect(shapeErrors(result).map((e) => e.anchorId)).toEqual([611, 613]);
   });
 
   // ---- ordering: the order key, not the row id ----
@@ -1708,25 +1734,69 @@ describe("errors E5 — lane shape: one start, one end", () => {
     expect(anchoredIn(inScope.errors, writable)).toHaveLength(2);
   });
 
-  test("the anchor is the DANGLING node itself, never the canonical one it is extra to", () => {
-    // A window that owns only the canonical start/end must NOT be refused:
-    // it cannot repair a chain it cannot write.
+  test("the anchor is the EDGE-OWNING CITER, never the canonical node merely for being canonical", () => {
+    // T1466. The two instances name T661 (extra sink) and T670 (extra
+    // source). The sink cites, so it anchors at itself; the source owns no
+    // outgoing row, so its instance anchors at T671, the turn whose
+    // `extends` row is the only thing a repair can retract or retag.
     const result = checkLanes([660, 661, 670, 671].map((id) => node(id)), [
       edge(661, "extends", 660, ["L"]),
       edge(671, "extends", 670, ["L"]),
     ]);
-    expect(shapeErrors(result).map((e) => e.anchorId)).toEqual([661, 670]);
-    expect(anchoredIn(result.errors, [660, 671])).toEqual([]); // the two CANONICAL nodes
+    expect(shapeErrors(result).map((e) => (e.class === "E5" ? `${e.role} T${e.nodeId}` : ""))).toEqual([
+      "sink T661",
+      "source T670",
+    ]);
+    expect(shapeErrors(result).map((e) => e.anchorId)).toEqual([661, 671]);
+    // A window owning only the canonical START is still never refused: it
+    // holds no repairable edge for either instance.
+    expect(anchoredIn(result.errors, [660])).toEqual([]);
+  });
+
+  test("ANCHOR — an extra SOURCE anchors at the EARLIEST citing side among its incoming in-lane edges, by ORDER key", () => {
+    // T1466's determinism half. T730 is the extra source; two turns cite it
+    // in-lane, and the earlier one by ORDER (T732, whose row id is the
+    // LARGER — the backfill divergence `LaneTurnInput.order` exists for) is
+    // the anchor. A "lowest id" or "first edge seen" rule would name T731.
+    const turns = [
+      node(720, { order: [0, 1] }), // the canonical source
+      node(721, { order: [0, 2] }),
+      node(730, { order: [0, 3] }), // the EXTRA source
+      node(731, { order: [0, 9] }),
+      node(732, { order: [0, 4] }),
+    ];
+    const result = checkLanes(turns, [
+      edge(721, "extends", 720, ["L"]),
+      edge(731, "extends", 730, ["L"]),
+      edge(732, "extends", 730, ["L"]),
+    ]);
+    const sources = shapeErrors(result).filter((e) => e.class === "E5" && e.role === "source");
+    expect(sources.map((e) => (e.class === "E5" ? `T${e.nodeId}@${e.anchorId}` : ""))).toEqual(["T730@732"]);
+    // Repair power, stated as the property: the anchor really does own an
+    // in-lane edge landing on the dangling node.
+    expect(sources.every((e) => e.class === "E5" && e.anchorId !== e.nodeId)).toBe(true);
+  });
+
+  test("ANCHOR — an extra SINK anchors at ITSELF: it cites, so it already owns the repairable row", () => {
+    const turns = [740, 741, 750, 751].map((id) => node(id));
+    const result = checkLanes(turns, [
+      edge(741, "extends", 740, ["L"]),
+      edge(751, "extends", 750, ["L"]),
+    ]);
+    const sinks = shapeErrors(result).filter((e) => e.class === "E5" && e.role === "sink");
+    expect(sinks.map((e) => (e.class === "E5" ? `T${e.nodeId}@${e.anchorId}` : ""))).toEqual(["T741@741"]);
   });
 
   test("E5 sorts into the shared error order by anchor then class", () => {
-    // T680 carries an empty type (E3) AND is the later of the lane's two
-    // starts (E5) — one anchor, two classes, and the shared comparator puts
-    // the class order beneath the anchor for both surfaces.
+    // T676 carries an empty type (E3) AND is the earlier of the lane's two
+    // ENDS (E5, anchored at itself) — one anchor, two classes, and the
+    // shared comparator puts the class order beneath the anchor for both
+    // surfaces. T681 anchors the extra-source instance for T680 (T1466), so
+    // the third line sorts by that citer's id, not the dangling node's.
     const turns = [
       { id: 675, type: ["design"], tags: ["L"] },
-      { id: 676, type: ["design"], tags: ["L"] },
-      { id: 680, type: [] as string[], tags: ["L"] },
+      { id: 676, type: [] as string[], tags: ["L"] },
+      { id: 680, type: ["design"], tags: ["L"] },
       { id: 681, type: ["design"], tags: ["L"] },
     ];
     const result = checkLanes(turns, [
@@ -1734,9 +1804,9 @@ describe("errors E5 — lane shape: one start, one end", () => {
       edge(681, "extends", 680, ["L"]),
     ]);
     expect(result.errors.map((e) => `${e.anchorId}:${e.class}`)).toEqual([
+      "676:E3",
       "676:E5",
-      "680:E3",
-      "680:E5",
+      "681:E5",
     ]);
   });
 });

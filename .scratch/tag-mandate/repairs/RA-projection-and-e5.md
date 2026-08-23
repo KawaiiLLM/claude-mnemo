@@ -27,7 +27,7 @@ read it first).
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: E5 source-anchor earliest→latest → 1 red; token reverted to join → collision fixture red; spec scope judgment ratified — the Anchoring paragraph had to follow the anchor rule)
 
 - [ ] Loader: turn-id-seed scope pinned (lookback E1, edge-less E3, and
       external-endpoint E2 fixtures load and fire; liveness/skip exempt)

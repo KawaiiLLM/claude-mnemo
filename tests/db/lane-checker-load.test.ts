@@ -687,14 +687,19 @@ describe("out-of-vocabulary edges (semantic-conformance ticket 02): the loader s
     expect(result.lanes[0]!.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
   });
 
-  test("a supersedes edge touching a turn OUTSIDE the loaded scope is never surfaced — the pass never widens beyond turns already in scope", () => {
+  // T1466 (finding P1-1) narrowed this claim rather than dropping it: a
+  // seed-scoped pass now DOES widen for a row written FROM the scope (see
+  // "turn-id seed scope" below). The direction is the anchor rule — this
+  // case, whose CITING side is the out-of-scope turn, anchors outside and
+  // stays unloaded, which is what the test has always actually pinned.
+  test("a supersedes edge whose CITING side is outside the scope is never surfaced — it anchors outside and blocks a different window", () => {
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1);
     const t2 = insertTurn(sessionId, 2);
     const outside = insertTurn(sessionId, 3); // never referenced by any tagged edge
     tagEdge(t2, t1, "extends", ["ownership"]);
     tagEdge(t2, t1, "indexes", ["ownership"]);
-    tagEdge(outside, t1, "supersedes", []); // touches `outside`, which is never in scope
+    tagEdge(outside, t1, "supersedes", []); // cites FROM `outside`, which is never in scope
 
     const projection = loadLaneCheckScope(db, {
       kind: "range",
@@ -833,6 +838,254 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
     expect(errors).toEqual([
       { class: "E1", anchorId: t3, citingId: t3, citedId: t2, relation: "extends" },
     ]);
+  });
+});
+
+// ------------------------- peer round T1466: collision-free exact-set match (P2-9)
+
+/**
+ * LOAD-BEARING PROPERTY. The WIDEN pass decides which rows belong to a lane by
+ * comparing canonical tag SETS. It used to compare a U+0001-delimited JOIN of
+ * the set, which collides exactly the way round-5 review #14 already found for
+ * the lane token: a tag that CONTAINS the delimiter character merges into its
+ * neighbour, so the three-tag set {a, b, c} and the two-tag set {a, "b<SEP>c"}
+ * produce the identical string. The `memory_edge_tags` prefilter cannot rule
+ * this out — both sets share the tag "a", so both rows are candidates — and a
+ * hit pulls ANOTHER lane's edges into this lane's projection, and from there
+ * into the commit gate's verdict. The compare is a canonical JSON array now,
+ * self-delimiting through its own quoting.
+ */
+describe("exact tag-SET matching is collision-free (T1466 P2-9)", () => {
+  // Built rather than written as a literal so this file carries no control
+  // byte of its own.
+  const SEP = String.fromCharCode(1);
+
+  test("two DIFFERENT tag arrays that join identically stay two lanes — neither pulls the other's edges", () => {
+    const sessionId = seedSession("tag-collision");
+    // Each turn carries its edge's own tags, so the fixture is clean under
+    // E4 too and the only thing left that could raise an error is the
+    // collision itself.
+    const a1 = insertTurn(sessionId, 1, { tags: ["a", "b", "c"] });
+    const a2 = insertTurn(sessionId, 2, { tags: ["a", "b", "c"] });
+    const b1 = insertTurn(sessionId, 3, { tags: ["a", "b" + SEP + "c"] });
+    const b2 = insertTurn(sessionId, 4, { tags: ["a", "b" + SEP + "c"] });
+    tagEdge(a2, a1, "extends", ["a", "b", "c"]);
+    tagEdge(b2, b1, "extends", ["a", "b" + SEP + "c"]);
+
+    // Naming the three-tag lane must load ITS edge only.
+    const three = loadLaneCheckScope(db, {
+      kind: "lanes",
+      laneKeys: [{ segment: DEFAULT_SEGMENT, tagSet: ["a", "b", "c"] }],
+    });
+    expect(three.edges).toEqual([
+      { citingId: a2, citedId: a1, relation: "extends", tags: ["a", "b", "c"] },
+    ]);
+    expect(three.turns.map((turn) => turn.id).sort((x, y) => x - y)).toEqual([a1, a2]);
+
+    // And the colliding two-tag lane loads only its own.
+    const two = loadLaneCheckScope(db, {
+      kind: "lanes",
+      laneKeys: [{ segment: DEFAULT_SEGMENT, tagSet: ["a", "b" + SEP + "c"] }],
+    });
+    expect(two.edges).toEqual([
+      { citingId: b2, citedId: b1, relation: "extends", tags: ["a", "b" + SEP + "c"] },
+    ]);
+    expect(two.turns.map((turn) => turn.id).sort((x, y) => x - y)).toEqual([b1, b2]);
+
+    // End to end: a scope holding both still reports TWO lanes with disjoint
+    // members, never one merged lane (which would then report a shape error
+    // it never earned).
+    const both = loadLaneCheckScope(db, { kind: "turns", turnIds: [a1, a2, b1, b2] });
+    const result = checkLanes(both.turns, both.edges, both.outOfVocabularyEdges);
+    expect(result.lanes.map((lane) => lane.key.tagSet)).toEqual([
+      ["a", "b", "c"],
+      ["a", "b" + SEP + "c"],
+    ]);
+    expect(result.lanes.map((lane) => lane.members.map((member) => member.id))).toEqual([
+      [a1, a2],
+      [b1, b2],
+    ]);
+    expect(result.errors).toEqual([]);
+  });
+});
+
+// ------------------------------- peer round T1466: the turn-id seed scope (P1-1)
+
+/**
+ * LOAD-BEARING PROPERTIES of `{ kind: "turns" }` (mutation acceptance).
+ *
+ * The finding: the settlement window's writable set is an immutable, enumerated
+ * turn-id list (window ∪ declared lookback ∪ closure) that no prompt-number
+ * RANGE can express. Seeding on `windowStart..windowEnd` alone means a
+ * lookback turn's E1/E3 stock never LOADS, so filtering errors by anchor
+ * afterwards cannot recover it — the projection, not the filter, is where the
+ * loss happens. Four properties, each with its own test below:
+ *
+ *   1. PROJECTION COMPLETENESS. Every seeded id is judged: an untagged
+ *      stance edge, a legacy type, and an out-of-vocabulary relation all
+ *      fire for a seed no range would have covered. Narrow any pass back to
+ *      a subset of the seed and one of these goes silent.
+ *   2. THE EXEMPTIONS ARE NOT RE-IMPLEMENTED. A skipped or rolled-back id in
+ *      the frozen set loads NOTHING (`loadLiveTurns` + `liveTurnSql`), so
+ *      the caller may hand over its writable set verbatim without first
+ *      re-deriving liveness — and no commit can be blocked by a row its
+ *      agent is never shown.
+ *   3. SET SEMANTICS. The projection is a pure function of the id SET:
+ *      duplicates and caller order change nothing.
+ *   4. E2's CITING-SIDE REACH. An out-of-vocabulary edge written FROM a seed
+ *      is loaded even when its cited turn is outside every other pass, and
+ *      that endpoint JOINS the projection (no dangling edge). The reverse —
+ *      cited side in scope, citing side outside — stays unloaded: it anchors
+ *      elsewhere and blocks a different window.
+ */
+describe("turn-id seed scope — the frozen writable set as the projection's seed (T1466 P1-1)", () => {
+  test("a LOOKBACK turn's untagged extends fires E1 under the turn-id seed, and is invisible to the window's own range", () => {
+    const sessionId = seedSession("seed-lookback");
+    const lookbackCited = insertTurn(sessionId, 1, { type: ["design"] });
+    const lookbackCiting = insertTurn(sessionId, 2, { type: ["design"] });
+    const windowA = insertTurn(sessionId, 8, { type: ["design"] });
+    const windowB = insertTurn(sessionId, 9, { type: ["design"] });
+    tagEdge(lookbackCiting, lookbackCited, "extends", []); // the stock defect, in the lookback
+
+    // The defect the RANGE cannot see: the window is prompts 8-9.
+    const rangeOnly = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 8,
+      promptEnd: 9,
+    });
+    expect(
+      checkLanes(rangeOnly.turns, rangeOnly.edges, rangeOnly.outOfVocabularyEdges).errors.filter(
+        (error) => error.class === "E1",
+      ),
+    ).toEqual([]);
+
+    // The same defect, under the writable set the commit gate actually froze.
+    const projection = loadLaneCheckScope(db, {
+      kind: "turns",
+      turnIds: [lookbackCited, lookbackCiting, windowA, windowB],
+    });
+    assertNoDanglingEdges(projection);
+    const e1 = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges).errors.filter(
+      (error) => error.class === "E1",
+    );
+    expect(e1.map((error) => error.anchorId)).toEqual([lookbackCiting]);
+  });
+
+  test("an EDGE-LESS seed still loads: a legacy type anywhere in the frozen set fires E3", () => {
+    const sessionId = seedSession("seed-edgeless");
+    const legacy = insertTurn(sessionId, 1, { type: ["discovery"] });
+    const windowTurn = insertTurn(sessionId, 7, { type: ["design"] });
+
+    const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [legacy, windowTurn] });
+    expect(projection.edges).toEqual([]);
+    const e3 = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges).errors.filter(
+      (error) => error.class === "E3",
+    );
+    expect(e3.map((error) => error.anchorId)).toEqual([legacy]);
+  });
+
+  test("an out-of-vocabulary edge whose CITED endpoint is outside the seed is still surfaced, and that endpoint joins the projection", () => {
+    const sessionId = seedSession("seed-e2-external");
+    const seedTurn = insertTurn(sessionId, 5, { type: ["design"] });
+    const external = insertTurn(sessionId, 1, { type: ["design"] }); // in no lane, in no seed
+    tagEdge(seedTurn, external, "supersedes", []); // frozen-legacy, anchors at seedTurn
+
+    const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [seedTurn] });
+
+    expect(projection.outOfVocabularyEdges).toEqual([
+      { citingId: seedTurn, citedId: external, relation: "supersedes", tags: [] },
+    ]);
+    // The endpoint is JOINED IN rather than left dangling — the same
+    // invariant every other pass holds. (It becomes a judgable row in its own
+    // right; any error it earns anchors at ITSELF, i.e. outside this
+    // window's writable set, so the commit gate still ignores it.)
+    expect(projection.turns.map((turn) => turn.id)).toContain(external);
+    assertNoDanglingEdges(projection);
+
+    const e2 = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges).errors.filter(
+      (error) => error.class === "E2",
+    );
+    expect(e2.map((error) => error.anchorId)).toEqual([seedTurn]);
+  });
+
+  test("the CITING side is the direction: an out-of-vocabulary edge INTO a seed from outside anchors elsewhere and is not loaded", () => {
+    const sessionId = seedSession("seed-e2-inbound");
+    const seedTurn = insertTurn(sessionId, 5, { type: ["design"] });
+    const external = insertTurn(sessionId, 9, { type: ["design"] });
+    tagEdge(external, seedTurn, "supersedes", []); // anchors at `external`, not at the seed
+
+    const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [seedTurn] });
+    expect(projection.outOfVocabularyEdges).toEqual([]);
+    expect(projection.turns.map((turn) => turn.id)).not.toContain(external);
+  });
+
+  test("DISCOVER/WIDEN seed from the FULL set: a lane touched only by a lookback seed still resolves whole", () => {
+    const sessionId = seedSession("seed-widen");
+    const laneStart = insertTurn(sessionId, 1, { tags: ["ownership"] });
+    const laneMiddle = insertTurn(sessionId, 2, { tags: ["ownership"] });
+    const laneEnd = insertTurn(sessionId, 20, { tags: ["ownership"] }); // far outside any window
+    const windowTurn = insertTurn(sessionId, 9, { type: ["design"] });
+    tagEdge(laneMiddle, laneStart, "extends", ["ownership"]);
+    tagEdge(laneEnd, laneMiddle, "indexes", ["ownership"]);
+
+    // Only the lookback half of the frozen set touches the lane at all.
+    const projection = loadLaneCheckScope(db, {
+      kind: "turns",
+      turnIds: [laneStart, laneMiddle, windowTurn],
+    });
+    expect(projection.involvedLaneKeys).toEqual([{ segment: DEFAULT_SEGMENT, tagSet: ["ownership"] }]);
+    expect(projection.turns.map((turn) => turn.id)).toContain(laneEnd);
+
+    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+    expect(result.lanes[0]!.coverage).toEqual({ status: "whole", missingTurnIds: [] });
+    expect(result.lanes[0]!.declaration.terminus).toBe(laneEnd);
+  });
+
+  test("liveness/skip stays the loader's law, not the caller's: a skipped or rolled-back id in the frozen set loads nothing", () => {
+    const sessionId = seedSession("seed-liveness");
+    const live = insertTurn(sessionId, 1, { type: [] }); // the same defect, live
+    const skipped = insertTurn(sessionId, 2, { type: [], status: "skipped" });
+    const rolledBack = insertTurn(sessionId, 3, { type: [], wasRolledBack: true });
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "turns",
+      turnIds: [live, skipped, rolledBack],
+    });
+    const loadedIds = projection.turns.map((turn) => turn.id);
+    expect(loadedIds).toContain(live);
+    expect(loadedIds).not.toContain(skipped);
+    expect(loadedIds).not.toContain(rolledBack);
+
+    const errors = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges).errors;
+    expect(errors.map((error) => `${error.class}@${error.anchorId}`)).toEqual([`E3@${live}`]);
+  });
+
+  test("SET semantics: duplicates and caller order never change the projection", () => {
+    const sessionId = seedSession("seed-set");
+    const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
+    const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
+    tagEdge(t2, t1, "extends", ["ownership"]);
+
+    const ascending = loadLaneCheckScope(db, { kind: "turns", turnIds: [t1, t2] });
+    const shuffled = loadLaneCheckScope(db, { kind: "turns", turnIds: [t2, t1, t2, t1] });
+    expect(shuffled.turns).toEqual(ascending.turns);
+    expect(shuffled.edges).toEqual(ascending.edges);
+    expect(shuffled.involvedLaneKeys).toEqual(ascending.involvedLaneKeys);
+    expect(shuffled.outOfVocabularyEdges).toEqual(ascending.outOfVocabularyEdges);
+  });
+
+  test("an empty frozen set resolves empty rather than loading the database", () => {
+    const sessionId = seedSession("seed-empty");
+    const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
+    const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
+    tagEdge(t2, t1, "extends", ["ownership"]);
+
+    const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [] });
+    expect(projection.turns).toEqual([]);
+    expect(projection.edges).toEqual([]);
+    expect(projection.involvedLaneKeys).toEqual([]);
+    expect(projection.outOfVocabularyEdges).toEqual([]);
   });
 });
 

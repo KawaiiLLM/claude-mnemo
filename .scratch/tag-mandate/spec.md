@@ -70,7 +70,7 @@ Three moves, one ladder:
 | E2 | out-of-vocabulary relation words (e.g. frozen `supersedes`) | already partitioned out of graph computation; now classed error |
 | E3 | out-of-vocabulary or EMPTY turn types | exemptions carry over: compact markers, legally-skipped turns; rolled-back turns are not nodes |
 | E4 | subset-invariant stock violations (edge tag absent from an endpoint's tags) | can arise from later tag edits; write gate already refuses fresh ones |
-| E5 | lane shape: a lane (same segment, exact tag set) with >1 source or >1 sink | disjoint same-set chains auto-join into one lane and become illegal — component emergence hardened into a constraint; repair = retag one chain (fork properly) or bridge/merge |
+| E5 | lane shape: a lane (same segment, exact tag set) with >1 source or >1 sink | disjoint same-set chains auto-join into one lane and become illegal — component emergence hardened into a constraint; repair = retag one chain (fork properly) or bridge/merge. One instance per EXTRA source/sink, NAMING that node; the ANCHOR is the edge-owning citer (T1466): an extra sink at itself, an extra source at the earliest citing side among its incoming in-lane edges |
 
 Warnings (unchanged reports, reclassified): reachability/connectivity,
 component entanglement, minimality (interfaces/bypass, path counts),
@@ -79,8 +79,12 @@ time-order violations, undeclared lanes, terminus citedness.
 ## Anchoring and repairability (the deadlock guard)
 
 Every error instance anchors at a turn: an edge error at its CITING turn, a
-type error at the turn itself, an E5 shape error at the violating extra
-source/sink node. The commit gate counts ONLY instances anchored inside the
+type error at the turn itself, an E5 shape error at the turn that OWNS an
+in-lane edge touching the violating extra source/sink node (T1466: an extra
+SINK cites, so it anchors at itself; an extra SOURCE owns no outgoing row, so
+it anchors at the deterministic earliest citing side among its incoming
+in-lane edges — anchor = repair power BY CONSTRUCTION, the same principle
+E1/E2/E4's citing anchors follow). The commit gate counts ONLY instances anchored inside the
 window's writable scope (window ∪ DECLARED lookback — see the pull
 architecture's immutable writable set) — an error anchored outside blocks
 its OWN window, never this one. This keeps every commit
@@ -240,7 +244,9 @@ graph-state write rejections).
   repair then commit succeeds; the same error anchored out-of-scope commits
   clean. Prior art: note-settlement-sdk-query.test.ts's real-handler
   discipline.
-- E5: disjoint same-set chains → two sources flagged; diamond fixture → clean.
+- E5: disjoint same-set chains → two sources flagged; diamond fixture → clean;
+  an extra source anchors at its earliest in-lane citer, an extra sink at
+  itself (T1466).
 
 ## Out of Scope
 

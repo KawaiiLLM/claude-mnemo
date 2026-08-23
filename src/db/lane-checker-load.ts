@@ -34,9 +34,10 @@ import { liveTurnSql } from "./turn-liveness";
  * to each involved lane's full live edges"). Read in three phases:
  *
  *   1. SEED — resolve the scope (a session's prompt-number range, a whole
- *      segment's members, or explicitly named lanes) into a starting turn-id
- *      set (empty for the `lanes` scope, whose seed IS the named lane).
- *   2. DISCOVER — for `range`/`segment` scopes, find every LANE (segment +
+ *      segment's members, an EXPLICIT turn-id set, or explicitly named lanes)
+ *      into a starting turn-id set (empty for the `lanes` scope, whose seed
+ *      IS the named lane).
+ *   2. DISCOVER — for the three seeded scopes, find every LANE (segment +
  *      exact canonical tag set) touched by a tagged edge with either
  *      endpoint in the seed set. The `lanes` scope skips this: its lane set
  *      is exactly what the caller named. BOTH endpoints' owning segments
@@ -84,6 +85,42 @@ import { liveTurnSql } from "./turn-liveness";
  * silently re-admits skipped turns as E3 errors and, through the commit
  * gate, would block a window on rows its agent is not even shown.
  *
+ * THE TURN-ID SEED SCOPE (peer round T1466, finding P1-1). The settlement
+ * window's writable set is an immutable, explicitly enumerated list of turn
+ * ids — window ∪ declared lookback ∪ closure — which no prompt-number RANGE
+ * can express: a lookback turn can sit anywhere in the session, and a range
+ * seeded on `windowStart..windowEnd` alone never LOADS the lookback's own E1/
+ * E3 stock, so filtering the resulting errors by anchor afterwards cannot
+ * recover what never entered the projection. `{ kind: "turns", turnIds }` is
+ * that missing seed: the frozen set goes in verbatim and every pass below —
+ * DISCOVER, the stance stock pass, the supplementary passes, the seeds-always-
+ * join step — reads the FULL set, exactly as the `range` scope's own seed
+ * does. Two exemptions are deliberately NOT re-implemented here:
+ *
+ *   - LIVENESS/SKIP. The ids arrive unfiltered (a caller's frozen set is a
+ *     claim about WRITABILITY, not about liveness) and stay unfiltered
+ *     through the seed passes; `loadLiveTurns` is what decides which of them
+ *     becomes a judgable row, and `liveTurnSql` on both endpoints of every
+ *     edge query is what keeps a dead seed from dragging an edge in. A
+ *     skipped or rolled-back id in the frozen set therefore loads NOTHING —
+ *     the same law-8 outcome the `range` scope gets from filtering at seed
+ *     time, reached one layer later.
+ *   - DE-DUPLICATION/ORDER. The set is deduped and sorted ascending so the
+ *     projection is a pure function of the id SET, never of the caller's
+ *     array order.
+ *
+ * OUT-OF-VOCABULARY EDGES REACHING OUTSIDE THE SCOPE (same finding). E2
+ * anchors at an edge's CITING turn, so an out-of-vocabulary row written FROM
+ * a seed turn is that seed's own repairable defect even when its cited turn
+ * sits outside everything else this projection loaded. The among-both-
+ * endpoints pass alone made such a row invisible, so a second, seed-scoped
+ * pass loads every out-of-vocabulary edge whose CITING side is in the seed
+ * set and JOINS the far endpoint into the loaded turn set (the
+ * no-dangling-edge invariant is preserved by construction, not by luck). The
+ * citing-side direction is exactly the anchor rule: a row whose citing side
+ * is OUTSIDE the seed anchors outside this window, blocks a different one,
+ * and is deliberately still not loaded.
+ *
  * COVERAGE (requirement 1's other half). The core's own report 1
  * (`LaneStatsReport.coverage`) is the honest signal: it is populated
  * whenever a lane member id appears as a tagged edge's endpoint with no
@@ -96,6 +133,16 @@ import { liveTurnSql } from "./turn-liveness";
 export type LaneCheckScope =
   | { kind: "range"; sessionId: number; promptStart: number; promptEnd: number }
   | { kind: "segment"; segmentId: number }
+  /**
+   * An EXPLICIT turn-id set as the seed (peer round T1466, finding P1-1) —
+   * the shape the settlement window's immutable writable set (window ∪
+   * declared lookback ∪ closure) actually has, which no prompt-number range
+   * can express. See the module header's "THE TURN-ID SEED SCOPE": the ids
+   * are taken verbatim (deduped, ascending), liveness is applied by
+   * `loadLiveTurns`/`liveTurnSql` rather than at seed time, and every pass
+   * seeds from the FULL set.
+   */
+  | { kind: "turns"; turnIds: readonly number[] }
   | { kind: "lanes"; laneKeys: readonly LaneKey[] };
 
 export interface LaneCheckProjection {
@@ -190,6 +237,25 @@ function laneKeyToken(key: LaneKey): string {
   return laneToken(key.segment, key.tagSet);
 }
 
+/**
+ * The segment-free half of `laneToken`'s own encoding: a canonical tag SET
+ * serialized as a JSON array, which is what the WIDEN pass compares an edge
+ * row's stored tags against (peer round T1466, finding P2-9). The former
+ * `canonicalTagSet(...).join("<U+0001>")` collided exactly the way round-5
+ * review #14 already found for the lane token — a tag that CONTAINS the
+ * delimiter merges into its neighbour, so `["a","b","c"]` and
+ * `["a","b<U+0001>c"]` joined identically and each lane pulled in the other's
+ * edges (both sets share the first canonical tag, so the `memory_edge_tags`
+ * prefilter above admits both candidates and cannot rule the collision out).
+ * `JSON.stringify` self-delimits every element through its own quoting, so
+ * no two distinct sets can serialize alike. Deliberately NOT `laneToken`
+ * itself: an edge row carries no segment of its own, only its endpoint turns
+ * do, and the segment filter is applied separately in `loadLaneCheckScope`.
+ */
+function tagSetToken(tags: readonly string[]): string {
+  return JSON.stringify(canonicalTagSet(tags));
+}
+
 /** Every `segment_members` row's owning segment for the given turn ids, batched in one query (`MIN` mirrors `getOwningSegmentId`'s own "lowest id wins" tie-break for a legacy multi-membership row). */
 function loadOwningSegments(db: Database, turnIds: readonly number[]): Map<number, number> {
   const ids = [...new Set(turnIds)];
@@ -210,8 +276,17 @@ function loadOwningSegments(db: Database, turnIds: readonly number[]): Map<numbe
 
 function resolveSeedTurnIds(
   db: Database,
-  scope: Extract<LaneCheckScope, { kind: "range" | "segment" }>,
+  scope: Extract<LaneCheckScope, { kind: "range" | "segment" | "turns" }>,
 ): number[] {
+  if (scope.kind === "turns") {
+    // Verbatim, deduped, ascending — no liveness query here on purpose
+    // (module header, "THE TURN-ID SEED SCOPE"): a dead or skipped id in the
+    // caller's frozen set is dropped by `loadLiveTurns` at the end and can
+    // never carry an edge in, since `liveTurnSql` gates both endpoints of
+    // every edge query below.
+    return [...new Set(scope.turnIds)].sort((a, b) => a - b);
+  }
+
   if (scope.kind === "range") {
     return db
       .query<{ id: number }, [number, number, number]>(
@@ -273,8 +348,9 @@ function loadEdgesForExactTagSet(db: Database, tagSet: readonly string[]): EdgeL
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
     .all(tagSet[0]!);
-  const wanted = canonicalTagSet(tagSet).join("\u0001");
-  return rows.filter((row) => canonicalTagSet(JSON.parse(row.tags) as string[]).join("\u0001") === wanted);
+  // Collision-free exact-set compare (finding P2-9) - see `tagSetToken`.
+  const wanted = tagSetToken(tagSet);
+  return rows.filter((row) => tagSetToken(JSON.parse(row.tags) as string[]) === wanted);
 }
 
 /** Every live turn-turn edge touching any of `turnIds` (either endpoint) whose relation is one of `relations` — the SUPPLEMENTARY pass (cross-phase citedness, untagged override, the component neighbourhood). */
@@ -347,9 +423,11 @@ function loadComponentEdgesAmong(db: Database, turnIds: readonly number[]): Edge
  * predates the tag model and is never tagged). Scoped to turns ALREADY in
  * `turnIds` — never a reason to widen the loaded turn set further, since
  * these rows are reported as a bare fact by the checker, not resolved into
- * lane membership. `loadLaneCheckScope` calls this with the FINAL
- * `allTurnIds` set, so both endpoints are guaranteed already present among
- * the turns this projection returns — no dangling-edge risk.
+ * lane membership. `loadLaneCheckScope` calls this with the whole loaded turn
+ * set, so both endpoints of everything it returns are already present among
+ * the turns this projection returns — no dangling-edge risk. Its seed-scoped
+ * sibling below is the one pass that CAN name a turn not yet loaded, and it
+ * joins that endpoint in explicitly.
  */
 function loadOutOfVocabularyEdgesAmong(db: Database, turnIds: readonly number[]): EdgeLiteRow[] {
   if (turnIds.length === 0) {
@@ -369,6 +447,40 @@ function loadOutOfVocabularyEdgesAmong(db: Database, turnIds: readonly number[])
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
     .all(...turnIds, ...turnIds, ...EDGE_RELATIONS);
+}
+
+/**
+ * The seed-scoped counterpart of the pass above (peer round T1466, finding
+ * P1-1): every live out-of-vocabulary edge whose CITING side is one of
+ * `turnIds`, whatever its cited side is. E2 anchors at the citing turn, so
+ * such a row is the seed's own repairable defect and must be visible to the
+ * window that owns it even when its cited turn joined no other pass; the
+ * among-BOTH-endpoints pass alone hid exactly those rows. The reverse case
+ * (cited side in scope, citing side outside) is deliberately NOT loaded: it
+ * anchors outside this scope and blocks a different window.
+ *
+ * `loadLaneCheckScope` joins the cited endpoints this returns into the final
+ * turn set, so the projection still cannot carry an edge whose endpoint it
+ * never loaded.
+ */
+function loadOutOfVocabularyEdgesFromCiting(db: Database, turnIds: readonly number[]): EdgeLiteRow[] {
+  if (turnIds.length === 0) {
+    return [];
+  }
+  const idPlaceholders = turnIds.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  return db
+    .query<EdgeLiteRow, (number | string)[]>(
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.citing_id IN (${idPlaceholders})
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IS NOT NULL AND me.relation NOT IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
+    )
+    .all(...turnIds, ...EDGE_RELATIONS);
 }
 
 /** Every DISTINCT session id the given turns belong to — the session bound `widenComponentClosure` (round-5 review #12) stays inside. */
@@ -642,17 +754,37 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     allTurnIds.add(id);
   }
 
-  // OUT-OF-VOCABULARY EDGES (semantic-conformance ticket 02): both endpoints
-  // are already members of `allTurnIds` by the query's own WHERE clause, so
-  // this cannot introduce a new turn id. Kept on its OWN field — never
-  // merged into `edgeMap`/`edges` — so `mcp/note.ts`'s Gate C self-`grounds`
-  // terminus check, the one OTHER reader of `projection.edges` in this
-  // codebase, never has its own `deriveLaneInterpretation` re-derivation
-  // widened by a relation it was never scoped to see (`LaneCheckProjection`'s
-  // own doc comment). `checkLanes` (`shared/lane-checker.ts`) is what keeps
-  // these OUT of every graph computation once they DO reach it, through its
-  // own third parameter.
-  const outOfVocabularyEdges = loadOutOfVocabularyEdgesAmong(db, [...allTurnIds])
+  // OUT-OF-VOCABULARY EDGES (semantic-conformance ticket 02), from two
+  // passes: the among-BOTH-endpoints one over everything loaded so far, and
+  // the seed-scoped CITING-side one (peer round T1466, finding P1-1 — module
+  // header, "OUT-OF-VOCABULARY EDGES REACHING OUTSIDE THE SCOPE") whose far
+  // endpoint may not be in `allTurnIds` yet and is joined in right below, so
+  // the no-dangling-endpoint invariant survives. Deduplicated by the same
+  // `edgeKey` the edge map uses; a row both passes return is carried once.
+  //
+  // Kept on its OWN field — never merged into `edgeMap`/`edges` — so
+  // `mcp/note.ts`'s Gate C self-`grounds` terminus check, the one OTHER
+  // reader of `projection.edges` in this codebase, never has its own
+  // `deriveLaneInterpretation` re-derivation widened by a relation it was
+  // never scoped to see (`LaneCheckProjection`'s own doc comment).
+  // `checkLanes` (`shared/lane-checker.ts`) is what keeps these OUT of every
+  // graph computation once they DO reach it, through its own third parameter.
+  const outOfVocabularyRows = new Map<string, EdgeLiteRow>();
+  for (const row of loadOutOfVocabularyEdgesAmong(db, [...allTurnIds])) {
+    outOfVocabularyRows.set(edgeKey(row), row);
+  }
+  for (const row of loadOutOfVocabularyEdgesFromCiting(db, seedTurnIds)) {
+    outOfVocabularyRows.set(edgeKey(row), row);
+  }
+  // The far endpoints join the projection (never the reverse — this pass
+  // widens the TURN set only, never re-runs the among-pass over the widened
+  // set: an out-of-vocabulary row is a reported fact, not a lane input, so
+  // one round is the whole of it).
+  for (const row of outOfVocabularyRows.values()) {
+    allTurnIds.add(row.citingId);
+    allTurnIds.add(row.citedId);
+  }
+  const outOfVocabularyEdges = [...outOfVocabularyRows.values()]
     .map(toEdgeInput)
     .sort((a, b) => {
       if (a.citingId !== b.citingId) return a.citingId - b.citingId;

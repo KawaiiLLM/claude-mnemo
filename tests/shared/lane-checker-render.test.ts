@@ -424,6 +424,33 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     );
   });
 
+  /**
+   * T1466 (finding P1-3): an E5 anchor is the EDGE-OWNING CITER, so for a
+   * dangling SOURCE it is a DIFFERENT turn from the one the sentence names.
+   * The line has to say why, or the reader sees an anchor that appears
+   * nowhere in the sentence and cannot tell which of the two is the typo.
+   */
+  test("an E5 source whose anchor is not the dangling node says which edge the anchor owns", () => {
+    const text = renderLaneCheckerReports({
+      ...emptyResult(),
+      errors: [
+        {
+          class: "E5",
+          anchorId: 512, // the citer that owns the in-lane edge into T511
+          key: { segment: DEFAULT_SEGMENT, tagSet: ["L"] },
+          role: "source",
+          nodeId: 511,
+          canonicalId: 509,
+        },
+      ],
+    });
+    expect(text).toContain(
+      "[E5] anchor T512 -- lane default:{L} has a second source: T511 dangles beside T509;" +
+        " a lane has exactly one start and one end (retag one chain, or bridge them;" +
+        " the anchor owns the in-lane edge into T511)",
+    );
+  });
+
   test("an error-free result says so explicitly, and the retired vocabulary-conformance section prints nowhere", () => {
     const clean = renderLaneCheckerReports(emptyResult());
     const lines = clean.split("\n");
@@ -436,7 +463,15 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(clean).not.toContain("Vocabulary conformance");
   });
 
-  test("the printed error list caps while the count line states the TRUE total (the data itself never caps)", () => {
+  /**
+   * PEER ROUND T1466, FINDING P2-8 — the settlement surface is UNCAPPED.
+   * `lane_check` and the commit gate read the same `result.errors`; a 50-entry
+   * display cap here meant a window with 51+ instances was told about 50,
+   * repaired those, and was refused again over a remainder it had never been
+   * shown. The CLI digraph keeps its cap (its reader can re-run the check,
+   * and its output is a picture, not a work list).
+   */
+  test("the settlement prose prints EVERY error instance — no cap, and no 'showing first' suffix", () => {
     const many: LaneCheckerResult["errors"] = Array.from({ length: 60 }, (_, index) => ({
       class: "E1" as const,
       anchorId: index + 1,
@@ -445,9 +480,13 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       relation: "extends",
     }));
     const text = renderLaneCheckerReports({ ...emptyResult(), errors: many });
-    expect(text).toContain("60 error(s) (showing first 50)");
+    expect(text).toContain("60 error(s)");
+    expect(text).not.toContain("showing first");
     expect(text).toContain("[E1] anchor T50 --");
-    expect(text).not.toContain("[E1] anchor T51 --");
+    expect(text).toContain("[E1] anchor T51 --");
+    expect(text).toContain("[E1] anchor T60 --");
+    // Every instance, counted rather than sampled: one line per error.
+    expect(text.split("\n").filter((line) => line.startsWith("  [E1] anchor")).length).toBe(60);
   });
 
   /**
@@ -845,5 +884,25 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     for (const line of renderLaneDigraph(result).split("\n")) {
       expect(line.length).toBeLessThanOrEqual(100);
     }
+  });
+
+  /**
+   * The OTHER half of finding P2-8: only the settlement prose was uncapped.
+   * The digraph is CLI-only, human-read and column-truncated already, and its
+   * reader can re-run the check — so it keeps the 50-entry bound and states
+   * the true total beside it.
+   */
+  test("the digraph still caps its error list at 50 while its heading states the TRUE total", () => {
+    const many: LaneCheckerResult["errors"] = Array.from({ length: 60 }, (_, index) => ({
+      class: "E1" as const,
+      anchorId: index + 1,
+      citingId: index + 1,
+      citedId: 0,
+      relation: "extends",
+    }));
+    const digraph = renderLaneDigraph({ ...emptyResult(), errors: many });
+    expect(digraph.split("\n")[0]).toBe("ERRORS (60) (showing first 50)");
+    expect(digraph).toContain("[E1] anchor T50 --");
+    expect(digraph).not.toContain("[E1] anchor T51 --");
   });
 });
