@@ -279,12 +279,13 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   // 992->989. None of these are grounds/testimony, so the OLD report (no
   // `used[]`) rendered these lanes' "cited from outside" line as if they
   // were never cited by consume at all.
-  // tag-mandate ticket 03's acceptance bar: the hand-judged golden corpus
+  // tag-mandate tickets 03/04's acceptance bar: the hand-judged golden corpus
   // CONFORMS, so the error side must be empty on it — every tagged edge's
   // set sits inside both endpoints' own tags (E4), no extends/narrows is
-  // untagged (E1), every relation is one of the eight (E2), and every turn's
-  // type is in vocabulary once compact markers are exempt (E3). Any
-  // discrepancy here is a STOP-AND-REPORT, never a golden adjustment.
+  // untagged (E1), every relation is one of the eight (E2), every turn's
+  // type is in vocabulary once compact markers are exempt (E3), and every
+  // lane runs from ONE start to ONE end (E5). Any discrepancy here is a
+  // STOP-AND-REPORT, never a golden adjustment.
   test("the golden fixture reports ZERO errors — it conforms", () => {
     expect(result.errors).toEqual([]);
     // Not vacuous: the fixture really does carry tagged edges and turn tags
@@ -292,6 +293,23 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
     expect(fixtureEdges.some((e) => e.tags.length > 0)).toBe(true);
     expect(fixtureTurns.every((t) => (t.tags ?? []).length >= 0)).toBe(true);
     expect(fixtureEdges.some((e) => e.relation === "extends" || e.relation === "narrows")).toBe(true);
+  });
+
+  test("the golden fixture reports ZERO E5 — 12 real lanes, each single-source single-sink", () => {
+    // Stated on its own (ticket 04) so a later class's regression can never
+    // be mistaken for this one, and so the non-vacuity is E5's OWN: twelve
+    // enumerated lanes, every one with at least one tagged edge to shape.
+    expect(result.errors.filter((e) => e.class === "E5")).toEqual([]);
+    expect(result.lanes).toHaveLength(12);
+    for (const lane of result.lanes) {
+      expect(lane.members.length).toBeGreaterThanOrEqual(2);
+    }
+    // The corpus exercises the whole edge domain E5 reads, not just the
+    // stance chain: `{write-gate}` ENDS at a tagged override (T958 -> T957)
+    // and every declared lane's terminus is woven in by tagged `indexes`.
+    // A domain that dropped either word would strand those nodes and fire.
+    expect(fixtureEdges.some((e) => e.relation === "override" && e.tags.length > 0)).toBe(true);
+    expect(fixtureEdges.some((e) => e.relation === "indexes" && e.tags.length > 0)).toBe(true);
   });
 
   test("report 1 golden — used[] lists the fixture's real external consume citations", () => {
@@ -1408,5 +1426,317 @@ describe("errors E1-E4 — detection and anchoring", () => {
     expect(stats?.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
     expect(stats?.state.closure).toBe("closed");
     expect(findPath(result, ["L"])?.pathCount).toBe(1);
+  });
+});
+
+// ------------------------------------------------ tag-mandate ticket 04: E5, lane shape
+
+/**
+ * E5 — "a lane has exactly ONE start and ONE end" (spec, "Lane shape").
+ *
+ * DIRECTION, the thing every fixture below silently depends on: an edge row
+ * points citing -> cited, i.e. BACKWARD in time. So a lane's START is the
+ * node that is cited but never cites in-lane (no OUTGOING edge — report
+ * 4(b)'s own `starts` field), and its END is the node that cites but is
+ * never cited (no INCOMING edge). Each fixture therefore writes its chain
+ * "later extends earlier" and reads its start off the LOW id.
+ *
+ * LOAD-BEARING PROPERTIES (mutation acceptance — each has its own test):
+ *   1. One instance per EXTRA node, never one per lane and never one per
+ *      dangling end: two disjoint chains (2 sources + 2 sinks) are TWO
+ *      instances, three chains are FOUR.
+ *   2. The canonical source is the EARLIEST, the canonical sink the LATEST —
+ *      swap either and the anchors move to the wrong nodes.
+ *   3. "Earliest/latest" is the ORDER KEY, not the row id, and cross-session
+ *      pairs fall back to `createdAtEpoch` (the tuple-order trap).
+ *   4. The edge domain is the lane's OWN tagged edges over ALL EIGHT words:
+ *      an `indexes` declaration and a tagged `override` are real in-lane
+ *      edges, so a lane ending in either is CLEAN. Narrowing the domain to
+ *      report 4(b)'s stance+consume graph strands those nodes and fires on
+ *      conforming lanes — including the golden corpus's own `{write-gate}`.
+ *   5. A diamond is legal expression and produces NOTHING.
+ */
+describe("errors E5 — lane shape: one start, one end", () => {
+  /** The commit gate's whole filter, in one line — identical to the E1-E4 block's. */
+  const anchoredIn = (errors: readonly LaneCheckerError[], writable: readonly number[]) =>
+    errors.filter((error) => writable.includes(error.anchorId));
+
+  interface NodeSpec {
+    order?: readonly [number, number];
+    createdAtEpoch?: number;
+    tags?: string[];
+  }
+  const node = (id: number, spec: NodeSpec = {}): LaneCheckerTurnInput => ({
+    id,
+    type: ["design"],
+    tags: spec.tags ?? ["L"],
+    order: spec.order,
+    createdAtEpoch: spec.createdAtEpoch,
+  });
+  const shapeErrors = (result: ReturnType<typeof checkLanes>) =>
+    result.errors.filter((error) => error.class === "E5");
+
+  // ---- the named fixture: disjoint same-set chains ----
+
+  test("DISJOINT SAME-SET CHAINS — two chains, one lane: the non-canonical source and sink are the two instances", () => {
+    // The component-emergence principle hardened into a constraint (spec,
+    // user story 10): T501<-T502 and T503<-T504 never touch, but they share
+    // one exact tag set in one segment, so the machine sees ONE lane with
+    // two starts and two ends. Repair = retag one chain, or bridge them.
+    const turns = [node(501), node(502), node(503), node(504)];
+    const result = checkLanes(turns, [
+      edge(502, "extends", 501, ["L"]),
+      edge(504, "extends", 503, ["L"]),
+    ]);
+
+    expect(findLaneStats(result, ["L"])?.members.map((m) => m.id)).toEqual([501, 502, 503, 504]);
+    expect(result.errors).toEqual([
+      {
+        class: "E5",
+        anchorId: 502,
+        key: { segment: DEFAULT_SEGMENT, tagSet: ["L"] },
+        role: "sink",
+        nodeId: 502,
+        canonicalId: 504,
+      },
+      {
+        class: "E5",
+        anchorId: 503,
+        key: { segment: DEFAULT_SEGMENT, tagSet: ["L"] },
+        role: "source",
+        nodeId: 503,
+        canonicalId: 501,
+      },
+    ]);
+  });
+
+  test("one instance per EXTRA node — three disjoint chains are FOUR instances, not three and not one", () => {
+    // Pins the arithmetic against both plausible mutations: "one per lane"
+    // (would be 1) and "one per dangling end" (would be 6).
+    const turns = [510, 511, 520, 521, 530, 531].map((id) => node(id));
+    const result = checkLanes(turns, [
+      edge(511, "extends", 510, ["L"]),
+      edge(521, "extends", 520, ["L"]),
+      edge(531, "extends", 530, ["L"]),
+    ]);
+    expect(shapeErrors(result)).toHaveLength(4);
+    expect(shapeErrors(result).map((e) => `${e.anchorId}:${e.class === "E5" ? e.role : ""}`)).toEqual([
+      "511:sink",
+      "520:source",
+      "521:sink",
+      "530:source",
+    ]);
+  });
+
+  test("CANONICAL — the earliest source and the LATEST sink survive; every other one is the violation", () => {
+    const turns = [540, 541, 550, 551].map((id) => node(id));
+    const result = checkLanes(turns, [
+      edge(541, "extends", 540, ["L"]),
+      edge(551, "extends", 550, ["L"]),
+    ]);
+    const sources = shapeErrors(result).filter((e) => e.class === "E5" && e.role === "source");
+    const sinks = shapeErrors(result).filter((e) => e.class === "E5" && e.role === "sink");
+    // Sources are 540 and 550; the EARLIEST (540) is the lane's real start.
+    expect(sources.map((e) => e.anchorId)).toEqual([550]);
+    expect(sources.every((e) => e.class === "E5" && e.canonicalId === 540)).toBe(true);
+    // Sinks are 541 and 551; the LATEST (551) is the lane's real end.
+    expect(sinks.map((e) => e.anchorId)).toEqual([541]);
+    expect(sinks.every((e) => e.class === "E5" && e.canonicalId === 551)).toBe(true);
+  });
+
+  // ---- the null case: a diamond is legal expression ----
+
+  test("DIAMOND — parallel paths that re-merge produce NOTHING", () => {
+    // T561 and T562 both extend T560; T563 extends both. Two routes, but one
+    // start (T560, the only node with no outgoing edge) and one end (T563,
+    // the only node with no incoming one) — the spec keeps this as valid
+    // expression, so the shape law must stay silent on it.
+    const turns = [560, 561, 562, 563].map((id) => node(id));
+    const result = checkLanes(turns, [
+      edge(561, "extends", 560, ["L"]),
+      edge(562, "extends", 560, ["L"]),
+      edge(563, "extends", 561, ["L"]),
+      edge(563, "extends", 562, ["L"]),
+    ]);
+    expect(result.errors).toEqual([]);
+    // Not vacuous: the diamond really does fork and re-merge — report 4(b)
+    // sees two routes over the same nodes E5 just declared conforming.
+    expect(findPath(result, ["L"])?.forkNodes).toEqual([560]);
+    expect(findPath(result, ["L"])?.joinNodes).toEqual([563]);
+  });
+
+  test("a plain chain of any length produces nothing", () => {
+    const turns = [570, 571, 572, 573].map((id) => node(id));
+    const result = checkLanes(turns, [
+      edge(571, "extends", 570, ["L"]),
+      edge(572, "extends", 571, ["L"]),
+      edge(573, "extends", 572, ["L"]),
+    ]);
+    expect(result.errors).toEqual([]);
+  });
+
+  // ---- the edge domain: all eight words, every member ----
+
+  test("DOMAIN — a lane whose end is a tagged OVERRIDE is clean (the golden corpus's own {write-gate} shape)", () => {
+    // T582 overrides T581 inside the lane: the lane genuinely ENDS at that
+    // correction. Restricting the domain to report 4(b)'s stance+consume
+    // graph would leave T582 attached to nothing and report it as an extra
+    // source AND an extra sink — two false positives on a conforming lane.
+    const turns = [580, 581, 582].map((id) => node(id));
+    const result = checkLanes(turns, [
+      edge(581, "extends", 580, ["L"]),
+      edge(582, "override", 581, ["L"]),
+    ]);
+    expect(result.errors).toEqual([]);
+    expect(findLaneStats(result, ["L"])?.members.map((m) => m.id)).toEqual([580, 581, 582]);
+  });
+
+  test("DOMAIN — a declaring turn attached only by tagged `indexes` is a real in-lane node, not a dangling end", () => {
+    // T592 declares the lane by indexing its latest structural node. That
+    // `indexes` edge is the terminus's only in-lane edge; it still counts,
+    // so the lane runs T590 -> T592 with one start and one end.
+    const turns = [590, 591, 592].map((id) => node(id));
+    const result = checkLanes(turns, [
+      edge(591, "extends", 590, ["L"]),
+      edge(592, "indexes", 591, ["L"]),
+    ]);
+    expect(result.errors).toEqual([]);
+    expect(findLaneStats(result, ["L"])?.declaration.terminus).toBe(592);
+  });
+
+  test("DOMAIN — a fork the declaration never re-joins IS an extra end", () => {
+    // The other side of the previous test: T602 declares by indexing the
+    // lane's START (T600) rather than its latest node, so T601 and T602 both
+    // dangle as ends off one start. The declaration edge does not launder a
+    // parallel tail — it just is not one.
+    const turns = [600, 601, 602].map((id) => node(id));
+    const result = checkLanes(turns, [
+      edge(601, "extends", 600, ["L"]),
+      edge(602, "indexes", 600, ["L"]),
+    ]);
+    expect(shapeErrors(result).map((e) => `${e.anchorId}:${e.class === "E5" ? e.role : ""}`)).toEqual([
+      "601:sink",
+    ]);
+    expect(shapeErrors(result)[0]!.class === "E5" && shapeErrors(result)[0]!.canonicalId).toBe(602);
+  });
+
+  test("two lanes are two independent shapes — a node dangling in one is silent about the other", () => {
+    // T611 dangles in {L} (T610<-T611 and T612<-T613 never touch) while
+    // {M}'s own chain is whole. The instance names the lane it belongs to,
+    // so a repair can be aimed without guessing.
+    const turns = [
+      { id: 610, type: ["design"], tags: ["L"] },
+      { id: 611, type: ["design"], tags: ["L"] },
+      { id: 612, type: ["design"], tags: ["L", "M"] },
+      { id: 613, type: ["design"], tags: ["L", "M"] },
+    ];
+    const result = checkLanes(turns, [
+      edge(611, "extends", 610, ["L"]),
+      edge(613, "extends", 612, ["L"]),
+      edge(613, "extends", 612, ["M"]),
+    ]);
+    expect(shapeErrors(result).map((e) => e.class === "E5" && e.key.tagSet.join(","))).toEqual(["L", "L"]);
+    expect(shapeErrors(result).map((e) => e.anchorId)).toEqual([611, 612]);
+  });
+
+  // ---- ordering: the order key, not the row id ----
+
+  test("ORDER KEY — a backfilled turn with a LATER row id but an EARLIER order is the canonical source", () => {
+    // The exact divergence `LaneTurnInput.order` exists for: T622/T623 were
+    // inserted later (higher ids) but sit EARLIER in the conversation. Read
+    // by raw id, the canonical source would be T620 and the canonical sink
+    // T623 — both wrong, and both anchors would move.
+    const turns = [
+      node(620, { order: [0, 5] }),
+      node(621, { order: [0, 6] }),
+      node(622, { order: [0, 1] }),
+      node(623, { order: [0, 2] }),
+    ];
+    const result = checkLanes(turns, [
+      edge(621, "extends", 620, ["L"]),
+      edge(623, "extends", 622, ["L"]),
+    ]);
+    expect(
+      shapeErrors(result).map((e) =>
+        e.class === "E5" ? `${e.role} T${e.nodeId} extra to T${e.canonicalId}` : "",
+      ),
+    ).toEqual([
+      "source T620 extra to T622", // earliest ORDER wins, not the lowest id
+      "sink T623 extra to T621", // latest ORDER wins, not the highest id
+    ]);
+  });
+
+  test("ORDER KEY — a cross-session pair compares epochs, never the session-id half of the tuple", () => {
+    // The tuple-order trap (report 4(c)'s own hazard, here applied to an
+    // ORDERING): a `session_id` carries no wall-clock meaning relative to
+    // another's. Session 7's chain really ran FIRST. A bare tuple compare
+    // would call session 3 earlier and pick T632 as the canonical source.
+    const turns = [
+      node(630, { order: [7, 1], createdAtEpoch: 100 }),
+      node(631, { order: [7, 2], createdAtEpoch: 101 }),
+      node(632, { order: [3, 1], createdAtEpoch: 200 }),
+      node(633, { order: [3, 2], createdAtEpoch: 201 }),
+    ];
+    const result = checkLanes(turns, [
+      edge(631, "extends", 630, ["L"]),
+      edge(633, "extends", 632, ["L"]),
+    ]);
+    expect(
+      shapeErrors(result).map((e) =>
+        e.class === "E5" ? `${e.role} T${e.nodeId} extra to T${e.canonicalId}` : "",
+      ),
+    ).toEqual([
+      "sink T631 extra to T633", // T633's epoch is the latest, though its session id is lower
+      "source T632 extra to T630", // T630's epoch is the earliest, though its session id is higher
+    ]);
+  });
+
+  // ---- anchoring ----
+
+  test("E5 — in-scope vs out-of-scope anchor variants: the same shape defect blocks only the window that owns the node", () => {
+    const outOfScope = checkLanes([640, 641, 642, 643].map((id) => node(id)), [
+      edge(641, "extends", 640, ["L"]),
+      edge(643, "extends", 642, ["L"]),
+    ]);
+    const inScope = checkLanes([650, 651, 652, 653].map((id) => node(id)), [
+      edge(651, "extends", 650, ["L"]),
+      edge(653, "extends", 652, ["L"]),
+    ]);
+    const writable = [650, 651, 652, 653];
+    expect(outOfScope.errors).toHaveLength(2);
+    expect(anchoredIn(outOfScope.errors, writable)).toEqual([]);
+    expect(anchoredIn(inScope.errors, writable)).toHaveLength(2);
+  });
+
+  test("the anchor is the DANGLING node itself, never the canonical one it is extra to", () => {
+    // A window that owns only the canonical start/end must NOT be refused:
+    // it cannot repair a chain it cannot write.
+    const result = checkLanes([660, 661, 670, 671].map((id) => node(id)), [
+      edge(661, "extends", 660, ["L"]),
+      edge(671, "extends", 670, ["L"]),
+    ]);
+    expect(shapeErrors(result).map((e) => e.anchorId)).toEqual([661, 670]);
+    expect(anchoredIn(result.errors, [660, 671])).toEqual([]); // the two CANONICAL nodes
+  });
+
+  test("E5 sorts into the shared error order by anchor then class", () => {
+    // T680 carries an empty type (E3) AND is the later of the lane's two
+    // starts (E5) — one anchor, two classes, and the shared comparator puts
+    // the class order beneath the anchor for both surfaces.
+    const turns = [
+      { id: 675, type: ["design"], tags: ["L"] },
+      { id: 676, type: ["design"], tags: ["L"] },
+      { id: 680, type: [] as string[], tags: ["L"] },
+      { id: 681, type: ["design"], tags: ["L"] },
+    ];
+    const result = checkLanes(turns, [
+      edge(676, "extends", 675, ["L"]),
+      edge(681, "extends", 680, ["L"]),
+    ]);
+    expect(result.errors.map((e) => `${e.anchorId}:${e.class}`)).toEqual([
+      "676:E5",
+      "680:E3",
+      "680:E5",
+    ]);
   });
 });

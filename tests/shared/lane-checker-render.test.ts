@@ -382,6 +382,44 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text.indexOf("## WARNINGS")).toBeLessThan(text.indexOf("## Report 1"));
   });
 
+  // tag-mandate ticket 04 — E5 is the one class whose instance is about a
+  // LANE rather than a row, so its line has to name three things the other
+  // four never need: which lane, which end, and the canonical node the
+  // anchored one is extra to (without that last one the reader cannot tell
+  // "retag this chain" from "bridge it to the lane's real start").
+  test("the ERRORS block renders E5 with its lane, its dangling end, and the canonical node", () => {
+    const withShapeErrors: LaneCheckerResult = {
+      ...emptyResult(),
+      errors: [
+        {
+          class: "E5",
+          anchorId: 502,
+          key: { segment: DEFAULT_SEGMENT, tagSet: ["L"] },
+          role: "sink",
+          nodeId: 502,
+          canonicalId: 504,
+        },
+        {
+          class: "E5",
+          anchorId: 503,
+          key: { segment: "42", tagSet: ["a", "b"] },
+          role: "source",
+          nodeId: 503,
+          canonicalId: 501,
+        },
+      ],
+    };
+    const text = renderLaneCheckerReports(withShapeErrors);
+    expect(text).toContain("2 error(s)");
+    expect(text).toContain(
+      "[E5] anchor T502 -- lane default:{L} has a second sink: T502 dangles beside T504;" +
+        " a lane has exactly one start and one end (retag one chain, or bridge them)",
+    );
+    expect(text).toContain(
+      "[E5] anchor T503 -- lane E42:{a,b} has a second source: T503 dangles beside T501;",
+    );
+  });
+
   test("an error-free result says so explicitly, and the retired vocabulary-conformance section prints nowhere", () => {
     const clean = renderLaneCheckerReports(emptyResult());
     const lines = clean.split("\n");
@@ -674,6 +712,47 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     expect(lines.find((line) => line.includes("● T2"))).not.toContain("✗");
     // T77 is not a member, so it appears ONLY in the block.
     expect(lines.filter((line) => line.includes("T77"))).toHaveLength(1);
+  });
+
+  // tag-mandate ticket 04 — an E5 instance ALWAYS anchors at a lane member
+  // (its node is one of the lane's own edge endpoints by construction), so
+  // unlike E1/E3 it is guaranteed to earn an inline mark as well as a block
+  // line. Both must appear: the mark is where a reader scanning the lane
+  // sees it, the block line is where the canonical counterpart is named.
+  test("the digraph marks an E5-anchored member inline and keeps the block line inside the column bound", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      lanes: [
+        {
+          key: LANE_KEY,
+          phases: [],
+          members: [
+            { id: 2, dead: false },
+            { id: 9, dead: false },
+          ],
+          edgeCountsByRelation: {},
+          declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+          state: { key: LANE_KEY, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+          coverage: { status: "whole", missingTurnIds: [] },
+        },
+      ],
+      errors: [
+        { class: "E5", anchorId: 2, key: LANE_KEY, role: "sink", nodeId: 2, canonicalId: 9 },
+      ],
+    };
+
+    const digraph = renderLaneDigraph(result);
+    const lines = digraph.split("\n");
+    expect(lines[0]).toBe("ERRORS (1)");
+    // Truncation is allowed to eat the teaching tail, never the three facts
+    // that identify the defect: which end, which node, which canonical one.
+    expect(digraph).toContain("[E5] anchor T2 -- lane E42:{ownership} has a second sink: T2 dangles beside T9;");
+    expect(lines.find((line) => line.includes("● T2"))).toContain("✗[E5]");
+    expect(lines.find((line) => line.includes("● T9"))).not.toContain("✗");
+    for (const line of lines) {
+      expect(line.length).toBeLessThanOrEqual(100);
+    }
   });
 
   test("an error-free digraph still states the count, so an empty block is never ambiguous with a missing one", () => {

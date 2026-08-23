@@ -166,8 +166,8 @@
  * lanes, terminus citedness). None of their computations changed with this
  * ticket; they were reclassified, not rewritten.
  *
- * `errors` is the new, separate list: states the GRAMMAR FORBIDS. Four
- * classes ship here (E5, lane shape, is ticket 04):
+ * `errors` is the new, separate list: states the GRAMMAR FORBIDS. Five
+ * classes ship: E1-E4 (ticket 03) and E5, lane shape (ticket 04):
  *
  *   - **E1** an `extends`/`narrows` row carrying NO lane tags. Those two
  *     words' semantics IS continuation of a line of work, so using either
@@ -186,11 +186,19 @@
  *     turns' own `tags` — the subset invariant `turn-phase.ts`'s Gate B
  *     enforces at write time, checked again over STOCK because a later tag
  *     EDIT on an endpoint turn can orphan a row the gate once passed.
+ *   - **E5** a LANE (one segment, one exact tag set) with more than one
+ *     SOURCE or more than one SINK — the spec's lane-shape law is "exactly
+ *     ONE start and ONE end". One instance per EXTRA source/sink, anchored
+ *     at that node. Diamonds (parallel paths that re-merge) produce nothing:
+ *     a diamond's branches share the one start and the one end. See "Lane
+ *     shape (E5)" below for the direction convention, the edge domain, and
+ *     the canonical-vs-extra rule.
  *
  * ### The ANCHOR (spec "Anchoring and repairability") — the load-bearing field
  *
  * Every error instance carries `anchorId`: an EDGE error anchors at its
- * CITING turn, a TYPE error at the turn itself. The settlement commit gate
+ * CITING turn, a TYPE error at the turn itself, a SHAPE error at the
+ * violating extra source/sink node. The settlement commit gate
  * (ticket 05) counts only instances anchored inside the window's writable
  * scope, so an error anchored outside blocks its OWN window and never this
  * one — without that scoping one bad out-of-window edge would pin a window
@@ -200,11 +208,52 @@
  *   1. `anchorId` is always a turn id the repairing agent can address —
  *      never an edge row id, never a lane token — and for an edge error it
  *      is the CITING side, because retract/re-add is the citing turn's own
- *      power.
+ *      power. For E5 it is the DANGLING node itself, whose own tags/edges
+ *      are what the repair (retag one chain, or bridge them) changes.
  *   2. `errors` is UNCAPPED. Every other list in this module caps its
  *      entries for display; a capped ERROR list would let an instance past
  *      the commit gate simply by sorting late, and the window would commit
  *      dirty. The RENDER caps; the data never does.
+ *
+ * ### Lane shape (E5) — direction, domain, and which node is EXTRA
+ *
+ * DIRECTION. An edge row points citing -> cited, i.e. BACKWARD in time
+ * (`lane-interpretation.ts`: "`citingId` is always the LATER turn"). So a
+ * lane's flow-START is the node that is cited but never cites in-lane — no
+ * OUTGOING edge — which is exactly report 4(b)'s own `starts` field; its
+ * flow-END is the node that cites but is never cited — no INCOMING edge.
+ * This module keeps that vocabulary: SOURCE = no outgoing (the start),
+ * SINK = no incoming (the end). Read against the time-forward flow rather
+ * than the stored arrows, those are the ordinary "nothing feeds in" /
+ * "nothing leads out" definitions.
+ *
+ * DOMAIN. All of the lane's OWN tagged edges (`Lane.taggedEdges`, exact tag
+ * set, all eight relation words) over all of its members — deliberately NOT
+ * report 4(b)'s `LANE_PATH_RELATIONS` subgraph. A lane's members ARE its
+ * tagged edges' endpoints, so this domain judges every member and lets none
+ * hide from the shape law behind an `indexes`/`override` edge; and a lane
+ * whose last event is a tagged `override` (the golden corpus's
+ * `{write-gate}`: T958 override T957) genuinely ENDS at that override,
+ * whereas a path-relations-only domain would leave T958 attached to nothing
+ * and report it as an extra source AND an extra sink — a false positive on
+ * a conforming lane.
+ *
+ * CANONICAL vs EXTRA. The canonical SOURCE is the EARLIEST source by order
+ * key and the canonical SINK the LATEST sink — the lane's real start and
+ * real end in time; every other source/sink is one instance. The comparator
+ * is `compareOrderKeyAcrossSessions`, not the bare tuple compare: a lane can
+ * span sessions and a `session_id` carries no wall-clock meaning relative to
+ * another's (the "tuple-order trap" report 4(c) already avoids). Ties — and
+ * members missing from `turns` entirely, whose order falls back to `[0, id]`
+ * by this module's own convention — break by ascending id, so the choice is
+ * always deterministic.
+ *
+ * A member can never be BOTH an extra source and an extra sink: every member
+ * is an endpoint of at least one of the lane's tagged edges, so it has an
+ * in-edge or an out-edge. A cross-segment lane is enumerated once per side's
+ * segment (`lane-interpretation.ts`'s dual appearance), so a defective one
+ * reports its instances once per copy — exactly as reports 2/3/4 already
+ * emit one entry per copy.
  *
  * ### Turn tags (E4's second input)
  *
@@ -220,6 +269,7 @@ import { EDGE_RELATIONS, STANCE_RELATIONS } from "./turn-phase";
 import { isMemoryType } from "./type-vocabulary";
 import {
   canonicalTagSet,
+  compareOrderKeyAcrossSessions,
   DEFAULT_SEGMENT,
   deriveLaneInterpretation,
   deriveLaneStates,
@@ -452,7 +502,7 @@ export interface LaneVocabularyConformance {
   };
 }
 
-// ------------------------------------------------------ Errors (E1-E4)
+// ------------------------------------------------------ Errors (E1-E5)
 
 /**
  * One taggable input turn, widened with the turn's OWN stored tag set —
@@ -473,8 +523,8 @@ export interface LaneCheckerTurnInput extends LaneTurnInput {
   tags?: readonly string[];
 }
 
-/** The four classes this ticket ships. E5 (lane shape) is ticket 04 and is deliberately absent from this union until then. */
-export type LaneErrorClass = "E1" | "E2" | "E3" | "E4";
+/** The five classes of the spec's error table: E1-E4 (tag-mandate ticket 03) and E5, lane shape (ticket 04). */
+export type LaneErrorClass = "E1" | "E2" | "E3" | "E4" | "E5";
 
 interface LaneErrorAnchor {
   /**
@@ -530,11 +580,32 @@ export interface LaneSubsetInvariantError extends LaneErrorAnchor {
   missing: readonly LaneSubsetInvariantMiss[];
 }
 
+/** Which end of a lane an E5 instance dangles from — SOURCE = no outgoing in-lane edge (the lane's start), SINK = no incoming one (its end). See module header, "Lane shape (E5)". */
+export type LaneShapeRole = "source" | "sink";
+
+/**
+ * E5 — a lane with more than one source or more than one sink, one instance
+ * per EXTRA node. Anchor: the violating node itself (so `anchorId ===
+ * nodeId`, kept as two fields for the same reason E3 keeps `id` — the commit
+ * gate reads only `anchorId` and needs no per-class knowledge).
+ */
+export interface LaneShapeError extends LaneErrorAnchor {
+  class: "E5";
+  /** The lane whose shape this violates — a node dangling in ONE lane is silent about every other lane it belongs to. */
+  key: LaneKey;
+  role: LaneShapeRole;
+  /** The extra source/sink. */
+  nodeId: number;
+  /** The source/sink this one is extra TO: the lane's earliest source, or its latest sink (module header, "CANONICAL vs EXTRA"). Never equal to `nodeId`. */
+  canonicalId: number;
+}
+
 export type LaneCheckerError =
   | LaneUntaggedContinuationError
   | LaneOutOfVocabularyRelationError
   | LaneTypeVocabularyError
-  | LaneSubsetInvariantError;
+  | LaneSubsetInvariantError
+  | LaneShapeError;
 
 // -------------------------------------------------------------------------
 
@@ -560,7 +631,7 @@ export interface LaneCheckerResult {
    */
   vocabularyConformance: LaneVocabularyConformance;
   /**
-   * Tag-mandate ticket 03 — states the grammar forbids, E1-E4, sorted by
+   * Tag-mandate tickets 03/04 — states the grammar forbids, E1-E5, sorted by
    * `anchorId` then class then endpoints. UNCAPPED on purpose (module
    * header, "The ANCHOR"): the settlement commit gate filters this list by
    * `anchorId` against the window's writable scope, so a display cap here
@@ -991,19 +1062,94 @@ function computeSubsetInvariantErrors(
   return errors;
 }
 
+/**
+ * E5 (module header, "Lane shape"): per lane, the members with no OUTGOING
+ * in-lane edge (sources / starts) and the members with no INCOMING one
+ * (sinks / ends), each over the lane's OWN tagged edges across all eight
+ * relation words. More than one of either is a violation of the "exactly one
+ * start and one end" law, and every source past the EARLIEST — and every
+ * sink before the LATEST — is one instance, anchored at that node.
+ *
+ * A diamond yields exactly one of each by construction (its parallel
+ * branches share the start they fork from and the end they re-merge into),
+ * so it produces nothing: legal expression, per the spec's own rubric text.
+ */
+function computeLaneShapeErrors(
+  lanes: readonly Lane[],
+  turnById: ReadonlyMap<number, LaneCheckerTurnInput>,
+): LaneShapeError[] {
+  // Same fallback the rest of this module uses for a turn absent from the
+  // input projection: order `[0, id]`, no epoch — so a partially covered
+  // lane still gets a deterministic canonical choice rather than none.
+  const sortKeyFor = (id: number): { order: LaneOrderKey; createdAtEpoch?: number } => {
+    const turn = turnById.get(id);
+    return { order: turn?.order ?? [0, id], createdAtEpoch: turn?.createdAtEpoch };
+  };
+  const byOrderThenId = (a: number, b: number): number =>
+    compareOrderKeyAcrossSessions(sortKeyFor(a), sortKeyFor(b)) || a - b;
+
+  const errors: LaneShapeError[] = [];
+  for (const lane of lanes) {
+    const cites = new Set<number>(); // has an outgoing in-lane edge
+    const cited = new Set<number>(); // has an incoming in-lane edge
+    for (const edge of lane.taggedEdges) {
+      cites.add(edge.citingId);
+      cited.add(edge.citedId);
+    }
+    const memberIds = lane.members.map((member) => member.id);
+    const sources = memberIds.filter((id) => !cites.has(id)).sort(byOrderThenId);
+    const sinks = memberIds.filter((id) => !cited.has(id)).sort(byOrderThenId);
+
+    if (sources.length > 1) {
+      // Canonical = EARLIEST; every later source dangles.
+      const canonicalId = sources[0]!;
+      for (const nodeId of sources.slice(1)) {
+        errors.push({ class: "E5", anchorId: nodeId, key: lane.key, role: "source", nodeId, canonicalId });
+      }
+    }
+    if (sinks.length > 1) {
+      // Canonical = LATEST; every earlier sink dangles.
+      const canonicalId = sinks[sinks.length - 1]!;
+      for (const nodeId of sinks.slice(0, -1)) {
+        errors.push({ class: "E5", anchorId: nodeId, key: lane.key, role: "sink", nodeId, canonicalId });
+      }
+    }
+  }
+  return errors;
+}
+
 /** Endpoint/identity tie-break shared by every error class, after `anchorId` and `class` — deterministic output for a byte-comparable render. */
 function compareErrors(a: LaneCheckerError, b: LaneCheckerError): number {
   if (a.anchorId !== b.anchorId) return a.anchorId - b.anchorId;
   if (a.class !== b.class) return a.class.localeCompare(b.class);
-  const citedA = a.class === "E3" ? a.id : a.citedId;
-  const citedB = b.class === "E3" ? b.id : b.citedId;
+  const citedA = errorIdentity(a);
+  const citedB = errorIdentity(b);
   if (citedA !== citedB) return citedA - citedB;
-  const relationA = a.class === "E3" ? "" : a.relation;
-  const relationB = b.class === "E3" ? "" : b.relation;
+  const relationA = errorWord(a);
+  const relationB = errorWord(b);
   if (relationA !== relationB) return relationA.localeCompare(relationB);
-  const tagsA = a.class === "E4" ? a.tags.join(",") : "";
-  const tagsB = b.class === "E4" ? b.tags.join(",") : "";
-  return tagsA.localeCompare(tagsB);
+  return errorDetail(a).localeCompare(errorDetail(b));
+}
+
+/** The compare's second key: the counterpart turn for an edge class, the turn itself for E3, the dangling node for E5. */
+function errorIdentity(error: LaneCheckerError): number {
+  if (error.class === "E3") return error.id;
+  if (error.class === "E5") return error.nodeId;
+  return error.citedId;
+}
+
+/** The compare's third key: the relation word for an edge class, the dangling END for E5 (two lanes can strand the SAME node, once per role). */
+function errorWord(error: LaneCheckerError): string {
+  if (error.class === "E3") return "";
+  if (error.class === "E5") return error.role;
+  return error.relation;
+}
+
+/** The compare's last key: E4's own tag set, and for E5 the lane token — the only thing distinguishing two instances a single node earns in two different lanes (or in one cross-segment lane's two copies). */
+function errorDetail(error: LaneCheckerError): string {
+  if (error.class === "E4") return error.tags.join(",");
+  if (error.class === "E5") return laneToken(error.key.segment, error.key.tagSet);
+  return "";
 }
 
 /**
@@ -1177,9 +1323,10 @@ export function checkLanes(
   const bypass = computeBypass(lanes, vocabEdges);
   const timeOrderViolations = computeTimeOrderViolations(turnById, vocabEdges);
 
-  // ---- ERRORS (tag-mandate ticket 03, module header). E2/E3 are the SAME
-  // uncapped fact lists `vocabularyConformance` caps for display, classed
-  // rather than recomputed; E1/E4 are this ticket's own two computations.
+  // ---- ERRORS (tag-mandate tickets 03/04, module header). E2/E3 are the
+  // SAME uncapped fact lists `vocabularyConformance` caps for display,
+  // classed rather than recomputed; E1/E4 read the in-vocabulary edge set;
+  // E5 reads the enumerated `lanes` above, never a graph of its own.
   // The list stays uncapped — the commit gate filters it by `anchorId`. ----
   const errors: LaneCheckerError[] = [
     ...computeUntaggedContinuationErrors(vocabEdges),
@@ -1202,6 +1349,7 @@ export function checkLanes(
       }),
     ),
     ...computeSubsetInvariantErrors(turnById, vocabEdges),
+    ...computeLaneShapeErrors(lanes, turnById),
   ].sort(compareErrors);
 
   return {

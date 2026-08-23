@@ -14,7 +14,7 @@ one chain or bridge them).
 
 **Blocked by:** 03 (the errors block infrastructure).
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: domain narrowed to stance words → 8 red; canonical comparator degraded to bare tuple → 11 red; instance-count reading = one per EXTRA end (the ticket prose said four, the normative paragraph and the implementation say two — ticket prose was the error))
 
 - [ ] Disjoint same-set chains fixture → the expected instances at the
       expected anchors; diamond fixture → zero

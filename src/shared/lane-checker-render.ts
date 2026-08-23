@@ -35,10 +35,10 @@ import { DEFAULT_SEGMENT, laneToken, type LaneKey } from "./lane-interpretation"
  *     (requirement 2). CLI-only, per the spec's own "digraph rendering is
  *     human/CLI-only; agents receive the numeric reports."
  *
- * ## The error/warning split (tag-mandate ticket 03)
+ * ## The error/warning split (tag-mandate tickets 03/04)
  *
  * Both surfaces lead with an ERRORS block — states the grammar forbids,
- * E1-E4, each naming its ANCHOR turn — visually separated from everything
+ * E1-E5, each naming its ANCHOR turn — visually separated from everything
  * below it, which is the WARNING side (the three principles' aspirational
  * facts, reports 1-4 and the cross-segment warnings, unchanged).
  *
@@ -291,6 +291,24 @@ function renderLaneError(error: LaneCheckerError): string {
         error.missing
           .map((miss) => '"' + miss.tag + "\" missing from the " + miss.endpoint + " turn's tags")
           .join("; ")
+      );
+    case "E5":
+      // Names the CANONICAL node too, because the repair is a choice between
+      // two shapes ("retag this chain into its own lane" vs "bridge it to the
+      // lane's real start/end") and neither is decidable without knowing
+      // which node the lane already runs from/to.
+      return (
+        head +
+        "lane " +
+        formatTagSet(error.key) +
+        " has a second " +
+        error.role +
+        ": T" +
+        error.nodeId +
+        " dangles beside T" +
+        error.canonicalId +
+        "; a lane has exactly one start and one end" +
+        " (retag one chain, or bridge them)"
       );
   }
 }
