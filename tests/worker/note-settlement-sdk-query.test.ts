@@ -352,6 +352,10 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       expect(description).toContain("closed-valid/closed-invalid/open");
       expect(description).toContain("consume-class use");
       expect(description).toContain("still ADOPTED, not unused");
+      // semantic-conformance ticket 02: the one added clause naming the new
+      // vocabulary-conformance facts, so the agent knows to read them.
+      expect(description).toContain("vocabulary-conformance");
+      expect(description).toContain("supersedes");
     } finally {
       db?.close();
     }
@@ -399,6 +403,109 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 3,
+      });
+    } finally {
+      db?.close();
+    }
+  });
+
+  // semantic-conformance ticket 02: the vocabulary-conformance fact block
+  // reaches the settlement surface too, not just the CLI — same "prove it at
+  // the real registered handler" discipline as the state-line/used[] test
+  // above.
+  test("a real lane_check call surfaces a legacy-typed turn and a frozen-legacy supersedes edge in its text result", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const sessionDbId = upsertSession(db, {
+        contentSessionId: "settlement-sdk-query-lane-check-vocab-session",
+        project: "/tmp/project-settlement-sdk-query-lane-check-vocab",
+        title: "settlement sdk-query lane-check vocabulary fixture",
+        content: null,
+        insight: null,
+        createdAtEpoch: NOW - 10_000,
+        updatedAtEpoch: NOW - 10_000,
+        completedAtEpoch: null,
+      }).id;
+
+      function insertTurn(promptNumber: number, type: string): number {
+        return db!
+          .query<{ id: number }, [number, number, string, string, number, string]>(
+            `INSERT INTO turns (
+               session_id, prompt_number, status, user_prompt, assistant_response,
+               tool_call_count, created_at_epoch, type
+             ) VALUES (?, ?, 'active', ?, ?, 3, ?, ?)
+             RETURNING id`,
+          )
+          .get(sessionDbId, promptNumber, `prompt ${promptNumber}`, `response ${promptNumber}`, NOW - 900 + promptNumber, type)!
+          .id;
+      }
+
+      const t1 = insertTurn(1, '["bugfix"]'); // legacy-typed: outside MEMORY_TYPES
+      const t2 = insertTurn(2, '["design"]');
+
+      writeMemoryEdges(
+        db,
+        [
+          { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", tags: ["vocab-fixture"] },
+          { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "indexes", provenance: "asserted", tags: ["vocab-fixture"] },
+          { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "supersedes", provenance: "asserted", tags: [] },
+        ],
+        NOW,
+      );
+
+      enqueueNoteSettlementWindows(
+        db,
+        [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 2, triggerType: "consecutive" }],
+        NOW,
+        SETTLEMENT_ERA_CUTOFF_EPOCH,
+      );
+      const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+      if (!job) {
+        throw new Error("fixture failed to claim a settlement job");
+      }
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const laneCheckReceipt = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const text = laneCheckReceipt.content[0]!.text;
+          expect(text).toContain("## Vocabulary conformance");
+          expect(text).toContain(`T${t1} - type: [bugfix] (outside vocabulary: bugfix)`);
+          expect(text).toContain(`T${t2} -> T${t1} (supersedes)`);
+          // Never admitted: the lane's own edge tally in report 1 is exactly
+          // the extends+indexes pair.
+          expect(text).toContain("extends=1");
+          expect(text).toContain("indexes=1");
+          expect(text).not.toContain("supersedes=");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        reviewableTurnIds: new Set(),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 2,
       });
     } finally {
       db?.close();
