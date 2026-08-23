@@ -12,7 +12,7 @@ the CLI and the settlement compact surface:
 **Blocked by:** 02 — Election core module (owns the lane-state helper's home in
 the interpretation core; this ticket only consumes it).
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: used[] member filter → 4 red, open-state lastDeclarer render → 1 red)
 
 - [ ] Report 1 renders the three states correctly on fixtures covering
       closed-valid, dead-core invalid, and reopened/open lanes

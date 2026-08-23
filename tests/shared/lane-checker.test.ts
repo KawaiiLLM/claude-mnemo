@@ -8,6 +8,7 @@ import {
   type LaneEdgeInput,
   type LaneTurnInput,
 } from "../../src/shared/lane-checker";
+import { renderLaneCheckerReports } from "../../src/shared/lane-checker-render";
 
 const design = (id: number, type: string[] = ["design"]): LaneTurnInput => ({ id, type });
 const edge = (
@@ -240,6 +241,45 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
 
   test("report 4c golden — no time-order violations: the fixture has no cross-session or forward edges", () => {
     expect(result.timeOrderViolations).toEqual([]);
+  });
+
+  // milestone-election ticket 04 — recomputed by running the real
+  // implementation (`deriveLaneStates` via `checkLanes`) against the
+  // fixture, not hand-guessed, the same methodology every other golden test
+  // in this block uses. All 11 declared lanes read closed-valid (the spec's
+  // own measured baseline: "All 11 closed lanes are valid on this window").
+  // {write-gate} is the one undeclared lane — open, no declarer at all.
+  test("report 1 golden — every declared lane's state is closed-valid; {write-gate} is open with no declarer", () => {
+    for (const tag of declaredLaneTags) {
+      const stats = findLaneStats(result, [tag]);
+      expect(stats?.state.closure).toBe("closed");
+      expect(stats?.state.validity).toBe("valid");
+      expect(stats?.state.lastDeclarer).toBe(stats?.declaration.terminus);
+    }
+    const writeGate = findLaneStats(result, ["write-gate"]);
+    expect(writeGate?.state).toEqual({
+      key: writeGate!.key,
+      closure: "open",
+      validity: null,
+      terminus: null,
+      lastDeclarer: null,
+    });
+  });
+
+  // T1351 trap fix — external CONSUME citations the fixture actually
+  // carries (`python3` probe over the fixture JSON, not hand-guessed):
+  // {ownership} is used by 902->900, {segment-audit} by 991->990 and
+  // 992->989. None of these are grounds/testimony, so the OLD report (no
+  // `used[]`) rendered these lanes' "cited from outside" line as if they
+  // were never cited by consume at all.
+  test("report 1 golden — used[] lists the fixture's real external consume citations", () => {
+    const ownership = findLaneStats(result, ["ownership"]);
+    expect(ownership?.citedness.usedFromNonMembers).toEqual([{ citingId: 902, citedId: 900 }]);
+    const segmentAudit = findLaneStats(result, ["segment-audit"]);
+    const pairs = segmentAudit?.citedness.usedFromNonMembers
+      .map((f) => `${f.citingId}->${f.citedId}`)
+      .sort();
+    expect(pairs).toEqual(["991->990", "992->989"]);
   });
 });
 
@@ -710,5 +750,225 @@ describe("report 4c — time-order violations", () => {
     const result = checkLanes(turns, edges);
     // Neither turn carries `createdAtEpoch`, so the cross-session comparison cannot be judged.
     expect(result.timeOrderViolations).toEqual([]);
+  });
+});
+
+// ------------------------------------------------ milestone-election ticket 04: report 1's state line
+
+describe("report 1's state line (milestone-election ticket 04) — closed-valid / closed-invalid / open, consumed from deriveLaneStates", () => {
+  test("a plain closed lane with a living core reads closed-valid, lastDeclarer equals the terminus", () => {
+    const turns = [design(30), design(31)];
+    const edges = [edge(31, "extends", 30, ["v"]), edge(31, "indexes", 30, ["v"])];
+    const result = checkLanes(turns, edges);
+    const stats = findLaneStats(result, ["v"]);
+    expect(stats?.state.closure).toBe("closed");
+    expect(stats?.state.validity).toBe("valid");
+    expect(stats?.state.terminus).toBe(31);
+    expect(stats?.state.lastDeclarer).toBe(31);
+  });
+
+  // Same fixture ticket 02's own "abandonment ritual" test uses — repudiate
+  // (kill the wrong conclusion via same-tag override), THEN declare closure
+  // indexing the now-dead core.
+  test("the abandonment ritual (repudiate, then declare closure indexing the dead core) reads closed-invalid", () => {
+    const turns = [design(10), design(11), design(12), design(13)];
+    const edges = [
+      edge(11, "extends", 10, ["dead"]),
+      edge(12, "override", 11, ["dead"]), // repudiate 11 first
+      edge(13, "indexes", 11, ["dead"]), // then declare closure indexing the dead core
+    ];
+    const result = checkLanes(turns, edges);
+    const stats = findLaneStats(result, ["dead"]);
+    expect(stats?.state.closure).toBe("closed");
+    expect(stats?.state.validity).toBe("invalid");
+    expect(stats?.state.terminus).toBe(13);
+    expect(stats?.state.lastDeclarer).toBe(13);
+    // The rendered text says exactly "closed-invalid" — no other spelling.
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("declaration: closed-invalid");
+  });
+
+  test("a lane reopened by a later override reads open, naming the pre-override winner as lastDeclarer — no invented 'last stable milestone'", () => {
+    const turns = [design(101), design(102), design(103)];
+    const edges = [
+      edge(102, "extends", 101, ["x"]),
+      edge(102, "indexes", 101, ["x"]),
+      edge(103, "override", 102, ["x"]), // reopens: the lane has no living terminus any more
+    ];
+    const result = checkLanes(turns, edges);
+    const stats = findLaneStats(result, ["x"]);
+    expect(stats?.state.closure).toBe("open");
+    expect(stats?.state.validity).toBeNull();
+    expect(stats?.state.terminus).toBeNull(); // no living "last stable milestone"
+    expect(stats?.state.lastDeclarer).toBe(102); // the override's own target, honestly named
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("declaration: open (last declarer T102)");
+  });
+
+  test("an undeclared lane (structural continuation only, no `indexes` ever) reads open with lastDeclarer null — bare 'open', no fabricated declarer", () => {
+    const turns = [design(401), design(402), design(403)];
+    const edges = [edge(402, "extends", 401, ["silent"]), edge(403, "extends", 402, ["silent"])];
+    const result = checkLanes(turns, edges);
+    const stats = findLaneStats(result, ["silent"]);
+    expect(stats?.state.closure).toBe("open");
+    expect(stats?.state.lastDeclarer).toBeNull();
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("declaration: open");
+    expect(text).not.toContain("declaration: open (last declarer");
+  });
+});
+
+// ------------------------------------------------ milestone-election ticket 04: used[] consume-class citations
+
+describe("used[] — consume-class external citations (the T1351 trap fix)", () => {
+  const turns = [design(1), design(2), design(3), design(4), design(5), design(6)];
+  // Lane {u}: 2 extends 1, declared by 2's own tagged indexes. 3's own
+  // consume edge is IN-LANE (both endpoints members of {u} — 3 is not a
+  // member of {u} until it gets its own {u}-tagged edge, so give it one).
+  const edges = [
+    edge(2, "extends", 1, ["u"]),
+    edge(2, "indexes", 1, ["u"]),
+    edge(3, "consume", 2, ["u"]), // IN-LANE: 3 becomes a {u} member via this same tagged edge
+    edge(4, "consume", 1, []), // EXTERNAL, untagged consume -> counts
+    edge(5, "consume", 2, ["other-lane"]), // EXTERNAL, tagged with a DIFFERENT lane's set -> still counts (any tag state)
+    edge(6, "verifies", 1, []), // EXTERNAL testimony, a DIFFERENT citer -> must NOT appear in used[]
+  ];
+  const result = checkLanes(turns, edges);
+  const stats = findLaneStats(result, ["u"]);
+
+  test("external consume citations (untagged and differently-tagged) both land in usedFromNonMembers", () => {
+    const pairs = stats?.citedness.usedFromNonMembers.map((f) => `${f.citingId}->${f.citedId}`).sort();
+    expect(pairs).toEqual(["4->1", "5->2"]);
+  });
+
+  test("a member's own IN-LANE consume edge (3->2, both {u} members) never enters usedFromNonMembers", () => {
+    expect(stats?.citedness.usedFromNonMembers.some((f) => f.citingId === 3)).toBe(false);
+    // Confirm 3 really is a member (the in-lane exclusion is doing real work, not vacuous).
+    expect(stats?.members.some((m) => m.id === 3)).toBe(true);
+  });
+
+  test("testimony from outside (verifies/refutes) never enters usedFromNonMembers, only testimonyFromNonMembers", () => {
+    expect(stats?.citedness.usedFromNonMembers.some((f) => f.citingId === 6)).toBe(false);
+    expect(stats?.citedness.testimonyFromNonMembers).toEqual([{ citingId: 6, citedId: 1, relation: "verifies" }]);
+  });
+
+  test("the rendered text carries used[] beside grounds[]/testimony[]", () => {
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("used[T4->T1, T5->T2]");
+  });
+});
+
+// ------------------------------------------------ milestone-election ticket 04: reports 2/3/4 byte-stability pin
+
+describe("reports 2/3/4 are byte-stable across the ticket 04 report-1-only change", () => {
+  // Captured from the ACTUAL `renderLaneCheckerReports` output for the golden
+  // fixture before ticket 04's report-1 edits landed (`## Report 2` onward,
+  // verbatim) — this ticket touches only report 1's rendering
+  // (`renderStatsReport`); reports 2/3/4 go through `renderComponentReport`/
+  // `renderPathReport`/`renderInterfacePair`/`renderBypassReport`/
+  // `renderTimeOrderViolation`/`renderSharedNodes`, none of which this ticket
+  // edits. A future change that (even accidentally) perturbs any of those
+  // functions' output breaks this pin.
+  const REPORT_2_ONWARD_BASELINE = [
+    "## Report 2 -- component integrity",
+    "Lane default:{cadence} - components: 1 (healthy)",
+    "  island@978: 978,979,981",
+    "Lane default:{contract-repair} - components: 1 (healthy)",
+    "  island@982: 982,983,984",
+    "Lane default:{contract-verify} - components: 1 (healthy)",
+    "  island@945: 945,946",
+    "Lane default:{ownership} - components: 1 (healthy)",
+    "  island@900: 900,910,912,913",
+    "Lane default:{relation-vocabulary} - components: 1 (healthy)",
+    "  island@933: 933,935,937,938,939",
+    "Lane default:{rewind-marking} - components: 1 (healthy)",
+    "  island@914: 914,915",
+    "Lane default:{segment-audit} - components: 1 (healthy)",
+    "  island@989: 989,990",
+    "Lane default:{settlement-scope} - components: 1 (healthy)",
+    "  island@900: 900,906",
+    "Lane default:{spec-design} - components: 1 (healthy)",
+    "  island@900: 900,901",
+    "Lane default:{turn-edge-mechanism} - components: 1 (healthy)",
+    "  island@926: 926,927,929",
+    "Lane default:{view-spec} - components: 1 (healthy)",
+    "  island@919: 919,920,921,922",
+    "Lane default:{write-gate} - components: 1 (healthy)",
+    "  island@950: 950,951,952,953,954,955,957,958",
+    "",
+    "## Report 3 -- shared components (multi-lane entanglement)",
+    "component@918: default:{contract-verify}, default:{ownership}, default:{relation-vocabulary}, default:{settlement-scope}, default:{spec-design}, default:{turn-edge-mechanism}, default:{view-spec}",
+    "  shared T900 (designed fork/merge): default:{ownership}, default:{settlement-scope}, default:{spec-design}",
+    "component@958: default:{cadence}, default:{contract-repair}, default:{segment-audit}, default:{write-gate}",
+    "",
+    "## Report 4a -- inter-lane interfaces + per-lane bypass (fewer/zero is the aspiration; nothing enforced)",
+    "  default:{cadence} <-> default:{segment-audit}: 1",
+    "  default:{contract-verify} <-> default:{ownership}: 1",
+    "  default:{contract-verify} <-> default:{relation-vocabulary}: 1",
+    "  Lane default:{cadence} - bypass: 2",
+    "    T985 -> T978 (grounds)",
+    "    T989 -> T978 (grounds)",
+    "  Lane default:{contract-repair} - bypass: 1",
+    "    T985 -> T982 (consume)",
+    "  Lane default:{contract-verify} - bypass: 0",
+    "  Lane default:{ownership} - bypass: 5",
+    "    T901 -> T900 (extends {spec-design})",
+    "    T902 -> T900 (consume)",
+    "    T906 -> T900 (narrows {settlement-scope})",
+    "    T936 -> T910 (grounds)",
+    "    T946 -> T912 (grounds)",
+    "  Lane default:{relation-vocabulary} - bypass: 1",
+    "    T942 -> T935 (grounds)",
+    "  Lane default:{rewind-marking} - bypass: 0",
+    "  Lane default:{segment-audit} - bypass: 1",
+    "    T992 -> T989 (consume)",
+    "  Lane default:{settlement-scope} - bypass: 3",
+    "    T901 -> T900 (extends {spec-design})",
+    "    T902 -> T900 (consume)",
+    "    T910 -> T900 (extends {ownership})",
+    "  Lane default:{spec-design} - bypass: 3",
+    "    T902 -> T900 (consume)",
+    "    T906 -> T900 (narrows {settlement-scope})",
+    "    T910 -> T900 (extends {ownership})",
+    "  Lane default:{turn-edge-mechanism} - bypass: 0",
+    "  Lane default:{view-spec} - bypass: 0",
+    "",
+    "## Report 4b -- start-to-terminus path counts (fact, no target)",
+    "Lane default:{cadence} - paths: 1 (terminus T981; starts: 978)",
+    "  folded pathCount=3 (citing turns folded: 985,989,992)",
+    "Lane default:{contract-repair} - paths: 1 (terminus T984; starts: 982)",
+    "  folded pathCount=1 (citing turns folded: -)",
+    "Lane default:{contract-verify} - paths: 1 (terminus T946; starts: 945)",
+    "  folded pathCount=1 (citing turns folded: -)",
+    "Lane default:{ownership} - paths: 1 (terminus T913; starts: 900)",
+    "  folded pathCount=4 (citing turns folded: 936,946)",
+    "Lane default:{relation-vocabulary} - paths: 1 (terminus T939; starts: 933)",
+    "  folded pathCount=3 (citing turns folded: 940,942,945)",
+    "Lane default:{rewind-marking} - paths: 1 (terminus T915; starts: 914)",
+    "  folded pathCount=1 (citing turns folded: -)",
+    "Lane default:{segment-audit} - paths: 1 (terminus T990; starts: 989)",
+    "  folded pathCount=1 (citing turns folded: -)",
+    "Lane default:{settlement-scope} - paths: 1 (terminus T906; starts: 900)",
+    "  folded pathCount=1 (citing turns folded: -)",
+    "Lane default:{spec-design} - paths: 1 (terminus T901; starts: 900)",
+    "  folded pathCount=1 (citing turns folded: -)",
+    "Lane default:{turn-edge-mechanism} - paths: 1 (terminus T929; starts: 926)",
+    "  folded pathCount=1 (citing turns folded: 930)",
+    "Lane default:{view-spec} - paths: 1 (terminus T922; starts: 919)",
+    "  folded pathCount=1 (citing turns folded: 923)",
+    "Lane default:{write-gate} - paths: skipped (undeclared); starts: 950",
+    "",
+    "## Report 4c -- time-order violations (the DAG guarantee)",
+    "(none)",
+    "",
+    "## Cross-segment warnings",
+    "(none)",
+  ].join("\n");
+
+  test("the golden fixture's report 2/3/4 text (## Report 2 onward) is byte-identical to the pre-ticket-04 baseline", () => {
+    const result = checkLanes(fixtureTurns, fixtureEdges);
+    const text = renderLaneCheckerReports(result);
+    const tail = text.slice(text.indexOf("## Report 2"));
+    expect(tail).toBe(REPORT_2_ONWARD_BASELINE);
   });
 });

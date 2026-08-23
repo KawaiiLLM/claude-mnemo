@@ -396,6 +396,37 @@ describe("supplementary widening: cross-phase citedness, override, and the compo
     assertNoDanglingEdges(projection);
   });
 
+  // milestone-election ticket 04 — no NEW adapter plumbing was needed for
+  // `used[]`: an external same-phase `consume` citation already reaches the
+  // checker through the SAME component-neighbourhood widening report 4a's
+  // bypass count already depends on (the homeless-lane fixpoint closure,
+  // `widenComponentClosure`, for this default-segment scenario) — `consume`
+  // has been in `LANE_COMPONENT_RELATIONS_SQL` since ticket 06. This test
+  // proves the existing widening already carries it end to end into
+  // `citedness.usedFromNonMembers`, the same way the grounds test above
+  // proves it for `citedness.groundsFromNonMembers`.
+  test("an external consume citation into a lane member is loaded (report 1 used[])", () => {
+    const sessionId = seedSession();
+    const t1 = insertTurn(sessionId, 1, { type: ["design"] });
+    const t2 = insertTurn(sessionId, 2, { type: ["design"] });
+    const outside = insertTurn(sessionId, 3, { type: ["design"] });
+    tagEdge(t2, t1, "extends", ["ownership"]);
+    tagEdge(outside, t1, "consume", []);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+
+    const result = checkLanes(projection.turns, projection.edges);
+    expect(result.lanes[0]!.citedness.usedFromNonMembers).toEqual([
+      { citingId: outside, citedId: t1 },
+    ]);
+    assertNoDanglingEdges(projection);
+  });
+
   test("an untagged global-kill override touching a member is loaded", () => {
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1);

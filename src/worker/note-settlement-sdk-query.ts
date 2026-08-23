@@ -165,8 +165,10 @@ const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
 const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "Run the lane checker over THIS window's own scope (no parameters) and " +
   "return its four reports as compact numbers and names — never a digraph, " +
-  "never a write. Report 1: per-lane statistics (members, edge counts, " +
-  "declaration state, who cites a member from outside). Report 2: whether " +
+  "never a write. Report 1: per-lane statistics (members, edge counts, a " +
+  "closed-valid/closed-invalid/open state, who cites a member from outside " +
+  "— grounds, consume-class use, or testimony; a lane cited only by " +
+  "consume is still ADOPTED, not unused). Report 2: whether " +
   "each lane's members sit in one connected component (severed if not). " +
   "Report 3: components several lanes' members share. Report 4, three " +
   "blocks: inter-lane interface counts with terminus-bypass edges; " +

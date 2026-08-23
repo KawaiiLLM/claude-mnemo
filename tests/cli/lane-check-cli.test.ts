@@ -162,6 +162,11 @@ describe("runLaneCheckCli end to end", () => {
     // (T3 declares itself terminus over T1/T2 via tagged `indexes`).
     expect(out).toContain("●");
     expect(out).toContain("◎");
+    // milestone-election ticket 04: report 1's state line and used[] reach
+    // the CLI surface too — T3 declares over T1/T2 with no later
+    // continuation, so the lane reads closed-valid.
+    expect(out).toContain("declaration: closed-valid");
+    expect(out).toContain("used[-]");
   });
 
   test("--no-digraph suppresses the digraph section but keeps the four reports", () => {

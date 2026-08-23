@@ -108,6 +108,33 @@
  * "From non-members" already excludes self-citation as a degenerate case: a
  * member citing itself is trivially cited by a member, so it can never pass
  * the "citing turn is NOT a lane member" filter.
+ *
+ * ## Report 1 gains a state line and `used[...]` (milestone-election spec,
+ * ticket 04)
+ *
+ * `LaneStatsReport.state` is `lane-interpretation.ts`'s `deriveLaneStates`
+ * helper's own output for this lane, CONSUMED directly (`checkLanes` calls
+ * it once, over the same `lanes`/`turns` it already has) — never
+ * re-derived here. The raw `declaration.state` (declared/reopened/
+ * undeclared) is the wrong axis to render as "the state": that helper's own
+ * doc names the trap directly — a lane that kept living past its own
+ * declaration (a narrows/extends continuation, no re-declaration) still
+ * reports `declaration.state === "declared"` even though it is actually
+ * OPEN. `state` is the corrected reading: closed-valid / closed-invalid /
+ * open, with `lastDeclarer` naming an open lane's most recent declarer when
+ * one exists (`null` for a lane that was never declared at all).
+ *
+ * `usedFromNonMembers` sits alongside `groundsFromNonMembers`/
+ * `testimonyFromNonMembers` in `citedness`, same lane-wide "target is ANY
+ * member, citer is NOT a member" filter, for relation `consume` (any tag
+ * state — a `consume` edge tagged with THIS lane's own exact set would
+ * already make its citing turn a member by construction, so "citer is not a
+ * member" already excludes that case structurally, exactly like `grounds`
+ * above). This is the T1351 trap fix: a lane adopted only through an
+ * external `consume` citation used to render with an empty
+ * "cited from outside" line, reading as unadopted when it was not — a
+ * member's own IN-LANE consume edges (both endpoints members) and any
+ * testimony relation never enter this field.
  */
 
 import { STANCE_RELATIONS } from "./turn-phase";
@@ -115,6 +142,7 @@ import {
   canonicalTagSet,
   DEFAULT_SEGMENT,
   deriveLaneInterpretation,
+  deriveLaneStates,
   laneToken,
   type Lane,
   type LaneCrossSegmentWarning,
@@ -123,6 +151,7 @@ import {
   type LaneKey,
   type LaneMember,
   type LaneOrderKey,
+  type LaneState,
   type LaneTurnInput,
   type TurnPhase,
 } from "./lane-interpretation";
@@ -132,13 +161,16 @@ import { phasesForTypes } from "./turn-phase";
 const STANCE_RELATION_WORDS: ReadonlySet<string> = STANCE_RELATIONS;
 
 export type {
+  LaneClosure,
   LaneCrossSegmentWarning,
   LaneDeclaration,
   LaneDeclarationState,
   LaneEdgeInput,
   LaneKey,
   LaneMember,
+  LaneState,
   LaneTurnInput,
+  LaneValidity,
 } from "./lane-interpretation";
 export { DEFAULT_SEGMENT } from "./lane-interpretation";
 
@@ -177,8 +209,12 @@ export interface LaneStatsReport {
   /** Tally of this lane's OWN tagged edges by relation word. */
   edgeCountsByRelation: Record<string, number>;
   declaration: LaneDeclaration;
+  /** `lane-interpretation.ts`'s `deriveLaneStates` output for this lane, consumed directly — see module header "Report 1 gains a state line". The corrected closed-valid/closed-invalid/open reading; never re-derive this from `declaration` here. */
+  state: LaneState;
   citedness: {
     groundsFromNonMembers: LaneCitedFact[];
+    /** Consume-class external citations (milestone-election ticket 04) — see module header. */
+    usedFromNonMembers: LaneCitedFact[];
     testimonyFromNonMembers: LaneTestimonyFact[];
   };
   coverage: LaneCoverage;
@@ -572,6 +608,10 @@ export function checkLanes(
   edges: readonly LaneEdgeInput[],
 ): LaneCheckerResult {
   const { lanes, warnings } = deriveLaneInterpretation(turns, edges);
+  // Ticket 04: the ONE `deriveLaneStates` call for this whole run — every
+  // lane's report-1 `state` field below is a lookup into this map, never a
+  // fresh derivation (module header "Report 1 gains a state line").
+  const laneStates = deriveLaneStates(lanes, turns);
   const turnById = new Map<number, LaneTurnInput>();
   for (const turn of turns) {
     turnById.set(turn.id, turn);
@@ -611,9 +651,13 @@ export function checkLanes(
   for (const lane of lanes) {
     const memberIds = new Set(lane.members.map((member) => member.id));
     const thisLaneToken = laneToken(lane.key.segment, lane.key.tagSet);
+    // Guaranteed present: `deriveLaneStates` keys one entry per lane in
+    // `lanes`, by that same lane's own token, and `lane` is drawn from that
+    // identical `lanes` array — see `checkLanes`'s own `laneStates` call above.
+    const laneState = laneStates.get(thisLaneToken)!;
 
     // ---- Report 1 ----
-    laneStats.push(buildLaneStats(lane, memberIds, turnById, edges));
+    laneStats.push(buildLaneStats(lane, laneState, memberIds, turnById, edges));
 
     for (const edge of lane.taggedEdges) {
       if (!STANCE_RELATION_WORDS.has(edge.relation)) continue;
@@ -713,6 +757,7 @@ function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
 
 function buildLaneStats(
   lane: Lane,
+  laneState: LaneState,
   memberIds: ReadonlySet<number>,
   turnById: ReadonlyMap<number, LaneTurnInput>,
   allEdges: readonly LaneEdgeInput[],
@@ -734,6 +779,7 @@ function buildLaneStats(
   }
 
   const groundsFromNonMembers: LaneCitedFact[] = [];
+  const usedFromNonMembers: LaneCitedFact[] = [];
   const testimonyFromNonMembers: LaneTestimonyFact[] = [];
   for (const edge of allEdges) {
     if (!memberIds.has(edge.citedId) || memberIds.has(edge.citingId)) {
@@ -741,6 +787,8 @@ function buildLaneStats(
     }
     if (edge.relation === "grounds") {
       groundsFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
+    } else if (edge.relation === "consume") {
+      usedFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
     } else if (edge.relation === "verifies" || edge.relation === "refutes") {
       testimonyFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
     }
@@ -754,7 +802,8 @@ function buildLaneStats(
     members: lane.members,
     edgeCountsByRelation,
     declaration: lane.declaration,
-    citedness: { groundsFromNonMembers, testimonyFromNonMembers },
+    state: laneState,
+    citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
     coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds },
   };
 }

@@ -59,8 +59,10 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           ],
           edgeCountsByRelation: { extends: 1, indexes: 1 },
           declaration: { state: "declared", terminus: 2, latestEventTurn: 2 },
+          state: { key: LANE_KEY, closure: "closed", validity: "valid", terminus: 2, lastDeclarer: 2 },
           citedness: {
             groundsFromNonMembers: [{ citingId: 9, citedId: 1 }],
+            usedFromNonMembers: [{ citingId: 6, citedId: 1 }],
             testimonyFromNonMembers: [{ citingId: 8, citedId: 1, relation: "verifies" }],
           },
           coverage: { status: "partial", missingTurnIds: [7] },
@@ -81,13 +83,63 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("1, 2(dead)");
     expect(text).toContain("extends=1");
     expect(text).toContain("indexes=1");
-    expect(text).toContain("declared");
+    // The raw declaration.state word ("declared") no longer renders here —
+    // ticket 04 replaces it with the corrected closed-valid/closed-invalid/
+    // open reading (`LaneStatsReport.state`), read from `deriveLaneStates`.
+    expect(text).toContain("closed-valid");
+    expect(text).not.toMatch(/declaration: declared/);
     expect(text).toContain("terminus 2");
     expect(text).toContain("[last event T2]");
     expect(text).toContain("T9->T1");
+    expect(text).toContain("used[T6->T1]");
     expect(text).toContain("T8 verifies T1");
     expect(text).toContain("partial");
     expect(text).toContain("missing: 7");
+  });
+
+  test("report 1's state line renders all three forms — closed-valid, closed-invalid, and open with/without a last declarer", () => {
+    const closedValid: LaneCheckerResult["lanes"][number] = {
+      key: { segment: "1", tagSet: ["cv"] },
+      phases: [],
+      members: [],
+      edgeCountsByRelation: {},
+      declaration: { state: "declared", terminus: 31, latestEventTurn: 31 },
+      state: { key: { segment: "1", tagSet: ["cv"] }, closure: "closed", validity: "valid", terminus: 31, lastDeclarer: 31 },
+      citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+      coverage: { status: "whole", missingTurnIds: [] },
+    };
+    const closedInvalid: LaneCheckerResult["lanes"][number] = {
+      ...closedValid,
+      key: { segment: "1", tagSet: ["ci"] },
+      state: { key: { segment: "1", tagSet: ["ci"] }, closure: "closed", validity: "invalid", terminus: 13, lastDeclarer: 13 },
+    };
+    const openWithDeclarer: LaneCheckerResult["lanes"][number] = {
+      ...closedValid,
+      key: { segment: "1", tagSet: ["ow"] },
+      declaration: { state: "reopened", terminus: null, latestEventTurn: 103 },
+      state: { key: { segment: "1", tagSet: ["ow"] }, closure: "open", validity: null, terminus: null, lastDeclarer: 102 },
+    };
+    const openNoDeclarer: LaneCheckerResult["lanes"][number] = {
+      ...closedValid,
+      key: { segment: "1", tagSet: ["on"] },
+      declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+      state: { key: { segment: "1", tagSet: ["on"] }, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+    };
+
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      lanes: [closedValid, closedInvalid, openWithDeclarer, openNoDeclarer],
+    };
+
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("declaration: closed-valid");
+    expect(text).toContain("declaration: closed-invalid");
+    expect(text).toContain("declaration: open (last declarer T102)");
+    // The never-declared lane prints bare "open" — no invented declarer.
+    const lines = text.split("\n");
+    const onIndex = lines.findIndex((line) => line.includes("{on}"));
+    const onDeclarationLine = lines.slice(onIndex).find((line) => line.includes("declaration:"))!;
+    expect(onDeclarationLine.trim()).toBe("declaration: open");
   });
 
   test("the default-segment sentinel renders as 'default', never the raw sentinel bytes", () => {
@@ -99,7 +151,14 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           members: [],
           edgeCountsByRelation: {},
           declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-          citedness: { groundsFromNonMembers: [], testimonyFromNonMembers: [] },
+          state: {
+            key: { segment: DEFAULT_SEGMENT, tagSet: ["homeless-lane"] },
+            closure: "open",
+            validity: null,
+            terminus: null,
+            lastDeclarer: null,
+          },
+          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
@@ -274,7 +333,8 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           ],
           edgeCountsByRelation: {},
           declaration: { state: "declared", terminus: 3, latestEventTurn: 3 },
-          citedness: { groundsFromNonMembers: [], testimonyFromNonMembers: [] },
+          state: { key: LANE_KEY, closure: "closed", validity: "valid", terminus: 3, lastDeclarer: 3 },
+          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
@@ -314,7 +374,8 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           members: [{ id: 1, dead: false }],
           edgeCountsByRelation: {},
           declaration: { state: "declared", terminus: 1, latestEventTurn: 1 },
-          citedness: { groundsFromNonMembers: [], testimonyFromNonMembers: [] },
+          state: { key: LANE_KEY, closure: "closed", validity: "valid", terminus: 1, lastDeclarer: 1 },
+          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
@@ -352,7 +413,8 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           members: [{ id: 5, dead: false }],
           edgeCountsByRelation: {},
           declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-          citedness: { groundsFromNonMembers: [], testimonyFromNonMembers: [] },
+          state: { key: LANE_KEY, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
         {
@@ -361,7 +423,8 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           members: [{ id: 5, dead: false }],
           edgeCountsByRelation: {},
           declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-          citedness: { groundsFromNonMembers: [], testimonyFromNonMembers: [] },
+          state: { key: otherKey, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
@@ -391,7 +454,14 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           members: manyMembers,
           edgeCountsByRelation: {},
           declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-          citedness: { groundsFromNonMembers: [], testimonyFromNonMembers: [] },
+          state: {
+            key: { segment: "1234567890", tagSet: ["a-very-long-tag-name-that-pushes-width", "another-tag"] },
+            closure: "open",
+            validity: null,
+            terminus: null,
+            lastDeclarer: null,
+          },
+          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
@@ -423,7 +493,8 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           members: [{ id: 1, dead: false }],
           edgeCountsByRelation: {},
           declaration: { state: "declared", terminus: 999, latestEventTurn: 999 },
-          citedness: { groundsFromNonMembers: [], testimonyFromNonMembers: [] },
+          state: { key: LANE_KEY, closure: "closed", validity: "valid", terminus: 999, lastDeclarer: 999 },
+          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],

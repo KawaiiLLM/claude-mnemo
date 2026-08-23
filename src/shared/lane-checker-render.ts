@@ -7,6 +7,7 @@ import type {
   LaneInterfacePair,
   LaneMember,
   LanePathReport,
+  LaneState,
   LaneStatsReport,
   LaneTimeOrderViolation,
 } from "./lane-checker";
@@ -44,6 +45,25 @@ function formatMembers(members: readonly LaneMember[]): string {
     .join(", ");
 }
 
+/**
+ * The three-state reading (milestone-election spec, ticket 04) — replaces
+ * the raw `declaration.state` word (declared/reopened/undeclared) that used
+ * to render here, which `lane-interpretation.ts`'s `deriveLaneStates` doc
+ * names as the wrong axis to show: a lane that kept living past its own
+ * declaration still reports `declaration.state === "declared"` even though
+ * it is actually open. `state` (`LaneStatsReport.state`, consumed straight
+ * from that helper) is the corrected reading. An open lane names its last
+ * declarer only when one exists — a truly never-declared lane (`{write-gate}`
+ * in the golden fixture) has none, and this prints exactly "open" for it, no
+ * invented "last stable milestone".
+ */
+function formatLaneState(state: LaneState): string {
+  if (state.closure === "closed") {
+    return "closed-" + state.validity;
+  }
+  return state.lastDeclarer !== null ? "open (last declarer T" + state.lastDeclarer + ")" : "open";
+}
+
 function renderStatsReport(lane: LaneStatsReport): string[] {
   const lines: string[] = [];
   lines.push("Lane " + formatTagSet(lane.key) + " - phases: " + (lane.phases.join(",") || "(none)"));
@@ -54,7 +74,7 @@ function renderStatsReport(lane: LaneStatsReport): string[] {
   lines.push("  edges: " + (edgeCounts || "(none)"));
   lines.push(
     "  declaration: " +
-      lane.declaration.state +
+      formatLaneState(lane.state) +
       (lane.declaration.terminus !== null ? " (terminus " + lane.declaration.terminus + ")" : "") +
       (lane.declaration.latestEventTurn !== null
         ? " [last event T" + lane.declaration.latestEventTurn + "]"
@@ -63,12 +83,17 @@ function renderStatsReport(lane: LaneStatsReport): string[] {
   const grounds = lane.citedness.groundsFromNonMembers.map(
     (fact) => "T" + fact.citingId + "->T" + fact.citedId,
   );
+  const used = lane.citedness.usedFromNonMembers.map(
+    (fact) => "T" + fact.citingId + "->T" + fact.citedId,
+  );
   const testimony = lane.citedness.testimonyFromNonMembers.map(
     (fact) => "T" + fact.citingId + " " + fact.relation + " T" + fact.citedId,
   );
   lines.push(
     "  cited from outside: grounds[" +
       (grounds.join(", ") || "-") +
+      "] used[" +
+      (used.join(", ") || "-") +
       "] testimony[" +
       (testimony.join(", ") || "-") +
       "]",

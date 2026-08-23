@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -70,6 +71,67 @@ function seedFixture(db: Database): { sessionDbId: number; t1: number; job: Note
     throw new Error("fixture failed to claim a settlement job");
   }
   return { sessionDbId, t1, job };
+}
+
+/**
+ * milestone-election ticket 04: a fixture WITH a declared lane (t1/t2/t3,
+ * tagged `ownership`, t3 declares over t1/t2) plus an external same-phase
+ * `consume` citer (`outside`, t4) — enough for `lane_check`'s real handler
+ * to render a non-empty state line and `used[]`, proving both facts reach
+ * the settlement surface (not just the CLI).
+ */
+function seedLaneCheckFixture(db: Database): { sessionDbId: number; job: NoteSettlementJob } {
+  const sessionDbId = upsertSession(db, {
+    contentSessionId: "settlement-sdk-query-lane-check-session",
+    project: "/tmp/project-settlement-sdk-query-lane-check",
+    title: "settlement sdk-query lane-check fixture",
+    content: null,
+    insight: null,
+    createdAtEpoch: NOW - 10_000,
+    updatedAtEpoch: NOW - 10_000,
+    completedAtEpoch: null,
+  }).id;
+
+  function insertTurn(promptNumber: number): number {
+    return db
+      .query<{ id: number }, [number, number, string, string, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, assistant_response,
+           tool_call_count, created_at_epoch, type
+         ) VALUES (?, ?, 'active', ?, ?, 3, ?, '["design"]')
+         RETURNING id`,
+      )
+      .get(sessionDbId, promptNumber, `prompt ${promptNumber}`, `response ${promptNumber}`, NOW - 900 + promptNumber)!
+      .id;
+  }
+
+  const t1 = insertTurn(1);
+  const t2 = insertTurn(2);
+  const t3 = insertTurn(3);
+  const outside = insertTurn(4);
+
+  writeMemoryEdges(
+    db,
+    [
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", tags: ["ownership"] },
+      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t1 }, relation: "indexes", provenance: "asserted", tags: ["ownership"] },
+      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t2 }, relation: "indexes", provenance: "asserted", tags: ["ownership"] },
+      { citing: { kind: "turn", id: outside }, cited: { kind: "turn", id: t1 }, relation: "consume", provenance: "asserted", tags: [] },
+    ],
+    NOW,
+  );
+
+  enqueueNoteSettlementWindows(
+    db,
+    [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 3, triggerType: "consecutive" }],
+    NOW,
+    SETTLEMENT_ERA_CUTOFF_EPOCH,
+  );
+  const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+  if (!job) {
+    throw new Error("fixture failed to claim a settlement job");
+  }
+  return { sessionDbId, job };
 }
 
 /** Mirrors diary-sdk-query.test.ts's mocking pattern: capture every registered tool's name/description/shape/handler. */
@@ -243,6 +305,101 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
       // validation is phase domains + tag legality + the self-citation gate.
       expect(description).toContain("{turn, tags}");
       expect(description).toContain("self-citation gate");
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+describe("milestone-election ticket 04 — the state line and used[] reach the settlement surface, not just the CLI", () => {
+  test("the lane_check tool's own description names the corrected state reading and consume-class use, guarding against the T1351 misreading", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+
+      const { toolImpl, descriptions } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        reviewableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      });
+
+      const description = descriptions.get("lane_check")!;
+      expect(description).toContain("closed-valid/closed-invalid/open");
+      expect(description).toContain("consume-class use");
+      expect(description).toContain("still ADOPTED, not unused");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a real lane_check call through the ACTUAL registered handler renders the state line and used[] in its text result", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, job } = seedLaneCheckFixture(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const laneCheckReceipt = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const text = laneCheckReceipt.content[0]!.text;
+          expect(text).toContain("declaration: closed-valid");
+          expect(text).toContain("used[T");
+          expect(text).not.toContain("digraph");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        reviewableTurnIds: new Set(),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 3,
+      });
     } finally {
       db?.close();
     }
