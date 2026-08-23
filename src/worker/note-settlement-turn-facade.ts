@@ -26,6 +26,7 @@ import { checkFieldGate, claimWriterId, stampField } from "../db/write-gate";
 import { settlementNoteInputShape } from "../mcp/definitions";
 import {
   FieldModeError,
+  fieldModeErrorMessage,
   isFieldEditMode,
   MODE_FIELDS,
   parseModeMap,
@@ -33,6 +34,7 @@ import {
   resolveStringField,
   type FieldMode,
 } from "../mcp/field-mode";
+import { clearToolCallSyntaxRejections } from "../shared/tool-call-syntax";
 import {
   bracketBareTurnReferences,
   checkSelfGroundsTerminusPostWrite,
@@ -531,7 +533,7 @@ function evaluateSettlementSessionWrite(
     );
   } catch (error) {
     if (error instanceof FieldModeError) {
-      return { ok: false, message: error.message };
+      return { ok: false, message: fieldModeErrorMessage(error, ref) };
     }
     throw error;
   }
@@ -553,6 +555,8 @@ function evaluateSettlementSessionWrite(
   for (const field of sessionFields) {
     usage.push(formatSessionFieldUsage(field, resolved[field] ?? null));
   }
+
+  clearToolCallSyntaxRejections(ref);
 
   return {
     ok: true,
@@ -600,7 +604,10 @@ export function evaluateSettlementTurnWrite(
     modeMap = parseModeMap(rawInput.mode, MODE_FIELDS);
   } catch (error) {
     if (error instanceof FieldModeError) {
-      return { ok: false, message: error.message };
+      // `null` address: this parse deliberately runs AHEAD of the turn/session
+      // branch (one vocabulary for both address kinds), so there is no address
+      // to count a syntax rejection against yet — see `fieldModeErrorMessage`.
+      return { ok: false, message: fieldModeErrorMessage(error, null) };
     }
     throw error;
   }
@@ -736,7 +743,7 @@ export function evaluateSettlementTurnWrite(
       }
     } catch (error) {
       if (error instanceof FieldModeError) {
-        return { ok: false, message: error.message };
+        return { ok: false, message: fieldModeErrorMessage(error, ref) };
       }
       throw error;
     }
@@ -874,7 +881,7 @@ export function evaluateSettlementTurnWrite(
           : undefined;
     } catch (error) {
       if (error instanceof FieldModeError) {
-        return { ok: false, message: error.message };
+        return { ok: false, message: fieldModeErrorMessage(error, ref) };
       }
       throw error;
     }
@@ -1151,6 +1158,8 @@ export function evaluateSettlementTurnWrite(
   } else if (retracted > 0) {
     relations = { written: 0, restated: 0, retracted, restored };
   }
+
+  clearToolCallSyntaxRejections(ref);
 
   return {
     ok: true,

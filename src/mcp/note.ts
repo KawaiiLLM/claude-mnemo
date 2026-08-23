@@ -46,6 +46,7 @@ import { checkFieldGate, sessionWriterId, stampField } from "../db/write-gate";
 import {
   decodeHtmlEntities,
   FieldModeError,
+  fieldModeErrorMessage,
   isFieldEditMode,
   modeRequiredMessage,
   parseModeMap,
@@ -67,10 +68,7 @@ import {
   retiredTopicTagMessage,
   stripPrivateTags,
 } from "../shared/tag-stripping";
-import {
-  containsToolCallSyntax,
-  toolCallSyntaxMessage,
-} from "../shared/tool-call-syntax";
+import { clearToolCallSyntaxRejections } from "../shared/tool-call-syntax";
 import {
   MEMORY_TYPES,
   normalizeTypeValues,
@@ -1079,6 +1077,13 @@ function handleTurnWrite(
     return parameterError("crossSession must be a boolean when present.");
   }
   const crossSession = input.crossSession === true;
+  // Declared here rather than beside its first gate use further down because
+  // the tool-call-syntax rejection path (write-gate-hardening ticket 01) keys
+  // its consecutive-rejection counter on it, and the first rejection that can
+  // reach that path — `parseModeMap`'s edit-form check — runs before the turn
+  // row is even loaded. `getTurn` below resolves THIS address, so the label is
+  // the same string either way.
+  const addressLabel = `S${address.sessionId}/T${address.promptNumber}`;
 
   if (input.skip === true) {
     return declineTurn(db, address, options, crossSession);
@@ -1141,7 +1146,7 @@ function handleTurnWrite(
     modeMap = parseModeMap(input.mode, TURN_MODE_FIELDS);
   } catch (error) {
     if (error instanceof FieldModeError) {
-      return parameterError(error.message);
+      return parameterError(fieldModeErrorMessage(error, addressLabel));
     }
     throw error;
   }
@@ -1189,7 +1194,6 @@ function handleTurnWrite(
     typeof options.callerSessionId === "number"
       ? sessionWriterId(options.callerSessionId)
       : null;
-  const addressLabel = `S${turn.sessionId}/T${turn.promptNumber}`;
 
   // Prose on a pre-cutoff turn is REFUSED, not written somewhere quiet (user
   // ruling). A legacy turn never promotes, so its title/content/insight could
@@ -1533,10 +1537,15 @@ function handleTurnWrite(
     });
   } catch (error) {
     if (error instanceof FieldModeError) {
-      return parameterError(error.message);
+      return parameterError(fieldModeErrorMessage(error, addressLabel));
     }
     throw error;
   }
+
+  // The write landed: whatever run of malformed serializations preceded it is
+  // over, so the next rejection on this address starts from one again
+  // (write-gate-hardening ticket 01 — "any successful write resets").
+  clearToolCallSyntaxRejections(addressLabel);
 
   const verb = result.noteExisted || !result.touchedProse ? "Updated" : "Noted";
   const parts = [

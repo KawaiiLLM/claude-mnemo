@@ -355,6 +355,20 @@ const RETRACTION_TAG_FORM_LINE =
   "Same bare-address-or-`{turn, tags}` form as the relation field: an untagged " +
   "entry retracts the bare row, a tagged one retracts that exact tag-set row.";
 
+// PROPERTY ORDER IS LOAD-BEARING (write-gate-hardening ticket 01). Zod keeps
+// insertion order all the way into the serialized JSON schema, and that order
+// is what the model sees when it writes the call. The observed failure it
+// defends against: at the CLOSING boundary of a very long value, the next
+// field's name is the most salient token around, and the serialization drifts
+// into closing the parameter with the FIELD's own name; the parser then glues
+// everything after it into that field as literal text, and the parameters that
+// rode in never land. So the two longest fields go last — `content` gets the
+// successor-free boundary (nothing after it to drift into) and `insight`, the
+// next longest, sits beside it. Everything short and structural
+// (turn/title/skip/crossSession/segment/type/tags/mode) comes first, the
+// relation and retraction arrays after that. Reordering is the WHOLE change:
+// no field's type, nullability or description differs from before.
+// `tests/mcp/definitions.test.ts` pins the serialized order on both surfaces.
 export const noteInputShape = {
   turn: z
     .string()
@@ -372,32 +386,6 @@ export const noteInputShape = {
     .optional()
     .describe(
       `Turn (~${NOTE_TOKEN_BUDGET.title} tok): the INDEX, not the conclusion — one English sentence saying what this turn is doing, standing alone in a title-only list, enough to recognise it among titles alone. No activity/topic prefix (type/tags carry that). Name the decider when a ruling landed. No session-local codewords without a gloss. Length tracks this turn's output, not the effort spent.`,
-    ),
-  content: z
-    .string()
-    .nullable()
-    .optional()
-    .describe(
-      `Turn only (~${NOTE_TOKEN_BUDGET.content} tok): the CONCLUSIONS — assume the title was just read, expand, never restate. Every useful decision this turn produced, each rejected alternative with a one-line reason, secondary conclusions, citations. Sentence deletion test: remove a sentence — if a decision's derivation still holds without it, cut it. No process narration (replay stores it). Length tracks this turn's output, not the effort spent — long when the turn produced a lot, terse when it produced little. Lead with the conclusions: a reader's budget cuts the tail, so whatever only supports a decision comes after it.`,
-    ),
-  insight: z
-    .string()
-    .nullable()
-    .optional()
-    .describe(
-      `Turn only (~${NOTE_TOKEN_BUDGET.insight} tok, default omit): REUSABLE experience, not a conclusion of this turn — a task-scoped lesson under the episode-deletion test: delete the episode; does the sentence still teach someone useful prior knowledge?`,
-    ),
-  type: z
-    .array(z.string())
-    .optional()
-    .describe(
-      `Closed vocabulary: ${TYPE_VOCABULARY_LIST} — omit or [] when none fit, never guess. Honesty rule: report the stage that actually happened — a design discussion with no ruling is discuss, not design.`,
-    ),
-  tags: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "At least one coarse noun naming the project, then fine nouns for subsystems/artifacts. Never activities (type carries those), no -design/-fix hybrids. Reuse exact spellings already in use.",
     ),
   skip: z
     .boolean()
@@ -426,6 +414,20 @@ export const noteInputShape = {
     .describe(
       'Assign this turn\'s own membership to one segment this session has ATTACHED ("E<n>"). An unattached or nonexistent segment rejects, naming the attachment requirement ("remember(attach, id=...)" first). The segment\'s hand-curated tags gate the assignment — this turn\'s tags (after this same call\'s own `tags`, if given) must carry every one of them, or the call rejects naming the gap; an untagged segment gates nothing. `remember`\'s `assign` verb is the batch/reassignment/clearing surface instead.',
     ),
+  type: z
+    .array(z.string())
+    .optional()
+    .describe(
+      `Closed vocabulary: ${TYPE_VOCABULARY_LIST} — omit or [] when none fit, never guess. Honesty rule: report the stage that actually happened — a design discussion with no ruling is discuss, not design.`,
+    ),
+  tags: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "At least one coarse noun naming the project, then fine nouns for subsystems/artifacts. Never activities (type carries those), no -design/-fix hybrids. Reuse exact spellings already in use.",
+    ),
+
+  mode: noteModeShape,
 
   // Flow-relations spec (ticket 02, "六行律" — the six-row law): the eight-
   // word vocabulary that replaces ADR-0010's nine-cell grammar outright.
@@ -587,7 +589,24 @@ export const noteInputShape = {
       "Retired on the note tool — use extends/override instead. Present here only as frozen documentation.",
     ),
 
-  mode: noteModeShape,
+  // The two long prose fields, last on purpose — see this shape's own header
+  // comment. `content` is the longest and takes the final slot (no successor
+  // field name for its closing boundary to drift into); `insight`, the next
+  // longest, sits beside it.
+  insight: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      `Turn only (~${NOTE_TOKEN_BUDGET.insight} tok, default omit): REUSABLE experience, not a conclusion of this turn — a task-scoped lesson under the episode-deletion test: delete the episode; does the sentence still teach someone useful prior knowledge?`,
+    ),
+  content: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      `Turn only (~${NOTE_TOKEN_BUDGET.content} tok): the CONCLUSIONS — assume the title was just read, expand, never restate. Every useful decision this turn produced, each rejected alternative with a one-line reason, secondary conclusions, citations. Sentence deletion test: remove a sentence — if a decision's derivation still holds without it, cut it. No process narration (replay stores it). Length tracks this turn's output, not the effort spent — long when the turn produced a lot, terse when it produced little. Lead with the conclusions: a reader's budget cuts the tail, so whatever only supports a decision comes after it.`,
+    ),
 };
 
 // ticket 02: one shape for all five `remember` verbs (D5/D5a's own
@@ -825,12 +844,16 @@ export const timelineInputShape = {
 // declaration for the one surviving reason: settlement's `session` address
 // writes them non-nullably. They are a TURN's prose too now (D6 revoked
 // "结算不再重建笔记"), through the same mode vocabulary and the same gate.
+// Write-gate-hardening ticket 01: property order mirrors `noteInputShape`'s —
+// structural short fields, then the relation/retraction arrays, then `insight`,
+// then `content` dead last. The reason is the same on both surfaces (a long
+// value's closing boundary is where the serialization drifts into a
+// field-named closing tag), and the failure was first caught on THIS one, so
+// the two orders are kept identical rather than reasoned about separately.
 export const settlementNoteInputShape = {
   turn: z.string().min(1).optional(),
   session: z.string().min(1).optional(),
   title: z.string().optional(),
-  content: z.string().optional(),
-  insight: noteInputShape.insight,
   mode: noteInputShape.mode,
   type: noteInputShape.type,
   tags: noteInputShape.tags,
@@ -850,6 +873,8 @@ export const settlementNoteInputShape = {
   retractGrounds: noteInputShape.retractGrounds,
   retractVerifies: noteInputShape.retractVerifies,
   retractRefutes: noteInputShape.retractRefutes,
+  insight: noteInputShape.insight,
+  content: z.string().optional(),
 };
 
 // Ticket 04/11: `truncate` and `view` are defined on `recallInputShape`

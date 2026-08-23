@@ -22,6 +22,7 @@ import {
 } from "../../src/db/write-gate";
 import { noteInputShape } from "../../src/mcp/definitions";
 import { modeRequiredMessage } from "../../src/mcp/field-mode";
+import { resetToolCallSyntaxRejectionsForTests } from "../../src/shared/tool-call-syntax";
 import {
   evaluateSettlementTurnWrite,
   renderSettlementTurnWriteReceipt,
@@ -1608,5 +1609,121 @@ describe("stitch — the session narrative write is gated under the claim identi
     expect(resultText(stale)).toContain("was changed by");
     expect(resultText(stale)).toContain("recall(id=");
     expect(getSession(db, sessionDbId)?.content).toBe("window one increment");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// write-gate-hardening ticket 01: the tool-call-syntax rejection on THIS
+// surface. Settlement writes through the same field-mode engine the main agent
+// does, so it inherits the shape echo for free — what needed wiring is the
+// consecutive-rejection counter, which is keyed on the address this facade
+// resolves for itself (`ref`), not on anything the guard can see.
+//
+// Markup fixtures are assembled from fragments, never written whole: a literal
+// antml-prefixed closing tag in a source file is read as the end of a tool
+// call by the harness writing the file, and a complete call in a test file is
+// one more exemplar for whatever reads this repo next.
+// ---------------------------------------------------------------------------
+
+const SYNTAX_LT = "<";
+const syntaxOpen = (name: string): string => `${SYNTAX_LT}parameter name="${name}">`;
+const syntaxFieldNamedClosing = (name: string): string => `${SYNTAX_LT}/${name}>`;
+const SYNTAX_GLUED_CONTENT =
+  `What this turn settled.${syntaxFieldNamedClosing("content")}\n` +
+  `${syntaxOpen("insight")}A reusable lesson.`;
+
+describe("tool-call-syntax rejection: shape echo and loop naming (write-gate-hardening 01)", () => {
+  beforeEach(() => {
+    resetToolCallSyntaxRejectionsForTests();
+  });
+
+  test("the first rejection echoes the shape in prose; the second for the same turn names the loop", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const call = (): SettlementTurnWriteEvaluation =>
+      write(
+        context,
+        {
+          turn: `S${sessionDbId}/T1`,
+          title: "settlement: a title",
+          content: SYNTAX_GLUED_CONTENT,
+        },
+        NOW,
+      );
+
+    const first = call();
+    expect(first.ok).toBe(false);
+    const firstMessage = first.ok ? "" : first.message;
+    expect(firstMessage).toContain("content");
+    expect(firstMessage).toContain("insight");
+    expect(firstMessage).toContain("literal text");
+    expect(firstMessage).not.toContain(SYNTAX_LT);
+    expect(firstMessage).not.toContain("in a row");
+    expect(getShadowNote(db, t1)).toBeNull();
+
+    const second = call();
+    const secondMessage = second.ok ? "" : second.message;
+    expect(secondMessage).toContain("rejection 2 in a row");
+    expect(secondMessage).toContain(`S${sessionDbId}/T1`);
+    expect(secondMessage.toLowerCase()).toContain("settlement");
+  });
+
+  test("a landed write ends the run for that turn", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const reject = (): SettlementTurnWriteEvaluation =>
+      write(
+        context,
+        {
+          turn: `S${sessionDbId}/T1`,
+          title: "settlement: a title",
+          content: SYNTAX_GLUED_CONTENT,
+        },
+        NOW,
+      );
+
+    reject();
+    reject();
+    const landed = write(
+      context,
+      {
+        turn: `S${sessionDbId}/T1`,
+        title: "settlement: a well-formed title",
+        content: "Well-formed conclusions.",
+      },
+      NOW,
+    );
+    expect(landed.ok).toBe(true);
+
+    const after = reject();
+    expect(after.ok).toBe(false);
+    expect(after.ok ? "" : after.message).not.toContain("in a row");
+  });
+
+  test("a different turn address does not inherit the run", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const job = claimWindow(sessionDbId, 1, 2);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
+    const reject = (promptNumber: number): SettlementTurnWriteEvaluation =>
+      write(
+        context,
+        {
+          turn: `S${sessionDbId}/T${promptNumber}`,
+          title: "settlement: a title",
+          content: SYNTAX_GLUED_CONTENT,
+        },
+        NOW,
+      );
+
+    reject(1);
+    reject(1);
+    const other = reject(2);
+    expect(other.ok ? "" : other.message).not.toContain("in a row");
   });
 });

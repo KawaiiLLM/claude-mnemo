@@ -175,7 +175,7 @@ function resolveProseField(field: string, value: unknown, opts: { required: bool
     return null;
   }
   if (containsToolCallSyntax(decoded)) {
-    fail(toolCallSyntaxMessage(field));
+    fail(toolCallSyntaxMessage(field, decoded));
   }
   return stripPrivateTags(decoded);
 }
@@ -564,7 +564,7 @@ function handleWrite(
     } else {
       const decoded = decodeHtmlEntities(input.value);
       if (containsToolCallSyntax(decoded)) {
-        fail(toolCallSyntaxMessage("value"));
+        fail(toolCallSyntaxMessage("value", decoded));
       }
       value = decoded.trim() === "" ? null : stripPrivateTags(decoded);
     }
@@ -672,10 +672,10 @@ function handleEdit(
   const oldString = decodeHtmlEntities(input.oldString);
   const newStringRaw = decodeHtmlEntities(input.newString);
   if (containsToolCallSyntax(oldString)) {
-    return parameterError(toolCallSyntaxMessage("oldString"));
+    return parameterError(toolCallSyntaxMessage("oldString", oldString));
   }
   if (newStringRaw !== "" && containsToolCallSyntax(newStringRaw)) {
-    return parameterError(toolCallSyntaxMessage("newString"));
+    return parameterError(toolCallSyntaxMessage("newString", newStringRaw));
   }
   const newString = newStringRaw === "" ? "" : stripPrivateTags(newStringRaw);
 

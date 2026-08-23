@@ -1,6 +1,8 @@
 import { stripPrivateTags } from "../shared/tag-stripping";
 import {
   containsToolCallSyntax,
+  recordToolCallSyntaxRejection,
+  toolCallSyntaxLoopMessage,
   toolCallSyntaxMessage,
 } from "../shared/tool-call-syntax";
 
@@ -76,8 +78,58 @@ export const MODE_FIELDS = ["title", "content", "insight", "type", "tags"] as co
  */
 export class FieldModeError extends Error {}
 
+/**
+ * The tool-call-syntax rejection, distinguished from every other field-mode
+ * refusal by its own class rather than by its wording (write-gate-hardening
+ * ticket 01). Two things need to tell it apart: the loop counter below, and
+ * nothing else — so the class carries the field and the offending text and
+ * builds its own shape-echo message, and every existing `instanceof
+ * FieldModeError` catch site keeps catching it unchanged.
+ */
+export class ToolCallSyntaxError extends FieldModeError {
+  constructor(
+    readonly field: string,
+    readonly text: string,
+  ) {
+    super(toolCallSyntaxMessage(field, text));
+  }
+}
+
 function fail(message: string): never {
   throw new FieldModeError(message);
+}
+
+function failToolCallSyntax(field: string, text: string): never {
+  throw new ToolCallSyntaxError(field, text);
+}
+
+/**
+ * Render a field-mode rejection at a surface boundary that knows WHICH address
+ * the rejected call was writing — the one place the consecutive-rejection
+ * counter can be keyed correctly, since the guard itself (`resolveStringField`,
+ * `parseModeMap`) sees a field name and a string and nothing else.
+ *
+ * `address === null` means the surface has not resolved an address for this
+ * call yet (settlement parses its mode map before its address branch): the
+ * rejection still renders, it just cannot be counted against anything, and
+ * counting it under a wrong key would be worse than not counting it.
+ *
+ * Non-syntax rejections pass through untouched AND do not reset the run: the
+ * counter tracks consecutive TOOL-CALL-SYNTAX rejections, and only a
+ * successful write clears it (`clearToolCallSyntaxRejections`).
+ */
+export function fieldModeErrorMessage(
+  error: FieldModeError,
+  address: string | null,
+): string {
+  if (address === null || !(error instanceof ToolCallSyntaxError)) {
+    return error.message;
+  }
+  const count = recordToolCallSyntaxRejection(address);
+  if (count < 2) {
+    return error.message;
+  }
+  return `${error.message} ${toolCallSyntaxLoopMessage(address, count)}`;
 }
 
 export function modeRequiredMessage(field: string): string {
@@ -175,10 +227,10 @@ export function parseModeMap(
     const oldString = decodeHtmlEntities(editRaw.oldString);
     const newStringRaw = decodeHtmlEntities(editRaw.newString);
     if (containsToolCallSyntax(oldString)) {
-      fail(toolCallSyntaxMessage(`mode.${key}.oldString`));
+      failToolCallSyntax(`mode.${key}.oldString`, oldString);
     }
     if (newStringRaw !== "" && containsToolCallSyntax(newStringRaw)) {
-      fail(toolCallSyntaxMessage(`mode.${key}.newString`));
+      failToolCallSyntax(`mode.${key}.newString`, newStringRaw);
     }
     const newString = newStringRaw === "" ? "" : stripPrivateTags(newStringRaw);
     result[key] = { mode: "edit", oldString, newString };
@@ -237,7 +289,7 @@ export function resolveStringField(
     fail(`${field} must not be empty.`);
   }
   if (containsToolCallSyntax(decoded)) {
-    fail(toolCallSyntaxMessage(field));
+    failToolCallSyntax(field, decoded);
   }
   const isEmpty = existing === null || existing.trim() === "";
   // `mode` here can only be `undefined` or `"write"` (edit is routed away

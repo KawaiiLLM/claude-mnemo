@@ -38,7 +38,7 @@ boundaries, then exemplar lock-in making every retry identical):
 **Blocked by:** None — can start immediately. Independent of the
 tag-mandate batch.
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: order swap → 2 red note-surface only; charset widening → adversarial red; strictness removal → 3 red; threshold 2→99 → 4 red)
 
 - [ ] Schema order pin: the serialized JSON schema's property order for the
       note tool lists content last and insight second-to-last; the

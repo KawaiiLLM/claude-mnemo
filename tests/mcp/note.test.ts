@@ -146,16 +146,23 @@ describe("note tool", () => {
     // `session` from this schema outright — `turn` is the only address left.
     // ticket 02 (edge-mechanism-revision D3) added the seven `retract…`
     // mirrors, one per relation.
+    //
+    // write-gate-hardening ticket 01 REORDERED this list (and nothing else —
+    // same keys, same field objects): the long prose fields moved to the end,
+    // `content` dead last. The order is what the model reads off the
+    // serialized schema, and a long value's closing boundary is where the
+    // serialization drifts into a field-named closing tag. See
+    // `tests/mcp/definitions.test.ts` for the serialized-order pin this one's
+    // shape-level list backs up.
     expect(Object.keys(noteInputSchema.shape)).toEqual([
       "turn",
       "title",
-      "content",
-      "insight",
-      "type",
-      "tags",
       "skip",
       "crossSession",
       "segment",
+      "type",
+      "tags",
+      "mode",
       "override",
       "narrows",
       "extends",
@@ -172,7 +179,8 @@ describe("note tool", () => {
       "retractGrounds",
       "retractVerifies",
       "retractRefutes",
-      "mode",
+      "insight",
+      "content",
     ]);
     expect(note.rideTurnId).toBe(rideTurnId);
     expect(note.writerModel).toBeNull();

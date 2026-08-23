@@ -259,6 +259,55 @@ describe("tool surface", () => {
     }
   });
 
+  // write-gate-hardening ticket 01: property ORDER is a contract, not a
+  // formatting accident. Zod carries insertion order into the serialized JSON
+  // schema, and that order is what the model reads when it writes the call —
+  // the observed failure is a long value's CLOSING boundary drifting into a
+  // tag named after the field, which glues every following parameter into that
+  // field as literal text. So the longest field goes last (nothing after it to
+  // drift into) and the next longest sits beside it. Checked on the SERIALIZED
+  // schema, the artifact an MCP client actually receives, not on the raw shape.
+  it("the note tool's serialized schema puts content last and insight second-to-last", () => {
+    const rendered = z.toJSONSchema(noteInputSchema, { io: "input" }) as {
+      properties: Record<string, unknown>;
+    };
+    const keys = Object.keys(rendered.properties);
+
+    expect(keys.at(-1)).toBe("content");
+    expect(keys.at(-2)).toBe("insight");
+    // The structural short parameters lead, in the ruled order, and the
+    // relation/retraction arrays sit between them and the prose tail.
+    expect(keys.slice(0, 8)).toEqual([
+      "turn",
+      "title",
+      "skip",
+      "crossSession",
+      "segment",
+      "type",
+      "tags",
+      "mode",
+    ]);
+    for (const [relation] of RELATION_FIELD_ENTRIES) {
+      expect(keys.indexOf(relation)).toBeGreaterThan(keys.indexOf("mode"));
+      expect(keys.indexOf(relation)).toBeLessThan(keys.indexOf("insight"));
+    }
+  });
+
+  // The settlement facade registers `settlementNoteInputShape` with the SDK
+  // directly (worker/note-settlement-sdk-query.ts), so its own serialized
+  // schema is a second surface the same order has to reach — one edit site,
+  // two consumers.
+  it("the settlement note shape's serialized schema puts content last and insight second-to-last too", () => {
+    const rendered = z.toJSONSchema(z.object(settlementNoteInputShape).strict(), {
+      io: "input",
+    }) as { properties: Record<string, unknown> };
+    const keys = Object.keys(rendered.properties);
+
+    expect(keys.at(-1)).toBe("content");
+    expect(keys.at(-2)).toBe("insight");
+    expect(keys.slice(0, 3)).toEqual(["turn", "session", "title"]);
+  });
+
   // ticket 01 requirement: "compose faithfully from the spec — these tests
   // are load-bearing". Each admission test's distinctive wording, pinned
   // verbatim on the field it governs.
