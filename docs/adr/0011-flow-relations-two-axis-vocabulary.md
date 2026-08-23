@@ -212,10 +212,11 @@ not a v1 exception.
 
 ## Open items
 
-- Scoring (all of it): an out-degree key, `override`'s victim treatment, and
+- ~~Scoring (all of it): an out-degree key, `override`'s victim treatment, and
   `grounds` as an election key all wait for the scoring-trio redesign on the
-  backfilled graph — unchanged from ADR-0009/0010's open item, now
-  inherited here.
+  backfilled graph~~ — unchanged from ADR-0009/0010's open item, inherited
+  here. **Closed 2026-08-23** by the milestone-election spec
+  (S15069/T1350–T1360) — see ADR-0009's closure note.
 - Render-side transparency for `collects` (P3's deferred half).
 - Delivery-layer tag flows (decision 4's deferred half; P2's deferred half):
   v2 territory.

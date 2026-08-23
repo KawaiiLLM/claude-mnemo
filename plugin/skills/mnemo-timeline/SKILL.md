@@ -52,7 +52,7 @@ timeline(id="E47", view="milestones")      # the same segment, milestone-selecte
 Views:
 
 - `turns` - every candidate turn, time-ordered, in the same row form `recall` renders, plus a `metadata` line per row.
-- `milestones` - key-turn digest. Selection is a fixed lexicographic order over edge signals, not a score: any turn with a live `override` edge against it is excluded outright, then turns rank by how many other turns `grounds` them (descending), then by excess `extends` in-degree — decision-phase excess ranked before delivery-phase excess — then by recency; admission fills `pageSize` in that order. A session or segment with no edges at all degrades safely to a flat chronological list. Turns from before the segment-era cutoff never enter milestone rendering.
+- `milestones` - key-turn digest, elected through a lane-first structural rule, not a score. A rolled-back or skipped turn, or any node carrying an `override`/`refutes` in-edge in any tag state, never competes. Surviving candidates rank by five identity tiers, highest wins: releases (untagged-`indexes` writers) > closed-valid lane termini and open lanes' last declarer > nodes an elected tier-1/2 row indexes > correctors (override writers, citers of a reversed turn) > everything else. Within a tier, in-degree (`narrows`/`extends`/`consume`/`indexes`/`grounds`/`verifies`, self-edges included) breaks ties, then out-degree, then the later turn. `pageSize` bounds the election itself, so admission is single-page by construction. A session or segment with no edges at all degrades safely to a flat, recency-ordered list — every candidate lands in the same tier at zero degree, so only recency discriminates.
 
 ### Range syntax
 
@@ -119,7 +119,12 @@ Markers:
 
 A milestone row states its stamp inline (that is what tells it apart from a
 turn row) and carries a type glyph. `↳` lists that row's antecedent
-ADDRESSES and nothing else — a bare `T<m>` inside the same session, a
+ADDRESSES and nothing else, restricted to citations that are THEMSELVES
+elected — an unelected citation never appears on a `↳` line, and the
+budget cost of the line is charged to the citing row. An elected
+antecedent can render both under a citing row's `↳` and as its own
+milestone row elsewhere on the page — the list is non-exclusive, there is
+no re-homing. Addresses render as a bare `T<m>` inside the same session, a
 session-qualified `S<n>/T<m>` when the antecedent lives elsewhere, and a
 trailing `+N` when there are more than four. `⚑` marks a row that is itself a
 corrector. No importance value renders on any row.

@@ -174,13 +174,16 @@ pairs.
   (evidence/decision/delivery), standalone edges (ADR-0009), and the
   non-contagion ruling (`override` does not cascade to a `refines`
   descendant).
-- **The scoring-trio redesign is still pending** on the backfilled graph: an
+- ~~**The scoring-trio redesign is still pending**~~ on the backfilled graph: an
   evidence-phase scoring bucket for `refines`, the override victim's
   downstream treatment (does zeroing a node cascade to its `refines`
   descendants — ruled NO, non-contagious, left to per-edge judgment
   [S15069/T1169], but the trio still sets weights and ordering), and
   `grounded-on` as a fourth election key (ADR-0009's original open item,
-  unchanged by this spec).
+  unchanged by this spec). **Closed 2026-08-23** by the milestone-election
+  spec (S15069/T1350–T1360): election structure, not a phase-specific
+  scoring bucket, now decides tier membership — see ADR-0009's closure
+  note.
 - **`supersedes` stays machine-only**, coexisting with the writer's
   `override` as two words with different provenance — a note's
   machine-judged supersession is not the same claim as a writer judging a

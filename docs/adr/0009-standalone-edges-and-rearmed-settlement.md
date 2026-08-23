@@ -187,11 +187,23 @@ Recorded rather than papered over:
   11: the counts split one bucket per verb — prose writes, relations written/restated/retracted,
   proposals, segments created, reassignments, session narrative — and `create` no longer reports
   itself as a proposal. The receipt now answers "what did that settlement pass do" on its own.
-- **Scoring is untouched and is NOT final** (spec **D10**). The three scoring changes — an
-  out-degree key, the override victim's treatment, and `grounded-on` as a fourth key — plus every
-  election weight, wait for a graph worth scoring: they are judged after the edges are actually
-  filled in, on real data, not on the 2-edge window that motivated this batch. Nothing here
-  touches `edge-signals`' scoring logic.
+- ~~**Scoring is untouched and is NOT final**~~ (spec **D10**). **Closed 2026-08-23**,
+  ruled [S15069/T1350–T1360] (`.scratch/milestone-election/spec.md`): the
+  milestone-election redesign answers this by SUPERSESSION, not by a scoring
+  formula — a lane-first structural election (candidacy exclusion → five
+  identity tiers → in-degree → out-degree → recency) replaces `effGrade`-based
+  milestone selection wholesale, so "how much does each relation word score"
+  stops being the live question for milestone rendering. `consume` now
+  credits in-degree (supersedes "depends-on 不涉分"); `narrows` now credits
+  too (the interim distortion resolves); `override`/`refutes` become a
+  CANDIDACY KILL (supersedes both the all-or-nothing zeroing and the interim
+  −1/tier-demotion drafts); the proposed out-degree key lands as an
+  intra-tier TIE-BREAK only, never an additive score; `grounds` — this
+  item's own fourth-key question — joins the plain in-degree set beside
+  `narrows`/`extends`/`consume`/`indexes`/`verifies`, no separate weight.
+  `edge-signals`' own scoring logic is untouched, as this item already
+  noted — only milestone SELECTION stopped reading it. Full supersession
+  list: `.scratch/anchoring-eval/scoring-rulings.md`'s closure note.
 - Vocabulary gaps left open from the rebuild report's A-series: A2 (`responds-to` missing),
   A3 (`grounded-on` source lock), A7 (pre-registration). A5/A10/A11 are dissolved or accepted.
   _Superseded (2026-08-21):_ A2 and A3 are both closed by ADR-0010's nine-cell grammar —

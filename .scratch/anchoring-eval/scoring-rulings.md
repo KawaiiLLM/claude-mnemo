@@ -105,3 +105,51 @@ accepted interim distortions (grounded-on-shaped `grounds` edges begin
 crediting; `narrows` scores nothing) that this file's still-open scoring-trio
 question inherits unchanged; see `tests/db/edge-signals.test.ts` for the
 pinned tests.
+
+## Closure (2026-08-23)
+
+The scoring-trio question this file fed is CLOSED — by supersession, not by
+the scoring formula this file's header once expected. Ruled S15069/T1350–T1360
+(`.scratch/milestone-election/spec.md`): a lane-first structural election
+(candidacy exclusion → five identity tiers → in-degree → out-degree →
+recency) replaces the whole `effGrade`/`edge-signals`-scored milestone
+selection, so "how much does each relation word score" stops being the
+live question for milestone rendering.
+
+Supersessions, against this file's five rulings and the interim pin:
+
+- **`consume` now credits in-degree** — supersedes ruling 4
+  ("depends-on 不涉分"; the migration-era interim pin had already renamed
+  the key but kept it scoreless).
+- **`narrows` now credits in-degree** — the interim pin's "narrows scores
+  nothing" distortion resolves; `narrows` joins the plain six-word
+  in-degree set with `extends`/`consume`/`indexes`/`grounds`/`verifies`.
+- **`override`/`refutes` become a CANDIDACY KILL** — supersedes both
+  ruling 1's all-or-nothing zeroing and the peer-review interim −1/
+  tier-demotion draft (§Peer design-review inputs, item 2). A struck
+  node's own out-edges still contribute to every OTHER node's degree;
+  only its own candidacy is removed.
+- **Out-degree is an intra-tier TIE-BREAK only**, never a scoring term —
+  the "out-degree key" half of ADR-0009's open item resolves this way,
+  not as an additive score.
+- **`extends` keeps crediting**, now caged within identity tiers rather
+  than a flat score (ruling 2's `refines`→`extends` lineage, unchanged in
+  kind).
+- **`grounds`** — ADR-0009's fourth-key question — joins the same
+  in-degree set, no separate weight (ruling 3's `encodes`→`grounds`
+  lineage, unchanged in kind).
+- **Self-edges keep participating** (ruling 5, unchanged): the election's
+  in-/out-degree tally has no `citingId !== citedId` filter, upholding
+  T1180 (a self-`grounds` prices a real declared convergence).
+- **The evidence-source boundary retires** along with every other
+  phase-specific bucket: the election's six in-degree words score per
+  edge regardless of phase, so there is no more "skipped at scoring" case
+  to track.
+
+Election REPLACED scoring-based selection wholesale — see ADR-0009's own
+closure note and CONTEXT.md's "Milestone election" entry for the shipped
+five-step pipeline. This file is historical input from here on: it records
+what the relation-matrix spec ruled about relation SCORING in the old
+`effGrade`/`edge-signals` regime, a regime milestone selection no longer
+consults. `edge-signals.ts`'s own scoring logic is untouched by this
+closure — only milestone SELECTION stopped reading it.

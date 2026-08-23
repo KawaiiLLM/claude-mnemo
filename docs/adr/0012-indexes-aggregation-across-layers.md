@@ -255,9 +255,12 @@ excess, recency — is untouched and stays with the pending scoring pass.
   grounds fan.
 - **T915-class unreachable effective nodes** are queued as review debt, not
   auto-repaired.
-- **Scoring beyond `indexes`' participation** — weights, `narrows`'
+- ~~**Scoring beyond `indexes`' participation**~~ — weights, `narrows`'
   consequence, the override victim's treatment — stays with the scoring pass
-  (inherited from ADR-0009/0010/0011).
+  (inherited from ADR-0009/0010/0011). **Closed 2026-08-23** by the
+  milestone-election spec (S15069/T1350–T1360): `narrows` now credits
+  in-degree, the override victim's treatment is a candidacy kill, and
+  weights are replaced by identity tiers — see ADR-0009's closure note.
 - **Delivery-layer tag flows** remain v2 (ADR-0011 decision 4's deferred half,
   unchanged by this amendment).
 - **The soft-assertion tie-breaker for hedged stance pairs** is unruled;

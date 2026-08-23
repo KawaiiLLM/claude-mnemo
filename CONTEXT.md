@@ -4,9 +4,12 @@ Persistent memory for Claude Code sessions: an episodic layer of recorded turns 
 a semantic layer of task containers, maintained by the agents that do the work.
 Vocabulary pinned by the 2026-08-17 segment redesign, the 2026-08-19
 edge-ownership redesign, the 2026-08-20 edge-mechanism revision, the
-2026-08-21/22 flow-relations and indexes amendments (ADR-0001…0012), and the
+2026-08-21/22 flow-relations and indexes amendments (ADR-0001…0012), the
 2026-08-22 lane-model redesign (`.scratch/rubric-v10/`, ruled; ships with v10 —
-until that release the CODE still speaks the flow-era semantics).
+until that release the CODE still speaks the flow-era semantics), and the
+2026-08-23 milestone-election redesign (`.scratch/milestone-election/`,
+shipped — a lane-first structural election replaces effGrade-based
+milestone selection wholesale).
 
 ## Language
 
@@ -154,21 +157,28 @@ indexing the artifacts it ships). Validity is therefore lane-relative for
 tagged kills and turn-global for untagged ones.
 
 **Lane**:
-A separable subworkflow inside one phase, under a segment. Its identity is
-its exact tag SET, scoped to the segment: the machine treats every distinct
-set as an independent lane, and {P}→{P,c1} forks or {A}+{B}→{A,B} merges
-are human narration read off tag composition — no stored hierarchy.
-Membership comes from being an endpoint of the lane's tagged edges; a
-single-node lane carries no tag and no machinery, and is consumed
-cross-phase directly. Lanes never cross phases; cross-segment tagged edges
-are legal and warned (the boundary and the workline disagree somewhere).
-The system core identifies no lane, no 起点, no 终点 — interpretation lives
-in the rubric and is encoded once, in the checker. Segments never enter the
-graph as relation nodes: a lane is the subgraph its tagged edges carve, the
-segment stays the container.
+A separable subworkflow inside ONE phase, under a segment. Its identity is
+its exact tag SET, scoped to the segment — the machine treats every
+distinct set as an independent lane — taking the form of a DAG of tagged
+edges over AT LEAST TWO nodes; every node's own tags must contain the
+lane's tags. **Single-node lanes do not exist** (upholding v10's
+isolated-product rule; the once-floated self-indexes closure clause was
+withdrawn): an isolated single-turn product needs no tag, joins no lane,
+and still competes for milestone election through in-degree and release
+indexing. A lane may start from another lane's node: adding a tag to the
+parent's set FORKS a new branch; inheriting the parent's exact tag set
+REOPENS a closed lane — the machine knows only exact sets, parenthood is
+narration read off tag composition, never stored hierarchy. Lanes never
+cross phases; cross-segment tagged edges are legal and warned (the
+boundary and the workline disagree somewhere). The system core identifies
+no lane, no 起点, no 终点 — interpretation lives in the rubric and is
+encoded once, in the checker. Segments never enter the graph as relation
+nodes: a lane is the subgraph its tagged edges carve, the segment stays
+the container.
 _Avoid_: flow (retired — the decision-only branch topology derived from
 narrows/extends; superseded by tag-identified lanes across all phases),
-workflow as a stored object, connected components as the lane definition
+workflow as a stored object, connected components as the lane definition,
+single-node lanes (retired 2026-08-23 — see Lane state)
 
 **Convergence declaration (收敛宣告 / 终点)**:
 A tagged indexes edge closing its lane: the declaring member becomes the
@@ -182,12 +192,58 @@ a fresh declaration; repudiated by an untagged override, every lane it
 currently closes loses its terminus. A repudiated or reopened lane is
 revivable by any later member's fresh declaration.
 
-**Adoption (采纳 / valid lane)**:
+**Lane state (closed/open, valid/invalid)**:
+Whether a lane's LATEST node is its declared terminus — CLOSED — or not —
+OPEN, including a reopened lane pre-redeclaration and a lane that kept
+living past its own declaration (a narrows/extends continuation with no
+re-declaration is open, not closed, even though a terminus still exists).
+A closed lane is VALID while at least one of the terminus's own declared
+core members is living, INVALID once the whole indexed core is dead — the
+abandonment ritual is repudiate-then-declare: override the wrong
+conclusions, then declare closure indexing the dead core, so the terminus
+still carries the story. A fizzled lane with no product and nothing to
+bury stays OPEN forever — convergence never happened, and undeclared is
+the honest state; no machinery marks it. An open lane's `lastDeclarer` is
+the citingId of its most recent tagged-`indexes` edge; `null` iff the lane
+was never declared at all ("open, no declarer, no seat").
+_Avoid_: "valid lane" as a synonym for adopted (see Adoption) — validity
+here is a mechanized read of the terminus's own declared core, never
+whether the outside took the lane's outcome up
+
+**Adoption (采纳)**:
 Whether a lane's outcome was taken up — a dynamic human judgment, never
 stored. Strongest evidence: an EXTERNAL delivery node citing the lane's
 terminus (self-citations never count). Necessary condition on the graph,
-reported by the checker and never enforced: a valid lane has a declared
-terminus; single-node lanes are exempt.
+reported by the checker and never enforced: an adopted lane is CLOSED (a
+declared terminus exists to cite) — single-node lanes no longer exist, so
+the old exemption clause is gone with them.
+_Avoid_: "valid lane" as this concept's name (retired 2026-08-23 — `valid`
+now names the Lane state entry's mechanized concept, not adoption)
+
+**Milestone election**:
+The lane-first structural selection `timeline`'s `milestones` view runs
+(`shared/milestone-election.ts`), replacing the retired effGrade/
+always-keep chain wholesale — see Election (差额选举) above, a different,
+unrelated retired mechanism from the settlement side. Five steps: (1)
+candidacy exclusion — a rolled-back or skipped turn, or any node carrying
+an `override`/`refutes` in-edge in ANY tag state, leaves candidacy
+entirely; (2) five identity tiers, lexicographic, highest wins — ①
+untagged-`indexes` writers (releases), ② a closed-valid lane's terminus or
+an open lane's last declarer, ③ nodes indexed by an ELECTED tier-①/② node
+(a two-stage fill — only the budget-bounded winners of ①/② seed this
+tier), ④ correctors (override writers, citers of a reversed turn), ⑤
+everything else; (3) within a tier, positive in-degree
+(`narrows`/`extends`/`consume`/`indexes`/`grounds`/`verifies`, self-edges
+included) breaks ties, then out-degree, then the LATER turn; (4) the
+renderer's own budget applies unchanged, and an edgeless window degrades
+to recent-N — every candidate lands in tier ⑤ at zero degree, so the
+later-turn tiebreak alone decides, which IS recency; (5) elected rows
+render in TIME order, never score order, and a row's `↳` line lists only
+its cited turns that are THEMSELVES elected (non-exclusive — an elected
+antecedent can also render as its own row).
+_Avoid_: effGrade-based selection, the always-keep chain (endpoints ∪
+correctors ∪ reversed ∪ era-G4), era gating as a candidacy signal — all
+retired 2026-08-23
 
 **Lane checker (校验器)**:
 The one place interpretation is encoded — a read-only advisory tool that

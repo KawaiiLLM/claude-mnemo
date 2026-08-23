@@ -14,7 +14,7 @@ lane states, so no cached doc teaches the retired chain:
 
 **Blocked by:** 03 — views integration (teaching follows shipped behavior).
 
-**Status:** ready-for-agent
+**Status:** done (sweep grep re-run clean by the main agent; 43 guard tests green)
 
 - [ ] No teaching surface mentions effGrade-based milestone selection or the
       always-keep chain as live behavior (grep sweep evidence in the report)
