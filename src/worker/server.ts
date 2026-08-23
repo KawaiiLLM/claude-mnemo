@@ -69,6 +69,12 @@ import {
   captureSessionEnv,
   type CapturedSessionEnv,
 } from "../mnemosyne/env";
+import {
+  createLazyConsoleReaderResolver,
+  type ConsoleReader,
+  type OpenConsoleReaderDatabase,
+} from "./console-reader";
+import { routeConsoleApiRequest, toConsoleApiResponse } from "./console-api";
 
 const WORKER_PORT = 37778;
 const STARTING_STALE_MS = 10_000;
@@ -167,6 +173,20 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   now?: () => number;
   /** The server's own bound port; defaults to `WORKER_PORT`. Threaded through so the request gate below checks against the port actually listening, not a hardcoded assumption. */
   port?: number;
+  /**
+   * Console boot-wiring (memory-console spec; ticket 03, resolving ticket
+   * 02's flagged question). The reader connection is opened LAZILY, on the
+   * first `/api/console/*` request — see `console-reader.ts`'s
+   * `createLazyConsoleReaderResolver` for the full reasoning. `consoleReaderImpl`
+   * is the direct-injection seam a test uses when the worker's own `db` is
+   * `:memory:` (two separate `:memory:` connections share no state, so
+   * opening a second one against the same "path" would not see the first's
+   * data); `consoleDatabasePathImpl` is the real file path `main()` derives
+   * from its own already-open primary connection (`db.filename`).
+   */
+  consoleReaderImpl?: ConsoleReader;
+  openConsoleReaderDatabaseImpl?: OpenConsoleReaderDatabase;
+  consoleDatabasePathImpl?: string;
   pidPath?: string;
   startingPath?: string;
   existsSyncImpl?: typeof existsSync;
@@ -1309,6 +1329,9 @@ export function createWorkerFetchHandler(
   const clearSessionEnvImpl =
     deps.clearSessionEnvImpl ?? runtime?.clearSessionEnv;
   const drainSettleSessionImpl = deps.drainSettleSessionImpl;
+  // Console routes (memory-console spec; ticket 03) — see the field docs on
+  // `WorkerServerDeps.consoleReaderImpl`/`consoleDatabasePathImpl` above.
+  const getConsoleReader = createLazyConsoleReaderResolver(deps);
   let wakeScanInFlight: Promise<void> | null = null;
   let activeGlobalWork = 0;
   let resolveGlobalWork: (() => void) | null = null;
@@ -1387,6 +1410,44 @@ export function createWorkerFetchHandler(
             headers: { "content-type": "application/json" },
           },
         );
+      }
+
+      // Console API (memory-console spec; ticket 03). Read-only, structurally
+      // separate from every route below: handlers receive only the narrow
+      // `ConsoleReader` capability, never `runtimeDb`/`deps.db`, and this
+      // dispatch touches NEITHER `sessionEnvRegistry` NOR
+      // `deps.hardExitTimerImpl` — a console request must not extend the
+      // worker's life (spec "Worker lifecycle": no keep-alive) or reset the
+      // idle/hard-exit machinery, and the simplest proof of that is that the
+      // code path below never references either.
+      if (req.method === "GET" && url.pathname.startsWith("/api/console/")) {
+        let consoleReader: ConsoleReader;
+        try {
+          consoleReader = getConsoleReader();
+        } catch (error) {
+          return toConsoleApiResponse({
+            status: 503,
+            body: {
+              error: {
+                code: "unavailable",
+                message:
+                  error instanceof Error ? error.message : String(error),
+              },
+            },
+          });
+        }
+        const consoleResult = routeConsoleApiRequest(
+          url.pathname,
+          consoleReader,
+          url,
+          {
+            buildId: BUILD_ID,
+            nowMs: deps.nowMs ?? Date.now,
+          },
+        );
+        if (consoleResult) {
+          return toConsoleApiResponse(consoleResult);
+        }
       }
 
       if (req.method === "POST" && url.pathname === "/wake") {
@@ -1983,6 +2044,17 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
       drainSettleSessionImpl:
         deps.drainSettleSessionImpl ??
         ((sessionDbId) => core.noteSettlement.drainSession(sessionDbId)),
+      // Console boot wiring (ticket 03): the console's own readonly
+      // connection targets the SAME file this primary connection opened —
+      // read from `db.filename` rather than re-resolving a path
+      // independently, so the two can never drift onto different files.
+      // `:memory:` (test-only; production always opens a real file) has no
+      // second connection to open at all — `undefined` here means the lazy
+      // resolver fails closed (503) unless a test also supplies
+      // `consoleReaderImpl` directly.
+      consoleDatabasePathImpl:
+        deps.consoleDatabasePathImpl ??
+        (db.filename && db.filename !== ":memory:" ? db.filename : undefined),
     },
     serverState,
   );
