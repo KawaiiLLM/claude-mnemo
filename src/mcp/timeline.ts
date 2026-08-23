@@ -1,9 +1,6 @@
 import type { Database } from "bun:sqlite";
-import {
-  getSessionEffectiveCitations,
-  parseInlineCitations,
-  type EffectiveCitations,
-} from "../db/citations";
+import { parseInlineCitations } from "../db/citations";
+import { getRelationEdgesAmongTurns } from "../db/memory-edges";
 import {
   getSegmentMembershipForTurns,
   listOrphanAnchorTurns,
@@ -12,16 +9,21 @@ import {
   type RankedSegmentMember,
   type SegmentSpineRow,
 } from "../db/segment-rank";
-import { getTurnEdgeSignals, type TurnEdgeSignals } from "../db/edge-signals";
 import { liveTurnSql } from "../db/turn-liveness";
 import { getSegment, type SegmentRecord } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { estimateDiaryTokens } from "../diary/domain";
 import { isSegmentEra } from "../segment-era";
+import {
+  electMilestones,
+  type LaneEdgeInput,
+  type MilestoneCandidate,
+  type MilestoneTier,
+  type MilestoneTurnInput,
+} from "../shared/milestone-election";
 import { resolveSessionTranscriptPath } from "../shared/paths";
 import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
-import { isTaskCausalityEra } from "../task-causality-era";
 import {
   LEGACY_TYPE_GLYPH,
   MEMORY_TYPES,
@@ -123,13 +125,15 @@ export interface TimelineInput {
   /** Test seam for the read-grant timestamp; defaults to the real clock. */
   now?: () => number;
   /**
-   * Ticket 09: forwarded to `SegmentTimelineInput.taskCausalityEraCutoffEpoch`
-   * on the standalone `E<n>` route. Ticket 12: ALSO threaded into the `S<n>`
-   * era spine's own nested per-segment milestone rows
-   * (`selectSegmentMilestonesByEdgeSignals`, shared with the `E<n>` route) —
-   * the two routes' admission must agree on the same fixture, so they now
-   * share this era-boundary input too. The turns-view/legacy-milestone-body
-   * path (`selectMilestoneTurns`) still ignores it, unchanged.
+   * Forwarded to `SegmentTimelineInput.taskCausalityEraCutoffEpoch` on the
+   * standalone `E<n>` route, and threaded into the `S<n>` era spine's own
+   * nested per-segment milestone rows (`selectSegmentMilestonesByEdgeSignals`,
+   * shared with the `E<n>` route). Milestone-election spec, ticket 03: era
+   * gating retired from candidacy on both routes — this field is now
+   * accepted-but-unread for schema stability (see
+   * `SegmentTimelineInput.taskCausalityEraCutoffEpoch`'s own doc comment).
+   * The turns-view/legacy-milestone-body path (`selectMilestoneTurns`) never
+   * took this field at all, unchanged.
    */
   taskCausalityEraCutoffEpoch?: number;
 }
@@ -152,19 +156,6 @@ export interface TimelineView {
   windowTurns: TurnRecord[];
   pageTurns: TurnRecord[];
   pagedMilestones: KeptMilestone[];
-  /**
-   * Every ↳ antecedent the kept rows pull in (spec §C ⑤), for the whole selection
-   * rather than the current page — a renderer places one under its
-   * `citedByPromptNumber` row when that row is on the page. Empty outside the
-   * milestones view.
-   */
-  milestonePulled: PulledAntecedent[];
-  /**
-   * effGrade per turn DB id (spec §C truth table; an edge no longer moves it,
-   * spec H1), so every view can print the grade column. Turns with no main-row
-   * candidacy at all (compact markers) are absent.
-   */
-  turnEffGrades: ReadonlyMap<number, number>;
   milestoneDayGroups: MilestoneDayGroup[];
   viewItemTotal: number;
   pageAnchorEpoch: number | null;
@@ -443,59 +434,28 @@ export interface ShapeSignals {
 
 export interface KeptMilestone {
   turn: TurnRecord;
-  /** effGrade + tie-break (spec §C). Ordering only; never crosses a grade tier. */
+  /**
+   * Strict election-rank ordinal, higher is better (milestone-election spec,
+   * ticket 03): monotonically decreasing with `electMilestones`'s own
+   * tier/in-degree/out-degree/order rank, so ties never occur among a
+   * selection's own rows. Degradation order only (`compareMilestoneRank`,
+   * `milestoneDegradationOrder`) — DISPLAY order is always chronological
+   * (spec step 5), never this.
+   */
   score: number;
-  /** The truth-table grade (spec §C); an edge no longer moves it (spec H1). */
-  effGrade: number;
-  /** Kept for a structural reason, so a budget may degrade it but never drop it. */
-  alwaysKeep: boolean;
-  /** Admitted on grade alone (effGrade ≥ 3), as opposed to structurally. */
-  spine: boolean;
+  /** The election tier `electMilestones` assigned this row (1 highest .. 5 lowest) — informational, never rendered as a badge (no grade/tier label survives on any surface). */
+  tier: MilestoneTier;
   marker: MilestoneMarker;
   /**
-   * Prompt numbers of the turns that superseded this one, ascending. Present on
-   * any kept row that is itself a victim, however it got kept — its own grade
-   * decided that (spec H1), not the edge. The renderer prints the
-   * `→被T<n>推翻` back-link from this field on a main row, and from
-   * `PulledAntecedent.supersededBy` on a ↳ row: spec H3's "the back-link
-   * survives" means it appears wherever the row lands, and H1 moved victims
-   * onto main rows.
+   * `↳` addresses (spec step 5): this row's OWN cited turns that are
+   * themselves elected (present in the same selection's `kept` set) —
+   * pre-formatted `T<n>` strings, ascending by the cited turn's prompt
+   * number. An unelected cited turn is omitted entirely, never pulled in as
+   * a separate row; the line's rendering (and token-budget) cost is folded
+   * into THIS row's own unit — no separate pulled-antecedent object survives
+   * this ticket (contrast the retired `PulledAntecedent`).
    */
-  supersededBy?: number[];
-}
-
-/**
- * A turn pulled in under a kept main row because that row cites it (spec §C ⑤):
- * effGrade ≤ 2, rendered as an indented `↳` line beneath its citer. A
- * rolled-back or skipped turn is never one of these (ticket 06, ruling
- * [S15069/T1084]) — it is excluded from the citation universe before
- * selection ever considers it, so it can never be pulled through.
- */
-export interface PulledAntecedent {
-  turn: TurnRecord;
-  effGrade: number;
-  /**
-   * Prompt number of the main row this antecedent renders under: the EARLIEST
-   * citer among the kept rows, so a shared antecedent appears exactly once.
-   */
-  citedByPromptNumber: number;
-  /**
-   * EVERY kept main row that cites this antecedent, ascending — `citedByPromptNumber`
-   * is just the first. The renderer needs the full list because dropping a unit
-   * under a token budget must re-home that unit's shared antecedents onto the
-   * earliest still-rendered citer (spec §D); with only the earliest citer stored,
-   * an antecedent cited three times would vanish the moment its first citer went.
-   */
-  citerPromptNumbers: number[];
-  /**
-   * Render-ready one-line label: the stored title when there is one, else a
-   * ≤`MILESTONE_PULLED_LABEL_CAP`-char prefix of the user prompt. Existing
-   * skipped rows carry no title at all (extraction only starts titling them in
-   * ticket 05), and a pulled row that renders as `(untitled)` is dead weight.
-   */
-  label: string;
-  /** Prompt numbers of the turns that superseded this one, ascending; empty when it is not a victim. */
-  supersededBy: number[];
+  antecedents: string[];
 }
 
 export interface OverflowHint {
@@ -513,27 +473,22 @@ export interface OverflowHint {
 
 export interface MilestoneSelection {
   /**
-   * The main rows, in prompt order: spine (effGrade ≥ 3) ∪ always-keep. There is
-   * no budget here — cutting is the unified renderer's job (spec §D / ticket 03),
-   * which reads `ranked` for its degradation order.
+   * The election's own budget cut (milestone-election spec, ticket 03): the
+   * top-`budget` window candidates by election rank, re-sorted to TIME order
+   * (spec step 5 — "elected rows render in TIME order, never score order").
+   * This is the display set; `ranked` (below) is the wider, unbounded pool a
+   * degradation pass (a `tokenBudget`) still has to consult.
    */
   kept: KeptMilestone[];
   /**
-   * The scored pool, best first: every turn clearing the pool gate
-   * (effGrade ≥ 2) plus the always-keep rows. A superset of `kept` — the G2 band
-   * is scored and ordered but not admitted to the spine. Shares object identity
-   * with `kept` for the rows in both.
+   * Every non-excluded window candidate, election-rank order (best first),
+   * UNBOUNDED by `budget` — a superset of `kept`. `compareMilestoneRank`
+   * sorts with this array's own order (via `score`); the renderer's
+   * degradation ladder reads it in reverse to decide what a `tokenBudget`
+   * sheds first. Shares object identity with `kept` for the rows in both.
    */
   ranked: KeptMilestone[];
-  /** ↳ antecedents pulled in by the kept rows, in citer order then cite order. */
-  pulled: PulledAntecedent[];
   overflowByDay: OverflowHint[];
-  /**
-   * effGrade for EVERY main-row candidate in the window, keyed by DB id — the
-   * truth-table value (spec §C), not the stored grade. The turns view renders a
-   * grade column off this, so its `G` cell agrees with the arc view.
-   */
-  effGradeByTurnId: Map<number, number>;
 }
 
 export interface MilestoneDayGroup {
@@ -867,173 +822,18 @@ export function milestoneMarker(
   return null;
 }
 
-/**
- * Legacy type→grade map. This is the ONLY surviving use of the old type base
- * score table: it exists solely inside the pre-era effGrade fallback, because a
- * turn created before the task-causality cutoff carries a grade written under
- * the old "significance" semantics that must not be read as a task-causality
- * grade. Post-era turns never touch it.
- */
-const MILESTONE_LEGACY_TYPE_GRADE: Readonly<Record<string, number>> = {
-  decision: 3,
-  feature: 2,
-  refactor: 2,
-  bugfix: 2,
-  change: 1,
-  discovery: 1,
-};
+// The effGrade truth table, its tie-break, and the whole always-keep/
+// correction-graph/pull-through machinery that used to live here (spec §C of
+// the retired grade-first arc) are RETIRED (milestone-election spec, ticket
+// 03): `selectMilestoneTurns`/`selectSegmentMilestonesByEdgeSignals` below
+// delegate to `shared/milestone-election.ts`'s `electMilestones` instead.
+// Grading itself is untouched — `significanceGrade`/`milestoneEffGrade`-style
+// truth tables may still exist for OTHER consumers (settlement) — only their
+// role in milestone ELECTION is gone. See
+// `tests/mcp/timeline.election-retirement.test.ts` for the grep-guards
+// pinning this.
 
-/**
- * A legacy effGrade is capped here and therefore can never be 4 — G4 is the
- * always-keep anchor tier, and a pre-era turn must never claim it on the
- * strength of a type map alone.
- */
-export const MILESTONE_LEGACY_GRADE_CAP = 3;
-
-/** Spine admission (spec §C ④). */
-export const MILESTONE_SPINE_MIN_EFF_GRADE = 3;
-/**
- * Scored-pool gate (spec §C). On effGrade, NOT on the composite score: the
- * bonuses used to be able to lift a G2 turn past a G3 one, which is exactly the
- * inversion the redesign removes. Nothing a turn's content can do admits it to
- * a tier its grade did not earn.
- */
-export const MILESTONE_POOL_MIN_EFF_GRADE = 2;
-/** Pull-through ceiling (spec §C ⑤): antecedents are what the spine outranks. */
-export const MILESTONE_PULL_MAX_EFF_GRADE = 2;
-
-const MILESTONE_TIE_CITED_WEIGHT = 0.25;
-const MILESTONE_TIE_CITED_CAP = 2;
-const MILESTONE_TIE_INSIGHT_WEIGHT = 0.25;
-const MILESTONE_TIE_PURE_SPEC_WEIGHT = 0.15;
-/** Ceiling on the whole tie-break, so a score can never cross a grade tier. */
-const MILESTONE_TIE_BREAK_MAX = 0.9;
-
-const MILESTONE_PURE_SPEC_RE = /^docs\/(?:plans|specs|superpowers)\/.*\.md$/;
 const MILESTONE_VERSION_RE = /\b0\.\d+\.\d+\b/g;
-
-/** Character budget for the prompt-prefix pseudo-title of an untitled ↳ row. */
-export const MILESTONE_PULLED_LABEL_CAP = 60;
-
-/**
- * The effGrade truth table (spec §C).
- *
- *   - era turn, graded    → that grade (0-4)
- *   - era turn, ungraded  → 0, i.e. out of the pool until the settle pass grades it
- *   - pre-era (legacy)    → type map, zeroed for an artifact type that touched no
- *                           file, +1 for an insight, capped at 3
- *
- * Both halves are era-gated. The half-gate that shipped before this (base score
- * ungated, content score gated) let 761 stored legacy grades feed the base score
- * with pre-era semantics.
- */
-export function milestoneEffGrade(
-  turn: TurnRecord,
-  taskCausalityEraCutoffEpoch?: number,
-): number {
-  if (isTaskCausalityEra(turn.createdAtEpoch, taskCausalityEraCutoffEpoch)) {
-    const grade = turn.significanceGrade;
-    if (grade === null || grade === undefined) {
-      return 0;
-    }
-    return Math.max(0, Math.min(4, grade));
-  }
-
-  return legacyEffGrade(turn);
-}
-
-function legacyEffGrade(turn: TurnRecord): number {
-  // This whole function is exercised only against pre-era turns (spec's own
-  // doc comment above), which the ticket 02 migration wraps one legacy word
-  // per one-element array — so the first (and only) element IS the value
-  // this map has always been keyed on. Untouched behaviour for every row this
-  // function actually sees.
-  const legacyType = turn.type[0] ?? "";
-  let grade = MILESTONE_LEGACY_TYPE_GRADE[legacyType] ?? 0;
-  if (
-    (legacyType === "feature" || legacyType === "refactor" || legacyType === "change") &&
-    turn.filesModified.length === 0
-  ) {
-    grade = 0;
-  }
-  if (hasMilestoneInsight(turn)) {
-    grade += 1;
-  }
-  return Math.min(grade, MILESTONE_LEGACY_GRADE_CAP);
-}
-
-function hasMilestoneInsight(turn: TurnRecord): boolean {
-  return typeof turn.insight === "string" && turn.insight.trim() !== "" && turn.insight !== "[]";
-}
-
-function isPureSpecTurn(turn: TurnRecord): boolean {
-  return (
-    turn.filesModified.length > 0 &&
-    turn.filesModified.every((path) => MILESTONE_PURE_SPEC_RE.test(path))
-  );
-}
-
-/**
- * Sub-unit ordering signal, bounded by `MILESTONE_TIE_BREAK_MAX` (< 1) so that
- * `effGrade + tieBreak` sorts strictly within a grade tier and never across one.
- * `citedBy` is the session-local DISTINCT-citer in-degree.
- */
-export function milestoneTieBreak(turn: TurnRecord, citedBy = 0): number {
-  const raw =
-    MILESTONE_TIE_CITED_WEIGHT * Math.min(Math.max(citedBy, 0), MILESTONE_TIE_CITED_CAP) +
-    (hasMilestoneInsight(turn) ? MILESTONE_TIE_INSIGHT_WEIGHT : 0) +
-    (isPureSpecTurn(turn) ? MILESTONE_TIE_PURE_SPEC_WEIGHT : 0);
-  return Math.min(raw, MILESTONE_TIE_BREAK_MAX);
-}
-
-/**
- * The in-memory stand-in for `getSessionEffectiveCitations` (spec §B), for
- * callers that hold turn records but no `Database` — the pure-function selection
- * seam the tests use. It reproduces the DB reader's contract for a session with
- * no edge rows: the union of both sources degenerates to the inline grammar
- * alone, dropping dangling, cross-session and self citations.
- *
- * No `cites_recorded` branch, because the reader has no gate any more: a turn
- * with no edge rows reads its prose whether or not anything ever "spoke" for
- * it. Production always passes the real map, so structured edges are never
- * lost to this fallback.
- */
-function inlineCitationFallback(
-  turns: readonly TurnRecord[],
-): Map<number, EffectiveCitations> {
-  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
-  const effective = new Map<number, EffectiveCitations>();
-
-  for (const turn of turns) {
-    effective.set(turn.id, {
-      citedTurnIds: parseInlineCitations(turn.content).filter(
-        (id) => id !== turn.id && sessionTurnIds.has(id),
-      ),
-      edges: [],
-    });
-  }
-
-  return effective;
-}
-
-/**
- * Session-local DISTINCT-citer in-degree, derived from the citation map the
- * caller already holds. Same result as `getSessionCitationInDegree`, without a
- * second pass over the DB — selection reads the map once and reuses it for
- * in-degree, the correction graph and pull-through alike.
- */
-function citationInDegree(
-  citations: ReadonlyMap<number, EffectiveCitations>,
-): Map<number, number> {
-  const inDegree = new Map<number, number>();
-  for (const entry of citations.values()) {
-    // citedTurnIds is de-duplicated per citer, so each citer contributes ≤ 1.
-    for (const citedTurnId of entry.citedTurnIds) {
-      inDegree.set(citedTurnId, (inDegree.get(citedTurnId) ?? 0) + 1);
-    }
-  }
-  return inDegree;
-}
 
 function extractMilestoneVersion(title: string | null): string | null {
   if (!title) return null;
@@ -1085,142 +885,6 @@ function demotedOutcomePrompts(seq: TurnRecord[]): Set<number> {
   }
 
   return demoted;
-}
-
-export interface CorrectionGraph {
-  /** DB ids of turns that supersede at least one resolvable predecessor. */
-  correctors: Set<number>;
-  /**
-   * DB ids of superseded turns. Annotation only (spec H1): a victim's grade and
-   * spine eligibility are untouched by this set, which now drives only the
-   * renderer's `→被T<n>推翻` back-link and the `rolled-back` orphan signal. A
-   * victim resolved from OUTSIDE the window is still included, so a ranged
-   * view's back-link is correct even when the corrector that named it sits
-   * outside the range.
-   */
-  supersededVictims: Set<number>;
-  /** Victim DB id → superseding DB ids, ascending by the superseder's prompt number. */
-  supersededBy: Map<number, number[]>;
-}
-
-/**
- * Builds the supersession graph (spec §B, H1). A turn is a *corrector* when it
- * carries a `supersedes` edge to an earlier same-session turn; that turn is the
- * *victim*. The graph is an annotation, not a scorer (spec H1): a victim keeps
- * the grade it was given and is exactly as eligible to anchor a milestone
- * selection as any other turn. What the graph still drives is display — a
- * corrector's unconditional always-keep slot, the renderer's `→被T<n>推翻`
- * back-link, and the `rolled-back` orphan signal (spec D11) — never a grade.
- *
- * Victimhood comes off the EDGE, not off the victim's tags. The previous model
- * required the victim to already carry a `rolled-back` tag before any of this
- * fired, which meant a partial reversal (the common case — the corrector knows
- * what it overturned, the victim does not know it was overturned) produced
- * neither a back-link nor a corrector always-keep slot.
- *
- * The legacy adapter covers pre-era citers whose citations came from INLINE
- * prose, which carries no relation: for those, citing a turn that is *marked*
- * reversed (rolled-back tag or the rewind column) is read as a supersession,
- * which is precisely the old rule — an additional signal for pre-era turns only,
- * so era turns are governed by edges alone.
- *
- * BOTH gates are load-bearing. Era alone is not enough: a structured edge is
- * authoritative wherever it exists (spec §B), including on a turn created before
- * the cutoff and extracted after it. Such a turn's `depends-on` / `evidence-for`
- * edge states a relation, and that relation is not `supersedes`; reading the
- * victim's tag over it would invent a correction the extractor declined to
- * record, mislabeling a mere consumer as a corrector.
- *
- * A cited victim is matched first against `turns`, then via `resolveCited` (the
- * full-session set), so a ranged view whose corrector cites a victim OUTSIDE the
- * window still gives that corrector its always-keep slot and still renders the
- * victim's back-link wherever the victim itself is shown.
- */
-export function buildCorrectionGraph(
-  turns: readonly TurnRecord[],
-  options: {
-    citations?: ReadonlyMap<number, EffectiveCitations>;
-    resolveCited?: (dbId: number) => TurnRecord | null | undefined;
-    taskCausalityEraCutoffEpoch?: number;
-  } = {},
-): CorrectionGraph {
-  const correctors = new Set<number>();
-  const supersededVictims = new Set<number>();
-  const supersedersByVictim = new Map<number, TurnRecord[]>();
-
-  const byDbId = new Map<number, TurnRecord>();
-  for (const turn of turns) {
-    byDbId.set(turn.id, turn);
-  }
-  const citations = options.citations ?? inlineCitationFallback(turns);
-
-  for (const corrector of turns) {
-    const entry = citations.get(corrector.id);
-    if (entry === undefined) {
-      continue;
-    }
-
-    const supersededIds = new Set<number>();
-    const structuredTargets = new Set<number>();
-    for (const edge of entry.edges) {
-      structuredTargets.add(edge.citedTurnId);
-      if (edge.relation === "supersedes") {
-        supersededIds.add(edge.citedTurnId);
-      }
-    }
-    // The legacy adapter: a pre-era corrector infers supersession from a cited
-    // turn's own reversal marker, for the targets it has no structured edge
-    // about.
-    //
-    // PER TARGET, not per turn. The predicate was once `source === "inline"`,
-    // which was a whole-turn fact because the reader picked one source for the
-    // entire turn. The union is per target, so the first translation of it —
-    // `entry.edges.length === 0` — silently disabled the adapter for the whole
-    // turn as soon as ONE structured edge existed: a corrector whose prose
-    // cites both a settled target and a reversed victim would lose the victim
-    // entirely, along with its own corrector status and the victim's back-link.
-    // A per-turn gate cannot survive a per-target union.
-    if (!isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
-      for (const citedTurnId of entry.citedTurnIds) {
-        if (structuredTargets.has(citedTurnId)) {
-          continue;
-        }
-        const cited = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
-        if (cited && milestoneMarker(cited) === "reversed") {
-          supersededIds.add(citedTurnId);
-        }
-      }
-    }
-
-    for (const citedTurnId of supersededIds) {
-      const victim = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
-      if (
-        !victim ||
-        victim.sessionId !== corrector.sessionId ||
-        // Predecessor guard: a causal reference points backward.
-        victim.promptNumber >= corrector.promptNumber
-      ) {
-        continue;
-      }
-      correctors.add(corrector.id);
-      supersededVictims.add(victim.id);
-      const bucket = supersedersByVictim.get(victim.id) ?? [];
-      bucket.push(corrector);
-      supersedersByVictim.set(victim.id, bucket);
-    }
-  }
-
-  const supersededBy = new Map<number, number[]>();
-  for (const [victimId, superseders] of supersedersByVictim) {
-    supersededBy.set(
-      victimId,
-      [...superseders]
-        .sort((left, right) => left.promptNumber - right.promptNumber)
-        .map((turn) => turn.id),
-    );
-  }
-
-  return { correctors, supersededVictims, supersededBy };
 }
 
 function getCompactMetadata(tags: string[]): {
@@ -1609,114 +1273,79 @@ function isTimelineExcludedTurn(turn: Pick<TurnRecord, "wasRolledBack" | "status
 }
 
 /**
- * Grade-first milestone selection (spec §C, H1). The steps run in this order and
- * the order is load-bearing:
+ * `↳` addresses for the milestone views (milestone-election spec, ticket 03,
+ * step 5): for every id in `electedIds`, its own OUTGOING `laneEdges` whose
+ * target is ALSO in `electedIds` — an unelected cited turn is omitted
+ * entirely, never promoted to a row of its own (contrast the retired
+ * `PulledAntecedent`, which pulled a NON-elected turn in). Self-edges are
+ * excluded (a row never lists itself). Reused by both `selectMilestoneTurns`
+ * (S-view) and `selectSegmentMilestonesByEdgeSignals` (E-view) so the two
+ * routes' `↳` semantics cannot drift apart.
+ */
+function buildElectedCitations(
+  laneEdges: readonly LaneEdgeInput[],
+  electedIds: ReadonlySet<number>,
+): Map<number, number[]> {
+  const citedByTurn = new Map<number, number[]>();
+  for (const edge of laneEdges) {
+    if (edge.citingId === edge.citedId) continue;
+    if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
+    const bucket = citedByTurn.get(edge.citingId) ?? [];
+    if (!bucket.includes(edge.citedId)) {
+      bucket.push(edge.citedId);
+    }
+    citedByTurn.set(edge.citingId, bucket);
+  }
+  return citedByTurn;
+}
+
+/**
+ * The session-view milestone selection (milestone-election spec, ticket 03).
+ * Delegates the whole election to `shared/milestone-election.ts`'s
+ * `electMilestones` — the always-keep/effGrade/era-gate/pull-through chain
+ * this function used to run itself is retired (see
+ * `tests/mcp/timeline.election-retirement.test.ts`'s grep-guards). Three
+ * steps, in order:
  *
- *   ① always-keep: endpoints ∪ correctors ∪ reversed (spec H1: no longer
- *     conditioned on having no corrector — that condition was an accident of
- *     the removed victim-ineligibility short-circuit, which used to return
- *     false for a victim before this bullet ever ran) ∪ era G4;
- *     `type='compact'` is in none of it and holds no kept slot
- *   ② spine admission: effGrade ≥ 3 — the truth-table grade alone. An edge is
- *     an annotation and does not move it (spec H1): a `supersedes` edge neither
- *     floors its victim's grade nor lifts its corrector's, so a superseded turn
- *     is admitted on its own merit exactly like any other. The always-keep
- *     bullet above is the only place the graph still decides anything, and only
- *     for structural inclusion, never for grade.
- *   ③ pull-through: effGrade ≤ 2 turns cited by a kept row become its ↳
- *     antecedents. A rolled-back or skipped turn (ticket 06, ruling
- *     [S15069/T1084]) is never one of them — it is excluded before this
- *     function sees it at all (below), on EITHER end of the edge: it cannot
- *     be pulled in as an antecedent, and it cannot lend a corrector its
- *     always-keep slot by being cited as a victim.
- *   ④ budget/degradation — NOT here. Selection returns the whole eligible set
- *     plus `ranked`; the unified renderer (ticket 03) does the cutting.
+ *   ① candidacy: `windowTurns`, minus every ticket-06-excluded (rolled-back/
+ *     skipped) and `compact`-typed turn — unchanged from before this ticket.
+ *   ② election: `electMilestones(electionTurns, laneEdges, budget)` ranks the
+ *     candidates; the top `budget` (by rank) become `kept`, re-sorted to TIME
+ *     order (spec step 5) — `budget` is the caller's OWN election-budget
+ *     knob (see `buildTimelineView`'s call site for how it is derived from
+ *     `pageSize`), decoupled from any later PAGINATION of `kept`.
+ *   ③ `↳`: `buildElectedCitations` restricted to the `kept` set — a cited
+ *     turn survives on a row's `↳` line only if it ALSO made the cut.
  */
 export function selectMilestoneTurns(view: {
-  session?: SessionRecord;
   windowTurns: TurnRecord[];
-  windowSignals: ShapeSignals;
-  compactBoundaries: number[];
-  /**
-   * Full-session turns, used to resolve a citation whose target sits *outside* a
-   * ranged `windowTurns`. Omit for a full-window view.
-   */
-  sessionTurns?: TurnRecord[];
-  taskCausalityEraCutoffEpoch?: number;
-  /**
-   * Session-local effective citations, read ONCE per selection by the caller
-   * (`getSessionEffectiveCitations`) and reused here for in-degree, victim
-   * derivation and pull-through. Omitted, selection falls back to the in-memory
-   * inline-grammar reader — correct for legacy turns, blind to structured edges.
-   */
-  citations?: ReadonlyMap<number, EffectiveCitations>;
+  /** Tagged + untagged turn↔turn edges among (at least) `windowTurns`' own ids — `db/memory-edges.ts`'s `getRelationEdgesAmongTurns`, precomputed by the caller so this function stays a pure, DB-free selection (the same seam `citations` used to be). */
+  laneEdges?: readonly LaneEdgeInput[];
+  /** The election's own budget (see this function's own doc comment) — bounds `kept`, and (via `electMilestones`) tier ③'s two-stage fill. */
+  budget: number;
 }): MilestoneSelection {
-  const eraCutoff = view.taskCausalityEraCutoffEpoch;
-  const rawUniverse = view.sessionTurns ?? view.windowTurns;
-  // Ticket 06 (view-render-repair, ruling [S15069/T1084]): a rolled-back
-  // (`turns.was_rolled_back`) or skipped (`status = 'skipped'`) turn is
-  // excluded from the citation-resolution universe entirely, not merely from
-  // main-row candidacy — it can no longer be resolved as a citation target,
-  // so it cannot lend a corrector its always-keep slot and cannot be pulled
-  // in as a ↳ antecedent either. `status = 'undone'` is untouched (a
-  // different, third state; a separate ruling's scope).
-  const universe = rawUniverse.filter((turn) => !isTimelineExcludedTurn(turn));
-  // Main-row candidates: an excluded turn (above) never reaches candidacy on
-  // any bullet, and a compact marker is structural noise that the arc view
-  // no longer spends a row on.
+  // Main-row candidates: ticket 06's exclusion (rolled-back/skipped) plus a
+  // compact marker, structural noise the arc view spends no row on.
   const seq = sortTurnsForAnalysis(view.windowTurns).filter(
     (turn) => !isTimelineExcludedTurn(turn) && !turn.type.includes("compact"),
   );
   if (seq.length === 0) {
-    return {
-      kept: [],
-      ranked: [],
-      pulled: [],
-      overflowByDay: [],
-      effGradeByTurnId: new Map(),
-    };
+    return { kept: [], ranked: [], overflowByDay: [] };
   }
 
-  // An excluded turn's own outgoing citations must not matter either: it can
-  // never become `row.turn` (already out of `seq`), so pull-through never
-  // reads its entry — but `citationInDegree` reads every entry in the map
-  // regardless of who does the iterating, and a turn ticket 06 excludes must
-  // not nudge another row's tie-break score by having cited it.
-  const excludedIds = new Set(
-    rawUniverse.filter((turn) => isTimelineExcludedTurn(turn)).map((turn) => turn.id),
-  );
-  const rawCitations = view.citations ?? inlineCitationFallback(universe);
-  const citations =
-    excludedIds.size === 0
-      ? rawCitations
-      : new Map([...rawCitations].filter(([citerId]) => !excludedIds.has(citerId)));
-  const inDegree = citationInDegree(citations);
-  const universeById = new Map(universe.map((turn) => [turn.id, turn]));
-  const inWindowById = new Map(seq.map((turn) => [turn.id, turn]));
-
-  // Built from the WHOLE session, not the window. `citations` already spans the
-  // session, and a supersession is a fact about the pair rather than about
-  // which turns a reader asked to see: with the window as the citer set, a
-  // ranged view whose corrector fell outside the range rendered its victim as
-  // an ordinary main row with no `→被T<n>推翻` at all. Selection and rendering
-  // stay ranged — `seq` still decides what is a candidate — so the only thing
-  // widening the citer set changes is which annotations are known. An
-  // out-of-window corrector landing in `graph.correctors` is inert, because
-  // always-keep is only ever asked about turns in `seq`.
-  const graph = buildCorrectionGraph(universe, {
-    citations,
-    resolveCited: (id) => universeById.get(id),
-    taskCausalityEraCutoffEpoch: eraCutoff,
-  });
-
-  // An edge annotates; it does not move a grade (spec H1). No floor for a
-  // victim, no ceiling-lift for a corrector — the truth-table grade stands.
-  const effGradeOf = (turn: TurnRecord): number => milestoneEffGrade(turn, eraCutoff);
-
-  // Part of ①: window first candidate + window last *titled* candidate.
-  const endpoints = new Set<number>([seq[0]!.id]);
-  const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
-  endpoints.add((lastTitled ?? seq[seq.length - 1]!).id);
+  const laneEdges = view.laneEdges ?? [];
+  const electionTurns: MilestoneTurnInput[] = seq.map((turn) => ({
+    id: turn.id,
+    type: turn.type,
+    order: [turn.sessionId, turn.promptNumber] as const,
+  }));
+  const { candidates } = electMilestones(electionTurns, laneEdges, view.budget);
+  const windowIds = new Set(seq.map((turn) => turn.id));
+  // The election's own return spans every node its `laneEdges` touched; a
+  // caller-supplied `laneEdges` scoped to `windowIds` (the documented
+  // contract above) never produces an out-of-window candidate, but this
+  // filter is the correctness guarantee, not an optimization.
+  const windowCandidates = candidates.filter((candidate) => windowIds.has(candidate.id));
 
   const demotedOutcomes = demotedOutcomePrompts(seq);
   const markerForSelection = (turn: TurnRecord): MilestoneMarker => {
@@ -1724,120 +1353,41 @@ export function selectMilestoneTurns(view: {
     return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
   };
 
-  const isAlwaysKeep = (turn: TurnRecord): boolean => {
-    if (endpoints.has(turn.id)) {
-      return true;
-    }
-    if (graph.correctors.has(turn.id)) {
-      return true;
-    }
-    if (milestoneMarker(turn) === "reversed") {
-      // Unconditional (spec H1): a corrector no longer suppresses this, so a
-      // legacy turn that is BOTH tag-reversed and edge-corrected is kept on
-      // this bullet too, not demoted and pulled under its corrector.
-      return true;
-    }
-    return (
-      isTaskCausalityEra(turn.createdAtEpoch, eraCutoff) && effGradeOf(turn) === 4
-    );
-  };
+  const turnById = new Map(seq.map((turn) => [turn.id, turn] as const));
+  const electedSlice = windowCandidates.slice(0, Math.max(0, view.budget));
+  const electedIds = new Set(electedSlice.map((candidate) => candidate.id));
+  const citedByTurn = buildElectedCitations(laneEdges, electedIds);
+  const antecedentsOf = (turnId: number): string[] =>
+    [...(citedByTurn.get(turnId) ?? [])]
+      .sort((a, b) => turnById.get(a)!.promptNumber - turnById.get(b)!.promptNumber)
+      .map((id) => `T${turnById.get(id)!.promptNumber}`);
 
-  const promptNumbersOf = (turnIds: readonly number[]): number[] =>
-    turnIds
-      .map((id) => universeById.get(id)?.promptNumber ?? inWindowById.get(id)?.promptNumber)
-      .filter((promptNumber): promptNumber is number => promptNumber !== undefined);
-
-  // ① + ②: the eligible main rows, plus the wider scored pool for ticket 03.
-  const keptIds = new Set<number>();
-  const rows: KeptMilestone[] = [];
-  const poolRows: KeptMilestone[] = [];
-  for (const turn of seq) {
-    const effGrade = effGradeOf(turn);
-    const alwaysKeep = isAlwaysKeep(turn);
-    const spine = effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
-    if (!alwaysKeep && !spine && effGrade < MILESTONE_POOL_MIN_EFF_GRADE) {
-      continue;
-    }
-
-    const superseders = graph.supersededBy.get(turn.id);
-    const row: KeptMilestone = {
+  const rankedRows: KeptMilestone[] = windowCandidates.map((candidate) => {
+    const turn = turnById.get(candidate.id)!;
+    return {
       turn,
-      score: effGrade + milestoneTieBreak(turn, inDegree.get(turn.id) ?? 0),
-      effGrade,
-      alwaysKeep,
-      spine,
+      score: 0,
+      tier: candidate.tier,
       marker: markerForSelection(turn),
-      ...(superseders ? { supersededBy: promptNumbersOf(superseders) } : {}),
+      antecedents: antecedentsOf(turn.id),
     };
-    poolRows.push(row);
-    if (alwaysKeep || spine) {
-      keptIds.add(turn.id);
-      rows.push(row);
-    }
-  }
+  });
+  // Strict rank order -> strict descending score, so `compareMilestoneRank`
+  // (degradation order) recovers the exact election rank with no ties.
+  rankedRows.forEach((row, index) => {
+    row.score = rankedRows.length - index;
+  });
 
-  const ranked = [...poolRows].sort(compareMilestoneRank);
+  const kept = rankedRows
+    .slice(0, Math.max(0, view.budget))
+    .slice()
+    .sort((a, b) => a.turn.promptNumber - b.turn.promptNumber);
 
-  // ③ pull-through. Rows are already in prompt order, so the first row to claim
-  // an antecedent IS its earliest citer — a shared antecedent renders once.
-  const pulled: PulledAntecedent[] = [];
-  const pulledIds = new Set<number>();
-  const pulledByTurnId = new Map<number, PulledAntecedent>();
-  for (const row of rows) {
-    const entry = citations.get(row.turn.id);
-    if (entry === undefined) {
-      continue;
-    }
-    for (const citedTurnId of entry.citedTurnIds) {
-      if (keptIds.has(citedTurnId)) {
-        continue;
-      }
-      const already = pulledByTurnId.get(citedTurnId);
-      if (already !== undefined) {
-        // Second and later citers of the same antecedent: the ↳ row still
-        // renders once, under the earliest citer, but the renderer needs the
-        // whole citer list to re-home it when that citer is dropped.
-        if (!already.citerPromptNumbers.includes(row.turn.promptNumber)) {
-          already.citerPromptNumbers.push(row.turn.promptNumber);
-        }
-        continue;
-      }
-      const cited = universeById.get(citedTurnId);
-      if (
-        cited === undefined ||
-        cited.type.includes("compact") ||
-        cited.sessionId !== row.turn.sessionId ||
-        // Predecessor guard: a causal reference points backward.
-        cited.promptNumber >= row.turn.promptNumber
-      ) {
-        continue;
-      }
-      const effGrade = effGradeOf(cited);
-      if (effGrade > MILESTONE_PULL_MAX_EFF_GRADE) {
-        continue;
-      }
-      pulledIds.add(citedTurnId);
-      const antecedent: PulledAntecedent = {
-        turn: cited,
-        effGrade,
-        citedByPromptNumber: row.turn.promptNumber,
-        citerPromptNumbers: [row.turn.promptNumber],
-        label: pulledAntecedentLabel(cited),
-        supersededBy: promptNumbersOf(graph.supersededBy.get(citedTurnId) ?? []),
-      };
-      pulled.push(antecedent);
-      pulledByTurnId.set(citedTurnId, antecedent);
-    }
-  }
-
-  // `+N more` = this day's candidate turns that got NO rendered row at all
-  // (spec §D). A pulled antecedent holds a ↳ row and is therefore already
-  // visible to the reader: counting it here would both inflate `+N` and claim
-  // a turn is hidden while it sits two lines above the hint.
+  const keptIds = new Set(kept.map((row) => row.turn.id));
   const overflowByDay: OverflowHint[] = [];
   const droppedByDay = new Map<string, TurnRecord[]>();
   for (const turn of seq) {
-    if (keptIds.has(turn.id) || pulledIds.has(turn.id)) {
+    if (keptIds.has(turn.id)) {
       continue;
     }
     const day = formatLocalDate(turn.createdAtEpoch);
@@ -1856,29 +1406,7 @@ export function selectMilestoneTurns(view: {
     });
   }
 
-  const effGradeByTurnId = new Map<number, number>();
-  for (const turn of seq) {
-    effGradeByTurnId.set(turn.id, effGradeOf(turn));
-  }
-
-  return { kept: rows, ranked, pulled, overflowByDay, effGradeByTurnId };
-}
-
-/**
- * One-line label for a ↳ row. An untitled low-grade turn (extraction only
- * starts titling every turn in ticket 05) falls back to a prompt prefix;
- * without it a pulled antecedent would render as `(untitled)` and carry no
- * information at all. A skipped turn is never a candidate here at all
- * (ticket 06) — it cannot be pulled through, titled or not.
- */
-function pulledAntecedentLabel(turn: TurnRecord, signal?: TruncationSignal): string {
-  if (turn.title !== null && turn.title.trim() !== "") {
-    return turn.title;
-  }
-  const prompt = cleanPromptForLabel(turn.userPrompt);
-  return prompt === ""
-    ? "(untitled)"
-    : truncateText(prompt, { limit: MILESTONE_PULLED_LABEL_CAP, signal });
+  return { kept, ranked: rankedRows, overflowByDay };
 }
 
 /**
@@ -1979,14 +1507,6 @@ export function buildTimelineView(
   db: Database,
   input: TimelineInput,
   preloadedTurns?: TurnRecord[],
-  /**
-   * Citation snapshot to render against, alongside the preloaded-turns seam.
-   * Settlement derives its mechanical signals from one read of this map and then
-   * renders the arc; passing that same map here is what keeps the two halves of
-   * one settle describing the same graph when a citation write lands between
-   * them.
-   */
-  preloadedCitations?: ReadonlyMap<number, EffectiveCitations>,
 ): TimelineView {
   const parsed = parseTimelineId(input.id);
   const viewKind = input.view ?? "turns";
@@ -2069,18 +1589,24 @@ export function buildTimelineView(
   const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
-  // One read for BOTH selections: in-degree, the correction graph and
-  // pull-through all consume this map (spec §B), and the legacy and era
-  // selections must see the identical snapshot for the same reason settlement
-  // hands its own snapshot in rather than paying for a second read.
-  const citations = preloadedCitations ?? getSessionEffectiveCitations(db, session.id);
+  // Milestone election (ticket 03): the election's own budget is `pageSize`
+  // CLAMPED to the sensible default — never `pageSize` alone, because the
+  // SessionStart injection asks for `pageSize: Number.MAX_SAFE_INTEGER` (no
+  // pagination limit) and relies ENTIRELY on `RenderTimelineOptions.tokenBudget`
+  // to size the output; an unclamped budget would hand `electMilestones` (and
+  // so `kept`) an unbounded cut, defeating curation before the token-budget
+  // ladder ever runs. A caller wanting a SMALLER election (the golden-nine
+  // fixture: budget 9) still gets it, since the clamp only ever lowers, never
+  // raises, an explicit small `pageSize`.
+  const milestoneBudget = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
+  const laneEdges = getRelationEdgesAmongTurns(
+    db,
+    legacyWindowTurns.map((turn) => turn.id),
+  );
   const milestoneSelection = selectMilestoneTurns({
-    session,
     windowTurns: legacyWindowTurns,
-    windowSignals,
-    compactBoundaries,
-    sessionTurns: legacySessionTurns,
-    citations,
+    laneEdges,
+    budget: milestoneBudget,
   });
   // `windowTurns` is already exclusion-filtered above (ticket 06), so no
   // second skip/rewind filter is needed here — the turns view's page budget
@@ -2105,10 +1631,7 @@ export function buildTimelineView(
         )
       : [];
   // The spine is the arc view's business only: the turn table is a flat
-  // ledger of raw rows, so it never changes semantics at the boundary. (The
-  // turn table's G column does: era turns are absent from `effGradeByTurnId`
-  // and print `—`, which is correct — a grade is legacy semantics and an era
-  // turn must not claim one.)
+  // ledger of raw rows, so it never changes semantics at the boundary.
   const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
   // The era side answers to the same window the legacy body does: a range view
   // shows the chapters its turns belong to and nothing else.
@@ -2189,8 +1712,6 @@ export function buildTimelineView(
     windowTurns,
     pageTurns: pagedTurns.items,
     pagedMilestones: pagedMilestones.items,
-    milestonePulled: viewKind === "milestones" ? milestoneSelection.pulled : [],
-    turnEffGrades: milestoneSelection.effGradeByTurnId,
     milestoneDayGroups,
     viewItemTotal,
     pageAnchorEpoch,
@@ -2581,10 +2102,9 @@ function titleOrPromptLabel(title: string | null, rawPrompt: string | null): str
   return prompt === "" ? "(untitled)" : prompt;
 }
 
-/** One spine row plus the `↳` antecedents homed under it — the budget unit (spec §D). */
+/** One spine row plus its own `↳` addresses (spec step 5: budget cost attributed to the citing row) — the budget unit (spec §D). */
 interface MilestoneRenderUnit {
   milestone: KeptMilestone;
-  pulled: PulledAntecedent[];
 }
 
 /**
@@ -2594,7 +2114,7 @@ interface MilestoneRenderUnit {
 interface MilestoneUnitTrim {
   showDesc: boolean;
   descTokens: number | null;
-  pulledShown: number;
+  antecedentsShown: number;
   titleTokens: number | null;
   promptTokens: number | null;
   showFiles: boolean;
@@ -2604,7 +2124,7 @@ function initialUnitTrim(unit: MilestoneRenderUnit): MilestoneUnitTrim {
   return {
     showDesc: true,
     descTokens: null,
-    pulledShown: Math.min(unit.pulled.length, MILESTONE_UNIT_PULLED_CAP),
+    antecedentsShown: Math.min(unit.milestone.antecedents.length, MILESTONE_UNIT_PULLED_CAP),
     titleTokens: null,
     promptTokens: null,
     showFiles: true,
@@ -2636,29 +2156,20 @@ function renderUnitLines(
     title = truncateToTokens(title, trim.titleTokens);
   }
   const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
-  // Spec H3: the back-link survives the removal of the grade coupling, and
-  // surviving means appearing where the row now IS. Before ticket 13 a
-  // superseded turn could only reach a main row through the endpoint bullet —
-  // every other path demoted or excluded it — so this line reads as new code
-  // when it is really the same fact rendered at the position the row moved to.
-  // Rendering it only under ↳ would have deleted the back-link from output for
-  // the common case, which is the regression H3 exists to forbid.
-  const mainBackLink =
-    milestone.supersededBy && milestone.supersededBy.length > 0
-      ? ` →被T${milestone.supersededBy.join("/T")}推翻`
-      : "";
 
   // The sample's milestone row is the BASELINE this ladder degrades back to
   // (spec 补充裁决 2+3): `[T821] 08-17 18:19 ⚖️ title`. The user's own words,
-  // the `✏️` file tail, the back-link and the desc block below are
-  // budget-permitting ENRICHMENTS — every one of them is already a trim knob,
-  // so a unit under pressure lands exactly on the baseline and never below it.
-  // No `G<n>`: the grade DISPLAY is retired everywhere.
+  // the `✏️` file tail and the desc block below are budget-permitting
+  // ENRICHMENTS — every one of them is already a trim knob, so a unit under
+  // pressure lands exactly on the baseline and never below it. No `G<n>`, no
+  // tier label, no back-link: an overridden/refuted victim never reaches a
+  // row at all under the election (candidacy exclusion, milestone-election
+  // spec step 1), so there is no row left to hang one on.
   const markerGlyph = milestone.marker === null ? "" : `${glyph} `;
   const promptTail = prompt === "" ? "" : ` · "${prompt}"`;
   const stamp = `${formatLocalMonthDay(milestone.turn.createdAtEpoch)} ${formatLocalTime(milestone.turn.createdAtEpoch)}`;
   const lines = [
-    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${typeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}${mainBackLink}`.trimEnd(),
+    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${typeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd(),
   ];
 
   if (trim.showDesc) {
@@ -2674,17 +2185,17 @@ function renderUnitLines(
 
   // `↳` is a pure ADDRESS INDEX (spec 金样例 `↳ T811, T812`; [S15069/T876]:
   // "箭头标记是纯地址索引"), one line for the whole antecedent set rather than
-  // one titled row each. The per-antecedent title/grade/back-link the old rows
-  // carried was a second, worse rendering of turns the reader can address
-  // directly — and it is what made the `↳` block cost more than the row it
-  // hung under. Overflow past `trim.pulledShown` folds into a trailing count,
-  // which is now the ONLY count form left on this surface.
-  const shown = unit.pulled.slice(0, trim.pulledShown);
-  const foldedPulled = unit.pulled.length - trim.pulledShown;
-  if (shown.length > 0 || foldedPulled > 0) {
+  // one titled row each — `milestone.antecedents` is already pre-formatted
+  // `T<n>` addresses (milestone-election spec, ticket 03: only cited turns
+  // that are themselves elected). Overflow past `trim.antecedentsShown` folds
+  // into a trailing count, which is now the ONLY count form left on this
+  // surface.
+  const shown = milestone.antecedents.slice(0, trim.antecedentsShown);
+  const foldedAntecedents = milestone.antecedents.length - trim.antecedentsShown;
+  if (shown.length > 0 || foldedAntecedents > 0) {
     const addresses = [
-      ...shown.map((antecedent) => `T${antecedent.turn.promptNumber}`),
-      ...(foldedPulled > 0 ? [`+${foldedPulled}`] : []),
+      ...shown,
+      ...(foldedAntecedents > 0 ? [`+${foldedAntecedents}`] : []),
     ];
     lines.push(`${TIMELINE_FIELD_INDENT}↳ ${addresses.join(", ")}`);
   }
@@ -2784,9 +2295,9 @@ function fitUnitTrim(
     return trim;
   }
 
-  // ② fold ↳ rows into `+N 前件` until it fits.
-  while (trim.pulledShown > 0 && unitTokens(unit, trim, titleCap, signal) > cap) {
-    trim.pulledShown -= 1;
+  // ② fold ↳ addresses into `+N` until it fits.
+  while (trim.antecedentsShown > 0 && unitTokens(unit, trim, titleCap, signal) > cap) {
+    trim.antecedentsShown -= 1;
   }
   if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
@@ -2994,64 +2505,21 @@ function createMilestoneBodyModel(
   titleCap: number,
   signal?: TruncationSignal,
 ): MilestoneBodyModel {
-  const pagedPrompts = new Set(
-    view.pagedMilestones.map((milestone) => milestone.turn.promptNumber),
-  );
-  const milestoneByPrompt = new Map(
-    view.pagedMilestones.map((milestone) => [milestone.turn.promptNumber, milestone]),
-  );
-  // A turn holding a main row must never ALSO render as a ↳ row: `ranked` and
-  // `pulled` overlap in the G2 band, so this guard is what keeps a G2 antecedent
-  // that is itself kept from being drawn twice.
-  const mainRowTurnIds = new Set(
-    view.pagedMilestones.map((milestone) => milestone.turn.id),
-  );
-  const pullable = view.milestonePulled.filter(
-    (antecedent) => !mainRowTurnIds.has(antecedent.turn.id),
-  );
-  // Selection order, so a re-homed antecedent lands where a from-scratch pass
-  // would have put it rather than at the end of its new host's list.
-  const pullOrder = new Map(
-    pullable.map((antecedent, index) => [antecedent, index] as const),
-  );
-  // `formatLocalDate` builds an `Intl.DateTimeFormat` per call, so every date a
-  // degradation step needs is resolved once here, never inside the step.
-  const antecedentDates = new Map(
-    pullable.map(
-      (antecedent) =>
-        [antecedent, formatLocalDate(antecedent.turn.createdAtEpoch)] as const,
-    ),
-  );
-
-  const retainedPrompts = new Set(pagedPrompts);
   const removed = new Set<KeptMilestone>();
   const descOff = new Set<KeptMilestone>();
-  const homedPulled = new Map<number, PulledAntecedent[]>();
   const unitEntries = new Map<KeptMilestone, MilestoneUnitEntry>();
 
+  // No synthetic (row-less-but-hosting-an-antecedent) days: every `↳` address
+  // (milestone-election spec, ticket 03, step 5) names an ALSO-elected turn,
+  // which is either itself a main row on some day group already in
+  // `view.milestoneDayGroups`, or off this page entirely — a `↳` line is
+  // never the ONLY reason a day exists any more (contrast the retired
+  // `PulledAntecedent`, which could).
   const sections: MilestoneBodySection[] = view.milestoneDayGroups.map((group) => ({
     date: group.date,
     labelEpoch: group.labelEpoch,
     group,
   }));
-  const groupedDates = new Set(sections.map((section) => section.date));
-  const syntheticEpochs = new Map<string, number>();
-  for (const antecedent of pullable) {
-    const date = antecedentDates.get(antecedent)!;
-    if (groupedDates.has(date)) {
-      continue;
-    }
-    const known = syntheticEpochs.get(date);
-    if (known === undefined || antecedent.turn.createdAtEpoch < known) {
-      syntheticEpochs.set(date, antecedent.turn.createdAtEpoch);
-    }
-  }
-  for (const [date, labelEpoch] of syntheticEpochs) {
-    sections.push({ date, labelEpoch, group: null });
-  }
-  // Stable sort: the real groups are already chronological, so only the
-  // synthetic days move, into their place in the day sequence.
-  sections.sort((left, right) => left.labelEpoch - right.labelEpoch);
 
   const orderedStates: MilestoneSectionState[] = sections.map((section, index) => {
     const overflow = section.group?.overflow ?? null;
@@ -3068,9 +2536,6 @@ function createMilestoneBodyModel(
       run: null,
     };
   });
-  const stateByDate = new Map(
-    orderedStates.map((state) => [state.section.date, state] as const),
-  );
   const stateOfMilestone = new Map<KeptMilestone, MilestoneSectionState>();
   for (const state of orderedStates) {
     for (const milestone of state.rows) {
@@ -3080,7 +2545,6 @@ function createMilestoneBodyModel(
 
   let totalTenths = 0;
   let priced = false;
-  let framed = false;
 
   function lineTenths(line: string): number {
     return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
@@ -3091,15 +2555,7 @@ function createMilestoneBodyModel(
     if (cached !== undefined) {
       return cached;
     }
-    const pulled = [...(homedPulled.get(milestone.turn.promptNumber) ?? [])].sort(
-      (left, right) => (pullOrder.get(left) ?? 0) - (pullOrder.get(right) ?? 0),
-    );
-    const lines = renderUnitFitted(
-      { milestone, pulled },
-      titleCap,
-      descOff.has(milestone),
-      signal,
-    );
+    const lines = renderUnitFitted({ milestone }, titleCap, descOff.has(milestone), signal);
     const entry: MilestoneUnitEntry = {
       lines,
       tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0),
@@ -3250,57 +2706,6 @@ function createMilestoneBodyModel(
     priceRun(run);
   }
 
-  /** One more turn of this day renders nowhere; re-price whichever frame owns it. */
-  function noteHidden(state: MilestoneSectionState, promptNumber: number): void {
-    state.hiddenCount += 1;
-    state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
-    state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
-    if (!framed) {
-      return;
-    }
-    const { run } = state;
-    if (run === null) {
-      refreshExpandedFrame(state);
-      return;
-    }
-    run.hidden += 1;
-    run.promptLo = Math.min(run.promptLo, promptNumber);
-    run.promptHi = Math.max(run.promptHi, promptNumber);
-    priceRun(run);
-  }
-
-  function homeAntecedent(antecedent: PulledAntecedent): void {
-    const home = antecedent.citerPromptNumbers.find((promptNumber) =>
-      retainedPrompts.has(promptNumber),
-    );
-    if (home !== undefined) {
-      homedPulled.set(home, [...(homedPulled.get(home) ?? []), antecedent]);
-      const host = milestoneByPrompt.get(home);
-      if (host !== undefined) {
-        invalidateUnit(host);
-      }
-      return;
-    }
-    if (
-      !antecedent.citerPromptNumbers.some((promptNumber) => pagedPrompts.has(promptNumber))
-    ) {
-      // Cited only from off-page rows: it was never this page's to render.
-      return;
-    }
-    // Every citer of this antecedent on the page is gone, so it renders nowhere
-    // and folds into its own day's hidden count — which is why that day gets a
-    // section even when it owns no main row on this page. It is never also in
-    // that day's base overflow: `overflowByDay` skips every pulled turn.
-    const state = stateByDate.get(antecedentDates.get(antecedent)!);
-    if (state === undefined) {
-      return;
-    }
-    noteHidden(state, antecedent.turn.promptNumber);
-  }
-
-  for (const antecedent of pullable) {
-    homeAntecedent(antecedent);
-  }
   for (const state of orderedStates) {
     state.unitTenths = state.rows.reduce(
       (sum, milestone) => sum + unitEntryFor(milestone).tenths,
@@ -3319,7 +2724,6 @@ function createMilestoneBodyModel(
       refreshExpandedFrame(state);
     }
   }
-  framed = true;
   // The blank line the body opens with.
   totalTenths += NEWLINE_WEIGHT_TENTHS;
 
@@ -3337,7 +2741,6 @@ function createMilestoneBodyModel(
       }
       const promptNumber = milestone.turn.promptNumber;
       removed.add(milestone);
-      retainedPrompts.delete(promptNumber);
       const state = stateOfMilestone.get(milestone);
       if (state !== undefined) {
         const entry = unitEntryFor(milestone);
@@ -3348,9 +2751,6 @@ function createMilestoneBodyModel(
         state.hiddenCount += 1;
         state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
         state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
-        // Settle the day's own frame BEFORE re-homing: an antecedent orphaned by
-        // this removal can be homed on this very day, and it must land on the
-        // frame the day now has, not the one it is about to lose.
         if (state.rows.length === 0) {
           collapseState(state);
         } else {
@@ -3358,11 +2758,6 @@ function createMilestoneBodyModel(
         }
       }
       unitEntries.delete(milestone);
-      const orphaned = homedPulled.get(promptNumber) ?? [];
-      homedPulled.delete(promptNumber);
-      for (const antecedent of orphaned) {
-        homeAntecedent(antecedent);
-      }
     },
     weightTenths(): number {
       return totalTenths;
@@ -3436,13 +2831,14 @@ function milestoneDegradationOrder(view: TimelineView): KeptMilestone[] {
 
 /**
  * Fits the arc body into `tokenBudget` (spec §D). Lowest-score units lose their
- * desc first; if that is not enough, whole units go, lowest score first, and
- * always-keep units are exempt from removal however low they score. Day frames
- * follow the units down: a day that loses its last row collapses, and a run of
- * consecutive collapsed days costs one combined hint line rather than two lines
- * per day. When the anchors alone still overrun — frames already collapsed
- * around them — the body is rendered in full with one overflow note; an anchor
- * is never dropped silently.
+ * desc first; if that is not enough, whole units go, lowest election rank
+ * first — every row is droppable now (milestone-election spec, ticket 03:
+ * always-keep retired from the election path, so nothing is structurally
+ * exempt from a `tokenBudget` any more). Day frames follow the units down: a
+ * day that loses its last row collapses, and a run of consecutive collapsed
+ * days costs one combined hint line rather than two lines per day. When the
+ * whole selection still overruns — frames already collapsed around it — the
+ * body is rendered in full with one overflow note.
  *
  * Two-tier measurement. The model's running weight prices every step in O(1),
  * but it is a LOWER bound on `estimateDiaryTokens` (that function's float
@@ -3490,9 +2886,6 @@ function fitMilestoneBodyToBudget(
   }
 
   for (const milestone of milestoneDegradationOrder(view)) {
-    if (milestone.alwaysKeep) {
-      continue;
-    }
     body.removeUnit(milestone);
     if (fits()) {
       return result();
@@ -3954,120 +3347,115 @@ function fetchUserPrompts(
 }
 
 // ---------------------------------------------------------------------------
-// Ticket 09 (read-write-contract spec, "里程碑"): the segment timeline's
-// (`timeline(id="E<n>")`) own milestone admission rule — LEXICOGRAPHIC over
-// `getTurnEdgeSignals`, filling `pageSize`. Ticket 12 (`会话视图里程碑并轨`)
-// unified the `S<n>` session view's own nested per-segment rows onto this
-// SAME function (`renderEraMilestoneLines` below now calls it too, via
+// Milestone-election spec, ticket 03: the segment timeline's
+// (`timeline(id="E<n>")`) own milestone admission — and the `S<n>` session
+// view's own nested per-segment rows, unified onto this SAME function since
+// ticket 12 (`renderEraMilestoneLines` below calls it via
 // `TimelineView.segmentMilestoneSelection`, computed eagerly in
-// `buildTimelineView`) — the old state-citation/token-budget rule
-// (`selectSegmentMilestoneRows`) that used to serve that second consumer had
-// no remaining functional reference once this happened, and was removed
-// along with its dedicated unit tests, closing the scoping ticket 09 itself
-// flagged as owed.
+// `buildTimelineView`) — now delegates to `shared/milestone-election.ts`'s
+// `electMilestones`. The OLD lexicographic edge-signal rule (`overridden`
+// exclusion, `encodesCount`/`refinesExcess` ranking, `getTurnEdgeSignals`,
+// the `taskCausalityEraCutoffEpoch` candidacy gate) retires — see
+// `tests/mcp/timeline.election-retirement.test.ts`'s grep-guards.
 //
-// Key order (spec, pinned): (0) `overridden` — EXCLUDED outright, not merely
-// deprioritized; (1) `encodesCount` desc; (2) `refinesExcess.decision` desc,
-// THEN `refinesExcess.delivery` desc (decision bucket compared first); (3)
-// recency desc. Ties beyond that break by turn id, descending, for a total
-// order. A LEGACY-ERA turn (before `taskCausalityEraCutoffEpoch`) never
-// becomes a candidate at all (spec: "旧纪元 turn 整体退出里程碑渲染") — it
-// carries no edge signals under this era's semantics regardless of what
-// `getTurnEdgeSignals` would compute for it.
-//
-// "Edge-free graphs degrade to flat chronological" (spec) is not a special
-// case coded here: with every signal at zero, only the recency key
-// discriminates, and the KEPT set always renders in event order regardless
-// of ranking order (same "selection ranks, display stays chronological"
-// split `selectMilestoneTurns`'s own SEPARATE, still-live legacy-body
-// selection uses) — so an edge-free segment's top-`pageSize` selection IS
-// its `pageSize` most recent members, in event order, which is flat
-// chronological by construction.
-//
-// `selectMilestoneTurns` (the effGrade/correction-graph, session-WIDE
-// selection feeding the LEGACY pre-era milestone body — a different render
-// region from the era spine this module governs) is UNCHANGED by ticket 12:
-// its retirement was scoped OUT of this ticket — it also feeds the turns
-// view's `G` column (`TimelineView.turnEffGrades`) and its own large
-// integration-test surface across `timeline.test.ts`, both surfaces beyond
-// "the session view's milestone ROWS" this ticket unifies. Flagged in ticket
-// 12's own report as the STOP-clause call, matching ticket 09's precedent.
+// "Edge-free graphs degrade to flat chronological" still holds, now for the
+// same structural reason `selectMilestoneTurns` documents: with zero edges
+// every candidate is tier ⑤ at zero degree, so only the LATER-turn tiebreak
+// (election rank) discriminates — pure recency — and the KEPT set renders in
+// EVENT order regardless (ranking decides membership, never display order).
 // ---------------------------------------------------------------------------
 
 export interface SegmentMilestoneEdgeSelection {
   /** Admitted rows, in EVENT order (chronological) — ranking decides membership, never display order. */
   kept: SegmentMilestoneRow[];
-  /** Era-eligible, non-overridden candidates the pageSize cap could not admit. */
+  /** Non-excluded candidates the pageSize (election budget) cap could not admit. */
   demotedCount: number;
 }
 
-function compareEdgeSignalRank(
-  left: { turnId: number; createdAtEpoch: number },
-  right: { turnId: number; createdAtEpoch: number },
-  signals: ReadonlyMap<number, TurnEdgeSignals>,
-): number {
-  const leftSignal = signals.get(left.turnId)!;
-  const rightSignal = signals.get(right.turnId)!;
-  if (leftSignal.encodesCount !== rightSignal.encodesCount) {
-    return rightSignal.encodesCount - leftSignal.encodesCount;
-  }
-  if (leftSignal.refinesExcess.decision !== rightSignal.refinesExcess.decision) {
-    return rightSignal.refinesExcess.decision - leftSignal.refinesExcess.decision;
-  }
-  if (leftSignal.refinesExcess.delivery !== rightSignal.refinesExcess.delivery) {
-    return rightSignal.refinesExcess.delivery - leftSignal.refinesExcess.delivery;
-  }
-  if (left.createdAtEpoch !== right.createdAtEpoch) {
-    return right.createdAtEpoch - left.createdAtEpoch;
-  }
-  return right.turnId - left.turnId;
-}
-
+/**
+ * The segment-view milestone selection (milestone-election spec, ticket 03).
+ * `pageSize` is BOTH the election's own budget (`electMilestones`'s tier-③
+ * two-stage-fill boundary) and the hard admission cut — unlike
+ * `selectMilestoneTurns`'s own S-view call site, every caller of this
+ * function already passes a bounded `pageSize` (never an unbounded
+ * sentinel), so no separate clamp is needed here.
+ */
 export function selectSegmentMilestonesByEdgeSignals(
   db: Database,
   members: readonly RankedSegmentMember[],
   pageSize: number,
-  taskCausalityEraCutoffEpoch?: number,
+  /** Retired from candidacy (era gating leaves the election path) — accepted for schema stability with callers that still set it, never read. */
+  _taskCausalityEraCutoffEpoch?: number,
 ): SegmentMilestoneEdgeSelection {
   // Ticket 06 (view-render-repair, ruling [S15069/T1084]): a rolled-back or
-  // skipped member is dropped before ordinal numbering, era eligibility or
-  // edge-signal ranking ever sees it — it admits no seat, and a live
-  // neighbour's ordinal is numbered as if it were never there.
+  // skipped member is dropped before ordinal numbering or election ever sees
+  // it — it admits no seat, and a live neighbour's ordinal is numbered as if
+  // it were never there.
   const liveMembers = excludeTimelineHiddenMembers(db, members);
-  const eraEligible = liveMembers.filter((member) =>
-    isTaskCausalityEra(member.createdAtEpoch, taskCausalityEraCutoffEpoch),
-  );
-  if (eraEligible.length === 0) {
+  if (liveMembers.length === 0) {
     return { kept: [], demotedCount: 0 };
   }
 
-  const signals = getTurnEdgeSignals(db, eraEligible.map((member) => member.turnId));
-  const candidates = eraEligible.filter((member) => !signals.get(member.turnId)!.overridden);
-
-  const ranked = [...candidates].sort((left, right) =>
-    compareEdgeSignalRank(left, right, signals),
+  const laneEdges = getRelationEdgesAmongTurns(
+    db,
+    liveMembers.map((member) => member.turnId),
   );
-  const admitted = new Set(ranked.slice(0, Math.max(0, pageSize)).map((member) => member.turnId));
+  const electionTurns: MilestoneTurnInput[] = liveMembers.map((member) => ({
+    id: member.turnId,
+    type: member.type,
+    order: [member.sessionId, member.promptNumber] as const,
+  }));
+  const { candidates } = electMilestones(electionTurns, laneEdges, pageSize);
+  const memberIds = new Set(liveMembers.map((member) => member.turnId));
+  // The correctness guarantee (not an optimization) — see the identical
+  // filter in `selectMilestoneTurns`.
+  const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
+  const admittedList = windowCandidates.slice(0, Math.max(0, pageSize));
+  const admittedIds = new Set(admittedList.map((candidate) => candidate.id));
 
   const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
-  const keptMembers = liveMembers.filter((member) => admitted.has(member.turnId));
-  const links = resolveTurnRowLinks(db, keptMembers);
-  const userPrompts = fetchUserPrompts(db, keptMembers.map((member) => member.turnId));
+  const keptMembers = liveMembers.filter((member) => admittedIds.has(member.turnId));
+  // Chronological (event) display order (spec step 5) — matches this
+  // interface's own `kept` doc comment, unchanged by the election rewrite.
+  const orderedKeptMembers = [...keptMembers].sort(
+    (left, right) => chronologicalOrdinals.get(left.turnId)! - chronologicalOrdinals.get(right.turnId)!,
+  );
+  const memberById = new Map(liveMembers.map((member) => [member.turnId, member] as const));
+  const citedByTurn = buildElectedCitations(laneEdges, admittedIds);
+  const userPrompts = fetchUserPrompts(db, orderedKeptMembers.map((member) => member.turnId));
   const sessionTitles = new Map<number, string | null>();
-  const kept: SegmentMilestoneRow[] = keptMembers.map((member) => {
+  const kept: SegmentMilestoneRow[] = orderedKeptMembers.map((member) => {
     if (!sessionTitles.has(member.sessionId)) {
       sessionTitles.set(member.sessionId, getSession(db, member.sessionId)?.title ?? null);
     }
+    // Pre-capped at selection time (unlike the S-view's `KeptMilestone.antecedents`):
+    // a segment row carries no per-unit token-degradation ladder to fold
+    // further (`renderEraMilestoneLines`'s own doc comment), so this is the
+    // one and only place the `+N` fold happens.
+    const citedIds = [...(citedByTurn.get(member.turnId) ?? [])].sort((a, b) => {
+      const memberA = memberById.get(a)!;
+      const memberB = memberById.get(b)!;
+      return memberA.sessionId !== memberB.sessionId
+        ? memberA.sessionId - memberB.sessionId
+        : memberA.promptNumber - memberB.promptNumber;
+    });
+    const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
+      const cited = memberById.get(id)!;
+      return cited.sessionId === member.sessionId
+        ? `T${cited.promptNumber}`
+        : `S${cited.sessionId}/T${cited.promptNumber}`;
+    });
+    const folded = citedIds.length - shown.length;
     return {
       member,
       ordinal: chronologicalOrdinals.get(member.turnId)!,
-      antecedents: links.get(member.turnId)?.antecedents ?? [],
+      antecedents: folded > 0 ? [...shown, `+${folded}`] : shown,
       sessionTitle: sessionTitles.get(member.sessionId) ?? null,
       userPrompt: userPrompts.get(member.turnId) ?? null,
     };
   });
 
-  return { kept, demotedCount: candidates.length - kept.length };
+  return { kept, demotedCount: windowCandidates.length - kept.length };
 }
 
 /**
@@ -4155,14 +3543,13 @@ function renderMilestoneDemotedPointer(demotedCount: number): string | null {
  * Milestone rows nested beneath each segment line in the S<n> era spine (spec
  * "Session (S) views: same minimal milestone row, same per-view overflow") —
  * one call per segment, from its own pre-computed
- * `TimelineView.segmentMilestoneSelection` (ticket 12: selected EAGERLY in
+ * `TimelineView.segmentMilestoneSelection` (selected EAGERLY in
  * `buildTimelineView` via `selectSegmentMilestonesByEdgeSignals`, the SAME
- * lexicographic edge-signal rule and the SAME minimal row a standalone
- * `E<n>` milestone view renders — a segment's nested content is
- * byte-identical to what addressing it directly with the same `pageSize`
- * and `taskCausalityEraCutoffEpoch` would show). This function is now purely
- * a renderer: no admission decision happens here any more, matching every
- * other render step's "pure function of `TimelineView`" discipline.
+ * election and the SAME minimal row a standalone `E<n>` milestone view
+ * renders — a segment's nested content is byte-identical to what addressing
+ * it directly with the same `pageSize` would show). This function is now
+ * purely a renderer: no admission decision happens here any more, matching
+ * every other render step's "pure function of `TimelineView`" discipline.
  *
  * Replaces the pre-ticket-05 effGrade/day-budget nested renderer, and then
  * ticket-05's own state-citation/token-budget rule in turn: a minimal row
@@ -4391,7 +3778,7 @@ export interface SegmentTimelineInput {
   /** See `TimelineInput.pageBudget`. Governs the turn view's per-page token ceiling. Ticket 09: no longer the milestones view's admission rule — see `pageSize` above and `selectSegmentMilestonesByEdgeSignals`. */
   pageBudget?: number;
   eraCutoffEpoch?: number | null;
-  /** Ticket 09: the task-causality era boundary the milestones view's edge-signal selection gates candidacy on. Omitted uses `TASK_CAUSALITY_ERA_CUTOFF_EPOCH` (the same default `isTaskCausalityEra` itself falls back to). */
+  /** Retired from candidacy (milestone-election spec, ticket 03: era gating leaves the election path) — accepted for schema stability with callers that still set it, forwarded to `selectSegmentMilestonesByEdgeSignals` but never read there. */
   taskCausalityEraCutoffEpoch?: number;
 }
 

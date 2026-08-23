@@ -25,7 +25,6 @@ import {
   MILESTONE_INJECTION_TOKEN_BUDGET,
   renderSessionMilestoneInjection,
 } from "../../src/hooks/milestone-injection";
-import { NAVIGATION_LEGEND } from "../../src/mcp/format";
 import { renderSpineRow } from "../../src/mcp/segment-spine";
 import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
 
@@ -426,51 +425,51 @@ describe("timeline dual-path rendering across the era boundary", () => {
 /**
  * The byte pin behind "a null cutoff changes nothing". Marker absence only
  * proves the NEW blocks stay silent; it says nothing about whether the legacy
- * arc still emits the same characters. `PRE_SEGMENT_ARC` was captured by
- * running commit 5acdf4a — the last commit before the spine existed — over this
- * exact fixture:
+ * arc still emits the same characters.
  *
- *   renderTimeline(buildTimelineView(db, { id: `S<n>`, view: "milestones" }))
- *
- * Regenerate it the same way if the LEGACY arc renderer ever changes on
- * purpose; a diff here that nobody intended is the regression this guards.
+ * Milestone-election spec, ticket 03: `PRE_SEGMENT_ARC` was regenerated
+ * against the new `selectMilestoneTurns` — the whole grade-first eligibility
+ * chain this pin used to freeze (effGrade ≥ 3 spine admission, the pool-gate
+ * cut) retires with this ticket, so the fixture's 7 legacy turns (all
+ * non-excluded, no lane edges at all — election rank is pure recency) are
+ * now ALL elected under the default budget (30 ≥ 7), rather than the two the
+ * old grade threshold admitted. Regenerate the same way —
+ * `renderTimeline(buildTimelineView(db, { id: 'S<n>', view: "milestones" }))`
+ * — if the legacy arc renderer ever changes on purpose again; a diff here
+ * that nobody intended is the regression this guards.
  *
  * TZ is pinned because the arc prints local dates and the header's UTC offset,
  * and the fixture pins `transcriptPath` because the test HOME is a fresh
  * mkdtemp on every run.
  */
 describe("a null era cutoff is byte-identical to the pre-segment renderer", () => {
-  // Updated for the recall-render-legend spec (ticket 02, D4): the day-group
-  // hint's repeated `→ timeline(...)` command is gone (said once now, in the
-  // response-level legend appended below) — this is an intentional legacy
-  // renderer change, per the comment above, so the pin moved with it.
-  //
-  // Updated again for the settlement-agentic spec (ticket 02, B5): glyph
-  // resolution now covers the full current-vocabulary word set, not only the
-  // legacy 6-word render map — a "review"-typed turn gets its own glyph (✅)
-  // instead of falling through to the generic • placeholder. `review` was
-  // already a legal value on this column before this ticket; only the
-  // renderer's blind spot for it is what changed.
   const PRE_SEGMENT_ARC = `- [S1] 2030-03-17 15:00 → 19:10 (4h 10m)
   /tmp/project | 7 turns | 0 tool_calls
   types: 🔍1 ⚖️2 🔧1 🔴1 ✅1 🟣1 (session-wide)
   tz: UTC (+00:00)
   raw: /tmp/project/session-era.jsonl
 
-── 2030-03-17 Sun · T1–T14 · 2 kept ──
+── 2030-03-17 Sun · T1–T14 · 7 kept ──
         [T1] 03-17 16:23 ⚖️ legacy decision one · "the user asked something"
+            body text
+        [T2] 03-17 16:40 🟣 legacy feature two · "the user asked something"
+            body text
+        [T10] 03-17 17:46 🔍 research the spine · "the user asked something"
+            body text
+        [T11] 03-17 17:46 ⚖️ design the spine · "the user asked something"
+            body text
+        [T12] 03-17 17:46 🔧 implement the spine · "the user asked something"
+            body text
+        [T13] 03-17 17:46 🔴 fix the watchdog race · "the user asked something"
             body text
         [T14] 03-17 17:46 ✅ review the fix · "the user asked something"
             body text
             ↳ T13
-        … +4 more @ within T2..T12
 
   shape signals (window T1-T14 = full session):
     - fastest gap:   after T10 (+1s)
     - longest gap:   after T2 (+1h 6m)
-    - broken-prompt: T10→T11, T11→T12, T12→T13, T13→T14
-
-${NAVIGATION_LEGEND}`;
+    - broken-prompt: T10→T11, T11→T12, T12→T13, T13→T14`;
 
   let db: Database;
   let sessionId: number;
@@ -499,15 +498,14 @@ ${NAVIGATION_LEGEND}`;
   });
 
   test("the whole arc comes back unchanged", () => {
-    expect(
-      renderTimeline(
-        buildTimelineView(db, {
-          id: `S${sessionId}`,
-          view: "milestones",
-          eraCutoffEpoch: null,
-        }),
-      ),
-    ).toBe(PRE_SEGMENT_ARC);
+    const rendered = renderTimeline(
+      buildTimelineView(db, {
+        id: `S${sessionId}`,
+        view: "milestones",
+        eraCutoffEpoch: null,
+      }),
+    );
+    expect(rendered).toBe(PRE_SEGMENT_ARC);
   });
 });
 

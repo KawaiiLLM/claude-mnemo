@@ -15,7 +15,7 @@ view's (the SessionStart-injected milestones included) both delegate to ticket
 
 **Blocked by:** 02 — Election core module.
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: elected-only ↳ filter → 1 red, kept time re-sort → 11 red)
 
 - [ ] S-view and E-view (segment/injection) integration tests show the new
       election's output end to end; the fixture window renders the golden nine

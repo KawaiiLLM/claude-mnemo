@@ -147,10 +147,20 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       writeMemoryEdges(
         db,
         [
+          // `supersedes` still drives the ⚑ corrector flag (`RankedSegmentMember.isCorrector`,
+          // unrelated to milestone election); `grounds` is what the election
+          // reads for the `↳` address (milestone-election spec, ticket 03 —
+          // `supersedes` left the election's own edge vocabulary).
           {
             citing: { kind: "turn", id: t2 },
             cited: { kind: "turn", id: t1 },
             relation: "supersedes",
+            provenance: "judged",
+          },
+          {
+            citing: { kind: "turn", id: t2 },
+            cited: { kind: "turn", id: t1 },
+            relation: "grounds",
             provenance: "judged",
           },
         ],
@@ -221,59 +231,34 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(keptIds).toContain(plain);
     });
 
-    test("key 1: encodesCount ranks desc, filling pageSize with the strongest-encoded turns first", () => {
-      const strong = makeTurn(1, { title: "strongly encoded" });
-      const weak = makeTurn(2, { title: "weakly encoded" });
-      const none = makeTurn(3, { title: "no encodes" });
-      addSegmentMembers(db, segmentId, [strong, weak, none], CUTOFF);
-      const e1 = makeTurn(4, { title: "e1" });
-      const e2 = makeTurn(5, { title: "e2" });
-      const e3 = makeTurn(6, { title: "e3" });
-      const w1 = makeTurn(7, { title: "w1" });
+    test("in-degree ranks desc within a tier, filling pageSize with the most-cited turns first (milestone-election spec, ticket 03)", () => {
+      // Milestone-election spec: in-degree is counted only among the edges
+      // `electMilestones` is fed — for the segment route that is edges among
+      // this SEGMENT's own members (`getRelationEdgesAmongTurns`), so every
+      // citer here is itself a member (an outside citer's edge is out of
+      // scope, unlike the retired `getTurnEdgeSignals`'s whole-DB scan).
+      const strong = makeTurn(1, { title: "strongly cited" });
+      const weak = makeTurn(2, { title: "weakly cited" });
+      const none = makeTurn(3, { title: "not cited" });
+      const c1 = makeTurn(4, { title: "citer 1" });
+      const c2 = makeTurn(5, { title: "citer 2" });
+      addSegmentMembers(db, segmentId, [strong, weak, none, c1, c2], CUTOFF);
       writeMemoryEdges(
         db,
         [
-          { citing: { kind: "turn", id: e1 }, cited: { kind: "turn", id: strong }, relation: "grounds", provenance: "judged" },
-          { citing: { kind: "turn", id: e2 }, cited: { kind: "turn", id: strong }, relation: "grounds", provenance: "judged" },
-          { citing: { kind: "turn", id: e3 }, cited: { kind: "turn", id: strong }, relation: "grounds", provenance: "judged" },
-          { citing: { kind: "turn", id: w1 }, cited: { kind: "turn", id: weak }, relation: "grounds", provenance: "judged" },
+          { citing: { kind: "turn", id: c1 }, cited: { kind: "turn", id: strong }, relation: "grounds", provenance: "judged" },
+          { citing: { kind: "turn", id: c2 }, cited: { kind: "turn", id: strong }, relation: "verifies", provenance: "judged" },
+          { citing: { kind: "turn", id: c1 }, cited: { kind: "turn", id: weak }, relation: "grounds", provenance: "judged" },
         ],
         CUTOFF,
       );
 
       const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 2 });
-      // Ranking admits [strong, weak]; DISPLAY stays event order (strong's
-      // member ordinal precedes weak's).
+      // Ranking admits [strong (in-degree 2), weak (in-degree 1)]; DISPLAY
+      // stays event order (strong's member ordinal precedes weak's).
       expect(view.keptMilestones.map((row) => row.member.turnId)).toEqual([strong, weak]);
       expect(view.keptMilestones.map((row) => row.member.turnId)).not.toContain(none);
-      expect(view.demotedCount).toBe(1);
-    });
-
-    test("key 2: refinesExcess — the decision bucket outranks the delivery bucket at equal encodes", () => {
-      const decisionHeavy = makeTurn(1, { title: "decision-refined" });
-      const deliveryHeavy = makeTurn(2, { title: "delivery-refined" });
-      addSegmentMembers(db, segmentId, [decisionHeavy, deliveryHeavy], CUTOFF);
-
-      // Baseline (1st) refines edge contributes nothing — only EXCESS
-      // (2nd+) counts, per the excess-in-degree rule.
-      const baselineA = makeTurn(3, { title: "baseline a" });
-      const baselineB = makeTurn(4, { title: "baseline b" });
-      const decisionRefiner = makeTurn(5, { title: "decision refiner", type: "design" });
-      const deliveryRefiner = makeTurn(6, { title: "delivery refiner", type: "implement" });
-
-      writeMemoryEdges(
-        db,
-        [
-          { citing: { kind: "turn", id: baselineA }, cited: { kind: "turn", id: decisionHeavy }, relation: "extends", provenance: "judged" },
-          { citing: { kind: "turn", id: decisionRefiner }, cited: { kind: "turn", id: decisionHeavy }, relation: "extends", provenance: "judged" },
-          { citing: { kind: "turn", id: baselineB }, cited: { kind: "turn", id: deliveryHeavy }, relation: "extends", provenance: "judged" },
-          { citing: { kind: "turn", id: deliveryRefiner }, cited: { kind: "turn", id: deliveryHeavy }, relation: "extends", provenance: "judged" },
-        ],
-        CUTOFF,
-      );
-
-      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 1 });
-      expect(view.keptMilestones.map((row) => row.member.turnId)).toEqual([decisionHeavy]);
+      expect(view.demotedCount).toBeGreaterThan(0);
     });
 
     test("edge-free graph degrades to flat chronological — every member fits within pageSize", () => {
@@ -287,7 +272,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(view.demotedCount).toBe(0);
     });
 
-    test("a legacy-era turn (before the task-causality cutoff) exits milestone rendering entirely", () => {
+    test("a legacy-era turn now competes on the SAME footing as a modern one (milestone-election spec, ticket 03: era gating retired from candidacy) — `taskCausalityEraCutoffEpoch` is accepted but no longer excludes it", () => {
       const legacy = makeTurn(1, { title: "legacy member" });
       db.query("UPDATE turns SET created_at_epoch = ? WHERE id = ?").run(CUTOFF - 100, legacy);
       const modern = makeTurn(2, { title: "modern member" });
@@ -300,7 +285,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
         taskCausalityEraCutoffEpoch: CUTOFF,
       });
       const keptIds = view.keptMilestones.map((row) => row.member.turnId);
-      expect(keptIds).not.toContain(legacy);
+      expect(keptIds).toContain(legacy);
       expect(keptIds).toContain(modern);
     });
 

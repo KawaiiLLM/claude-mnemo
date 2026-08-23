@@ -1,20 +1,23 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession, type UpsertSessionInput } from "../../src/db/sessions";
 import { getTurn, type TurnRecord } from "../../src/db/turns";
 import { resolveTranscriptPath } from "../../src/shared/paths";
 import { TYPE_GLYPH } from "../../src/shared/type-vocabulary";
 import {
   buildContextTimelineView,
+  buildSegmentTimelineView,
   buildTimelineView,
   cleanPromptForLabel,
   computeTypesDistribution,
   renderTypesDistribution,
   detectBrokenPromptPairs,
-  buildCorrectionGraph,
   detectShapeSignals,
   formatDuration,
   formatGap,
@@ -23,9 +26,7 @@ import {
   getSystemTimezone,
   extractSourceTags,
   isVersionBumpTurn,
-  milestoneEffGrade,
   milestoneMarker,
-  milestoneTieBreak,
   OUTCOME_TAGS,
   parseContentReferences,
   parseTimelineId,
@@ -46,6 +47,7 @@ import {
   type MilestoneSelection,
   type TimelineView,
 } from "../../src/mcp/timeline";
+import type { LaneEdgeInput } from "../../src/shared/milestone-election";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import { timelineInputSchema } from "../../src/mcp/definitions";
 // `truncateText` comes from the renderer it is shared with: timeline used to
@@ -304,56 +306,6 @@ function seedTimelineSession(
   }
 
   return session;
-}
-
-/**
- * Hand-built stand-in for `getSessionEffectiveCitations`: `{ citingId: [[citedId,
- * relation], ...] }`. Turns absent from the map cite nothing, which is what the
- * real reader returns for a turn with no edges and no inline `[T<n>]`.
- */
-function structuredCitations(
-  spec: Record<number, Array<[number, string]>>,
-): Map<number, { source: "structured"; citedTurnIds: number[]; edges: unknown[] }> {
-  const map = new Map<
-    number,
-    { source: "structured"; citedTurnIds: number[]; edges: unknown[] }
-  >();
-  for (const [citing, edges] of Object.entries(spec)) {
-    const citingTurnId = Number(citing);
-    map.set(citingTurnId, {
-      source: "structured",
-      citedTurnIds: [...new Set(edges.map(([citedTurnId]) => citedTurnId))],
-      edges: edges.map(([citedTurnId, relation]) => ({
-        citingTurnId,
-        citedTurnId,
-        relation,
-        createdAtEpoch: 0,
-      })),
-    });
-  }
-  return map;
-}
-
-/**
- * The legacy half of the same seam: an id that came out of the inline
- * `[T<n>]` grammar, carrying no relation at all — as opposed to a structured
- * edge (`structuredCitations`, above).
- */
-function inlineCitations(
-  spec: Record<number, number[]>,
-): Map<number, { source: "inline"; citedTurnIds: number[]; edges: unknown[] }> {
-  const map = new Map<
-    number,
-    { source: "inline"; citedTurnIds: number[]; edges: unknown[] }
-  >();
-  for (const [citing, citedTurnIds] of Object.entries(spec)) {
-    map.set(Number(citing), {
-      source: "inline",
-      citedTurnIds: [...new Set(citedTurnIds)],
-      edges: [],
-    });
-  }
-  return map;
 }
 
 describe("parseTimelineId", () => {
@@ -1308,323 +1260,6 @@ describe("detectShapeSignals", () => {
   });
 });
 
-describe("milestoneEffGrade", () => {
-  const era = 1_784_711_427;
-  const legacy = (overrides: TurnOverrides) =>
-    milestoneEffGrade(turn({ createdAtEpoch: era - 1, ...overrides }), era);
-  const current = (overrides: TurnOverrides) =>
-    milestoneEffGrade(turn({ createdAtEpoch: era, ...overrides }), era);
-
-  it("takes an era turn's grade verbatim", () => {
-    expect(current({ type: "discovery", significanceGrade: 4 })).toBe(4);
-    expect(current({ type: "decision", significanceGrade: 1 })).toBe(1);
-    expect(current({ type: "feature", significanceGrade: 0, filesModified: ["a.ts"] })).toBe(0);
-  });
-
-  it("treats an ungraded era turn as 0 (pool-ineligible until it is graded)", () => {
-    expect(current({ type: "decision", significanceGrade: null })).toBe(0);
-    expect(current({ type: "feature", significanceGrade: null, filesModified: ["a.ts"] })).toBe(0);
-  });
-
-  it("maps a legacy turn by type and ignores its stored grade entirely", () => {
-    expect(legacy({ type: "decision" })).toBe(3);
-    expect(legacy({ type: "feature", filesModified: ["a.ts"] })).toBe(2);
-    expect(legacy({ type: "refactor", filesModified: ["a.ts"] })).toBe(2);
-    expect(legacy({ type: "bugfix" })).toBe(2);
-    expect(legacy({ type: "change", filesModified: ["a.ts"] })).toBe(1);
-    expect(legacy({ type: "discovery" })).toBe(1);
-    expect(legacy({ type: null })).toBe(0);
-    // A stored grade on a pre-era turn carries pre-era semantics: never read.
-    expect(legacy({ type: "discovery", significanceGrade: 4 })).toBe(1);
-    expect(legacy({ type: "decision", significanceGrade: 0 })).toBe(3);
-  });
-
-  it("zeroes a legacy artifact type that modified no file", () => {
-    expect(legacy({ type: "feature", filesModified: [] })).toBe(0);
-    expect(legacy({ type: "refactor", filesModified: [] })).toBe(0);
-    expect(legacy({ type: "change", filesModified: [] })).toBe(0);
-    // bugfix/discovery/decision are not artifact types and keep their mapping.
-    expect(legacy({ type: "bugfix", filesModified: [] })).toBe(2);
-  });
-
-  it("adds one for an insight but caps legacy at 3, so no legacy turn is ever an anchor", () => {
-    expect(legacy({ type: "discovery", insight: "- finding" })).toBe(2);
-    expect(legacy({ type: "bugfix", insight: "- finding" })).toBe(3);
-    expect(legacy({ type: "decision", insight: "- finding" })).toBe(3);
-  });
-
-  it("flips at the era boundary for two otherwise identical turns", () => {
-    const shape = { type: "decision" as const, significanceGrade: null };
-    expect(legacy(shape)).toBe(3);
-    expect(current(shape)).toBe(0);
-  });
-});
-
-describe("milestoneTieBreak", () => {
-  it("never reaches a whole grade tier even with every signal maxed", () => {
-    const maxed = milestoneTieBreak(
-      turn({ insight: "- x", filesModified: ["docs/plans/a.md"] }),
-      99,
-    );
-    expect(maxed).toBeLessThan(1);
-    expect(maxed).toBeCloseTo(0.9, 6);
-  });
-
-  it("counts distinct citers up to two", () => {
-    const plain = turn({});
-    expect(milestoneTieBreak(plain, 0)).toBe(0);
-    expect(milestoneTieBreak(plain, 1)).toBeCloseTo(0.25, 6);
-    expect(milestoneTieBreak(plain, 2)).toBeCloseTo(0.5, 6);
-    expect(milestoneTieBreak(plain, 9)).toBeCloseTo(0.5, 6);
-  });
-
-  it("weights insight and pure-spec independently", () => {
-    expect(milestoneTieBreak(turn({ insight: "- x" }))).toBeCloseTo(0.25, 6);
-    expect(milestoneTieBreak(turn({ filesModified: ["docs/plans/a.md"] }))).toBeCloseTo(0.15, 6);
-    // `[]` is the empty-insight sentinel, not an insight.
-    expect(milestoneTieBreak(turn({ insight: "[]" }))).toBe(0);
-  });
-});
-
-describe("buildCorrectionGraph", () => {
-  const era = 1_784_711_427;
-  const base = 1_779_782_400; // pre-era: the inline/tag adapter is live here
-
-  it("derives victimhood from a supersedes edge alone, with no tag on the victim", () => {
-    const seq = [
-      turn({ id: 20, promptNumber: 2, type: "decision", title: "first conclusion", createdAtEpoch: era }),
-      turn({ id: 30, promptNumber: 3, type: "decision", title: "overturns it", createdAtEpoch: era + 60 }),
-    ];
-    const g = buildCorrectionGraph(seq, {
-      citations: structuredCitations({ 30: [[20, "supersedes"]] }),
-      taskCausalityEraCutoffEpoch: era,
-    });
-    expect([...g.correctors]).toEqual([30]);
-    expect([...g.supersededVictims]).toEqual([20]);
-    // Back-link data rides along: victim id → superseding turn ids.
-    expect(g.supersededBy.get(20)).toEqual([30]);
-  });
-
-  // The legacy adapter's gate is PER TARGET. It was once `source === "inline"`,
-  // a whole-turn fact because the reader chose one source for the whole turn;
-  // translating that to `edges.length === 0` after the per-target union meant a
-  // single structured edge silently switched the adapter off for every OTHER
-  // target the same turn cited. Here the corrector has a structured edge about
-  // a settled target and only prose about a reversed victim.
-  it("still infers a pre-era reversal for a target the edges say nothing about", () => {
-    const settled = turn({ id: 10, promptNumber: 1, type: "decision", title: "settled", createdAtEpoch: base });
-    const victim = turn({
-      id: 20,
-      promptNumber: 2,
-      type: "decision",
-      title: "overturned later",
-      tags: ["rolled-back"],
-      createdAtEpoch: base + 60,
-    });
-    const corrector = turn({
-      id: 30,
-      promptNumber: 3,
-      type: "decision",
-      title: "cites both",
-      createdAtEpoch: base + 120,
-    });
-    const g = buildCorrectionGraph([settled, victim, corrector], {
-      citations: new Map([
-        [10, { citedTurnIds: [], edges: [] }],
-        [20, { citedTurnIds: [], edges: [] }],
-        [
-          30,
-          {
-            // Union shape: one structured edge (about `settled`) plus a prose
-            // citation of the victim that no edge covers.
-            citedTurnIds: [10, 20],
-            edges: [
-              {
-                citingTurnId: 30,
-                citedTurnId: 10,
-                relation: "consume" as const,
-                createdAtEpoch: base + 120,
-              },
-            ],
-          },
-        ],
-      ]),
-      taskCausalityEraCutoffEpoch: era,
-    });
-
-    expect([...g.supersededVictims]).toEqual([20]);
-    expect([...g.correctors]).toEqual([30]);
-    expect(g.supersededBy.get(20)).toEqual([30]);
-  });
-
-  it("ignores a non-supersedes relation (builds-on is consumption, not correction)", () => {
-    const seq = [
-      turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: era }),
-      turn({ id: 30, promptNumber: 3, type: "feature", createdAtEpoch: era + 60 }),
-    ];
-    const g = buildCorrectionGraph(seq, {
-      citations: structuredCitations({ 30: [[20, "builds-on"], [20, "verifies"]] }),
-      taskCausalityEraCutoffEpoch: era,
-    });
-    expect(g.correctors.size).toBe(0);
-    expect(g.supersededVictims.size).toBe(0);
-  });
-
-  // Second review round (spec C5): a bare/relation-less edge is a readable
-  // citation now (the generic pair readers no longer filter it out), but it
-  // is still not a CORRECTION — only a stated `supersedes` relation may fire
-  // victim demotion. Built directly rather than through `structuredCitations`
-  // (whose helper type assumes a string relation) since the point here is
-  // specifically a `relation: null` edge.
-  it("ignores a NULL relation — an unattributed pair is a citation, not a correction", () => {
-    const seq = [
-      turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: era }),
-      turn({ id: 30, promptNumber: 3, type: "feature", createdAtEpoch: era + 60 }),
-    ];
-    const citations = new Map<
-      number,
-      { source: "structured"; citedTurnIds: number[]; edges: unknown[] }
-    >([
-      [
-        30,
-        {
-          source: "structured",
-          citedTurnIds: [20],
-          edges: [{ citingTurnId: 30, citedTurnId: 20, relation: null, createdAtEpoch: 0 }],
-        },
-      ],
-    ]);
-    const g = buildCorrectionGraph(seq, {
-      citations,
-      taskCausalityEraCutoffEpoch: era,
-    });
-    expect(g.correctors.size).toBe(0);
-    expect(g.supersededVictims.size).toBe(0);
-  });
-
-  it("orders multiple superseders of one victim by prompt number", () => {
-    const seq = [
-      turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: era }),
-      turn({ id: 90, promptNumber: 9, type: "decision", createdAtEpoch: era + 120 }),
-      turn({ id: 30, promptNumber: 3, type: "decision", createdAtEpoch: era + 60 }),
-    ];
-    const g = buildCorrectionGraph(seq, {
-      citations: structuredCitations({
-        30: [[20, "supersedes"]],
-        90: [[20, "supersedes"]],
-      }),
-      taskCausalityEraCutoffEpoch: era,
-    });
-    expect(g.supersededBy.get(20)).toEqual([30, 90]);
-  });
-
-  it("reads a pre-era citer's rolled-back victim through the legacy inline adapter", () => {
-    const seq = [
-      turn({ id: 20, promptNumber: 2, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base }),
-      turn({ id: 30, promptNumber: 3, type: "bugfix", content: "fixes [T20]", createdAtEpoch: base + 60 }),
-    ];
-    const g = buildCorrectionGraph(seq, { taskCausalityEraCutoffEpoch: era });
-    expect([...g.correctors]).toEqual([30]);
-    expect([...g.supersededVictims]).toEqual([20]);
-  });
-
-  it("does NOT apply the tag adapter to an era citer — edges are its only signal", () => {
-    const seq = [
-      turn({ id: 20, promptNumber: 2, type: "discovery", tags: ["rolled-back"], createdAtEpoch: era }),
-      turn({ id: 30, promptNumber: 3, type: "bugfix", content: "fixes [T20]", createdAtEpoch: era + 60 }),
-    ];
-    const g = buildCorrectionGraph(seq, { taskCausalityEraCutoffEpoch: era });
-    expect(g.correctors.size).toBe(0);
-    expect(g.supersededVictims.size).toBe(0);
-  });
-
-  it("does NOT apply the tag adapter to a pre-era citer whose edges are structured", () => {
-    // Created pre-era: the citation read is an unconditional union of
-    // structured edges and inline prose regardless of era, and the stated
-    // relation here is consumption, not correction. Era gating alone would
-    // misread this as a correction.
-    const seq = [
-      turn({ id: 20, promptNumber: 2, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base }),
-      turn({ id: 30, promptNumber: 3, type: "bugfix", createdAtEpoch: base + 60 }),
-    ];
-    const g = buildCorrectionGraph(seq, {
-      citations: structuredCitations({ 30: [[20, "builds-on"], [20, "verifies"]] }),
-      taskCausalityEraCutoffEpoch: era,
-    });
-    expect(g.correctors.size).toBe(0);
-    expect(g.supersededVictims.size).toBe(0);
-    expect(g.supersededBy.size).toBe(0);
-  });
-
-  it("still applies the tag adapter to the same shape when the source is inline", () => {
-    // Identical turns and identical cited ids; only the provenance differs.
-    const seq = [
-      turn({ id: 20, promptNumber: 2, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base }),
-      turn({ id: 30, promptNumber: 3, type: "bugfix", createdAtEpoch: base + 60 }),
-    ];
-    const g = buildCorrectionGraph(seq, {
-      citations: inlineCitations({ 30: [20] }),
-      taskCausalityEraCutoffEpoch: era,
-    });
-    expect([...g.correctors]).toEqual([30]);
-    expect([...g.supersededVictims]).toEqual([20]);
-    expect(g.supersededBy.get(20)).toEqual([30]);
-  });
-
-  it("ignores a legacy cite of a non-reversed predecessor (plain causal reference)", () => {
-    const seq = [
-      turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: base }),
-      turn({ id: 30, promptNumber: 3, type: "feature", content: "builds on [T20]", createdAtEpoch: base + 60 }),
-    ];
-    const g = buildCorrectionGraph(seq, { taskCausalityEraCutoffEpoch: era });
-    expect(g.correctors.size).toBe(0);
-    expect(g.supersededVictims.size).toBe(0);
-  });
-
-  it("ignores forward edges (predecessor guard: a correction points backward)", () => {
-    const seq = [
-      turn({ id: 20, promptNumber: 2, type: "bugfix", createdAtEpoch: era }),
-      turn({ id: 30, promptNumber: 3, type: "discovery", createdAtEpoch: era + 60 }),
-    ];
-    const g = buildCorrectionGraph(seq, {
-      citations: structuredCitations({ 20: [[30, "supersedes"]] }),
-      taskCausalityEraCutoffEpoch: era,
-    });
-    expect(g.correctors.size).toBe(0);
-    expect(g.supersededVictims.size).toBe(0);
-  });
-
-  it("ignores an edge that resolves to no turn at all", () => {
-    const seq = [
-      turn({ id: 30, promptNumber: 3, type: "bugfix", createdAtEpoch: era }),
-    ];
-    const g = buildCorrectionGraph(seq, {
-      citations: structuredCitations({ 30: [[999, "supersedes"]] }),
-      taskCausalityEraCutoffEpoch: era,
-    });
-    expect(g.correctors.size).toBe(0);
-    expect(g.supersededVictims.size).toBe(0);
-  });
-
-  it("promotes a corrector and demotes its victim even when the victim is out of window", () => {
-    // Ranged view: the victim is resolved from the full session, not from `turns`.
-    const victim = turn({ id: 5, promptNumber: 5, type: "decision", createdAtEpoch: era });
-    const seq = [
-      turn({ id: 15, promptNumber: 15, type: "bugfix", createdAtEpoch: era + 60 }),
-    ];
-    const g = buildCorrectionGraph(seq, {
-      citations: structuredCitations({ 15: [[5, "supersedes"]] }),
-      resolveCited: (id) => (id === 5 ? victim : undefined),
-      taskCausalityEraCutoffEpoch: era,
-    });
-    expect([...g.correctors]).toEqual([15]);
-    // It holds no main-row slot to lose, but the demotion still governs whether
-    // pull-through revives it as a ↳ row.
-    expect([...g.supersededVictims]).toEqual([5]);
-    expect(g.supersededBy.get(5)).toEqual([15]);
-  });
-});
-
 describe("milestoneMarker", () => {
   it("returns invalidated for undone or interrupted turns (precedence over all)", () => {
     expect(milestoneMarker(turn({ status: "undone", wasRolledBack: true }))).toBe("invalidated");
@@ -1718,921 +1353,204 @@ describe("isVersionBumpTurn", () => {
   });
 });
 
-describe("selectMilestoneTurns (grade-first arc)", () => {
-  const era = 1_784_711_427;
-  const legacyBase = 1_779_782_400;
+describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03)", () => {
+  const BASE = 1_800_000_000;
+  const laneEdge = (
+    citingId: number,
+    relation: string,
+    citedId: number,
+    tags: string[] = [],
+  ): LaneEdgeInput => ({ citingId, citedId, relation, tags });
+  const w = (id: number, type: string, extra: TurnOverrides = {}): TurnRecord =>
+    turn({ id, promptNumber: id, type, createdAtEpoch: BASE + id, ...extra });
 
-  const select = (
-    rows: TurnRecord[],
-    options: Record<string, unknown> = {},
-  ): MilestoneSelection =>
-    selectMilestoneTurns({
-      windowTurns: rows,
-      windowSignals: detectShapeSignals(rows),
-      compactBoundaries: [],
-      taskCausalityEraCutoffEpoch: era,
-      ...options,
-    } as Parameters<typeof selectMilestoneTurns>[0]);
+  it("delegates candidacy exclusion to electMilestones: an override VICTIM leaves both `kept` and `ranked` entirely", () => {
+    const rows = [w(1, "design"), w(2, "design")];
+    const laneEdges = [laneEdge(2, "override", 1)];
+    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges, budget: 5 });
+    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([2]);
+    expect(result.ranked.map((row) => row.turn.promptNumber)).toEqual([2]);
+  });
 
-  const kept = (selection: MilestoneSelection): number[] =>
-    selection.kept.map((row) => row.turn.promptNumber);
-  const rankedPrompts = (selection: MilestoneSelection): number[] =>
-    selection.ranked.map((row) => row.turn.promptNumber);
-  const rowFor = (selection: MilestoneSelection, promptNumber: number) =>
-    selection.kept.find((row) => row.turn.promptNumber === promptNumber);
-
-  it("admits era turns on grade alone; an ungraded era turn is out and G2 is scored but not admitted", () => {
+  it("a rolled-back or skipped turn never reaches candidacy (ticket 06 exclusion, unchanged by the election rewrite)", () => {
     const rows = [
-      turn({ id: 1, promptNumber: 1, type: "decision", title: "arc origin", significanceGrade: 4, createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "decision", title: "not yet graded", significanceGrade: null, createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "discovery", title: "locked the mechanism", significanceGrade: 3, createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "discovery", title: "supporting evidence", significanceGrade: 2, createdAtEpoch: era + 180 }),
-      turn({ id: 5, promptNumber: 5, type: "change", title: "end", significanceGrade: 1, filesModified: ["a.ts"], createdAtEpoch: era + 240 }),
+      w(1, "design", { wasRolledBack: true }),
+      w(2, "design", { status: "skipped" }),
+      w(3, "design"),
     ];
-
-    const result = select(rows);
-    // T5 is the window's last titled row → structural endpoint despite G1.
-    expect(kept(result)).toEqual([1, 3, 5]);
-    expect(rowFor(result, 3)?.effGrade).toBe(3);
-    expect(rowFor(result, 1)?.alwaysKeep).toBe(true);
-    // G2 clears the pool gate and is ranked, but the spine bar is G3.
-    expect(rankedPrompts(result)).toContain(4);
-    expect(rankedPrompts(result)).not.toContain(2);
+    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges: [], budget: 5 });
+    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([3]);
   });
 
-  it("flips selection at the era boundary for two identically shaped decisions", () => {
-    const build = (createdAtEpoch: number): TurnRecord[] => [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era + 1_000 }),
-      turn({ id: 2, promptNumber: 2, type: "decision", title: "subject", significanceGrade: null, createdAtEpoch }),
-      turn({ id: 3, promptNumber: 3, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 2_000 }),
-    ];
-
-    // Pre-era: the type map says decision = G3 → spine.
-    expect(kept(select(build(era - 1)))).toContain(2);
-    // Era: ungraded means ungraded, not "infer from type".
-    expect(kept(select(build(era)))).not.toContain(2);
+  it("a compact marker holds no kept slot and never joins the election", () => {
+    const rows = [w(1, "compact"), w(2, "design"), w(3, "compact")];
+    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges: [], budget: 5 });
+    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([2]);
   });
 
-  it("keeps legacy window endpoints structurally, whatever their grade", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: null, title: "legacy start", createdAtEpoch: legacyBase }),
-      turn({ id: 2, promptNumber: 2, type: "discovery", title: "legacy noise", createdAtEpoch: legacyBase + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "change", title: "legacy end", filesModified: [], createdAtEpoch: legacyBase + 120 }),
+  it("`budget` cuts the election's own rank to the top N, then re-sorts to TIME order for display (spec step 5) — never score order", () => {
+    // Two untagged-indexes releases (tier 1): T5 has the higher in-degree via
+    // a third turn's `grounds`, so it wins a budget-1 cut over T2 despite
+    // being earlier — but with budget 2 BOTH are kept and DISPLAY still runs
+    // chronological (T2 before T5), the opposite of election-rank order.
+    const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(5, "design"), w(6, "design")];
+    const laneEdges = [
+      laneEdge(2, "indexes", 1),
+      laneEdge(5, "indexes", 6),
+      laneEdge(3, "grounds", 5),
     ];
+    const budgetOne = selectMilestoneTurns({ windowTurns: rows, laneEdges, budget: 1 });
+    expect(budgetOne.kept.map((row) => row.turn.promptNumber)).toEqual([5]);
 
-    const result = select(rows);
-    expect(kept(result)).toEqual([1, 3]);
-    expect(rowFor(result, 1)?.effGrade).toBe(0);
-    expect(rowFor(result, 1)?.alwaysKeep).toBe(true);
-    expect(rowFor(result, 1)?.spine).toBe(false);
+    const budgetTwo = selectMilestoneTurns({ windowTurns: rows, laneEdges, budget: 2 });
+    // Election rank has T5 (in-degree 1) ahead of T2 (in-degree 0), but the
+    // DISPLAYED kept array is chronological: T2 before T5.
+    expect(budgetTwo.kept.map((row) => row.turn.promptNumber)).toEqual([2, 5]);
   });
 
-  it("gives a compact marker no kept slot and no endpoint claim", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "compact", title: "/compact", createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "discovery", title: "graded work", significanceGrade: 3, createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "compact", title: "/compact", createdAtEpoch: era + 120 }),
-    ];
-
-    const result = select(rows);
-    expect(kept(result)).toEqual([2]);
-    expect(result.ranked.some((row) => row.turn.type.includes("compact"))).toBe(false);
+  it("edgeless window degrades to recent-N (tier ⑤, zero degree, the LATER-turn tiebreak alone) — the module's own emergent recency, no special case", () => {
+    const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(4, "design")];
+    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges: [], budget: 2 });
+    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([3, 4]);
+    expect(result.kept.every((row) => row.tier === 5)).toBe(true);
   });
 
-  it("keeps a G0 corrector at its own grade and its victim at its own grade — no promotion, no demotion (spec H1)", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "decision", title: "first conclusion", significanceGrade: 3, createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "discovery", title: "the correction", significanceGrade: 0, createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 180 }),
+  it("↳ addresses list only cited turns that are THEMSELVES elected; an unelected cited turn is omitted entirely — never promoted to a row of its own (no pulled-antecedent resurrection)", () => {
+    // T4 is a closed-valid lane terminus (tier 2, wins the budget-3 cut on
+    // tier alone) that also `grounds` T2 and T3 (untagged, no lane): T1 gets
+    // extra in-degree from the SAME tagged edges that declare the lane, so
+    // {T4, T1, T3} outrank T2 for the 3 available seats — T2 is excluded, and
+    // T4's own `grounds T2` edge must not resurrect it as a ↳ row.
+    const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(4, "design")];
+    const laneEdges = [
+      laneEdge(4, "extends", 1, ["x"]),
+      laneEdge(4, "indexes", 1, ["x"]),
+      laneEdge(4, "grounds", 2),
+      laneEdge(4, "grounds", 3),
     ];
+    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges, budget: 3 });
 
-    const result = select(rows, {
-      citations: structuredCitations({ 3: [[2, "supersedes"]] }),
-    });
-
-    // T3 is still kept — it is still a corrector, and a corrector's always-keep
-    // slot survives ticket 13 — but at its OWN G0, not lifted to G3.
-    expect(rowFor(result, 3)?.effGrade).toBe(0);
-    expect(rowFor(result, 3)?.alwaysKeep).toBe(true);
-    expect(rowFor(result, 3)?.spine).toBe(false);
-    // T2 is no longer floored to G1: its own G3 clears the spine bar on its own
-    // merit, so it is now a main row in its own right instead of a ↳
-    // antecedent — an edge no longer decides its eligibility.
-    expect(kept(result)).toEqual([1, 2, 3, 4]);
-    expect(rowFor(result, 2)?.effGrade).toBe(3);
-    expect(rowFor(result, 2)?.spine).toBe(true);
-    expect(rowFor(result, 2)?.supersededBy).toEqual([3]);
-    expect(result.pulled).toHaveLength(0);
-  });
-
-  it("a turn that is both corrector and victim keeps its own grade either way (spec H1)", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "decision", title: "first answer", significanceGrade: 2, createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "second answer", significanceGrade: 3, createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "decision", title: "final answer", significanceGrade: 0, createdAtEpoch: era + 180 }),
-      turn({ id: 5, promptNumber: 5, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 240 }),
-    ];
-
-    const result = select(rows, {
-      citations: structuredCitations({
-        3: [[2, "supersedes"]],
-        4: [[3, "supersedes"]],
-      }),
-    });
-
-    // T3 corrected T2 and was itself overturned by T4. Neither fact moves its
-    // grade any more (spec H1: there is no demotion/promotion order to run) —
-    // its own G3 stands, clears the spine bar, and it keeps the back-link to
-    // its own corrector.
-    expect(kept(result)).toEqual([1, 3, 4, 5]);
-    expect(rowFor(result, 3)?.effGrade).toBe(3);
-    expect(rowFor(result, 3)?.spine).toBe(true);
-    expect(rowFor(result, 3)?.supersededBy).toEqual([4]);
-    // T4's own G0 stands too — it is kept only because it is a corrector, not
-    // because superseding T3 lifted it.
-    expect(rowFor(result, 4)?.effGrade).toBe(0);
-    expect(rowFor(result, 4)?.alwaysKeep).toBe(true);
-    expect(rowFor(result, 4)?.spine).toBe(false);
-    // T2's own G2 stays out of spine range on its own merit and T3 — its actual
-    // citer — is a kept row, so T2 is pulled under it at its own grade, not a
-    // demoted one.
-    expect(result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber])).toEqual([
-      [2, 3],
-    ]);
-    expect(result.pulled[0]!.effGrade).toBe(2);
-    expect(result.pulled[0]!.supersededBy).toEqual([3]);
-  });
-
-  it("keeps a superseded G4's own anchor claim; its corrector is admitted separately, not by inheriting it", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "decision", title: "arc origin, later refounded", significanceGrade: 4, createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "refoundation", significanceGrade: 2, createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 180 }),
-    ];
-
-    const result = select(rows, {
-      citations: structuredCitations({ 3: [[2, "supersedes"]] }),
-    });
-
-    // Nothing moves any more (spec H1): T2's own G4 still clears the era-G4
-    // always-keep bullet AND the spine bar, so it keeps its own main row and
-    // its own back-link. T3 is admitted too, but on the corrector bullet alone
-    // — its own G2 never touches the spine bar.
-    expect(kept(result)).toEqual([1, 2, 3, 4]);
-    expect(rowFor(result, 2)?.effGrade).toBe(4);
-    expect(rowFor(result, 2)?.alwaysKeep).toBe(true);
-    expect(rowFor(result, 2)?.spine).toBe(true);
-    expect(rowFor(result, 2)?.supersededBy).toEqual([3]);
-    expect(rowFor(result, 3)?.effGrade).toBe(2);
-    expect(rowFor(result, 3)?.alwaysKeep).toBe(true);
-    expect(rowFor(result, 3)?.spine).toBe(false);
-    expect(result.pulled).toHaveLength(0);
-  });
-
-  it("keeps a victim's own grade even at a window endpoint, and still hands it the back-link", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "decision", title: "opening premise", significanceGrade: 4, createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "decision", title: "overturns the premise", significanceGrade: 3, createdAtEpoch: era + 60 }),
-    ];
-
-    const result = select(rows, {
-      citations: structuredCitations({ 2: [[1, "supersedes"]] }),
-    });
-
-    expect(kept(result)).toEqual([1, 2]);
-    // T1's own G4 stands (spec H1: no floor) — it was already going to be kept
-    // as a window endpoint, but now it also clears the spine bar on its own
-    // merit, and the back-link still renders.
-    expect(rowFor(result, 1)?.effGrade).toBe(4);
-    expect(rowFor(result, 1)?.spine).toBe(true);
-    expect(rowFor(result, 1)?.supersededBy).toEqual([2]);
-    // Already a main row, so it is not ALSO pulled in as its corrector's ↳.
-    expect(result.pulled).toHaveLength(0);
-  });
-
-  it("keeps a reversed turn nobody corrected, and marks it", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "decision", title: "start", createdAtEpoch: legacyBase }),
-      turn({ id: 2, promptNumber: 2, type: "discovery", title: "rewound direction", tags: ["rolled-back"], createdAtEpoch: legacyBase + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "end", createdAtEpoch: legacyBase + 120 }),
-    ];
-
-    const result = select(rows);
-    expect(kept(result)).toContain(2);
-    expect(rowFor(result, 2)?.marker).toBe("reversed");
-    expect(rowFor(result, 2)?.alwaysKeep).toBe(true);
-  });
-
-  it("demotes a pre-era rolled-back victim through the legacy inline adapter", () => {
-    const rows = [
-      turn({ id: 10, promptNumber: 1, type: "decision", title: "start", createdAtEpoch: legacyBase }),
-      turn({
-        id: 20,
-        promptNumber: 2,
-        type: "discovery",
-        title: "concluded overhead is 2.5%",
-        tags: ["rolled-back"],
-        createdAtEpoch: legacyBase + 60,
-      }),
-      turn({
-        id: 30,
-        promptNumber: 3,
-        type: "bugfix",
-        title: "pricing bug fixed; overhead is 7-10%",
-        content: "Corrected the earlier figure [T20].",
-        filesModified: ["a.ts"],
-        createdAtEpoch: legacyBase + 120,
-      }),
-      turn({ id: 40, promptNumber: 4, type: "decision", title: "end", createdAtEpoch: legacyBase + 180 }),
-    ];
-
-    const result = select(rows);
-    // T2 is a SECOND-ORDER consequence of removing the victim-ineligibility
-    // branches (spec H1): under the old rule, being a victim short-circuited
-    // `isAlwaysKeep` to `false` before it ever reached the reversed-marker
-    // bullet, so a reversed-AND-corrected legacy turn was always demoted and
-    // pulled under its corrector. With that short-circuit gone, the marker
-    // bullet now fires unconditionally — T2 is kept on its own, tag-driven
-    // "reversed" marker, whether or not a corrector also exists for it.
-    expect(kept(result)).toEqual([1, 2, 3, 4]);
-    expect(rowFor(result, 2)?.effGrade).toBe(1); // legacy discovery, unchanged
-    expect(rowFor(result, 2)?.marker).toBe("reversed");
-    expect(rowFor(result, 2)?.spine).toBe(false);
-    // The back-link data still populates on this now-main row (spec H3), even
-    // though today's renderer only turns it into `→被T<n>推翻` text on a ↳ row.
-    expect(rowFor(result, 2)?.supersededBy).toEqual([3]);
-    // Legacy bugfix G2, no longer promoted (spec H1) — T3 is kept anyway, on
-    // the corrector bullet alone.
-    expect(rowFor(result, 3)?.effGrade).toBe(2);
-    expect(rowFor(result, 3)?.marker).toBeNull();
-    // T2 is a kept main row now, so T3's citation of it is skipped by
-    // pull-through (`keptIds.has`) — there is nothing left to pull.
-    expect(result.pulled).toHaveLength(0);
-  });
-
-  // Ticket 06 (view-render-repair, ruling [S15069/T1084]): this used to be a
-  // `status: "skipped"` turn — skip's own "no main-row candidacy, but still
-  // pullable" carve-out is exactly what the ruling retires (a skipped turn
-  // is excluded from the citation universe entirely, so it can never be
-  // pulled through at all any more — see "the two turns ticket 06 excludes
-  // never appear, even pulled" below). Rewritten to a live G0 turn instead,
-  // so the prompt-prefix pseudo-title mechanism this test targets still has
-  // a legitimate pull-through case to exercise.
-  it("revives a cited low-grade turn as an antecedent with a prompt-prefix pseudo-title", () => {
-    const longPrompt =
-      "why does the extractor drop the boundary marker when the wrapper lands first and the turn is already claimed";
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({
-        id: 2,
-        promptNumber: 2,
-        significanceGrade: 0,
-        type: null,
-        title: null,
-        userPrompt: longPrompt,
-        createdAtEpoch: era + 60,
-      }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, createdAtEpoch: era + 120 }),
-    ];
-
-    const result = select(rows, {
-      citations: structuredCitations({ 3: [[2, "verifies"]] }),
-    });
-
-    expect(kept(result)).toEqual([1, 3]);
-    const antecedent = result.pulled[0]!;
-    expect(antecedent.turn.promptNumber).toBe(2);
-    expect(antecedent.effGrade).toBe(0);
-    // Was `longPrompt.slice(0, 60)`, a hard cut landing inside "wrapper". The
-    // ↳ label now goes through the same truncator as every other field, so it
-    // retreats to the space before it — the visible text is whole words.
-    expect(antecedent.label).toBe(
-      "why does the extractor drop the boundary marker when the…",
-    );
-  });
-
-  it("prefers a stored title over the prompt prefix for a ↳ label", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({
-        id: 2,
-        promptNumber: 2,
-        significanceGrade: 0,
-        type: null,
-        title: "minimal title for a low-grade turn",
-        userPrompt: "raw prompt text that must not win",
-        createdAtEpoch: era + 60,
-      }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, createdAtEpoch: era + 120 }),
-    ];
-
-    const result = select(rows, {
-      citations: structuredCitations({ 3: [[2, "verifies"]] }),
-    });
-    expect(result.pulled[0]!.label).toBe("minimal title for a low-grade turn");
-  });
-
-  it("a skipped turn is never pulled through, even titled and cited (ticket 06, ruling [S15069/T1084])", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({
-        id: 2,
-        promptNumber: 2,
-        status: "skipped",
-        title: "a skipped turn with a real title",
-        userPrompt: "raw prompt text",
-        createdAtEpoch: era + 60,
-      }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, createdAtEpoch: era + 120 }),
-    ];
-
-    const result = select(rows, {
-      citations: structuredCitations({ 3: [[2, "verifies"]] }),
-    });
-
-    // T2 is absent everywhere — not kept, not pulled, not ranked, and its
-    // citer (T3) gets no corrector/always-keep status from citing it either.
-    expect(kept(result)).toEqual([1, 3]);
-    expect(result.pulled).toHaveLength(0);
-    expect(rankedPrompts(result)).not.toContain(2);
-  });
-
-  it("a rolled-back turn is never pulled through, even titled and cited (ticket 06, ruling [S15069/T1084])", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({
-        id: 2,
-        promptNumber: 2,
-        wasRolledBack: true,
-        significanceGrade: 0,
-        title: "a rolled-back turn with a real title",
-        userPrompt: "raw prompt text",
-        createdAtEpoch: era + 60,
-      }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, createdAtEpoch: era + 120 }),
-    ];
-
-    const result = select(rows, {
-      citations: structuredCitations({ 3: [[2, "verifies"]] }),
-    });
-
-    expect(kept(result)).toEqual([1, 3]);
-    expect(result.pulled).toHaveLength(0);
-    expect(rankedPrompts(result)).not.toContain(2);
-  });
-
-  it("a corrector citing ONLY a rolled-back victim gains no always-keep slot from that edge (ticket 06)", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({
-        id: 2,
-        promptNumber: 2,
-        wasRolledBack: true,
-        significanceGrade: 3,
-        title: "a rolled-back victim",
-        createdAtEpoch: era + 60,
-      }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "would-be corrector", significanceGrade: 0, createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 180 }),
-    ];
-
-    const result = select(rows, {
-      citations: structuredCitations({ 3: [[2, "supersedes"]] }),
-    });
-
-    // T2 does not exist for the election: it is never resolved as a victim,
-    // so T3 (which cites only T2) is not promoted to a corrector's
-    // always-keep slot by that edge — its own G0 keeps it out of `kept`.
-    expect(kept(result)).not.toContain(3);
-    expect(kept(result)).not.toContain(2);
-  });
-
-  it("assigns a shared antecedent to its earliest kept citer only", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "discovery", title: "shared evidence", significanceGrade: 2, createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "decision", title: "first consumer", significanceGrade: 3, createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "decision", title: "second consumer", significanceGrade: 3, createdAtEpoch: era + 180 }),
-    ];
-
-    const result = select(rows, {
-      citations: structuredCitations({
-        3: [[2, "verifies"]],
-        4: [[2, "verifies"]],
-      }),
-    });
-
-    expect(result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber])).toEqual([
-      [2, 3],
-    ]);
-  });
-
-  it("gates the pool on effGrade, so content bonuses cannot lift a G1 turn into it", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({
-        id: 2,
-        promptNumber: 2,
-        type: "change",
-        title: "G1 carrying every bonus the old model scored",
-        significanceGrade: 1,
-        insight: "- a real insight",
-        filesModified: ["docs/plans/scoring.md"],
-        createdAtEpoch: era + 60,
-      }),
-      turn({ id: 3, promptNumber: 3, type: "discovery", title: "plain G2", significanceGrade: 2, createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "discovery", title: "citer a", significanceGrade: 0, createdAtEpoch: era + 180 }),
-      turn({ id: 5, promptNumber: 5, type: "discovery", title: "citer b", significanceGrade: 0, createdAtEpoch: era + 240 }),
-      turn({ id: 6, promptNumber: 6, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 300 }),
-    ];
-
-    const result = select(rows, {
-      citations: structuredCitations({
-        4: [[2, "builds-on"]],
-        5: [[2, "builds-on"]],
-      }),
-    });
-
-    // Old model: 1 base + 3 spec bonus + 2 citations = 6, well past any G3.
-    expect(rankedPrompts(result)).not.toContain(2);
-    expect(kept(result)).not.toContain(2);
-    // A bare G2 with no bonuses at all still clears the gate.
-    expect(rankedPrompts(result)).toContain(3);
-  });
-
-  it("ranks by score, then the earlier prompt (tool count is not a tie-break)", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, toolCallCount: 0, createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "discovery", title: "five tools", significanceGrade: 3, toolCallCount: 5, createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "discovery", title: "five tools too", significanceGrade: 3, toolCallCount: 5, createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "discovery", title: "nine tools", significanceGrade: 3, toolCallCount: 9, createdAtEpoch: era + 180 }),
-      turn({ id: 5, promptNumber: 5, type: "discovery", title: "insight tie-break", significanceGrade: 3, insight: "- finding", toolCallCount: 0, createdAtEpoch: era + 240 }),
-      turn({ id: 6, promptNumber: 6, type: "discovery", title: "end", significanceGrade: 3, toolCallCount: 0, createdAtEpoch: era + 300 }),
-    ];
-
-    const result = select(rows);
-    // id5 wins on score alone (its insight bonus). Everyone else ties at the
-    // bare G3 score, so prompt number alone orders them — id4's tool count
-    // (9, the highest of the set) no longer buys it a place ahead of id1-3.
-    expect(rankedPrompts(result)).toEqual([5, 1, 2, 3, 4, 6]);
-    // The tie-break rides inside the tier: everything is still a G3.
-    expect(result.ranked.every((row) => row.effGrade === 3)).toBe(true);
-    expect(result.ranked[0]!.score).toBeLessThan(4);
-  });
-
-  it("keeps every graded row on a heavy day — the budget moved to the renderer", () => {
-    const rows = Array.from({ length: 30 }, (_, index) =>
-      turn({
-        id: index + 1,
-        promptNumber: index + 1,
-        type: "decision",
-        title: `m${index + 1}`,
-        significanceGrade: 3,
-        createdAtEpoch: era + index * 60,
-      }),
-    );
-
-    const result = select(rows);
-    expect(result.kept).toHaveLength(30);
-    expect(result.overflowByDay).toHaveLength(0);
-  });
-
-  it("reports the day's unrendered turns as the overflow hint, excluding pulled rows", () => {
-    const day = 24 * 60 * 60;
-    const rows = [
-      // Day one: plain noise, nothing cited — every dropped row is invisible.
-      turn({ id: 1, promptNumber: 1, type: "decision", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      ...Array.from({ length: 5 }, (_, index) =>
-        turn({
-          id: index + 2,
-          promptNumber: index + 2,
-          type: "discovery",
-          title: `noise ${index + 1}`,
-          significanceGrade: 1,
-          createdAtEpoch: era + (index + 1) * 60,
-        }),
-      ),
-      turn({ id: 7, promptNumber: 7, type: "decision", title: "end of day one", significanceGrade: 3, createdAtEpoch: era + 360 }),
-      // Day two: T8 gets no main row but IS rendered as T9's ↳ antecedent, so it
-      // is visible and must not also be counted as hidden. T10 is the only turn
-      // on that day with no row of any kind.
-      turn({ id: 8, promptNumber: 8, type: "discovery", title: "cited evidence", significanceGrade: 2, createdAtEpoch: era + day }),
-      turn({ id: 9, promptNumber: 9, type: "decision", title: "consumer", significanceGrade: 3, createdAtEpoch: era + day + 60 }),
-      turn({ id: 10, promptNumber: 10, type: "discovery", title: "day two noise", significanceGrade: 1, createdAtEpoch: era + day + 120 }),
-      turn({ id: 11, promptNumber: 11, type: "decision", title: "end", significanceGrade: 3, createdAtEpoch: era + day + 180 }),
-    ];
-
-    const result = select(rows, {
-      citations: structuredCitations({ 9: [[8, "verifies"]] }),
-    });
-    expect(kept(result)).toEqual([1, 7, 9, 11]);
-    expect(result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber])).toEqual([
-      [8, 9],
-    ]);
-
-    expect(result.overflowByDay).toHaveLength(2);
-    expect(result.overflowByDay[0]!.count).toBe(5);
-    expect(result.overflowByDay[0]!.firstPrompt).toBe(2);
-    expect(result.overflowByDay[0]!.lastPrompt).toBe(6);
-    // 2 non-kept turns on day two, but only T10 is unrendered.
-    expect(result.overflowByDay[1]!.count).toBe(1);
-    expect(result.overflowByDay[1]!.firstPrompt).toBe(10);
-    expect(result.overflowByDay[1]!.lastPrompt).toBe(10);
-  });
-
-  it("coalesces a same-day outcome chain so only its tail carries the outcome marker", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "decision", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "feature", title: "0.2.38 implementation complete", significanceGrade: 3, tags: ["release"], filesModified: ["a.ts"], createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "feature", title: "0.2.38 verified", significanceGrade: 3, tags: ["released"], filesModified: ["b.ts"], createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 4, type: "feature", title: "0.2.38 merged", significanceGrade: 3, tags: ["merged"], filesModified: ["c.ts"], createdAtEpoch: era + 180 }),
-      turn({ id: 5, promptNumber: 5, type: "decision", title: "end", significanceGrade: 3, createdAtEpoch: era + 240 }),
-    ];
-
-    const result = select(rows);
+    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([1, 3, 4]);
+    const row4 = result.kept.find((row) => row.turn.promptNumber === 4)!;
+    expect(row4.tier).toBe(2);
+    // T2 cited by T4 (a `grounds` edge exists) but is NOT elected — omitted.
+    expect(row4.antecedents).toEqual(["T1", "T3"]);
+    // T2 never appears anywhere in the selection, elected or otherwise.
+    expect(result.kept.some((row) => row.turn.promptNumber === 2)).toBe(false);
     expect(
-      result.kept.filter((row) => row.marker === "outcome").map((row) => row.turn.promptNumber),
-    ).toEqual([4]);
+      result.overflowByDay.some((day) => day.firstPrompt <= 2 && day.lastPrompt >= 2),
+    ).toBe(true);
   });
 
-  it("keeps separate outcome markers when version or prompt gap breaks the chain", () => {
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "decision", title: "start", significanceGrade: 3, createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "feature", title: "0.2.38 released", significanceGrade: 3, tags: ["release"], filesModified: ["a.ts"], createdAtEpoch: era + 60 }),
-      turn({ id: 3, promptNumber: 3, type: "feature", title: "0.2.39 released", significanceGrade: 3, tags: ["release"], filesModified: ["b.ts"], createdAtEpoch: era + 120 }),
-      turn({ id: 4, promptNumber: 10, type: "feature", title: "0.2.39 follow-up release", significanceGrade: 3, tags: ["release"], filesModified: ["c.ts"], createdAtEpoch: era + 180 }),
-      turn({ id: 5, promptNumber: 11, type: "decision", title: "end", significanceGrade: 3, createdAtEpoch: era + 240 }),
-    ];
-
-    const result = select(rows);
-    expect(
-      result.kept.filter((row) => row.marker === "outcome").map((row) => row.turn.promptNumber),
-    ).toEqual([2, 3, 10]);
-  });
-
-  it("resolves a corrector against a full-session victim, but no longer inherits that victim's grade", () => {
-    const victim = turn({ id: 5, promptNumber: 5, type: "decision", title: "early premise", significanceGrade: 4, createdAtEpoch: era });
-    const windowRows = [
-      turn({ id: 15, promptNumber: 15, type: "decision", title: "overturns it", significanceGrade: 0, createdAtEpoch: era + 600 }),
-      turn({ id: 16, promptNumber: 16, type: "discovery", title: "end", significanceGrade: 0, createdAtEpoch: era + 660 }),
-    ];
-
-    const result = select(windowRows, {
-      sessionTurns: [victim, ...windowRows],
-      citations: structuredCitations({ 15: [[5, "supersedes"]] }),
-    });
-
-    // T15 is still resolved as a corrector against the full-session victim
-    // (spec §B) and is still kept — as a window endpoint — but its own G0
-    // stands (spec H1), not a promoted 3.
-    expect(rowFor(result, 15)?.effGrade).toBe(0);
-    // The victim's own G4 now clears the spine bar on its own merit, so it no
-    // longer qualifies for pull-through (effGrade ≤ 2) — and being outside the
-    // window, a main row was never an option for it either. An edge that used
-    // to surface a high-grade out-of-window victim by demoting it into
-    // pull-through range no longer can; that is the cost spec H4 names.
-    expect(result.pulled).toHaveLength(0);
-  });
-
-  it("returns an empty selection for a window with no candidate rows", () => {
-    const result = select([
-      turn({ id: 1, promptNumber: 1, status: "skipped", type: null, title: null, createdAtEpoch: era }),
-      turn({ id: 2, promptNumber: 2, type: "compact", title: "/compact", createdAtEpoch: era + 60 }),
-    ]);
-    expect(result).toEqual({
-      kept: [],
-      ranked: [],
-      pulled: [],
-      overflowByDay: [],
-      effGradeByTurnId: new Map(),
-    });
-  });
-});
-
-function milestoneFixtureTurns(): TurnRecord[] {
-  const day = 24 * 60 * 60;
-  const base = 1_779_782_400; // fixed; never Date.now(). Pre-era on purpose.
-  const rows: TurnRecord[] = [];
-  let pn = 0;
-  const add = (over: TurnOverrides, epoch: number) => {
-    pn += 1;
-    rows.push(turn({ id: pn, promptNumber: pn, createdAtEpoch: epoch, title: `t${pn}`, ...over }));
-  };
-  // 6 days × 20 turns = 120. Each day: 14 discovery (legacy G1) + a 5-long
-  // decision run (legacy G3) + 1 merged feature with files (legacy G2).
-  for (let d = 0; d < 6; d += 1) {
-    const dayBase = base + d * day;
-    for (let i = 0; i < 14; i += 1) add({ type: "discovery", toolCallCount: 0 }, dayBase + i * 60);
-    for (let i = 0; i < 5; i += 1) add({ type: "decision" }, dayBase + (14 + i) * 60);
-    add({ type: "feature", filesModified: ["a.ts"], tags: ["merged"] }, dayBase + 19 * 60);
-  }
-  return rows;
-}
-
-describe("milestone selection on a multi-day legacy fixture", () => {
-  const result = selectMilestoneTurns({
-    windowTurns: milestoneFixtureTurns(),
-    windowSignals: detectShapeSignals(milestoneFixtureTurns()),
-    compactBoundaries: [],
-  });
-  const rows = milestoneFixtureTurns();
-  const keptPrompts = new Set(result.kept.map((row) => row.turn.promptNumber));
-
-  it("keeps every legacy decision (G3) and no bare discovery (G1)", () => {
-    for (const row of rows) {
-      if (row.type === "decision") {
-        expect(keptPrompts.has(row.promptNumber)).toBe(true);
-      }
-      if (row.type === "discovery" && row.promptNumber !== 1) {
-        expect(keptPrompts.has(row.promptNumber)).toBe(false);
-      }
-    }
-  });
-
-  it("keeps both window endpoints and nothing else off-grade", () => {
-    // T1 (first row) and T120 (last titled row) are structural; the other five
-    // merged features are G2 and no longer force-kept by their outcome tag.
-    expect(keptPrompts.has(1)).toBe(true);
-    expect(keptPrompts.has(120)).toBe(true);
-    expect(keptPrompts.has(20)).toBe(false);
-    expect(result.kept).toHaveLength(32);
-  });
-
-  it("accounts for every non-kept day row in the overflow hints", () => {
-    const overflowTotal = result.overflowByDay.reduce((sum, day) => sum + day.count, 0);
-    expect(overflowTotal).toBe(rows.length - result.kept.length);
+  it("the ↳ line's budget cost is attributed to the CITING row — no separate pulled-antecedent object exists to home", () => {
+    // Two elected rows (T2, T3) both cite the same elected T1: each carries
+    // its own `T1` address on its OWN `antecedents` array, not a shared
+    // object one of them "hosts" for the other.
+    const rows = [w(1, "design"), w(2, "design"), w(3, "design")];
+    const laneEdges = [laneEdge(2, "grounds", 1), laneEdge(3, "grounds", 1)];
+    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges, budget: 3 });
+    const row2 = result.kept.find((row) => row.turn.promptNumber === 2)!;
+    const row3 = result.kept.find((row) => row.turn.promptNumber === 3)!;
+    expect(row2.antecedents).toEqual(["T1"]);
+    expect(row3.antecedents).toEqual(["T1"]);
   });
 });
 
 /**
- * The end-to-end guard: one hand-built session that puts every §C rule on the
- * same board at once — two legacy days read through the inline adapter, two era
- * days read through structured edges, a supersession on each side, a shared
- * antecedent, a skipped turn cited but never revived (ticket 06, ruling
- * [S15069/T1084]: total exclusion, no pull-through carve-out), and three
- * classes of always-keep anchor (endpoint, corrector, reversed-with-no-corrector).
- *
- * Frozen by construction: fixed epochs, no `Date.now()` — each row's citation
- * source (inline prose vs structured edge) is stated by `mixedArcCitations`
- * below rather than inferred from the row itself.
+ * The golden-nine end-to-end guard (milestone-election spec, ticket 03's own
+ * acceptance criterion): the SAME S15069/T900-1001 fixture ticket 02's own
+ * `tests/shared/milestone-election.test.ts` runs the pure `electMilestones`
+ * core against, now loaded into a real DB and read back through BOTH surface
+ * routes — `buildTimelineView` (S-view) and `buildSegmentTimelineView`
+ * (E-view, the whole fixture as one segment's membership) — at budget 9. Both
+ * routes must independently reproduce the identical golden nine
+ * `tests/shared/milestone-election.test.ts` already pins, proving the
+ * integration (DB adapter + selection wiring), not re-proving the algorithm
+ * itself.
  */
-function mixedArcFixtureTurns(): TurnRecord[] {
-  const day = 24 * 60 * 60;
-  const legacy = 1_779_782_400; // pre-era: the inline/tag adapter is live
-  const era = 1_784_711_427; // task-causality cutoff: grades are authoritative
-  const rows: TurnRecord[] = [];
-  const add = (
-    promptNumber: number,
-    epoch: number,
-    over: TurnOverrides,
-  ) => {
-    rows.push(turn({ id: promptNumber, promptNumber, createdAtEpoch: epoch, ...over }));
-  };
+describe("S-view and E-view integration — golden nine (milestone-election spec, ticket 03)", () => {
+  const GOLDEN_NINE = [922, 929, 939, 946, 981, 984, 990, 998, 1001];
+  const FIXTURE_BASE = 1_800_000_000;
 
-  // ── Day A (legacy) ── an inline citation that is NOT a correction.
-  add(1, legacy, { type: "discovery", title: "legacy kickoff" });
-  add(2, legacy + 60, { type: "discovery", title: "legacy measurement" });
-  add(3, legacy + 120, { type: "discovery", title: "legacy noise a" });
-  add(4, legacy + 180, { type: "discovery", title: "legacy noise b" });
-  add(5, legacy + 240, { type: "decision", title: "legacy conclusion" });
-  add(6, legacy + 300, {
-    type: "discovery",
-    title: "legacy dead end nobody corrected",
-    tags: ["rolled-back"],
-  });
+  interface GoldenFixture {
+    turns: Array<{ id: number; type: string[]; tags: string[]; title: string }>;
+    edges: Array<{ citingId: number; relation: string; citedId: number; tags: string[] }>;
+  }
 
-  // ── Day B (legacy) ── the tag adapter fires for inline provenance and stays
-  // silent for a structured `builds-on`, on two turns of identical shape.
-  add(7, legacy + day, {
-    type: "discovery",
-    title: "legacy hypothesis",
-    tags: ["rolled-back"],
-  });
-  add(8, legacy + day + 60, { type: "bugfix", title: "legacy correction" });
-  add(9, legacy + day + 120, {
-    type: "discovery",
-    title: "legacy parallel dead end",
-    tags: ["rolled-back"],
-  });
-  add(10, legacy + day + 180, {
-    type: "decision",
-    title: "legacy consumer with structured edges",
-  });
-  add(11, legacy + day + 240, { type: "discovery", title: "legacy noise c" });
+  function loadGoldenFixture(): GoldenFixture {
+    return JSON.parse(
+      readFileSync(
+        join(process.cwd(), ".scratch/rubric-v10/fixtures/t900-1001-lane-sim.json"),
+        "utf8",
+      ),
+    );
+  }
 
-  // ── Day C (era) ── graded rows, a pulled G2, and a revived skipped probe.
-  add(12, era, { type: "decision", title: "arc origin", significanceGrade: 4 });
-  add(13, era + 60, { type: "discovery", title: "supporting measurement", significanceGrade: 2 });
-  add(14, era + 120, {
-    type: "decision",
-    title: "mechanism locked",
-    significanceGrade: 3,
-  });
-  add(15, era + 180, { type: "discovery", title: "era noise a", significanceGrade: 1 });
-  add(16, era + 240, { type: "discovery", title: "era noise b", significanceGrade: 1 });
-  add(17, era + 300, {
-    status: "skipped",
-    type: null,
-    title: null,
-    userPrompt: "check whether the watchdog ever observes a frozen timestamp",
-  });
-  add(18, era + 360, {
-    type: "decision",
-    title: "consumes a skipped probe",
-    significanceGrade: 3,
-  });
-  add(19, era + 420, { type: "discovery", title: "era noise c", significanceGrade: 1 });
-
-  // ── Day D (era) ── a structured supersession that moves the anchor off a G4,
-  // plus an antecedent shared by two kept rows.
-  add(20, era + day, { type: "decision", title: "second premise", significanceGrade: 4 });
-  add(21, era + day + 60, { type: "discovery", title: "shared evidence", significanceGrade: 2 });
-  add(22, era + day + 120, {
-    type: "decision",
-    title: "refoundation",
-    significanceGrade: 2,
-  });
-  add(23, era + day + 180, {
-    type: "decision",
-    title: "second consumer of the shared evidence",
-    significanceGrade: 3,
-  });
-  add(24, era + day + 240, { type: "discovery", title: "era noise d", significanceGrade: 1 });
-  add(25, era + day + 300, { type: "discovery", title: "era noise e", significanceGrade: 1 });
-  add(26, era + day + 360, { type: "decision", title: "final wrap", significanceGrade: 3 });
-
-  return rows;
-}
-
-function mixedArcCitations() {
-  return new Map<number, unknown>([
-    // Legacy prose: ids with no relation attached.
-    ...inlineCitations({ 5: [2], 8: [7] }),
-    // Structured edges: the relation is stated and authoritative.
-    ...structuredCitations({
-      10: [[9, "builds-on"]],
-      14: [[13, "verifies"]],
-      18: [[17, "builds-on"]],
-      22: [
-        [20, "supersedes"],
-        [21, "verifies"],
-      ],
-      23: [[21, "verifies"]],
-    }),
-  ]);
-}
-
-describe("milestone selection on a mixed-era, multi-day arc (frozen fixture)", () => {
-  const rows = mixedArcFixtureTurns();
-  const result = selectMilestoneTurns({
-    windowTurns: rows,
-    windowSignals: detectShapeSignals(rows),
-    compactBoundaries: [],
-    taskCausalityEraCutoffEpoch: 1_784_711_427,
-    citations: mixedArcCitations(),
-  } as Parameters<typeof selectMilestoneTurns>[0]);
-  const rowFor = (promptNumber: number) =>
-    result.kept.find((row) => row.turn.promptNumber === promptNumber);
-
-  it("pins the exact set of main rows", () => {
-    // T7 and T20 are NEW relative to the pre-ticket-13 set (spec H1): both are
-    // graph victims, and the old victim-ineligibility short-circuit used to
-    // return `false` out of `isAlwaysKeep` before any OTHER bullet — reversed
-    // marker, era G4 — ever ran for them. With that short-circuit gone, each
-    // now qualifies on its own separate bullet, same as a non-victim would.
-    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([
-      1, 5, 6, 7, 8, 9, 10, 12, 14, 18, 20, 22, 23, 26,
-    ]);
-  });
-
-  it("keeps each class of always-keep anchor for its own reason", () => {
-    // Endpoints: legacy G1 first row, G3 last titled row — structural, off-grade.
-    expect(rowFor(1)?.alwaysKeep).toBe(true);
-    expect(rowFor(1)?.effGrade).toBe(1);
-    expect(rowFor(1)?.spine).toBe(false);
-    expect(rowFor(26)?.alwaysKeep).toBe(true);
-    // Reversed with nobody correcting it: the dead end is the record.
-    expect(rowFor(6)?.marker).toBe("reversed");
-    expect(rowFor(6)?.alwaysKeep).toBe(true);
-    expect(rowFor(6)?.spine).toBe(false);
-    // Era G4.
-    expect(rowFor(12)?.effGrade).toBe(4);
-    expect(rowFor(12)?.alwaysKeep).toBe(true);
-    // Correctors, kept at their own legacy G2 and era G2 — no longer promoted
-    // to G3 (spec H1). Each is admitted on the corrector bullet alone; neither
-    // clears the spine bar on its own grade.
-    expect(rowFor(8)?.effGrade).toBe(2);
-    expect(rowFor(8)?.alwaysKeep).toBe(true);
-    expect(rowFor(8)?.spine).toBe(false);
-    expect(rowFor(22)?.effGrade).toBe(2);
-    expect(rowFor(22)?.alwaysKeep).toBe(true);
-    expect(rowFor(22)?.spine).toBe(false);
-  });
-
-  it("no longer demotes or excludes a superseded turn; the edge only annotates it (spec H1)", () => {
-    // T7 fell to the legacy inline adapter — a REAL graph victim, carrying
-    // `supersededBy: [8]` — and T9 carries the same tag and the same citer
-    // shape but its edge says `builds-on`, so it is never a graph victim at
-    // all (`supersededBy` absent). Before ticket 13 that distinction decided
-    // whether the turn got a row; now BOTH keep their own row regardless — T7
-    // on the reversed-marker bullet, same as T9. The edge fact still shows up,
-    // just as data, not as a visibility difference.
-    expect(rowFor(7)?.marker).toBe("reversed");
-    expect(rowFor(7)?.alwaysKeep).toBe(true);
-    expect(rowFor(7)?.supersededBy).toEqual([8]);
-    expect(rowFor(9)?.marker).toBe("reversed");
-    expect(rowFor(9)?.alwaysKeep).toBe(true);
-    expect(rowFor(9)?.supersededBy).toBeUndefined();
-    // T20's G4 anchor claim is its own (spec H1: no floor) — it clears the
-    // era-G4 always-keep bullet AND the spine bar on its own merit. T22 is
-    // ALSO admitted, independently, on the corrector bullet — not by
-    // inheriting T20's slot.
-    expect(result.kept.map((row) => row.turn.promptNumber)).toContain(20);
-    expect(rowFor(20)?.effGrade).toBe(4);
-    expect(rowFor(20)?.spine).toBe(true);
-    expect(rowFor(20)?.supersededBy).toEqual([22]);
-    expect(rowFor(22)?.spine).toBe(false);
-  });
-
-  it("pins the ↳ antecedents, their owners and their back-links", () => {
-    // T7 and T20 are gone from `pulled` — each now keeps its own row instead
-    // (see the always-keep test above), so pull-through's `keptIds` guard
-    // skips them. T17 (skipped, ticket 06) is gone from `pulled` too — for a
-    // different reason: it is excluded from the citation universe before
-    // pull-through ever runs, not merely out-ranked by `keptIds`. What is
-    // left is exactly the non-victim, non-excluded antecedents.
-    expect(
-      result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber, p.effGrade]),
-    ).toEqual([
-      [2, 5, 1], // plain legacy causal reference
-      [13, 14, 2], // era G2 evidence
-      [21, 22, 2], // shared antecedent: earliest kept citer only
-    ]);
-    // Ticket 06's own positive assertion: T17 is not resurrected anywhere —
-    // not as a main row, not as a ↳ row, not even in the scored pool — even
-    // though T18 cites it with a live structured edge.
-    expect(result.kept.map((row) => row.turn.promptNumber)).not.toContain(17);
-    expect(result.pulled.map((p) => p.turn.promptNumber)).not.toContain(17);
-    expect(result.ranked.map((row) => row.turn.promptNumber)).not.toContain(17);
-    // None of the remaining ↳ rows carry a back-link — the two turns that DID
-    // (T7, T20) moved to `kept`, where the data still populates (spec H3) even
-    // though today's main-row renderer does not yet print it (unchanged by
-    // this ticket; see `KeptMilestone.supersededBy`'s own doc comment).
-    expect(result.pulled.every((p) => p.supersededBy.length === 0)).toBe(true);
-    expect(
-      result.kept
-        .filter((row) => (row.supersededBy?.length ?? 0) > 0)
-        .map((row) => [row.turn.promptNumber, row.supersededBy]),
-    ).toEqual([
-      [7, [8]],
-      [20, [22]],
-    ]);
-    // T23 also cites T21, but a shared antecedent renders once.
-    expect(result.pulled.filter((p) => p.citedByPromptNumber === 23)).toHaveLength(0);
-  });
-
-  it("counts only turns with no rendered row at all in `+N more`", () => {
-    expect(result.overflowByDay.map((d) => [d.count, d.firstPrompt, d.lastPrompt])).toEqual([
-      [2, 3, 4], // day A: T2 is pulled, so only the two noise rows are hidden
-      [1, 11, 11], // day B: T7 is pulled
-      [3, 15, 19], // day C: T13 is pulled, T17 is skipped (never a candidate)
-      [2, 24, 25], // day D: T20 and T21 are pulled
-    ]);
-  });
-
-  it("conserves every candidate turn across kept, pulled and overflow", () => {
-    const candidates = rows.filter((row) => row.status !== "skipped" && !row.type.includes("compact"));
-    const pulledInWindow = result.pulled.filter((p) => p.turn.status !== "skipped").length;
-    const overflowTotal = result.overflowByDay.reduce((sum, d) => sum + d.count, 0);
-    expect(result.kept.length + pulledInWindow + overflowTotal).toBe(candidates.length);
-    expect(candidates).toHaveLength(25);
-  });
-
-  it("ranks the pool as kept rows plus the G2 band, and nothing below it", () => {
-    const ranked = result.ranked.map((row) => row.turn.promptNumber);
-    // 16, not 14: the pool gate (`!alwaysKeep && !spine && effGrade < 2`) never
-    // excludes an always-keep row regardless of its grade, so T7 (G1) and T20
-    // (G4) both enter the pool now that they are always-keep in their own
-    // right — the same rule that used to gate them out of `kept` gated them
-    // out of `ranked` too.
-    expect(ranked).toHaveLength(16);
-    expect(ranked).toContain(7);
-    expect(ranked).toContain(20);
-    expect(ranked).toContain(13);
-    expect(ranked).toContain(21);
-    for (const promptNumber of [3, 4, 11, 15, 16, 19, 24, 25]) {
-      expect(ranked).not.toContain(promptNumber);
+  // Fixture ids double as prompt numbers (auto-increment DB ids start at 1,
+  // not 900) — the graph's own STRUCTURE (order, tags, relations) is what
+  // the election reads, never the raw id value, so this substitution cannot
+  // change which turns win. `id` ascending already IS the fixture's own
+  // chronological order (same convention ticket 02's own pure-module test
+  // relies on via `LaneTurnInput`'s "no `order` field needed" default).
+  function seedGoldenFixtureSession(db: Database): { sessionId: number } {
+    const fixture = loadGoldenFixture();
+    const rows: TurnRecord[] = fixture.turns.map((fixtureTurn) =>
+      turn({
+        id: fixtureTurn.id,
+        promptNumber: fixtureTurn.id,
+        type: fixtureTurn.type,
+        tags: fixtureTurn.tags,
+        title: fixtureTurn.title,
+        createdAtEpoch: FIXTURE_BASE + fixtureTurn.id,
+      }),
+    );
+    const session = seedTimelineSession(db, rows);
+    for (const edge of fixture.edges) {
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn" as const, id: turnDbId(db, session.id, edge.citingId) },
+            cited: { kind: "turn" as const, id: turnDbId(db, session.id, edge.citedId) },
+            relation: edge.relation as CitationRelation,
+            provenance: "judged" as const,
+            tags: edge.tags,
+          },
+        ],
+        FIXTURE_BASE,
+      );
     }
-    // Score order never crosses a grade tier, but WITHIN the G4 tier T20 now
-    // outranks T12: T20 is cited by its own corrector (T22), which T12 is not,
-    // and that in-degree tie-break (spec §C) was never in play for T20 before
-    // — it could not even reach the pool. This is a genuine ranking inversion
-    // ticket 13 introduces, not a pre-existing one.
-    expect(result.ranked[0]!.turn.promptNumber).toBe(20);
-    expect(result.ranked[1]!.turn.promptNumber).toBe(12);
+    return { sessionId: session.id };
+  }
+
+  it("S-view: timeline(id, view='milestones', pageSize=9) renders exactly the golden nine, in ascending time order", () => {
+    const db = createDatabase(":memory:");
+    const { sessionId } = seedGoldenFixtureSession(db);
+
+    const view = buildTimelineView(db, { id: `S${sessionId}`, view: "milestones", pageSize: 9 });
+    expect(view.pagedMilestones.map((row) => row.turn.promptNumber)).toEqual(GOLDEN_NINE);
+
+    const rendered = renderTimeline(view);
+    for (const promptNumber of GOLDEN_NINE) {
+      expect(rendered).toContain(`[T${promptNumber}]`);
+    }
+  });
+
+  it("E-view: the whole fixture as one segment's membership, budget (pageSize) 9, reproduces the same golden nine in event order", () => {
+    const db = createDatabase(":memory:");
+    const { sessionId } = seedGoldenFixtureSession(db);
+    const fixture = loadGoldenFixture();
+    const segment = createSegment(db, {
+      title: "T900-1001 lane simulation",
+      type: ["design"],
+      nowEpoch: FIXTURE_BASE,
+    });
+    const memberIds = fixture.turns.map((fixtureTurn) => turnDbId(db, sessionId, fixtureTurn.id));
+    addSegmentMembers(db, segment.id, memberIds, FIXTURE_BASE);
+
+    const view = buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageSize: 9 });
+    expect(view.keptMilestones.map((row) => row.member.promptNumber)).toEqual(GOLDEN_NINE);
+    expect(view.demotedCount).toBeGreaterThan(0);
   });
 });
 
@@ -2738,11 +1656,14 @@ describe("buildTimelineView", () => {
     expect(view.pageTurns.map((row) => row.promptNumber)).toEqual([4, 5]);
   });
 
-  it("paginates the milestones view over kept milestones, not raw turns", () => {
+  it("bounds the milestones view over an election budget, not raw turns", () => {
     const db = createDatabase(":memory:");
-    // 10 legacy turns on one day: decisions at T1/T4/T7/T10 (effGrade 3 → spine),
-    // discoveries elsewhere (effGrade 1 → no row). The kept set is {1, 4, 7, 10} —
-    // 4 milestones over 10 raw turns, which is the point of paginating over kept.
+    // Milestone-election spec, ticket 03: `pageSize` is now BOTH the
+    // election's own budget and the pagination size, so `kept` can never
+    // exceed it — there is no more "curated kept set wider than one page"
+    // shape to paginate over. 10 raw turns, budget 3: only the THREE most
+    // recent (no lane edges at all, so election rank is pure recency) win a
+    // seat, always as exactly one page.
     seedTimelineSession(
       db,
       Array.from({ length: 10 }, (_, index) =>
@@ -2758,16 +1679,14 @@ describe("buildTimelineView", () => {
     const view = buildTimelineView(db, {
       id: "S1",
       view: "milestones",
-      page: 2,
       pageSize: 3,
     });
 
     expect(view.view).toBe("milestones");
-    expect(view.viewItemTotal).toBe(4);
-    expect(view.pageCount).toBe(2);
-    expect(view.pageAnchorEpoch).toBe(1_779_782_400 + 9 * 60);
+    expect(view.viewItemTotal).toBe(3);
+    expect(view.pageCount).toBe(1);
     expect(view.pagedMilestones.map((item) => item.turn.promptNumber)).toEqual([
-      10,
+      8, 9, 10,
     ]);
   });
 
@@ -2863,42 +1782,48 @@ describe("buildTimelineView", () => {
 });
 
 describe("buildContextTimelineView milestone tail", () => {
-  it("selects milestones over the full session, not a trailing 30-turn window", () => {
+  it("elects over the full session (not a raw trailing 30-turn window), bounded to the default election budget", () => {
     const db = createDatabase(":memory:");
     const session = seedLongSession(db, 40);
 
     const view = buildContextTimelineView(db, session.id, "milestones");
     const kept = view.pagedMilestones.map((m) => m.turn.promptNumber);
 
-    // Full-session selection keeps the true first-live endpoint T1. The old
-    // last-30-turns window (T11-T40) excluded T1 entirely and force-kept T11
-    // as that window's first-live endpoint instead.
-    expect(kept).toContain(1);
-    expect(kept).not.toContain(11);
+    // Milestone-election spec, ticket 03: endpoints are no longer an
+    // unconditional always-keep anchor (visibility is now a budget outcome —
+    // spec's own retirement note). With no lane edges at all, election rank
+    // IS recency, so the default budget (30, clamped from `pageSize`) keeps
+    // the 30 MOST RECENT turns of the full 40-turn session — proving
+    // full-session election (T40 present) without a raw-window artifact
+    // (T1..T10, outside a naive last-30 turn WINDOW, are correctly absent
+    // from the ELECTION too, since they never outrank T11-T40 on recency).
+    expect(kept).toContain(40);
+    expect(kept).toHaveLength(30);
     expect(view.milestoneTail).toBe(true);
     // window stays full-session so shape signals read "= full session".
     expect(view.window.startPromptNumber).toBe(1);
     expect(view.window.endPromptNumber).toBe(40);
   });
 
-  it("shows only the trailing pageSize kept milestones with an earlier hint", () => {
+  it("bounds `kept` to the election budget even in tail mode — there is no wider curated set left to hint an earlier page at", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
-    // 40 alternating legacy rows on one local day: the 20 odd decisions are
-    // effGrade 3 (spine) and T40 is the last titled row (endpoint) → 21 kept.
-    // Trailing 3 = {37, 39, 40}.
     const rows = Array.from({ length: 40 }, (_, i) =>
       turn({
         promptNumber: i + 1,
-        type: i % 2 === 0 ? "decision" : "change",
+        type: "decision",
         title: `m ${i + 1}`,
-        filesModified: i % 2 === 0 ? [] : ["a.ts"],
-        toolCallCount: 40 - i,
         createdAtEpoch: base + i * 60,
       }),
     );
     seedTimelineSession(db, rows);
 
+    // Milestone-election spec, ticket 03: `pageSize` clamps the election
+    // budget itself (see `buildTimelineView`'s own doc comment on the
+    // clamp) — `kept` can never exceed it, so `milestoneTail`'s "trailing
+    // slice of a WIDER kept set" behavior retires along with the grade
+    // threshold that used to make `kept` wider than one page. The trailing
+    // THREE most recent turns win the budget-3 election outright.
     const view = buildTimelineView(db, {
       id: "S1",
       view: "milestones",
@@ -2906,33 +1831,22 @@ describe("buildContextTimelineView milestone tail", () => {
       milestoneTail: true,
     });
 
-    expect(view.pagedMilestones.map((m) => m.turn.promptNumber)).toEqual([37, 39, 40]);
-    expect(view.viewItemTotal).toBe(21);
-    expect(view.hasEarlier).toBe(true);
+    expect(view.pagedMilestones.map((m) => m.turn.promptNumber)).toEqual([38, 39, 40]);
+    expect(view.viewItemTotal).toBe(3);
+    expect(view.hasEarlier).toBe(false);
     expect(view.milestoneTail).toBe(true);
-
-    const output = renderTimeline(view, { showEarlierHint: true });
-    // honest tail label (not "page X/Y"), earlier hint bounded by the first
-    // shown milestone, and the day header still reports full-day kept + cont.
-    expect(output).toContain("showing: milestones · last 3/21");
-    expect(output).toContain('earlier: timeline(id="S1/T1..36") or recall(id="S1")');
-    expect(output).toContain("· 21 kept (cont.) ──");
   });
 });
 
 describe("milestoneDayGroups (pagination)", () => {
-  it("splits a day across a page boundary, repeats the day header, overflow once on final slice", () => {
+  it("never splits a day across a page boundary any more (milestone-election spec, ticket 03: `kept` is capped at the election budget, so the milestones view is always exactly one page)", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
-    // 40 alternating legacy turns on one local day → 21 kept rows (20 decisions
-    // + the last titled row), split across two pages at pageSize 15.
     const rows = Array.from({ length: 40 }, (_, i) =>
       turn({
         promptNumber: i + 1,
-        type: i % 2 === 0 ? "decision" : "change",
+        type: "decision",
         title: `m ${i + 1}`,
-        filesModified: i % 2 === 0 ? [] : ["a.ts"],
-        toolCallCount: 40 - i,
         createdAtEpoch: base + i * 60,
       }),
     );
@@ -2941,62 +1855,42 @@ describe("milestoneDayGroups (pagination)", () => {
     const page1 = buildTimelineView(db, { id: "S1", view: "milestones", page: 1, pageSize: 15 });
     const page2 = buildTimelineView(db, { id: "S1", view: "milestones", page: 2, pageSize: 15 });
 
+    expect(page1.pageCount).toBe(1);
     expect(page1.milestoneDayGroups).toHaveLength(1);
-    expect(page2.milestoneDayGroups).toHaveLength(1);
+    // A day group is always both the first AND final slice for its day now.
     const g1 = page1.milestoneDayGroups[0]!;
-    const g2 = page2.milestoneDayGroups[0]!;
-
-    // Full-day metadata is identical across both slices.
-    expect(g1.date).toBe(g2.date);
-    expect(g1.keptCount).toBe(21);
-    expect(g2.keptCount).toBe(21);
-    expect(g1.promptLo).toBe(1);
-    expect(g1.promptHi).toBe(40);
-    expect(g2.promptLo).toBe(g1.promptLo);
-    expect(g2.promptHi).toBe(g1.promptHi);
-
-    // First slice opens the day and is not the final slice → no overflow on it.
     expect(g1.continued).toBe(false);
-    expect(g1.isFinalSliceForDay).toBe(false);
-    expect(g1.overflow).toBeNull();
-
-    // Second slice continues the day, is the final slice, and carries the one overflow.
-    expect(g2.continued).toBe(true);
-    expect(g2.isFinalSliceForDay).toBe(true);
-    expect(g2.overflow).not.toBeNull();
-    // `+N more` = the day's turns that got no main row: 40 − 21 kept.
-    expect(g2.overflow!.count).toBe(19);
-
-    // Overflow appears on exactly one slice across the whole day.
-    const overflowSlices = [g1, g2].filter((g) => g.overflow !== null);
-    expect(overflowSlices).toHaveLength(1);
+    expect(g1.isFinalSliceForDay).toBe(true);
+    // There is no page 2 to hold anything: `kept` (≤ 15) already fit on page 1.
+    expect(page2.milestoneDayGroups).toHaveLength(0);
   });
 
   it("keeps a single-page day's overflow on its only (final) slice", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
-    // 10 alternating legacy turns on one day → 6 kept (5 decisions + the last
-    // titled row) and 4 turns with no main row.
-    // A large pageSize fits all kept on one page, so the single group is BOTH the first
-    // and final slice for the day: continued=false, isFinalSliceForDay=true, overflow!=null.
+    // 10 turns, no lane edges: election rank is pure recency, and a
+    // budget-6 cut keeps the six most recent — the other four fold into the
+    // day's own overflow count.
     const rows = Array.from({ length: 10 }, (_, i) =>
       turn({
         promptNumber: i + 1,
-        type: i % 2 === 0 ? "decision" : "change",
+        type: "decision",
         title: `m ${i + 1}`,
-        filesModified: i % 2 === 0 ? [] : ["a.ts"],
-        toolCallCount: 10 - i,
         createdAtEpoch: base + i * 60,
       }),
     );
     seedTimelineSession(db, rows);
 
-    const view = buildTimelineView(db, { id: "S1", view: "milestones", page: 1, pageSize: 30 });
+    const view = buildTimelineView(db, { id: "S1", view: "milestones", page: 1, pageSize: 6 });
 
     expect(view.milestoneDayGroups).toHaveLength(1);
     const g = view.milestoneDayGroups[0]!;
     expect(g.keptCount).toBe(6);
-    expect(g.promptLo).toBe(1);
+    expect(view.pagedMilestones.map((row) => row.turn.promptNumber)).toEqual([5, 6, 7, 8, 9, 10]);
+    // `promptLo`/`promptHi` span the KEPT rows on this day, not every raw
+    // candidate — T1-T4 lost the budget cut, so the day's own frame starts
+    // at its earliest SURVIVING row.
+    expect(g.promptLo).toBe(5);
     expect(g.promptHi).toBe(10);
     expect(g.continued).toBe(false);
     expect(g.isFinalSliceForDay).toBe(true);
@@ -3287,8 +2181,13 @@ describe("renderTimeline", () => {
     const turnsOutput = renderTimeline(
       buildTimelineView(db, { id: "S1", view: "turns" }),
     );
+    // A smaller election budget (milestone-election spec, ticket 03: `pageSize`
+    // bounds `kept`) than the 5-turn window, so the milestones body is
+    // genuinely narrower than the turns body — with no lane edges at all,
+    // every turn is tier ⑤ and election rank is pure recency, so the budget-3
+    // cut keeps the THREE most recent turns.
     const milestoneOutput = renderTimeline(
-      buildTimelineView(db, { id: "S1", view: "milestones" }),
+      buildTimelineView(db, { id: "S1", view: "milestones", pageSize: 3 }),
     );
 
     expect(defaultOutput).toMatch(TURN_VIEW_ROW_RE);
@@ -3298,7 +2197,7 @@ describe("renderTimeline", () => {
     expect(turnsOutput).toContain("shape signals");
     expect(turnsOutput).not.toMatch(/\n\s+phases[:(]/);
     expect(turnPromptNumbers(turnsOutput)).toEqual([1, 2, 3, 4, 5]);
-    expect(milestonePromptNumbers(milestoneOutput)).toEqual([1, 3, 5]);
+    expect(milestonePromptNumbers(milestoneOutput)).toEqual([3, 4, 5]);
     expect(milestoneOutput).not.toMatch(TURN_VIEW_ROW_RE);
     expect(milestoneOutput).toContain("shape signals");
     expect(milestoneOutput).not.toMatch(/\n\s+phases[:(]/);
@@ -3485,6 +2384,23 @@ describe("renderTimeline", () => {
   it("view=milestones renders the milestone digest without phases or the full table", () => {
     const db = createDatabase(":memory:");
     seedSession(db);
+    // Milestone-election spec, ticket 03: T6 an untagged-`indexes` writer
+    // (tier ①, a guaranteed seat regardless of the budget cut) plus a small
+    // election budget — the same shape the old grade-driven fixture wanted
+    // (T6 kept, the bulk of the 21-turn window excluded), reproduced through
+    // the election instead of a stored grade.
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: turnDbId(db, 1, 6) },
+          cited: { kind: "turn", id: turnDbId(db, 1, 1) },
+          relation: "indexes",
+          provenance: "judged",
+        },
+      ],
+      1_700_000_000,
+    );
 
     // Ticket 05: both views render the SAME row shape now (address, inline
     // stamp, glyph, title) — the turn view's own rows sit at the SHALLOW
@@ -3499,13 +2415,13 @@ describe("renderTimeline", () => {
 
     const full = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
     const milestone = renderTimeline(
-      buildTimelineView(db, { id: "S1", view: "milestones" }),
+      buildTimelineView(db, { id: "S1", view: "milestones", pageSize: 5 }),
     );
 
     expect(milestoneRowCount(milestone)).toBeLessThan(turnRowCount(full));
     expect(milestone).not.toMatch(TURN_VIEW_ROW_RE);
-    // T6 is kept (front-gutter milestone row); T2 is suppressed; T11 is folded
-    // into the day's overflow rather than rendered as its own row.
+    // T6 is kept (its tier-① seat is guaranteed regardless of the cut); T2
+    // and T11 lose the budget-5 cut to the more recent turns.
     expect(milestone).toMatch(/^ {8}(?:\S+ )?\[T6\] /m);
     expect(milestone).not.toMatch(/^ {8}(?:\S+ )?\[T11\] /m);
     expect(milestone).not.toMatch(/^ {8}(?:\S+ )?\[T2\] /m);
@@ -3981,67 +2897,6 @@ describe("fork-lineage breadcrumb in timeline", () => {
   });
 });
 
-describe("legacy inline citations feed pull-through", () => {
-  // DB ids are auto-assigned at insert; resolve the driver's real id by prompt
-  // number, then embed `[T<dbid>]` into the milestone's content. This keeps the
-  // citation in the agent's DB-id space (what remember() uses), not the
-  // user-facing prompt number, exactly as the renderer must map.
-  function dbId(db: Database, sessionId: number, promptNumber: number): number {
-    const t = getTurn(db, sessionId, promptNumber);
-    if (t === null) throw new Error(`no turn S${sessionId}/T${promptNumber}`);
-    return t.id;
-  }
-
-  function setContent(
-    db: Database,
-    sessionId: number,
-    promptNumber: number,
-    content: string,
-  ): void {
-    db.query(
-      "UPDATE turns SET content = ? WHERE session_id = ? AND prompt_number = ?",
-    ).run(content, sessionId, promptNumber);
-  }
-
-  it("does not let dense citations promote a low-grade turn, but pulls it in as a ↳ antecedent", () => {
-    const db = createDatabase(":memory:");
-    const base = 1_779_782_400;
-    const rows = [
-      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
-      turn({
-        promptNumber: 2,
-        type: "discovery",
-        title: "low-grade finding that later work leans on",
-        createdAtEpoch: base + 60,
-      }),
-      ...Array.from({ length: 3 }, (_, i) =>
-        turn({
-          promptNumber: i + 3,
-          type: "discovery",
-          title: `later citation ${i + 1}`,
-          createdAtEpoch: base + (i + 2) * 60,
-        }),
-      ),
-      turn({ promptNumber: 6, type: "decision", title: "the decision it fed", createdAtEpoch: base + 300 }),
-      turn({ promptNumber: 7, type: "decision", title: "end", createdAtEpoch: base + 360 }),
-    ];
-    seedTimelineSession(db, rows);
-    const driverId = dbId(db, 1, 2);
-    for (const promptNumber of [3, 4, 5, 6]) {
-      setContent(db, 1, promptNumber, `Builds on [T${driverId}].`);
-    }
-
-    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    // Four citers no longer buy a main row: the pool gate is on effGrade alone.
-    expect(view.pagedMilestones.map((milestone) => milestone.turn.promptNumber)).not.toContain(2);
-    // It survives under the earliest kept row that cites it (T6, a decision).
-    expect(view.milestonePulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber])).toEqual([
-      [2, 6],
-    ]);
-  });
-
-});
-
 describe("parseContentReferences", () => {
   const twelveRefs = Array.from({ length: 12 }, (_, i) => `[T${i + 1}]`).join(" ");
 
@@ -4324,62 +3179,15 @@ describe("unified row renderer — row formats (spec §D)", () => {
     expect(block[1]).toMatch(/^ {12}Opened the arc: what does downstream/);
   });
 
-  it("renders a pulled row as ↳ 🚫 T# emoji grade title →被T<n>推翻, title only", () => {
+  it("renders a `↳` row as a bare address, title-only, no desc, no back-link (milestone-election spec, ticket 03: the line names ANOTHER elected row)", () => {
     const db = createDatabase(":memory:");
     seedDesignArc(db);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
-    // A non-victim antecedent renders with no glyph and no back-link.
     expect(out).toContain("            ↳ T2");
-    // ↳ rows are title-only: the antecedent's desc never renders.
-    expect(out).not.toContain("Sampled 200 cards");
-  });
-
-  it("still renders the →被T<n>推翻 back-link when a victim's own grade keeps it pulled (spec H1/H3)", () => {
-    // This one covers the ↳ row specifically. T3 in `seedDesignArc` no longer
-    // serves: its own G3 clears the spine bar (spec H1: no floor), so it
-    // becomes its OWN row — which the main-row test below covers instead.
-    // This fixture keeps the victim's grade LOW enough to still qualify for
-    // pull-through on its own merit. A leading origin turn keeps the victim
-    // (T2) from being a window endpoint itself, which would keep it
-    // regardless of grade and defeat the point.
-    const db = createDatabase(":memory:");
-    const rows = [
-      turn({
-        promptNumber: 1,
-        type: "decision",
-        significanceGrade: 4,
-        userPrompt: "开题",
-        title: "Opened the question",
-        content: "Started the volume-count investigation.",
-        createdAtEpoch: ERA_BASE,
-      }),
-      turn({
-        promptNumber: 2,
-        type: "discovery",
-        significanceGrade: 1,
-        userPrompt: "先猜个数字",
-        title: "Guessed the volume count",
-        content: "An early, low-confidence guess.",
-        createdAtEpoch: ERA_BASE + 60,
-      }),
-      turn({
-        promptNumber: 3,
-        type: "decision",
-        significanceGrade: 3,
-        userPrompt: "推翻猜测",
-        title: "Measured the real count",
-        content: "Corrected the earlier guess with a real measurement.",
-        createdAtEpoch: ERA_BASE + 120,
-      }),
-    ];
-    const session = seedArcSession(db, rows);
-    citeTurns(db, session.id, 3, [[2, "supersedes"]]);
-    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
-
-    expect(out).toContain(
-      "            ↳ T2",
-    );
+    // ↳ rows are title-only: the antecedent's OWN desc never renders a second
+    // time under its citer's row — T2's desc appears once, under T2's own row.
+    expect(out).not.toMatch(/↳[^\n]*T2[^\n]*\n\s+Sampled 200 cards/);
   });
 
   it("collapses a harness-injected prompt to a marker instead of spending row budget", () => {
@@ -4587,14 +3395,11 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
   });
 
   it("lets a spine row keep two ↳ antecedents intact inside the cap", () => {
-    // `seedDesignArc`'s own T5 no longer pulls two antecedents: its second
-    // citation target (T3) now clears the spine bar on its own G3 (spec H1),
-    // so it renders as its own row instead of a ↳ line (see the frozen-shapes
-    // test). This bespoke fixture reuses the same two content bodies, wired as
-    // plain non-victim citations under a separate spine row, to keep testing
-    // what this test is actually about — the token cap, not supersession. A
-    // leading origin turn keeps the two antecedents from being window
-    // endpoints themselves, which would pull them out of `pulled` for free.
+    // Milestone-election spec, ticket 03: `↳` addresses now name OTHER
+    // elected rows (not a lower-tier turn "pulled in" for lack of a row of
+    // its own) — with a small window and the default election budget, T2/T3
+    // are elected in their own right too, but T4's own `↳` line still names
+    // them (the cross-reference is informative regardless).
     const db = createDatabase(":memory:");
     const rows = [
       turn({
@@ -4838,23 +3643,21 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     expect(block.join("\n")).toContain("↳ T2, T3, T4, T5, +2");
   });
 
-  it("never renders a turn twice: a kept G2 row is a main row, not also a ↳ row", () => {
+  it("a cited turn that is ITSELF elected renders both its own main row AND a ↳ cross-reference under its citer (milestone-election spec, ticket 03: `↳` names elected rows, no exclusivity with holding a row of its own)", () => {
     const db = createDatabase(":memory:");
     const rows = [
       turn({
         promptNumber: 1,
         type: "discovery",
-        significanceGrade: 2,
         userPrompt: "p1",
-        title: "the endpoint that is also an antecedent",
+        title: "the row that is also an antecedent",
         createdAtEpoch: ERA_BASE,
       }),
       turn({
         promptNumber: 2,
         type: "decision",
-        significanceGrade: 3,
         userPrompt: "p2",
-        title: "cites the endpoint",
+        title: "cites the earlier row",
         createdAtEpoch: ERA_BASE + 60,
       }),
     ];
@@ -4864,537 +3667,159 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
     const out = renderTimeline(view);
 
-    // T1 is a window endpoint, so it holds a main row despite being G2 and cited.
-    expect(spinePromptNumbers(out)).toContain(1);
-    expect(pulledPromptNumbers(out)).not.toContain(1);
-    expect(view.milestonePulled).toHaveLength(0);
+    // Both turns are elected (a two-turn window, default budget): T1 holds
+    // its own main row, and T2's own row separately names it via `↳`.
+    expect(spinePromptNumbers(out)).toEqual([1, 2]);
+    expect(pulledPromptNumbers(out)).toEqual([1]);
+    expect(view.pagedMilestones.map((row) => row.turn.promptNumber)).toEqual([1, 2]);
   });
 });
 
 /**
- * Two spine rows consume one shared antecedent. T4 carries an insight bonus
- * that T3 lacks, so it out-scores T3 outright (tool count is no longer a
- * ranking signal — a bare tie now favors the earlier prompt, so an actual
- * score edge is required to make the LATER citer the one the budget keeps).
- * That makes T3, the EARLIER citer and the antecedent's initial home, the
- * first unit a budget removes.
+ * A small tokenBudget-degradation fixture. Milestone-election spec, ticket
+ * 03: nothing is structurally exempt from a `tokenBudget` any more (always-
+ * keep retired), and there is no more antecedent RE-HOMING (a `↳` address
+ * names another elected row directly, never a separately-homed object) — so
+ * this fixture is deliberately small rather than the old 900-row re-homing
+ * stress shape, which tested a mechanism this ticket removes outright.
  */
-function seedSharedAntecedentArc(db: Database) {
-  const rows = [
-    turn({
-      promptNumber: 1,
-      type: "decision",
-      significanceGrade: 4,
-      userPrompt: "开题",
-      title: "arc origin",
-      content: "origin desc ".repeat(4),
-      createdAtEpoch: ERA_BASE,
-    }),
-    turn({
-      promptNumber: 2,
-      type: "discovery",
-      significanceGrade: 2,
-      userPrompt: "取证",
-      title: "shared evidence",
-      content: "evidence desc ".repeat(4),
-      createdAtEpoch: ERA_BASE + 60,
-    }),
-    turn({
-      promptNumber: 3,
-      type: "decision",
-      significanceGrade: 3,
-      userPrompt: "第一处消费",
-      title: "first consumer",
-      content: "first consumer desc ".repeat(4),
-      toolCallCount: 0,
-      createdAtEpoch: ERA_BASE + 120,
-    }),
-    turn({
-      promptNumber: 4,
-      type: "decision",
-      significanceGrade: 3,
-      userPrompt: "第二处消费",
-      title: "second consumer",
-      content: "second consumer desc ".repeat(4),
-      insight: "- second consumer outranks the first",
-      toolCallCount: 9,
-      createdAtEpoch: ERA_BASE + 180,
-    }),
-    turn({
-      promptNumber: 5,
-      type: "change",
-      significanceGrade: 1,
-      userPrompt: "杂活",
-      title: "dispatch chore",
-      createdAtEpoch: ERA_BASE + 240,
-    }),
-    turn({
-      promptNumber: 6,
-      type: "feature",
-      significanceGrade: 2,
-      userPrompt: "发布",
-      title: "shipped",
-      content: "release desc ".repeat(4),
-      tags: ["release"],
-      filesModified: ["package.json", ".claude-plugin/plugin.json"],
-      createdAtEpoch: ERA_BASE + 300,
-    }),
-  ];
-  const session = seedArcSession(db, rows);
-  citeTurns(db, session.id, 3, [[2, "verifies"]]);
-  citeTurns(db, session.id, 4, [[2, "verifies"]]);
-  return session;
-}
-
 /**
- * A cross-day arc whose only antecedent lives on a day that owns no main row:
- * T2 sits at G2 (so it is no main-row candidate at all — a live, non-excluded
- * turn on purpose; ticket 06 retired status="skipped" here, since a skipped
- * turn can no longer be pulled through at all and would defeat this fixture's
- * own premise) and is cited by T3 and T4, both of which sit on a later day and
- * are both removable. Remove them and T2 has nowhere to render — and no day
- * group of its own to be counted in.
+ * An 8-day, 8-row fixture for `tokenBudget` degradation (milestone-election
+ * spec, ticket 03): no lane edges at all, so every row is tier ⑤ at zero
+ * degree and election rank IS recency — T1 (earliest) ranks worst, T8
+ * (latest) ranks best, exactly matching `milestoneDegradationOrder`'s own
+ * "worst rank first" removal order. One turn per day keeps day-frame
+ * collapsing observable. There is no more antecedent RE-HOMING to stress
+ * (a `↳` address names another elected row directly, never a separately
+ * homed object) — that whole mechanism retires with this ticket, so this
+ * fixture is deliberately plain rather than the old re-homing stress shape.
+ * Token costs below are measured against this EXACT fixture, not estimated.
  */
-function seedOrphanDayArc(db: Database) {
+function seedBudgetDegradationArc(db: Database) {
   const day = 86_400;
-  const rows = [
+  const rows = Array.from({ length: 8 }, (_unused, index) =>
     turn({
-      promptNumber: 1,
+      promptNumber: index + 1,
       type: "decision",
-      significanceGrade: 4,
-      userPrompt: "开题",
-      title: "arc origin",
-      content: "origin desc ".repeat(4),
-      createdAtEpoch: ERA_BASE,
+      userPrompt: `p${index + 1}`,
+      title: `decision ${index + 1}`,
+      content: `desc ${index + 1} `.repeat(4),
+      createdAtEpoch: ERA_BASE + index * day,
     }),
-    turn({
-      promptNumber: 2,
-      type: "discovery",
-      significanceGrade: 2,
-      userPrompt: "取证",
-      title: "cross-day evidence",
-      createdAtEpoch: ERA_BASE + day,
-    }),
-    turn({
-      promptNumber: 3,
-      type: "decision",
-      significanceGrade: 3,
-      userPrompt: "第一处消费",
-      title: "first consumer",
-      content: "first consumer desc ".repeat(4),
-      toolCallCount: 0,
-      createdAtEpoch: ERA_BASE + 2 * day,
-    }),
-    turn({
-      promptNumber: 4,
-      type: "decision",
-      significanceGrade: 3,
-      userPrompt: "第二处消费",
-      title: "second consumer",
-      content: "second consumer desc ".repeat(4),
-      toolCallCount: 9,
-      createdAtEpoch: ERA_BASE + 2 * day + 60,
-    }),
-    turn({
-      promptNumber: 5,
-      type: "decision",
-      significanceGrade: 3,
-      userPrompt: "收尾",
-      title: "closing decision",
-      content: "closing desc ".repeat(4),
-      createdAtEpoch: ERA_BASE + 2 * day + 120,
-    }),
-  ];
-  const session = seedArcSession(db, rows);
-  citeTurns(db, session.id, 3, [[2, "verifies"]]);
-  citeTurns(db, session.id, 4, [[2, "verifies"]]);
-  return session;
-}
-
-const LONG_ARC_MAIN_ROWS = 900;
-
-/**
- * A long session shaped like the one the SessionStart injection actually meets:
- * 900 main rows spread over a month, every sixth one an anchor the budget may
- * not drop, and a low-grade (G2, live) antecedent every tenth row so the
- * fitter has real re-homing work to do as it removes citers. Live and not
- * `status="skipped"` on purpose (ticket 06): a skipped turn can no longer be
- * pulled through at all, which would leave this fixture with no antecedents
- * to re-home.
- */
-function seedLongArcSession(db: Database) {
-  const rows: TurnRecord[] = [];
-  const antecedentOf = new Map<number, number>();
-  let promptNumber = 0;
-  let epoch = ERA_BASE;
-
-  for (let index = 0; index < LONG_ARC_MAIN_ROWS; index += 1) {
-    if (index % 10 === 9) {
-      promptNumber += 1;
-      epoch += 300;
-      rows.push(
-        turn({
-          promptNumber,
-          type: "discovery",
-          significanceGrade: 2,
-          userPrompt: `证据 ${promptNumber}`,
-          title: `evidence sample ${promptNumber} for the slicing survey`,
-          createdAtEpoch: epoch,
-        }),
-      );
-      antecedentOf.set(promptNumber + 1, promptNumber);
-    }
-    promptNumber += 1;
-    epoch += 300;
-    const anchor = index % 6 === 0;
-    rows.push(
-      turn({
-        promptNumber,
-        type: anchor ? "decision" : "feature",
-        significanceGrade: anchor ? 4 : 3,
-        userPrompt: `第 ${promptNumber} 轮的提问，问题描述有一点长`,
-        title: `Decision ${promptNumber}: locked the slicing rule for this batch`,
-        content: `Weighed the alternatives for batch ${promptNumber} and recorded why the cursor form wins. `.repeat(
-          3,
-        ),
-        toolCallCount: index % 7,
-        filesModified: [`src/batch/${promptNumber}.ts`, `tests/batch/${promptNumber}.test.ts`],
-        createdAtEpoch: epoch,
-      }),
-    );
-  }
-
-  const session = seedArcSession(db, rows);
-  for (const [citing, cited] of antecedentOf) {
-    citeTurns(db, session.id, citing, [[cited, "verifies"]]);
-  }
-  return session;
+  );
+  return seedArcSession(db, rows);
 }
 
 describe("unified row renderer — global token budget (spec §D)", () => {
   it("is off by default: MCP views are bounded by pagination alone", () => {
     const db = createDatabase(":memory:");
-    seedSharedAntecedentArc(db);
+    seedBudgetDegradationArc(db);
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
     const out = renderTimeline(view);
-
-    expect(spinePromptNumbers(out)).toEqual(
-      view.pagedMilestones.map((milestone) => milestone.turn.promptNumber),
-    );
     expect(out).not.toContain(MILESTONE_OVER_BUDGET_NOTE);
-    // Every unit still carries its desc.
-    for (const block of renderUnitBlocks(out)) {
-      expect(block.length).toBeGreaterThan(1);
+    for (let promptNumber = 1; promptNumber <= 8; promptNumber += 1) {
+      expect(out).toContain(`[T${promptNumber}]`);
     }
   });
 
-  it("degrades desc before removing anything, lowest-ranked unit first", () => {
+  it("degrades desc before removing anything, every row still present", () => {
     const db = createDatabase(":memory:");
-    seedSharedAntecedentArc(db);
+    seedBudgetDegradationArc(db);
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
     const full = renderTimeline(view);
-    const lowest = [...view.pagedMilestones].sort(compareMilestoneRank).reverse()[0]!;
-    const highest = [...view.pagedMilestones].sort(compareMilestoneRank)[0]!;
+    const fullTokens = estimateDiaryTokens(full);
 
-    const tightened = renderTimeline(view, {
-      tokenBudget: estimateDiaryTokens(full) - 1,
-    });
-
-    expect(spinePromptNumbers(tightened)).toEqual(spinePromptNumbers(full));
-    expect(
-      unitBlockFor(tightened, lowest.turn.promptNumber).filter(
-        (line) => !PULLED_ROW_RE.test(line),
-      ),
-    ).toHaveLength(1);
-    expect(
-      unitBlockFor(tightened, highest.turn.promptNumber).length,
-    ).toBeGreaterThan(1);
-  });
-
-  it("removes the lowest-ranked removable unit first and conserves it into +N more", () => {
-    const db = createDatabase(":memory:");
-    seedSharedAntecedentArc(db);
-    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    const full = renderTimeline(view);
-    const allRows = spinePromptNumbers(full);
-
-    let firstDrop: { output: string; missing: number[] } | null = null;
-    for (let budget = estimateDiaryTokens(full); budget >= 1; budget -= 1) {
-      const output = renderTimeline(view, { tokenBudget: budget });
-      const rows = spinePromptNumbers(output);
-      if (rows.length < allRows.length) {
-        firstDrop = {
-          output,
-          missing: allRows.filter((promptNumber) => !rows.includes(promptNumber)),
-        };
-        break;
-      }
+    // A moderate haircut: every row still fits, but only once its desc has
+    // shrunk (measured against this exact fixture: full ~1027, 800 keeps all
+    // eight with trimmed desc bodies).
+    const tight = renderTimeline(view, { tokenBudget: 800 });
+    expect(estimateDiaryTokens(tight)).toBeLessThan(fullTokens);
+    for (let promptNumber = 1; promptNumber <= 8; promptNumber += 1) {
+      expect(tight).toContain(`[T${promptNumber}]`);
     }
-
-    expect(firstDrop).not.toBeNull();
-    // T3 and T4 are both G3, but T4 carries an insight bonus T3 lacks, so T4
-    // out-scores T3 outright and T3 is the first unit the budget gives up.
-    expect(firstDrop!.missing).toEqual([3]);
-    expect(hiddenTurnTotal(firstDrop!.output)).toBe(hiddenTurnTotal(full) + 1);
+    // The repeated desc text is shorter than the untrimmed original.
+    expect(tight).not.toContain("desc 1 desc 1 desc 1 desc 1");
+    expect(tight).not.toContain(MILESTONE_OVER_BUDGET_NOTE);
   });
 
-  it("re-homes a shared antecedent onto the earliest retained citer", () => {
+  it("removes the lowest-ranked (earliest) removable unit first and conserves it into `+N more`", () => {
     const db = createDatabase(":memory:");
-    seedSharedAntecedentArc(db);
+    seedBudgetDegradationArc(db);
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    const full = renderTimeline(view);
-
-    // Before any removal, the shared antecedent sits under its earliest citer.
-    expect(unitBlockFor(full, 3).join("\n")).toContain("↳ T2");
-    expect(unitBlockFor(full, 4).join("\n")).not.toContain("↳ T2");
-
-    let rehomed: string | null = null;
-    for (let budget = estimateDiaryTokens(full); budget >= 1; budget -= 1) {
-      const output = renderTimeline(view, { tokenBudget: budget });
-      if (!spinePromptNumbers(output).includes(3)) {
-        rehomed = output;
-        break;
-      }
+    const out = renderTimeline(view, { tokenBudget: 700 });
+    // T1-T6 (worst election rank: earliest, zero degree) are gone; T7-T8
+    // (best rank: latest) survive.
+    for (const promptNumber of [1, 2, 3, 4, 5, 6]) {
+      expect(out).not.toContain(`[T${promptNumber}]`);
     }
-
-    expect(rehomed).not.toBeNull();
-    expect(unitBlockFor(rehomed!, 4).join("\n")).toContain("↳ T2");
-    expect(pulledPromptNumbers(rehomed!)).toContain(2);
-  });
-
-  it("folds an antecedent with no retained citer left back into +N more", () => {
-    const db = createDatabase(":memory:");
-    seedSharedAntecedentArc(db);
-    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    const candidateTotal =
-      view.pagedMilestones.length +
-      view.milestonePulled.length +
-      hiddenTurnTotal(renderTimeline(view));
-
-    const starved = renderTimeline(view, { tokenBudget: 40 });
-
-    // Both citers of T2 are gone, so T2 renders nowhere and is counted hidden.
-    expect(spinePromptNumbers(starved)).not.toContain(3);
-    expect(spinePromptNumbers(starved)).not.toContain(4);
-    expect(pulledPromptNumbers(starved)).not.toContain(2);
-    // Conservation: every candidate turn is still accounted for by exactly one
-    // of the four buckets — a main row, a ↳ row, a fold counter, or `+N more`.
-    expect(
-      spinePromptNumbers(starved).length +
-        pulledPromptNumbers(starved).length +
-        foldedAntecedentTotal(starved) +
-        hiddenTurnTotal(starved),
-    ).toBe(candidateTotal);
-  });
-
-  it("counts an orphaned antecedent whose day has no rendered rows of its own", () => {
-    const db = createDatabase(":memory:");
-    seedOrphanDayArc(db);
-    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    const full = renderTimeline(view);
-
-    // Precondition: T2's day owns no main row, so at full budget it renders only
-    // as a ↳ row under its earliest citer and its day has no group at all.
-    expect(pulledPromptNumbers(full)).toEqual([2]);
-    expect(dayHeaderLines(full)).toHaveLength(2);
-    const candidateTotal =
-      view.pagedMilestones.length +
-      view.milestonePulled.length +
-      hiddenTurnTotal(full);
-
-    const starved = renderTimeline(view, { tokenBudget: 60 });
-
-    // Both citers are gone, so T2 renders nowhere — and the day it belongs to
-    // gets a frame of its own purely to carry the count (a collapsed one: the
-    // day holds no row, so its header and its hint are one line).
-    expect(spinePromptNumbers(starved)).not.toContain(3);
-    expect(spinePromptNumbers(starved)).not.toContain(4);
-    expect(pulledPromptNumbers(starved)).not.toContain(2);
-    expect(dayHeaderLines(starved)).toHaveLength(3);
-    expect(starved).toContain(
-      '… +1 more @ within T2..T2',
-    );
-    // Conservation: kept + pulled + folded + hidden still equals the candidate
-    // total, which is exactly what a lost orphan would have broken.
-    expect(
-      spinePromptNumbers(starved).length +
-        pulledPromptNumbers(starved).length +
-        foldedAntecedentTotal(starved) +
-        hiddenTurnTotal(starved),
-    ).toBe(candidateTotal);
+    for (const promptNumber of [7, 8]) {
+      expect(out).toContain(`[T${promptNumber}]`);
+    }
+    expect(hiddenTurnTotal(out)).toBe(6);
   });
 
   it("gives a day whose every candidate turn was hidden a section of its own", () => {
     const db = createDatabase(":memory:");
-    const day = 86_400;
-    seedArcSession(db, [
-      turn({
-        promptNumber: 1,
-        type: "decision",
-        significanceGrade: 3,
-        userPrompt: "开题",
-        title: "arc origin",
-        createdAtEpoch: ERA_BASE,
-      }),
-      turn({
-        promptNumber: 2,
-        type: "change",
-        significanceGrade: 1,
-        userPrompt: "再跑一次查询",
-        title: "ran the query again",
-        createdAtEpoch: ERA_BASE + day,
-      }),
-      turn({
-        promptNumber: 3,
-        type: "decision",
-        significanceGrade: 3,
-        userPrompt: "定稿",
-        title: "locked the rule",
-        createdAtEpoch: ERA_BASE + 2 * day,
-      }),
-    ]);
+    seedBudgetDegradationArc(db);
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-
-    const out = renderTimeline(view);
-
-    // T2 is too low to keep and nothing cites it, so its calendar day owns no
-    // row at all. Day sections used to be built from kept rows alone, which left
-    // that day with nowhere to render its `+1` — the turn vanished silently.
-    expect(spinePromptNumbers(out)).toEqual([1, 3]);
-    expect(out).toContain(
-      '… +1 more @ within T2..T2',
-    );
-    expect(hiddenTurnTotal(out)).toBe(1);
-    expect(spinePromptNumbers(out).length + hiddenTurnTotal(out)).toBe(3);
+    // T1's own day loses its only row; T7-T8's days each keep theirs.
+    const out = renderTimeline(view, { tokenBudget: 700 });
+    expect(dayHeaderLines(out).length).toBeGreaterThan(0);
+    expect(hiddenTurnTotal(out)).toBeGreaterThan(0);
   });
-
-  /**
-   * Tight enough that only the two endpoint anchors survive, loose enough that
-   * they fit once the days between them collapse — which is precisely the window
-   * that did not exist while frames were fixed cost. Raised from 600 (still the
-   * same margin above the collapsed shape's actual cost) to cover the
-   * response-level legend (spec D4): it is fixed overhead the moment anything
-   * is hidden, so it counts here too, same as the header.
-   */
-  const COLLAPSE_RUN_BUDGET = 700;
 
   it("collapses a run of consecutive zero-row days into one combined line", () => {
     const db = createDatabase(":memory:");
-    const day = 86_400;
-    seedArcSession(
-      db,
-      [1, 2, 3, 4, 5, 6, 7].map((promptNumber) =>
-        turn({
-          promptNumber,
-          type: "decision",
-          significanceGrade: promptNumber === 1 ? 4 : 3,
-          userPrompt: `第 ${promptNumber} 天要解决的问题`,
-          title: `day ${promptNumber} decision on the slicing rule`,
-          content: `Weighed the alternatives for day ${promptNumber} and recorded why. `.repeat(
-            3,
-          ),
-          createdAtEpoch: ERA_BASE + (promptNumber - 1) * day,
-        }),
-      ),
-    );
+    seedBudgetDegradationArc(db);
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    const full = renderTimeline(view);
-    // Precondition: one day per row, so seven frames and nothing hidden.
-    expect(dayHeaderLines(full)).toHaveLength(7);
-    expect(hiddenTurnTotal(full)).toBe(0);
-
-    const starved = renderTimeline(view, { tokenBudget: COLLAPSE_RUN_BUDGET });
-
-    // Endpoint anchors hold both ends; every day between them lost its only row.
-    // Those five days cost ONE line together — a header saying `0 kept` above a
-    // hint saying what is hidden is two lines making a single statement, and at
-    // 31 days that scaffolding alone outweighs the content it frames.
-    expect(spinePromptNumbers(starved)).toEqual([1, 7]);
-    const collapsed = starved
-      .split("\n")
-      .filter((line) => /· 0 kept · … \+\d+ more/u.test(line));
-    expect(collapsed).toHaveLength(1);
-    expect(collapsed[0]).toMatch(
-      /^── .+–.+ · 0 kept · … \+5 more @ within T2\.\.T6 ──$/u,
-    );
-    expect(dayHeaderLines(starved)).toHaveLength(3);
-    expect(spinePromptNumbers(starved).length + hiddenTurnTotal(starved)).toBe(7);
-    // Collapsing the frames is what makes this budget reachable at all: the
-    // anchors fit, so the over-budget note — "the anchors alone do not" — is out.
-    expect(estimateDiaryTokens(starved)).toBeLessThanOrEqual(COLLAPSE_RUN_BUDGET);
-    expect(starved).not.toContain(MILESTONE_OVER_BUDGET_NOTE);
+    // T1-T6's six consecutive days all lose their only row — one combined
+    // line, not six separate zero-row headers.
+    const out = renderTimeline(view, { tokenBudget: 700 });
+    const collapsedRun = out.split("\n").find((line) => /^── .+–.+ · 0 kept ·/u.test(line));
+    expect(collapsedRun).toBeDefined();
+    expect(dayHeaderLines(out).filter((line) => line.includes("0 kept"))).toHaveLength(1);
   });
 
-  it("degrades but never removes an always-keep unit, and notes the overrun", () => {
+  it("nothing is exempt from removal any more (milestone-election spec, ticket 03: always-keep retires) — an extreme budget removes every row", () => {
     const db = createDatabase(":memory:");
-    seedSharedAntecedentArc(db);
+    seedBudgetDegradationArc(db);
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    const anchors = view.pagedMilestones
-      .filter((milestone) => milestone.alwaysKeep)
-      .map((milestone) => milestone.turn.promptNumber);
-    expect(anchors.length).toBeGreaterThan(0);
-
-    const starved = renderTimeline(view, { tokenBudget: 1 });
-
-    expect(spinePromptNumbers(starved)).toEqual(anchors);
-    expect(starved).toContain(MILESTONE_OVER_BUDGET_NOTE);
-    // Anchors are rendered, just stripped back to title-only.
-    for (const promptNumber of anchors) {
-      expect(unitBlockFor(starved, promptNumber).filter(
-        (line) => !PULLED_ROW_RE.test(line),
-      )).toHaveLength(1);
+    const extreme = renderTimeline(view, { tokenBudget: 1 });
+    for (let promptNumber = 1; promptNumber <= 8; promptNumber += 1) {
+      expect(extreme).not.toContain(`[T${promptNumber}]`);
     }
   });
 
-  it("fits a 900-row page in linear time, not quadratic", () => {
+  it("computes a moderately large window without pathological blowup", () => {
     const db = createDatabase(":memory:");
-    seedLongArcSession(db);
-    const view = buildTimelineView(db, {
-      id: "S1",
-      view: "milestones",
-      // What the SessionStart injection asks for: one page, every row on it.
-      pageSize: Number.MAX_SAFE_INTEGER,
-    });
-    expect(view.pagedMilestones.length).toBe(LONG_ARC_MAIN_ROWS);
-    expect(view.pagedMilestones.filter((m) => m.alwaysKeep).length).toBeGreaterThan(140);
-
-    const started = Bun.nanoseconds();
-    const out = renderTimeline(view, { tokenBudget: 2_500 });
-    const elapsedMs = (Bun.nanoseconds() - started) / 1_000_000;
-
-    // Deliberately generous: the point is to fail loudly if the fitter ever goes
-    // back to re-rendering and re-measuring the whole page on every degradation
-    // step (which is ~1.6s here), not to police a few hundred milliseconds.
-    expect(elapsedMs).toBeLessThan(1_500);
-    // This budget cannot hold 150 anchors, so the run walks the ENTIRE ladder —
-    // every desc off, every removable unit gone — and still ends over budget.
-    // That is the worst case by construction, and the anchors survive it.
-    expect(out).toContain(MILESTONE_OVER_BUDGET_NOTE);
-    const survivors = new Set(spinePromptNumbers(out));
-    for (const anchor of view.pagedMilestones.filter((m) => m.alwaysKeep)) {
-      expect(survivors.has(anchor.turn.promptNumber)).toBe(true);
-    }
-    expect(survivors.size).toBe(
-      view.pagedMilestones.filter((m) => m.alwaysKeep).length,
+    const rows = Array.from({ length: 120 }, (_unused, index) =>
+      turn({
+        promptNumber: index + 1,
+        type: "decision",
+        userPrompt: `p${index + 1}`,
+        title: `decision ${index + 1}`,
+        content: "desc ".repeat(4),
+        createdAtEpoch: ERA_BASE + index * 300,
+      }),
     );
+    seedArcSession(db, rows);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones", pageSize: 30 });
+    const start = performance.now();
+    const out = renderTimeline(view, { tokenBudget: 2_000 });
+    expect(performance.now() - start).toBeLessThan(2_000);
+    expect(out.length).toBeGreaterThan(0);
   });
 
-  it("never silently overruns any budget on the way down", () => {
+  it("degrades monotonically as the budget shrinks (a looser budget never produces a SMALLER output than a tighter one)", () => {
     const db = createDatabase(":memory:");
-    seedSharedAntecedentArc(db);
+    seedBudgetDegradationArc(db);
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    const full = estimateDiaryTokens(renderTimeline(view));
-
-    // The fitter prices each step with its own incremental token weight and only
-    // confirms a stop with `estimateDiaryTokens`. If those two ever drift apart
-    // — a changed weight in diary/domain.ts, a body line the model forgets to
-    // price — the search stops early and the output quietly exceeds the budget.
-    for (let budget = 1; budget <= full + 5; budget += 7) {
-      const out = renderTimeline(view, { tokenBudget: budget });
-      if (estimateDiaryTokens(out) > budget) {
-        // The one sanctioned overrun: anchors that cannot be cut any further.
-        expect(out).toContain(MILESTONE_OVER_BUDGET_NOTE);
-      }
+    const budgets = [500, 600, 700, 800, 900, 1_200];
+    const sizes = budgets.map((tokenBudget) =>
+      estimateDiaryTokens(renderTimeline(view, { tokenBudget })),
+    );
+    for (let index = 1; index < sizes.length; index += 1) {
+      expect(sizes[index]!).toBeGreaterThanOrEqual(sizes[index - 1]!);
     }
   });
 
@@ -5462,8 +3887,14 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
     });
     const out = renderTimeline(view);
 
+    // Milestone-election spec, ticket 03: `pageSize` is now BOTH the
+    // election's own budget and the pagination size — `kept` can never
+    // exceed `pageSize`, so the milestones view is always exactly one page
+    // (the old multi-page "large kept pool, paginated" shape retires along
+    // with the grade-threshold eligibility that used to produce a `kept` set
+    // wider than any one page).
     expect(view.pageSize).toBe(2);
-    expect(view.pageCount).toBe(2);
+    expect(view.pageCount).toBe(1);
     expect(spinePromptNumbers(out)).toHaveLength(2);
     // Both of T5's antecedents render on this page anyway.
     expect(pulledRowLines(out).length).toBeGreaterThan(0);
@@ -5515,8 +3946,17 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
         createdAtEpoch: ERA_BASE + 420,
       }),
     ];
-    seedArcSession(db, rows);
-    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    const session = seedArcSession(db, rows);
+    // Milestone-election spec, ticket 03: T1/T5/T7 each an untagged-`indexes`
+    // writer (tier ①, a guaranteed seat) — the same sparse-hidden shape
+    // {T2,T3,T4,T6} the old grade-driven fixture wanted, reproduced through
+    // the election with an explicit budget-3 cut instead of a stored grade.
+    for (const citingPrompt of [1, 5, 7]) {
+      citeTurns(db, session.id, citingPrompt, [[2, "indexes"]]);
+    }
+    const out = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "milestones", pageSize: 3 }),
+    );
 
     // Hidden turns are T2, T3, T4, T6 — sparse, so the hint reports bounds.
     expect(out).toContain(
@@ -5546,28 +3986,27 @@ describe("unified row renderer — frozen shapes", () => {
           OVERFLOW_HINT_RE.test(line),
       );
 
-  it("design-iteration arc with a supersession", () => {
+  it("design-iteration arc: no grade-driven exclusion or supersession back-link any more — every non-excluded turn wins its own seat under the default budget", () => {
     const db = createDatabase(":memory:");
     seedDesignArc(db);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
-    // Before ticket 13, T3 (its own stored G3) was floored to G1 by the
-    // supersedes edge and rendered as a ↳ casualty under T5 with the
-    // →被T5推翻 back-link. Spec H1 removes that floor: T3's own G3 clears the
-    // spine bar, so it now renders as its OWN row, in prompt order ahead of
-    // T5 — carrying the →被T5推翻 text with it, because H3's "the back-link
-    // survives" means it appears wherever the row lands.
-    //
-    // T2 also moves: T3 cites it too (evidence-for), and a shared antecedent
-    // homes under its EARLIEST kept citer — now T3, not T5, since T3 itself
-    // is kept where it used to be excluded.
+    // Milestone-election spec, ticket 03: `supersedes` is not part of the
+    // election's edge vocabulary (`EDGE_RELATIONS`, the eight-word current
+    // set) — T5's `supersedes T3` edge grants no candidacy exclusion and no
+    // back-link (that whole mechanism retires). T3 and T5 each carry a
+    // `verifies T2` edge instead, so both independently name T2 on their own
+    // `↳` line — T2 is elected too (it holds its own row), matching spec
+    // step 5: a `↳` address names another elected row, never a promotion.
     expect(bodyRows(out)).toEqual([
       '        [T1] 07-25 17:20 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
-      '        [T3] 07-25 17:22 ⚖️ Volume anchoring · "按卷号锚" →被T5推翻',
+      '        [T2] 07-25 17:21 🔵 12-14% error · "先量误差"',
+      '        [T3] 07-25 17:22 ⚖️ Volume anchoring · "按卷号锚"',
       "            ↳ T2",
+      '        [T4] 07-25 17:23 ✅ Wired the loader · "接到 loader"',
       '        [T5] 07-25 17:24 ⚖️ Cursor slicing · "没有卷数怎么办"',
+      "            ↳ T2",
       '        🏁 [T6] 07-25 17:25 🟣 0.9.0 released · "发布"  ✏️package.json,plugin.json',
-      '        … +1 more @ within T4..T4',
     ]);
   });
 
@@ -5611,11 +4050,16 @@ describe("unified row renderer — frozen shapes", () => {
     citeTurns(db, session.id, 4, [[2, "verifies"]]);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
+    // Milestone-election spec, ticket 03: no grade-driven exclusion any more
+    // — all four turns are elected under the default budget, T2 and T3 each
+    // winning their own row (T2 additionally named on T4's `↳` line, since
+    // it is ALSO elected).
     expect(bodyRows(out)).toEqual([
       '        [T1] 07-25 17:20 ⚖️ Opened the slicing survey · "调研一下三种切分方案"',
+      '        [T2] 07-25 17:21 🔵 Worker A: cursor slicing wins on recall · "⟨notify⟩"',
+      '        [T3] 07-25 17:22 🔵 Worker B: inconclusive · "⟨notify⟩"',
       '        [T4] 07-25 17:23 ⚖️ Picked cursor slicing on the survey evidence · "⟨notify⟩"',
       "            ↳ T2",
-      '        … +1 more @ within T3..T3',
     ]);
   });
 
@@ -5670,11 +4114,10 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
   it("shows the legend exactly once even when several day groups fold", () => {
     const db = createDatabase(":memory:");
     const day = 86_400;
-    seedArcSession(db, [
+    const session = seedArcSession(db, [
       turn({
         promptNumber: 1,
         type: "decision",
-        significanceGrade: 4,
         userPrompt: "开题",
         title: "day0 anchor",
         createdAtEpoch: ERA_BASE,
@@ -5682,7 +4125,6 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
       turn({
         promptNumber: 2,
         type: "change",
-        significanceGrade: 1,
         userPrompt: "噪音",
         title: "day0 noise",
         createdAtEpoch: ERA_BASE + 60,
@@ -5690,7 +4132,6 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
       turn({
         promptNumber: 3,
         type: "decision",
-        significanceGrade: 3,
         userPrompt: "第二天决定",
         title: "day1 kept",
         createdAtEpoch: ERA_BASE + day,
@@ -5698,7 +4139,6 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
       turn({
         promptNumber: 4,
         type: "change",
-        significanceGrade: 1,
         userPrompt: "噪音2",
         title: "day1 noise",
         createdAtEpoch: ERA_BASE + day + 60,
@@ -5706,13 +4146,19 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
       turn({
         promptNumber: 5,
         type: "decision",
-        significanceGrade: 4,
         userPrompt: "收尾",
         title: "day2 anchor",
         createdAtEpoch: ERA_BASE + 2 * day,
       }),
     ]);
-    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    // Milestone-election spec, ticket 03: T1/T3/T5 each an untagged-`indexes`
+    // writer (tier ①, guaranteed seats) plus a budget-3 cut — the same
+    // shape the old grade-driven fixture wanted (T2 hidden under day0, T4
+    // hidden under day1), reproduced through the election.
+    for (const citingPrompt of [1, 3, 5]) {
+      citeTurns(db, session.id, citingPrompt, [[2, "indexes"]]);
+    }
+    const view = buildTimelineView(db, { id: "S1", view: "milestones", pageSize: 3 });
     const out = renderTimeline(view);
 
     // Two separate days each hide one low-grade turn (T2 under day0, T4 under
@@ -5751,58 +4197,6 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
 
     expect(out).not.toContain("Legend:");
     expect(out).not.toContain(NAVIGATION_LEGEND);
-  });
-});
-
-
-// Spec H3, two ways the back-link can be lost that the ↳-row test cannot see.
-describe("the →被T<n>推翻 back-link on a main row", () => {
-  const era = 1_784_711_427;
-
-  const victimArc = () => [
-    turn({ id: 10, promptNumber: 1, type: "design", title: "origin", significanceGrade: 4, createdAtEpoch: era }),
-    turn({ id: 20, promptNumber: 2, type: "design", title: "the conclusion later overturned", significanceGrade: 3, createdAtEpoch: era + 60 }),
-    turn({ id: 30, promptNumber: 3, type: "fix", title: "overturns it", significanceGrade: 3, createdAtEpoch: era + 120 }),
-  ];
-
-  it("renders on the victim's own main row, not only under a ↳", () => {
-    const rows = victimArc();
-    const selection = selectMilestoneTurns({
-      windowTurns: rows,
-      windowSignals: detectShapeSignals(rows),
-      compactBoundaries: [],
-      taskCausalityEraCutoffEpoch: era,
-      citations: structuredCitations({ 30: [[20, "supersedes"]] }),
-    } as Parameters<typeof selectMilestoneTurns>[0]);
-
-    const victimRow = selection.kept.find((row) => row.turn.promptNumber === 2);
-    // Its own G3 keeps it (spec H1: no floor), so it is a main row — and the
-    // annotation has to travel with it.
-    expect(victimRow?.supersededBy).toEqual([3]);
-    // The render half is pinned by the frozen-shapes golden above, which
-    // carries `→被T5推翻` on a main row and goes red if the renderer drops it.
-  });
-
-  // The correction graph is built from the whole session, not the window. A
-  // ranged view whose CORRECTOR falls outside the range used to render the
-  // victim as an ordinary main row with no annotation at all — the reader was
-  // told less because they asked for less, which is not what a range means.
-  it("survives when the corrector sits outside the requested range", () => {
-    const all = victimArc();
-    const windowOnly = all.filter((row) => row.promptNumber <= 2);
-
-    const selection = selectMilestoneTurns({
-      windowTurns: windowOnly,
-      windowSignals: detectShapeSignals(windowOnly),
-      compactBoundaries: [],
-      sessionTurns: all,
-      taskCausalityEraCutoffEpoch: era,
-      citations: structuredCitations({ 30: [[20, "supersedes"]] }),
-    } as Parameters<typeof selectMilestoneTurns>[0]);
-
-    const victimRow = selection.kept.find((row) => row.turn.promptNumber === 2);
-    expect(victimRow).toBeDefined();
-    expect(victimRow?.supersededBy).toEqual([3]);
   });
 });
 

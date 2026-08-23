@@ -16,7 +16,6 @@ import {
   renderTimeline,
   DEFAULT_TITLE_CAP,
   MILESTONE_OVER_BUDGET_NOTE,
-  type KeptMilestone,
   type TimelineView,
 } from "../../src/mcp/timeline";
 
@@ -131,10 +130,6 @@ function milestoneView(
     view: "milestones",
     pageSize: Number.MAX_SAFE_INTEGER,
   });
-}
-
-function anchors(view: TimelineView): KeptMilestone[] {
-  return view.pagedMilestones.filter((milestone) => milestone.alwaysKeep);
 }
 
 /** A four-row arc with one pulled antecedent, seeded straight into SQLite. */
@@ -302,11 +297,28 @@ describe("SessionStart milestone injection = the arc view", () => {
 
   test("bounds a long arc at 2500 tokens without char-halving any title", () => {
     const db = createDatabase(":memory:");
-    const sessionId = seedLongArc(db, {
-      mainRows: 300,
-      anchorEvery: 0,
-      contentSessionId: "long-sparse-arc",
-    });
+    // Milestone-election spec, ticket 03: the election's own budget (clamped
+    // to 30 — see `buildTimelineView`'s own doc comment on why) is now what
+    // narrows a long session, not the 2500-token budget alone — so this
+    // fixture is a plain, edge-free 30-turn arc (every turn IS the election,
+    // no in-degree tie-break to skew which titles survive) rather than the
+    // old 300+30-row shape, which the new election would fill entirely with
+    // its 30 in-degree-bearing "evidence" rows before a single "Decision"
+    // title ever got a seat.
+    const rows: SeedRow[] = Array.from({ length: 30 }, (_unused, index) => ({
+      promptNumber: index + 1,
+      prompt: `第 ${index + 1} 轮的提问，问题描述有一点长`,
+      title: arcTitle(index + 1),
+      content: `Weighed the alternatives for batch ${index + 1} and recorded why the cursor form wins. `.repeat(
+        3,
+      ),
+      type: "feature",
+      grade: 3,
+      toolCalls: index % 7,
+      filesModified: [`src/batch/${index + 1}.ts`, `tests/batch/${index + 1}.test.ts`],
+      epoch: ERA_BASE + index * 300,
+    }));
+    const sessionId = seedSession(db, "long-sparse-arc", rows);
 
     const injected = renderSessionMilestoneInjection(db, sessionId);
 
@@ -321,12 +333,9 @@ describe("SessionStart milestone injection = the arc view", () => {
     for (const promptNumber of survivors) {
       expect(injected).toContain(arcTitle(promptNumber));
     }
-    // Turns the budget could not fit are conserved into the day hints, not lost.
-    expect(injected).toMatch(/… \+\d+ more @ within T\d+\.\.T\d+/u);
-    db.close();
   });
 
-  test("removes the lowest-ranked unit first, never an anchor", () => {
+  test("removes the lowest-ranked unit first (milestone-election spec, ticket 03: every row is removable now — always-keep retired)", () => {
     const db = createDatabase(":memory:");
     const sessionId = seedLongArc(db, {
       mainRows: 12,
@@ -334,9 +343,7 @@ describe("SessionStart milestone injection = the arc view", () => {
       contentSessionId: "anchor-heavy-arc",
     });
     const view = milestoneView(db, sessionId);
-    const removable = [...view.pagedMilestones]
-      .filter((milestone) => !milestone.alwaysKeep)
-      .sort(compareMilestoneRank);
+    const removable = [...view.pagedMilestones].sort(compareMilestoneRank);
     expect(removable.length).toBeGreaterThan(1);
     const lowest = removable.at(-1)!;
 
@@ -371,45 +378,36 @@ describe("SessionStart milestone injection = the arc view", () => {
     db.close();
   });
 
-  test("keeps every anchor in full under an impossible budget, with one note", () => {
+  test("nothing is exempt from an impossible budget any more (milestone-election spec, ticket 03: always-keep retires) — every row goes, with one over-budget note", () => {
     const db = createDatabase(":memory:");
     const sessionId = seedLongArc(db, {
       mainRows: 12,
       anchorEvery: 2,
       contentSessionId: "anchor-heavy-arc",
     });
-    const view = milestoneView(db, sessionId);
-    const anchorPrompts = anchors(view).map(
-      (milestone) => milestone.turn.promptNumber,
-    );
-    expect(anchorPrompts.length).toBeGreaterThan(1);
 
     const starved = renderSessionMilestoneInjection(db, sessionId, {
       tokenBudget: 1,
     });
 
-    expect(spinePromptNumbers(starved)).toEqual(anchorPrompts);
+    expect(spinePromptNumbers(starved)).toEqual([]);
     expect(starved).toContain(MILESTONE_OVER_BUDGET_NOTE);
-    // Anchors lose their desc, never their title.
-    for (const promptNumber of anchorPrompts) {
-      expect(starved).toContain(arcTitle(promptNumber));
-    }
     db.close();
   });
 
-  test("renders a 900-row session in well under a second", () => {
+  test("elects over a 900-row session in well under a second, bounded to the election budget", () => {
     const db = createDatabase(":memory:");
     const sessionId = seedLongArc(db, {
       mainRows: 900,
       anchorEvery: 6,
       contentSessionId: "long-dense-arc",
     });
+    // Milestone-election spec, ticket 03: `kept` can never exceed the
+    // clamped election budget (30) any more, whatever the session's raw
+    // turn count — the old "hundreds of always-keep anchors, degraded by
+    // the token ladder alone" shape retires with always-keep itself.
     const view = milestoneView(db, sessionId);
-    expect(view.pagedMilestones.length).toBe(900);
-    const anchorPrompts = anchors(view).map(
-      (milestone) => milestone.turn.promptNumber,
-    );
-    expect(anchorPrompts.length).toBeGreaterThan(140);
+    expect(view.pagedMilestones.length).toBe(30);
 
     const started = Bun.nanoseconds();
     const injected = renderSessionMilestoneInjection(db, sessionId);
@@ -417,12 +415,11 @@ describe("SessionStart milestone injection = the arc view", () => {
 
     // The deleted four-stage ladder re-rendered the whole view once per
     // candidate count: ~57s on this fixture. The bound is deliberately generous
-    // — it exists to fail loudly if anything quadratic comes back.
+    // — it exists to fail loudly if anything quadratic comes back (both in the
+    // election itself, over 900+ candidates, and in the render ladder, now
+    // over at most 30 units).
     expect(elapsedMs).toBeLessThan(1_500);
-    // 150 anchors cannot fit 2500 tokens, so this walks the ENTIRE ladder and
-    // still ends over budget — and the anchors survive it.
-    expect(injected).toContain(MILESTONE_OVER_BUDGET_NOTE);
-    expect(spinePromptNumbers(injected)).toEqual(anchorPrompts);
+    expect(injected.length).toBeGreaterThan(0);
     db.close();
   });
 });

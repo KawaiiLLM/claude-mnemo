@@ -235,6 +235,25 @@ describe("milestone rows nest under segment lines, lexicographic edge-signal adm
   });
 
   test("minimal row: no grade label, no prompt excerpt, and `↳` carries ADDRESSES", () => {
+    // Milestone-election spec, ticket 03: T19 is override-excluded, so it can
+    // never appear on ANY `↳` line — an unelected cited turn is omitted
+    // entirely (spec step 5), never named regardless. `corrector`'s own edge
+    // to T19 (`supersedes`) is also outside the election's vocabulary. This
+    // test's own `↳` demonstration therefore needs a real, in-vocabulary
+    // edge between two turns that ARE both elected — `corrector` (T21)
+    // `grounds` `correctorCited` (T20).
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn" as const, id: ids.corrector! },
+          cited: { kind: "turn" as const, id: ids.correctorCited! },
+          relation: "grounds" as const,
+          provenance: "judged" as const,
+        },
+      ],
+      CUTOFF,
+    );
     const output = renderArc();
     const spineBlock = output.split("── legacy era")[0]!;
     // The grade DISPLAY is retired on EVERY surface now, legacy block included.
@@ -242,7 +261,8 @@ describe("milestone rows nest under segment lines, lexicographic edge-signal adm
     expect(output).not.toMatch(/G[0-4]/);
     expect(spineBlock).not.toContain("the user asked something"); // the shared prompt text — never on a milestone row
     // Spec 金样例: `↳` is a pure address index, never a `+N 前件` count.
-    expect(spineBlock).toContain("↳ T19");
+    expect(spineBlock).toContain("↳ T20");
+    expect(spineBlock).not.toContain("↳ T19");
     expect(output).not.toContain("前件");
   });
 

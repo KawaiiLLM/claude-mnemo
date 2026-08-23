@@ -6,6 +6,8 @@ import {
   type CitationRelation,
 } from "./citations";
 import { runWriteTransaction } from "./database";
+import { liveTurnSql } from "./turn-liveness";
+import { EDGE_RELATIONS } from "../shared/turn-phase";
 
 /**
  * The universal citation graph (spec D7). One table for every edge the system
@@ -684,6 +686,75 @@ export function getIncomingEdges(db: Database, cited: EdgeNode): MemoryEdge[] {
     )
     .all(cited.kind, cited.id)
     .map(mapEdgeRow);
+}
+
+/** One `turn`↔`turn` edge, the shape `shared/milestone-election.ts`'s `LaneEdgeInput` wants — `relation`/`tags` unparsed off the row. */
+export interface TurnRelationEdgeLite {
+  citingId: number;
+  citedId: number;
+  relation: string;
+  tags: string[];
+}
+
+/**
+ * Every live `turn`↔`turn` edge touching `turnIds` on EITHER end, current-
+ * vocabulary relations only (`EDGE_RELATIONS` — the eight-word set a fresh
+ * write may carry; excludes the frozen-legacy `supersedes` word and the bare,
+ * relation-NULL existence row, neither of which the election module's own
+ * vocabulary reads), tags parsed to their canonical array.
+ *
+ * The milestone-election module's (`shared/milestone-election.ts`, ticket 02)
+ * own DB feed — timeline.ts's `selectMilestoneTurns`/
+ * `selectSegmentMilestonesByEdgeSignals` (ticket 03) call this once per
+ * selection and hand the result straight to `electMilestones` as
+ * `LaneEdgeInput[]`. Distinct from every existing edge reader here: unlike
+ * `getOutgoingEdges`/`getIncomingEdges` (one node's own edges) or
+ * `db/citations.ts`'s `getSessionEffectiveCitations` (session-scoped, no
+ * tags — a citation reader, not a lane-tag reader), election needs the full
+ * TAGGED graph touching an explicit, caller-resolved turn set — a session
+ * window's turns or one segment's membership, either already resolved by the
+ * caller — which is also why this takes a plain id list rather than a
+ * session id: the caller (not this function) decides the scope.
+ *
+ * EITHER end, not both: an override/refutes writer OUTSIDE `turnIds` (a
+ * segment's own membership, say) must still be able to exclude a member from
+ * candidacy — `electMilestones`'s own contract is that an excluded node's
+ * edges keep counting toward every OTHER node's degree even though the node
+ * itself never displays, so the caller (`electMilestones`, via its
+ * candidates ∩ window-ids filter) is what narrows this wider read back down
+ * to the caller's own display scope, not this query.
+ */
+export function getRelationEdgesAmongTurns(
+  db: Database,
+  turnIds: readonly number[],
+): TurnRelationEdgeLite[] {
+  const ids = [...new Set(turnIds)];
+  if (ids.length === 0) {
+    return [];
+  }
+  const idPlaceholders = ids.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  return db
+    .query<
+      { citingId: number; citedId: number; relation: string; tags: string },
+      (number | string)[]
+    >(
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation, me.tags AS tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
+    )
+    .all(...ids, ...ids, ...EDGE_RELATIONS)
+    .map((row) => ({
+      citingId: row.citingId,
+      citedId: row.citedId,
+      relation: row.relation,
+      tags: parseTagSet(row.tags),
+    }));
 }
 
 /**
