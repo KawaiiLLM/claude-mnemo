@@ -209,6 +209,57 @@ describe("MCP format renderer", () => {
     );
   });
 
+  // Edge-read-surface spec, ticket 01: `relations` is a plain list field like
+  // `insight`/`files_*` above, but its own lines already carry the ruled
+  // `→`/`←` glyph — this pins that the renderer does not ALSO prefix them
+  // with `pushBullets`' own `- `, and that the field stays silent (no header
+  // line at all) when unrequested or empty, the same as every other optional
+  // field.
+  test("relations renders pre-formatted lines verbatim under one header, off by default", () => {
+    const turnWithRelations: FormattedTurn = {
+      id: 1,
+      promptNumber: 1,
+      title: "Diagnose auth",
+      content: "Refresh overlap diagnosed",
+      relations: [
+        "→ override T38 {rule-ledger-tickets+watchdog-liveness}",
+        "← narrows from T48",
+      ],
+    };
+
+    // Unrequested (default fields): the relations header/lines never appear,
+    // even though the data is populated — a caller who never asked pays
+    // nothing and sees nothing different from before this ticket.
+    expect(renderNode({ type: "turn", value: turnWithRelations })).toBe(
+      ["[T1] Diagnose auth", "    - content: Refresh overlap diagnosed"].join("\n"),
+    );
+
+    // Requested: one header line, then each pre-formatted line indented
+    // beneath it, glyph-first — no extra `- ` bullet marker.
+    expect(
+      renderNode({ type: "turn", value: turnWithRelations }, { fields: ALL_FIELDS }),
+    ).toContain(
+      [
+        "    - relations:",
+        "        → override T38 {rule-ledger-tickets+watchdog-liveness}",
+        "        ← narrows from T48",
+      ].join("\n"),
+    );
+
+    // Requested but empty: still silent — an empty list is not a header with
+    // nothing under it.
+    const turnWithNoRelations: FormattedTurn = {
+      id: 2,
+      promptNumber: 2,
+      title: "No edges",
+      content: "c",
+      relations: [],
+    };
+    expect(
+      renderNode({ type: "turn", value: turnWithNoRelations }, { fields: ALL_FIELDS }),
+    ).not.toContain("relations");
+  });
+
   test("a session detail render includes the raw pointer only when includeRawPointer is set", () => {
     const session: FormattedSession = {
       id: 200,

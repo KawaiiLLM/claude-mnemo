@@ -272,7 +272,7 @@ describe("金样例 — the rendered row contract", () => {
     expect(lines[0]).toBe("[E31] title");
     expect(lines[1]).toBe("    [S15069]");
     expect(lines).toContain("        [T821] 08-17 18:19 ⚖️ title");
-    expect(lines).toContain("            ↳ T811, T812");
+    expect(lines).toContain("            ↳ T811(extends), T812(extends)");
     // A milestone row never carries a G value.
     expect(output).not.toMatch(/\bG[0-4]\b/);
   });
@@ -307,7 +307,7 @@ describe("金样例 — the rendered row contract", () => {
       taskCausalityEraCutoffEpoch: CUTOFF,
     });
 
-    expect(output.split("\n")).toContain("            ↳ S15088/T21");
+    expect(output.split("\n")).toContain("            ↳ S15088/T21(extends)");
   });
 
   test("milestone view: a session re-entered later gets a second transition line, and its title only once", () => {

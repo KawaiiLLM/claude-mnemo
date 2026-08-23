@@ -114,7 +114,7 @@ Markers:
 [E31] the arc's title
     [S15069]
         [T821] 08-17 18:19 ⚖️ the turn's title
-            ↳ T811, T812
+            ↳ T811(extends), T812(consume)
 ```
 
 A milestone row states its stamp inline (that is what tells it apart from a
@@ -124,7 +124,12 @@ elected — an unelected citation never appears on a `↳` line, and the
 budget cost of the line is charged to the citing row. An elected
 antecedent can render both under a citing row's `↳` and as its own
 milestone row elsewhere on the page — the list is non-exclusive, there is
-no re-homing. Addresses render as a bare `T<m>` inside the same session, a
+no re-homing. Each address carries the relation word(s) that pair holds in
+parentheses — `T<n>(<word>)`, or `T<n>(<word>,<word2>)` when the same pair
+declares more than one relation, each word named once; this is a plain
+address index (which word, not its tags or provenance — use
+`recall(filter={fields:["relations"]})` for the full tagged detail).
+Addresses render as a bare `T<m>` inside the same session, a
 session-qualified `S<n>/T<m>` when the antecedent lives elsewhere, and a
 trailing `+N` when there are more than four. `⚑` marks a row that is itself a
 corrector. No importance value renders on any row.

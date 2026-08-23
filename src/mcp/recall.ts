@@ -61,6 +61,7 @@ import {
   type RecallTurnField,
 } from "./memory-filter";
 import { estimateTokens } from "../utils/token-estimate";
+import { buildTurnRelationLines } from "./relations-view";
 import { renderSegmentHeaderLines } from "./segment-spine";
 import {
   chronologicalSegmentMembers,
@@ -461,6 +462,7 @@ export function buildTurnView(
   db: Database,
   turn: TurnRecord,
   eraCutoffEpoch: number | null = null,
+  fields?: TurnRenderFields,
 ): FormattedTurn {
   // Excluded observations (a `note` call) stay out of every reader-facing view:
   // their count, their ids and their tool names are as much of a leak as their
@@ -490,6 +492,12 @@ export function buildTurnView(
     // a session-ordered walk, so there is no "previous" this builder can name
     // honestly. The gap belongs to timeline's own session-scoped turn view.
     metadata: composeTurnMetadata(turn, null),
+    // Edge-read-surface spec, ticket 01: the DB query behind `relations` runs
+    // ONLY when a caller's own `fields` actually selects it — "costs nothing
+    // when not requested" is enforced here, at the query boundary, not just
+    // at render time (unlike `insight`/`filesRead`/etc. above, which are
+    // already-loaded `TurnRecord` columns with no extra query to skip).
+    relations: fields?.has("relations") ? buildTurnRelationLines(db, turn) : undefined,
   };
 }
 
@@ -678,7 +686,7 @@ function renderSession(
   const preview = previewItems(turns, CHILD_PREVIEW_SIZE);
   const turnIds: number[] = [];
   for (const item of preview.items) {
-    const turnView = buildTurnView(db, item, eraCutoffEpoch);
+    const turnView = buildTurnView(db, item, eraCutoffEpoch, fields);
     const turnLines = renderNode(
       { type: "turn", value: turnView },
       {
@@ -746,7 +754,7 @@ function renderTurnScope(
 
     const sessionTurns = grouped.get(session.id) ?? [];
     for (const item of sessionTurns) {
-      const turnView = buildTurnView(db, item, eraCutoffEpoch);
+      const turnView = buildTurnView(db, item, eraCutoffEpoch, fields);
       lines.push(
         renderNode(
           { type: "turn", value: turnView },
@@ -1539,21 +1547,24 @@ function renderGroupedSearchResults(
 
     for (const turn of turns) {
       grants.push({ entityType: "turn", entityId: turn.id });
-      const turnView = withTurnSearchSnippet(
-        buildTurnView(db, turn, eraCutoffEpoch),
-        terms,
-        snippetWindow,
-        signal,
-      );
       // A turn pulled in only via an observation hit (never itself a direct
       // turn-layer hit) renders at the DEFAULT field set regardless of what
       // the caller asked for — same "collapsed" floor the pre-ticket-11
       // depth switch gave it; a turn that WAS itself a direct hit gets the
-      // caller's own field selection.
+      // caller's own field selection. Computed BEFORE `buildTurnView` (edge-
+      // read-surface spec, ticket 01) so a turn that downgrades to the
+      // default set — which never includes `relations` — never pays for the
+      // relations query it will not render.
       const turnFields =
         group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id)
           ? DEFAULT_TURN_RENDER_FIELDS
           : fields;
+      const turnView = withTurnSearchSnippet(
+        buildTurnView(db, turn, eraCutoffEpoch, turnFields),
+        terms,
+        snippetWindow,
+        signal,
+      );
 
       lines.push(
         renderNode(
@@ -2032,6 +2043,14 @@ function browseFieldText(
     case "observations": {
       const count = getExtractableObservationsForTurn(db, turn.id).length;
       return count > 0 ? `${count} observation${count === 1 ? "" : "s"}` : null;
+    }
+    case "relations": {
+      // Edge-read-surface spec, ticket 01: same "; "-joined single-line
+      // convention `insight` uses above — the browse row is one field line
+      // per field, never a nested bullet list the way the unified renderer's
+      // turn body can afford.
+      const lines = buildTurnRelationLines(db, turn);
+      return lines.length > 0 ? lines.join("; ") : null;
     }
     case "metadata":
       // No previous-turn epoch in a GLOBAL chronological feed: the unit before

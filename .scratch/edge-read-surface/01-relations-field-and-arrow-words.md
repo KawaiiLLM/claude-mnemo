@@ -22,7 +22,7 @@ the T1-100 real annotation). Two approved additions:
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: Law-8 strip → 1 red, address-word strip → 11 red; peer completeness bar checked — legacy relations visible (no vocabulary filter in the reader), settlement allowlist carries recall; accepted gap: the costs-nothing-when-unrequested gate is structural, not mutation-pinned)
 
 - [ ] `relations` accepted in `filter.fields`; unrequested output
       byte-identical to today (absence pinned); requested output renders

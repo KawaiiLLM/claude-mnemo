@@ -450,11 +450,13 @@ export interface KeptMilestone {
   /**
    * `↳` addresses (spec step 5): this row's OWN cited turns that are
    * themselves elected (present in the same selection's `kept` set) —
-   * pre-formatted `T<n>` strings, ascending by the cited turn's prompt
-   * number. An unelected cited turn is omitted entirely, never pulled in as
-   * a separate row; the line's rendering (and token-budget) cost is folded
-   * into THIS row's own unit — no separate pulled-antecedent object survives
-   * this ticket (contrast the retired `PulledAntecedent`).
+   * pre-formatted `T<n>(word,word2)` strings (edge-read-surface spec, ticket
+   * 01: the relation word(s) that pair carries, alphabetical, each named
+   * once), ascending by the cited turn's prompt number. An unelected cited
+   * turn is omitted entirely, never pulled in as a separate row; the line's
+   * rendering (and token-budget) cost is folded into THIS row's own unit —
+   * no separate pulled-antecedent object survives this ticket (contrast the
+   * retired `PulledAntecedent`).
    */
   antecedents: string[];
 }
@@ -1282,22 +1284,43 @@ function isTimelineExcludedTurn(turn: Pick<TurnRecord, "wasRolledBack" | "status
  * excluded (a row never lists itself). Reused by both `selectMilestoneTurns`
  * (S-view) and `selectSegmentMilestonesByEdgeSignals` (E-view) so the two
  * routes' `↳` semantics cannot drift apart.
+ *
+ * Edge-read-surface spec, ticket 01: the citedId bucket now maps to the
+ * DISTINCT relation words `laneEdges` recorded for that exact pair
+ * (alphabetical — this file's own `relation ASC` convention, see
+ * `db/memory-edges.ts`), not just a bare id — a pair carrying several
+ * relations (a landing turn that both `extends` and `indexes` the same
+ * target) renders each word once on the `↳` line
+ * (`T<n>(extends,indexes)`) instead of the address alone.
  */
 function buildElectedCitations(
   laneEdges: readonly LaneEdgeInput[],
   electedIds: ReadonlySet<number>,
-): Map<number, number[]> {
-  const citedByTurn = new Map<number, number[]>();
+): Map<number, Map<number, string[]>> {
+  const citedByTurn = new Map<number, Map<number, Set<string>>>();
   for (const edge of laneEdges) {
     if (edge.citingId === edge.citedId) continue;
     if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
-    const bucket = citedByTurn.get(edge.citingId) ?? [];
-    if (!bucket.includes(edge.citedId)) {
-      bucket.push(edge.citedId);
-    }
+    const bucket = citedByTurn.get(edge.citingId) ?? new Map<number, Set<string>>();
+    const words = bucket.get(edge.citedId) ?? new Set<string>();
+    words.add(edge.relation);
+    bucket.set(edge.citedId, words);
     citedByTurn.set(edge.citingId, bucket);
   }
-  return citedByTurn;
+  const result = new Map<number, Map<number, string[]>>();
+  for (const [citingId, bucket] of citedByTurn) {
+    const wordsByCited = new Map<number, string[]>();
+    for (const [citedId, words] of bucket) {
+      wordsByCited.set(citedId, [...words].sort());
+    }
+    result.set(citingId, wordsByCited);
+  }
+  return result;
+}
+
+/** `T<n>` / `S<sid>/T<n>` plus its `(word,word2)` suffix — `()` omitted when `words` is empty (a bare, unclassified pair — see the callers' own doc comments for when that happens). */
+function formatAntecedentAddress(address: string, words: readonly string[]): string {
+  return words.length > 0 ? `${address}(${words.join(",")})` : address;
 }
 
 /**
@@ -1439,10 +1462,15 @@ export function selectMilestoneTurns(view: {
   const electedSlice = windowCandidates.slice(0, Math.max(0, view.budget));
   const electedIds = new Set(electedSlice.map((candidate) => candidate.id));
   const citedByTurn = buildElectedCitations(laneEdges, electedIds);
-  const antecedentsOf = (turnId: number): string[] =>
-    [...(citedByTurn.get(turnId) ?? [])]
+  const antecedentsOf = (turnId: number): string[] => {
+    const bucket = citedByTurn.get(turnId);
+    if (!bucket) return [];
+    return [...bucket.keys()]
       .sort((a, b) => turnById.get(a)!.promptNumber - turnById.get(b)!.promptNumber)
-      .map((id) => `T${turnById.get(id)!.promptNumber}`);
+      .map((id) =>
+        formatAntecedentAddress(`T${turnById.get(id)!.promptNumber}`, bucket.get(id)!),
+      );
+  };
 
   const rankedRows: KeptMilestone[] = windowCandidates.map((candidate) => {
     const turn = turnById.get(candidate.id)!;
@@ -3228,11 +3256,11 @@ export interface SegmentMilestoneRow {
   member: RankedSegmentMember;
   ordinal: number;
   /**
-   * `↳` antecedent ADDRESSES (spec 金样例 `↳ T811, T812`), resolved at
-   * selection time because that is where `db` is. Session-qualified
-   * (`S15088/T21`) when the antecedent lives in a DIFFERENT session from the
-   * row citing it — the bare form is only unambiguous under the row's own
-   * transition line.
+   * `↳` antecedent ADDRESSES (spec 金样例 `↳ T811(extends), T812(indexes)` —
+   * edge-read-surface spec, ticket 01), resolved at selection time because
+   * that is where `db` is. Session-qualified (`S15088/T21`) when the
+   * antecedent lives in a DIFFERENT session from the row citing it — the
+   * bare form is only unambiguous under the row's own transition line.
    */
   antecedents: string[];
   /** The owning session's title, for the transition line above the row. */
@@ -3289,7 +3317,7 @@ function resolveTurnRowLinks(
   const citingIds = [...result.keys()];
   const placeholders = citingIds.map(() => "?").join(",");
   const edges = db
-    .query<{ citingId: number; citedId: number; relation: string }, number[]>(
+    .query<{ citingId: number; citedId: number; relation: string | null }, number[]>(
       // Law 8 (indexes-rescope spec): a deleted or dormant turn is not a node,
       // so it may not appear as a `↳` antecedent either — the index row is the
       // graph's most visible face. Filtered at BOTH ends here, at the source:
@@ -3331,21 +3359,37 @@ function resolveTurnRowLinks(
   // of the cap's slots on one address. The relation detail is NOT dropped: the
   // ⚑ corrector test above still runs over every row, so a `supersedes`
   // alongside another relation on the same pair still raises the flag.
-  const byCiter = new Map<number, Array<{ sessionId: number; promptNumber: number }>>();
-  const seenPairs = new Set<string>();
+  //
+  // Edge-read-surface spec, ticket 01: each pair entry additionally collects
+  // the DISTINCT relation words its rows carry (a bare, relation-NULL row
+  // contributes none), so the `↳` line can name them — `T<n>(word,word2)`
+  // when the pair has words, plain `T<n>` for a pair whose only row is bare
+  // (nothing to name).
+  const byCiter = new Map<
+    number,
+    Array<{ sessionId: number; promptNumber: number; words: Set<string> }>
+  >();
+  const pairEntries = new Map<
+    string,
+    { sessionId: number; promptNumber: number; words: Set<string> }
+  >();
   for (const edge of edges) {
     const cited = citedById.get(edge.citedId);
     if (!cited || !result.has(edge.citingId)) {
       continue;
     }
     const pair = `${edge.citingId}>${edge.citedId}`;
-    if (seenPairs.has(pair)) {
-      continue;
+    let entry = pairEntries.get(pair);
+    if (!entry) {
+      entry = { sessionId: cited.sessionId, promptNumber: cited.promptNumber, words: new Set() };
+      pairEntries.set(pair, entry);
+      const bucket = byCiter.get(edge.citingId) ?? [];
+      bucket.push(entry);
+      byCiter.set(edge.citingId, bucket);
     }
-    seenPairs.add(pair);
-    const bucket = byCiter.get(edge.citingId) ?? [];
-    bucket.push({ sessionId: cited.sessionId, promptNumber: cited.promptNumber });
-    byCiter.set(edge.citingId, bucket);
+    if (edge.relation !== null) {
+      entry.words.add(edge.relation);
+    }
   }
 
   for (const turn of turns) {
@@ -3354,11 +3398,13 @@ function resolveTurnRowLinks(
         ? left.sessionId - right.sessionId
         : left.promptNumber - right.promptNumber,
     );
-    const shown = resolved.slice(0, MILESTONE_ANTECEDENT_CAP).map((entry) =>
-      entry.sessionId === turn.sessionId
-        ? `T${entry.promptNumber}`
-        : `S${entry.sessionId}/T${entry.promptNumber}`,
-    );
+    const shown = resolved.slice(0, MILESTONE_ANTECEDENT_CAP).map((entry) => {
+      const address =
+        entry.sessionId === turn.sessionId
+          ? `T${entry.promptNumber}`
+          : `S${entry.sessionId}/T${entry.promptNumber}`;
+      return formatAntecedentAddress(address, [...entry.words].sort());
+    });
     const folded = resolved.length - shown.length;
     result.get(turn.turnId)!.antecedents = folded > 0 ? [...shown, `+${folded}`] : shown;
   }
@@ -3529,18 +3575,23 @@ export function selectSegmentMilestonesByEdgeSignals(
     // a segment row carries no per-unit token-degradation ladder to fold
     // further (`renderEraMilestoneLines`'s own doc comment), so this is the
     // one and only place the `+N` fold happens.
-    const citedIds = [...(citedByTurn.get(member.turnId) ?? [])].sort((a, b) => {
-      const memberA = memberById.get(a)!;
-      const memberB = memberById.get(b)!;
-      return memberA.sessionId !== memberB.sessionId
-        ? memberA.sessionId - memberB.sessionId
-        : memberA.promptNumber - memberB.promptNumber;
-    });
+    const citedBucket = citedByTurn.get(member.turnId);
+    const citedIds = citedBucket
+      ? [...citedBucket.keys()].sort((a, b) => {
+          const memberA = memberById.get(a)!;
+          const memberB = memberById.get(b)!;
+          return memberA.sessionId !== memberB.sessionId
+            ? memberA.sessionId - memberB.sessionId
+            : memberA.promptNumber - memberB.promptNumber;
+        })
+      : [];
     const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
       const cited = memberById.get(id)!;
-      return cited.sessionId === member.sessionId
-        ? `T${cited.promptNumber}`
-        : `S${cited.sessionId}/T${cited.promptNumber}`;
+      const address =
+        cited.sessionId === member.sessionId
+          ? `T${cited.promptNumber}`
+          : `S${cited.sessionId}/T${cited.promptNumber}`;
+      return formatAntecedentAddress(address, citedBucket!.get(id)!);
     });
     const folded = citedIds.length - shown.length;
     return {

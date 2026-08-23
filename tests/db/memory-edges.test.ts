@@ -11,6 +11,7 @@ import {
   getEdgesByTag,
   getIncomingEdges,
   getOutgoingEdges,
+  getTurnRelationEdges,
   isCitationRelation,
   pairKey,
   parseNodeRef,
@@ -1297,6 +1298,188 @@ describe("universal memory edges", () => {
       expect(written[0]?.tags).toEqual([]);
       expect(getEdgesByTag(db, "ignored")).toEqual([]);
     });
+  });
+});
+
+// Edge-read-surface spec, ticket 01: `getTurnRelationEdges` is the `relations`
+// recall field's ONLY data source — both directions of one turn's
+// relation-carrying edges, Law-8 filtered at both ends. Exercised at the DB
+// layer directly (rather than only through `recall`'s render path) so a
+// filtering regression here is caught independent of the renderer above it.
+describe("getTurnRelationEdges (edge-read-surface spec, ticket 01)", () => {
+  let db: Database;
+  let sessionId: number;
+  let otherSessionId: number;
+
+  function addTurn(
+    promptNumber: number,
+    options: { sessionId?: number; wasRolledBack?: boolean; status?: string } = {},
+  ): number {
+    return db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, was_rolled_back, created_at_epoch)
+         VALUES (?, ?, ?, ?, 100)
+         RETURNING id`,
+      )
+      .get(
+        options.sessionId ?? sessionId,
+        promptNumber,
+        options.status ?? "extracted",
+        options.wasRolledBack ? 1 : 0,
+      )!.id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-relation-edges",
+      project: "/tmp/project",
+      title: null,
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    otherSessionId = upsertSession(db, {
+      contentSessionId: "session-relation-edges-other",
+      project: "/tmp/project",
+      title: null,
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("resolves both directions with relation, tags, and the other endpoint's own address", () => {
+    const subject = addTurn(1);
+    const outboundTarget = addTurn(2);
+    const inboundSource = addTurn(3);
+
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: subject },
+          cited: { kind: "turn", id: outboundTarget },
+          relation: "override",
+          provenance: "asserted",
+          tags: ["rule-ledger-tickets", "watchdog-liveness"],
+        },
+        {
+          citing: { kind: "turn", id: inboundSource },
+          cited: { kind: "turn", id: subject },
+          relation: "narrows",
+          provenance: "asserted",
+        },
+      ],
+      500,
+    );
+
+    const edges = getTurnRelationEdges(db, subject);
+
+    expect(edges.outbound).toEqual([
+      {
+        relation: "override",
+        tags: ["rule-ledger-tickets", "watchdog-liveness"],
+        otherTurnId: outboundTarget,
+        otherSessionId: sessionId,
+        otherPromptNumber: 2,
+      },
+    ]);
+    expect(edges.inbound).toEqual([
+      {
+        relation: "narrows",
+        tags: [],
+        otherTurnId: inboundSource,
+        otherSessionId: sessionId,
+        otherPromptNumber: 3,
+      },
+    ]);
+  });
+
+  test("excludes a bare (relation-NULL) pair — no word to render", () => {
+    const subject = addTurn(1);
+    const target = addTurn(2);
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: subject }, cited: { kind: "turn", id: target }, relation: null, provenance: "text-ref" }],
+      500,
+    );
+
+    const edges = getTurnRelationEdges(db, subject);
+    expect(edges.outbound).toEqual([]);
+    expect(edges.inbound).toEqual([]);
+  });
+
+  test("Law 8: a dormant (skipped) or deleted (rolled-back) endpoint never renders on either side", () => {
+    const subject = addTurn(1);
+    const dormantTarget = addTurn(2, { status: "skipped" });
+    const deletedTarget = addTurn(3, { wasRolledBack: true });
+    const dormantSource = addTurn(4, { status: "skipped" });
+    const deletedSource = addTurn(5, { wasRolledBack: true });
+    const liveTarget = addTurn(6);
+
+    writeMemoryEdges(
+      db,
+      [
+        { citing: { kind: "turn", id: subject }, cited: { kind: "turn", id: dormantTarget }, relation: "extends", provenance: "asserted" },
+        { citing: { kind: "turn", id: subject }, cited: { kind: "turn", id: deletedTarget }, relation: "extends", provenance: "asserted" },
+        { citing: { kind: "turn", id: subject }, cited: { kind: "turn", id: liveTarget }, relation: "extends", provenance: "asserted" },
+        { citing: { kind: "turn", id: dormantSource }, cited: { kind: "turn", id: subject }, relation: "consume", provenance: "asserted" },
+        { citing: { kind: "turn", id: deletedSource }, cited: { kind: "turn", id: subject }, relation: "consume", provenance: "asserted" },
+      ],
+      500,
+    );
+
+    const edges = getTurnRelationEdges(db, subject);
+    expect(edges.outbound.map((edge) => edge.otherTurnId)).toEqual([liveTarget]);
+    expect(edges.inbound).toEqual([]);
+  });
+
+  test("a cross-session edge resolves the other endpoint's OWN session id", () => {
+    const subject = addTurn(1);
+    const foreign = addTurn(21, { sessionId: otherSessionId });
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: subject }, cited: { kind: "turn", id: foreign }, relation: "grounds", provenance: "asserted" }],
+      500,
+    );
+
+    const edges = getTurnRelationEdges(db, subject);
+    expect(edges.outbound).toEqual([
+      {
+        relation: "grounds",
+        tags: [],
+        otherTurnId: foreign,
+        otherSessionId: otherSessionId,
+        otherPromptNumber: 21,
+      },
+    ]);
+  });
+
+  test("a relation-carrying self row (ticket 05) appears once under each direction", () => {
+    const subject = addTurn(1);
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: subject }, cited: { kind: "turn", id: subject }, relation: "verifies", provenance: "asserted" }],
+      500,
+    );
+
+    const edges = getTurnRelationEdges(db, subject);
+    expect(edges.outbound).toHaveLength(1);
+    expect(edges.inbound).toHaveLength(1);
+    expect(edges.outbound[0]?.otherTurnId).toBe(subject);
+    expect(edges.inbound[0]?.otherTurnId).toBe(subject);
   });
 });
 

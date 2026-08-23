@@ -247,6 +247,16 @@ export interface FormattedTurn {
    * not a second one inside the node renderer.
    */
   metadata?: string | null;
+  /**
+   * Edge-read-surface spec, ticket 01: the `relations` field's pre-formatted
+   * lines — `→ <word> T<n> {tag+tag}` outbound, `← <word> from T<n>
+   * {tag+tag}` inbound, untagged edges with no brace suffix. Resolved by the
+   * caller (`mcp/relations-view.ts`'s `buildTurnRelationLines`), keeping this
+   * module DB-free like every other field here. `undefined`/`[]` renders
+   * nothing — the caller only populates this when `fields.has("relations")`,
+   * so the query behind it costs nothing when the field is not requested.
+   */
+  relations?: string[];
 }
 
 export interface FormattedSession {
@@ -1122,6 +1132,17 @@ function formatTurnBody(
     const childBlock = renderTurnChildren(turn, options);
     if (childBlock) {
       lines.push(childBlock);
+    }
+  }
+
+  // Edge-read-surface spec, ticket 01: `relations` is a plain list field like
+  // `insight`/`files_*` above it, but its own lines already open with a
+  // glyph (`→`/`←`) that IS the ruled format — `pushBullets`' own `- ` prefix
+  // would double up on it, so this pushes the pre-formatted lines directly.
+  if (fields.has("relations") && turn.relations && turn.relations.length > 0) {
+    lines.push(`${fieldIndent}- relations:`);
+    for (const line of turn.relations) {
+      lines.push(`${bulletIndent}${line}`);
     }
   }
 

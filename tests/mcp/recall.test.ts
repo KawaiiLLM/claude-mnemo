@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import {
@@ -1550,5 +1551,172 @@ describe("filter unification (ticket 04): recall's id route AND-composes filter,
     expect(recallOutput).toContain("turn 4");
     expect(recallOutput).not.toContain("turn 1");
     expect(recallOutput).not.toContain("turn 3");
+  });
+});
+
+// Edge-read-surface spec, ticket 01: `relations` end-to-end through
+// `recallMemory` — off by default (unrequested output stays byte-identical
+// to every pre-ticket render), both directions with word+tag set when
+// requested, Law-8 filtered, cross-session addresses session-qualified.
+describe("relations field (edge-read-surface spec, ticket 01)", () => {
+  let db: Database;
+  let sessionId: number;
+  let otherSessionId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-relations",
+      project: "claude-mnemo",
+      title: "Relations fixture",
+      insight: null,
+      createdAtEpoch: 500_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    otherSessionId = upsertSession(db, {
+      contentSessionId: "session-relations-other",
+      project: "claude-mnemo",
+      title: "Foreign session",
+      insight: null,
+      createdAtEpoch: 500_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    const rows: Array<[number, string]> = [
+      [1, "subject"],
+      [2, "outbound target"],
+      [3, "inbound source"],
+      [4, "dormant target"],
+      [5, "deleted source"],
+    ];
+    for (const [promptNumber, label] of rows) {
+      saveTurn(db, {
+        sessionId,
+        promptNumber,
+        userPrompt: `prompt ${promptNumber}`,
+        assistantResponse: `response ${promptNumber}`,
+        title: `turn ${promptNumber} ${label}`,
+        content: `content ${promptNumber}`,
+        insight: null,
+        type: "decision",
+        tags: [],
+        filesRead: [],
+        filesModified: [],
+        createdAtEpoch: 500_000 + promptNumber,
+        updatedAtEpoch: 500_000 + promptNumber,
+        observations: [],
+      });
+    }
+    saveTurn(db, {
+      sessionId: otherSessionId,
+      promptNumber: 21,
+      userPrompt: "prompt 21",
+      assistantResponse: "response 21",
+      title: "turn 21 foreign",
+      content: "content 21",
+      insight: null,
+      type: "decision",
+      tags: [],
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 500_021,
+      updatedAtEpoch: 500_021,
+      observations: [],
+    });
+
+    db.query("UPDATE turns SET status = 'skipped' WHERE session_id = ? AND prompt_number = 4").run(sessionId);
+    db.query("UPDATE turns SET was_rolled_back = 1 WHERE session_id = ? AND prompt_number = 5").run(sessionId);
+
+    const subjectId = getTurn(db, sessionId, 1)!.id;
+    const outboundTargetId = getTurn(db, sessionId, 2)!.id;
+    const inboundSourceId = getTurn(db, sessionId, 3)!.id;
+    const dormantTargetId = getTurn(db, sessionId, 4)!.id;
+    const deletedSourceId = getTurn(db, sessionId, 5)!.id;
+    const foreignId = getTurn(db, otherSessionId, 21)!.id;
+
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: subjectId },
+          cited: { kind: "turn", id: outboundTargetId },
+          relation: "override",
+          provenance: "asserted",
+          tags: ["rule-ledger-tickets", "watchdog-liveness"],
+        },
+        {
+          citing: { kind: "turn", id: inboundSourceId },
+          cited: { kind: "turn", id: subjectId },
+          relation: "narrows",
+          provenance: "asserted",
+        },
+        // Law-8: neither of these may ever render, in either direction.
+        {
+          citing: { kind: "turn", id: subjectId },
+          cited: { kind: "turn", id: dormantTargetId },
+          relation: "extends",
+          provenance: "asserted",
+        },
+        {
+          citing: { kind: "turn", id: deletedSourceId },
+          cited: { kind: "turn", id: subjectId },
+          relation: "consume",
+          provenance: "asserted",
+        },
+        // Cross-session outbound — renders session-qualified.
+        {
+          citing: { kind: "turn", id: subjectId },
+          cited: { kind: "turn", id: foreignId },
+          relation: "grounds",
+          provenance: "asserted",
+        },
+      ],
+      500_100,
+    );
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("unrequested: no relations header or arrow lines anywhere in the render", () => {
+    const output = recallMemory(db, { id: `S${sessionId}/T1` });
+
+    expect(output).not.toContain("relations");
+    expect(output).not.toContain("→");
+    expect(output).not.toContain("←");
+  });
+
+  test("requested: both directions render with word + tag set, Law-8 filtered, cross-session qualified", () => {
+    const output = recallMemory(db, {
+      id: `S${sessionId}/T1`,
+      filter: { fields: ["title", "relations"] },
+    });
+
+    expect(output).toContain("- relations:");
+    expect(output).toContain("→ override T2 {rule-ledger-tickets+watchdog-liveness}");
+    expect(output).toContain("← narrows from T3");
+    expect(output).toContain(`→ grounds S${otherSessionId}/T21`);
+    // Law 8: the dormant target and the deleted source never appear.
+    expect(output).not.toContain("T4");
+    expect(output).not.toContain("T5");
+  });
+
+  test("the browse feed's own single-line rendering honors filter.fields the same way", () => {
+    // Bare `recall()` — no `id`, no `query`, and `filter.fields` alone is
+    // deliberately NOT a scoping criterion (`hasFilterCriteria`), so both
+    // calls below stay on `buildBrowseFeed`'s global chronological path, not
+    // the search/listing one `filter.session` would trigger.
+    const unrequested = recallMemory(db, {});
+    expect(unrequested).not.toContain("→");
+
+    const requested = recallMemory(db, {
+      filter: { fields: ["title", "relations"] },
+    });
+    expect(requested).toContain("→ override T2 {rule-ledger-tickets+watchdog-liveness}");
   });
 });

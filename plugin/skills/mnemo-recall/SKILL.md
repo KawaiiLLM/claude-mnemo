@@ -273,13 +273,21 @@ order and share this call's `page`/`pageBudget`/`turn` budgets.
 
 | Field | Meaning |
 |---|---|
-| `fields` | Any combination of `title`, `content`, `prompt`, `response`, `insight`, `observations`, `files`, `metadata` — which turn fields to render. Default `title` + `content`. |
+| `fields` | Any combination of `title`, `content`, `prompt`, `response`, `insight`, `observations`, `files`, `metadata`, `relations` — which turn fields to render. Default `title` + `content`. |
 
 `title` is never a field LINE — it is the row label itself, so selecting it
 alone gives you bare rows. `metadata` renders as one UNPREFIXED line directly
 under the row (`08-17 18:19 · 🔧20 ✏️3`): it is `timeline`'s turn-view default
 and `recall`'s opt-in, and it is where the retired turn table's time/gap/stats
 columns went.
+
+`relations` is a read convenience, off by default, that grants nothing new:
+it shows the turn's own tagged edges in both directions, one line each —
+`→ <word> T<n> {tag+tag}` for an edge this turn cites out, `← <word> from
+T<n> {tag+tag}` for one that cites it — untagged edges render with no brace
+suffix. Deleted or dormant endpoints never appear on either side. Ask for it
+when you need to self-verify an edge you just wrote, or check what a turn is
+already linked to before adding another relation.
 
 ## Common Patterns
 

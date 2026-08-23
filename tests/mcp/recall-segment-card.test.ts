@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { reindexTurnFromDb } from "../../src/db/search";
 import {
@@ -12,6 +13,7 @@ import {
   getSegment,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { getTurn } from "../../src/db/turns";
 import { capRenderToTokenBudget, DEFAULT_TURN_TOKEN_BUDGET, NAVIGATION_LEGEND } from "../../src/mcp/format";
 import { recallMemory } from "../../src/mcp/recall";
 import {
@@ -572,6 +574,40 @@ describe("recall(id=\"E<n>\") segment card", () => {
       expect(output.toLowerCase()).not.toContain("election");
       expect(output.toLowerCase()).not.toContain("tier");
     }
+  });
+
+  // Edge-read-surface spec, ticket 01: the `E<n>/T<m>` member-listing route
+  // builds its own `FormattedTurn` (`segment-card.ts`'s
+  // `renderSegmentMembersByOrdinal`) rather than going through
+  // `recall.ts`'s `buildTurnView` — this pins that it wires `relations` the
+  // same way, off by default.
+  test("a segment member's relations render only when filter.fields requests them", () => {
+    const t3 = makeTurn(3, { title: "third turn" });
+    addSegmentMembers(db, segmentId, [t3], CUTOFF);
+    const t1Id = getTurn(db, sessionId, 1)!.id;
+    const t3Id = getTurn(db, sessionId, 3)!.id;
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t3Id },
+          cited: { kind: "turn", id: t1Id },
+          relation: "extends",
+          provenance: "asserted",
+          tags: ["seg-tag"],
+        },
+      ],
+      CUTOFF,
+    );
+
+    const unrequested = recallMemory(db, { id: `E${segmentId}/T3` });
+    expect(unrequested).not.toContain("→");
+
+    const requested = recallMemory(db, {
+      id: `E${segmentId}/T3`,
+      filter: { fields: ["title", "relations"] },
+    });
+    expect(requested).toContain("→ extends T1 {seg-tag}");
   });
 });
 

@@ -35,6 +35,15 @@ export const RECALL_TURN_FIELD_NAMES = [
   // this vocabulary rather than a view-only switch — `recall` leaves it out of
   // its default set, `timeline`'s turn view includes it.
   "metadata",
+  // Edge-read-surface spec, ticket 01: a turn's own tagged edge set, BOTH
+  // directions — `→ <word> T<n> {tag+tag}` outbound, `← <word> from T<n>
+  // {tag+tag}` inbound — so a writer can self-verify an edge it just wrote
+  // (the read surface used to render neither the relation word nor its
+  // tags anywhere). OFF by default (absent from `DEFAULT_TURN_RENDER_FIELDS`
+  // and `DEFAULT_BROWSE_FIELDS` alike): a read convenience, not a scoping or
+  // licensing concern — rendering it grants nothing new (see
+  // `GATED_TURN_FIELDS` in format.ts, which deliberately excludes it).
+  "relations",
 ] as const;
 
 export type RecallTurnField = (typeof RECALL_TURN_FIELD_NAMES)[number];

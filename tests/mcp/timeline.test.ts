@@ -1434,7 +1434,10 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     const row4 = result.kept.find((row) => row.turn.promptNumber === 4)!;
     expect(row4.tier).toBe(2);
     // T2 cited by T4 (a `grounds` edge exists) but is NOT elected — omitted.
-    expect(row4.antecedents).toEqual(["T1", "T3"]);
+    // T4's own `extends`+`indexes` edges onto T1 (edge-read-surface spec,
+    // ticket 01) both name T1, so the pair renders one address with both
+    // words, alphabetical.
+    expect(row4.antecedents).toEqual(["T1(extends,indexes)", "T3(grounds)"]);
     // T2 never appears anywhere in the selection, elected or otherwise.
     expect(result.kept.some((row) => row.turn.promptNumber === 2)).toBe(false);
     expect(
@@ -1451,8 +1454,8 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     const result = selectMilestoneTurns({ windowTurns: rows, laneEdges, budget: 3 });
     const row2 = result.kept.find((row) => row.turn.promptNumber === 2)!;
     const row3 = result.kept.find((row) => row.turn.promptNumber === 3)!;
-    expect(row2.antecedents).toEqual(["T1"]);
-    expect(row3.antecedents).toEqual(["T1"]);
+    expect(row2.antecedents).toEqual(["T1(grounds)"]);
+    expect(row3.antecedents).toEqual(["T1(grounds)"]);
   });
 });
 
@@ -2527,7 +2530,7 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
       [
         `[S${session.id}] title`,
         "    [T821] 08-17 18:19 ⚖️ title",
-        "        ↳ T811, T812",
+        "        ↳ T811(consume), T812(consume)",
         "    [T822] 08-17 18:20 ⚖️ title",
       ].join("\n"),
     );
@@ -2682,8 +2685,36 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
       buildTimelineView(db, { id: `S${sessionId}/T821..821` }),
     );
 
-    // Cap is 4 addresses; 5 distinct antecedents fold exactly one.
-    expect(output).toContain("↳ T801, T802, T803, T804, +1");
+    // Cap is 4 addresses; 5 distinct antecedents fold exactly one. T801 carries
+    // both `consume` and `grounds` (edge-read-surface spec, ticket 01: each
+    // word named once, alphabetical); the rest carry `consume` alone.
+    expect(output).toContain("↳ T801(consume,grounds), T802(consume), T803(consume), T804(consume), +1");
+  });
+
+  // Edge-read-surface spec, ticket 01: `resolveTurnRowLinks`' own `↳` feed
+  // (unlike the milestone views' `laneEdges`, which only ever carry a
+  // relation word) still counts a pair's BARE row toward `↳` — "an
+  // antecedent is a turn this row was built on, whatever relation the writer
+  // named" (see that function's own doc comment). A pair with NO relation
+  // word at all has nothing to put in parens, so it keeps the plain `T<n>`
+  // form rather than an empty `T<n>()`.
+  it("a bare (unclassified) antecedent keeps the plain T<n> form; a classified one gets its word", () => {
+    const db = createDatabase(":memory:");
+    const { sessionId, citerId, antecedentIds } = seedCiter(db, 2);
+    writeMemoryEdges(
+      db,
+      [
+        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: null, provenance: "text-ref" },
+        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[1]! }, relation: "extends", provenance: "asserted" },
+      ],
+      dayEpoch(30),
+    );
+
+    const output = renderTimeline(
+      buildTimelineView(db, { id: `S${sessionId}/T821..821` }),
+    );
+
+    expect(output).toContain("↳ T801, T802(extends)");
   });
 });
 
@@ -3640,7 +3671,7 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     // addresses on that line, not in rows.
     const pulledLine = block.find((line) => PULLED_ROW_RE.test(line))!;
     expect([...pulledLine.matchAll(/T\d+/g)]).toHaveLength(MILESTONE_UNIT_PULLED_CAP);
-    expect(block.join("\n")).toContain("↳ T2, T3, T4, T5, +2");
+    expect(block.join("\n")).toContain("↳ T2(verifies), T3(verifies), T4(verifies), T5(verifies), +2");
   });
 
   it("a cited turn that is ITSELF elected renders both its own main row AND a ↳ cross-reference under its citer (milestone-election spec, ticket 03: `↳` names elected rows, no exclusivity with holding a row of its own)", () => {
@@ -4002,10 +4033,10 @@ describe("unified row renderer — frozen shapes", () => {
       '        [T1] 07-25 17:20 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
       '        [T2] 07-25 17:21 🔵 12-14% error · "先量误差"',
       '        [T3] 07-25 17:22 ⚖️ Volume anchoring · "按卷号锚"',
-      "            ↳ T2",
+      "            ↳ T2(verifies)",
       '        [T4] 07-25 17:23 ✅ Wired the loader · "接到 loader"',
       '        [T5] 07-25 17:24 ⚖️ Cursor slicing · "没有卷数怎么办"',
-      "            ↳ T2",
+      "            ↳ T2(verifies)",
       '        🏁 [T6] 07-25 17:25 🟣 0.9.0 released · "发布"  ✏️package.json,plugin.json',
     ]);
   });
@@ -4059,7 +4090,7 @@ describe("unified row renderer — frozen shapes", () => {
       '        [T2] 07-25 17:21 🔵 Worker A: cursor slicing wins on recall · "⟨notify⟩"',
       '        [T3] 07-25 17:22 🔵 Worker B: inconclusive · "⟨notify⟩"',
       '        [T4] 07-25 17:23 ⚖️ Picked cursor slicing on the survey evidence · "⟨notify⟩"',
-      "            ↳ T2",
+      "            ↳ T2(verifies)",
     ]);
   });
 

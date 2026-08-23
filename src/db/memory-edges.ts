@@ -688,6 +688,102 @@ export function getIncomingEdges(db: Database, cited: EdgeNode): MemoryEdge[] {
     .map(mapEdgeRow);
 }
 
+/**
+ * One relation-carrying edge from the perspective of the turn whose
+ * `relations` recall field is being rendered (edge-read-surface spec, ticket
+ * 01) — the OTHER endpoint's own session/prompt address, pre-joined so the
+ * renderer needs no follow-up lookup.
+ */
+export interface TurnRelationEdgeView {
+  relation: CitationRelation;
+  tags: string[];
+  otherTurnId: number;
+  otherSessionId: number;
+  otherPromptNumber: number;
+}
+
+export interface TurnRelationEdges {
+  /** This turn is the citing side — `→ <relation> <other>`. */
+  outbound: TurnRelationEdgeView[];
+  /** This turn is the cited side — `← <relation> from <other>`. */
+  inbound: TurnRelationEdgeView[];
+}
+
+interface TurnRelationEdgeRow {
+  relation: CitationRelation;
+  tags: string;
+  otherTurnId: number;
+  otherSessionId: number;
+  otherPromptNumber: number;
+}
+
+function mapTurnRelationEdgeRow(row: TurnRelationEdgeRow): TurnRelationEdgeView {
+  return {
+    relation: row.relation,
+    tags: parseTagSet(row.tags),
+    otherTurnId: row.otherTurnId,
+    otherSessionId: row.otherSessionId,
+    otherPromptNumber: row.otherPromptNumber,
+  };
+}
+
+/**
+ * Edge-read-surface spec, ticket 01: the `relations` recall field's ONLY data
+ * source — BOTH directions of one turn's relation-carrying `turn`↔`turn`
+ * edges (`relation IS NOT NULL`; a bare existence row has no word to render,
+ * so it is excluded here the same way it is invisible to every other reader
+ * that only cares about classified citations), Law-8 filtered at BOTH ends
+ * the same discipline `mcp/timeline.ts`'s `resolveTurnRowLinks` already
+ * applies to the `↳` line — a deleted or dormant endpoint never renders, on
+ * either side of the pair. `relation ASC, tags ASC` matches this file's own
+ * ordering convention (`getOutgoingEdges`/`getIncomingEdges`), so the
+ * `relations` field renders deterministically.
+ *
+ * A relation-carrying SELF row (ticket 05's deliberate exception to the
+ * bare-only self-loop refusal) satisfies both queries at once — it is a real
+ * edge in both directions on the same node, so it legitimately appears once
+ * under `outbound` and once under `inbound`.
+ */
+export function getTurnRelationEdges(db: Database, turnId: number): TurnRelationEdges {
+  const outbound = db
+    .query<TurnRelationEdgeRow, [number]>(
+      `SELECT e.relation AS relation, e.tags AS tags,
+              cited.id AS otherTurnId, cited.session_id AS otherSessionId,
+              cited.prompt_number AS otherPromptNumber
+         FROM memory_edges e
+         JOIN turns citing ON citing.id = e.citing_id
+         JOIN turns cited ON cited.id = e.cited_id
+        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+          AND e.relation IS NOT NULL
+          AND e.citing_id = ?
+          AND ${liveTurnSql("citing")}
+          AND ${liveTurnSql("cited")}
+        ORDER BY e.relation ASC, e.tags ASC`,
+    )
+    .all(turnId)
+    .map(mapTurnRelationEdgeRow);
+
+  const inbound = db
+    .query<TurnRelationEdgeRow, [number]>(
+      `SELECT e.relation AS relation, e.tags AS tags,
+              citing.id AS otherTurnId, citing.session_id AS otherSessionId,
+              citing.prompt_number AS otherPromptNumber
+         FROM memory_edges e
+         JOIN turns citing ON citing.id = e.citing_id
+         JOIN turns cited ON cited.id = e.cited_id
+        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+          AND e.relation IS NOT NULL
+          AND e.cited_id = ?
+          AND ${liveTurnSql("citing")}
+          AND ${liveTurnSql("cited")}
+        ORDER BY e.relation ASC, e.tags ASC`,
+    )
+    .all(turnId)
+    .map(mapTurnRelationEdgeRow);
+
+  return { outbound, inbound };
+}
+
 /** One `turn`↔`turn` edge, the shape `shared/milestone-election.ts`'s `LaneEdgeInput` wants — `relation`/`tags` unparsed off the row. */
 export interface TurnRelationEdgeLite {
   citingId: number;

@@ -591,7 +591,7 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
         `[E${segment.id}] title`,
         `    [S${sessionA}]`,
         "        [T821] 08-17 18:19 ⚖️ title",
-        "            ↳ T811, T812",
+        "            ↳ T811(consume), T812(consume)",
         "        [T822] 08-17 18:20 ⚖️ title",
         `    [S${sessionB}]`,
         "        [T21] 08-18 18:19 ⚖️ title",
