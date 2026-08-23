@@ -20,7 +20,7 @@ architecture's "writable set is IMMUTABLE and declared" bullet.
 **Blocked by:** 03 (the error computation with anchors). E5 instances flow
 in automatically once 04 lands — no change here.
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: anchor filter neutered → 1 red; closure liveness dropped → 1 red; one-hop closure ruling accepted — fixpoint cascade would contradict window-by-window cleaning)
 
 - [ ] A window with one in-scope-anchored error refuses commit naming it;
       repair then commit succeeds; the same error anchored outside the set

@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { isSqliteBusy } from "../db/database";
 import {
+  computeSettlementWritableTurnIds,
   getNoteSettlementJob,
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
   type NoteSettlementFailureClass,
@@ -122,14 +123,43 @@ export interface NoteSettlementQueryRequest {
   jobId: number;
   claimGeneration: number;
   sessionId: number;
-  reviewableTurnIds: ReadonlySet<number>;
+  /**
+   * The IMMUTABLE WRITABLE SET (tag-mandate ticket 05, spec "the writable set
+   * is IMMUTABLE and declared") — `db/note-settlement.ts`'s
+   * `computeSettlementWritableTurnIds` over the context's rendered turns:
+   * window ∪ rendered lookback ∪ the deadlock-guard closure (the cited
+   * endpoints of in-scope-anchored edges). Computed ONCE, here, before the
+   * model runs, and it is the SINGLE definition three things read:
+   *
+   *   1. the turn facade's own writable-range check (its
+   *      `SettlementTurnFacadeContext.reviewableTurnIds`, fed verbatim from
+   *      this field by `note-settlement-sdk-query.ts` — that field keeps its
+   *      older name only because the membership facade shares it; it carries
+   *      THIS set, not a separately computed one);
+   *   2. the commit gate, which refuses while any checker error anchors
+   *      inside it (`note-settlement-sdk-query.ts`);
+   *   3. the prompt, which declares it to the agent (ticket 06).
+   *
+   * It was `reviewableTurnIds` (window ∪ RENDERED lookback) before this
+   * ticket. The rename is the honest one: the closure adds ids this prompt
+   * never rendered, so "reviewable" stopped describing it, and a gate that
+   * judged one set while the facade enforced another would be the fork this
+   * spec's whole "immutable and declared" clause exists to forbid.
+   */
+  writableTurnIds: ReadonlySet<number>;
   contextBuiltAtEpoch: number;
   /**
    * The settled window's own prompt-number bounds (rubric-v10 ticket 06):
    * the `lane_check` tool's scope, exactly `job.windowStart`/`windowEnd` —
-   * not `reviewableTurnIds`, which also carries the rendered LOOKBACK
-   * turns. A lane check runs over the window being settled, same as the
-   * spec's own "may run it over its window's lanes".
+   * not `writableTurnIds`, which also carries the rendered LOOKBACK turns
+   * and the deadlock-guard closure. A lane check runs over the window being
+   * settled, same as the spec's own "may run it over its window's lanes".
+   *
+   * Tag-mandate ticket 05: the commit GATE runs that same projection over
+   * this same window scope, then filters the resulting errors by
+   * `writableTurnIds`. Scope and verdict are two different questions — one
+   * projection decides what is TRUE, the set decides what is THIS RUN'S to
+   * fix.
    */
   windowStart: number;
   windowEnd: number;
@@ -289,6 +319,17 @@ export function createNoteSettlementDispatch(
       return { ok: true };
     }
 
+    // Tag-mandate ticket 05: the immutable writable set, resolved HERE —
+    // before the prompt is rendered and before the model exists — so the
+    // range check, the commit gate and (ticket 06) the prompt's own
+    // declaration all read one value that cannot move mid-run. Deliberately
+    // computed ahead of `renderNoteSettlementPrompt` so ticket 06's prompt
+    // rewrite has it in hand at the render call with no reordering.
+    const writableTurnIds = computeSettlementWritableTurnIds(
+      db,
+      context.reviewableTurnIds,
+    );
+
     let queryResult: NoteSettlementQueryResult;
     try {
       queryResult = await options.runQuery({
@@ -299,7 +340,7 @@ export function createNoteSettlementDispatch(
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: job.sessionId,
-        reviewableTurnIds: context.reviewableTurnIds,
+        writableTurnIds,
         contextBuiltAtEpoch: context.builtAtEpoch,
         windowStart: job.windowStart,
         windowEnd: job.windowEnd,

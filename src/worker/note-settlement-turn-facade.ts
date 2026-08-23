@@ -200,7 +200,23 @@ export interface SettlementTurnFacadeContext {
   claimGeneration: number;
   /** For reference resolution's drop-log prefix only; not an authority gate. */
   sessionId: number;
-  /** The review-scope check (window plus rendered lookback). */
+  /**
+   * The writable-range check. Tag-mandate ticket 05: this carries the
+   * dispatch's IMMUTABLE WRITABLE SET —
+   * `db/note-settlement.ts`'s `computeSettlementWritableTurnIds` over the
+   * rendered turns, i.e. window ∪ rendered lookback ∪ the deadlock-guard
+   * closure (the cited endpoints of in-scope-anchored edges, so an
+   * untagged extends/narrows is repairable by TAGGING and not only by
+   * retracting). Fed verbatim from `NoteSettlementQueryRequest.writableTurnIds`
+   * by `note-settlement-sdk-query.ts`; nothing here recomputes it, which is
+   * what makes the commit gate's verdict and this range check the same
+   * question asked twice rather than two sets that can disagree.
+   *
+   * The FIELD keeps its pre-ticket name only because
+   * `note-settlement-membership-facade.ts` shares this interface; the name
+   * now under-describes the value, which ticket 06 may settle when it
+   * declares the set in the prompt.
+   */
   reviewableTurnIds: ReadonlySet<number>;
   /** When this dispatch's context was read — the note-timestamp fence's boundary. */
   contextBuiltAtEpoch: number;
@@ -716,9 +732,11 @@ export function evaluateSettlementTurnWrite(
     return {
       ok: false,
       message:
-        `${ref} is outside this dispatch's reviewable window (the window ` +
-        "plus its rendered lookback) — a turn's fields and its edges may " +
-        "only be written for a turn this prompt actually showed.",
+        `${ref} is outside this dispatch's reviewable window — its writable ` +
+        "set is the window, its lookback, and the cited endpoints those " +
+        "turns' own edges reach. A turn's fields and its edges may only be " +
+        "written for a turn that set names; recalling a turn outside it " +
+        "grants reading, never writing.",
     };
   }
 

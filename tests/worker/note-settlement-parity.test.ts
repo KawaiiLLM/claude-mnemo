@@ -119,7 +119,7 @@ async function captureSettlementRegistration(db: Database): Promise<{
     jobId: job.id,
     claimGeneration: job.claimGeneration,
     sessionId: sessionDbId,
-    reviewableTurnIds: new Set([t1]),
+    writableTurnIds: new Set([t1]),
     contextBuiltAtEpoch: NOW,
     windowStart: 1,
     windowEnd: 1,

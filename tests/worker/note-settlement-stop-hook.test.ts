@@ -242,7 +242,7 @@ describe("the hook is registered on the run's own job identity", () => {
       jobId: job.id,
       claimGeneration: job.claimGeneration,
       sessionId: sessionDbId,
-      reviewableTurnIds: new Set([turnId]),
+      writableTurnIds: new Set([turnId]),
       contextBuiltAtEpoch: NOW,
       windowStart: 1,
       windowEnd: 1,

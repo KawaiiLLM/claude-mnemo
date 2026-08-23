@@ -236,7 +236,7 @@ function queryThatStages(
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
       sessionId: request.sessionId,
-      reviewableTurnIds: request.reviewableTurnIds,
+      reviewableTurnIds: request.writableTurnIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
     };
     const engine = createSettlementDirectWriteEngine({ db, context, now: () => NOW });
@@ -1108,5 +1108,58 @@ describe("lane_check reminder (rubric-v10 ticket 06) — advisory, never a block
     expect(outcome.ok).toBe(false);
     expect(!outcome.ok && outcome.failureClass).toBe("deterministic");
     expect(warnings.some((line) => line.includes("lane_check"))).toBe(true);
+  });
+});
+
+/**
+ * THE IMMUTABLE WRITABLE SET (tag-mandate ticket 05, spec "the writable set
+ * is IMMUTABLE and declared"). Proved at the DISPATCH, which is the only
+ * place it is computed: the range check inside the facade and the commit
+ * gate inside the query layer both read this one value, so a dispatch that
+ * declared the wrong set would fork them silently.
+ */
+describe("the dispatch declares one immutable writable set (tag-mandate ticket 05)", () => {
+  test("the request carries window ∪ rendered lookback ∪ the deadlock-guard closure", async () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1, { note: { title: "one", content: "first" } });
+    const t2 = seedTurn(sessionDbId, 2, { note: { title: "two", content: "second" } });
+    const t3 = seedTurn(sessionDbId, 3, { note: { title: "three", content: "third" } });
+    const t4 = seedTurn(sessionDbId, 4, { note: { title: "four", content: "fourth" } });
+
+    // T4 continues T1 with an UNTAGGED extends — the mandate's own stock
+    // case. T1 is far enough back that the render never shows it, so without
+    // the closure the repair (tag the edge; the subset invariant needs the
+    // tag on both endpoints) would be unreachable and the window would be
+    // pinned on a commit it could never satisfy.
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t4 },
+          cited: { kind: "turn", id: t1 },
+          relation: "extends",
+          provenance: "asserted",
+          tags: [],
+        },
+      ],
+      NOW,
+    );
+
+    // A one-turn window: the lookback defaults to the window's own size, so
+    // the RENDER reaches back exactly to T3 and T1/T2 stay off-screen.
+    const job = claimWindow(sessionDbId, 4, 4);
+
+    let seen: NoteSettlementQueryRequest | null = null;
+    await dispatchWith(async (request) => {
+      seen = request;
+      return { text: "no commit", commitMetrics: null };
+    })({ job });
+
+    const request = seen as NoteSettlementQueryRequest | null;
+    expect(request).not.toBeNull();
+    expect([...request!.writableTurnIds].sort((a, b) => a - b)).toEqual([t1, t3, t4]);
+    // T2 is neither rendered nor an endpoint of any in-scope edge: the
+    // closure widens for repairability, never for convenience.
+    expect(request!.writableTurnIds.has(t2)).toBe(false);
   });
 });

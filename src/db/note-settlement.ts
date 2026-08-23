@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
 import { closePendingNoteDebtsAsClosed, realPromptPredicate } from "./note-debt";
+import { liveTurnSql } from "./turn-liveness";
 import {
   DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
   DEFAULT_NOTE_SETTLEMENT_CAP_TURNS,
@@ -270,6 +271,96 @@ export function getNoteSettlementJob(
       .query<NoteSettlementJob, [number]>(`${JOB_SELECT} WHERE id = ?`)
       .get(jobId) ?? null
   );
+}
+
+/**
+ * How many turn ids one closure query binds at a time — SQLite's own
+ * parameter ceiling is the only reason this is chunked at all; the result is
+ * identical for any chunk size.
+ */
+const WRITABLE_CLOSURE_ID_CHUNK = 400;
+
+/**
+ * The IMMUTABLE WRITABLE SET (tag-mandate spec, "the writable set is
+ * IMMUTABLE and declared"; ticket 05). One definition of "which turn ids may
+ * this settlement run write", computed ONCE at dispatch time, BEFORE the
+ * model runs:
+ *
+ *   window ∪ declared lookback
+ *     where declared lookback = the rendered lookback (the existing rule,
+ *     `worker/note-settlement-context.ts`'s `reviewableTurnIds`, which already
+ *     carries window + lookback)
+ *     PLUS the DEADLOCK-GUARD CLOSURE below.
+ *
+ * `renderedTurnIds` is that base set; this function returns base ∪ closure.
+ *
+ * ## The closure, and why it is the shape it is
+ *
+ * Every one of the checker's edge error classes (E1 untagged
+ * extends/narrows, E2 out-of-vocabulary relation, E4 subset-invariant stock)
+ * anchors at the CITING turn, and the commit gate refuses while any error
+ * anchors inside this set. The TAG repair for those classes —
+ * retract + re-add carrying a lane tag — is legal only when the tag sits on
+ * BOTH endpoints (`shared/turn-phase.ts`'s Gate B subset invariant), so
+ * repairing an edge whose citing side is in scope may require writing `tags`
+ * on a CITED turn outside it. Without that endpoint in the writable set the
+ * window is pinned on a commit it can never satisfy — the terminal-state trap
+ * the anchoring rule exists to prevent (spec "Anchoring and repairability",
+ * the burned window_start precedent S15069/T1410).
+ *
+ * So: for every live turn-turn relation edge whose CITING side is already in
+ * the set, the CITED side joins it. Three deliberate boundaries:
+ *
+ *   - ONE HOP, seeded from the whole base set (window AND rendered lookback),
+ *     not from the window alone: the gate judges errors anchored at lookback
+ *     turns too, so their repairs need the same endpoint reach. It is NOT a
+ *     fixpoint — following the added endpoints' own out-edges would drag the
+ *     transitive citation chain of the whole session into one window's
+ *     writable scope, contradicting the spec's "stock cleans itself window by
+ *     window; no bulk migration". A newly-added endpoint whose OWN edge is in
+ *     error is repairable by retraction (always the citing turn's power) even
+ *     when the tag path stops here.
+ *   - EVERY relation word, not just the two mandated ones: E4 repairs touch
+ *     tagged edges of any word, and the settlement checklist's own duty 3
+ *     ("complete a lane's continuation along override/consume/indexes too")
+ *     needs those endpoints taggable as well.
+ *   - LIVE endpoints only (`db/turn-liveness.ts`, law 8), on both sides. A
+ *     rolled-back or skipped turn is never a node, so it can neither anchor
+ *     an error nor be required by one — granting write reach to it would be
+ *     reach nothing needs.
+ *
+ * Returned ASCENDING so the declared set is byte-stable: the prompt prints
+ * it (ticket 06) and a set whose order wandered between runs would churn the
+ * prompt cache for no semantic change.
+ *
+ * Read-only: every statement here is a SELECT.
+ */
+export function computeSettlementWritableTurnIds(
+  db: Database,
+  renderedTurnIds: Iterable<number>,
+): Set<number> {
+  const base = [...new Set(renderedTurnIds)];
+  const writable = new Set<number>(base);
+  for (let offset = 0; offset < base.length; offset += WRITABLE_CLOSURE_ID_CHUNK) {
+    const chunk = base.slice(offset, offset + WRITABLE_CLOSURE_ID_CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = db
+      .query<{ citedId: number }, number[]>(
+        `SELECT DISTINCT me.cited_id AS citedId
+           FROM memory_edges me
+           JOIN turns tc ON tc.id = me.citing_id
+           JOIN turns td ON td.id = me.cited_id
+          WHERE me.citing_id IN (${placeholders})
+            AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+            AND me.relation IS NOT NULL
+            AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
+      )
+      .all(...chunk);
+    for (const row of rows) {
+      writable.add(row.citedId);
+    }
+  }
+  return new Set([...writable].sort((a, b) => a - b));
 }
 
 export function listNoteSettlementJobs(

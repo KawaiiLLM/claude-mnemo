@@ -5,6 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
+  computeSettlementWritableTurnIds,
   enqueueNoteSettlementWindows,
   getNoteSettlementJob,
   type NoteSettlementJob,
@@ -181,7 +182,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        reviewableTurnIds: new Set([t1]),
+        writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -231,7 +232,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        reviewableTurnIds: new Set([t1]),
+        writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -289,7 +290,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        reviewableTurnIds: new Set([t1]),
+        writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -342,7 +343,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        reviewableTurnIds: new Set([t1]),
+        writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -407,7 +408,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        reviewableTurnIds: new Set(),
+        writableTurnIds: new Set(),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 3,
@@ -518,7 +519,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        reviewableTurnIds: new Set(),
+        writableTurnIds: new Set(),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -563,7 +564,7 @@ describe("ticket 01 (agent-thinking-config): maxThinkingTokens passthrough", () 
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        reviewableTurnIds: new Set([t1]),
+        writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -613,7 +614,7 @@ describe("ticket 01 (agent-thinking-config): maxThinkingTokens passthrough", () 
           jobId: job.id,
           claimGeneration: job.claimGeneration,
           sessionId: sessionDbId,
-          reviewableTurnIds: new Set([t1]),
+          writableTurnIds: new Set([t1]),
           contextBuiltAtEpoch: NOW,
           windowStart: 1,
           windowEnd: 1,
@@ -681,7 +682,7 @@ describe("direct write holds through the real registered handlers (ticket 05: st
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        reviewableTurnIds: new Set([t1]),
+        writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -691,6 +692,311 @@ describe("direct write holds through the real registered handlers (ticket 05: st
       expect(getTurnById(db, t1)!.type).toEqual(["design"]);
       expect(getTurnById(db, t1)!.tags).toEqual(["lease"]);
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+/**
+ * THE COMMIT GATE (tag-mandate ticket 05, spec "The commit gate" +
+ * "Anchoring and repairability"). Proved at the REAL registered handler —
+ * the same discipline the rest of this file uses — because the gate's whole
+ * value is that the tool the model actually calls refuses, and a test against
+ * a helper function would prove only that the helper computes.
+ *
+ * Three properties, one per test:
+ *
+ *   1. an error anchored INSIDE the run's immutable writable set refuses the
+ *      commit, names the offending row and the move that clears it, and
+ *      costs the job NOTHING (still `claimed`, same attempt count) — a
+ *      refusal is an ordinary in-run tool rejection, not an attempt failure;
+ *      repairing and re-calling `commit` in the SAME run then succeeds;
+ *   2. the SAME error anchored outside the set commits clean — the scoping
+ *      that keeps every window able to converge (spec: an error anchored
+ *      outside blocks its OWN window, never this one);
+ *   3. a turn-anchored class (E3) behaves identically, so the gate reads
+ *      `anchorId` and nothing else — it needs no per-class knowledge.
+ */
+describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)", () => {
+  /**
+   * A window (T1-T2) whose T2 carries a TAGGED `extends` at an out-of-window
+   * turn that does not carry the tag — a genuine E4 subset-invariant stock
+   * violation, anchored at the citing turn T2. The repair (tagging the CITED
+   * endpoint) is only possible because the deadlock-guard closure puts that
+   * endpoint in the writable set, so this fixture exercises the gate and the
+   * closure together, which is how they meet in production.
+   */
+  function seedSubsetInvariantFixture(db: Database): {
+    sessionDbId: number;
+    t1: number;
+    t2: number;
+    outside: number;
+    job: NoteSettlementJob;
+  } {
+    const sessionDbId = upsertSession(db, {
+      contentSessionId: "settlement-sdk-query-commit-gate-session",
+      project: "/tmp/project-settlement-sdk-query-commit-gate",
+      title: "settlement sdk-query commit-gate fixture",
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW - 10_000,
+      updatedAtEpoch: NOW - 10_000,
+      completedAtEpoch: null,
+    }).id;
+
+    const insertTurn = (promptNumber: number, tags: string): number =>
+      db
+        .query<{ id: number }, [number, number, string, string, number, string]>(
+          `INSERT INTO turns (
+             session_id, prompt_number, status, user_prompt, assistant_response,
+             tool_call_count, created_at_epoch, type, tags
+           ) VALUES (?, ?, 'active', ?, ?, 3, ?, '["design"]', ?)
+           RETURNING id`,
+        )
+        .get(
+          sessionDbId,
+          promptNumber,
+          `prompt ${promptNumber}`,
+          `response ${promptNumber}`,
+          NOW - 900 + promptNumber,
+          tags,
+        )!.id;
+
+    const t1 = insertTurn(1, "[]");
+    const t2 = insertTurn(2, '["lane"]');
+    const outside = insertTurn(3, "[]");
+
+    // Straight through the primitive, bypassing the write gate — the exact
+    // orphan shape the checker exists to catch over STOCK (a later tag edit
+    // on an endpoint can strand a row the gate once passed).
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t2 },
+          cited: { kind: "turn", id: outside },
+          relation: "extends",
+          provenance: "asserted",
+          tags: ["lane"],
+        },
+      ],
+      NOW,
+    );
+
+    enqueueNoteSettlementWindows(
+      db,
+      [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 2, triggerType: "consecutive" }],
+      NOW,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+    const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+    if (!job) {
+      throw new Error("fixture failed to claim a settlement job");
+    }
+    return { sessionDbId, t1, t2, outside, job };
+  }
+
+  test("an in-scope error refuses commit naming it, costs no attempt, and a repair inside the same run commits", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, t1, t2, outside, job } = seedSubsetInvariantFixture(db);
+      const capturedDb = db;
+
+      // The dispatch's own computation, used verbatim: window + lookback
+      // (here just the window's own turns) plus the deadlock-guard closure,
+      // which is what puts the CITED endpoint within repairing reach.
+      const writableTurnIds = computeSettlementWritableTurnIds(db, [t1, t2]);
+      expect(writableTurnIds.has(outside)).toBe(true);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const claimed = getNoteSettlementJob(capturedDb, job.id)!;
+          expect(claimed.status).toBe("claimed");
+
+          const refused = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const refusalText = refused.content[0]!.text;
+          expect(refusalText).toContain("Commit refused");
+          expect(refusalText).toContain("[E4]");
+          // Addressed the way the repair call itself is addressed — a raw
+          // `turns.id` would make the list unactionable.
+          expect(refusalText).toContain(`S${sessionDbId}/T2`);
+          expect(refusalText).toContain(`S${sessionDbId}/T3`);
+          expect(refusalText).toContain('"lane" missing from the cited turn\'s own tags');
+          expect(refusalText).toContain("NOT a failed attempt");
+
+          // THE PROPERTY: a refusal is an ordinary in-run tool rejection.
+          // The job row is untouched — still claimed, same attempt count —
+          // so nothing about this refusal moves the window toward
+          // three-strike abandonment.
+          const afterRefusal = getNoteSettlementJob(capturedDb, job.id)!;
+          expect(afterRefusal.status).toBe("claimed");
+          expect(afterRefusal.attempts).toBe(claimed.attempts);
+          expect(afterRefusal.claimGeneration).toBe(claimed.claimGeneration);
+
+          // The repair the refusal asked for, on a turn the CLOSURE (not the
+          // rendered window) put in reach.
+          const repair = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T3`,
+            tags: ["lane"],
+          })) as { content: Array<{ text: string }> };
+          expect(repair.content[0]!.text).toContain("Landed");
+
+          const committed = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(committed.content[0]!.text).toContain("Committed");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds,
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 2,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      expect(getTurnById(db, outside)!.tags).toEqual(["lane"]);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("the SAME error anchored OUTSIDE the writable set never blocks this window", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, t1, t2, job } = seedSubsetInvariantFixture(db);
+      const capturedDb = db;
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const committed = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          // The error is still THERE — the checker reports it either way. It
+          // simply anchors at T2, which this run's set does not name, so it
+          // is another window's work.
+          expect(committed.content[0]!.text).toContain("Committed");
+          expect(committed.content[0]!.text).not.toContain("Commit refused");
+          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("done");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        // T2 — the anchor — deliberately absent.
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 2,
+      });
+
+      // Untouched by this window: the offending row still stands, waiting for
+      // the window that actually owns its anchor.
+      expect(getTurnById(db, t2)!.tags).toEqual(["lane"]);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a turn-anchored class (E3, empty type) blocks and clears the same way — the gate reads anchorId alone", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      // `seedFixture`'s turn is inserted with no `type` at all, so it carries
+      // the column default `[]` — E3's emptiness case, anchored at the turn.
+      const { sessionDbId, t1, job } = seedFixture(db);
+      const capturedDb = db;
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const refused = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(refused.content[0]!.text).toContain("[E3]");
+          expect(refused.content[0]!.text).toContain(`S${sessionDbId}/T1`);
+          expect(refused.content[0]!.text).toContain("type is empty");
+          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
+
+          await handlers.get("note")!({ turn: `S${sessionDbId}/T1`, type: ["design"] });
+
+          const committed = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(committed.content[0]!.text).toContain("Committed");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      expect(getTurnById(db, t1)!.type).toEqual(["design"]);
     } finally {
       db?.close();
     }

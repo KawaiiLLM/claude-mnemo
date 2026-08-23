@@ -14,7 +14,8 @@ import {
 import { createDatabaseBackedHandlers } from "../mcp/handlers";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
-import { checkLanes } from "../shared/lane-checker";
+import { getTurnById } from "../db/turns";
+import { checkLanes, type LaneCheckerError } from "../shared/lane-checker";
 import { renderLaneCheckerReports } from "../shared/lane-checker-render";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type {
@@ -188,7 +189,16 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "than once, and never let its output alone justify a write without the " +
   "usual Memory Rubric judgment.";
 
-/** Ticket 06 (spec "commit 重定位"): claim validity + a run summary + the job's terminal mark — no separate `check` tool. */
+/**
+ * Ticket 06 (spec "commit 重定位"): claim validity + a run summary + the job's
+ * terminal mark — no separate `check` tool.
+ *
+ * Tag-mandate ticket 05 adds the GATE sentence. It belongs on the tool's own
+ * description rather than only in the prompt for the same reason the lease
+ * refusal does: the contract a call is judged by is the one fact a caller
+ * must know at the moment of calling, and the description is the surface
+ * carried into every retry.
+ */
 const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "Finish this window: verify your job lease is still valid, report what " +
   "this run actually wrote, and mark the job durably complete. Call this " +
@@ -197,7 +207,16 @@ const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "ran, so an empty-handed `commit` (nothing to propose or correct) is a " +
   "normal, clean finish, not a no-op to avoid. This is the ONLY way the " +
   "job itself is marked done — without it, the window is retried later " +
-  "even though your writes already stand. If your job lease has been " +
+  "even though your writes already stand. " +
+  "Commit REFUSES while any state the grammar forbids still anchors on a " +
+  "turn inside your writable set — an untagged extends/narrows (E1), a " +
+  "relation word outside the eight (E2), an empty or out-of-vocabulary turn " +
+  "type (E3), a tagged edge whose tags are missing from an endpoint turn's " +
+  "own tags (E4). The refusal lists every one with its address and the move " +
+  "that clears it; repair them and call `commit` again — a refusal costs " +
+  "you nothing and is not a failed attempt. Errors anchored OUTSIDE your " +
+  "writable set are another window's work and never block you. " +
+  "If your job lease has been " +
   "reclaimed, commit refuses and no further commit from this run will " +
   "ever succeed — stop making tool calls.";
 
@@ -216,6 +235,142 @@ export interface CreateNoteSettlementSdkQueryOptions {
 
 function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
+}
+
+// ---------------------------------------------------------------------------
+// The commit gate (tag-mandate ticket 05, spec "The commit gate")
+// ---------------------------------------------------------------------------
+
+/** The window this dispatch settles, as the lane checker's own `range` scope takes it. */
+export interface SettlementWindowScope {
+  sessionId: number;
+  windowStart: number;
+  windowEnd: number;
+}
+
+/**
+ * ONE projection, one semantics: the `lane_check` tool and the commit gate
+ * run the IDENTICAL `loadLaneCheckScope` -> `checkLanes` pass over the job's
+ * own window (spec's implementation decision: "the same
+ * loadLaneCheckScope→checkLanes pass the lane_check tool uses — one
+ * projection, no second semantics"). Two callers of one function, so the
+ * cheap look the agent may take before committing and the verdict it is
+ * judged by can never disagree about a fact.
+ */
+function checkWindowLanes(db: Database, scope: SettlementWindowScope) {
+  const projection = loadLaneCheckScope(db, {
+    kind: "range",
+    sessionId: scope.sessionId,
+    promptStart: scope.windowStart,
+    promptEnd: scope.windowEnd,
+  });
+  return checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+}
+
+/**
+ * The checker addresses turns by `turns.id` (its `anchorId`); the AGENT can
+ * only write through `S<session>/T<prompt>` addresses. The refusal payload is
+ * a repair list, so it is rendered in the address vocabulary the repair calls
+ * actually take — a row id the model cannot type into `note` would make the
+ * list unactionable. Falls back to the raw id if the row vanished between the
+ * check and this render (it cannot in practice: the checker only ever
+ * anchors at a live turn it just loaded).
+ */
+function turnAddressFor(db: Database, turnId: number): string {
+  const turn = getTurnById(db, turnId);
+  return turn ? `S${turn.sessionId}/T${turn.promptNumber}` : `turn #${turnId}`;
+}
+
+/** One error instance as a repair line: what is wrong, where, and the move that clears it. */
+function describeCommitGateError(db: Database, error: LaneCheckerError): string {
+  const anchor = turnAddressFor(db, error.anchorId);
+  switch (error.class) {
+    case "E1":
+      return (
+        `[E1] ${anchor}: ${error.relation} -> ${turnAddressFor(db, error.citedId)} carries no lane tag. ` +
+        "extends/narrows name the line they continue — retract it and re-add it " +
+        "with the lane's tag set (every tag must sit on BOTH turns' own tags), or " +
+        "retract it if the continuation is not real."
+      );
+    case "E2":
+      return (
+        `[E2] ${anchor}: "${error.relation}" -> ${turnAddressFor(db, error.citedId)} is outside the eight-word ` +
+        "relation vocabulary. Retract it; re-add a legal relation if the link still holds."
+      );
+    case "E3":
+      return (
+        `[E3] ${anchor}: type ${
+          error.types.length === 0
+            ? "is empty"
+            : `[${error.types.join(",")}] is outside the vocabulary (${error.outsideVocabulary.join(",")})`
+        }. Set a legal type on this turn.`
+      );
+    case "E4":
+      return (
+        `[E4] ${anchor}: ${error.relation} -> ${turnAddressFor(db, error.citedId)} {${error.tags.join(",")}} — ` +
+        `${error.missing
+          .map((miss) => `"${miss.tag}" missing from the ${miss.endpoint} turn's own tags`)
+          .join(", ")}. Add the tag to that turn, or retract the edge.`
+      );
+    default: {
+      // Exhaustive over `LaneErrorClass` today. A class added to the checker
+      // (E5, lane shape, is ticket 04) must gain a line here rather than
+      // reach the agent as an unexplained refusal — this is the compile-time
+      // reminder, and the runtime fallback keeps the anchor actionable even
+      // if one ever slips through.
+      const unclassed = error as { class: string };
+      return `[${unclassed.class}] ${anchor}: see \`lane_check\` for this instance.`;
+    }
+  }
+}
+
+/**
+ * The gate itself: run the checker over the job's window and REFUSE while any
+ * error anchors INSIDE this run's immutable writable set.
+ *
+ * Returns the refusal payload, or `null` when the window is clean enough to
+ * commit. Three properties this function exists to hold:
+ *
+ *   - **Anchor filtering is the whole verdict.** `LaneCheckerError.anchorId`
+ *     is a turn id the repairing agent can address (an edge error anchors at
+ *     its CITING turn, a type error at the turn itself), and membership in
+ *     `writableTurnIds` is the ONLY question asked of it. An error anchored
+ *     outside blocks its OWN window and never this one — without that
+ *     scoping a single bad out-of-window edge pins a window on a
+ *     permanently failing commit, the terminal-state trap (spec "Anchoring
+ *     and repairability", the burned window_start precedent S15069/T1410).
+ *   - **`result.errors` is uncapped and so is this list.** The checker's
+ *     RENDER caps for display; the data does not, because an instance that
+ *     sorted past a cap would slip the gate and the window would commit
+ *     dirty. Every offending instance is named here for the same reason.
+ *   - **Exemptions flow from the checker alone.** Compact markers and
+ *     legally-skipped/rolled-back turns never reach `errors` at all
+ *     (`db/lane-checker-load.ts`'s `liveTurnSql` gate, and the checker's own
+ *     compact skip), so there is no second exemption predicate here to drift
+ *     from the first.
+ */
+export function evaluateSettlementCommitGate(
+  db: Database,
+  scope: SettlementWindowScope & { writableTurnIds: ReadonlySet<number> },
+): string | null {
+  const result = checkWindowLanes(db, scope);
+  const blocking = result.errors.filter((error) => scope.writableTurnIds.has(error.anchorId));
+  if (blocking.length === 0) {
+    return null;
+  }
+  const outOfScope = result.errors.length - blocking.length;
+  return [
+    `Commit refused — ${blocking.length} error(s) the grammar forbids still anchor inside your ` +
+      "writable set. NOTHING was committed and this is NOT a failed attempt: repair these " +
+      "and call `commit` again in this same run.",
+    ...blocking.map((error) => `  ${describeCommitGateError(db, error)}`),
+    outOfScope > 0
+      ? `(${outOfScope} further error(s) anchor OUTSIDE your writable set — another window's work, not listed and not blocking.)`
+      : null,
+    "`lane_check` shows the same list, plus the warnings, without a commit attempt.",
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
 }
 
 export function createNoteSettlementSdkQuery(
@@ -262,7 +417,14 @@ export function createNoteSettlementSdkQuery(
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
       sessionId: request.sessionId,
-      reviewableTurnIds: request.reviewableTurnIds,
+      // ONE definition of the writable set (tag-mandate ticket 05): the
+      // facade's range check reads the SAME `request.writableTurnIds` the
+      // commit gate judges anchors against. The facade's field keeps its
+      // older name (`reviewableTurnIds`) because the membership facade shares
+      // that interface; what it CARRIES is this dispatch's declared writable
+      // set, closure included — nothing recomputes "window ∪ rendered
+      // lookback" independently any more.
+      reviewableTurnIds: request.writableTurnIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
     };
     const writes = createSettlementDirectWriteEngine({
@@ -332,7 +494,34 @@ export function createNoteSettlementSdkQuery(
           "commit",
           SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
           {},
-          async () => writes.commit(),
+          async () => {
+            // THE COMMIT GATE (tag-mandate ticket 05). It runs BEFORE
+            // `writes.commit()` and, on refusal, INSTEAD of it — which is
+            // exactly what makes a refusal cost no attempt: nothing touches
+            // the job row, so the job stays `claimed` with its attempt count
+            // untouched and the agent may repair and call `commit` again in
+            // this same run, like any other rejected tool call. Attempts are
+            // consumed only where they always were — by the dispatch layer,
+            // when a run ENDS without the job ever reaching `done`
+            // (worker/note-settlement-dispatch.ts).
+            //
+            // Skipped once this run has already committed: `commit` is
+            // idempotent within a run (the engine returns "Already
+            // committed"), and re-judging a window whose job row is already
+            // terminal would answer a question nothing can act on.
+            if (writes.getLastCommitMetrics() === null) {
+              const refusal = evaluateSettlementCommitGate(options.db, {
+                sessionId: request.sessionId,
+                windowStart: request.windowStart,
+                windowEnd: request.windowEnd,
+                writableTurnIds: request.writableTurnIds,
+              });
+              if (refusal !== null) {
+                return textResult(refusal);
+              }
+            }
+            return writes.commit();
+          },
         ),
         toolImpl(
           "lane_check",
@@ -340,14 +529,19 @@ export function createNoteSettlementSdkQuery(
           {},
           async () => {
             laneCheckCalled = true;
-            const projection = loadLaneCheckScope(options.db, {
-              kind: "range",
-              sessionId: request.sessionId,
-              promptStart: request.windowStart,
-              promptEnd: request.windowEnd,
-            });
-            const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
-            return textResult(renderLaneCheckerReports(result));
+            // The SAME pass the commit gate runs (ticket 05) — see
+            // `checkWindowLanes`: the preview and the verdict are one
+            // projection, so the list this prints cannot differ from the
+            // list `commit` judges.
+            return textResult(
+              renderLaneCheckerReports(
+                checkWindowLanes(options.db, {
+                  sessionId: request.sessionId,
+                  windowStart: request.windowStart,
+                  windowEnd: request.windowEnd,
+                }),
+              ),
+            );
           },
         ),
       ],
