@@ -583,6 +583,18 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   for (const row of loadEdgesByRelationTouching(db, memberIdList, ["override"])) {
     edgeMap.set(edgeKey(row), row);
   }
+  // TAG-MANDATE E1 STOCK PASS (ticket 05's probe, repaired at acceptance):
+  // every pass above seeds from DISCOVERED lane members, so a neighbourhood
+  // holding only untagged stance edges — the exact stock the mandate exists
+  // to repair — loads nothing, and E1 stays invisible to lane_check and the
+  // commit gate alike. Stance edges touching the scope's own SEED turns load
+  // unconditionally instead; tagged rows arriving here are harmless
+  // duplicates the edgeMap already dedupes.
+  if (seedTurnIds.length > 0) {
+    for (const row of loadEdgesByRelationTouching(db, seedTurnIds, [...STANCE_RELATIONS])) {
+      edgeMap.set(edgeKey(row), row);
+    }
+  }
   // HOMELESS-LANE FIXPOINT CLOSURE (round-5 review #12): a default-segment
   // lane has no `segment_members` to widen from at all, so its own members
   // get an iterative BFS closure over LANE_COMPONENT_RELATIONS edges instead
@@ -620,6 +632,14 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   for (const row of edgeMap.values()) {
     allTurnIds.add(row.citingId);
     allTurnIds.add(row.citedId);
+  }
+  // The scope's own SEED turns always join the projection (the E1 pass's
+  // sibling repair): without this, an edge-less laneless window loads zero
+  // turns and E3 on its own rows is as invisible as E1 was. `loadLiveTurns`
+  // below keeps the liveness/skip exemptions — a dead or skipped seed still
+  // never becomes a judgable row.
+  for (const id of seedTurnIds) {
+    allTurnIds.add(id);
   }
 
   // OUT-OF-VOCABULARY EDGES (semantic-conformance ticket 02): both endpoints

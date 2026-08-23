@@ -835,3 +835,48 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
     ]);
   });
 });
+
+describe("tag-mandate ticket 05 acceptance repair — E1/E3 stock loads without any tagged lane nearby", () => {
+  // The ticket-05 probe: every discovery/supplementary pass seeds from
+  // DISCOVERED lane members, so a neighbourhood holding ONLY untagged
+  // stance edges — the exact stock the mandate exists to repair — loaded
+  // nothing, and E1 was invisible to lane_check and the commit gate alike.
+  test("a pure untagged extends among laneless, tagless turns reaches the projection and fires E1 at the citing turn", () => {
+    const sessionId = seedSession("e1-stock");
+    const a = insertTurn(sessionId, 1, { type: ["design"] });
+    const b = insertTurn(sessionId, 2, { type: ["design"] });
+    tagEdge(b, a, "extends", []);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+    expect(projection.edges.some((e) => e.citingId === b && e.citedId === a && e.relation === "extends")).toBe(true);
+
+    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+    const e1 = result.errors.filter((error) => error.class === "E1");
+    expect(e1).toHaveLength(1);
+    expect(e1[0]!.anchorId).toBe(b);
+  });
+
+  test("an edge-less laneless window still loads its own seed turns, so a legacy type fires E3", () => {
+    const sessionId = seedSession("e3-stock");
+    const legacy = insertTurn(sessionId, 1, { type: ["discovery"] });
+    insertTurn(sessionId, 2, { type: ["design"] });
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+    expect(projection.turns.some((t) => t.id === legacy)).toBe(true);
+
+    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+    const e3 = result.errors.filter((error) => error.class === "E3");
+    expect(e3).toHaveLength(1);
+    expect(e3[0]!.anchorId).toBe(legacy);
+  });
+});
