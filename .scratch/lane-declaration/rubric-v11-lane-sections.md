@@ -22,6 +22,12 @@ Ticket 08 reproduces this wording rather than paraphrasing it.
 - **grounds** → 异相位：本节点的成立依赖其成立，它若倒下，本节点随之倒下。有独立 spec 轮时由 spec 承担 grounds、其余工件 consume 该承担者；无 spec 时工件直接 grounds。
 - **verifies / refutes** → 异相位：以本轮产出的检验结果支持/反驳其结论；源节点须含取证相位。
 
+**示例**（边由引用方指向被引方）:
+
+- **#release**:每次发布 `consume{release}` 上一次发布——lane 由这条边串起,永不收敛。同一个节点另写**无 tag** 的 `indexes` 聚合本次所交付的工件:两个 indexes 用途不同,只有带 tag 的那个才宣告收敛。
+- **跨相位的一条线**:`实现 —consume{rubric-design}→ spec —grounds{rubric-design}→ 设计终点`。同一个 tag 贯穿决策与落地,不拆成两条 lane。
+- **汇聚**:一批同时落地 A/B/C 三条 lane 时,这批的边同时带 `{A,B,C}`,单看任一条仍是完整的一条线;而针对其中一条的纠正写**只点名那条**的 `override{B}`,否则一次修理会重开整批。
+
 **原则**（不强制）:
 
 - **有效性**: 无有效产出、重复的 turn 应该 skip，被 skip/rewind 的 turn 不参与连接。
