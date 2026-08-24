@@ -186,6 +186,16 @@ export interface ConsoleGraphTurn {
   id: number;
   sessionId: number;
   promptNumber: number;
+  /**
+   * The address every console surface renders for this turn — server-formatted
+   * once here so the shell never assembles one (T1524 ruling). Under a SEGMENT
+   * scope a member reads `E<segmentId>/T<k>`, `k` being its 1-based position in
+   * that segment's own time-ordered roster (the handle `recall`'s `E<n>/T<m>`
+   * selector already uses); every other turn — a foreign turn the widened
+   * projection pulled in, and every turn under a session/range scope — keeps
+   * the citable `S<sessionId>/T<promptNumber>` form. See `graphAddressesFor`.
+   */
+  address: string;
   title: string | null;
   promptExcerpt: string;
   contentExcerpt: string;
@@ -403,9 +413,52 @@ function buildMeta(input: {
   };
 }
 
-/** "S<sessionId>/T<promptNumber>" — the same reader-facing address form every other console surface uses (floor-and-render-fidelity ticket 03). */
+/**
+ * The turn's own rendered address — `ConsoleGraphTurn.address`, decided once at
+ * projection time by `graphAddressesFor` (T1524 ruling), so the interval label
+ * and the row it points at can never disagree about what a turn is called. The
+ * `S<sessionId>/T<promptNumber>` fallback stands only for a turn built without
+ * that field (floor-and-render-fidelity ticket 03's original form).
+ */
 function turnAddress(turn: ConsoleGraphTurn): string {
-  return `S${turn.sessionId}/T${turn.promptNumber}`;
+  return turn.address || `S${turn.sessionId}/T${turn.promptNumber}`;
+}
+
+/**
+ * Per-turn addresses for ONE graph response (T1524 ruling: "就展示最新归属段内的
+ * turn,按时间顺序排列的 id(从 1 开始)").
+ *
+ * A segment is not session-bound, so labelling its interval `S15069/T1–S15069/
+ * T1518` asserts a session-scoped prompt range that is simply false the moment
+ * the segment spans sessions — and it silently reads as one even when it does
+ * not. Under a segment scope the ordering that actually governs the view is the
+ * segment's own event order, so that is what the address names: `E<id>/T<k>`
+ * over `sortedTurns` (already id-ordered, i.e. time-ordered), counting only the
+ * scope's OWN members. Two turns therefore keep `S<n>/T<m>`: a turn the widened
+ * lane structure pulled in from another segment (it has no position in this
+ * one), and every turn under a session/range scope (where the prompt number IS
+ * the reader's ordering key). The ordinal is a navigation handle, never a
+ * citation — a late-settling member shifts it — which is why the detail panel
+ * keeps showing the `S/T` form beside it.
+ */
+function graphAddressesFor(
+  scope: LaneCheckScope,
+  sortedTurns: readonly LaneTurnInput[],
+  segmentByTurnId: ReadonlyMap<number, string>,
+): Map<number, string> {
+  const addresses = new Map<number, string>();
+  if (scope.kind !== "segment") {
+    return addresses;
+  }
+  const scopedSegmentKey = String(scope.segmentId);
+  let ordinal = 0;
+  for (const turn of sortedTurns) {
+    if ((segmentByTurnId.get(turn.id) ?? DEFAULT_SEGMENT) === scopedSegmentKey) {
+      ordinal += 1;
+      addresses.set(turn.id, `E${scope.segmentId}/T${ordinal}`);
+    }
+  }
+  return addresses;
 }
 
 // ------------------------------------------------------------- sessions ----
@@ -1235,12 +1288,20 @@ export function handleGraphRoute(
   // correctly, and the interval it selects must be able to reach any turn in
   // the true full index, including the newest ones past 10000.
   const displayFields = reader.loadTurnDisplayFields(sortedTurns.map((turn) => turn.id));
+  // T1524 ruling — see `graphAddressesFor`. Computed over `sortedTurns`, the
+  // WHOLE projection, before any interval narrowing: a turn's ordinal is its
+  // place in the segment's roster, so paging to an older interval must not
+  // renumber the rows that stay on screen.
+  const segmentOrdinalAddresses = graphAddressesFor(scope, sortedTurns, segmentByTurnId);
   const turnsPayload: ConsoleGraphTurn[] = sortedTurns.map((turn) => {
     const fields = displayFields.get(turn.id);
+    const sessionId = fields?.sessionId ?? turn.order?.[0] ?? 0;
+    const promptNumber = fields?.promptNumber ?? turn.order?.[1] ?? 0;
     return {
       id: turn.id,
-      sessionId: fields?.sessionId ?? turn.order?.[0] ?? 0,
-      promptNumber: fields?.promptNumber ?? turn.order?.[1] ?? 0,
+      sessionId,
+      promptNumber,
+      address: segmentOrdinalAddresses.get(turn.id) ?? `S${sessionId}/T${promptNumber}`,
       title: fields?.title ?? null,
       promptExcerpt: codePointExcerpt(fields?.userPrompt ?? null, EXCERPT_PROMPT_CP),
       contentExcerpt: codePointExcerpt(fields?.content ?? null, EXCERPT_CONTENT_CP),

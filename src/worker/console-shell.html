@@ -97,6 +97,9 @@
   #tip .lg { color:#cdb8e8; }
   #panel { position:fixed; right:0; top:0; bottom:0; width:400px; background:var(--panel); border-left:1px solid var(--line); padding:20px 22px; overflow-y:auto; display:none; z-index:10; box-shadow:-6px 0 18px rgba(0,0,0,.04); }
   #panel .addr { font-family:Menlo,monospace; font-size:12px; color:var(--faint); }
+  /* the citable S/T form, shown beside a segment ordinal — the ordinal is a
+     navigation handle only, so the address you may quote stays on screen */
+  #panel .addr .addrcite { margin-left:8px; opacity:.62; }
   #panel h2 { font-size:14.5px; font-weight:600; margin:6px 0 10px; }
   #panel .chips { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }
   .chip { font-size:11px; padding:2px 8px; border-radius:9px; background:#eef0f2; color:#555; }
@@ -197,7 +200,11 @@ const relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";
 // panel erows) is, by construction, always a member of the currently-loaded
 // `turns`. The fallback is therefore asserted UNREACHABLE on any real graph
 // response, kept only as defensive dead code for a malformed fixture.
-const addrOf = id => { const t = turns[idx.get(id)]; return t ? `S${t.sessionId}/T${t.promptNumber}` : "T"+id; };
+// `t.address` is server-decided (T1524 ruling): `E<segment>/T<ordinal>` under a
+// segment scope, `S<session>/T<prompt>` everywhere else. The shell never
+// assembles one itself — the `S/T` term below is the same defensive fallback as
+// the bare `T<id>` one, for a fixture predating the field.
+const addrOf = id => { const t = turns[idx.get(id)]; return t ? (t.address || `S${t.sessionId}/T${t.promptNumber}`) : "T"+id; };
 
 /* ---- mutable render state: reset on every graph load ---- */
 let turns = [], edges = [], lanes = [];
@@ -359,7 +366,7 @@ for (const w of WORDS) {
   l.innerHTML = `<input type="checkbox" checked data-w="${w}"><span class="sw ${DASH.has(w)?"dash":""}" style="border-color:var(--${w})"></span>${w}`;
   bar.appendChild(l);
 }
-bar.insertAdjacentHTML("beforeend", `<span class="sep"></span><input id="search" placeholder="跳转:T1010 或标题关键词 ⏎">`);
+bar.insertAdjacentHTML("beforeend", `<span class="sep"></span><input id="search" placeholder="跳转:地址或标题关键词 ⏎">`);
 bar.addEventListener("change", e => { if (e.target.dataset.w){ on[e.target.dataset.w]=e.target.checked; paintFilters(); }});
 
 /* ---- graph load: session or segment scope -> /api/console/graph ---- */
@@ -449,7 +456,10 @@ function renderRangeBar(meta){
   rangeBar.innerHTML = "";
   const label = document.createElement("span");
   label.className = "rangeLabel";
-  label.textContent = `区间 ${iv.fromAddress}–${iv.toAddress}`; // textContent — addresses are server-formatted, not raw payload text
+  // textContent — addresses are server-formatted, not raw payload text. The
+  // node count rides along because it is the one number the endpoints alone
+  // never give: how much of the scope this interval actually holds.
+  label.textContent = `区间 ${iv.fromAddress}–${iv.toAddress} · ${turns.length} 个节点`;
   rangeBar.appendChild(label);
   if (!iv.isOldest) {
     const older = document.createElement("button");
@@ -515,7 +525,7 @@ function laneChip(l){
 }
 
 /* ---- vertical graph: one row per turn, arcs on the left rails ---- */
-const ROW = 22, TOP = 16, NODE_X = 352, TEXT_X = 372;
+const ROW = 22, TOP = 16, NODE_X = 352, TEXT_X = 372, LABEL_GAP = 12;
 const yOf = id => TOP + idx.get(id)*ROW + ROW/2;
 const W = 1080;
 const NS = "http://www.w3.org/2000/svg";
@@ -559,6 +569,7 @@ function renderGraphSvg(){
   }
 
   const ng = mk("g",{}); svg.appendChild(ng);
+  const labelEls = [], titleEls = [];
   for (const t of turns) {
     const y = yOf(t.id);
     // hit target covers node + text only — the arc rail stays BLANK, and blank
@@ -590,8 +601,9 @@ function renderGraphSvg(){
     ng.appendChild(g); nodeEls.set(t.id,g);
 
     const lb = mk("text",{class:"rowlbl",x:TEXT_X,y:y+3.5});
-    lb.textContent = `S${t.sessionId}/T${t.promptNumber}`;
-    const title = mk("text",{class:"rowtitle"+(t.title?"":" none"),x:TEXT_X+52,y:y+3.5});
+    lb.textContent = addrOf(t.id);
+    // x is set AFTER the loop, from the measured label column — see below.
+    const title = mk("text",{class:"rowtitle"+(t.title?"":" none"),y:y+3.5});
     const tt = t.title || "(无笔记)";
     // Code-point slice, never `.slice()` — a UTF-16 code-unit slice cuts
     // mid-surrogate-pair on non-BMP titles (peer finding #14b, matching the
@@ -600,8 +612,25 @@ function renderGraphSvg(){
     const ttCp = Array.from(tt);
     title.textContent = ttCp.length>62 ? ttCp.slice(0,62).join("")+"…" : tt; // textContent — no esc() needed
     ng.appendChild(lb); ng.appendChild(title);
+    labelEls.push(lb); titleEls.push(title);
     rowEls.set(t.id,[hit,lb,title]);
   }
+
+  // The label column is MEASURED, never a constant. The retired fixed 52px
+  // gutter was sized for the old `T<dbid>` label and painted the title straight
+  // through the wider `S<session>/T<prompt>` form the address ruling
+  // introduced; segment ordinals (`E60/T512`) are a third width again. Measure
+  // once per render — `ng` is already in the document, so getComputedTextLength
+  // reports real typeset widths — and fall back to a per-character estimate for
+  // an unattached or hidden SVG, where every measurement reads 0.
+  let labelW = 0, maxChars = 0;
+  for (const lb of labelEls) {
+    labelW = Math.max(labelW, lb.getComputedTextLength());
+    maxChars = Math.max(maxChars, lb.textContent.length);
+  }
+  if (!(labelW > 0)) labelW = maxChars * 6.8;
+  const titleX = TEXT_X + Math.ceil(labelW) + LABEL_GAP;
+  for (const el of titleEls) el.setAttribute("x", titleX);
 }
 
 /* ---- interactions ---- */
@@ -704,7 +733,7 @@ function renderTurnPanel(id){
     return `<span class="chip lane">${esc(l ? l.tagSet.join("+") : tok)}</span>`;
   }).join("");
   pbody.innerHTML =
-    `<div class="addr">S${t.sessionId}/T${t.promptNumber}</div><h2>${esc(t.title||"(无笔记)")}</h2>
+    `<div class="addr">${esc(addrOf(t.id))}${addrOf(t.id) !== `S${t.sessionId}/T${t.promptNumber}` ? `<span class="addrcite">S${t.sessionId}/T${t.promptNumber}</span>` : ""}</div><h2>${esc(t.title||"(无笔记)")}</h2>
      <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}</div>
      ${t.lanes.length?`<div class="flowline">所属 lane:${laneChipsHtml}${t.isTerminus?" · ◎ 已宣告终点":""}${t.isDead?" · ✕ 被 override":""}</div>`:""}
      ${t.promptExcerpt?`<div class="sec">prompt</div><div class="prompt">${esc(t.promptExcerpt)}</div>`:""}
@@ -720,12 +749,24 @@ function jump(id){
   wrap.scrollTo({top: yOf(id)-innerHeight/2, behavior:"smooth"});
 }
 document.getElementById("close").onclick = ()=>{ sel=null; paintFilters(); syncBadge(); panel.style.display="none"; };
+// Jump by ADDRESS, never by internal id (T1482's ruling, which this box was
+// the last holdout of): a full `E60/T512` or `S15069/T1387` matches exactly, a
+// bare `T512`/`512` matches the trailing `/T<n>` of whatever form the current
+// scope renders, and anything else falls through to a title substring.
 document.getElementById("search").addEventListener("keydown", e=>{
   if (e.key!=="Enter") return;
   const q = e.target.value.trim();
-  const m = q.match(/^T?(\d+)$/i);
-  if (m && idx.has(+m[1])) return jump(+m[1]);
-  const hit = turns.find(t=>(t.title||"").toLowerCase().includes(q.toLowerCase()));
+  if (!q) return;
+  const lower = s => s.toLowerCase();
+  const exact = turns.find(t=>lower(addrOf(t.id))===lower(q));
+  if (exact) return jump(exact.id);
+  const m = q.match(/^t?(\d+)$/i);
+  if (m) {
+    const suffix = "/t"+m[1];
+    const byOrdinal = turns.find(t=>lower(addrOf(t.id)).endsWith(suffix));
+    if (byOrdinal) return jump(byOrdinal.id);
+  }
+  const hit = turns.find(t=>(t.title||"").toLowerCase().includes(lower(q)));
   if (hit) jump(hit.id);
 });
 function tip(ev,html){ tipEl.innerHTML=html; tipEl.style.display="block"; tipEl.style.left=Math.min(ev.clientX+14,innerWidth-440)+"px"; tipEl.style.top=(ev.clientY+16)+"px"; }

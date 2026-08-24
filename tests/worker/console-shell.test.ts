@@ -322,15 +322,39 @@ describe("console-shell.html behavior-matrix wiring spot checks", () => {
   // the lane chip's terminus mark, the edge tooltip/panel erows (their own
   // FIELD_SINKS pins above). `turns.id` may still key the internal `idx`/
   // `nodeEls`/`rowEls`/edge `citingId`/`citedId` maps (DATA, never printed).
-  test("the node label renders S<sessionId>/T<promptNumber>, never the bare internal turns.id", () => {
-    expect(html).toContain('lb.textContent = `S${t.sessionId}/T${t.promptNumber}`;');
+  test("the node label renders the server-decided address, never the bare internal turns.id", () => {
+    expect(html).toContain("lb.textContent = addrOf(t.id);");
     expect(html).not.toContain('lb.textContent = "T"+t.id;');
   });
 
-  test("addrOf resolves a turn id to its address (falling back to the bare id only for a turn outside the loaded set)", () => {
+  // T1524 ruling: the address form is the SERVER's call (`E<segment>/T<ordinal>`
+  // under a segment scope, `S/T` otherwise), so the shell reads `t.address` and
+  // only falls back for a fixture predating the field.
+  test("addrOf reads the server-supplied address, falling back to S/T then the bare id", () => {
     expect(html).toContain(
-      "const addrOf = id => { const t = turns[idx.get(id)]; return t ? `S${t.sessionId}/T${t.promptNumber}` : \"T\"+id; };",
+      "const addrOf = id => { const t = turns[idx.get(id)]; return t ? (t.address || `S${t.sessionId}/T${t.promptNumber}`) : \"T\"+id; };",
     );
+  });
+
+  // The overlap defect (user screenshot, T1520): the title column was pinned at
+  // `TEXT_X+52`, sized for the retired `T<dbid>` label, and the wider address
+  // form painted straight through it. The column is measured now — this pins
+  // BOTH halves, because keeping the measurement while leaving one hard-coded
+  // offset behind would restore the bug for that row.
+  test("the title column is measured from the widest label, never a fixed gutter", () => {
+    expect(html).not.toContain("TEXT_X+52");
+    expect(html).toContain("lb.getComputedTextLength()");
+    expect(html).toContain("const titleX = TEXT_X + Math.ceil(labelW) + LABEL_GAP;");
+    expect(html).toContain('for (const el of titleEls) el.setAttribute("x", titleX);');
+  });
+
+  // The jump box was the last surface still resolving an internal id (its own
+  // placeholder taught `T1010`, a DB id). It matches rendered addresses now.
+  test("the jump box resolves addresses, never the internal turn id", () => {
+    expect(html).not.toContain("if (m && idx.has(+m[1])) return jump(+m[1]);");
+    expect(html).toContain("const exact = turns.find(t=>lower(addrOf(t.id))===lower(q));");
+    expect(html).toContain('const suffix = "/t"+m[1];');
+    expect(html).not.toContain("跳转:T1010");
   });
 
   test("a lane's terminus mark addresses the turn instead of printing its bare id", () => {

@@ -1551,3 +1551,59 @@ describe("bound constants (verbatim)", () => {
     expect(ELECTION_PREVIEW_BUDGET).toBe(30);
   });
 });
+
+// T1524 ruling ("就展示最新归属段内的 turn,按时间顺序排列的 id(从 1 开始)"):
+// a segment is not session-bound, so a segment-scoped view addresses its own
+// members by their place in the segment's roster. `segment` on a lane-check
+// turn is the stringified segment id (db/lane-checker-load.ts `segmentKeyFor`),
+// which is what these fixtures use — not the "E1" shorthand the older
+// hand-built fixtures above happen to carry.
+describe("GET /api/console/graph — turn address form", () => {
+  function threeTurnRun(): ConsoleLaneCheckRun {
+    return emptyLaneCheckRun({
+      turns: [
+        { id: 10, type: ["design"], order: [1, 4], segment: "7" },
+        { id: 20, type: ["ops"], order: [2, 9], segment: "9" },
+        { id: 30, type: ["review"], order: [1, 6], segment: "7" },
+      ],
+      edges: [],
+    });
+  }
+  const displayFields = new Map<number, ConsoleTurnDisplayFields>([
+    [10, { sessionId: 1, promptNumber: 4, title: "a", userPrompt: null, content: null }],
+    [20, { sessionId: 2, promptNumber: 9, title: "b", userPrompt: null, content: null }],
+    [30, { sessionId: 1, promptNumber: 6, title: "c", userPrompt: null, content: null }],
+  ]);
+  const segmentReader = () =>
+    makeFakeReader({
+      findSegment: () => ({ id: 7 }) as any,
+      runLaneCheck: () => threeTurnRun(),
+      loadTurnDisplayFields: () => displayFields,
+    });
+
+  test("a segment scope numbers its OWN members 1..n in event order; a foreign turn keeps its S/T address", () => {
+    const body = handleGraphRoute(segmentReader(), new URL("http://x/api/console/graph?segment=7"), CTX).body as any;
+    const addressById = new Map(body.turns.map((t: any) => [t.id, t.address]));
+    expect(addressById.get(10)).toBe("E7/T1");
+    expect(addressById.get(30)).toBe("E7/T2");
+    // turn 20 belongs to segment 9 — it has no position in THIS roster, so it
+    // keeps the citable form rather than borrowing a neighbour's ordinal.
+    expect(addressById.get(20)).toBe("S2/T9");
+  });
+
+  test("the interval endpoints are the very addresses their rows carry", () => {
+    const body = handleGraphRoute(segmentReader(), new URL("http://x/api/console/graph?segment=7"), CTX).body as any;
+    expect(body.meta.interval.fromAddress).toBe("E7/T1");
+    expect(body.meta.interval.toAddress).toBe(body.turns[body.turns.length - 1].address);
+  });
+
+  test("a session scope keeps S<session>/T<prompt> — the prompt number IS the reader's ordering key there", () => {
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () => threeTurnRun(),
+      loadTurnDisplayFields: () => displayFields,
+    });
+    const body = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=1&to=99"), CTX).body as any;
+    expect(body.turns.map((t: any) => t.address)).toEqual(["S1/T4", "S2/T9", "S1/T6"]);
+  });
+});
