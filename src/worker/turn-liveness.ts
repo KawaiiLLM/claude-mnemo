@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
 import { calendarDayBounds, contentDateAt } from "../diary/calendar";
+import { realPromptPredicate } from "../db/note-debt";
 import { getTurnById, updateTurnById } from "../db/turns";
 import {
   aggregateTurnFiles,
@@ -73,6 +74,14 @@ interface CandidateTurnRow {
  * yet the turn itself never reached a terminal status. One SQL fragment, shared
  * verbatim by the per-day candidate scan and the candidate-date derivation, so
  * the two readings of "stranded" cannot drift apart.
+ *
+ * The "later prompt" arm reuses `realPromptPredicate` (db/note-debt.ts, spec
+ * D1/D10) verbatim — the same filter db/turn-settlement.ts applies to its own
+ * "later real prompt" completion proof — rather than restating it. Without it,
+ * a sidechain row (born `undone`, at a HIGHER `prompt_number` than the root
+ * turn that dispatched it — session-init.ts's `createPendingTurn`) would read
+ * as proof that the still-running root turn ended, and this repair would floor
+ * a root whose subagent is still writing (P1-2).
  */
 const STRANDED_TURN_PREDICATE = `
   t.status IN ('active', 'provisional')
@@ -88,6 +97,7 @@ const STRANDED_TURN_PREDICATE = `
       SELECT 1 FROM turns later
       WHERE later.session_id = t.session_id
         AND later.prompt_number > t.prompt_number
+        AND ${realPromptPredicate("later")}
     )
   )`;
 

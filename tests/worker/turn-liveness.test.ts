@@ -131,6 +131,49 @@ describe("stranded-turn liveness repair", () => {
     ]);
   });
 
+  test("a later sidechain row is not completion evidence, but a later real prompt still is (P1-2)", () => {
+    // The root's only "later" row is a sidechain marker — born `undone` at a
+    // higher prompt_number the instant its subagent is dispatched (spec D10 /
+    // session-init.ts's createPendingTurn). The old predicate read ANY higher
+    // prompt_number as proof the root had ended; a still-running root with an
+    // in-flight subagent must not be read as stranded on that evidence alone.
+    const rootWithSidechain = seedTurn({ promptNumber: 1 });
+    db.query(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, tags, user_prompt, created_at_epoch
+       ) VALUES (?, ?, 'undone', '["subagent:pending"]', 'sidechain prompt', ?)`,
+    ).run(sessionId, 2, DUE_EPOCH);
+
+    // A second session where the later row IS a real prompt — the prompt-clock
+    // proof still applies exactly as before.
+    const realSuccessorSessionId = makeSession("real-successor-session");
+    const rootWithRealSuccessor = seedTurn({
+      sessionDbId: realSuccessorSessionId,
+      promptNumber: 1,
+    });
+    seedTurn({ sessionDbId: realSuccessorSessionId, promptNumber: 2 });
+
+    const prepared = repair();
+
+    expect(prepared.strandedTurnIds).toEqual([rootWithRealSuccessor]);
+    expect(getTurnById(db, rootWithSidechain)?.status).toBe("active");
+
+    const floored = finalizeUnreachableStrandedTurns(db, prepared.unreachable, {
+      hasRegisteredSessionEnv: () => false,
+    });
+
+    // Response floor (6da4efb): a response-carrying un-noted turn floors
+    // `extracted` only inside the recorded new era; this fixture passes no
+    // eraCutoffEpoch (legacy), so completionFloorStatus lands it `failed` —
+    // same shape as the sibling "a floored turn still records the files it
+    // touched" fixture. The property this test pins is the gate, not the
+    // exact status: the real successor still reaches a terminal status, the
+    // sidechain-only root never does.
+    expect(getTurnById(db, rootWithRealSuccessor)?.status).toBe("failed");
+    expect(floored.map((item) => item.turnId)).toEqual([rootWithRealSuccessor]);
+    expect(getTurnById(db, rootWithSidechain)?.status).toBe("active");
+  });
+
   test("leaves no-evidence, no-response, and outside-due-day turns untouched", () => {
     const noEvidence = seedTurn({ promptNumber: 1 });
     const noResponse = seedTurn({
