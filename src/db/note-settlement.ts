@@ -104,8 +104,52 @@ export const NOTE_SETTLEMENT_MIN_WINDOW_TURNS = 20;
 export const NOTE_SETTLEMENT_BACKFILL_MAX_TURNS =
   DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS;
 
-/** A `claimed` job older than this is presumed dead and returns to `pending`. */
+/**
+ * A `claimed` job whose lease has not been RENEWED within this window is
+ * presumed dead and returns to `pending`. Renewal is what makes the number
+ * mean "silent for ten minutes" rather than "running for ten minutes":
+ * `touchNoteSettlementJobLease` below stamps it on every tool call the
+ * dispatch makes, so an agent that is demonstrably working keeps its job
+ * however long the window legitimately takes. Sized against the largest gap
+ * measured between two consecutive settlement tool calls (404s, S15069/T1539),
+ * with room to spare.
+ */
 export const NOTE_SETTLEMENT_LEASE_MS = 10 * 60 * 1000;
+
+/**
+ * The lease heartbeat (S15069/T1540 ruling: "写操作续租", widened to every tool
+ * call — see below). Stamps `claimed_at_epoch` so the reclaim query stops
+ * counting from the CLAIM and starts counting from the last sign of life.
+ *
+ * Why every call and not only writes: measured on the two runs that exposed
+ * this, the read-only prelude alone took 502s and 666s before the first write
+ * (S15069/T1539) — the second one already past a ten-minute lease. A
+ * writes-only heartbeat would have renewed a lease that had died 66 seconds
+ * earlier, which is no heartbeat at all.
+ *
+ * Fenced exactly like every other lease-bearing statement: the UPDATE matches
+ * only while the job is still `claimed` under the SAME generation, so a
+ * reclaimed dispatch's heartbeat touches nothing and can never resurrect its
+ * own lost lease. It returns whether it landed rather than throwing — a read
+ * tool has no business failing on a lease it does not need, and every WRITE
+ * still meets `assertNoteSettlementJobClaimed` inside its own transaction.
+ */
+export function touchNoteSettlementJobLease(
+  db: Database,
+  jobId: number,
+  claimGeneration: number,
+  nowEpoch: number,
+): boolean {
+  const renewed = db
+    .query<{ id: number }, [number, number, number, number]>(
+      `UPDATE note_settlement_jobs
+          SET claimed_at_epoch = ?, updated_at_epoch = ?
+        WHERE id = ? AND status = 'claimed' AND claim_generation = ?
+        RETURNING id`,
+    )
+    .get(nowEpoch, nowEpoch, jobId, claimGeneration);
+  return renewed !== null;
+}
 
 /**
  * Ticket 06 (read-write-contract spec, "重试"): the DETERMINISTIC failure

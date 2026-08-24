@@ -13,6 +13,7 @@ import {
 } from "../mcp/definitions";
 import { createDatabaseBackedHandlers } from "../mcp/handlers";
 import { claimWriterId } from "../db/write-gate";
+import { touchNoteSettlementJobLease } from "../db/note-settlement";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
 import { getTurnById } from "../db/turns";
@@ -502,6 +503,9 @@ export function createNoteSettlementSdkQuery(
   const createSdkMcpServerImpl =
     options.createSdkMcpServerImpl ?? createSdkMcpServer;
   const toolImpl = options.toolImpl ?? tool;
+  // Epoch seconds, injectable like every other clock on this closure — the
+  // lease heartbeat below stamps with it.
+  const nowEpoch = options.now ?? (() => Math.floor(Date.now() / 1000));
   const handlers = createDatabaseBackedHandlers(options.db, {
     defaultProject: options.defaultProject,
     audience: "worker",
@@ -596,6 +600,35 @@ export function createNoteSettlementSdkQuery(
     // tool result itself, just whether the call ever happened.
     let laneCheckCalled = false;
 
+    // THE LEASE HEARTBEAT (S15069/T1540 ruling). Wrapping the tool FACTORY,
+    // not each handler, is the point: every tool this server registers — reads
+    // included, since the read-only prelude alone outran the lease
+    // (S15069/T1539) — renews the claim before it runs, and a tool added later
+    // inherits that automatically instead of having to remember. The renewal
+    // is fenced on this run's own generation inside the UPDATE, so a dispatch
+    // whose lease already moved renews nothing; its writes still meet the
+    // fence in their own transaction, and its reads stay harmless.
+    const leasedTool = ((
+      name: string,
+      description: string,
+      shape: unknown,
+      handler: (...handlerArgs: never[]) => unknown,
+    ) =>
+      toolImpl(
+        name as never,
+        description as never,
+        shape as never,
+        (async (...handlerArgs: never[]) => {
+          touchNoteSettlementJobLease(
+            options.db,
+            request.jobId,
+            request.claimGeneration,
+            nowEpoch(),
+          );
+          return handler(...handlerArgs);
+        }) as never,
+      )) as unknown as typeof toolImpl;
+
     const server = createSdkMcpServerImpl({
       name: "mnemo",
       version: "0.19.0",
@@ -621,7 +654,7 @@ export function createNoteSettlementSdkQuery(
         // seam exists now, and the copy is gone with it: the envelope this
         // read is delivered in, and the grant that envelope authorizes (peer
         // round P1-6), are one implementation for both callers.
-        toolImpl(
+        leasedTool(
           "recall",
           MNEMO_TOOL_DESCRIPTIONS.recall,
           workerRecallInputShape,
@@ -636,7 +669,7 @@ export function createNoteSettlementSdkQuery(
         // `readerId` is null and `mcp/timeline.ts` records no grant at all.
         // A navigational view that licensed writes would let an agent skip
         // Step 0's coverage entirely.
-        toolImpl(
+        leasedTool(
           "timeline",
           MNEMO_TOOL_DESCRIPTIONS.timeline,
           timelineInputShape,
@@ -646,19 +679,19 @@ export function createNoteSettlementSdkQuery(
                 "timeline unavailable",
             ),
         ),
-        toolImpl(
+        leasedTool(
           "note",
           SETTLEMENT_NOTE_TOOL_DESCRIPTION,
           settlementTurnWriteInputShape,
           async (args: SettlementTurnWriteInput) => writes.writeNote(args),
         ),
-        toolImpl(
+        leasedTool(
           "remember",
           SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
           settlementMembershipWriteInputShape,
           async (args: SettlementMembershipWriteInput) => writes.writeMembership(args),
         ),
-        toolImpl(
+        leasedTool(
           "commit",
           SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
           {},
@@ -688,7 +721,7 @@ export function createNoteSettlementSdkQuery(
             return writes.commit();
           },
         ),
-        toolImpl(
+        leasedTool(
           "lane_check",
           SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
           {},

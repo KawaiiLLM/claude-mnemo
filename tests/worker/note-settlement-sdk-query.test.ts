@@ -1,5 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
@@ -8,6 +10,9 @@ import {
   computeSettlementWritableTurnIds,
   enqueueNoteSettlementWindows,
   getNoteSettlementJob,
+  listDispatchableNoteSettlementSessions,
+  NOTE_SETTLEMENT_LEASE_MS,
+  touchNoteSettlementJobLease,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
@@ -2044,6 +2049,136 @@ describe("T1466 — an extra-SOURCE E5 blocks the window owning the CITER", () =
         windowStart: 2,
         windowEnd: 2,
       });
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+// S15069/T1540 ruling ("写操作续租"), widened to every tool call because the
+// read-only prelude alone outran the lease on two measured runs (S15069/T1539:
+// 502s and 666s before the first write, against a 600s lease). The heartbeat
+// lives in the tool FACTORY, so these tests drive it through a registered tool
+// rather than by calling the db helper directly.
+describe("the lease heartbeat", () => {
+  // `commit` is excluded from the behavioural loop for a real reason, not
+  // convenience: it renews like the rest, then COMPLETES the job in the same
+  // call, which nulls `claimed_at_epoch` — the renewal is unobservable after
+  // its own terminal write. The source pin below is what covers it.
+  const REGISTERED = ["recall", "timeline", "note", "remember", "lane_check"];
+
+  async function registerTools(db: Database, options: { generation?: number } = {}) {
+    const { sessionDbId, job, laneTurnIds } = seedFixture(db);
+    const { toolImpl, handlers } = captureToolImpl();
+    const queryImpl = mock(() =>
+      (async function* () {
+        yield { type: "result", subtype: "success", is_error: false, result: "done" };
+      })(),
+    );
+    const runQuery = createNoteSettlementSdkQuery({
+      db,
+      dataRoot: "/tmp/claude-mnemo-settlement-lease",
+      queryImpl: queryImpl as never,
+      createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+      toolImpl: toolImpl as never,
+      now: () => NOW,
+    });
+    await runQuery({
+      prompt: "settle",
+      systemPrompt: "system",
+      model: "claude-sonnet-5",
+      jobId: job.id,
+      claimGeneration: options.generation ?? job.claimGeneration,
+      sessionId: sessionDbId,
+      writableTurnIds: new Set(laneTurnIds),
+      contextBuiltAtEpoch: NOW,
+      windowStart: 1,
+      windowEnd: 3,
+    });
+    // Age the lease past its own window so a renewal is visible as a change.
+    const stale = NOW - Math.floor(NOTE_SETTLEMENT_LEASE_MS / 1000) - 60;
+    db.run("UPDATE note_settlement_jobs SET claimed_at_epoch = ? WHERE id = ?", [stale, job.id]);
+    return { job, handlers, stale };
+  }
+
+  test("a READ tool renews the lease — the prelude is where the old lease died", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { job, handlers, stale } = await registerTools(db);
+      expect(getNoteSettlementJob(db, job.id)?.claimedAtEpoch).toBe(stale);
+
+      await Promise.resolve(handlers.get("timeline")!({ id: "S1" })).catch(() => undefined);
+
+      expect(getNoteSettlementJob(db, job.id)?.claimedAtEpoch).toBe(NOW);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("every registered tool renews, so a tool added later cannot forget to", async () => {
+    for (const name of REGISTERED) {
+      let db: Database | undefined;
+      try {
+        db = createDatabase(":memory:");
+        initializeSchema(db);
+        const { job, handlers, stale } = await registerTools(db);
+        expect(getNoteSettlementJob(db, job.id)?.claimedAtEpoch).toBe(stale);
+
+        await Promise.resolve(handlers.get(name)!({})).catch(() => undefined);
+
+        expect({ name, at: getNoteSettlementJob(db, job.id)?.claimedAtEpoch }).toEqual({
+          name,
+          at: NOW,
+        });
+      } finally {
+        db?.close();
+      }
+    }
+  });
+
+  test("no tool is registered outside the leased factory — the structural half of the guard", () => {
+    const source = readFileSync(
+      join(import.meta.dir, "../../src/worker/note-settlement-sdk-query.ts"),
+      "utf8",
+    );
+    // Registrations are indented eight spaces inside the tools array; the
+    // factory itself is defined at four. A raw registration would read
+    // `        toolImpl(` and skip the heartbeat entirely.
+    expect(source).not.toContain("        toolImpl(");
+    expect(source.match(/ {8}leasedTool\(/g)?.length).toBe(6);
+  });
+
+  test("a dispatch whose generation already moved renews nothing — a heartbeat can never resurrect a lost lease", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { job, handlers, stale } = await registerTools(db, { generation: 99 });
+
+      await Promise.resolve(handlers.get("timeline")!({ id: "S1" })).catch(() => undefined);
+
+      expect(getNoteSettlementJob(db, job.id)?.claimedAtEpoch).toBe(stale);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a renewed lease stops the job being dispatchable — the reclaim counts from the last sign of life", () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, job } = seedFixture(db);
+      const stale = NOW - Math.floor(NOTE_SETTLEMENT_LEASE_MS / 1000) - 60;
+      db.run("UPDATE note_settlement_jobs SET claimed_at_epoch = ? WHERE id = ?", [stale, job.id]);
+
+      expect(listDispatchableNoteSettlementSessions(db, { nowMs: NOW * 1000 })).toContain(sessionDbId);
+
+      expect(touchNoteSettlementJobLease(db, job.id, job.claimGeneration, NOW)).toBe(true);
+
+      expect(listDispatchableNoteSettlementSessions(db, { nowMs: NOW * 1000 })).not.toContain(sessionDbId);
     } finally {
       db?.close();
     }
