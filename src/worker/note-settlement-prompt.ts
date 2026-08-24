@@ -158,15 +158,39 @@ import type {
  *     The session summary survives (duty 3 edits it, and settlement is its
  *     sole writer); segment cards and turn content are recalled on demand.
  *
- * The three prose blocks this ticket introduced — the Procedure's scope /
- * Step-0 framing, the duties' edges bullet, and the commit paragraph's gate
- * sentence — were authored by the main agent personally (user ruling T1452,
+ * The prose blocks this ticket introduced — now four (revision 7 added
+ * Block D) — were authored by the main agent personally (user ruling T1452,
  * `.scratch/tag-mandate/issues/06-prompt-text.md`) and are integrated
  * VERBATIM; only their leading indentation is adjusted, to seat them in the
  * list they replace. Do not paraphrase them. The one thing that authorship
  * costs: the edges bullet's relation-word list and its `retract<Relation>`
  * mirrors are literal prose there, so a change to `EDGE_RELATIONS` no longer
  * reaches this bullet for free — it has to be re-authored.
+ *
+ * TAG-MANDATE TICKET 07'S BATCHED PROCEDURE (revision 7 of the same authored
+ * file, S15069/T1498 peer round, ruling T1500): Block A's scope/Step-0
+ * framing and the old "Reconcile what is stored..." SUPPLY/CORRECT/RETRACT
+ * paragraph both retire, replaced by a single scope-and-batching statement
+ * plus three per-batch workstations (TURN AUDIT, CONTENT CANDIDATES,
+ * BACK-LINK) worked in chronological batches of ten turns — the earlier
+ * per-window "page everything, then reconcile" shape could not hold once a
+ * window's whole writable set has to fit through this pass at once. Block B
+ * replaces the seven-step per-thread lane procedure with a five-step
+ * finalization pass (DISPOSE/FORM LANES/JUDGE AND WRITE/DECLARE CONVERGENCE/
+ * CHECK AND REPAIR) that runs ONCE, after the last batch, over the private
+ * open-thread ledger BATCH STEP 2/3 built rather than over one batch's own
+ * turns. Block C drops the old "call `lane_check` early" advice — Block A
+ * now forbids calling it during the batch loop, and Block B's own step 5 is
+ * where the call belongs. Block D lands two single sentences elsewhere in
+ * the prompt: D1 (session-narrative duty) forbids inferring a `lane_check`
+ * range as fully conforming from anything but a successful tool receipt; D2
+ * (output tail) drops the old no-op commit exemption — certainty that
+ * nothing changed still requires an empty-handed successful `commit`, the
+ * same rule Block C now states for the commit paragraph itself. The Duties
+ * preamble's "exactly one `commit`" also becomes "one SUCCESSFUL `commit`; a
+ * refusal is not that commit" — a REFUSED commit call is still a commit
+ * call, so the old wording let a run read its own refusal as the one commit
+ * it was allowed and stop there.
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -290,55 +314,74 @@ export function renderNoteSettlementPrompt(
     "",
     // ------------------------------------------------------------------
     // BLOCK A, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
-    // text.md). Replaces the window-rendering framing this section used to
-    // open with. Do not paraphrase; `{WRITABLE_SET}` is the one hole the
-    // plumbing fills.
+    // text.md, revision 7). Replaces the old scope/STEP-0 coverage framing
+    // AND the "Reconcile what is stored..." SUPPLY/CORRECT/RETRACT
+    // paragraph whole: the batch loop below is the one procedure now,
+    // start to finish. Do not paraphrase; `{WRITABLE_SET}` is the one hole
+    // the plumbing fills.
     // ------------------------------------------------------------------
     "Your scope is the WRITABLE SET printed below: the window's turns plus the",
     "declared lookback. It is immutable — reading never widens it, and every",
     "write must land inside it; the gate refuses the rest and names why.",
     "",
-    "STEP 0 — COVERAGE, before any judgment: page through EVERY turn of the",
-    "writable set with `recall` (ranges — `recall(id=\"S<s>/T<a>..T<b>\",",
-    "filter={fields:[\"title\",\"metadata\",\"content\",\"insight\",\"relations\"]})`)",
-    "until you have seen each turn's title, its type and tags, its content and",
-    // The authored text's own line, long on purpose: reflowing it would split
-    // the sentence the coverage pins read as one line.
-    "insight, and its existing relations. A truncated field is re-read with a bigger `turn` budget, never",
-    // Ticket 02 (floor-and-render-fidelity): the note-less-turn sentence the
-    // authored file gained once the label stopped leaking the prompt — a turn
-    // with no note renders EMPTY under Step 0's field list, so the reading
-    // the coverage promise names has to say where its evidence comes from.
-    "skipped. A turn carrying no note yet renders nothing under those fields:",
-    "read it with `prompt` and `response` added to the selection — the raw",
-    "exchange is what you judge it by, and a field never delivered licenses",
-    "nothing. `timeline` helps navigate; it substitutes for none of this",
-    "reading and licenses nothing. Reading is also your write license: a",
-    "whole-field `write` over another writer's text requires your own",
-    "untruncated read of that field. Turns outside the set may be read freely",
-    "whenever they help.",
+    "Work the WHOLE writable set in chronological batches of ten turns (the",
+    "last batch may be smaller). Batches bound working memory, nothing else:",
+    "window and lookback labels and batch boundaries are never thread, lane,",
+    "phase or convergence boundaries. Do not call `lane_check` during the",
+    "batch loop. Reading is your write license throughout: a whole-field",
+    "`write` over another writer's text requires your own untruncated read of",
+    "that field, and `timeline` licenses nothing.",
+    "",
+    "Each batch runs three workstations, in order:",
+    "",
+    "BATCH STEP 1 — TURN AUDIT. Recall every turn of this batch with",
+    "`filter={fields:[\"title\",\"metadata\",\"content\",\"insight\",\"relations\"]}`;",
+    "re-read any truncated field with a bigger `turn` budget, and read a turn",
+    "carrying no note with `prompt` and `response` added — the raw exchange is",
+    "what you judge it by, and a field never delivered licenses nothing. Audit",
+    "EVERY turn independently, whether or not anything flags it: does the note",
+    "misread its turn; does the type honor the Ruling supplement (a user",
+    "ruling or veto that landed here adds `design` or `correction`, and",
+    "`discuss` cannot remain); does membership match content against the",
+    "roster (homeless is legal by itself — reassign only when one destination",
+    "is obvious from content, never from adjacency, a shared project noun or",
+    "a checker warning). Turn-local corrections — notes, type, tags,",
+    "membership — may land now.",
+    "",
+    "BATCH STEP 2 — CONTENT CANDIDATES. Without consulting the stored edge",
+    "words, identify the claim-level links wholly visible in this batch. Add",
+    "each to a private open-thread ledger: at least two turn addresses, the",
+    "claim link, a phase hypothesis, its current frontier. Shared topic,",
+    "adjacency and state-only turns are never candidates; there is no target",
+    "count, and an empty batch ledger is valid. Record candidates only —",
+    "write no relation, no lane tag, no `indexes` yet.",
+    "",
+    "BATCH STEP 3 — BACK-LINK. Compare this batch against the ledger's open",
+    "frontiers, the batch's own explicit predecessor language, and any prior",
+    "terminus this content explicitly continues or corrects — never against",
+    "every earlier turn. Follow predecessor language across window, lookback",
+    "and batch boundaries; when it points outside the writable set, read that",
+    "endpoint for judgment even though it stays unwritable. A membership",
+    "break never proves a content thread absent. Targeted re-reads collect",
+    "any historical relations or full tag sets the final write gate will",
+    "require — the ledger itself licenses nothing. Update the ledger; do not",
+    "finalize the graph.",
     "",
     "WRITABLE SET:",
     renderWritableSet(writableSet),
     // ------------------------------------------------------------- end A --
-    "",
-    "Reconcile what is stored with what the window actually shows, in three",
-    "moves: SUPPLY what is missing (a turn with no note, an arc with no",
-    "edges), CORRECT what is wrong (a note that misreads its turn, a type",
-    "that names the wrong activity, a turn homed in the wrong segment), and",
-    "RETRACT what is false (an edge whose claim the later turns refute).",
-    "Leave alone what you are merely unsure about — the rubric's own judgment",
-    "sections are the standard, not your taste. After this first pass of",
-    "writes, you may call `lane_check` over this window's own scope and route",
-    "any findings it reports through this same supply/correct/propose",
-    "judgment, never a write obligation on its own.",
     "",
     "## Duties",
     "",
     "Everything below is a TOOL CALL — `remember` (proposals, membership) and",
     "`note` (prose, type/tags, edges) — each one LANDS IMMEDIATELY when you",
     "call it (validated and written in the same step, no staging), followed",
-    "by exactly one `commit` once you believe there is nothing further to add.",
+    // Tag-mandate ticket 07: "exactly one `commit`" becomes "one SUCCESSFUL
+    // `commit`; a refusal is not that commit" — a REFUSED commit call is
+    // still a commit call, so the old wording let a run read its own
+    // refusal as the one commit it was allowed and stop there.
+    "by one SUCCESSFUL `commit`; a refusal is not that commit, once you",
+    "believe there is nothing further to add.",
     "`commit` does not write anything itself — it verifies your job lease is",
     "still valid, reports what this run actually wrote, and marks the window",
     "durably complete; without it the window is retried later even though",
@@ -364,8 +407,9 @@ export function renderNoteSettlementPrompt(
     "   grab-bag. This is never required — a window may propose nothing.",
     "",
     "2. RECONCILIATION (notes, type/tags, membership, edges), via the `note`",
-    "   and `remember` tools — supply, correct, retract, as the procedure",
-    "   above describes. Judge every one of them by the Memory Rubric's own",
+    "   and `remember` tools — turn-local corrections in the batch audits,",
+    "   every relation in the finalization pass, as the procedure above",
+    "   describes. Judge every one of them by the Memory Rubric's own",
     "   sections; this prompt states only the call shape. Every annotation",
     "   you meet follows the SAME rule on every window, backfill or check:",
     "   MISSING (empty on a substantive turn) or NON-CONFORMING (stated,",
@@ -400,63 +444,65 @@ export function renderNoteSettlementPrompt(
     "     DISPLAYED mismatch, leave a merely-uncertain case alone.",
     // ------------------------------------------------------------------
     // BLOCK B, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
-    // text.md), re-indented by three spaces to sit in duty 2's own list.
-    // Replaces the derived-from-`EDGE_RELATIONS` edges bullet wholesale:
-    // the entry FORMS (bare vs `{turn, tags}`), the tag mandate and its
-    // subset invariant, and the seven-step lane procedure. Do not
-    // paraphrase.
+    // text.md, revision 7), re-indented by three spaces to sit in duty 2's
+    // own list. Replaces the old seven-step per-thread lane procedure
+    // wholesale with the five-step batched finalization pass (DISPOSE/FORM
+    // LANES/JUDGE AND WRITE/DECLARE CONVERGENCE/CHECK AND REPAIR) that runs
+    // ONCE, after the last batch, over the ledger Block A's BATCH STEP 2/3
+    // built. The entry FORMS (bare vs `{turn, tags}`) and the tag mandate's
+    // subset invariant are unchanged. Do not paraphrase.
     // ------------------------------------------------------------------
     "   - edges: `note`'s override/narrows/extends/consume/indexes/grounds/",
-    "     verifies/refutes fields. An entry is a bare address (\"S15069/T7\") —",
-    "     an UNTAGGED edge acting on the cited turn itself — or a tagged entry",
+    "     verifies/refutes fields. An entry is a bare address (\"S15069/T7\") — an",
+    "     UNTAGGED edge acting on the cited turn itself — or a tagged entry",
     "     `{ \"turn\": \"S15069/T7\", \"tags\": [\"lane-tag\"] }` acting on the named",
     "     LANE. extends/narrows accept ONLY the tagged form: continuation names",
     "     its line. An edge's tags must already sit on BOTH endpoint turns' own",
-    "     tags — write the member turns' tags first, then the edge. An edge",
-    "     write also needs your own current read of the citing turn's RELATIONS —",
-    "     Step 0's relations field is that read, and your own writes keep it",
-    "     current. The",
+    "     tags — write the member turns' tags first, then the edge. An edge write",
+    "     also needs your own current read of the citing turn's RELATIONS — the",
+    "     batch audits earn it, your own writes keep it current, and a",
+    "     stale one is re-read, never guessed. The",
     "     `retract<Relation>` mirrors delete one row each and still accept bare",
     "     addresses (legacy rows stay deletable). One pair may carry several",
     "     relations at once; a call carrying nothing but relations is valid.",
-    "     Work lanes in this order:",
-    "     1. THREADS from content. A run of two or more same-phase turns where",
-    "        one supplements or corrects another IS a lane — found from what the",
-    "        turns say and their explicit predecessor language, independently of",
-    "        the edge stock: a missing edge is work to add, never evidence the",
-    "        thread is absent. A turn that only records state or polls joins no",
-    "        lane; an ops turn that proposes, adopts or corrects a reusable",
-    "        proposition joins the lane of that proposition.",
-    "     2. NAME each thread with the smallest discriminating tag set, after",
-    "        the scope question: does this exact set name the SAME sub-result at",
-    "        both endpoints, one connected component, one phase? Reuse an",
-    "        existing noun only then; otherwise mint one. Never the segment's",
-    "        own tags. One exact set names one lane; a decision→delivery arc is",
-    "        TWO lanes, hinged by untagged cross-phase `grounds`.",
-    "     3. TAG the members (full-set rewrite, keeping their existing nouns),",
-    "        then wire the edges.",
-    "     4. THE WORD comes from the cited CLAIM: still fully valid and built",
-    "        upon = extends; partly withdrawn or re-scoped = narrows; replaced",
-    "        outright = override; merely used, same phase = consume; a check",
-    "        THIS turn produced, for or against the cited conclusion, is",
-    "        verifies or refutes, never extends; an evidence product cited from",
-    "        another phase takes `grounds`. Shared topic, adjacency,",
-    "        or preserving lane shape are never extends evidence — and a blocker",
-    "        satisfied by doing the work is completion (extends), not a correction",
-    "        of the blocking judgment (narrows).",
-    "     5. Keep each lane one source, one sink. Diamonds — parallel paths that",
-    "        re-merge — are fine; a fork the lane never re-joins is not: open a",
-    "        BRANCH instead, a proper-superset tag set rooted at the parent node.",
-    "     6. DECLARE convergence from content: explicit resolved/locked/converged",
-    "        language, a completed verification, a release, or downstream",
-    "        adoption closes a thread — its last node writes a TAGGED `indexes`",
-    "        citing the lane's surviving core. Work merely stopping stays OPEN,",
-    "        and the absence of an existing declaration is never evidence either",
-    "        way: producing the declaration is your job.",
-    "     7. REPAIR stock: an untagged extends/narrows row inside your writable",
-    "        set is illegal. Retag it into its lane when it really is",
-    "        continuation (member tags first), or retract it and rewrite with the",
-    "        word step 4 actually supports.",
+    "     All relation writes happen HERE, after the last batch, in five steps:",
+    "     1. DISPOSE every ledger candidate: NOT A LANE, OPEN, or CONVERGED —",
+    "        exactly one each. Uncertainty is OPEN, never CONVERGED. NOT A LANE",
+    "        names the failed criterion; CONVERGED names its exact closing",
+    "        evidence — explicit resolution, a completed verification, a",
+    "        release, or exact downstream adoption. There is no target number of",
+    "        lanes or declarations.",
+    "     2. FORM LANES across all batches: merge fragments, choose the smallest",
+    "        discriminating exact tag set and one phase, resolve continuation",
+    "        versus proper-superset branch, and identify each lane's source,",
+    "        frontier and surviving core. Never the segment's own tags. A batch",
+    "        boundary contributes no topology — it is never a source, sink,",
+    "        branch point or convergence signal. A decision→delivery arc is TWO",
+    "        lanes, hinged by untagged cross-phase `grounds`.",
+    "     3. JUDGE AND WRITE. For every candidate and every stock row you touch,",
+    "        ignore the stored relation word and run the claim test as if no",
+    "        edge existed — the old word is evidence of nothing. Still fully",
+    "        valid and built upon = extends; partly withdrawn or re-scoped =",
+    "        narrows; replaced outright = override; merely used, same phase =",
+    "        consume; a check THIS turn produced, for or against the cited",
+    "        conclusion, is verifies or refutes, never extends; an evidence",
+    "        product cited from another phase takes `grounds`. Shared topic,",
+    "        adjacency, or preserving lane shape are never extends evidence —",
+    "        and a blocker satisfied by doing the work is completion (extends),",
+    "        not a correction of the blocking judgment (narrows). Tag the",
+    "        members first, then write only what the fresh judgment supports.",
+    "     4. DECLARE CONVERGENCE. Only a candidate disposed CONVERGED writes a",
+    "        TAGGED `indexes`, from its actual last node to the surviving core.",
+    "        Work merely stopping, a batch ending, or an existing declaration is",
+    "        never closure evidence — producing the declaration is your job, and",
+    "        leaving a lane honestly OPEN is normal life.",
+    "     5. CHECK AND REPAIR. After the first complete graph write, call",
+    "        `lane_check`. ERRORS are a repair queue for the graph you already",
+    "        judged, never the work plan; every repair repeats step 3. WARNINGS",
+    "        inform the topology and minimality review and never compel a",
+    "        write. Keep each lane one source, one sink: diamonds that re-merge",
+    "        are fine; a fork the lane never re-joins opens a BRANCH — a",
+    "        proper-superset tag set rooted at the parent node.",
     // ------------------------------------------------------------- end B --
     "   - `type` and `tags` are the two fields that yield INDEPENDENTLY: if",
     "     another writer touched one of them since this dispatch started,",
@@ -483,6 +529,13 @@ export function renderNoteSettlementPrompt(
     "   session) and otherwise left alone — it changes rarely, not every",
     "   window. Always legal, never required: a window with nothing",
     "   narratively new may skip this duty entirely.",
+    // ------------------------------------------------------------------
+    // BLOCK D1, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
+    // text.md, revision 7), appended to this duty. Do not paraphrase.
+    // ------------------------------------------------------------------
+    "   Narrate only writes that actually landed in this run: never infer counts",
+    "   or claim a range fully conforming from `lane_check` — use successful",
+    "   tool receipts, or omit the claim.",
     "",
     "4. COMMIT. Call `commit` once you believe this window is done — whether",
     "   or not you wrote anything. Every `note`/`remember` call above already",
@@ -492,19 +545,18 @@ export function renderNoteSettlementPrompt(
     "   — always call it, even after a window where you wrote nothing.",
     // ------------------------------------------------------------------
     // BLOCK C, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
-    // text.md), appended to the commit paragraph and re-indented by three
-    // spaces to stay inside duty 4. The commit GATE's own contract — the
-    // one fact a caller must hold at the moment of calling. Do not
+    // text.md, revision 7), appended to the commit paragraph and re-indented
+    // by three spaces to stay inside duty 4. Drops the old "call
+    // `lane_check` early" advice — Block A now forbids calling it during the
+    // batch loop, and Block B's own step 5 is where it belongs. Do not
     // paraphrase.
     // ------------------------------------------------------------------
     "   `commit` is REFUSED while any ERROR `lane_check` reports anchors inside",
     "   your writable set — the refusal lists exactly the rows to repair, and a",
-    "   refusal costs no attempt. Call `lane_check` early to see the list before",
-    "   you are done; its WARNINGS inform judgment and never block. Errors",
-    "   anchored outside your set belong to other windows and never block you.",
-    "   You end this job only through ONE SUCCESSFUL commit — a window with",
-    "   nothing to change still commits empty-handed, and a refusal never counts",
-    "   as that commit: repair what it names and commit again.",
+    "   refusal costs no attempt. Errors anchored outside your set belong to",
+    "   other windows and never block you. The job ends only through ONE",
+    "   SUCCESSFUL commit: a refusal is repaired and retried, and certainty that",
+    "   nothing changed still requires an empty-handed successful commit.",
     // ------------------------------------------------------------- end C --
     "",
     "## Segment roster (this session's attached segments — id/title only)",
@@ -524,13 +576,18 @@ export function renderNoteSettlementPrompt(
     // writable set above declares WHICH turns; `recall` delivers them.
     "## Output",
     "",
+    // BLOCK D2, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
+    // text.md, revision 7): drops the old no-op exemption clause — a
+    // REFUSED commit is still a commit call, so "certain there is nothing
+    // to do" let a run treat its own refusal as the exit. Do not
+    // paraphrase.
     "Make your `remember`/`note` tool calls as you decide them, throughout this " +
       "run, then call `commit`. Every turn reference is the qualified " +
       "[S<session>/T<prompt>] form; bare [T<n>] is not an address. Omit any id " +
       "you are not certain of rather than guessing — an invented citation is " +
-      "discarded and costs the relation it claimed. After `commit` succeeds " +
-      "(or if you are certain there is nothing to do), a short final reply is " +
-      "enough — no JSON, no schema.",
+      "discarded and costs the relation it claimed. After `commit` succeeds, " +
+      "a short final reply is enough — no JSON, no schema. Certainty that " +
+      "nothing changed still requires an empty-handed successful commit.",
   ];
 
   return sections.join("\n");
