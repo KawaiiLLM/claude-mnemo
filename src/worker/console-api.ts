@@ -188,12 +188,15 @@ export interface ConsoleGraphTurn {
   promptNumber: number;
   /**
    * The address every console surface renders for this turn — server-formatted
-   * once here so the shell never assembles one (T1524 ruling). Under a SEGMENT
-   * scope a member reads `E<segmentId>/T<k>`, `k` being its 1-based position in
-   * that segment's own time-ordered roster (the handle `recall`'s `E<n>/T<m>`
-   * selector already uses); every other turn — a foreign turn the widened
-   * projection pulled in, and every turn under a session/range scope — keeps
-   * the citable `S<sessionId>/T<promptNumber>` form. See `graphAddressesFor`.
+   * once here so the shell never assembles one (T1524 ruling, superseded by
+   * [S15069/T1557] — ticket 10 "one address grammar"). ALWAYS
+   * `S<sessionId>/T<promptNumber>`, under every scope including segment: a
+   * turn has exactly one address, and a segment is a SCOPE in front of it
+   * (`meta.scope`'s own `E<segmentId>`), never a second address namespace.
+   * Retires the segment-scoped `E<segmentId>/T<k>` this field used to carry
+   * under two prior, now-superseded rulings — a roster ordinal (T1524) and
+   * then the turn's own global id (T1532) — both of which made the address
+   * mean something different depending on where a reader pasted it.
    */
   address: string;
   title: string | null;
@@ -417,54 +420,21 @@ function buildMeta(input: {
 }
 
 /**
- * The turn's own rendered address — `ConsoleGraphTurn.address`, decided once at
- * projection time by `graphAddressesFor` (T1524 ruling), so the interval label
- * and the row it points at can never disagree about what a turn is called. The
+ * The turn's own rendered address — `ConsoleGraphTurn.address`, decided once
+ * at projection time (in `handleGraphRoute`, below) so the interval label and
+ * the row it points at can never disagree about what a turn is called. The
  * `S<sessionId>/T<promptNumber>` fallback stands only for a turn built without
  * that field (floor-and-render-fidelity ticket 03's original form).
+ *
+ * ONE address grammar under every scope ([S15069/T1557] — ticket 10): the
+ * segment-scoped `E<segmentId>/T<k>` this used to read under a `segment`
+ * scope is retired, along with the per-segment computation that produced it
+ * (formerly `graphAddressesFor`, T1524/T1532). A segment is a SCOPE, named
+ * separately by `meta.scope`'s own `E<segmentId>`, never folded into a
+ * turn's own address.
  */
 function turnAddress(turn: ConsoleGraphTurn): string {
   return turn.address || `S${turn.sessionId}/T${turn.promptNumber}`;
-}
-
-/**
- * Per-turn addresses for ONE graph response (T1532 ruling: "段下 id 统一用全局
- * Turn id,不要动态计算").
- *
- * A segment is not session-bound, so labelling its interval `S15069/T1–S15069/
- * T1518` asserts a session-scoped prompt range that is false the moment the
- * segment spans sessions. Under a segment scope the address is therefore
- * `E<id>/T<globalTurnId>` — the turn's own primary key, which is monotone in
- * time (so a range over it still reads as a range) and, unlike a position in
- * the roster, is FIXED: adopting a turn into the segment renumbers nothing, and
- * the address stays valid across the membership backfill that is renumbering
- * the roster right now. The earlier per-segment ordinal was rejected for
- * exactly that: a computed index makes every address a function of the whole
- * membership set.
- *
- * Two turns keep `S<n>/T<m>`: one the widened lane structure pulled in from
- * ANOTHER segment (it has no address in this one), and every turn under a
- * session/range scope, where the prompt number is the reader's ordering key.
- * `S<n>/T<m>` stays the citable form either way — the detail panel shows it
- * beside the segment address, since the rest of the memory surface addresses
- * turns by session and prompt.
- */
-function graphAddressesFor(
-  scope: LaneCheckScope,
-  sortedTurns: readonly LaneTurnInput[],
-  segmentByTurnId: ReadonlyMap<number, string>,
-): Map<number, string> {
-  const addresses = new Map<number, string>();
-  if (scope.kind !== "segment") {
-    return addresses;
-  }
-  const scopedSegmentKey = String(scope.segmentId);
-  for (const turn of sortedTurns) {
-    if ((segmentByTurnId.get(turn.id) ?? DEFAULT_SEGMENT) === scopedSegmentKey) {
-      addresses.set(turn.id, `E${scope.segmentId}/T${turn.id}`);
-    }
-  }
-  return addresses;
 }
 
 // ------------------------------------------------------------- sessions ----
@@ -1294,11 +1264,6 @@ export function handleGraphRoute(
   // correctly, and the interval it selects must be able to reach any turn in
   // the true full index, including the newest ones past 10000.
   const displayFields = reader.loadTurnDisplayFields(sortedTurns.map((turn) => turn.id));
-  // T1524 ruling — see `graphAddressesFor`. Computed over `sortedTurns`, the
-  // WHOLE projection, before any interval narrowing: a turn's ordinal is its
-  // place in the segment's roster, so paging to an older interval must not
-  // renumber the rows that stay on screen.
-  const segmentOrdinalAddresses = graphAddressesFor(scope, sortedTurns, segmentByTurnId);
   const turnsPayload: ConsoleGraphTurn[] = sortedTurns.map((turn) => {
     const fields = displayFields.get(turn.id);
     const sessionId = fields?.sessionId ?? turn.order?.[0] ?? 0;
@@ -1307,7 +1272,9 @@ export function handleGraphRoute(
       id: turn.id,
       sessionId,
       promptNumber,
-      address: segmentOrdinalAddresses.get(turn.id) ?? `S${sessionId}/T${promptNumber}`,
+      // ONE address grammar under every scope ([S15069/T1557] — ticket 10):
+      // always `S<sessionId>/T<promptNumber>`, never a per-segment form.
+      address: `S${sessionId}/T${promptNumber}`,
       title: fields?.title ?? null,
       promptExcerpt: codePointExcerpt(fields?.userPrompt ?? null, EXCERPT_PROMPT_CP),
       contentExcerpt: codePointExcerpt(fields?.content ?? null, EXCERPT_CONTENT_CP),

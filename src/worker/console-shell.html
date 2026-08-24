@@ -59,9 +59,6 @@
   #rangeBar .rangeNav:hover { border-color:var(--lane); color:var(--lane); }
   /* an edge the shell could not place — loud on purpose, never a silent drop */
   #rangeBar .rangeWarn { color:var(--override); font-weight:600; }
-  #rangeBar .addrSwitch { display:inline-flex; border:1px solid var(--line); border-radius:5px; overflow:hidden; }
-  #rangeBar .addrOpt { border:none; background:var(--panel); color:var(--faint); padding:2px 9px; font-size:11.5px; cursor:pointer; }
-  #rangeBar .addrOpt.on { background:var(--lane-bg); color:var(--lane); font-weight:600; }
 
   #lanes { padding:8px 24px 4px; flex:none; }
   #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }
@@ -102,10 +99,6 @@
   #tip .lg { color:#cdb8e8; }
   #panel { position:fixed; right:0; top:0; bottom:0; width:400px; background:var(--panel); border-left:1px solid var(--line); padding:20px 22px; overflow-y:auto; display:none; z-index:10; box-shadow:-6px 0 18px rgba(0,0,0,.04); }
   #panel .addr { font-family:Menlo,monospace; font-size:12px; color:var(--faint); }
-  /* the citable S/T form, shown beside the segment address — the rest of the
-     memory surface addresses turns by session and prompt, so the form you may
-     quote stays on screen next to the one this view is organised by */
-  #panel .addr .addrcite { margin-left:8px; opacity:.62; }
   #panel h2 { font-size:14.5px; font-weight:600; margin:6px 0 10px; }
   #panel .chips { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }
   .chip { font-size:11px; padding:2px 8px; border-radius:9px; background:#eef0f2; color:#555; }
@@ -206,21 +199,19 @@ const relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";
 // panel erows) is, by construction, always a member of the currently-loaded
 // `turns`. The fallback is therefore asserted UNREACHABLE on any real graph
 // response, kept only as defensive dead code for a malformed fixture.
-// `t.address` is server-decided (T1524 ruling): `E<segment>/T<ordinal>` under a
-// segment scope, `S<session>/T<prompt>` everywhere else. The shell never
-// assembles one itself — the `S/T` term below is the same defensive fallback as
-// the bare `T<id>` one, for a fixture predating the field.
-// T1531 ruling: one view, ONE addressing logic. `t.address` is what the server
-// chose for this scope (`E<segment>/T<globalTurnId>` where it can, `S/T`
-// otherwise), so a segment holding turns it never adopted renders both forms at
-// once — two logics interleaved down the same column. The toggle in the range
-// bar picks the space instead of mixing it: "session" reads every row as
-// `S<n>/T<m>`, a form EVERY turn has; "scope" uses the server's choice.
-let addrMode = "scope"; // "scope" | "session"
+// `t.address` is server-decided ([S15069/T1557] — ticket 10, "one address
+// grammar"): ALWAYS `S<session>/T<prompt>`, under every scope including
+// segment. A segment appears only as a SCOPE (the header's own `E<n>`,
+// `renderHeader` above), never folded into a turn's own address — this
+// supersedes T1524/T1532, which each made a segment scope read
+// `E<segment>/T<k>` for its own members, and supersedes the T1531 toggle that
+// switch existed to reconcile (a segment holding turns it never adopted used
+// to render two address forms interleaved in one column; with one form there
+// is nothing left to switch between). The shell never assembles the address
+// itself — the `S/T` term below is the same defensive fallback as the bare
+// `T<id>` one, for a fixture predating the field.
 const sessionAddr = t => `S${t.sessionId}/T${t.promptNumber}`;
-const addrOf = id => { const t = turns[idx.get(id)]; return t ? (addrMode === "session" ? sessionAddr(t) : (t.address || sessionAddr(t))) : "T"+id; };
-/** True when this response really does carry both address forms — the only case the toggle has anything to switch between. */
-const addrMixed = () => turns.some(t => t.address && t.address !== sessionAddr(t)) && turns.some(t => !t.address || t.address === sessionAddr(t));
+const addrOf = id => { const t = turns[idx.get(id)]; return t ? (t.address || sessionAddr(t)) : "T"+id; };
 
 /* ---- mutable render state: reset on every graph load ---- */
 let turns = [], edges = [], lanes = [];
@@ -475,29 +466,8 @@ function renderRangeBar(meta){
   // textContent — addresses are server-formatted, not raw payload text. The
   // node count rides along because it is the one number the endpoints alone
   // never give: how much of the scope this interval actually holds.
-  label.textContent = `区间 ${addrMode === "session" ? sessionAddr(turns[0]) + "–" + sessionAddr(turns[turns.length-1]) : iv.fromAddress + "–" + iv.toAddress} · ${turns.length} 个节点`;
+  label.textContent = `区间 ${iv.fromAddress}–${iv.toAddress} · ${turns.length} 个节点`;
   rangeBar.appendChild(label);
-  // The address-space switch (T1531). Rendered only when this response really
-  // holds both forms — with nothing to switch between it would be a control
-  // that does nothing.
-  if (addrMixed()) {
-    const sw = document.createElement("span");
-    sw.className = "addrSwitch";
-    for (const [mode, text] of [["scope", "段序号"], ["session", "会话地址"]]) {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "addrOpt" + (addrMode === mode ? " on" : "");
-      b.textContent = text;
-      b.addEventListener("click", () => {
-        if (addrMode === mode) return;
-        addrMode = mode;
-        renderRangeBar(meta); renderLanes(); renderGraphSvg(); paintFilters(); syncBadge();
-        if (sel !== null) select(sel);
-      });
-      sw.appendChild(b);
-    }
-    rangeBar.appendChild(sw);
-  }
   if (!iv.isOldest) {
     const older = document.createElement("button");
     older.type = "button"; older.className = "rangeNav";
@@ -541,13 +511,12 @@ function laneChip(l){
   // a turn outside the currently-rendered (auto-narrowed) interval's own
   // `turns` array, so this reads the server-supplied `state.terminusAddress`
   // directly rather than calling `addrOf` (whose own dbid fallback would
-  // otherwise be reachable for exactly that turn).
-  // ...and when that terminus IS in the loaded set, it goes through `addrOf`
-  // so the chip speaks the same address space as the rows (T1531): a strip
-  // reading `◎S15069/T196` beside rows reading `E60/T8281` is the same
-  // two-logics-at-once the toggle exists to end.
-  const termAddr = l.state.terminus !== null && idx.has(l.state.terminus) ? addrOf(l.state.terminus) : l.state.terminusAddress;
-  const term = closed ? `◎${termAddr}` : (l.state.terminus ? `…◎${termAddr}` : "无宣告");
+  // otherwise be reachable for exactly that turn). T1531 briefly re-admitted
+  // `addrOf` here (under an `idx.has` guard) to keep a loaded terminus in the
+  // same address space as the rows around it; ticket 10's single grammar
+  // removes the second space that guard existed to reconcile, so this goes
+  // back to ticket 03's own invariant unconditionally.
+  const term = closed ? `◎${l.state.terminusAddress}` : (l.state.terminus ? `…◎${l.state.terminusAddress}` : "无宣告");
   // D5, v11 (lane-declaration ticket 05): a lane's identity is ONE tag now
   // (`ConsoleGraphLane.tag`, never an array) — the prototype's `tagSet.join`
   // is retired along with the exact-set identity it rendered.
@@ -694,8 +663,11 @@ function renderGraphSvg(){
   // The label column is MEASURED, never a constant. The retired fixed 52px
   // gutter was sized for the old `T<dbid>` label and painted the title straight
   // through the wider `S<session>/T<prompt>` form the address ruling
-  // introduced; segment addresses (`E60/T8281`) are a third width again. Measure
-  // once per render — `ng` is already in the document, so getComputedTextLength
+  // introduced. Ticket 10 (one address grammar) widens it again: a segment
+  // scope used to print a short per-segment ordinal (`E7/T2`) for its own
+  // members, narrower than most rows will now ever be — every row can run as
+  // wide as its session/prompt digits allow (`S15069/T15829`). Measure once
+  // per render — `ng` is already in the document, so getComputedTextLength
   // reports real typeset widths — and fall back to a per-character estimate for
   // an unattached or hidden SVG, where every measurement reads 0.
   let labelW = 0, maxChars = 0;
@@ -813,7 +785,7 @@ function renderTurnPanel(id){
     return `<span class="chip lane">${esc(l ? l.tag : tok)}</span>`;
   }).join("");
   pbody.innerHTML =
-    `<div class="addr">${esc(addrOf(t.id))}${addrOf(t.id) !== sessionAddr(t) ? `<span class="addrcite">${esc(sessionAddr(t))}</span>` : ""}</div><h2>${esc(t.title||"(无笔记)")}</h2>
+    `<div class="addr">${esc(addrOf(t.id))}</div><h2>${esc(t.title||"(无笔记)")}</h2>
      <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}</div>
      ${t.lanes.length?`<div class="flowline">所属 lane:${laneChipsHtml}${t.isTerminus?" · ◎ 已宣告终点":""}${t.isDead?" · ✕ 被 override":""}</div>`:""}
      ${t.promptExcerpt?`<div class="sec">prompt</div><div class="prompt">${esc(t.promptExcerpt)}</div>`:""}
@@ -830,9 +802,9 @@ function jump(id){
 }
 document.getElementById("close").onclick = ()=>{ sel=null; paintFilters(); syncBadge(); panel.style.display="none"; };
 // Jump by ADDRESS, never by internal id (T1482's ruling, which this box was
-// the last holdout of): a full `E60/T512` or `S15069/T1387` matches exactly, a
-// bare `T512`/`512` matches the trailing `/T<n>` of whatever form the current
-// scope renders, and anything else falls through to a title substring.
+// the last holdout of): a full `S15069/T1387` matches exactly, a bare
+// `T1387`/`1387` matches the trailing `/T<n>` of the address every turn now
+// carries, and anything else falls through to a title substring.
 document.getElementById("search").addEventListener("keydown", e=>{
   if (e.key!=="Enter") return;
   const q = e.target.value.trim();

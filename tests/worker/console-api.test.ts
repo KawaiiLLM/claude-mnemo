@@ -1598,12 +1598,16 @@ describe("bound constants (verbatim)", () => {
   });
 });
 
-// T1524 ruling ("就展示最新归属段内的 turn,按时间顺序排列的 id(从 1 开始)"):
-// a segment is not session-bound, so a segment-scoped view addresses its own
-// members by their place in the segment's roster. `segment` on a lane-check
-// turn is the stringified segment id (db/lane-checker-load.ts `segmentKeyFor`),
-// which is what these fixtures use — not the "E1" shorthand the older
-// hand-built fixtures above happen to carry.
+// [S15069/T1557] ruling — ticket 10 "one address grammar": ONE turn address,
+// `S<session>/T<prompt>`, on EVERY render and under EVERY scope. A segment is
+// a SCOPE in front of it (`meta.scope`'s own `E<segmentId>`), never a second
+// address namespace of its own. Supersedes T1524 (segment-scoped roster
+// ordinal) and T1532 (segment-scoped global id) alike — both made
+// `E<n>/T<m>` mean a turn's own address, which is exactly what let the same
+// string resolve to different turns depending on where it was pasted.
+// `segment` on a lane-check turn is the stringified segment id (db/lane-
+// checker-load.ts `segmentKeyFor`), which is what these fixtures use — not
+// the "E1" shorthand the older hand-built fixtures above happen to carry.
 describe("GET /api/console/graph — turn address form", () => {
   function threeTurnRun(): ConsoleLaneCheckRun {
     return emptyLaneCheckRun({
@@ -1627,45 +1631,21 @@ describe("GET /api/console/graph — turn address form", () => {
       loadTurnDisplayFields: () => displayFields,
     });
 
-  test("a segment scope addresses its OWN members by global turn id; a foreign turn keeps its S/T address", () => {
+  test("a segment scope still addresses every member — and every foreign turn — as S<session>/T<prompt>, never E<segment>/T<k>", () => {
     const body = handleGraphRoute(segmentReader(), new URL("http://x/api/console/graph?segment=7"), CTX).body as any;
     const addressById = new Map(body.turns.map((t: any) => [t.id, t.address]));
-    // The turn's own primary key, NOT its position in the roster (T1532): a
-    // computed index would make every address a function of the whole
-    // membership set, so adopting one turn would renumber the rest.
-    expect(addressById.get(10)).toBe("E7/T10");
-    expect(addressById.get(30)).toBe("E7/T30");
-    // turn 20 belongs to segment 9 — it has no address in THIS segment, so it
-    // keeps the citable session form.
+    expect(addressById.get(10)).toBe("S1/T4");
+    expect(addressById.get(30)).toBe("S1/T6");
+    // turn 20 belongs to a DIFFERENT segment (9) — under the old segment-
+    // ordinal grammar this was the ONE turn that kept S/T while its segment-7
+    // neighbours read E7/T*; now every turn reads the same grammar regardless
+    // of segment membership, so this assertion no longer distinguishes it.
     expect(addressById.get(20)).toBe("S2/T9");
-  });
-
-  test("a member's address does not depend on which other turns the segment holds", () => {
-    const full = handleGraphRoute(segmentReader(), new URL("http://x/api/console/graph?segment=7"), CTX).body as any;
-    // Same segment, but turn 10 is gone from the projection entirely — turn
-    // 30's address must be unchanged. Under a roster ordinal it would shift
-    // from E7/T2 to E7/T1.
-    const withoutFirst = makeFakeReader({
-      findSegment: () => ({ id: 7 }) as any,
-      runLaneCheck: () =>
-        emptyLaneCheckRun({
-          turns: [
-            { id: 20, type: ["ops"], order: [2, 9], segment: "9" },
-            { id: 30, type: ["review"], order: [1, 6], segment: "7" },
-          ],
-          edges: [],
-        }),
-      loadTurnDisplayFields: () => displayFields,
-    });
-    const trimmed = handleGraphRoute(withoutFirst, new URL("http://x/api/console/graph?segment=7"), CTX).body as any;
-    const addressOf = (body: any, id: number) => body.turns.find((t: any) => t.id === id).address;
-    expect(addressOf(trimmed, 30)).toBe(addressOf(full, 30));
-    expect(addressOf(trimmed, 30)).toBe("E7/T30");
   });
 
   test("the interval endpoints are the very addresses their rows carry", () => {
     const body = handleGraphRoute(segmentReader(), new URL("http://x/api/console/graph?segment=7"), CTX).body as any;
-    expect(body.meta.interval.fromAddress).toBe("E7/T10");
+    expect(body.meta.interval.fromAddress).toBe("S1/T4");
     expect(body.meta.interval.toAddress).toBe(body.turns[body.turns.length - 1].address);
   });
 

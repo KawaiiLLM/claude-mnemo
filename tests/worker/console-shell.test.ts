@@ -327,15 +327,21 @@ describe("console-shell.html behavior-matrix wiring spot checks", () => {
     expect(html).not.toContain('lb.textContent = "T"+t.id;');
   });
 
-  // T1524 ruling: the address form is the SERVER's call (`E<segment>/T<ordinal>`
-  // under a segment scope, `S/T` otherwise), so the shell reads `t.address` and
-  // only falls back for a fixture predating the field.
+  // [S15069/T1557] ruling — ticket 10: with one address grammar there is no
+  // second "citable" form left to show beside the panel's main address line
+  // (the retired `.addrcite` span existed only to surface S/T beside a
+  // segment ordinal when the two differed).
+  test("the detail panel's address line carries no second citable form beside it", () => {
+    expect(html).not.toContain("addrcite");
+    expect(html).toContain('`<div class="addr">${esc(addrOf(t.id))}</div><h2>');
+  });
+
+  // [S15069/T1557] ruling — ticket 10: the address form is ALWAYS
+  // `S<session>/T<prompt>`, under every scope, so the shell reads
+  // `t.address` and only falls back for a fixture predating the field.
   test("addrOf reads the server-supplied address, falling back to S/T then the bare id", () => {
-    // The T1531 switch wraps this: "session" mode forces the S/T form every
-    // turn has, "scope" keeps the server's choice; both still fall back to the
-    // bare id only for a turn outside the loaded set.
     expect(html).toContain(
-      "const addrOf = id => { const t = turns[idx.get(id)]; return t ? (addrMode === \"session\" ? sessionAddr(t) : (t.address || sessionAddr(t))) : \"T\"+id; };",
+      "const addrOf = id => { const t = turns[idx.get(id)]; return t ? (t.address || sessionAddr(t)) : \"T\"+id; };",
     );
     expect(html).toContain("const sessionAddr = t => `S${t.sessionId}/T${t.promptNumber}`;");
   });
@@ -362,7 +368,7 @@ describe("console-shell.html behavior-matrix wiring spot checks", () => {
   });
 
   test("a lane's terminus mark addresses the turn instead of printing its bare id", () => {
-    expect(html).toContain("const term = closed ? `◎${termAddr}`");
+    expect(html).toContain("const term = closed ? `◎${l.state.terminusAddress}`");
     expect(html).not.toContain("`◎T${l.state.terminus}`");
   });
 });
@@ -392,16 +398,16 @@ describe("console-shell.html full-snapshot lanes/checker copy and T<dbid> remova
     expect(block).toContain("addrOf(solo)");
   });
 
-  // Ticket 03 banned `addrOf` here because its bare-id fallback was reachable
-  // for a terminus outside the loaded interval. T1531 re-admits it under an
-  // `idx.has` guard — inside the loaded set the chip must speak the same
-  // address space as the rows; outside it, the server-supplied full-snapshot
-  // address still stands. The guard is what this now pins.
-  test("laneChip's terminus mark uses addrOf only for a LOADED terminus, keeping state.terminusAddress otherwise", () => {
+  // Ticket 03's original invariant, restored: `addrOf` is never called on a
+  // lane terminus (its bare-id fallback would be reachable for a terminus
+  // outside the loaded interval). T1531 briefly re-admitted it under an
+  // `idx.has` guard to keep a loaded terminus in the same address space as
+  // the rows; ticket 10's single grammar removes the second space that guard
+  // existed to reconcile, so the ban is unconditional again.
+  test("laneChip's terminus mark reads state.terminusAddress, never calls addrOf on the terminus id", () => {
     const block = html.slice(html.indexOf("function laneChip(l){"), html.indexOf("c.addEventListener"));
     expect(block).toContain("l.state.terminusAddress");
-    expect(block).toContain("idx.has(l.state.terminus) ? addrOf(l.state.terminus)");
-    expect(block).not.toMatch(/[^)]\s*addrOf\(l\.state\.terminus\)\s*;/);
+    expect(block).not.toContain("addrOf(l.state.terminus)");
   });
 
   test("addrOf's own doc states its bare-id fallback is now asserted unreachable, not a lane-terminus escape hatch", () => {
@@ -444,7 +450,7 @@ describe("console-shell.html range bar (ticket 04)", () => {
 
   test("the range bar label reads via textContent, never innerHTML — server-formatted addresses, not raw payload text", () => {
     const block = html.slice(html.indexOf("function renderRangeBar"), html.indexOf("function renderRangeBar") + 900);
-    expect(block).toContain("label.textContent = `区间 ${addrMode === \"session\"");
+    expect(block).toContain("label.textContent = `区间 ${iv.fromAddress}–${iv.toAddress}");
     expect(block).not.toMatch(/rangeBar\.innerHTML\s*=\s*`/);
   });
 
@@ -476,30 +482,25 @@ describe("console-shell.html edge geometry", () => {
   });
 });
 
-// T1531 ruling ("建议给个切换滑块而不是混合显示"): a segment holding turns it
-// never adopted renders ordinals and S/T interleaved down one column. The
-// switch picks the space rather than mixing it, and appears only when the
-// response actually carries both forms.
-describe("console-shell.html address-space switch", () => {
+// [S15069/T1557] ruling — ticket 10 "one address grammar": supersedes T1531
+// ("建议给个切换滑块而不是混合显示"). That switch existed only because a
+// segment scope rendered a per-segment ordinal for its own members and S/T
+// for a foreign turn pulled in beside them — two address forms in one
+// column. With one form, `S<session>/T<prompt>`, on every render under every
+// scope, there is nothing left to switch between: the control, its
+// `addrMode`/`addrMixed` state, and its `.addrSwitch`/`.addrOpt` CSS are all
+// gone from the shell (see the `addrOf`/lane-terminus/range-bar-label pins
+// elsewhere in this file for what replaced them).
+describe("console-shell.html address-space switch retirement", () => {
   const html = readFileSync(join(import.meta.dir, "../../src/worker/console-shell.html"), "utf8");
 
-  test("session mode reads every row as S<n>/T<m>; scope mode keeps the server's choice", () => {
-    expect(html).toContain('let addrMode = "scope";');
-    expect(html).toContain(
-      'const addrOf = id => { const t = turns[idx.get(id)]; return t ? (addrMode === "session" ? sessionAddr(t) : (t.address || sessionAddr(t))) : "T"+id; };',
-    );
-  });
-
-  test("the switch renders only when both forms are actually present", () => {
-    expect(html).toContain("if (addrMixed()) {");
-    expect(html).toContain("const addrMixed = () =>");
-  });
-
-  test("a lane chip's terminus speaks the same space as the rows whenever it is loaded", () => {
-    expect(html).toContain(
-      "const termAddr = l.state.terminus !== null && idx.has(l.state.terminus) ? addrOf(l.state.terminus) : l.state.terminusAddress;",
-    );
-    expect(html).not.toContain("const term = closed ? `◎${l.state.terminusAddress}`");
+  test("no address-space switch survives: no state, no toggle UI, no CSS", () => {
+    expect(html).not.toContain("addrMode");
+    expect(html).not.toContain("addrMixed");
+    expect(html).not.toContain("addrSwitch");
+    expect(html).not.toContain("addrOpt");
+    expect(html).not.toContain("段序号");
+    expect(html).not.toContain("会话地址");
   });
 });
 
