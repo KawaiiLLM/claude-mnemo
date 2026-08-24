@@ -25,5 +25,5 @@ Ticket 08 reproduces this wording rather than paraphrasing it.
 **原则**（不强制）:
 
 - **有效性**: 无有效产出、重复的 turn 应该 skip，被 skip/rewind 的 turn 不参与连接。
-- **连通性**: lane 的所有成员在段的全图上应连成一体。
+- **连通性**: lane 的所有成员在段的全图上应连成一体；indexes 不参与连通性计算。
 - **最小连通**: 任意两个节点之间的路径应该只有一条，除非节点通过多余的路径获取了额外的信息。如 A -> B -> C 表达 A 依赖的 B 依赖于 C，则 A -> C 表达需要通过 C 获取 B 处没有的必要信息。如果 A -> C 无必要则冗余。

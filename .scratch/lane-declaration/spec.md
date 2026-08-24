@@ -1,248 +1,210 @@
-# Lane declaration — spec (Rev 2)
+# Lane declaration — spec (Rev 3)
 
-Status: draft. Author: main agent. Rev 1 → Rev 2 after a peer round (6 P1 + 4 P2,
-all accepted) and three user rulings.
+Rev 1 → Rev 2 after a peer round (6 P1 + 4 P2, all accepted). Rev 2 → Rev 3
+after a field study over real windows and six further user rulings. Six of the
+ten tickets are already committed; this revision is what the remaining four are
+built against.
+
 Rulings encoded: [S15069/T1524], [S15069/T1530], [S15069/T1532], [S15069/T1535],
-[S15069/T1537], [S15069/T1541].
+[S15069/T1537], [S15069/T1541], [S15069/T1547], [S15069/T1548], [S15069/T1552],
+[S15069/T1553], [S15069/T1557], [S15069/T1560], [S15069/T1562].
+Rubric text: `.scratch/lane-declaration/rubric-v11-lane-sections.md` (the user's
+own wording; ticket 08 reproduces it verbatim).
 
 ## Problem
 
-A lane exists the moment somebody writes a tagged edge. Nobody creates one; you
-fall into one. Two forces multiply them: `extends`/`narrows` are REQUIRED to
-carry lane tags, so every pair of related turns mints a lane; and "the smallest
-discriminating set" always lands on the leaf noun, while refinement-by-superset
-makes a narrower topic a NEW lane instead of a continuation.
+A lane used to exist the moment somebody wrote a tagged edge. Nobody created
+one; you fell into one. Measured live: **72 lanes over 380 tagged edges, 30 of
+them two-member, 14 literally one edge**, while the six lanes with 12+ members
+were the only real workflows. Two forces produced that: `extends`/`narrows`
+were REQUIRED to carry a tag, so every related pair minted a lane; and
+identity-by-exact-tag-set made every refinement a new lane rather than a
+continuation.
 
-Measured live: **72 lanes over 380 tagged edges, 30 two-member, 14 literally one
-edge**, while the six lanes with 12+ members are the only real workflows. A
-second defect rides along: a lane tag can sit on an edge whose endpoint belongs
-to no segment at all, so a "lane" can exist outside every container that gives
-it meaning.
+## Solution — five moves
 
-## Solution
+1. **A lane is declared.** Identity is `(segment, ONE tag)`. `remember(declare)`
+   mints it; a tagged edge may name only a declared lane, and only in a segment
+   both endpoints belong to.
+2. **Ownership moves to settlement** [T1547]. The main agent writes
+   title/content/insight and a first pass at type/tags/edges; it is NOT required
+   to write lane tags, and its field descriptions say so. Settlement owns
+   declaration and tagging outright, because lane membership is a hindsight
+   judgment — forcing it at the moment of the first edge is what produced the
+   single-edge lanes.
+3. **The mandate is replaced by pressure** [T1547/T1548/T1553]. No word requires
+   a tag. Instead the checker reports two facts: a cluster of 4+ untagged turns
+   connected to each other, and a segment whose lane count exceeds 0.05 × its
+   member count. Warnings, never refusals.
+4. **A lane is not phase-local** [T1562]. All eight words may carry a tag, so a
+   tagged `grounds` is how a design line continues into the delivery that ships
+   it. One edge may carry SEVERAL tags — the confluence — so a batch that lands
+   three lanes' work names all three, and each lane still reads complete alone.
+5. **One address grammar** [T1557]. `S<session>/T<prompt>` on every render and
+   in every selector; a segment appears only as a scope: `E31/S123/T1..S234/T10`.
 
-A lane becomes a **declared** object, like a segment:
+## What changed since Rev 2
 
-1. **Identity is `(segment, ONE tag)`.** An edge carrying `["a","b"]` is a member
-   of lane `a` AND lane `b`.
-2. **Declaration precedes use**, and **membership precedes declaration**: a tag
-   may ride an edge only if EVERY endpoint's own segment has declared that tag.
-3. **Cross-segment edges stay legal — under both segments' declarations.** No
-   special mechanism: the same registry, consulted once per endpoint [T1541].
-4. **Declaration goes through `remember`**, unique within a segment.
-5. **The segment card lists its lanes**, each with its latest node's address.
-6. **`timeline` gains a lane view**, so a lane reads as a chain.
-
-## What this CHANGES about existing verdicts (Rev 2, peer P1-1)
-
-Rev 1 claimed closure/validity/terminus logic was "unchanged". The logic is;
-its INPUT PARTITION is not, and the user has ruled **merge** [T1541]. Stated
-plainly, with the peer's own failure figure:
-
-> `T2 --indexes{a}--> T1` closes lane `a`. Then `T3 --override{a,b}--> T2`.
-> Today `{a,b}` is a third, independent lane, so lane `a` is untouched. After
-> the merge that row acts on lane `a` AND lane `b`: T2 dies in `a` too, and
-> lane `a` reopens.
-
-This is accepted, not worked around. Consequences that must be re-derived rather
-than assumed:
-
-- **Checker**: declaration, override, dead members, closure/validity, and
-  terminus are now computed over per-tag membership. `tests/shared/lane-
-  interpretation.test.ts`'s pin that `{A}`, `{B}`, `{A,B}` are three independent
-  lanes is REPLACED, not preserved.
-- **Election / milestone tier** and **self-ground eligibility** read lane state,
-  so their fixtures are re-baselined in the same batch; any tier change is
-  reported in the ticket, never silently absorbed.
-- **Console**: an edge belongs to several lanes now, so the payload's single
-  `laneToken` becomes `laneTokens: string[]`, and the shell's focus/highlight/
-  strip logic indexes edges by set membership (peer P1-6). D9's "console
-  unchanged" is withdrawn.
+- **Rev 2 said lanes stay same-phase and span phases only through multi-phase
+  hinge turns.** A field study over two real windows measured the cost and the
+  user then removed the restriction entirely. The study is worth keeping for its
+  numbers: multi-phase turns are 33%/49% of those windows and 46%/53% of legal
+  edges already joined turns whose phase SETS differ, so the same-phase rule was
+  never rigid; but of 29 cross-phase references only 13 broke a line, and 12 of
+  those originated from dispatch/acceptance/release turns that have no single
+  sub-task identity anyway (T1150 fans in 17 and grounds into FOUR lanes; T1140
+  lands three unrelated repairs in one turn). With cross-phase tags the question
+  is moot, and so is the type-annotation nudge Rev 2 was going to need.
+- **Rev 2 had the delivery arc as its own campaign lane.** Withdrawn: a per-batch
+  lane is a transaction, born and converged and never continued, which the lane
+  definition explicitly excludes. Confluence tagging replaces it — the delivery
+  arc joins the lanes it serves.
+- **Rev 2's `E<segment>/T<globalTurnId>` address is withdrawn** along with the
+  segment ordinal before it. Both made `E<n>/T<m>` mean something, and it
+  already meant a third thing in `recall`'s selector.
 
 ## Implementation decisions
 
-### D1 — the lane registry
+### D1 — the registry (SHIPPED, 2d14a3c)
 
-```sql
-CREATE TABLE lanes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
-  tag TEXT NOT NULL,
-  created_at_epoch INTEGER NOT NULL,
-  UNIQUE(segment_id, tag)
-);
-```
+`lanes(id, segment_id → segments(id) ON DELETE CASCADE, tag, created_at_epoch,
+UNIQUE(segment_id, tag))` plus `migration_receipts`. No title: the card pays per
+character and the tag is the name. A lane tag is stored only in canonical form
+(NFC, trimmed, lowercase, non-empty, no interior whitespace) and `declare`
+REFUSES a non-canonical value rather than normalizing it. `declare` refuses a
+tag already among the segment's curated tags; `retag` refuses one already
+declared as a lane — the two vocabularies are separated by an enforced
+invariant, not by intent.
 
-No title: the card pays per character and the tag is the name.
+### D2 — the checks on a tagged edge write (ticket 02, NOT YET BUILT)
 
-**Canonical tag predicate (peer P2-10).** A lane tag is stored only in canonical
-form: NFC-normalized, trimmed, lowercase, non-empty, no interior whitespace runs.
-`declare` REFUSES a non-canonical value rather than silently canonicalizing it,
-so `write-gate`, `Write-Gate` and `" write-gate "` can never become three lanes.
-The same predicate is applied to edge tags at write time.
+Per tag, in order, each refusal naming the gap: canonical form; declared in
+EVERY endpoint's segment (a homeless endpoint refuses; endpoints in different
+segments are legal exactly when both segments declared it); and the subset
+invariant — the tag is on both endpoint turns' own `tags`.
 
-**Two vocabularies, one enforceable invariant (peer P2-9).** `declare` refuses a
-tag already in that segment's curated `tags`; `retag` refuses a tag already
-declared as one of that segment's lanes, naming it. Without both directions the
-separation is a storage detail, not a concept.
+Enforced at every membership write, not only at birth: `assign`,
+ownership-clearing, settlement reassignment and any member-seeding path re-check
+the incident tagged edges of every turn they move, in the same transaction, and
+refuse a move that would leave an edge undeclared on some side.
 
-### D2 — the checks on a tagged edge write
+**No word requires a tag** [T1548]: `TAG_MANDATORY_RELATIONS` empties.
+**Every word may carry one** [T1562]: `TAGGABLE_RELATIONS` widens from the five
+same-phase words to all eight, and the checker's own relation sets admit the
+cross-phase words when they carry the lane's tag.
 
-Per tag, in this order, each refusal naming the gap:
+### D3 — several lanes per edge (SHIPPED, 35200d2)
 
-1. **Canonical** — the tag is in canonical form.
-2. **Declared at every endpoint** — for EACH endpoint turn, that turn's own
-   segment has declared this tag. A homeless endpoint refuses (no segment, no
-   declaration). Endpoints in different segments are legal exactly when both
-   segments declared it [T1541].
-3. **Subset invariant (unchanged)** — the tag is present on both endpoint turns'
-   own `tags`.
+`memory_edges.tags` stays a canonical JSON array; its meaning is "the set of
+lanes this edge belongs to". Each tag validates independently.
 
-**The invariant is enforced at every membership write, not only at birth (peer
-P1-2).** `assign`, ownership-clearing, settlement's reassignment and any
-member-seeding path re-check the incident tagged edges of every turn they move,
-IN THE SAME TRANSACTION, and refuse a move that would leave an edge without a
-declaration on both sides — naming the edges and the missing declaration. The
-operator declares the lane in the destination segment first, then moves. Without
-this the invariant is only true at birth, and a lane can drift from one segment
-to another with no edge write at all.
+### D4 — the `remember` verbs (SHIPPED, 2d14a3c)
 
-### D3 — several lanes per edge
+`declare` / `undeclare`, the latter refusing while any edge still carries the
+tag. Settlement's own facade must accept both, since settlement now owns
+declaration.
 
-`memory_edges.tags` stays a canonical (sorted, deduped) JSON array; its meaning
-becomes "the set of lanes this edge belongs to". Each tag is validated
-independently by D2. `memory_edge_tags` remains the per-tag index and is rebuilt
-in the same transaction as any tag mutation.
+### D5 — identity in the checker (SHIPPED, 35200d2)
 
-### D4 — the `remember` verbs
+`LaneKey` is `{segment, tag}`. The merge is explicit and accepted: an edge with
+two tags acts on both lanes, so `T2 --indexes{a}--> T1` closing lane `a` and
+then `T3 --override{a,c}--> T1` reopens `a`. Election and self-ground fixtures
+were re-baselined, with the two constructed cases recorded (a seat falling tier
+2 → 5; a self-grounds write now rejected).
 
-- `remember(verb="declare", id="E60", tag="write-gate")` — refuses a duplicate,
-  a non-canonical tag, and a tag that is one of the segment's curated tags.
-- `remember(verb="undeclare", id="E60", tag="write-gate")` — refuses while any
-  edge in that segment still carries the tag, naming the count.
+### D6 — migration (SHIPPED, 2d14a3c + 16db8c2)
 
-### D5 — identity in the checker
+M0 classify (read-only, three buckets — placeable, notPlaceable, and REJECTED
+for tags no normalization can read, so nothing vanishes from the receipt the
+later phases consume), M1 create, M2 seed from the placeable set, M3 stamp
+curated tags onto members by an explicit reviewed allowlist — today only
+`(60, ["claude-mnemo"])`, stamping 1085 members — and M4 dispose of unplaceable
+edges BY RELATION CLASS: `extends`/`narrows` deleted (an untagged continuation
+edge is itself illegal, so stripping is not a repair), others downgraded and
+merged into any pre-existing untagged row rather than colliding with the unique
+key. Every phase gates on its OWN durable receipt row, never on the `lanes`
+table existing.
 
-`LaneKey` becomes `{ segment, tag }`; `laneToken(segment, tag)`. A lane's DAG is
-every live edge carrying that tag with an endpoint in that segment; members are
-its endpoints. Three rubric clauses retire (v11): exact-set identity, superset
-BRANCH, and set REOPEN. Branching becomes a different lane related by narration;
-reopening stays a tagged `override`, which needs no set arithmetic.
+### D7 — the segment card's lane list (SHIPPED, 9fd989e)
 
-### D6 — migration
+`tag ◎<addr>` for a declared terminus, bare `tag <addr>` for the newest node
+where the missing ◎ says "undeclared", `→<addr>` only when the terminus has been
+overtaken. Newest-lane-first, whole entries dropped against the card's budget
+with a `+N 条` tail — 63 lanes render ~1449 injector-tokens, so the cap is
+load-bearing. Addresses follow D10.
 
-Ordered, and **durable, not log-only (peer P2-8)**. A `migration_receipts` row
-(id, name, applied_at_epoch, payload JSON) records each phase; a phase is skipped
-only when ITS receipt exists — never inferred from the `lanes` table existing,
-because the first process to open the upgraded database is often a hook, and a
-crash after M1 would otherwise skip M2–M4 forever.
+### D8 — the timeline lane view (SHIPPED, 20f7d50)
 
-- **M0 — classify (read-only)**: build and persist the full disposition list for
-  M2/M3/M4 before anything writes. M2 must not seed lanes for tags M4 is about to
-  strip (Rev 1 had that ordering backwards).
-- **M1** create `lanes`, and `migration_receipts` if absent.
-- **M2** seed a lane per (owning segment, tag) from M0's list. Receipt: count per
-  segment.
-- **M3 — legal membership, by EXPLICIT ALLOWLIST (peer P1-4).** Rev 1's "≤2
-  curated tags" heuristic is withdrawn: a count is not provenance. The migration
-  carries a hard-coded, reviewed list of `(segment id, exact curated tag set)`
-  pairs — today exactly `(E60, ["claude-mnemo"])` — and stamps that tag onto the
-  segment's 1085 tagless members. Any other segment is REPORTED, never stamped.
-  A member whose `tags` column is malformed or non-array is reported and skipped,
-  never coerced to `[]` and overwritten.
-- **M4 — illegal edges, BY RELATION CLASS (peer P1-3).** Stripping tags is not a
-  universal repair: an untagged `extends`/`narrows` is itself rejected by the
-  checker (E1), so Rev 1 would have converted one illegal shape into another.
-  - `extends` / `narrows` with no legal placement: **delete the row**, recording
-    both addresses, the relation and the tags in the receipt.
-  - Other relations: downgrade to untagged, but only after checking for an
-    existing untagged row for the same (pair, relation) — the `(pair, relation,
-    tags)` UNIQUE key makes a blind UPDATE a collision — merging into it instead
-    when one exists, and rebuilding `memory_edge_tags` in the same transaction.
+`timeline(id="E60/L*", view="lane")`; `view: "lane"` on a bare `E<n>` routes the
+same way rather than silently falling back. Header: `[L<n>]`, the lane's NEWEST
+node's time, the modal type emoji (ties by the rubric's own type order), the
+tag; the chain ends in `(N)`, the member count. Path selection is a dynamic
+program over reachable coverage — greedy showed a two-hop branch while hiding a
+five-node body — with the relation preference only breaking ties between paths
+of EQUAL coverage. The chain starts at the newest node and every arrow points at
+an older turn.
 
-### D7 — the segment card's lane list
+### D9 — attribution warnings (ticket 09, NOT YET BUILT)
 
-```
-    - lanes:
-        arc-spine-redesign ◎E60/T8281 · codex-workflow E60/T8250 · write-gate ◎E60/T8100 →E60/T8290 …
-```
+- **Unattributed cluster**: 4+ turns carrying no lane tag and connected to each
+  other by untagged edges. The domain is that cluster, NOT the graph component:
+  `LANE_COMPONENT_RELATIONS` includes `grounds`, so on a mature segment almost
+  everything hangs off something tagged (one measured component holds 77 turns).
+  A cluster is EXCUSED when some node aggregates two or more of its members with
+  an untagged `indexes` — the free aggregation a release writes over what it
+  ships — because otherwise every legal batch warns forever.
+- **Proliferation**: lanes > 0.05 × member turns. The constant stays 0.05 even
+  though E60 sits under it at 63/1637 = 0.038: the ruling is explicit that E60
+  is not yet fully settled, so the line is drawn for the steady state.
 
-`◎<addr>` = declared terminus; a bare `<addr>` = the lane's newest node, and the
-absence of `◎` says "undeclared" without spending a word on it. `→<addr>` only
-when the terminus is no longer the newest node (measured: +25 chars across all
-63 lanes). Newest-first, truncated against the card's budget with a `+N 条` tail
-— 63 lanes render 2012 chars ≈ 1449 injector-tokens, so the cap is load-bearing.
-Addresses are the segment form `E<segment>/T<globalTurnId>` [T1532].
+### D10 — one address grammar (ticket 10; 10b SHIPPED as fc5047c)
 
-### D8 — the timeline lane view
+`S<session>/T<prompt>` everywhere. Selectors take `E<n>/S<a>/T<b>` and
+`E<n>/S<a>/T<b>..S<c>/T<d>`, the range running over the segment's own event
+order between the endpoints, sessions inside the span included; `E<n>/T*`
+survives, the ordinal `E<n>/T<m>` refuses rather than silently reinterpreting.
+Inside one row the full address prints for the first turn and again on any
+session change; the rest render bare `T<prompt>`. The console follows and its
+address-space switch is gone with the second grammar it existed to switch
+between.
 
-`timeline(id="E60/L*", view="lane")`, or `E60/L3` for one lane.
+### D11 — membership discrimination [T1552 → T1560]
 
-```
-[L1] 08-17 18:19 ⚖️ arc-spine-redesign
-    ◎T53 => T48 -> ...(7)
-[L2] 08-17 18:20 🔧 codex-workflow
-    T25 -> T24 -> ...(8)
-```
+A delivery turn joins a design lane when it serves that lane. Serving SEVERAL,
+the shared edge carries all of their tags — the confluence — rather than the
+turn being assigned to one arbitrarily or a throwaway campaign lane being minted
+for it. A release additionally sits on a standing `release` lane (permanently
+open by construction, which is honest: shipping never converges) and declares
+each landing lane's convergence with a tagged `indexes` naming THAT lane's core
+nodes, not one blanket declaration.
 
-- Header: `[L<n>]`, the lane's NEWEST node's time, the modal TYPE emoji across
-  its member turns (ties broken by the rubric's own type order), the tag.
-  Trailing `(N)` on the chain = the lane's member count [T1541].
-- Lanes ordered newest-first.
-- **Path selection (peer P2-7, revised):** not greedy. Among the paths through
-  the lane's newest node, take the one covering the MOST member turns within the
-  item budget; relation preference — `extends`/`narrows` > `indexes` >
-  `consume` > `override` — is only a tie-break between equal-coverage paths, and
-  `consume` is in the order because the checker's path graph already contains it.
-  A fork whose branch is not shown appends nothing; the trailing `(N)` already
-  tells the reader how much of the lane the chain omits.
-- `=>` marks an edge into an INDEXED node; `->` is ordinary continuation.
-- Turns inside the viewed segment render bare (`T8281`); a turn from ANOTHER
-  segment — legal now that both-declared cross-segment lanes exist — carries its
-  own `E<seg>/` prefix, and a homeless one its `S<n>/`.
+### D12 — what does NOT change
 
-### D9 — what does NOT change
-
-Settlement behaviour, scoring inputs other than the re-baselined lane state, the
-note tool's fields, and the CONTENT of the 63 existing E60 lanes. Merging
-`memory-policy`/`note-field-semantics`/`rubric-v5-design` into one lane is a
-separate campaign the user deferred. (Rev 1 also claimed the console was
-unchanged; withdrawn — see "What this CHANGES".)
+Settlement's window/retry machinery, scoring inputs beyond the re-baselined lane
+state, the note tool's own fields, and the CONTENT of the 63 existing E60 lanes.
+Merging `memory-policy`/`note-field-semantics`/`rubric-v5-design` into one lane
+is a separate campaign the user deferred; this batch only makes the duplicates
+visible.
 
 ## Testing decisions
 
-Assert externally visible refusals and renderings, never internal calls.
+Assert externally visible refusals and renderings, never internal calls. Per
+surface: the `remember` boundary (declare/undeclare, canonical forms, both
+vocabulary collisions); the edge write path (one test per D2 refusal, including
+a cross-segment pair declared on only one side, and a tagged CROSS-PHASE edge
+now accepted); membership write paths (a move that would strand an incident edge
+refuses, leaving nothing behind); the migration over a fixture mirroring the live
+shapes, asserting receipt ROWS and a second run being a no-op; the checker's
+merge figure; the card and lane view renders; the two warnings at their exact
+boundaries; and the selector grammar including a cross-session range and the
+retired form's refusal.
 
-- **`remember` boundary** — declare/undeclare happy paths; duplicate; a
-  non-canonical tag (whitespace, case, NFC, empty); a tag colliding with the
-  segment's curated tags; `retag` colliding with an existing lane; undeclare
-  while in use.
-- **Edge write path** — one test per D2 refusal, including the cross-segment
-  pair where only ONE side declared the tag.
-- **Membership write paths** — `assign` refusing a move that would strand an
-  incident tagged edge, and the same for ownership-clearing and settlement
-  reassignment; each asserting the transaction left NOTHING behind.
-- **Migration** — over a fixture mirroring the live shapes (homeless endpoint,
-  cross-segment edge, multi-tag edge, `extends` with no legal placement, a
-  member lacking the segment tag, a 29-tag legacy segment, a malformed `tags`
-  column): assert the receipt ROWS (not log lines), that a second run is a
-  no-op, that the legacy segment is reported and its turns untouched, and that
-  an `extends` row is deleted rather than downgraded.
-- **Checker** — the peer's own figure as a fixture: `indexes{a}` then
-  `override{a,b}`, asserting lane `a` reopens. This is the merge, pinned.
-- **Election / self-ground** — re-baselined fixtures, with any tier change named
-  in the ticket.
-- **Console** — `laneTokens` plural in the payload; an edge highlighted under
-  either of its lanes.
-- **Card + lane view** — the three lane-row shapes and the budget tail; the lane
-  view's header (emoji choice, count), path selection on a diamond where the
-  short branch is newer, and the foreign-turn prefix.
-
-Mutation-verify: the declaration check, the both-sides check, the membership
-re-validation, M3's allowlist, M4's relation split, and the path-coverage rule.
+Mutation-verify every load-bearing property before commit — six tickets so far
+have each had at least one declared property that turned out pinned by nothing,
+including a whole set of tag-index assertions that were passing over an index no
+fixture had ever populated.
 
 ## Out of scope
 
-- Merging the existing 63 lanes into ~18 (deferred).
-- Settlement or scoring changes beyond re-baselining.
-- Retagging E53/E58/E59 by hand (reported by M3, not performed).
+Merging the existing lanes; settlement or scoring changes beyond re-baselining;
+retagging E53/E58/E59 by hand (reported by M3, not performed).
