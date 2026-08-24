@@ -19,7 +19,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.18.0", () => {
+  test("release metadata is consistently bumped to 0.19.0", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -44,12 +44,12 @@ describe("release artifacts", () => {
       "utf8",
     );
 
-    expect(packageJson.version).toBe("0.18.0");
-    expect(pluginManifest.version).toBe("0.18.0");
-    expect(marketplace.metadata?.version).toBe("0.18.0");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.18.0");
-    expect(diarySdkQuery).toContain('version: "0.18.0"');
-    expect(settlementSdkQuery).toContain('version: "0.18.0"');
+    expect(packageJson.version).toBe("0.19.0");
+    expect(pluginManifest.version).toBe("0.19.0");
+    expect(marketplace.metadata?.version).toBe("0.19.0");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.19.0");
+    expect(diarySdkQuery).toContain('version: "0.19.0"');
+    expect(settlementSdkQuery).toContain('version: "0.19.0"');
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -185,12 +185,12 @@ describe("release artifacts", () => {
       "claim_generation", // lease ownership fence — a stale worker commits nothing
       "settleCompletedTurn", // ticket 15: completion settles the row, no agent
       "completionFloorStatus", // the ONE definition of an un-noted turn's status
-      // 0.18.0 — memory console (worker HTTP seam): the request gate and the
+      // 0.19.0 — memory console (worker HTTP seam): the request gate and the
       // final-envelope byte bound; a stale worker bundle would 404 /console.
       "evaluateRequestGate",
       "applyGraphAutoInterval",
       "electionCoverage", // R2 #11: election tiers computed on the full snapshot
-      // 0.18.0 — semantic conformance: the checker's vocabulary fact block and
+      // 0.19.0 — semantic conformance: the checker's vocabulary fact block and
       // the settlement re-annotation duty (non-conforming is never standing
       // content).
       "vocabularyConformance",
@@ -262,7 +262,7 @@ describe("release artifacts", () => {
       // so a stale bundle here would double-print `↳ T1, T1`.
       "resolveTurnRowLinks",
       "compareMilestoneRank", // one ordering for selection rank and budget degradation
-      // 0.18.0 — the milestone election (spec .scratch/milestone-election/):
+      // 0.19.0 — the milestone election (spec .scratch/milestone-election/):
       // five identity tiers over lane structure replace the old
       // correction-graph/always-keep/effGrade chain outright.
       "electMilestones", // the pure election core

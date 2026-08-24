@@ -463,7 +463,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.18.0-mt6t9bah" : "dev";
+var BUILD_ID = true ? "0.19.0-mt75ebqa" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -2980,17 +2980,37 @@ var SCHEMA_SQL = `
   -- CONTEXT.md). entity_type widens to session up front \u2014 a CHECK
   -- constraint cannot be ALTERed, and ticket 05's settlement narrative write
   -- is the same table, not a second one.
+  --
+  -- light-review-repairs 04 (P1): epoch is the writer's own
+  -- write_gate_epochs value at the moment this grant was recorded \u2014 the
+  -- writer-context-epoch soundness boundary that replaced PreCompact's
+  -- two-table DELETE. getReadGrant only returns a row whose epoch matches
+  -- the writer's CURRENT epoch; a bump (PreCompact, and its
+  -- SessionStart(compact) idempotent re-bump) makes every row recorded under
+  -- an older epoch invisible without physically touching it \u2014 physical
+  -- removal is deferred to the age/epoch janitor (sweepStaleReadGrants).
+  -- DEFAULT 0 with no prior write_gate_epochs row also defaulting to 0
+  -- (getWriterEpoch) keeps every pre-migration row's behavior byte-identical
+  -- until its writer's first bump.
   CREATE TABLE IF NOT EXISTS write_gate_reads (
     writer TEXT NOT NULL,
     entity_type TEXT NOT NULL CHECK (entity_type IN ('segment', 'turn', 'session')),
     entity_id INTEGER NOT NULL,
     read_at_epoch INTEGER NOT NULL,
     read_sequence INTEGER NOT NULL,
+    epoch INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (writer, entity_type, entity_id)
   );
 
   CREATE INDEX IF NOT EXISTS idx_write_gate_reads_entity
     ON write_gate_reads (entity_type, entity_id);
+
+  -- light-review-repairs 04 (P2): the age janitor filters on read_at_epoch
+  -- alone (sweepStaleReadGrants) \u2014 without this, that scan has no index to
+  -- seek from and degrades to a full table scan bounded only by its own
+  -- LIMIT, i.e. the LIMIT bounds deletions, never the scan itself.
+  CREATE INDEX IF NOT EXISTS idx_write_gate_reads_read_at
+    ON write_gate_reads (read_at_epoch);
 
   -- One field's freshness stamp: who wrote it last, and at what point in the
   -- monotonic write sequence (CONTEXT.md "Stale") \u2014 never epoch seconds, so
@@ -3037,11 +3057,23 @@ var SCHEMA_SQL = `
     -- captured before any row is read), never a record-time lookup.
     recorded_sequence INTEGER NOT NULL,
     recorded_at_epoch INTEGER NOT NULL,
+    -- light-review-repairs 04 (P1): same writer-context-epoch fact as
+    -- write_gate_reads.epoch, recorded at the same render pass \u2014 see that
+    -- column's own comment. checkRelationsGate and checkFieldGate's
+    -- requireCompleteRead both read through getFieldCompleteness, so a
+    -- completeness row this writer earned before its last bump is exactly as
+    -- dead as the grant row it rode in on.
+    epoch INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (writer, entity_type, entity_id, field)
   );
 
   CREATE INDEX IF NOT EXISTS idx_write_gate_field_completeness_entity
     ON write_gate_field_completeness (entity_type, entity_id);
+
+  -- light-review-repairs 04 (P2): same rationale as
+  -- idx_write_gate_reads_read_at, for the janitor's other half of the sweep.
+  CREATE INDEX IF NOT EXISTS idx_write_gate_field_completeness_recorded_at
+    ON write_gate_field_completeness (recorded_at_epoch);
 
   -- The write gate's single monotonic counter (db/write-gate.ts). One row,
   -- incremented inside the SAME transaction as the field stamp it numbers \u2014
@@ -3050,6 +3082,22 @@ var SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS write_gate_sequence (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     value INTEGER NOT NULL DEFAULT 0
+  );
+
+  -- light-review-repairs 04 (P1): one row per writer that has ever been
+  -- bumped \u2014 PreCompact (the context an active writer's grants were earned
+  -- on being destroyed) and SessionStart(source=compact)'s idempotent
+  -- re-bump (the crash backstop for a PreCompact bump that failed). A writer
+  -- with no row here is implicitly epoch 0 (getWriterEpoch), matching every
+  -- pre-migration write_gate_reads/write_gate_field_completeness row's own
+  -- DEFAULT 0 \u2014 so a writer nobody has ever bumped reads exactly as it did
+  -- before this ticket. Deliberately its own tiny table rather than a column
+  -- folded onto sessions/claims: a claim writer (claimWriterId) has no
+  -- backing row in any entity table this schema owns, and the epoch counter
+  -- must exist for it identically.
+  CREATE TABLE IF NOT EXISTS write_gate_epochs (
+    writer TEXT PRIMARY KEY,
+    epoch INTEGER NOT NULL DEFAULT 0
   );
 
   ${MEMORY_FTS_DDL}
@@ -3760,6 +3808,7 @@ function initializeSchema(db) {
   ensureSettlementClaimGenerationColumn(db);
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
+  ensureWriteGateEpochColumns(db);
   ensureShadowNoteWriterOriginColumn(db);
   ensureNoteDebtReasonVocabulary(db);
   ensureNoteDebtRemindedColumn(db);
@@ -4080,6 +4129,15 @@ function ensureObservationExtractionExclusionColumn(db) {
     db,
     "observations",
     "excluded_from_extraction",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
+}
+function ensureWriteGateEpochColumns(db) {
+  addColumnIfMissing(db, "write_gate_reads", "epoch", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(
+    db,
+    "write_gate_field_completeness",
+    "epoch",
     "INTEGER NOT NULL DEFAULT 0"
   );
 }
@@ -6232,74 +6290,113 @@ var SESSION_SELECT = `
     completed_at_epoch AS completedAtEpoch
   FROM sessions
 `;
+var SESSION_UPSERT_RETURNING = `
+  RETURNING
+    id,
+    content_session_id AS contentSessionId,
+    project,
+    transcript_path AS transcriptPath,
+    title,
+    content,
+    insight,
+    next_steps AS nextSteps,
+    decision,
+    done,
+    "current" AS current,
+    "reference" AS reference,
+    last_compact_turn AS lastCompactTurn,
+        summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+    scan_cursor_byte_offset AS scanCursorByteOffset,
+    scan_cursor_line AS scanCursorLine,
+    parent_session_id AS parentSessionId,
+    lineage_status AS lineageStatus,
+    last_remember_turn_id AS lastRememberTurnId,
+    created_at_epoch AS createdAtEpoch,
+    updated_at_epoch AS updatedAtEpoch,
+    completed_at_epoch AS completedAtEpoch
+`;
 function upsertSession(db, input) {
-  const session = db.query(`
-      INSERT INTO sessions (
-        content_session_id,
-        project,
-        transcript_path,
-        title,
-        content,
-        insight,
-        next_steps,
-        last_compact_turn,
-        summary_updated_at_epoch,
-        created_at_epoch,
-        updated_at_epoch,
-        completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(content_session_id) DO UPDATE SET
-        project = excluded.project,
-        -- First-non-NULL, and deliberately the reverse of project's
-        -- last-writer-wins: the transcript directory is fixed at the session's
-        -- STARTING cwd, so a later upsert from a different cwd must not move it.
-        transcript_path = COALESCE(sessions.transcript_path, excluded.transcript_path),
-        title = COALESCE(excluded.title, sessions.title),
-        content = COALESCE(excluded.content, sessions.content),
-        insight = COALESCE(excluded.insight, sessions.insight),
-        next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
-        last_compact_turn = COALESCE(excluded.last_compact_turn, sessions.last_compact_turn),
-        summary_updated_at_epoch = COALESCE(excluded.summary_updated_at_epoch, sessions.summary_updated_at_epoch),
-        created_at_epoch = excluded.created_at_epoch,
-        updated_at_epoch = excluded.updated_at_epoch,
-        completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
-      RETURNING
-        id,
-        content_session_id AS contentSessionId,
-        project,
-        transcript_path AS transcriptPath,
-        title,
-        content,
-        insight,
-        next_steps AS nextSteps,
-        decision,
-        done,
-        "current" AS current,
-        "reference" AS reference,
-        last_compact_turn AS lastCompactTurn,
-            summary_updated_at_epoch AS summaryUpdatedAtEpoch,
-        scan_cursor_byte_offset AS scanCursorByteOffset,
-        scan_cursor_line AS scanCursorLine,
-        parent_session_id AS parentSessionId,
-        lineage_status AS lineageStatus,
-        last_remember_turn_id AS lastRememberTurnId,
-        created_at_epoch AS createdAtEpoch,
-        updated_at_epoch AS updatedAtEpoch,
-        completed_at_epoch AS completedAtEpoch
-    `).get(
-    input.contentSessionId,
-    input.project,
-    input.transcriptPath ?? null,
-    input.title,
-    input.content ?? null,
-    input.insight,
-    input.nextSteps ?? null,
-    input.lastCompactTurn ?? null,
-    input.summaryUpdatedAtEpoch ?? null,
-    input.createdAtEpoch,
-    input.updatedAtEpoch,
-    input.completedAtEpoch
-  );
+  const runUpsert = db.transaction(() => {
+    const updated = db.query(`
+        UPDATE sessions SET
+          project = ?,
+          -- First-non-NULL, and deliberately the reverse of project's
+          -- last-writer-wins: the transcript directory is fixed at the
+          -- session's STARTING cwd, so a later upsert from a different cwd
+          -- must not move it.
+          transcript_path = COALESCE(transcript_path, ?),
+          title = COALESCE(?, title),
+          content = COALESCE(?, content),
+          insight = COALESCE(?, insight),
+          next_steps = COALESCE(?, next_steps),
+          last_compact_turn = COALESCE(?, last_compact_turn),
+          summary_updated_at_epoch = COALESCE(?, summary_updated_at_epoch),
+          created_at_epoch = ?,
+          updated_at_epoch = ?,
+          completed_at_epoch = COALESCE(?, completed_at_epoch)
+        WHERE content_session_id = ?
+        ${SESSION_UPSERT_RETURNING}
+      `).get(
+      input.project,
+      input.transcriptPath ?? null,
+      input.title,
+      input.content ?? null,
+      input.insight,
+      input.nextSteps ?? null,
+      input.lastCompactTurn ?? null,
+      input.summaryUpdatedAtEpoch ?? null,
+      input.createdAtEpoch,
+      input.updatedAtEpoch,
+      input.completedAtEpoch,
+      input.contentSessionId
+    );
+    if (updated) {
+      return updated;
+    }
+    return db.query(`
+        INSERT INTO sessions (
+          content_session_id,
+          project,
+          transcript_path,
+          title,
+          content,
+          insight,
+          next_steps,
+          last_compact_turn,
+          summary_updated_at_epoch,
+          created_at_epoch,
+          updated_at_epoch,
+          completed_at_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(content_session_id) DO UPDATE SET
+          project = excluded.project,
+          transcript_path = COALESCE(sessions.transcript_path, excluded.transcript_path),
+          title = COALESCE(excluded.title, sessions.title),
+          content = COALESCE(excluded.content, sessions.content),
+          insight = COALESCE(excluded.insight, sessions.insight),
+          next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
+          last_compact_turn = COALESCE(excluded.last_compact_turn, sessions.last_compact_turn),
+          summary_updated_at_epoch = COALESCE(excluded.summary_updated_at_epoch, sessions.summary_updated_at_epoch),
+          created_at_epoch = excluded.created_at_epoch,
+          updated_at_epoch = excluded.updated_at_epoch,
+          completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
+        ${SESSION_UPSERT_RETURNING}
+      `).get(
+      input.contentSessionId,
+      input.project,
+      input.transcriptPath ?? null,
+      input.title,
+      input.content ?? null,
+      input.insight,
+      input.nextSteps ?? null,
+      input.lastCompactTurn ?? null,
+      input.summaryUpdatedAtEpoch ?? null,
+      input.createdAtEpoch,
+      input.updatedAtEpoch,
+      input.completedAtEpoch
+    );
+  });
+  const session = runUpsert.immediate();
   if (!session) {
     throw new Error("Failed to upsert session.");
   }
@@ -6379,6 +6476,102 @@ function setSessionLineageStatus(db, sessionId, status) {
   db.query(
     `UPDATE sessions SET lineage_status = ? WHERE id = ?`
   ).run(status, sessionId);
+}
+
+// src/db/write-gate.ts
+function sessionWriterId(sessionDbId) {
+  return `session:${sessionDbId}`;
+}
+function snapshotWriteGateSequence(db) {
+  const row = db.query(`SELECT value FROM write_gate_sequence WHERE id = 1`).get();
+  return row?.value ?? 0;
+}
+function getWriterEpoch(db, writer) {
+  const row = db.query(
+    `SELECT epoch FROM write_gate_epochs WHERE writer = ?`
+  ).get(writer);
+  return row?.epoch ?? 0;
+}
+function bumpWriterEpoch(db, writer) {
+  return db.query(
+    `INSERT INTO write_gate_epochs (writer, epoch) VALUES (?, 1)
+       ON CONFLICT(writer) DO UPDATE SET epoch = epoch + 1
+       RETURNING epoch`
+  ).get(writer).epoch;
+}
+function recordReadGrants(db, writer, entries, nowEpoch, sequence) {
+  if (entries.length === 0) {
+    return;
+  }
+  const epoch = getWriterEpoch(db, writer);
+  const stmt = db.query(
+    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence, epoch)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
+       read_at_epoch = excluded.read_at_epoch,
+       read_sequence = excluded.read_sequence,
+       epoch = excluded.epoch`
+  );
+  for (const entry of entries) {
+    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence, epoch);
+  }
+}
+var STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
+function sweepStaleReadGrants(db, nowEpoch, limit, maxAgeSeconds = STALE_READ_GRANT_AGE_SECONDS) {
+  const cutoffEpoch = nowEpoch - maxAgeSeconds;
+  const clearedGrantsByAge = db.query(
+    `DELETE FROM write_gate_reads WHERE rowid IN (
+         SELECT rowid FROM write_gate_reads WHERE read_at_epoch <= ? LIMIT ?
+       )`
+  ).run(cutoffEpoch, limit).changes;
+  const clearedGrantsByEpoch = db.query(
+    `DELETE FROM write_gate_reads WHERE rowid IN (
+         SELECT r.rowid FROM write_gate_epochs we
+         JOIN write_gate_reads r ON r.writer = we.writer AND r.epoch != we.epoch
+         LIMIT ?
+       )`
+  ).run(limit).changes;
+  const clearedCompletenessByAge = db.query(
+    `DELETE FROM write_gate_field_completeness WHERE rowid IN (
+         SELECT rowid FROM write_gate_field_completeness WHERE recorded_at_epoch <= ? LIMIT ?
+       )`
+  ).run(cutoffEpoch, limit).changes;
+  const clearedCompletenessByEpoch = db.query(
+    `DELETE FROM write_gate_field_completeness WHERE rowid IN (
+         SELECT c.rowid FROM write_gate_epochs we
+         JOIN write_gate_field_completeness c ON c.writer = we.writer AND c.epoch != we.epoch
+         LIMIT ?
+       )`
+  ).run(limit).changes;
+  return clearedGrantsByAge + clearedGrantsByEpoch + clearedCompletenessByAge + clearedCompletenessByEpoch;
+}
+function recordFieldCompleteness(db, writer, entries, nowEpoch, sequence) {
+  if (entries.length === 0) {
+    return;
+  }
+  const epoch = getWriterEpoch(db, writer);
+  const stmt = db.query(
+    `INSERT INTO write_gate_field_completeness
+       (writer, entity_type, entity_id, field, complete, recorded_sequence, recorded_at_epoch, epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(writer, entity_type, entity_id, field) DO UPDATE SET
+       complete = excluded.complete,
+       recorded_sequence = excluded.recorded_sequence,
+       recorded_at_epoch = excluded.recorded_at_epoch,
+       epoch = excluded.epoch`
+  );
+  for (const entry of entries) {
+    stmt.run(
+      writer,
+      entry.entityType,
+      entry.entityId,
+      entry.field,
+      entry.complete ? 1 : 0,
+      sequence,
+      nowEpoch,
+      epoch
+    );
+  }
 }
 
 // src/worker/client.ts
@@ -6640,6 +6833,7 @@ async function notifyWorkerTrigger(input, deps = {}, env = process.env, timeoutM
 
 // src/hooks/handlers/compact.ts
 function createCompactHandler(dependencies) {
+  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   return async function handleCompactHook(input) {
     if (!input.sessionId) {
       return { continue: true };
@@ -6647,6 +6841,16 @@ function createCompactHandler(dependencies) {
     const session = getSessionByContentId(dependencies.db, input.sessionId);
     if (!session) {
       return { continue: true };
+    }
+    try {
+      writeTransaction(dependencies.db, () => {
+        bumpWriterEpoch(dependencies.db, sessionWriterId(session.id));
+      });
+    } catch (error48) {
+      process.stderr.write(
+        `[claude-mnemo] pre-compact write-gate epoch bump failed for session ${session.id}: ${error48 instanceof Error ? error48.message : String(error48)}
+`
+      );
     }
     await notifyWorkerCompact(
       session.id,
@@ -7957,6 +8161,10 @@ var DEFAULT_TURN_RENDER_FIELDS = /* @__PURE__ */ new Set([
   "metadata",
   "content"
 ]);
+var CONTEXT_TURN_RENDER_FIELDS = /* @__PURE__ */ new Set([
+  ...DEFAULT_TURN_RENDER_FIELDS,
+  "prompt"
+]);
 var MATCH_CONDITIONAL_TURN_FIELDS = /* @__PURE__ */ new Set(["prompt"]);
 function isTurnFieldActive(field, fields, matchedFields) {
   return fields.has(field) || MATCH_CONDITIONAL_TURN_FIELDS.has(field) && (matchedFields?.has(field) ?? false);
@@ -8029,15 +8237,13 @@ function renderTurnAddress(promptNumber, sessionId, includeSessionPrefix = false
 function formatTurnLabel(turn, fields, {
   indent = "",
   sessionId,
-  includeSessionPrefix = false,
-  includeDbTurnIds = false
+  includeSessionPrefix = false
 }) {
   const prefix = `${indent}${renderTurnAddress(turn.promptNumber, sessionId, includeSessionPrefix)}`;
-  const titleSelected = fields.has("title") && turn.title !== null;
-  const title = titleSelected ? turn.title : turn.promptPreview ? `"${collapseToSingleLine(turn.promptPreview)}"` : "Untitled";
-  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
+  const titleText = fields.has("title") ? turn.title : null;
+  const titleSegment = titleText ? ` ${titleText}` : "";
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
-  return `${prefix} ${title}${formatStatus(turn.status)}${dbIdSegment}${rewindSegment}`;
+  return `${prefix}${titleSegment}${formatStatus(turn.status)}${rewindSegment}`;
 }
 function formatObservationLabel(observation, indent, header) {
   return `${indent}[O${observation.id}] ${header ?? observation.title}`;
@@ -8139,8 +8345,7 @@ function formatTurnBody(turn, fields, options) {
   if (fields.has("content") && turn.content) {
     lines.push(`${fieldIndent}- content: ${turn.content}`);
   }
-  const titleSelected = fields.has("title") && turn.title !== null;
-  if (isTurnFieldActive("prompt", fields, options.matchedFields) && titleSelected && turn.promptPreview) {
+  if (isTurnFieldActive("prompt", fields, options.matchedFields) && turn.promptPreview) {
     lines.push(
       `${fieldIndent}- prompt: "${collapseToSingleLine(turn.promptPreview)}"`
     );
@@ -8786,9 +8991,9 @@ function renderSegmentCardRecord(db, segment, options) {
     }
     for (const [index, member] of members.entries()) {
       const turn = getTurnById(db, member.turnId);
-      const title = turn?.title ?? turn?.userPrompt ?? "untitled";
+      const address = `S${member.sessionId}/T${member.promptNumber}`;
       lines.push(
-        `${CARD_ROW_INDENT}- ${index + 1}. S${member.sessionId}/T${member.promptNumber} "${title}"`
+        `${CARD_ROW_INDENT}- ${index + 1}. ${turn?.title ? `${address} "${turn.title}"` : address}`
       );
     }
   }
@@ -8854,7 +9059,6 @@ function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
           fields: options.fields,
           sessionId: member.sessionId,
           includeSessionPrefix: pageOpensMidSession,
-          includeDbTurnIds: options.includeDbTurnIds,
           turnBudget: options.turnBudget,
           signal: options.signal
         }
@@ -8890,74 +9094,6 @@ function expandNumericSelector(value, endpointPrefix) {
     values.push(current);
   }
   return values;
-}
-
-// src/db/write-gate.ts
-function sessionWriterId(sessionDbId) {
-  return `session:${sessionDbId}`;
-}
-function snapshotWriteGateSequence(db) {
-  const row = db.query(`SELECT value FROM write_gate_sequence WHERE id = 1`).get();
-  return row?.value ?? 0;
-}
-function recordReadGrants(db, writer, entries, nowEpoch, sequence) {
-  if (entries.length === 0) {
-    return;
-  }
-  const stmt = db.query(
-    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
-       read_at_epoch = excluded.read_at_epoch,
-       read_sequence = excluded.read_sequence`
-  );
-  for (const entry of entries) {
-    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence);
-  }
-}
-function clearReadGrantsForWriter(db, writer) {
-  const clearedCompleteness = db.query(`DELETE FROM write_gate_field_completeness WHERE writer = ?`).run(writer).changes;
-  const clearedGrants = db.query(`DELETE FROM write_gate_reads WHERE writer = ?`).run(writer).changes;
-  return clearedGrants + clearedCompleteness;
-}
-function sweepReadGrantsForCompletedSessions(db, limit) {
-  const rows = db.query(
-    `SELECT DISTINCT r.writer AS writer
-       FROM write_gate_reads r
-       JOIN sessions s ON s.id = CAST(substr(r.writer, 9) AS INTEGER)
-       WHERE r.writer LIKE 'session:%' AND s.completed_at_epoch IS NOT NULL
-       LIMIT ?`
-  ).all(limit);
-  let cleared = 0;
-  for (const row of rows) {
-    cleared += clearReadGrantsForWriter(db, row.writer);
-  }
-  return cleared;
-}
-function recordFieldCompleteness(db, writer, entries, nowEpoch, sequence) {
-  if (entries.length === 0) {
-    return;
-  }
-  const stmt = db.query(
-    `INSERT INTO write_gate_field_completeness
-       (writer, entity_type, entity_id, field, complete, recorded_sequence, recorded_at_epoch)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(writer, entity_type, entity_id, field) DO UPDATE SET
-       complete = excluded.complete,
-       recorded_sequence = excluded.recorded_sequence,
-       recorded_at_epoch = excluded.recorded_at_epoch`
-  );
-  for (const entry of entries) {
-    stmt.run(
-      writer,
-      entry.entityType,
-      entry.entityId,
-      entry.field,
-      entry.complete ? 1 : 0,
-      sequence,
-      nowEpoch
-    );
-  }
 }
 
 // src/mcp/recall.ts
@@ -9284,7 +9420,7 @@ function deriveBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function renderSession(db, session, fields, turnSelector, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget) {
+function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null, signal, turnBudget) {
   const view = buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
@@ -9308,7 +9444,6 @@ function renderSession(db, session, fields, turnSelector, includeDbTurnIds, eraC
         indent: RENDER_INDENT_STEP,
         fields,
         sessionId: session.id,
-        includeDbTurnIds,
         turnBudget,
         signal
       }
@@ -9320,7 +9455,7 @@ function renderSession(db, session, fields, turnSelector, includeDbTurnIds, eraC
   }
   return { text: lines.join("\n") };
 }
-function renderTurnScope(db, turns, fields, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget, ledger) {
+function renderTurnScope(db, turns, fields, eraCutoffEpoch = null, signal, turnBudget, ledger) {
   const lines = [];
   let cursor = 0;
   const appendLine = (line) => {
@@ -9360,7 +9495,6 @@ function renderTurnScope(db, turns, fields, includeDbTurnIds, eraCutoffEpoch = n
             indent: RENDER_INDENT_STEP,
             fields,
             sessionId: session.id,
-            includeDbTurnIds,
             signal,
             turnBudget
           }
@@ -9371,7 +9505,7 @@ function renderTurnScope(db, turns, fields, includeDbTurnIds, eraCutoffEpoch = n
   }
   return lines.join("\n");
 }
-function renderObservationScope(db, observations, includeParents, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget) {
+function renderObservationScope(db, observations, includeParents, eraCutoffEpoch = null, signal, turnBudget) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const row of observations) {
@@ -9424,8 +9558,13 @@ function renderObservationScope(db, observations, includeParents, includeDbTurnI
           { type: "turn", value: turnView },
           {
             indent: RENDER_INDENT_STEP,
+            // Ticket 02: a FIXED-SHAPE surface — the `O*` routes render this
+            // turn row as the header its observations hang under, and no
+            // caller field selection reaches it. It declares `prompt` so a
+            // note-less turn still says what was asked of it, now inside the
+            // per-item `turn` budget instead of in the uncappable label.
+            fields: CONTEXT_TURN_RENDER_FIELDS,
             sessionId: session.id,
-            includeDbTurnIds,
             turnBudget,
             signal
           }
@@ -9480,14 +9619,13 @@ function buildOwnedObservationView(db, observation, eraCutoffEpoch) {
     eraCutoffEpoch
   );
 }
-function renderSessionDetail(db, sessionId, fields, includeDbTurnIds, eraCutoffEpoch = null, signal, turnBudget) {
+function renderSessionDetail(db, sessionId, fields, eraCutoffEpoch = null, signal, turnBudget) {
   const session = getSession(db, sessionId);
   return session ? renderSession(
     db,
     session,
     fields,
     void 0,
-    includeDbTurnIds,
     eraCutoffEpoch,
     signal,
     turnBudget
@@ -9709,7 +9847,7 @@ function matchedTurnFields(turn, terms) {
   }
   return matched;
 }
-function renderGroupedSearchResults(db, results, fields, turnBudget, includeDbTurnIds, eraCutoffEpoch = null, signal, queryText, ledger) {
+function renderGroupedSearchResults(db, results, fields, turnBudget, eraCutoffEpoch = null, signal, queryText, ledger) {
   const terms = queryText ? extractQueryTerms(queryText) : [];
   const snippetWindow = Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN);
   const relevanceRank = /* @__PURE__ */ new Map();
@@ -9819,7 +9957,7 @@ function renderGroupedSearchResults(db, results, fields, turnBudget, includeDbTu
     });
     for (const turn of turns) {
       blockGrants.push({ entityType: "turn", entityId: turn.id });
-      const turnFields = group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id) ? DEFAULT_TURN_RENDER_FIELDS : fields;
+      const turnFields = group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id) ? CONTEXT_TURN_RENDER_FIELDS : fields;
       const turnView = withTurnSearchSnippet(
         buildTurnView(db, turn, eraCutoffEpoch, turnFields),
         terms,
@@ -9834,7 +9972,6 @@ function renderGroupedSearchResults(db, results, fields, turnBudget, includeDbTu
             fields: turnFields,
             matchedFields: matchedTurnFields(turn, terms),
             sessionId: session.id,
-            includeDbTurnIds,
             turnBudget,
             signal
           }
@@ -9870,7 +10007,7 @@ function renderGroupedSearchResults(db, results, fields, turnBudget, includeDbTu
   }
   return blocks.join("\n");
 }
-function renderRoutedId(db, routed, fields, page, pageSize, after, before, includeDbTurnIds, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, ledger) {
+function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, ledger) {
   const routeCheckpoint = ledger?.checkpoint() ?? 0;
   if (routed.kind === "sessions") {
     const paged = paginateItems(
@@ -9885,7 +10022,6 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, inclu
         db,
         sessionId,
         fields,
-        includeDbTurnIds,
         eraCutoffEpoch,
         signal,
         turnBudget
@@ -9909,7 +10045,6 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, inclu
         pageBudget,
         page,
         turnBudget,
-        includeDbTurnIds,
         eraCutoffEpoch,
         signal
       });
@@ -9930,7 +10065,6 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, inclu
         pageBudget,
         page: 1,
         turnBudget,
-        includeDbTurnIds,
         eraCutoffEpoch,
         signal
       });
@@ -9958,7 +10092,6 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, inclu
     const precedingSessionId = firstOrdinal !== void 0 && firstOrdinal > 1 ? chronologicalMembers[firstOrdinal - 2]?.sessionId ?? null : null;
     const body = renderSegmentMembersByOrdinal(db, routed.segmentId, paged.items, {
       fields,
-      includeDbTurnIds,
       turnBudget,
       eraCutoffEpoch,
       signal,
@@ -9989,13 +10122,12 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, inclu
       page,
       pageSize,
       pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
-      (pageItems) => renderTurnScope(db, pageItems, fields, includeDbTurnIds, eraCutoffEpoch, void 0, turnBudget)
+      (pageItems) => renderTurnScope(db, pageItems, fields, eraCutoffEpoch, void 0, turnBudget)
     );
     const body = renderTurnScope(
       db,
       paged.items,
       fields,
-      includeDbTurnIds,
       eraCutoffEpoch,
       signal,
       turnBudget,
@@ -10014,7 +10146,6 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, inclu
       db,
       [turn],
       fields,
-      includeDbTurnIds,
       eraCutoffEpoch,
       signal,
       turnBudget,
@@ -10044,13 +10175,12 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, inclu
       page,
       pageSize,
       pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
-      (pageItems) => renderObservationScope(db, pageItems, true, includeDbTurnIds, eraCutoffEpoch, void 0, turnBudget)
+      (pageItems) => renderObservationScope(db, pageItems, true, eraCutoffEpoch, void 0, turnBudget)
     );
     const body = renderObservationScope(
       db,
       paged.items,
       true,
-      includeDbTurnIds,
       eraCutoffEpoch,
       signal,
       turnBudget
@@ -10086,13 +10216,12 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, inclu
       page,
       pageSize,
       pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
-      (pageItems) => renderObservationScope(db, pageItems, true, includeDbTurnIds, eraCutoffEpoch, void 0, turnBudget)
+      (pageItems) => renderObservationScope(db, pageItems, true, eraCutoffEpoch, void 0, turnBudget)
     );
     const body = renderObservationScope(
       db,
       paged.items,
       true,
-      includeDbTurnIds,
       eraCutoffEpoch,
       signal,
       turnBudget
@@ -10170,15 +10299,14 @@ function browseFieldText(db, turn, field) {
 }
 var BROWSE_TURN_INDENT = RENDER_INDENT_STEP;
 var BROWSE_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
-function formatBrowseTurnLabel(turn, sessionId, includeSessionPrefix, includeDbTurnIds, titleText) {
+function formatBrowseTurnLabel(turn, sessionId, includeSessionPrefix, titleText) {
   const address = renderTurnAddress(turn.promptNumber, sessionId, includeSessionPrefix);
-  const label = titleText ?? (turn.userPrompt ? `"${turn.userPrompt.replace(/\s+/g, " ").trim()}"` : "Untitled");
-  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
+  const labelSegment = titleText ? ` ${titleText}` : "";
   const statusSegment = turn.status ? ` [${turn.status}]` : "";
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
-  return `${BROWSE_TURN_INDENT}${address} ${label}${statusSegment}${dbIdSegment}${rewindSegment}`;
+  return `${BROWSE_TURN_INDENT}${address}${labelSegment}${statusSegment}${rewindSegment}`;
 }
-function renderBrowseTurnBlock(db, turn, sessionId, fields, includeSessionPrefix, includeDbTurnIds, turnBudget, signal) {
+function renderBrowseTurnBlock(db, turn, sessionId, fields, includeSessionPrefix, turnBudget, signal) {
   const titleText = fields.includes("title") ? turn.title : null;
   if (fields.includes("title")) {
     pushFieldCompleteness(signal, "turn", turn.id, "title", true);
@@ -10187,7 +10315,6 @@ function renderBrowseTurnBlock(db, turn, sessionId, fields, includeSessionPrefix
     turn,
     sessionId,
     includeSessionPrefix,
-    includeDbTurnIds,
     titleText
   );
   const values = fields.flatMap((field) => {
@@ -10195,7 +10322,13 @@ function renderBrowseTurnBlock(db, turn, sessionId, fields, includeSessionPrefix
       return [];
     }
     const text = browseFieldText(db, turn, field);
-    return text ? [{ field, text }] : [];
+    if (!text) {
+      if (GATED_TURN_FIELDS.includes(field)) {
+        pushFieldCompleteness(signal, "turn", turn.id, field, true);
+      }
+      return [];
+    }
+    return [{ field, text }];
   });
   if (values.length === 0) {
     return label;
@@ -10247,7 +10380,7 @@ function packPagesByTokenBudget(items, pageSize, budgetTokens, render, onPageSta
   }
   return pages;
 }
-function buildBrowseFeed(db, page, pageSize, pageBudget, turnBudget, fields, includeDbTurnIds, signal, ledger) {
+function buildBrowseFeed(db, page, pageSize, pageBudget, turnBudget, fields, signal, ledger) {
   const turnIdRows = db.query(
     `SELECT id FROM turns ORDER BY created_at_epoch DESC, id DESC LIMIT ?`
   ).all(BROWSE_CANDIDATE_CAP);
@@ -10308,7 +10441,6 @@ function buildBrowseFeed(db, page, pageSize, pageBudget, turnBudget, fields, inc
       session.id,
       resolvedFields,
       continuesRun && atPageTop,
-      includeDbTurnIds,
       turnBudget,
       signal
     );
@@ -10369,7 +10501,7 @@ ${block}`;
   ledger?.shiftFrom(feedCheckpoint, pageBodyOffset(header, body, pageCount));
   return joinPage(header, body, pageCount);
 }
-function renderBareOverview(db, page, pageSize, includeDbTurnIds, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, ledger) {
+function renderBareOverview(db, page, pageSize, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, ledger) {
   const parts = [];
   let cursor = 0;
   const appendPart = (part) => {
@@ -10389,7 +10521,6 @@ function renderBareOverview(db, page, pageSize, includeDbTurnIds, eraCutoffEpoch
             pageBudget,
             page: 1,
             turnBudget,
-            includeDbTurnIds,
             eraCutoffEpoch,
             signal
           })
@@ -10408,7 +10539,6 @@ function renderBareOverview(db, page, pageSize, includeDbTurnIds, eraCutoffEpoch
     pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
     turnBudget,
     filter.fields,
-    includeDbTurnIds ?? false,
     signal,
     ledger
   );
@@ -10460,7 +10590,6 @@ function recallMemoryDelivery(db, input) {
 function recallMemoryBody(db, input, signal, ledger) {
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
-  const includeDbTurnIds = input.includeDbTurnIds ?? false;
   const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
   const pageBudget = input.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
   const turnBudget = input.turn ?? DEFAULT_TURN_TOKEN_BUDGET;
@@ -10484,7 +10613,6 @@ function recallMemoryBody(db, input, signal, ledger) {
         pageSize,
         filter.after,
         filter.before,
-        includeDbTurnIds,
         eraCutoffEpoch,
         signal,
         pageBudget,
@@ -10521,7 +10649,6 @@ function recallMemoryBody(db, input, signal, ledger) {
         pageSize,
         filter.after,
         filter.before,
-        includeDbTurnIds,
         eraCutoffEpoch,
         signal,
         pageBudget,
@@ -10562,7 +10689,6 @@ function recallMemoryBody(db, input, signal, ledger) {
         pageItems,
         fields,
         turnBudget,
-        includeDbTurnIds,
         eraCutoffEpoch,
         void 0,
         text || void 0,
@@ -10575,7 +10701,6 @@ function recallMemoryBody(db, input, signal, ledger) {
       paged.items,
       fields,
       turnBudget,
-      includeDbTurnIds,
       eraCutoffEpoch,
       signal,
       text || void 0,
@@ -10589,7 +10714,6 @@ function recallMemoryBody(db, input, signal, ledger) {
     db,
     page,
     pageSize,
-    includeDbTurnIds,
     eraCutoffEpoch,
     signal,
     pageBudget,
@@ -28151,6 +28275,22 @@ function createContextHandler(dependencies, section = "sessions") {
         dependencies.workerEnv
       );
     }
+    if (input.sessionId && input.source === "compact") {
+      const compactingSession = getSessionByContentId(
+        dependencies.db,
+        input.sessionId
+      );
+      if (compactingSession) {
+        try {
+          bumpWriterEpoch(dependencies.db, sessionWriterId(compactingSession.id));
+        } catch (error48) {
+          process.stderr.write(
+            `[claude-mnemo] SessionStart(compact) write-gate epoch re-bump failed for session ${compactingSession.id}: ${error48 instanceof Error ? error48.message : String(error48)}
+`
+          );
+        }
+      }
+    }
     const hookSpecificOutput = buildContextOutput(
       dependencies.db,
       input,
@@ -28354,11 +28494,17 @@ function listOwedNoteTurns(db, sessionId, currentPromptNumber, options = {}) {
 }
 
 // src/db/turn-completion.ts
+function hasActualResponse(assistantResponse) {
+  return assistantResponse !== null && assistantResponse.trim() !== "";
+}
 function completionFloorStatus(turn, eraCutoffEpoch = null) {
   if (turn.title !== null || turn.content !== null) {
     return "extracted";
   }
-  return isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch) ? "skipped" : "failed";
+  if (!isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch)) {
+    return "failed";
+  }
+  return hasActualResponse(turn.assistantResponse) ? "extracted" : "skipped";
 }
 function safeJsonParse(raw) {
   if (!raw) {
@@ -28993,12 +29139,13 @@ function skipOrphanTurns(db, sessionDbId, nowEpoch, orphans) {
   let processedCount = 0;
   for (const orphan of orphans) {
     const turn = db.query(
-      "SELECT title, content FROM turns WHERE id = ? AND session_id = ?"
+      `SELECT title, content, assistant_response AS assistantResponse
+         FROM turns WHERE id = ? AND session_id = ?`
     ).get(orphan.id, sessionDbId);
     if (!turn) {
       continue;
     }
-    const status = turn.title !== null || turn.content !== null ? "extracted" : "skipped";
+    const status = turn.title !== null || turn.content !== null || hasActualResponse(turn.assistantResponse) ? "extracted" : "skipped";
     const result = db.query(
       `
         UPDATE turns
@@ -29669,15 +29816,11 @@ function createSessionEndHandler(dependencies) {
     }
     try {
       writeTransaction(dependencies.db, () => {
-        clearReadGrantsForWriter(dependencies.db, sessionWriterId(session.id));
-        sweepReadGrantsForCompletedSessions(
-          dependencies.db,
-          WRITE_GATE_JANITOR_SWEEP_LIMIT
-        );
+        sweepStaleReadGrants(dependencies.db, now(), WRITE_GATE_JANITOR_SWEEP_LIMIT);
       });
     } catch (error48) {
       repairLog(
-        `session-end write-gate cleanup failed for session ${session.id}: ${error48 instanceof Error ? error48.message : String(error48)}`
+        `session-end write-gate sweep failed for session ${session.id}: ${error48 instanceof Error ? error48.message : String(error48)}`
       );
     }
     return {
