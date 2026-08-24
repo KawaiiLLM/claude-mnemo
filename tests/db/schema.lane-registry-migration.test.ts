@@ -621,10 +621,13 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // M4 — disposal by relation class
+  // M4 — disposal, downgrade to untagged (repair [S15069/T1566], peer P1-1:
+  // the tag mandate that made an untagged `extends`/`narrows` illegal is
+  // withdrawn, so M4 no longer deletes any relation class — every relation,
+  // `extends`/`narrows` included, downgrades or merges like any other).
   // -------------------------------------------------------------------------
 
-  test("an extends edge with a homeless endpoint is DELETED, not downgraded, and both addresses are recorded", () => {
+  test("an extends edge with a homeless endpoint downgrades to untagged in place — extends/narrows are no longer deleted", () => {
     resetLaneMigrationReceipts();
     const segmentId = createSegment(db, { title: "owner", nowEpoch: 100 }).id;
     const owned = seedTurn(1);
@@ -634,12 +637,12 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
 
     runLaneRegistryMigration(db, 200);
 
-    expect(getEdgeById(edgeId)).toBeNull();
+    expect(getEdgeById(edgeId)).toEqual({ relation: "extends", tags: [] });
     expect(tagIndexRowCount(edgeId)).toBe(0);
     const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
       LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
     );
-    expect(receipt.deleted).toEqual([
+    expect(receipt.downgraded).toEqual([
       {
         edgeId,
         citingTurnId: homeless,
@@ -648,30 +651,43 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
         citedAddress: `S${sessionId}/T1`,
         relation: "extends",
         tags: ["orphan-lane"],
+        disposition: "downgraded",
       },
     ]);
-    expect(receipt.downgraded).toEqual([]);
   });
 
-  test("a narrows edge with a homeless endpoint is DELETED too (same continuation class as extends)", () => {
+  test("a narrows edge with a homeless endpoint also merges into a pre-existing untagged row — same as any other relation now (no continuation class left)", () => {
     resetLaneMigrationReceipts();
     const segmentId = createSegment(db, { title: "owner", nowEpoch: 100 }).id;
     const owned = seedTurn(1);
     const homeless = seedTurn(2);
     addMember(segmentId, owned);
+    const untaggedEdgeId = writeEdge(homeless, owned, "narrows", []);
     const edgeId = writeEdge(homeless, owned, "narrows", ["orphan-lane"]);
 
     runLaneRegistryMigration(db, 200);
 
     expect(getEdgeById(edgeId)).toBeNull();
+    expect(getEdgeById(untaggedEdgeId)).toEqual({ relation: "narrows", tags: [] });
     const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
       LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
     );
-    expect(receipt.deleted).toHaveLength(1);
-    expect(receipt.deleted[0]!.relation).toBe("narrows");
+    expect(receipt.downgraded).toEqual([
+      {
+        edgeId,
+        citingTurnId: homeless,
+        citingAddress: `S${sessionId}/T2`,
+        citedTurnId: owned,
+        citedAddress: `S${sessionId}/T1`,
+        relation: "narrows",
+        tags: ["orphan-lane"],
+        disposition: "merged",
+        mergedIntoEdgeId: untaggedEdgeId,
+      },
+    ]);
   });
 
-  test("a non-continuation relation with a homeless endpoint downgrades to untagged in place, and its tag index is cleared", () => {
+  test("a relation with a homeless endpoint downgrades to untagged in place, and its tag index is cleared", () => {
     resetLaneMigrationReceipts();
     const segmentId = createSegment(db, { title: "owner", nowEpoch: 100 }).id;
     const owned = seedTurn(1);
@@ -686,7 +702,6 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
       LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
     );
-    expect(receipt.deleted).toEqual([]);
     expect(receipt.downgraded).toEqual([
       {
         edgeId,
@@ -752,7 +767,6 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
       LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
     );
-    expect(receipt.deleted).toEqual([]);
     expect(receipt.downgraded).toHaveLength(2);
     // Which of the two processes first is an SQL row-order detail this test
     // does not pin — only that exactly one survives (downgraded in place)
@@ -786,7 +800,6 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
       LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
     );
-    expect(receipt.deleted).toEqual([]);
     expect(receipt.downgraded).toEqual([]);
   });
 
@@ -808,9 +821,14 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const other = seedTurn(3);
     addMember(segmentId, owned);
     addMember(segmentId, other);
-    // One of each disposition class, all with a homeless endpoint so M4 acts:
-    // a continuation edge (deleted), a non-continuation edge (downgraded), and
-    // a legal edge that must be left completely alone.
+    // A pre-existing untagged row for (homeless, owned, extends): the tagged
+    // sibling below must MERGE into it (deleted, cascading the tag index)
+    // rather than downgrade in place and collide with the UNIQUE key.
+    writeEdge(homeless, owned, "extends", []);
+    // One of each remaining disposition: a merge collision (row deleted, tag
+    // index cleared via ON DELETE CASCADE), a plain downgrade (tags cleared
+    // in place, tag index cleared by hand), and a legal edge left completely
+    // alone.
     writeEdge(homeless, owned, "extends", ["gone"]);
     writeEdge(homeless, owned, "consume", ["downgraded-lane"]);
     writeEdge(other, owned, "extends", ["kept"]);
@@ -842,9 +860,15 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
       }
     }
     // And the shape M4 was supposed to produce, so a vacuously empty index
-    // cannot pass the two loops above.
-    expect(tagsByEdge.size).toBe(2);
-    expect([...tagsByEdge.values()].map((tags) => tags.join(",")).sort()).toEqual(["", "kept"]);
+    // cannot pass the two loops above: the pre-existing untagged `extends` row
+    // survives the merge, the `consume` row survives downgraded, and the
+    // `extends`/`["kept"]` row is untouched.
+    expect(tagsByEdge.size).toBe(3);
+    expect([...tagsByEdge.values()].map((tags) => tags.join(",")).sort()).toEqual([
+      "",
+      "",
+      "kept",
+    ]);
   });
 
   test("M3 and M4 are both no-ops on a second run", () => {
@@ -910,7 +934,8 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     addMember(segB.id, crossB);
     const crossEdgeId = writeEdge(crossB, crossA, "override", ["shared-lane"]);
 
-    // extends edge, homeless endpoint, multi-tag — deleted with both tags recorded.
+    // extends edge, homeless endpoint, multi-tag — downgraded (not deleted:
+    // repair [S15069/T1566]) with both tags recorded.
     const homeless = seedTurn(5);
     const owned = seedTurn(6);
     addMember(segA.id, owned);
@@ -952,12 +977,13 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     expect(getTurnTagsRaw(legacyMember)).toBe("[]");
     expect(getTurnTagsRaw(malformedMember)).toBe("{not json");
 
-    // M4: the extends edge is DELETED (not downgraded), both tags and both
+    // M4: the extends edge is DOWNGRADED to untagged (no longer deleted —
+    // extends/narrows lost their special-cased deletion), both tags and both
     // addresses recorded; the cross-segment placeable edge is untouched.
     const disposalReceipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
       LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
     );
-    expect(disposalReceipt.deleted).toEqual([
+    expect(disposalReceipt.downgraded).toEqual([
       {
         edgeId: extendsEdgeId,
         citingTurnId: homeless,
@@ -966,10 +992,10 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
         citedAddress: `S${sessionId}/T6`,
         relation: "extends",
         tags: ["orphan-a", "orphan-b"],
+        disposition: "downgraded",
       },
     ]);
-    expect(disposalReceipt.downgraded).toEqual([]);
-    expect(getEdgeById(extendsEdgeId)).toBeNull();
+    expect(getEdgeById(extendsEdgeId)).toEqual({ relation: "extends", tags: [] });
     expect(getEdgeById(crossEdgeId)).toEqual({ relation: "override", tags: ["shared-lane"] });
   });
 });

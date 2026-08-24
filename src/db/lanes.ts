@@ -657,30 +657,10 @@ function classifyAndRepairMembership(db: Database): LaneMigrationMembershipRecei
 }
 
 // ---------------------------------------------------------------------------
-// M4 — illegal edges, by relation class
+// M4 — illegal edges, downgraded to untagged
 // ---------------------------------------------------------------------------
 
 export const LANE_REGISTRY_M4_DISPOSAL_RECEIPT = "lane-declaration-m4-disposal";
-
-/**
- * D6/M4 (peer P1-3). `extends`/`narrows` are the checker's own CONTINUATION
- * relations: an UNTAGGED one is itself rejected by the checker (E1), the same
- * way a tagged one with an undeclared endpoint is — so stripping tags off one
- * of these would trade one illegal shape for another, not repair it. Every
- * other relation carries no such constraint untagged, so it downgrades
- * instead of being deleted.
- */
-const CONTINUATION_RELATIONS: ReadonlySet<string> = new Set(["extends", "narrows"]);
-
-export interface LaneMigrationDeletedEdge {
-  edgeId: number;
-  citingTurnId: number;
-  citingAddress: string;
-  citedTurnId: number;
-  citedAddress: string;
-  relation: string;
-  tags: string[];
-}
 
 export interface LaneMigrationDowngradedEdge {
   edgeId: number;
@@ -702,7 +682,6 @@ export interface LaneMigrationDowngradedEdge {
 }
 
 export interface LaneMigrationDisposalReceipt {
-  deleted: LaneMigrationDeletedEdge[];
   downgraded: LaneMigrationDowngradedEdge[];
 }
 
@@ -725,12 +704,20 @@ function resolveTurnAddress(db: Database, turnId: number): string {
 }
 
 /**
- * M4 (spec D6, ticket 04): disposes of every edge M0 classified
- * `notPlaceable` — a homeless endpoint can never gain a segment declaration
- * through this migration (that is a live `assign` operator act, not a
- * repair), so every entry here is PERMANENTLY illegal under D2 rule 2, not
- * merely illegal today. Ticket 01's own doc comment on the orchestrator named
- * this exactly: "a later ticket consumes `notPlaceable` off the M0 receipt."
+ * M4 (spec D6, ticket 04; repaired by [S15069/T1566], peer P1-1). Disposes of
+ * every edge M0 classified `notPlaceable` — a homeless endpoint can never
+ * gain a segment declaration through this migration (that is a live `assign`
+ * operator act, not a repair), so every entry here is PERMANENTLY illegal
+ * under D2 rule 2, not merely illegal today. Ticket 01's own doc comment on
+ * the orchestrator named this exactly: "a later ticket consumes
+ * `notPlaceable` off the M0 receipt."
+ *
+ * EVERY relation downgrades to untagged — there is no relation class that
+ * deletes anymore. The original M4 deleted `extends`/`narrows` because an
+ * UNTAGGED continuation edge was itself illegal under the tag mandate; the
+ * user has since withdrawn that mandate, so all eight relation words have a
+ * legal untagged form and stripping the tag is a repair for every one of
+ * them, not seven of eight.
  *
  * Acts on the CURRENT row (looked up fresh by `edgeId`), not the M0 snapshot's
  * own relation/tags — defensive against a row that no longer matches between
@@ -742,7 +729,8 @@ function resolveTurnAddress(db: Database, turnId: number): string {
  * `runWriteTransaction`, and nesting one inside another does not compose under
  * bun:sqlite's `.immediate()` — see `note-settlement-completion.ts`'s
  * `completeNoteSettlementJobIfSegmentedCore` for the same constraint). A
- * DELETE (continuation relation, or a merge collision) already cascades via
+ * DELETE now happens only for a merge collision (an untagged row for the same
+ * (pair, relation) already existed), and that already cascades via
  * `memory_edge_tags.edge_row_id REFERENCES memory_edges(id) ON DELETE CASCADE`
  * (schema.ts); only the in-place downgrade needs its own tag-index row
  * cleared explicitly, since that edge survives with a different tag set.
@@ -751,7 +739,6 @@ function disposeIllegalEdges(
   db: Database,
   notPlaceable: readonly LaneMigrationClassifiedEdge[],
 ): LaneMigrationDisposalReceipt {
-  const deleted: LaneMigrationDeletedEdge[] = [];
   const downgraded: LaneMigrationDowngradedEdge[] = [];
 
   const readEdge = db.query<DisposalEdgeRow, [number]>(
@@ -780,20 +767,6 @@ function disposeIllegalEdges(
     const citingAddress = resolveTurnAddress(db, row.citingId);
     const citedAddress = resolveTurnAddress(db, row.citedId);
     const tags = JSON.parse(row.tags) as string[];
-
-    if (CONTINUATION_RELATIONS.has(row.relation)) {
-      deleteEdge.run(row.id);
-      deleted.push({
-        edgeId: row.id,
-        citingTurnId: row.citingId,
-        citingAddress,
-        citedTurnId: row.citedId,
-        citedAddress,
-        relation: row.relation,
-        tags,
-      });
-      continue;
-    }
 
     const existingUntagged = findUntaggedRow.get(row.citingId, row.citedId, row.relation);
     if (existingUntagged) {
@@ -825,7 +798,7 @@ function disposeIllegalEdges(
     }
   }
 
-  return { deleted, downgraded };
+  return { downgraded };
 }
 
 // ---------------------------------------------------------------------------

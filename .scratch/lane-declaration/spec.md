@@ -119,11 +119,22 @@ for tags no normalization can read, so nothing vanishes from the receipt the
 later phases consume), M1 create, M2 seed from the placeable set, M3 stamp
 curated tags onto members by an explicit reviewed allowlist — today only
 `(60, ["claude-mnemo"])`, stamping 1085 members — and M4 dispose of unplaceable
-edges BY RELATION CLASS: `extends`/`narrows` deleted (an untagged continuation
-edge is itself illegal, so stripping is not a repair), others downgraded and
-merged into any pre-existing untagged row rather than colliding with the unique
-key. Every phase gates on its OWN durable receipt row, never on the `lanes`
-table existing.
+edges by DOWNGRADING every one of them to untagged, merging into any
+pre-existing untagged row for the same (pair, relation) rather than colliding
+with the unique key. Every phase gates on its OWN durable receipt row, never on
+the `lanes` table existing.
+
+The relation-class branch is gone [T1566]: M4 used to DELETE `extends`/`narrows`
+because the mandate made an untagged continuation edge illegal in itself, so
+stripping the tag repaired nothing. D2 withdraws that mandate, so all eight
+words have a legal untagged form and stripping is a repair for every one.
+The receipt has one bucket, `downgraded`, each entry `downgraded` (cleared in
+place) or `merged` (absorbed into the pre-existing row). **This binds the
+release order**: run M4 while the old checker is live and every downgraded
+continuation edge becomes a fresh E1 violation the instant it lands, so ticket
+04 ships WITH ticket 02 or not at all. Verified read-only that no production
+database has run M4 yet (`lanes` and `migration_receipts` both absent), so
+nothing needs recovery.
 
 ### D7 — the segment card's lane list (SHIPPED, 9fd989e)
 
