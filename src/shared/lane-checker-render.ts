@@ -67,6 +67,24 @@ import {
  *     keeps `MAX_ERROR_RENDER_ENTRIES` with its true-total count line: its
  *     reader can re-run the check, and its output is a picture rather than a
  *     work list.
+ *
+ * ## Address form (floor-and-render-fidelity ticket 03, user ruling
+ * S15069/T1482)
+ *
+ * EVERY turn id this file prints — anchors, edge endpoints, error subjects,
+ * declaration/terminus/coverage facts, digraph member labels — routes
+ * through `formatTurnRef`, the ONE id -> `S<session>/T<prompt>` formatter.
+ * Internal DB ids never reach a reader as bare `T<dbid>` text; the CLI's own
+ * digraph labels are no exception (its own node IDENTITIES — the numeric
+ * comparisons `errorClassesByAnchor`/`findingTurnIds`/the crossing-lane scan
+ * use internally — may and do stay internal, since none of that is ever
+ * printed). A caller with no addresses map (a hand-built fixture with no
+ * `order`) falls back to the bare `T<dbid>` form — a marked last resort, not
+ * a silently-accepted default: `lane_check`'s own settlement caller and the
+ * CLI both always build one from the SAME projection they just loaded
+ * (`buildLaneAnchorAddresses`), so the fallback is unreachable on any real
+ * scope and exists only for a turn genuinely outside the projection (a
+ * loader bug post-widening) or a test fixture that never populated `order`.
  */
 
 function formatTagSet(key: LaneKey): string {
@@ -81,6 +99,53 @@ function formatMembers(members: readonly LaneMember[]): string {
 }
 
 /**
+ * Turn id -> `S<session>/T<prompt>`, built from the SAME projection turns the
+ * checker was run over (tag-mandate ticket 06).
+ *
+ * `LaneTurnInput.order` is the `[session_id, prompt_number]` tuple
+ * `db/lane-checker-load.ts` fills for every turn it loads, so the address is
+ * read straight off the input the checker already consumed — this module
+ * derives nothing and queries nothing, exactly as its header requires. A turn
+ * without an `order` (a hand-built fixture) contributes no entry and its
+ * references keep printing the bare row id.
+ */
+export type LaneAnchorAddresses = ReadonlyMap<number, string>;
+
+export function buildLaneAnchorAddresses(
+  turns: readonly LaneTurnInput[],
+): LaneAnchorAddresses {
+  const addresses = new Map<number, string>();
+  for (const turn of turns) {
+    if (turn.order) {
+      addresses.set(turn.id, "S" + turn.order[0] + "/T" + turn.order[1]);
+    }
+  }
+  return addresses;
+}
+
+/**
+ * The ONE id -> reader-vocabulary formatter every position in this file
+ * routes through (floor-and-render-fidelity ticket 03): an agent repairs
+ * through `S<session>/T<prompt>` addresses and cannot type a `turns.id` into
+ * any tool, so a settlement-facing report that printed the row id would name
+ * a row the reader has no way to act on. Falls back to the bare id when the
+ * caller supplied no addresses (the CLI/console did not build one — a hand
+ * fixture, say) or when this particular turn was not in the projection the
+ * map was built from.
+ */
+function formatTurnRef(turnId: number, addresses: LaneAnchorAddresses | undefined): string {
+  return addresses?.get(turnId) ?? "T" + turnId;
+}
+
+/** Comma-joined turn-id list, each element through `formatTurnRef` — `renderStatsReport`'s coverage line, an island's members, a path's starts/fork/join nodes, a folded path's citing turns. */
+function formatTurnRefList(
+  turnIds: readonly number[],
+  addresses: LaneAnchorAddresses | undefined,
+): string {
+  return turnIds.map((id) => formatTurnRef(id, addresses)).join(",");
+}
+
+/**
  * The three-state reading (milestone-election spec, ticket 04) — replaces
  * the raw `declaration.state` word (declared/reopened/undeclared) that used
  * to render here, which `lane-interpretation.ts`'s `deriveLaneStates` doc
@@ -92,14 +157,16 @@ function formatMembers(members: readonly LaneMember[]): string {
  * in the golden fixture) has none, and this prints exactly "open" for it, no
  * invented "last stable milestone".
  */
-function formatLaneState(state: LaneState): string {
+function formatLaneState(state: LaneState, addresses: LaneAnchorAddresses | undefined): string {
   if (state.closure === "closed") {
     return "closed-" + state.validity;
   }
-  return state.lastDeclarer !== null ? "open (last declarer T" + state.lastDeclarer + ")" : "open";
+  return state.lastDeclarer !== null
+    ? "open (last declarer " + formatTurnRef(state.lastDeclarer, addresses) + ")"
+    : "open";
 }
 
-function renderStatsReport(lane: LaneStatsReport): string[] {
+function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresses): string[] {
   const lines: string[] = [];
   lines.push("Lane " + formatTagSet(lane.key) + " - phases: " + (lane.phases.join(",") || "(none)"));
   lines.push("  members: " + formatMembers(lane.members));
@@ -109,20 +176,27 @@ function renderStatsReport(lane: LaneStatsReport): string[] {
   lines.push("  edges: " + (edgeCounts || "(none)"));
   lines.push(
     "  declaration: " +
-      formatLaneState(lane.state) +
-      (lane.declaration.terminus !== null ? " (terminus " + lane.declaration.terminus + ")" : "") +
+      formatLaneState(lane.state, addresses) +
+      (lane.declaration.terminus !== null
+        ? " (terminus " + formatTurnRef(lane.declaration.terminus, addresses) + ")"
+        : "") +
       (lane.declaration.latestEventTurn !== null
-        ? " [last event T" + lane.declaration.latestEventTurn + "]"
+        ? " [last event " + formatTurnRef(lane.declaration.latestEventTurn, addresses) + "]"
         : ""),
   );
   const grounds = lane.citedness.groundsFromNonMembers.map(
-    (fact) => "T" + fact.citingId + "->T" + fact.citedId,
+    (fact) => formatTurnRef(fact.citingId, addresses) + "->" + formatTurnRef(fact.citedId, addresses),
   );
   const used = lane.citedness.usedFromNonMembers.map(
-    (fact) => "T" + fact.citingId + "->T" + fact.citedId,
+    (fact) => formatTurnRef(fact.citingId, addresses) + "->" + formatTurnRef(fact.citedId, addresses),
   );
   const testimony = lane.citedness.testimonyFromNonMembers.map(
-    (fact) => "T" + fact.citingId + " " + fact.relation + " T" + fact.citedId,
+    (fact) =>
+      formatTurnRef(fact.citingId, addresses) +
+      " " +
+      fact.relation +
+      " " +
+      formatTurnRef(fact.citedId, addresses),
   );
   lines.push(
     "  cited from outside: grounds[" +
@@ -137,42 +211,51 @@ function renderStatsReport(lane: LaneStatsReport): string[] {
     "  coverage: " +
       lane.coverage.status +
       (lane.coverage.missingTurnIds.length > 0
-        ? " (missing: " + lane.coverage.missingTurnIds.join(",") + ")"
+        ? " (missing: " + formatTurnRefList(lane.coverage.missingTurnIds, addresses) + ")"
         : ""),
   );
   return lines;
 }
 
-function renderComponentReport(component: LaneComponentReport): string[] {
+function renderComponentReport(
+  component: LaneComponentReport,
+  addresses?: LaneAnchorAddresses,
+): string[] {
   const lines: string[] = [];
   const health = component.componentCount === 1 ? "healthy" : "SEVERED";
   lines.push(
     "Lane " + formatTagSet(component.key) + " - components: " + component.componentCount + " (" + health + ")",
   );
   for (const island of component.islands) {
-    lines.push("  island@" + island.representative + ": " + island.memberIds.join(","));
+    lines.push(
+      "  island@" +
+        formatTurnRef(island.representative, addresses) +
+        ": " +
+        formatTurnRefList(island.memberIds, addresses),
+    );
   }
   return lines;
 }
 
-function renderFoldedPaths(folded: LaneFoldedPaths): string {
-  const folding = folded.citingTurnsFolded.length > 0 ? folded.citingTurnsFolded.join(",") : "-";
+function renderFoldedPaths(folded: LaneFoldedPaths, addresses?: LaneAnchorAddresses): string {
+  const folding =
+    folded.citingTurnsFolded.length > 0 ? formatTurnRefList(folded.citingTurnsFolded, addresses) : "-";
   return "folded pathCount=" + folded.pathCount + " (citing turns folded: " + folding + ")";
 }
 
-function renderForkJoin(path: LanePathReport): string | null {
+function renderForkJoin(path: LanePathReport, addresses?: LaneAnchorAddresses): string | null {
   if (path.forkNodes.length === 0 && path.joinNodes.length === 0) {
     return null;
   }
   return (
     "fork: " +
-    (path.forkNodes.join(",") || "-") +
+    (formatTurnRefList(path.forkNodes, addresses) || "-") +
     " join: " +
-    (path.joinNodes.join(",") || "-")
+    (formatTurnRefList(path.joinNodes, addresses) || "-")
   );
 }
 
-function renderPathReport(path: LanePathReport): string[] {
+function renderPathReport(path: LanePathReport, addresses?: LaneAnchorAddresses): string[] {
   const lines: string[] = [];
   if (path.status === "skipped") {
     lines.push(
@@ -181,9 +264,9 @@ function renderPathReport(path: LanePathReport): string[] {
         " - paths: skipped (" +
         path.skipReason +
         "); starts: " +
-        (path.starts.join(",") || "-"),
+        (formatTurnRefList(path.starts, addresses) || "-"),
     );
-    const skippedForkJoin = renderForkJoin(path);
+    const skippedForkJoin = renderForkJoin(path, addresses);
     if (skippedForkJoin) {
       lines.push("  " + skippedForkJoin);
     }
@@ -194,16 +277,16 @@ function renderPathReport(path: LanePathReport): string[] {
       formatTagSet(path.key) +
       " - paths: " +
       path.pathCount +
-      " (terminus T" +
-      path.terminus +
+      " (terminus " +
+      formatTurnRef(path.terminus!, addresses) +
       "; starts: " +
-      (path.starts.join(",") || "-") +
+      (formatTurnRefList(path.starts, addresses) || "-") +
       ")",
   );
   if (path.folded) {
-    lines.push("  " + renderFoldedPaths(path.folded));
+    lines.push("  " + renderFoldedPaths(path.folded, addresses));
   }
-  const forkJoin = renderForkJoin(path);
+  const forkJoin = renderForkJoin(path, addresses);
   if (forkJoin) {
     lines.push("  " + forkJoin);
   }
@@ -214,26 +297,50 @@ function renderInterfacePair(pair: LaneInterfacePair): string {
   return "  " + formatTagSet(pair.laneA) + " <-> " + formatTagSet(pair.laneB) + ": " + pair.count;
 }
 
-function renderBypassReport(report: LaneBypassReport): string[] {
+function renderBypassReport(report: LaneBypassReport, addresses?: LaneAnchorAddresses): string[] {
   const lines: string[] = [];
   lines.push("  Lane " + formatTagSet(report.key) + " - bypass: " + report.count);
   for (const edge of report.edges) {
     const tags = edge.tags.length > 0 ? " {" + edge.tags.join(",") + "}" : "";
-    lines.push("    T" + edge.citingId + " -> T" + edge.citedId + " (" + edge.relation + tags + ")");
+    lines.push(
+      "    " +
+        formatTurnRef(edge.citingId, addresses) +
+        " -> " +
+        formatTurnRef(edge.citedId, addresses) +
+        " (" +
+        edge.relation +
+        tags +
+        ")",
+    );
   }
   return lines;
 }
 
-function renderTimeOrderViolation(violation: LaneTimeOrderViolation): string {
+function renderTimeOrderViolation(
+  violation: LaneTimeOrderViolation,
+  addresses?: LaneAnchorAddresses,
+): string {
   const tags = violation.tags.length > 0 ? " {" + violation.tags.join(",") + "}" : "";
-  return "  T" + violation.citingId + " -> T" + violation.citedId + " (" + violation.relation + tags + ")";
+  return (
+    "  " +
+    formatTurnRef(violation.citingId, addresses) +
+    " -> " +
+    formatTurnRef(violation.citedId, addresses) +
+    " (" +
+    violation.relation +
+    tags +
+    ")"
+  );
 }
 
-function renderSharedNodes(shared: LaneCheckerResult["multiLaneComponents"][number]): string[] {
+function renderSharedNodes(
+  shared: LaneCheckerResult["multiLaneComponents"][number],
+  addresses?: LaneAnchorAddresses,
+): string[] {
   return shared.sharedNodes.map(
     (node) =>
-      "  shared T" +
-      node.id +
+      "  shared " +
+      formatTurnRef(node.id, addresses) +
       (node.designedShape ? " (designed fork/merge)" : " (judgment)") +
       ": " +
       node.citingLanesByStance.map(formatTagSet).join(", "),
@@ -253,45 +360,13 @@ function cappedCountSuffix(count: number, shown: number): string {
   return count > shown ? " (showing first " + shown + ")" : "";
 }
 
-function renderEdgeArrow(citingId: number, relation: string, citedId: number): string {
-  return "T" + citingId + " --" + relation + "--> T" + citedId;
-}
-
-/**
- * Turn id -> `S<session>/T<prompt>`, built from the SAME projection turns the
- * checker was run over (tag-mandate ticket 06).
- *
- * `LaneTurnInput.order` is the `[session_id, prompt_number]` tuple
- * `db/lane-checker-load.ts` fills for every turn it loads, so the address is
- * read straight off the input the checker already consumed — this module
- * derives nothing and queries nothing, exactly as its header requires. A turn
- * without an `order` (a hand-built fixture) contributes no entry and its
- * anchors keep printing the bare row id.
- */
-export type LaneAnchorAddresses = ReadonlyMap<number, string>;
-
-export function buildLaneAnchorAddresses(
-  turns: readonly LaneTurnInput[],
-): LaneAnchorAddresses {
-  const addresses = new Map<number, string>();
-  for (const turn of turns) {
-    if (turn.order) {
-      addresses.set(turn.id, "S" + turn.order[0] + "/T" + turn.order[1]);
-    }
-  }
-  return addresses;
-}
-
-/**
- * The ANCHOR, in the vocabulary of whoever is reading. An agent repairs
- * through `S<session>/T<prompt>` addresses and cannot type a `turns.id` into
- * any tool, so a settlement-facing report that printed the row id would name
- * a row the reader has no way to act on. Falls back to the bare id when the
- * caller supplied no addresses (the CLI and the console, whose readers do work
- * in row ids) or when this particular turn was not in the projection.
- */
-function formatAnchor(anchorId: number, addresses: LaneAnchorAddresses | undefined): string {
-  return addresses?.get(anchorId) ?? "T" + anchorId;
+function renderEdgeArrow(
+  citingId: number,
+  relation: string,
+  citedId: number,
+  addresses?: LaneAnchorAddresses,
+): string {
+  return formatTurnRef(citingId, addresses) + " --" + relation + "--> " + formatTurnRef(citedId, addresses);
 }
 
 /**
@@ -303,28 +378,27 @@ function renderLaneError(
   error: LaneCheckerError,
   addresses?: LaneAnchorAddresses,
 ): string {
-  const head = "  [" + error.class + "] anchor " + formatAnchor(error.anchorId, addresses) + " -- ";
+  const head = "  [" + error.class + "] anchor " + formatTurnRef(error.anchorId, addresses) + " -- ";
   switch (error.class) {
     case "E1":
       return (
         head +
-        renderEdgeArrow(error.citingId, error.relation, error.citedId) +
+        renderEdgeArrow(error.citingId, error.relation, error.citedId, addresses) +
         " carries no lane tags; extends/narrows must name their line" +
         " (tag the edge; both endpoints carry the tag)"
       );
     case "E2":
       return (
         head +
-        renderEdgeArrow(error.citingId, error.relation, error.citedId) +
+        renderEdgeArrow(error.citingId, error.relation, error.citedId, addresses) +
         ": relation is outside the eight-word vocabulary"
       );
     case "E3":
       return (
         head +
         (error.types.length === 0
-          ? "T" + error.id + " type: [] (empty)"
-          : "T" +
-            error.id +
+          ? formatTurnRef(error.id, addresses) + " type: [] (empty)"
+          : formatTurnRef(error.id, addresses) +
             " type: [" +
             error.types.join(",") +
             "] (outside vocabulary: " +
@@ -334,7 +408,7 @@ function renderLaneError(
     case "E4":
       return (
         head +
-        renderEdgeArrow(error.citingId, error.relation, error.citedId) +
+        renderEdgeArrow(error.citingId, error.relation, error.citedId, addresses) +
         " {" +
         error.tags.join(",") +
         "}: " +
@@ -342,7 +416,7 @@ function renderLaneError(
           .map((miss) => '"' + miss.tag + "\" missing from the " + miss.endpoint + " turn's tags")
           .join("; ")
       );
-    case "E5":
+    case "E5": {
       // Names the CANONICAL node too, because the repair is a choice between
       // two shapes ("retag this chain into its own lane" vs "bridge it to the
       // lane's real start/end") and neither is decidable without knowing
@@ -354,21 +428,23 @@ function renderLaneError(
       // that appears nowhere in the sentence and cannot tell whether the
       // report or the anchor is wrong. A dangling SINK anchors at itself, so
       // the clause is absent and that line is unchanged.
+      const nodeRef = formatTurnRef(error.nodeId, addresses);
       return (
         head +
         "lane " +
         formatTagSet(error.key) +
         " has a second " +
         error.role +
-        ": T" +
-        error.nodeId +
-        " dangles beside T" +
-        error.canonicalId +
+        ": " +
+        nodeRef +
+        " dangles beside " +
+        formatTurnRef(error.canonicalId, addresses) +
         "; a lane has exactly one start and one end" +
         " (retag one chain, or bridge them" +
-        (error.anchorId !== error.nodeId ? "; the anchor owns the in-lane edge into T" + error.nodeId : "") +
+        (error.anchorId !== error.nodeId ? "; the anchor owns the in-lane edge into " + nodeRef : "") +
         ")"
       );
+    }
   }
 }
 
@@ -391,14 +467,17 @@ function errorInstanceLines(
   return shown.map((error) => renderLaneError(error, addresses));
 }
 
-function renderCrossSegmentWarning(warning: LaneCrossSegmentWarning): string {
+function renderCrossSegmentWarning(
+  warning: LaneCrossSegmentWarning,
+  addresses?: LaneAnchorAddresses,
+): string {
   return (
-    "⚠ T" +
-    warning.citingId +
+    "⚠ " +
+    formatTurnRef(warning.citingId, addresses) +
     "(" +
     warning.citingSegment +
-    ") -> T" +
-    warning.citedId +
+    ") -> " +
+    formatTurnRef(warning.citedId, addresses) +
     "(" +
     warning.citedSegment +
     ") {" +
@@ -413,14 +492,17 @@ function renderCrossSegmentWarning(warning: LaneCrossSegmentWarning): string {
  * hands back to the settlement model (requirement 3), and what the CLI
  * prints ahead of its own digraph.
  *
- * `anchorAddresses` (tag-mandate ticket 06) is OPTIONAL by design, not by
- * laziness: it changes only how an ERROR ANCHOR is spelled, and the two
- * surfaces want different spellings. The settlement tool passes the
- * projection's turns so every anchor prints as an address the agent can type
- * into `note`; the CLI and the console pass nothing and keep the row ids their
- * own readers navigate by. Nothing else in the report is affected — endpoints
- * inside an error's arrow stay bare ids on both surfaces, because they are
- * read as graph structure, not as repair targets.
+ * `anchorAddresses` (tag-mandate ticket 06) is OPTIONAL by TYPE only, not by
+ * an intended "some surfaces skip it" split any more (floor-and-render-
+ * fidelity ticket 03 retired that split — the CLI and the console now build
+ * and pass one too, from the same projection they just loaded, exactly like
+ * the settlement tool always has). It changes how EVERY turn id in this
+ * render is spelled: the settlement tool, the CLI, and the console all pass
+ * the projection's own turns so every reference — anchors, edge endpoints,
+ * declaration/coverage facts — prints as an address the agent can type into
+ * `note`. Only a caller with no projection at all (a hand-built fixture)
+ * legitimately omits it, and the bare-id fallback that produces is a marked
+ * last resort, never the steady state on a real scope.
  */
 export function renderLaneCheckerReports(
   result: LaneCheckerResult,
@@ -455,7 +537,7 @@ export function renderLaneCheckerReports(
     sections.push("(no lanes in scope)");
   } else {
     for (const lane of result.lanes) {
-      sections.push(...renderStatsReport(lane));
+      sections.push(...renderStatsReport(lane, anchorAddresses));
     }
   }
 
@@ -465,7 +547,7 @@ export function renderLaneCheckerReports(
     sections.push("(no lanes in scope)");
   } else {
     for (const component of result.components) {
-      sections.push(...renderComponentReport(component));
+      sections.push(...renderComponentReport(component, anchorAddresses));
     }
   }
 
@@ -475,8 +557,13 @@ export function renderLaneCheckerReports(
     sections.push("(none)");
   } else {
     for (const shared of result.multiLaneComponents) {
-      sections.push("component@" + shared.representative + ": " + shared.lanes.map(formatTagSet).join(", "));
-      sections.push(...renderSharedNodes(shared));
+      sections.push(
+        "component@" +
+          formatTurnRef(shared.representative, anchorAddresses) +
+          ": " +
+          shared.lanes.map(formatTagSet).join(", "),
+      );
+      sections.push(...renderSharedNodes(shared, anchorAddresses));
     }
   }
 
@@ -493,7 +580,7 @@ export function renderLaneCheckerReports(
     sections.push("(no declared lanes)");
   } else {
     for (const report of result.bypass) {
-      sections.push(...renderBypassReport(report));
+      sections.push(...renderBypassReport(report, anchorAddresses));
     }
   }
 
@@ -503,7 +590,7 @@ export function renderLaneCheckerReports(
     sections.push("(no lanes in scope)");
   } else {
     for (const path of result.paths) {
-      sections.push(...renderPathReport(path));
+      sections.push(...renderPathReport(path, anchorAddresses));
     }
   }
 
@@ -513,7 +600,7 @@ export function renderLaneCheckerReports(
     sections.push("(none)");
   } else {
     for (const violation of result.timeOrderViolations) {
-      sections.push(renderTimeOrderViolation(violation));
+      sections.push(renderTimeOrderViolation(violation, anchorAddresses));
     }
   }
 
@@ -524,7 +611,7 @@ export function renderLaneCheckerReports(
   } else {
     sections.push(result.warnings.length + " cross-segment tagged edge(s):");
     for (const warning of result.warnings) {
-      sections.push(renderCrossSegmentWarning(warning));
+      sections.push(renderCrossSegmentWarning(warning, anchorAddresses));
     }
   }
 
@@ -610,6 +697,16 @@ function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
  * CLI-only, per the spec's own "digraph rendering is human/CLI-only" -
  * `note-settlement-sdk-query.ts`'s `lane_check` tool never calls this.
  *
+ * `addresses` (floor-and-render-fidelity ticket 03): every printed member
+ * LABEL and the ERRORS block above the lane listing route through it, same
+ * as `renderLaneCheckerReports`. What stays internal is the graph's own node
+ * IDENTITY — `errorClassesByAnchor`/`findingTurnIds`/the same-lane/crossing
+ * scan below all key their maps and sets by the bare numeric id, since none
+ * of that keying is ever itself printed; only the text a member's line ends
+ * up showing goes through `formatTurnRef`. The CLI is this function's one
+ * caller and always builds `addresses` from the same projection it loaded —
+ * omitting it (the bare-id fallback) is a test-fixture path only.
+ *
  * Tag-mandate ticket 03: an ERRORS block leads, listing every instance with
  * its anchor, and each anchored LANE MEMBER additionally carries an inline
  * `✗[E1,...]` mark. The block is what makes the listing complete — an error
@@ -618,14 +715,14 @@ function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
  * edge whatsoever), so the inline marks alone would silently hide exactly
  * the class of error this ticket exists to surface.
  */
-export function renderLaneDigraph(result: LaneCheckerResult): string {
+export function renderLaneDigraph(result: LaneCheckerResult, addresses?: LaneAnchorAddresses): string {
   const flagged = findingTurnIds(result);
   const errorClasses = errorClassesByAnchor(result.errors);
   const lines: string[] = [];
 
   // CLI-only surface: the cap stays here (finding P2-8) — the count line
   // states the true total and this reader can re-run the check.
-  const shownErrors = errorInstanceLines(result.errors, undefined, MAX_ERROR_RENDER_ENTRIES);
+  const shownErrors = errorInstanceLines(result.errors, addresses, MAX_ERROR_RENDER_ENTRIES);
   lines.push(
     truncateToColumns(
       "ERRORS (" + result.errors.length + ")" + cappedCountSuffix(result.errors.length, shownErrors.length),
@@ -663,9 +760,11 @@ export function renderLaneDigraph(result: LaneCheckerResult): string {
       const errorMark = anchored ? " " + ERROR_GLYPH + "[" + anchored.join(",") + "]" : "";
       const flag = flagged.has(member.id) ? " " + FINDING_GLYPH : "";
       const crossing = seenElsewhere.has(member.id)
-        ? " " + CROSSING_ARROW + " see T" + member.id + " in another lane"
+        ? " " + CROSSING_ARROW + " see " + formatTurnRef(member.id, addresses) + " in another lane"
         : "";
-      lines.push(truncateToColumns("  " + glyph + " T" + member.id + errorMark + flag + crossing));
+      lines.push(
+        truncateToColumns("  " + glyph + " " + formatTurnRef(member.id, addresses) + errorMark + flag + crossing),
+      );
     }
   }
 

@@ -3,7 +3,11 @@ import { Database } from "bun:sqlite";
 import { loadLaneCheckScope, type LaneCheckScope } from "../db/lane-checker-load";
 import { checkLanes } from "../shared/lane-checker";
 import { canonicalTagSet, DEFAULT_SEGMENT, type LaneKey } from "../shared/lane-interpretation";
-import { renderLaneCheckerReports, renderLaneDigraph } from "../shared/lane-checker-render";
+import {
+  buildLaneAnchorAddresses,
+  renderLaneCheckerReports,
+  renderLaneDigraph,
+} from "../shared/lane-checker-render";
 import { resolveDatabasePath } from "../shared/paths";
 
 /**
@@ -205,13 +209,18 @@ export function runLaneCheckCli(
   try {
     const projection = loadLaneCheckScope(db, options.scope);
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+    // floor-and-render-fidelity ticket 03: every rendered turn reference
+    // speaks `S<session>/T<prompt>`, the CLI's own digraph included — built
+    // from the SAME projection just loaded, exactly like the settlement
+    // `lane_check` tool already does.
+    const addresses = buildLaneAnchorAddresses(projection.turns);
 
-    io.stdout(renderLaneCheckerReports(result));
+    io.stdout(renderLaneCheckerReports(result, addresses));
     if (options.digraph) {
       io.stdout("");
       io.stdout("## Digraph");
       io.stdout("");
-      io.stdout(renderLaneDigraph(result));
+      io.stdout(renderLaneDigraph(result, addresses));
     }
     return 0;
   } finally {

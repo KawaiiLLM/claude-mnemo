@@ -152,8 +152,13 @@ describe("P1-6 — the worker envelope's cut decides the grant, not the render",
 
     const firstTurn = turnIds[0]!;
     const lastTurn = turnIds[turnIds.length - 1]!;
-    expect(delivered).toContain(`dbid:T${firstTurn}`);
-    expect(delivered).not.toContain(`dbid:T${lastTurn}`);
+    // floor-and-render-fidelity ticket 03 retired the dbid:T<n> correlation
+    // token this used to key on; each seeded turn's own content marker
+    // (`body-<promptNumber> `, distinct per turn — the trailing space rules
+    // out `body-1 ` matching inside `body-12 `) identifies whose bytes
+    // actually crossed the envelope just as unambiguously.
+    expect(delivered).toContain("body-1 ");
+    expect(delivered).not.toContain("body-12 ");
 
     expect(grantCount(writer, "turn", firstTurn)).toBe(1);
     expect(grantCount(writer, "turn", lastTurn)).toBe(0);

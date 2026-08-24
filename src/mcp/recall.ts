@@ -258,11 +258,6 @@ export interface RecallInput {
    * through `renderNode` (format.ts); word-boundary cut, never a char count.
    */
   turn?: number;
-  // Internal worker-only flag. When set, rendered turns append a `dbid:T<dbid>`
-  // token so the memory worker can cite a turn it found via recall. NOT exposed
-  // on the public `recallInputShape` (definitions.ts) — wired through the
-  // handler-construction `audience` option (handlers.ts) instead.
-  includeDbTurnIds?: boolean;
   /**
    * P2 era boundary (spec D11). Observations created at or after it render
    * their mechanical fields (tool name + input/result prefixes) because nothing
@@ -806,7 +801,6 @@ function renderSession(
   session: NonNullable<ReturnType<typeof getSession>>,
   fields: TurnRenderFields,
   turnSelector: Set<number> | undefined,
-  includeDbTurnIds: boolean | undefined,
   eraCutoffEpoch: number | null = null,
   signal: TruncationSignal | undefined,
   turnBudget: number | undefined,
@@ -837,7 +831,6 @@ function renderSession(
         indent: RENDER_INDENT_STEP,
         fields,
         sessionId: session.id,
-        includeDbTurnIds,
         turnBudget,
         signal,
       },
@@ -856,7 +849,6 @@ function renderTurnScope(
   db: Database,
   turns: TurnRecord[],
   fields: TurnRenderFields,
-  includeDbTurnIds?: boolean,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   turnBudget?: number,
@@ -919,7 +911,6 @@ function renderTurnScope(
             indent: RENDER_INDENT_STEP,
             fields,
             sessionId: session.id,
-            includeDbTurnIds,
             signal,
             turnBudget,
           },
@@ -938,7 +929,6 @@ function renderObservationScope(
   db: Database,
   observations: Array<{ sessionId: number; turnId: number; observationId: number }>,
   includeParents: boolean,
-  includeDbTurnIds?: boolean,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   turnBudget?: number,
@@ -1013,7 +1003,6 @@ function renderObservationScope(
             // per-item `turn` budget instead of in the uncappable label.
             fields: CONTEXT_TURN_RENDER_FIELDS,
             sessionId: session.id,
-            includeDbTurnIds,
             turnBudget,
             signal,
           },
@@ -1113,7 +1102,6 @@ function renderSessionDetail(
   db: Database,
   sessionId: number,
   fields: TurnRenderFields,
-  includeDbTurnIds: boolean | undefined,
   eraCutoffEpoch: number | null = null,
   signal: TruncationSignal | undefined,
   turnBudget: number | undefined,
@@ -1125,7 +1113,6 @@ function renderSessionDetail(
         session,
         fields,
         undefined,
-        includeDbTurnIds,
         eraCutoffEpoch,
         signal,
         turnBudget,
@@ -1562,7 +1549,6 @@ function renderGroupedSearchResults(
   results: SearchMemoryResult[],
   fields: TurnRenderFields,
   turnBudget: number | undefined,
-  includeDbTurnIds?: boolean,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   queryText?: string,
@@ -1764,7 +1750,6 @@ function renderGroupedSearchResults(
             fields: turnFields,
             matchedFields: matchedTurnFields(turn, terms),
             sessionId: session.id,
-            includeDbTurnIds,
             turnBudget,
             signal,
           },
@@ -1817,7 +1802,6 @@ function renderRoutedId(
   pageSize: number,
   after?: number,
   before?: number,
-  includeDbTurnIds?: boolean,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   pageBudget?: number,
@@ -1859,7 +1843,6 @@ function renderRoutedId(
         db,
         sessionId,
         fields,
-        includeDbTurnIds,
         eraCutoffEpoch,
         signal,
         turnBudget,
@@ -1895,7 +1878,6 @@ function renderRoutedId(
         pageBudget,
         page,
         turnBudget,
-        includeDbTurnIds,
         eraCutoffEpoch,
         signal,
       });
@@ -1924,7 +1906,6 @@ function renderRoutedId(
         pageBudget,
         page: 1,
         turnBudget,
-        includeDbTurnIds,
         eraCutoffEpoch,
         signal,
       });
@@ -1969,7 +1950,6 @@ function renderRoutedId(
 
     const body = renderSegmentMembersByOrdinal(db, routed.segmentId, paged.items, {
       fields,
-      includeDbTurnIds,
       turnBudget,
       eraCutoffEpoch,
       signal,
@@ -2018,7 +1998,7 @@ function renderRoutedId(
       pageSize,
       pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
       (pageItems) =>
-        renderTurnScope(db, pageItems, fields, includeDbTurnIds, eraCutoffEpoch, undefined, turnBudget),
+        renderTurnScope(db, pageItems, fields, eraCutoffEpoch, undefined, turnBudget),
     );
     // `renderTurnScope` marks the ledger per TURN as it renders (peer round
     // P1-6) — this route no longer records a grant for the whole page up
@@ -2027,7 +2007,6 @@ function renderRoutedId(
       db,
       paged.items,
       fields,
-      includeDbTurnIds,
       eraCutoffEpoch,
       signal,
       turnBudget,
@@ -2047,7 +2026,6 @@ function renderRoutedId(
       db,
       [turn],
       fields,
-      includeDbTurnIds,
       eraCutoffEpoch,
       signal,
       turnBudget,
@@ -2086,13 +2064,12 @@ function renderRoutedId(
       pageSize,
       pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
       (pageItems) =>
-        renderObservationScope(db, pageItems, true, includeDbTurnIds, eraCutoffEpoch, undefined, turnBudget),
+        renderObservationScope(db, pageItems, true, eraCutoffEpoch, undefined, turnBudget),
     );
     const body = renderObservationScope(
       db,
       paged.items,
       true,
-      includeDbTurnIds,
       eraCutoffEpoch,
       signal,
       turnBudget,
@@ -2142,13 +2119,12 @@ function renderRoutedId(
       pageSize,
       pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
       (pageItems) =>
-        renderObservationScope(db, pageItems, true, includeDbTurnIds, eraCutoffEpoch, undefined, turnBudget),
+        renderObservationScope(db, pageItems, true, eraCutoffEpoch, undefined, turnBudget),
     );
     const body = renderObservationScope(
       db,
       paged.items,
       true,
-      includeDbTurnIds,
       eraCutoffEpoch,
       signal,
       turnBudget,
@@ -2295,15 +2271,13 @@ function formatBrowseTurnLabel(
   turn: TurnRecord,
   sessionId: number,
   includeSessionPrefix: boolean,
-  includeDbTurnIds: boolean,
   titleText: string | null,
 ): string {
   const address = renderTurnAddress(turn.promptNumber, sessionId, includeSessionPrefix);
   const labelSegment = titleText ? ` ${titleText}` : "";
-  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
   const statusSegment = turn.status ? ` [${turn.status}]` : "";
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
-  return `${BROWSE_TURN_INDENT}${address}${labelSegment}${statusSegment}${dbIdSegment}${rewindSegment}`;
+  return `${BROWSE_TURN_INDENT}${address}${labelSegment}${statusSegment}${rewindSegment}`;
 }
 
 /**
@@ -2319,7 +2293,6 @@ function renderBrowseTurnBlock(
   sessionId: number,
   fields: readonly RecallTurnField[],
   includeSessionPrefix: boolean,
-  includeDbTurnIds: boolean,
   turnBudget: number | undefined,
   signal: TruncationSignal | undefined,
 ): string {
@@ -2334,7 +2307,6 @@ function renderBrowseTurnBlock(
     turn,
     sessionId,
     includeSessionPrefix,
-    includeDbTurnIds,
     titleText,
   );
   // `title` never renders as a field line — it is the row label above.
@@ -2506,7 +2478,6 @@ function buildBrowseFeed(
   pageBudget: number,
   turnBudget: number | undefined,
   fields: readonly RecallTurnField[] | undefined,
-  includeDbTurnIds: boolean,
   signal: TruncationSignal | undefined,
   // Peer round P1-6: the pending delivery ledger, replacing the
   // readerId/now/sequence trio this feed used to record grants with directly.
@@ -2628,7 +2599,6 @@ function buildBrowseFeed(
       session.id,
       resolvedFields,
       continuesRun && atPageTop,
-      includeDbTurnIds,
       turnBudget,
       signal,
     );
@@ -2726,7 +2696,6 @@ function renderBareOverview(
   db: Database,
   page: number,
   pageSize: number,
-  includeDbTurnIds?: boolean,
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   pageBudget?: number,
@@ -2761,7 +2730,6 @@ function renderBareOverview(
             pageBudget,
             page: 1,
             turnBudget,
-            includeDbTurnIds,
             eraCutoffEpoch,
             signal,
           }),
@@ -2785,7 +2753,6 @@ function renderBareOverview(
     pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
     turnBudget,
     filter.fields,
-    includeDbTurnIds ?? false,
     signal,
     ledger,
   );
@@ -2898,7 +2865,6 @@ function recallMemoryBody(
 ): string {
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
-  const includeDbTurnIds = input.includeDbTurnIds ?? false;
   const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
   const pageBudget = input.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
   // Ticket 11: no more depth-dependent default — every render always has a
@@ -2942,7 +2908,6 @@ function recallMemoryBody(
         pageSize,
         filter.after,
         filter.before,
-        includeDbTurnIds,
         eraCutoffEpoch,
         signal,
         pageBudget,
@@ -2984,7 +2949,6 @@ function recallMemoryBody(
         pageSize,
         filter.after,
         filter.before,
-        includeDbTurnIds,
         eraCutoffEpoch,
         signal,
         pageBudget,
@@ -3044,7 +3008,6 @@ function recallMemoryBody(
         pageItems,
         fields,
         turnBudget,
-        includeDbTurnIds,
         eraCutoffEpoch,
         undefined,
         text || undefined,
@@ -3058,7 +3021,6 @@ function recallMemoryBody(
       paged.items,
       fields,
       turnBudget,
-      includeDbTurnIds,
       eraCutoffEpoch,
       signal,
       text || undefined,
@@ -3073,7 +3035,6 @@ function recallMemoryBody(
     db,
     page,
     pageSize,
-    includeDbTurnIds,
     eraCutoffEpoch,
     signal,
     pageBudget,

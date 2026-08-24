@@ -1,7 +1,7 @@
 import type { LaneCheckScope } from "../db/lane-checker-load";
 import { DEFAULT_SEGMENT, laneToken } from "../shared/lane-interpretation";
 import type { LaneEdgeInput, LaneStatsReport, LaneTurnInput } from "../shared/lane-checker";
-import { renderLaneCheckerReports } from "../shared/lane-checker-render";
+import { buildLaneAnchorAddresses, renderLaneCheckerReports } from "../shared/lane-checker-render";
 import { electMilestones, type MilestoneTurnInput } from "../shared/milestone-election";
 
 import type { ConsoleReader } from "./console-reader";
@@ -842,7 +842,11 @@ export function handleGraphRoute(
   // below only PROJECTS from `run.result`/`run.turns`/`run.edges`, never
   // re-derives.
   const run = reader.runLaneCheck(scope);
-  const laneCheckText = renderLaneCheckerReports(run.result);
+  // floor-and-render-fidelity ticket 03: `laneCheckText` is reader-facing
+  // (it ships in the console payload) and gets the same address form every
+  // other lane_check surface does, built from this exact projection's own
+  // turns — no second load.
+  const laneCheckText = renderLaneCheckerReports(run.result, buildLaneAnchorAddresses(run.turns));
 
   // Election preview (ticket 03): per-turn tier from the pure election
   // module, over the SAME projection inputs `checkLanes` just consumed.

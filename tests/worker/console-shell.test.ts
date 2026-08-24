@@ -144,8 +144,8 @@ describe("console-shell.html DOM rule", () => {
     },
     {
       name: "edge relation (tooltip)",
-      escaped: "T${e.citingId} —${esc(e.relation)}→ T${e.citedId}",
-      bare: "T${e.citingId} —${e.relation}→ T${e.citedId}",
+      escaped: "${addrOf(e.citingId)} —${esc(e.relation)}→ ${addrOf(e.citedId)}",
+      bare: "${addrOf(e.citingId)} —${e.relation}→ ${addrOf(e.citedId)}",
     },
     {
       name: "edge tags (tooltip)",
@@ -154,13 +154,13 @@ describe("console-shell.html DOM rule", () => {
     },
     {
       name: "edge relation (panel erow, out)",
-      escaped: "`—${esc(e.relation)}→ T${e.citedId}`",
-      bare: "`—${e.relation}→ T${e.citedId}`",
+      escaped: "`—${esc(e.relation)}→ ${addrOf(e.citedId)}`",
+      bare: "`—${e.relation}→ ${addrOf(e.citedId)}`",
     },
     {
       name: "edge relation (panel erow, in)",
-      escaped: "`T${e.citingId} —${esc(e.relation)}→`",
-      bare: "`T${e.citingId} —${e.relation}→`",
+      escaped: "`${addrOf(e.citingId)} —${esc(e.relation)}→`",
+      bare: "`${addrOf(e.citingId)} —${e.relation}→`",
     },
     {
       name: "edge tags (panel erow)",
@@ -315,5 +315,26 @@ describe("console-shell.html behavior-matrix wiring spot checks", () => {
     const lastUnit = oldUnsafeTruncation.charCodeAt(61);
     expect(lastUnit).toBeGreaterThanOrEqual(0xd800);
     expect(lastUnit).toBeLessThanOrEqual(0xdbff);
+  });
+
+  // floor-and-render-fidelity ticket 03 (user ruling S15069/T1482): every
+  // reader-facing turn reference is the S<n>/T<m> address — the node label,
+  // the lane chip's terminus mark, the edge tooltip/panel erows (their own
+  // FIELD_SINKS pins above). `turns.id` may still key the internal `idx`/
+  // `nodeEls`/`rowEls`/edge `citingId`/`citedId` maps (DATA, never printed).
+  test("the node label renders S<sessionId>/T<promptNumber>, never the bare internal turns.id", () => {
+    expect(html).toContain('lb.textContent = `S${t.sessionId}/T${t.promptNumber}`;');
+    expect(html).not.toContain('lb.textContent = "T"+t.id;');
+  });
+
+  test("addrOf resolves a turn id to its address (falling back to the bare id only for a turn outside the loaded set)", () => {
+    expect(html).toContain(
+      "const addrOf = id => { const t = turns[idx.get(id)]; return t ? `S${t.sessionId}/T${t.promptNumber}` : \"T\"+id; };",
+    );
+  });
+
+  test("a lane's terminus mark addresses the turn instead of printing its bare id", () => {
+    expect(html).toContain("const term = closed ? `◎${addrOf(l.state.terminus)}`");
+    expect(html).not.toContain("`◎T${l.state.terminus}`");
   });
 });

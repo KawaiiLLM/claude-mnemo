@@ -166,8 +166,13 @@ describe("release artifacts", () => {
 
     const worker = readFileSync("plugin/scripts/worker.cjs", "utf8");
     for (const marker of [
-      'audience: "worker"', // recall worker DB-id surface
-      "dbid:T", // DB-id token the worker recall emits
+      // floor-and-render-fidelity ticket 03 retired the "dbid:T" DB-id
+      // correlation token the worker recall used to emit — lane_check and
+      // recall both speak S<n>/T<m> now, so a stale bundle would still carry
+      // the token; a fresh one never does. `audience: "worker"` itself stays
+      // a marker — that gate still exists, for the private-tag-stripped
+      // envelope cap, just not for the dbid token any more.
+      'audience: "worker"', // recall worker envelope-cap surface
       "OUTCOME_TAGS", // milestone marker logic
       "workerRecallInputShape", // uncapped worker recall schema
       "allowedDocumentSubtrees", // read_doc request scope
@@ -223,6 +228,10 @@ describe("release artifacts", () => {
       // retired outright — owed turns are a derived query, not a maintained
       // ledger — so a stale worker bundle would still carry its call sites.
       "reconcileNoteDebt",
+      // floor-and-render-fidelity ticket 03: the dbid:T<n> correlation token
+      // retired — lane_check and recall both speak S<n>/T<m> now, so a stale
+      // bundle would still carry the token a fresh one never emits.
+      "dbid:T",
     ]) {
       expect(worker).not.toContain(removed);
     }

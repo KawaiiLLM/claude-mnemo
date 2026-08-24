@@ -208,6 +208,38 @@ describe("runLaneCheckCli end to end", () => {
     expect(opened).toBe(false);
   });
 
+  // floor-and-render-fidelity ticket 03 (user ruling S15069/T1482): the CLI
+  // now builds an address map from the SAME projection it loaded
+  // (`buildLaneAnchorAddresses`) and passes it to BOTH renderers — the four
+  // reports and the digraph's own member labels alike. Internal node
+  // IDENTITY (the digraph's crossing/anchor bookkeeping) may still key off
+  // `turns.id`, but nothing PRINTED does any more.
+  test("every rendered turn reference — reports and digraph member labels alike — is an S<n>/T<m> address, never a bare T<dbid>", () => {
+    const { sessionId } = seedFixtureDatabase();
+    const { io, stdout } = captureIo();
+
+    const code = runLaneCheckCli(
+      ["--session", String(sessionId), "--range", "1-3", "--db", dbPath],
+      io,
+    );
+
+    expect(code).toBe(0);
+    const out = stdout.join("\n");
+    // The reports side: the declared terminus (report 1) and the path
+    // start/terminus (report 4b) both address T3/T1.
+    expect(out).toContain(`terminus S${sessionId}/T3`);
+    expect(out).toContain(`starts: S${sessionId}/T1`);
+    // The digraph's own member lines carry the address too, not `T1`/`T2`/`T3`.
+    expect(out).toContain(`S${sessionId}/T1`);
+    expect(out).toContain(`S${sessionId}/T2`);
+    expect(out).toContain(`S${sessionId}/T3`);
+    // Every one of this fixture's three turns is in-projection (the range
+    // scope loaded exactly them) — the bare fallback never fires for them.
+    for (const promptNumber of [1, 2, 3]) {
+      expect(out).not.toMatch(new RegExp(`(^|[^0-9A-Za-z/])T${promptNumber}\\b`));
+    }
+  });
+
   test("the CLI's own default database open is READ-ONLY -- a write attempted through the real end-to-end path throws", () => {
     seedFixtureDatabase();
     // Same seam `runLaneCheckCli` uses by default (`openReadOnlyLaneCheckDatabase`

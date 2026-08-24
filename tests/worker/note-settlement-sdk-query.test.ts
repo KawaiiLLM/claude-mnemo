@@ -410,7 +410,9 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
           };
           const text = laneCheckReceipt.content[0]!.text;
           expect(text).toContain("declaration: closed-valid");
-          expect(text).toContain("used[T");
+          // floor-and-render-fidelity ticket 03: every projection turn's own
+          // citedness reference is an address now, not a bare `T<dbid>`.
+          expect(text).toContain("used[S");
           expect(text).not.toContain("digraph");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
@@ -517,17 +519,20 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
           // own `tags`) — the exact orphan shape the checker exists to catch.
           expect(text).toContain("## ERRORS");
           expect(text).not.toContain("## Vocabulary conformance");
-          // Tag-mandate ticket 06: the ANCHOR is an ADDRESS on this surface —
-          // the settlement agent repairs through `S<session>/T<prompt>` and
-          // cannot type a `turns.id` into `note`. The arrow's own endpoints
-          // stay bare ids (graph structure, not repair targets), which is why
-          // both spellings appear on one line.
+          // Floor-and-render-fidelity ticket 03: EVERY turn reference on this
+          // surface is an address now — the settlement agent repairs through
+          // `S<session>/T<prompt>` and cannot type a `turns.id` into `note`,
+          // and that now holds for an edge's endpoints too, not just its
+          // anchor (tag-mandate ticket 06's narrower scope). Both t1 and t2
+          // are in this window's own projection, so both resolve.
           expect(text).toContain(
-            `[E3] anchor S${sessionDbId}/T1 -- T${t1} type: [bugfix] (outside vocabulary: bugfix)`,
+            `[E3] anchor S${sessionDbId}/T1 -- S${sessionDbId}/T1 type: [bugfix] (outside vocabulary: bugfix)`,
           );
-          expect(text).toContain(`[E2] anchor S${sessionDbId}/T2 -- T${t2} --supersedes--> T${t1}`);
           expect(text).toContain(
-            `[E4] anchor S${sessionDbId}/T2 -- T${t2} --extends--> T${t1} {vocab-fixture}`,
+            `[E2] anchor S${sessionDbId}/T2 -- S${sessionDbId}/T2 --supersedes--> S${sessionDbId}/T1`,
+          );
+          expect(text).toContain(
+            `[E4] anchor S${sessionDbId}/T2 -- S${sessionDbId}/T2 --extends--> S${sessionDbId}/T1 {vocab-fixture}`,
           );
           // Never admitted: the lane's own edge tally in report 1 is exactly
           // the extends+indexes pair.

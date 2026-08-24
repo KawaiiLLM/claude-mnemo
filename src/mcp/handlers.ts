@@ -52,10 +52,14 @@ export interface TimelineQueryInput {
 
 export interface CreateDatabaseBackedHandlersOptions {
   defaultProject?: string;
-  // "worker" surfaces the DB turn id (`dbid:T<dbid>`) in recall output so the
-  // memory worker can cite a turn it found via `recall(query=...)`. The public
-  // main agent uses "main" (default) and keeps the prompt-number labels — this
-  // is wired here, NOT in `recallInputShape`, which is strict.
+  // "worker" gates the private-tag-stripped, 100K-char-capped envelope
+  // (`workerTextResult`/`deliverRecall` below) the memory worker's tool
+  // channel needs — the public main agent uses "main" (default) and gets the
+  // render verbatim. floor-and-render-fidelity ticket 03 retired the
+  // dbid:T<dbid> correlation token this flag used to ALSO gate (recall and
+  // lane_check both speak S<n>/T<m> now, so the worker no longer needs a
+  // second, db-id-keyed vocabulary to correlate the two) — this is wired
+  // here, NOT in `recallInputShape`, which is strict.
   audience?: "main" | "worker";
   /**
    * P2 era boundary (spec D11/D12). Resolved once here rather than per call —
@@ -151,7 +155,7 @@ export function createDatabaseBackedHandlers(
     return {};
   }
 
-  const includeDbTurnIds = options.audience === "worker";
+  const isWorkerAudience = options.audience === "worker";
   // Resolved per tool call, not once here. These handlers are built when the
   // MCP server connects, which can be before any process of this build has
   // recorded the era: pinning `null` at that moment would make every `note` in
@@ -174,7 +178,7 @@ export function createDatabaseBackedHandlers(
     return typeof callerSessionId === "number" ? sessionWriterId(callerSessionId) : null;
   };
   const workerTextResult = (text: string): ToolResult => {
-    if (!includeDbTurnIds) {
+    if (!isWorkerAudience) {
       return textResult(text);
     }
     const stripped = stripPrivateTags(text);
@@ -204,7 +208,7 @@ export function createDatabaseBackedHandlers(
    * against unstripped offsets can only ever under-grant).
    */
   const deliverRecall = (delivery: RecallDelivery): ToolResult => {
-    if (!includeDbTurnIds) {
+    if (!isWorkerAudience) {
       delivery.commitDelivered(delivery.text.length);
       return textResult(delivery.text);
     }
@@ -240,7 +244,6 @@ export function createDatabaseBackedHandlers(
           pageSize: args.pageSize as number | undefined,
           pageBudget: args.pageBudget as number | undefined,
           turn: args.turn as number | undefined,
-          includeDbTurnIds,
           eraCutoffEpoch: eraCutoff(),
           readerId: readerId(),
           ...(options.now ? { now: options.now } : {}),

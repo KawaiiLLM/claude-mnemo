@@ -10,7 +10,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { checkLanes } from "../../src/shared/lane-checker";
-import { renderLaneCheckerReports } from "../../src/shared/lane-checker-render";
+import { buildLaneAnchorAddresses, renderLaneCheckerReports } from "../../src/shared/lane-checker-render";
 import {
   createConsoleReader,
   type ConsoleLaneCheckRun,
@@ -1015,11 +1015,22 @@ describe("single-source pin — T900-1001 fixture", () => {
       promptStart: 900,
       promptEnd: 1001,
     });
+    // floor-and-render-fidelity ticket 03: `handleGraphRoute` now builds the
+    // address map from this SAME projection's own turns and passes it
+    // through — the independent re-run has to do the identical thing for
+    // the byte-for-byte comparison to mean anything.
     const expectedLaneCheckText = renderLaneCheckerReports(
       checkLanes(secondRun.turns, secondRun.edges),
+      buildLaneAnchorAddresses(secondRun.turns),
     );
 
     expect(body.laneCheckText).toBe(expectedLaneCheckText);
+    // Pin: no bare `T<dbid>`-shaped reference survives for an in-projection
+    // turn — every turn in this window carries `session_id`/`prompt_number`
+    // (seeded above), so the address map resolves every one of them.
+    for (const turn of secondRun.turns) {
+      expect(body.laneCheckText).not.toMatch(new RegExp(`(^|[^0-9A-Za-z/])T${turn.id}\\b`));
+    }
     expect(body.lanes.length).toBe(secondRun.result.lanes.length);
     expect(body.lanes.length).toBeGreaterThan(1); // non-trivial: several distinct lanes in this window
 

@@ -302,8 +302,6 @@ export interface RenderNodeOptions {
    */
   includeSessionPrefix?: boolean;
   turnPromptNumber?: number;
-  /** Worker-only: append a `dbid:T<dbid>` token to a turn label. */
-  includeDbTurnIds?: boolean;
   signal?: TruncationSignal;
   /**
    * Ticket 11: the per-item token cap, applied to every node kind (session,
@@ -899,7 +897,6 @@ function formatTurnLabel(
     indent = "",
     sessionId,
     includeSessionPrefix = false,
-    includeDbTurnIds = false,
   }: RenderNodeOptions,
 ): string {
   // Bare `T<n>` on purpose: the `:L<line>` suffix this once carried was the
@@ -927,10 +924,9 @@ function formatTurnLabel(
   const titleText = fields.has("title") ? turn.title : null;
   const titleSegment = titleText ? ` ${titleText}` : "";
 
-  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
 
-  return `${prefix}${titleSegment}${formatStatus(turn.status)}${dbIdSegment}${rewindSegment}`;
+  return `${prefix}${titleSegment}${formatStatus(turn.status)}${rewindSegment}`;
 }
 
 function formatObservationLabel(

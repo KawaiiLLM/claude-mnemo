@@ -514,6 +514,28 @@ describe("recall(id=\"E<n>\") segment card", () => {
     expect(output).toContain(`2. S${sessionId}/T2 "implement the card"`);
   });
 
+  test("a note-less member's index line is the bare address — its raw prompt never leaks (ticket 03)", () => {
+    // The retired fallback (`turn?.title ?? turn?.userPrompt ?? "untitled"`)
+    // was a third copy of the label fallback ticket 02 removed from
+    // format.ts/recall.ts; this pins the sweep.
+    const noteless = db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, title, tags, created_at_epoch,
+           user_prompt, assistant_response, files_read, files_modified
+         ) VALUES (?, 3, 'extracted', NULL, '[]', ?,
+                   'SECRET-RAW-PROMPT-WORDS', 'a response', '[]', '[]')
+         RETURNING id`,
+      )
+      .get(sessionId, CUTOFF + 3)!.id;
+    addSegmentMembers(db, segmentId, [noteless], CUTOFF);
+
+    const output = recallMemory(db, { id: `E${segmentId}`, page: 2 });
+    expect(output).toContain(`3. S${sessionId}/T3`);
+    expect(output).not.toContain("SECRET-RAW-PROMPT-WORDS");
+    expect(output).not.toContain("untitled");
+  });
+
   // ---- pagination stability (mutation target 2/3) ----
 
   test("page overflow paginates STABLY: page 2 deterministically re-fetches the un-elided card", () => {

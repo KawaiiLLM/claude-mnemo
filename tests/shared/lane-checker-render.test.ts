@@ -105,13 +105,16 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     // open reading (`LaneStatsReport.state`), read from `deriveLaneStates`.
     expect(text).toContain("closed-valid");
     expect(text).not.toMatch(/declaration: declared/);
-    expect(text).toContain("terminus 2");
+    expect(text).toContain("terminus T2");
     expect(text).toContain("[last event T2]");
     expect(text).toContain("T9->T1");
     expect(text).toContain("used[T6->T1]");
     expect(text).toContain("T8 verifies T1");
     expect(text).toContain("partial");
-    expect(text).toContain("missing: 7");
+    // floor-and-render-fidelity ticket 03: EVERY turn id this file prints
+    // routes through the same formatter, coverage's missing-id list included
+    // — no addresses supplied here, so it keeps the bare `T<dbid>` form.
+    expect(text).toContain("missing: T7");
   });
 
   test("report 1's state line renders all three forms — closed-valid, closed-invalid, and open with/without a last declarer", () => {
@@ -228,9 +231,12 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
 
     const text = renderLaneCheckerReports(result);
     expect(text).toContain("components: 2 (SEVERED)");
-    expect(text).toContain("island@1: 1");
-    expect(text).toContain("island@3: 3");
-    expect(text).toContain("component@5:");
+    // floor-and-render-fidelity ticket 03: an island's representative and
+    // member ids are turn references too, not exempt from the address
+    // formatter just because the old render left them bare.
+    expect(text).toContain("island@T1: T1");
+    expect(text).toContain("island@T3: T3");
+    expect(text).toContain("component@T5:");
     expect(text).toContain("E9:{other}");
     expect(text).toContain("shared T5 (designed fork/merge)");
   });
@@ -273,11 +279,14 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
 
     const text = renderLaneCheckerReports(result);
     expect(text).toContain("skipped (undeclared)");
-    expect(text).toContain("starts: 1,2");
+    // floor-and-render-fidelity ticket 03: starts/fork/join/folded-citing
+    // lists are turn-id lists too, formatted the same as every other
+    // reference in this file (bare `T<dbid>` here — no addresses supplied).
+    expect(text).toContain("starts: T1,T2");
     expect(text).toContain("paths: 2 (terminus T3");
     expect(text).toContain("folded pathCount=2");
-    expect(text).toContain("citing turns folded: 8");
-    expect(text).toContain("fork: 1 join: 3");
+    expect(text).toContain("citing turns folded: T8");
+    expect(text).toContain("fork: T1 join: T3");
   });
 
   test("report 4a prints an inter-lane interface pair's count and a declared lane's bypass edges", () => {
@@ -490,18 +499,22 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
   });
 
   /**
-   * TAG-MANDATE TICKET 06 — the ANCHOR is spelled for whoever is reading.
-   * An agent repairs through `S<session>/T<prompt>` and cannot type a
-   * `turns.id` into any tool, so the settlement surface passes the
-   * projection's turns and gets addresses; the CLI and the console pass
-   * nothing and keep the row ids their own readers navigate by.
+   * FLOOR-AND-RENDER-FIDELITY TICKET 03 (user ruling S15069/T1482) — EVERY
+   * turn id this file prints is spelled for whoever is reading, not just the
+   * error ANCHOR (tag-mandate ticket 06's own narrower scope): the edge
+   * endpoint on an E1 line, the E5 node/canonical pair, every count list —
+   * all route through the same `formatTurnRef`. The settlement tool, the
+   * CLI, and the console all now build and pass this map from the SAME
+   * projection they just loaded (`buildLaneAnchorAddresses`); a caller that
+   * omits it (a hand fixture, or a turn genuinely outside the projection)
+   * keeps the bare `T<dbid>` form as a marked last resort, never silently.
    *
    * The addresses come off `LaneTurnInput.order` — the `[session_id,
    * prompt_number]` tuple `db/lane-checker-load.ts` already fills — so this
    * module still derives nothing and queries nothing (the file header's own
    * requirement 4).
    */
-  describe("error anchors print as addresses when the caller supplies the projection's turns", () => {
+  describe("error anchors AND endpoints print as addresses when the caller supplies the projection's turns", () => {
     const errors: LaneCheckerResult["errors"] = [
       { class: "E1", anchorId: 5, citingId: 5, citedId: 4, relation: "extends" },
       {
@@ -514,33 +527,46 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       },
     ];
 
-    test("addresses replace the bare ids in the anchor position, and nowhere else on the line", () => {
+    test("addresses replace every resolvable id on the line, in the anchor position and the endpoints alike", () => {
       const addresses = buildLaneAnchorAddresses([
         { id: 5, type: ["design"], order: [15069, 332] },
         { id: 7, type: ["design"], order: [15069, 401] },
       ]);
       const text = renderLaneCheckerReports({ ...emptyResult(), errors }, addresses);
 
-      expect(text).toContain("[E1] anchor S15069/T332 -- T5 --extends--> T4 carries no lane tags");
-      // The E5 line's CANONICAL node stays a bare id: it is graph structure
-      // the reader is being pointed at, not a second repair target, and the
-      // repair sentence the settlement gate prints
-      // (`note-settlement-sdk-query.ts`) is the surface that addresses both.
-      expect(text).toContain("[E5] anchor S15069/T401 -- lane default:{L} has a second sink: T7 dangles beside T9");
+      // E1's CITING side (id 5, in the map) resolves; its CITED side (id 4,
+      // never in the map) keeps the bare fallback — proving this is a
+      // per-id lookup, not a blanket string substitution.
+      expect(text).toContain(
+        "[E1] anchor S15069/T332 -- S15069/T332 --extends--> T4 carries no lane tags",
+      );
+      // The E5 line's dangling NODE (id 7, same as the anchor) resolves too;
+      // its CANONICAL counterpart (id 9, not in the map) stays bare.
+      expect(text).toContain(
+        "[E5] anchor S15069/T401 -- lane default:{L} has a second sink: S15069/T401 dangles beside T9",
+      );
+      // Pin: no bare `T<dbid>`-shaped reference survives for an id the map
+      // actually resolved — ids 5 and 7 never appear as `T5`/`T7` anywhere.
+      expect(text).not.toMatch(/\bT5\b/);
+      expect(text).not.toMatch(/\bT7\b/);
     });
 
-    test("a turn missing from the projection, and the no-addresses caller, both keep the bare id", () => {
+    test("a turn missing from the projection, and the no-addresses caller, both keep the bare id (the marked last resort)", () => {
       // Only turn 5 is known: 7 was never in the projection (a hand-built
       // fixture, or a row that vanished between load and render).
       const partial = buildLaneAnchorAddresses([{ id: 5, type: ["design"], order: [15069, 332] }]);
       const text = renderLaneCheckerReports({ ...emptyResult(), errors }, partial);
       expect(text).toContain("[E1] anchor S15069/T332 --");
       expect(text).toContain("[E5] anchor T7 --");
+      expect(text).toContain("dangles beside T9");
 
       // A turn with no `order` contributes no entry at all.
       expect(buildLaneAnchorAddresses([{ id: 5, type: ["design"] }]).size).toBe(0);
 
-      // And the CLI/console call shape is byte-identical to before.
+      // And a caller that supplies NO map at all (the fallback path itself,
+      // unreachable on any real settlement/CLI/console scope — those always
+      // build one from the projection they loaded) is byte-identical to an
+      // explicitly empty one.
       const bare = renderLaneCheckerReports({ ...emptyResult(), errors });
       expect(bare).toContain("[E1] anchor T5 --");
       expect(bare).toContain("[E5] anchor T7 --");
@@ -760,7 +786,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
 
     expect(() => renderLaneCheckerReports(result)).not.toThrow();
     expect(() => renderLaneDigraph(result)).not.toThrow();
-    expect(renderLaneCheckerReports(result)).toContain("terminus 999");
+    expect(renderLaneCheckerReports(result)).toContain("terminus T999");
     // Member 1 is not the (nonexistent, unmatched) terminus, so it renders
     // as a plain member glyph -- the renderer never "fixes" the mismatch.
     const digraph = renderLaneDigraph(result);

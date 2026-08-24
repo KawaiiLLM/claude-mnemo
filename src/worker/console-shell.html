@@ -178,6 +178,13 @@ const esc = s => { const d=document.createElement("div"); d.textContent=s; retur
 // applied so the sink can never resolve to anything outside WORDS even if a
 // future schema value slips past the CHECK constraint in production data.
 const relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";
+// Reader-facing turn text is always the S<n>/T<m> address (floor-and-render-
+// fidelity ticket 03, user ruling S15069/T1482) — internal `turns.id` stays
+// a DATA KEY only (idx/edge citingId/citedId/nodeEls/rowEls), never printed.
+// A turn id absent from the currently-loaded `turns` array (a lane terminus
+// trimmed out by the graph's own byte/count bounds) falls back to the bare
+// `T<id>` form — the same marked last resort the server-side renderer uses.
+const addrOf = id => { const t = turns[idx.get(id)]; return t ? `S${t.sessionId}/T${t.promptNumber}` : "T"+id; };
 
 /* ---- mutable render state: reset on every graph load ---- */
 let turns = [], edges = [], lanes = [];
@@ -414,7 +421,7 @@ function laneChip(l){
   const closed = l.state.closure === "closed";
   const valid = l.state.validity === "valid";
   c.className = "lchip" + (closed ? (valid ? "" : " invalid") : " openlane");
-  const term = closed ? `◎T${l.state.terminus}` : (l.state.terminus ? `…◎T${l.state.terminus}` : "无宣告");
+  const term = closed ? `◎${addrOf(l.state.terminus)}` : (l.state.terminus ? `…◎${addrOf(l.state.terminus)}` : "无宣告");
   c.innerHTML = `${esc(l.tagSet.join("+"))}<span class="term">${term}${closed && !valid ? " ✝" : ""}</span>`;
   c.addEventListener("click", () => {
     const toks = lanesTouchingComponentForLane(l.token);
@@ -471,7 +478,7 @@ function renderGraphSvg(){
     p.dataset.r=e.relation; p.dataset.s=e.citingId; p.dataset.t=e.citedId;
     p.dataset.lane = e.laneToken ?? "";
     p.addEventListener("mousemove", ev=>tip(ev,
-      `T${e.citingId} —${esc(e.relation)}→ T${e.citedId}` +
+      `${addrOf(e.citingId)} —${esc(e.relation)}→ ${addrOf(e.citedId)}` +
       (e.tags.length?` <span class="lg">{${esc(e.tags.join(","))}}</span>`:"")));
     p.addEventListener("mouseleave", hideTip);
     eg.appendChild(p); edgeEls.push(p);
@@ -509,7 +516,7 @@ function renderGraphSvg(){
     ng.appendChild(g); nodeEls.set(t.id,g);
 
     const lb = mk("text",{class:"rowlbl",x:TEXT_X,y:y+3.5});
-    lb.textContent = "T"+t.id;
+    lb.textContent = `S${t.sessionId}/T${t.promptNumber}`;
     const title = mk("text",{class:"rowtitle"+(t.title?"":" none"),x:TEXT_X+52,y:y+3.5});
     const tt = t.title || "(无笔记)";
     // Code-point slice, never `.slice()` — a UTF-16 code-unit slice cuts
@@ -612,7 +619,7 @@ function select(id){
 function renderTurnPanel(id){
   const t = turns[idx.get(id)];
   const outE = edges.filter(e=>e.citingId===id), inE = edges.filter(e=>e.citedId===id);
-  const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`—${esc(e.relation)}→ T${e.citedId}`:`T${e.citingId} —${esc(e.relation)}→`}${e.tags.length?` <span class="etags">{${esc(e.tags.join(","))}}</span>`:""}</div>`;
+  const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`—${esc(e.relation)}→ ${addrOf(e.citedId)}`:`${addrOf(e.citingId)} —${esc(e.relation)}→`}${e.tags.length?` <span class="etags">{${esc(e.tags.join(","))}}</span>`:""}</div>`;
   const laneChipsHtml = t.lanes.map(tok => {
     const l = laneByToken.get(tok);
     return `<span class="chip lane">${esc(l ? l.tagSet.join("+") : tok)}</span>`;

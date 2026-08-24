@@ -54,7 +54,7 @@ export const memoryFilterShape = {
     .array(z.enum(RECALL_TURN_FIELD_NAMES))
     .optional()
     .describe(
-      `Which turn fields to render, any combination — replaces the collapsed/expanded field-set switch. One of: ${RECALL_TURN_FIELD_NAMES.join(", ")}.`,
+      `Which turn fields to render, any combination — replaces the collapsed/expanded field-set switch. One of: ${RECALL_TURN_FIELD_NAMES.join(", ")}. A note-less turn renders as a bare address unless \`prompt\` is selected.`,
     ),
 };
 export const memoryFilterSchema = z.object(memoryFilterShape).strict();

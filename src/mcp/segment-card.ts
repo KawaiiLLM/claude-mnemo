@@ -321,7 +321,6 @@ export interface RenderSegmentCardOptions {
   page?: number;
   /** Per-member-turn token cap, forwarded to the member index's turn rows. */
   turnBudget?: number;
-  includeDbTurnIds?: boolean;
   eraCutoffEpoch?: number | null;
   signal?: TruncationSignal;
 }
@@ -541,9 +540,14 @@ export function renderSegmentCardRecord(
     }
     for (const [index, member] of members.entries()) {
       const turn = getTurnById(db, member.turnId);
-      const title = turn?.title ?? turn?.userPrompt ?? "untitled";
+      const address = `S${member.sessionId}/T${member.promptNumber}`;
+      // Title or bare address (floor-and-render-fidelity ticket 03, ticket
+      // 02 hand-off): a note-less turn's own prompt never leaks here — the
+      // retired `turn?.userPrompt` fallback was a third copy of the exact
+      // pattern render-fidelity ticket 02 already swept out of the turn
+      // label and the segment header's own anchor refs.
       lines.push(
-        `${CARD_ROW_INDENT}- ${index + 1}. S${member.sessionId}/T${member.promptNumber} "${title}"`,
+        `${CARD_ROW_INDENT}- ${index + 1}. ${turn?.title ? `${address} "${turn.title}"` : address}`,
       );
     }
   }
@@ -559,7 +563,6 @@ export function renderSegmentCardRecord(
 
 export interface RenderSegmentMembersOptions {
   fields?: TurnRenderFields;
-  includeDbTurnIds?: boolean;
   turnBudget?: number;
   eraCutoffEpoch?: number | null;
   signal?: TruncationSignal;
@@ -662,7 +665,6 @@ export function renderSegmentMembersByOrdinal(
           fields: options.fields,
           sessionId: member.sessionId,
           includeSessionPrefix: pageOpensMidSession,
-          includeDbTurnIds: options.includeDbTurnIds,
           turnBudget: options.turnBudget,
           signal: options.signal,
         },
