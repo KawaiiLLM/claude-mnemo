@@ -144,6 +144,34 @@ describe("header composition", () => {
   });
 });
 
+// A REAL database never contains an edge whose citing turn is older than the
+// turn it cites — ids are chronological and a citation points to the past. A
+// fixture that ignores that renders a chain reading oldest-to-newest, which is
+// exactly backwards from what the view promises ("starts at the newest node
+// and walks backward") and what the reader will see in production. This pins
+// the direction against a realistically-ordered fixture.
+describe("chain direction against realistically-ordered ids", () => {
+  test("the chain starts at the newest node and every arrow points at an OLDER turn", () => {
+    const sessionId = seedSession();
+    const segment = createSegment(db, { title: "direction", nowEpoch: NOW });
+    const oldest = insertTurn(sessionId, 1);
+    const middle = insertTurn(sessionId, 2);
+    const newest = insertTurn(sessionId, 3);
+    addSegmentMembers(db, segment.id, [oldest, middle, newest], NOW);
+    insertLane(db, segment.id, "direction-lane", NOW);
+    // Citing is always the LATER turn, as every real write path produces.
+    tagEdge(middle, oldest, "extends", ["direction-lane"]);
+    tagEdge(newest, middle, "extends", ["direction-lane"]);
+
+    const output = timelineQuery(db, { id: `E${segment.id}/L*` });
+    const chain = output.split("\n").find((line) => line.includes("T" + newest))!;
+    const rendered = [...chain.matchAll(/T(\d+)/g)].map((match) => Number(match[1]));
+    expect(rendered).toEqual([newest, middle, oldest]);
+    // And the ids really do descend — the render is not merely "some order".
+    expect(rendered[0]).toBeGreaterThan(rendered[rendered.length - 1]!);
+  });
+});
+
 describe("path selection is NOT greedy (peer finding P2-7)", () => {
   test("a diamond where the two-hop branch is newer loses to the five-hop branch on total coverage", () => {
     // Pure unit test of the DP itself, isolated from any DB/rendering
