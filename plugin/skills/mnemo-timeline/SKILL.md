@@ -64,7 +64,7 @@ Views:
 | `S42/T..20` | Open-start range `T1-T20` |
 | `S42/T30..` | Open-end range starting at `T30` |
 | `E47` | All of the segment's member turns, in cross-session chronological order |
-| `E47/T...` (any trailing selector) | Same as `E47` — a segment id ignores anything after it; there is no sub-range grammar on a segment yet |
+| `E47/T...`, `E47/S12/T3`, `E47/S12/T3..S45/T7` (any trailing selector) | Same as `E47` — a segment id ignores anything after it on `timeline`; there is no sub-range grammar on a segment yet (contrast `recall`, where `E47/S12/T3` and `E47/S12/T3..S45/T7` DO select — see the mnemo-recall skill) |
 
 Range produces the full candidate set with no truncation; `pageSize` then slices (`turns` view) or admits (`milestones` view) from it.
 

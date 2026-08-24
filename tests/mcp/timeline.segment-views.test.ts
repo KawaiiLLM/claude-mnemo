@@ -113,20 +113,37 @@ describe("timeline(id=\"E<n>\") segment views", () => {
     // selector — is EQUIVALENT to bare `E<n>` (timeline(id="E31/T1...") ≡
     // timeline(id="E31")), a deliberate change from the pre-ticket-09
     // rejection this test used to assert.
-    expect(parseSegmentTimelineId("E47/T3")).toEqual({ segmentId: 47 });
-    expect(parseSegmentTimelineId("E47/T3..7")).toEqual({ segmentId: 47 });
+    // [S15069/T1564]: a NARROWING trailing selector no longer parses here —
+    // `timelineQuery` refuses it rather than silently rendering the whole
+    // segment. `E<n>/T*` names every member, which IS what this route
+    // renders, so it stays equivalent to the bare form.
+    expect(parseSegmentTimelineId("E47/T3")).toBeNull();
+    expect(parseSegmentTimelineId("E47/T3..7")).toBeNull();
     expect(parseSegmentTimelineId("E47/T*")).toEqual({ segmentId: 47 });
+    // Ticket 10 (one-address-grammar spec): recall's own trailing grammar
+    // moved from `E<n>/T<m>` to `E<n>/S<a>/T<b>` (one member) and
+    // `E<n>/S<a>/T<b>..S<c>/T<d>` (a range) — this route accepts both new
+    // shapes too, with the same "no separate meaning, equivalent to bare
+    // E<n>" contract the old `/T...` shape already had.
+    expect(parseSegmentTimelineId("E47/S12/T3")).toBeNull();
+    expect(parseSegmentTimelineId("E47/S12/T3..S15/T7")).toBeNull();
     expect(parseSegmentTimelineId("E*")).toBeNull();
     expect(parseSegmentTimelineId("E1..9")).toBeNull();
   });
 
-  test("timeline(id=\"E<n>/T1...\") renders identically to timeline(id=\"E<n>\")", () => {
+  test("timeline(id=\"E<n>/T*\") renders identically to timeline(id=\"E<n>\"), but a NARROWING selector refuses", () => {
     const t1 = makeTurn(1, { title: "equivalence member" });
     addSegmentMembers(db, segmentId, [t1], CUTOFF);
 
     const bare = timelineQuery(db, { id: `E${segmentId}`, view: "turns" });
-    const suffixed = timelineQuery(db, { id: `E${segmentId}/T1..9`, view: "turns" });
-    expect(suffixed).toBe(bare);
+    expect(timelineQuery(db, { id: `E${segmentId}/T*`, view: "turns" })).toBe(bare);
+    // A window this route cannot honor is refused, never widened in silence
+    // — the caller asked for part of a segment and would otherwise receive
+    // all of it with nothing saying so ([S15069/T1564]).
+    const narrowed = timelineQuery(db, { id: `E${segmentId}/S1/T1..S1/T9`, view: "turns" });
+    expect(narrowed).toContain("timeline error");
+    expect(narrowed).toContain("recall(id=");
+    expect(timelineQuery(db, { id: `E${segmentId}/T1..9`, view: "turns" })).toContain("timeline error");
   });
 
   test("timelineQuery reports an error for a segment that does not exist", () => {
@@ -584,7 +601,9 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
     // `[S15069]` line depends on.
     addSegmentMembers(db, segment.id, [t821, t822, t21, t22, t823], t823Epoch);
 
-    const output = timelineQuery(db, { id: `E${segment.id}/T1...` });
+    // The sample's own prose wrote `E31/T1...` with an ellipsis meaning "and
+    // so on"; the CALL it illustrates is the bare segment card.
+    const output = timelineQuery(db, { id: `E${segment.id}` });
 
     expect(output).toContain(
       [

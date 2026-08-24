@@ -160,7 +160,9 @@ describe("recall segment selector and cross-granularity filters", () => {
   // no longer inlines a ranked member listing (anchors-first/derived-rank was
   // a SELECTION concern for that old listing) — expanded now carries a
   // MEMBER INDEX in EVENT order instead (spec D9 user story 21), and members
-  // are read individually through `E<n>/T<m>` ordinal addressing.
+  // are read individually through their ordinary `S<session>/T<prompt>`
+  // address, scoped by `E<n>/` in front (ticket 10, one-address-grammar spec
+  // — retires this route's earlier `E<n>/T<m>` event-order ordinal).
   test("the expanded card's member index lists members in event order, not anchor/rank order", () => {
     const lines = recallMemory(db, { id: `E${segmentId}`, page: 2 }).split("\n");
     const indexLines = lines.filter((line) => /^\s*-\s+\d+\.\s+S\d+\/T\d+/.test(line));
@@ -171,9 +173,11 @@ describe("recall segment selector and cross-granularity filters", () => {
     expect(indexLines.map((line) => /T(\d+)/.exec(line)?.[1])).toEqual(["1", "2", "3"]);
   });
 
-  test("E<n>/T<m> addresses a member by its 1-based EVENT-ORDER ordinal, exposing its S/T home address", () => {
-    const first = recallMemory(db, { id: `E${segmentId}/T1` });
-    const third = recallMemory(db, { id: `E${segmentId}/T3` });
+  // Ticket 10 (one-address-grammar spec): `E<n>/S<a>/T<b>` addresses one
+  // segment member by its ordinary, ordinary-anywhere-else S/T address.
+  test("E<n>/S<a>/T<b> addresses one segment member by its ordinary S/T address", () => {
+    const first = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T1` });
+    const third = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T3` });
 
     // Spec 金样例: the member listing splits the `S<n>/T<m>` citation across
     // two rungs — a `[S<n>]` transition line, then bare `[T<m>]` rows.
@@ -183,6 +187,98 @@ describe("recall segment selector and cross-granularity filters", () => {
     expect(third).toContain("implement the ledger");
     expect(third).toContain(`[S${sessionId}]`);
     expect(third).toContain("[T3]");
+  });
+
+  test("the retired E<n>/T<m> ordinal form refuses, naming the new grammar — never a silent reinterpretation", () => {
+    const single = recallMemory(db, { id: `E${segmentId}/T1` });
+    expect(single).not.toContain("research the ledger");
+    expect(single).toContain("retired");
+    expect(single).toContain(`E${segmentId}/S<session>/T<prompt>`);
+
+    const range = recallMemory(db, { id: `E${segmentId}/T1..3` });
+    expect(range).not.toContain("research the ledger");
+    expect(range).toContain("retired");
+    // `E<n>/T*` (every member) is unaffected — no ordinal is named.
+    const wildcard = recallMemory(db, { id: `E${segmentId}/T*` });
+    expect(wildcard).toContain("research the ledger");
+    expect(wildcard).not.toContain("retired");
+  });
+
+  test("an E<n>/S<a>/T<b> endpoint that is not a member of the segment refuses, naming it", () => {
+    // Exists in the DB, and in the same session, but never joined via
+    // `addSegmentMembers` — a real turn, just not this segment's own.
+    makeTurn(50, { title: "never joined the segment" });
+
+    const output = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T50` });
+    expect(output).toContain(`S${sessionId}/T50`);
+    expect(output).toContain("not a member");
+    // A range whose SECOND endpoint is the non-member also refuses, naming
+    // that endpoint specifically (not the valid first one).
+    const rangeOutput = recallMemory(db, {
+      id: `E${segmentId}/S${sessionId}/T1..S${sessionId}/T50`,
+    });
+    expect(rangeOutput).toContain(`S${sessionId}/T50`);
+    expect(rangeOutput).toContain("not a member");
+  });
+
+  // Ticket 10: the range endpoints need not share a session — the range
+  // runs over the SEGMENT's own event order between them, so a session
+  // whose only member sits strictly between the two endpoints' event-order
+  // positions is pulled in too, and the render's leading-prefix rule prints
+  // a full address again the moment the run crosses into a new session.
+  test("a cross-session E<n>/S<a>/T<b>..S<c>/T<d> range spans event order regardless of session, and the render re-addresses on the session switch", () => {
+    const otherSessionId = upsertSession(db, {
+      contentSessionId: "session-recall-segments-other",
+      project: "/tmp/project",
+      title: "Other session",
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: CUTOFF + 1, // between design(T2) and implement(T3) in event order
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    const bridgeTurnId = db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, type, title, tags, created_at_epoch,
+           user_prompt, assistant_response, content, files_read, files_modified
+         ) VALUES (?, 1, 'extracted', '["implement"]', 'bridge turn in the other session', '[]', ?,
+                   'user prompt text', 'assistant response text', 'turn body', '[]', '[]')
+         RETURNING id`,
+      )
+      .get(otherSessionId, CUTOFF + 2)!.id;
+    reindexTurnFromDb(db, bridgeTurnId);
+    addSegmentMembers(db, segmentId, [bridgeTurnId], CUTOFF);
+
+    // Event order is now: research(S<sessionId>/T1), design(S<sessionId>/T2),
+    // bridge(S<otherSessionId>/T1), implement(S<sessionId>/T3).
+    const output = recallMemory(db, {
+      id: `E${segmentId}/S${sessionId}/T1..S${sessionId}/T3`,
+    });
+    expect(output).toContain("research the ledger");
+    expect(output).toContain("design the ledger");
+    expect(output).toContain("bridge turn in the other session");
+    expect(output).toContain("implement the ledger");
+    // The leading-prefix rule: the run opens in sessionId (full address on
+    // its first row), then switches to otherSessionId for the bridge turn
+    // (full address again), then switches BACK to sessionId for implement
+    // (full address a third time) — every session entry/re-entry gets one.
+    expect(output).toContain(`[S${sessionId}]`);
+    expect(output).toContain(`[S${otherSessionId}]`);
+  });
+
+  // Judgment call (not pinned by the ticket text, flagged in the report): a
+  // range whose two endpoints are given in the OPPOSITE of event order still
+  // resolves to the same span — min/max of the two ordinals, symmetric —
+  // mirroring `expandNumericSelector`'s own existing range convention rather
+  // than rejecting a "backwards" pasting order.
+  test("a range named end-before-start still resolves to the same span (symmetric, not directional)", () => {
+    const forward = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T1..S${sessionId}/T3` });
+    const backward = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T3..S${sessionId}/T1` });
+    expect(backward).toBe(forward);
+    expect(backward).toContain("research the ledger");
+    expect(backward).toContain("implement the ledger");
   });
 
   test("a cross-era segment's member count and member index drill down to its era half only", () => {
@@ -204,8 +300,11 @@ describe("recall segment selector and cross-granularity filters", () => {
     expect(unpartitioned).toContain("legacy fix before the switch");
   });
 
-  test("E<n>/T<selector> pagination bounds a large ordinal range with pageSize", () => {
-    const output = recallMemory(db, { id: `E${segmentId}/T1..3`, pageSize: 2 });
+  test("an E<n>/S<a>/T<b>..S<c>/T<d> range within one session paginates with pageSize", () => {
+    const output = recallMemory(db, {
+      id: `E${segmentId}/S${sessionId}/T1..S${sessionId}/T3`,
+      pageSize: 2,
+    });
 
     expect(output).toContain("page 1 / 2 (total 3)");
     expect(output).toContain("research the ledger");

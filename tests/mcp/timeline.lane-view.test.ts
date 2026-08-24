@@ -254,8 +254,12 @@ describe("path selection is NOT greedy (peer finding P2-7)", () => {
     expect(lane.truncated).toBe(false); // 6 nodes fit the default budget (8)
 
     const rendered = renderSegmentLaneView(view);
-    expect(rendered).toContain(`T${n0} -> T${n1b} -> T${n2b} -> T${n3b} -> T${n4b} -> T${n5b}(7)`);
-    expect(rendered).not.toContain(`T${n1a}`);
+    // Ticket 10: the address is the PROMPT NUMBER (session-scoped), full on
+    // the first node (all seven share one session here), bare after —
+    // n0..n5b's prompt numbers are 10,5,4,3,2,1, none of which coincides
+    // with n1a's own (9), so its exclusion is unambiguous here.
+    expect(rendered).toContain(`S${sessionId}/T10 -> T5 -> T4 -> T3 -> T2 -> T1(7)`);
+    expect(rendered).not.toContain("T9");
   });
 });
 
@@ -271,18 +275,22 @@ describe("=> vs -> and the ◎ terminus marker", () => {
 
     const view = buildSegmentLaneListView(db, segment.id, "all");
     const rendered = renderSegmentLaneView(view);
-    expect(rendered).toContain(`◎T${t2} => T${t1}(2)`);
+    // Ticket 10 (one-address-grammar spec): the first node carries the full
+    // `S<session>/T<prompt>` address; the rest render bare `T<prompt>` while
+    // the session stays the same (t1/t2 share `sessionId` here).
+    expect(rendered).toContain(`◎S${sessionId}/T2 => T1(2)`);
   });
 });
 
-describe("addresses: bare / E<seg>/ / S<session>/", () => {
-  // The lane model's own domain (lane-checker.ts's D5 doc: "A lane's DAG is
-  // every live edge carrying that tag with an endpoint in that segment") means
-  // a homeless member three hops away through ANOTHER segment never joins the
-  // VIEWED segment's own lane copy at all — only an edge with an endpoint
-  // directly in the viewed segment does. So each prefix case gets its own
-  // isolated two-node lane rather than one combined diamond.
-  test("a turn inside the viewed segment renders bare", () => {
+// Ticket 10 (one-address-grammar spec): a lane chain node's own address is
+// ALWAYS its `S<session>/T<prompt>` home — the earlier `E<seg>/` (a turn
+// owned by another segment) / `S<session>/` (a homeless turn) locator scheme
+// retired along with every other segment-scoped address form. What decides
+// whether a node renders full or bare is now SESSION identity alone: the
+// FIRST node in the chain, and any node whose session differs from the one
+// before it, prints the full address; every other node renders bare.
+describe("leading-prefix rule: full address on the first node and on a session change, bare otherwise", () => {
+  test("a same-session chain: only the first node carries the full address", () => {
     const sessionId = seedSession();
     const segment = createSegment(db, { title: "viewed", nowEpoch: NOW });
     const t1 = insertTurn(sessionId, 1);
@@ -294,47 +302,37 @@ describe("addresses: bare / E<seg>/ / S<session>/", () => {
     const view = buildSegmentLaneListView(db, segment.id, "all");
     const lane = view.lanes.find((entry) => entry.key.tag === "in-seg")!;
     const byId = new Map(lane.nodes.map((node) => [node.turnId, node]));
-    expect(byId.get(t1)!.addressPrefix).toBe("");
-    expect(byId.get(t2)!.addressPrefix).toBe("");
-    expect(renderSegmentLaneView(view)).toContain(`T${t2} -> T${t1}(2)`);
+    expect(byId.get(t1)!.sessionId).toBe(sessionId);
+    expect(byId.get(t1)!.promptNumber).toBe(1);
+    expect(byId.get(t2)!.promptNumber).toBe(2);
+    expect(renderSegmentLaneView(view)).toContain(`S${sessionId}/T2 -> T1(2)`);
   });
 
-  test("a turn owned by another (declared) segment carries E<seg>/", () => {
+  // A segment is no longer part of any node's own address — only its
+  // SESSION is. Two turns in different sessions both cite each other
+  // through ONE segment's own lane (D2's "both sides must declare" was
+  // about cross-SEGMENT edges; this fixture never crosses a segment at
+  // all, only a session, which is the property under test now).
+  test("a cross-session chain: the second node's session differs, so it ALSO carries the full address", () => {
     const sessionId = seedSession();
     const otherSessionId = seedSession("other");
-    const viewedSegment = createSegment(db, { title: "viewed", nowEpoch: NOW });
-    const otherSegment = createSegment(db, { title: "other", nowEpoch: NOW });
-    const inViewed = insertTurn(sessionId, 10);
-    const inOther = insertTurn(otherSessionId, 1);
-    addSegmentMembers(db, viewedSegment.id, [inViewed], NOW);
-    addSegmentMembers(db, otherSegment.id, [inOther], NOW);
-    insertLane(db, viewedSegment.id, "cross", NOW);
-    insertLane(db, otherSegment.id, "cross", NOW); // D2: both sides must declare
-    tagEdge(inViewed, inOther, "consume", ["cross"]);
-
-    const view = buildSegmentLaneListView(db, viewedSegment.id, "all");
-    const lane = view.lanes.find((entry) => entry.key.tag === "cross")!;
-    const byId = new Map(lane.nodes.map((node) => [node.turnId, node]));
-    expect(byId.get(inViewed)!.addressPrefix).toBe("");
-    expect(byId.get(inOther)!.addressPrefix).toBe(`E${otherSegment.id}/`);
-    expect(renderSegmentLaneView(view)).toContain(`T${inViewed} -> E${otherSegment.id}/T${inOther}(2)`);
-  });
-
-  test("a homeless turn (no owning segment) carries S<session>/", () => {
-    const sessionId = seedSession();
     const segment = createSegment(db, { title: "viewed", nowEpoch: NOW });
-    const inViewed = insertTurn(sessionId, 10);
-    const homeless = insertTurn(sessionId, 1); // never added to any segment
-    addSegmentMembers(db, segment.id, [inViewed], NOW);
-    insertLane(db, segment.id, "homeless-case", NOW);
-    tagEdge(inViewed, homeless, "consume", ["homeless-case"]);
+    const inFirstSession = insertTurn(sessionId, 10);
+    // Never added to any segment at all — segment membership plays no part
+    // in a node's own address any more.
+    const inOtherSession = insertTurn(otherSessionId, 1);
+    addSegmentMembers(db, segment.id, [inFirstSession], NOW);
+    insertLane(db, segment.id, "cross-session", NOW);
+    tagEdge(inFirstSession, inOtherSession, "consume", ["cross-session"]);
 
     const view = buildSegmentLaneListView(db, segment.id, "all");
-    const lane = view.lanes.find((entry) => entry.key.tag === "homeless-case")!;
+    const lane = view.lanes.find((entry) => entry.key.tag === "cross-session")!;
     const byId = new Map(lane.nodes.map((node) => [node.turnId, node]));
-    expect(byId.get(inViewed)!.addressPrefix).toBe("");
-    expect(byId.get(homeless)!.addressPrefix).toBe(`S${sessionId}/`);
-    expect(renderSegmentLaneView(view)).toContain(`T${inViewed} -> S${sessionId}/T${homeless}(2)`);
+    expect(byId.get(inFirstSession)!.sessionId).toBe(sessionId);
+    expect(byId.get(inOtherSession)!.sessionId).toBe(otherSessionId);
+    expect(renderSegmentLaneView(view)).toContain(
+      `S${sessionId}/T10 -> S${otherSessionId}/T1(2)`,
+    );
   });
 });
 
@@ -359,10 +357,20 @@ describe("budget truncation", () => {
     expect(lane.nodes).toHaveLength(DEFAULT_LANE_CHAIN_ITEM_BUDGET);
     expect(lane.truncated).toBe(true);
 
+    // `ids[k]` carries prompt number `total - k` (the loop counts DOWN while
+    // pushing), so the node just past the budget — `ids[DEFAULT_LANE_CHAIN_ITEM_BUDGET]`,
+    // the first one the shown slice does NOT reach — has this prompt number.
+    const excludedPromptNumber = total - DEFAULT_LANE_CHAIN_ITEM_BUDGET;
+    expect(lane.nodes.some((node) => node.promptNumber === excludedPromptNumber)).toBe(false);
+
     const rendered = renderSegmentLaneView(view);
     expect(rendered).toContain(`-> ...(${total})`);
-    // The node just past the budget must NOT appear.
-    expect(rendered).not.toContain(`T${ids[DEFAULT_LANE_CHAIN_ITEM_BUDGET]}`);
+    // The node just past the budget must NOT appear. Ticket 10: the address
+    // is now the PROMPT NUMBER, not the raw turn id — safe as a substring
+    // check here since the shown prompt numbers (total down to
+    // total - DEFAULT_LANE_CHAIN_ITEM_BUDGET + 1) share no digit sequence
+    // with `excludedPromptNumber` at this fixture's scale.
+    expect(rendered).not.toContain(`T${excludedPromptNumber}`);
   });
 
   test("a chain that fits within budget renders with no ellipsis, just the direct (N) tail", () => {
@@ -376,7 +384,7 @@ describe("budget truncation", () => {
 
     const rendered = renderSegmentLaneView(buildSegmentLaneListView(db, segment.id, "all"));
     expect(rendered).not.toContain("...");
-    expect(rendered).toContain(`T${t2} -> T${t1}(2)`);
+    expect(rendered).toContain(`S${sessionId}/T2 -> T1(2)`);
   });
 });
 

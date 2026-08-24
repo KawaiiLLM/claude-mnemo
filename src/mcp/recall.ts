@@ -288,12 +288,27 @@ type RoutedRecallId =
   | { kind: "observation-list"; sessionId: number; promptNumber: number }
   | { kind: "observation"; observationId: number }
   | { kind: "segments"; segmentIds?: number[] }
-  // ticket 03 (spec D9): `E<n>/T<m>` — a segment-scoped member address, `<m>`
-  // the member's 1-based EVENT-ORDER ordinal (see segment-card.ts), NOT a
-  // session prompt number. Symmetric with `S<n>/T<m>` above, one segment id
-  // only (unlike the bare `E` route, which accepts a range/wildcard) —
-  // "E31/T5..7" names members within ONE segment, never a cross-segment span.
-  | { kind: "segment-members"; segmentId: number; ordinals?: number[] };
+  // ticket 10 (one-address-grammar spec): `E<n>/T*` — every member of one
+  // segment, in event order. The ordinal single/range forms this route used
+  // to also carry (`E<n>/T<m>`, `E<n>/T3..7` — spec D9's EVENT-ORDER
+  // position, NOT a session prompt number) retired: the same string resolved
+  // to a different turn depending on where it was pasted. See
+  // `retiredSegmentOrdinalRefusal` — checked by every caller of
+  // `parseRoutedId` before it, so the old shape never reaches this parser.
+  | { kind: "segment-members"; segmentId: number }
+  // ticket 10: `E<n>/S<a>/T<b>` (one member) and
+  // `E<n>/S<a>/T<b>..S<c>/T<d>` (a range, second form). The endpoints are
+  // ORDINARY S/T addresses — parsing needs no database, so resolving them
+  // against the segment's own event order happens at render time. `start`
+  // equals `end` for the single form. The two endpoints need not share a
+  // session; the range runs over the segment's own event order between them,
+  // inclusive.
+  | {
+      kind: "segment-member-range";
+      segmentId: number;
+      start: { sessionId: number; promptNumber: number };
+      end: { sessionId: number; promptNumber: number };
+    };
 
 function splitInsight(insight: string | null): string[] {
   if (!insight) {
@@ -336,7 +351,35 @@ function formatParameterError(message: string): string {
  * do not all share the same address kind.
  */
 const ID_SELECTOR_GRAMMAR_HINT =
-  'each item must be one address: "S<n>", "S<n>/T<m>" (also T*, Ta..b), "E<n>" (also E*, Ea..b), "E<n>/T<m>" (also T*, Ta..b), "T<n>" (global), "O<n>", "S<n>/T<m>/O*", or "S<n>/T*/O*" — every item in the list must be the SAME kind.';
+  'each item must be one address: "S<n>", "S<n>/T<m>" (also T*, Ta..b), "E<n>" (also E*, Ea..b), "E<n>/T*" (every segment member), "E<n>/S<a>/T<b>" (one segment member), "E<n>/S<a>/T<b>..S<c>/T<d>" (a range within the segment), "T<n>" (global), "O<n>", "S<n>/T<m>/O*", or "S<n>/T*/O*" — every item in the list must be the SAME kind.';
+
+/**
+ * Ticket 10 (one-address-grammar spec): `E<n>/T<m>` (a single member) and
+ * `E<n>/T<a>..<b>` (a range) — the segment's own 1-based EVENT-ORDER
+ * ordinal — retired. The same string used to mean three different things
+ * depending on where it was pasted (this ordinal, a segment-scoped GLOBAL
+ * turn id elsewhere, and briefly a per-segment ordinal too), so a caller
+ * still sending it gets a refusal NAMING the replacement grammar rather than
+ * a silent reinterpretation — the two readings can differ by hundreds of
+ * turns and a silent one lands the reader on the wrong row with no signal.
+ * `E<n>/T*` (every member) names no ordinal and is unaffected — matched by
+ * `parseRoutedId` itself, never this function. Checked by every caller of
+ * `parseRoutedId` BEFORE it runs, so the retired shape never reaches the
+ * parser at all (it would otherwise just fail to match and fall through to
+ * the generic "invalid id selector" message, which names nothing).
+ */
+function retiredSegmentOrdinalRefusal(value: string): string | null {
+  const match = /^E(\d+)\/T(\d+|\d+\.\.[A-Za-z]?\d+)$/i.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+  const segmentId = match[1];
+  return (
+    `"${value}" uses the retired E<n>/T<ordinal> form — a segment's own event-order position is no ` +
+    `longer an address. Use "E${segmentId}/S<session>/T<prompt>" for one member, ` +
+    `"E${segmentId}/S<a>/T<b>..S<c>/T<d>" for a range, or "E${segmentId}/T*" for every member.`
+  );
+}
 
 function parseRoutedId(value: string): RoutedRecallId | null {
   const trimmed = value.trim();
@@ -380,22 +423,46 @@ function parseRoutedId(value: string): RoutedRecallId | null {
     };
   }
 
-  // Segment-scoped member route (ticket 03, spec D9): `E31/T5` and
-  // `E31/T3..7` — `<m>` is the member's 1-based EVENT-ORDER ordinal within
-  // the segment, a navigation handle only (see segment-card.ts). Checked
-  // BEFORE the bare segment route below, since that route's own pattern would
-  // otherwise stop at the digits and leave a trailing `/T5` unmatched instead
-  // of falling through to this one.
-  const segmentMemberMatch = /^E(\d+)\/T(\*|\d+|\d+\.\.[A-Za-z]?\d+)$/i.exec(trimmed);
-  if (segmentMemberMatch) {
-    const ordinals = expandNumericSelector(segmentMemberMatch[2]!, "T");
-    if (ordinals === null) {
-      return null;
-    }
+  // `E<n>/T*` — every member of one segment, in event order (ticket 10).
+  // Checked BEFORE the bare segment route below, since that route's own
+  // pattern would otherwise stop at the digits and leave a trailing `/T*`
+  // unmatched instead of falling through to this one. The ordinal
+  // single/range forms this pattern used to also accept are retired — see
+  // `retiredSegmentOrdinalRefusal`, checked by every caller before this
+  // function runs.
+  const segmentMemberWildcardMatch = /^E(\d+)\/T\*$/i.exec(trimmed);
+  if (segmentMemberWildcardMatch) {
     return {
       kind: "segment-members",
-      segmentId: Number(segmentMemberMatch[1]),
-      ordinals,
+      segmentId: Number(segmentMemberWildcardMatch[1]),
+    };
+  }
+
+  // Ticket 10 (one-address-grammar spec): `E31/S123/T1` (one member) and
+  // `E31/S123/T1..S456/T7` (a range). The endpoints are ORDINARY S/T
+  // addresses; resolving them to the segment's own event-order position
+  // needs the database, so it happens at render time
+  // (`renderSegmentMemberRange`), not here. The single form is the range
+  // form with `start` equal to `end`.
+  const segmentMemberAddressMatch =
+    /^E(\d+)\/S(\d+)\/T(\d+)(?:\.\.S(\d+)\/T(\d+))?$/i.exec(trimmed);
+  if (segmentMemberAddressMatch) {
+    const start = {
+      sessionId: Number(segmentMemberAddressMatch[2]),
+      promptNumber: Number(segmentMemberAddressMatch[3]),
+    };
+    const end =
+      segmentMemberAddressMatch[4] !== undefined
+        ? {
+            sessionId: Number(segmentMemberAddressMatch[4]),
+            promptNumber: Number(segmentMemberAddressMatch[5]),
+          }
+        : start;
+    return {
+      kind: "segment-member-range",
+      segmentId: Number(segmentMemberAddressMatch[1]),
+      start,
+      end,
     };
   }
 
@@ -1794,6 +1861,70 @@ function renderGroupedSearchResults(
   return blocks.join("\n");
 }
 
+/**
+ * Shared by both segment-member routes (ticket 10: `E<n>/T*`'s "every
+ * member" and the new S/T-addressed single/range forms) — paginate
+ * `wantedOrdinals` (1-based EVENT-ORDER positions, already resolved by the
+ * caller) and render the chosen page. Extracted so address resolution
+ * (`RoutedRecallId`-kind-specific) and pagination/rendering (identical
+ * either way) do not drift into two independently-maintained copies.
+ */
+function renderSegmentMemberOrdinals(
+  db: Database,
+  segment: SegmentRecord,
+  chronologicalMembers: readonly RankedSegmentMember[],
+  wantedOrdinals: number[],
+  fields: TurnRenderFields,
+  page: number,
+  pageSize: number,
+  eraCutoffEpoch: number | null,
+  signal: TruncationSignal | undefined,
+  turnBudget: number | undefined,
+  routeCheckpoint: number,
+  ledger?: DeliveryLedger,
+): string {
+  // Paginate by MEMBER (never mid-turn by line): page the ordinal list
+  // itself, so a large range (`E31/S1/T1..S1/T80`) still respects `pageSize`
+  // the same way `S<n>/T*` does.
+  const paged = paginateItems(wantedOrdinals, page, pageSize);
+
+  // The member one slot BEFORE this page's first — what tells the renderer
+  // whether the page opens mid-session-run (spec 补充裁决 "跨页引用自足").
+  const firstOrdinal = paged.items[0];
+  const precedingSessionId =
+    firstOrdinal !== undefined && firstOrdinal > 1
+      ? chronologicalMembers[firstOrdinal - 2]?.sessionId ?? null
+      : null;
+
+  const body = renderSegmentMembersByOrdinal(db, segment.id, paged.items, {
+    fields,
+    turnBudget,
+    eraCutoffEpoch,
+    signal,
+    precedingSessionId,
+  });
+  // The segment itself, plus the specific member turns THIS page actually
+  // shows — a reader can address those members individually via
+  // `S<n>/T<m>` from here on. Marked at the END of the whole page: the
+  // member renderer (`segment-card.ts`) composes its own page in one call
+  // and reports no per-member boundary, so this route grants all-or-nothing
+  // rather than guessing where one member's block stops (peer round P1-6 —
+  // under-granting costs a re-read, over-granting licenses an unseen write).
+  if (paged.items.length > 0) {
+    ledger?.mark(body.length, [
+      { entityType: "segment", entityId: segment.id },
+      ...paged.items
+        .map((ordinal) => chronologicalMembers[ordinal - 1])
+        .filter((member): member is NonNullable<typeof member> => member !== undefined)
+        .map((member) => ({ entityType: "turn" as const, entityId: member.turnId })),
+    ]);
+  }
+
+  const header = formatPageHeader(page, paged.pageCount, paged.total);
+  ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
+  return joinPage(header, body, paged.pageCount);
+}
+
 function renderRoutedId(
   db: Database,
   routed: RoutedRecallId,
@@ -1928,53 +2059,79 @@ function renderRoutedId(
     if (!segment) {
       return "Segment not found.";
     }
-    // Paginate by MEMBER (never mid-turn by line): resolve the requested
-    // ordinals up front — an empty selector means every member, matching the
-    // `S<n>/T*` convention — then page that ordinal list itself, so a large
-    // range (`E31/T1..80`) still respects `pageSize` the same way `S<n>/T*`
-    // does.
     const chronologicalMembers = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
-    const wantedOrdinals =
-      routed.ordinals && routed.ordinals.length > 0
-        ? routed.ordinals
-        : chronologicalMembers.map((_member, index) => index + 1);
-    const paged = paginateItems(wantedOrdinals, page, pageSize);
-
-    // The member one slot BEFORE this page's first — what tells the renderer
-    // whether the page opens mid-session-run (spec 补充裁决 "跨页引用自足").
-    const firstOrdinal = paged.items[0];
-    const precedingSessionId =
-      firstOrdinal !== undefined && firstOrdinal > 1
-        ? chronologicalMembers[firstOrdinal - 2]?.sessionId ?? null
-        : null;
-
-    const body = renderSegmentMembersByOrdinal(db, routed.segmentId, paged.items, {
+    const wantedOrdinals = chronologicalMembers.map((_member, index) => index + 1);
+    return renderSegmentMemberOrdinals(
+      db,
+      segment,
+      chronologicalMembers,
+      wantedOrdinals,
       fields,
-      turnBudget,
+      page,
+      pageSize,
       eraCutoffEpoch,
       signal,
-      precedingSessionId,
-    });
-    // The segment itself, plus the specific member turns THIS page actually
-    // shows — a reader can address those members individually via
-    // `S<n>/T<m>` from here on. Marked at the END of the whole page: the
-    // member renderer (`segment-card.ts`) composes its own page in one call
-    // and reports no per-member boundary, so this route grants all-or-nothing
-    // rather than guessing where one member's block stops (peer round P1-6 —
-    // under-granting costs a re-read, over-granting licenses an unseen write).
-    if (paged.items.length > 0) {
-      ledger?.mark(body.length, [
-        { entityType: "segment", entityId: segment.id },
-        ...paged.items
-          .map((ordinal) => chronologicalMembers[ordinal - 1])
-          .filter((member): member is NonNullable<typeof member> => member !== undefined)
-          .map((member) => ({ entityType: "turn" as const, entityId: member.turnId })),
-      ]);
+      turnBudget,
+      routeCheckpoint,
+      ledger,
+    );
+  }
+
+  // Ticket 10 (one-address-grammar spec): `E<n>/S<a>/T<b>` and
+  // `E<n>/S<a>/T<b>..S<c>/T<d>` — both endpoints are ordinary S/T addresses,
+  // resolved here (render time, database available) to their position in the
+  // segment's own event order. Either endpoint missing from that order
+  // refuses, naming it — an address that is not a member of this segment is
+  // not silently dropped or clamped. The range then runs from the FIRST
+  // endpoint through the SECOND inclusive; the two endpoints need not share
+  // a session, and this is the min/max of their two ordinals, so either
+  // pasting order names the same span.
+  if (routed.kind === "segment-member-range") {
+    const segment = getSegment(db, routed.segmentId);
+    if (!segment) {
+      return "Segment not found.";
+    }
+    const chronologicalMembers = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+    const ordinalOf = (address: { sessionId: number; promptNumber: number }): number =>
+      chronologicalMembers.findIndex(
+        (member) =>
+          member.sessionId === address.sessionId && member.promptNumber === address.promptNumber,
+      );
+
+    const startOrdinal = ordinalOf(routed.start);
+    if (startOrdinal === -1) {
+      return formatParameterError(
+        `S${routed.start.sessionId}/T${routed.start.promptNumber} is not a member of E${routed.segmentId}`,
+      );
+    }
+    const endOrdinal = ordinalOf(routed.end);
+    if (endOrdinal === -1) {
+      return formatParameterError(
+        `S${routed.end.sessionId}/T${routed.end.promptNumber} is not a member of E${routed.segmentId}`,
+      );
     }
 
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
-    ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
-    return joinPage(header, body, paged.pageCount);
+    const lower = Math.min(startOrdinal, endOrdinal);
+    const upper = Math.max(startOrdinal, endOrdinal);
+    const wantedOrdinals: number[] = [];
+    for (let index = lower; index <= upper; index += 1) {
+      wantedOrdinals.push(index + 1);
+    }
+
+    return renderSegmentMemberOrdinals(
+      db,
+      segment,
+      chronologicalMembers,
+      wantedOrdinals,
+      fields,
+      page,
+      pageSize,
+      eraCutoffEpoch,
+      signal,
+      turnBudget,
+      routeCheckpoint,
+      ledger,
+    );
   }
 
   if (routed.kind === "turns") {
@@ -2895,6 +3052,14 @@ function recallMemoryBody(
       .filter((item) => item.length > 0);
 
     if (idItems.length <= 1) {
+      // Ticket 10: checked BEFORE `parseRoutedId` so the retired ordinal
+      // form gets a refusal naming the new grammar rather than falling
+      // through to `parseRoutedId`'s own generic "invalid id selector"
+      // message, which names nothing a caller could act on.
+      const retiredOrdinal = retiredSegmentOrdinalRefusal(input.id.trim());
+      if (retiredOrdinal) {
+        return formatParameterError(retiredOrdinal);
+      }
       const routed = parseRoutedId(input.id.trim());
       if (!routed) {
         return formatParameterError(`invalid id selector "${input.id}"`);
@@ -2919,6 +3084,10 @@ function recallMemoryBody(
 
     const routedItems: RoutedRecallId[] = [];
     for (const item of idItems) {
+      const retiredOrdinal = retiredSegmentOrdinalRefusal(item);
+      if (retiredOrdinal) {
+        return formatParameterError(`${retiredOrdinal} (in comma list "${input.id}")`);
+      }
       const routed = parseRoutedId(item);
       if (!routed) {
         return formatParameterError(

@@ -85,11 +85,14 @@ Output IDs map directly to selectors:
 - `[O87]` → `recall(id="O87")`
 - `[E47]` → `recall(id="E47")`
 
-A segment's own members can also be addressed by their in-segment chronological
-position — `E47/T3` — but that ordinal is a **navigation handle only, never a
-citation**: a member that settles into the segment later shifts every ordinal
-after it. Cite the rendered `S<session>/T<prompt>` address instead; `E<n>/T<m>`
-is only for picking a member out while you are looking at the card.
+A segment's own members are addressed by their ordinary `S<session>/T<prompt>`
+address, scoped to the segment: `E47/S12/T3` (one member), `E47/S12/T3..S45/T7`
+(a range over the segment's own event order — the two endpoints need not share
+a session), or `E47/T*` (every member). This is the SAME address you would
+cite the turn by anywhere else — a segment is a scope in front of it, never a
+second address namespace. The retired `E47/T3` (a 1-based event-order
+ordinal) refuses outright, naming this grammar, rather than silently landing
+on a different turn.
 
 ### Row shape
 
@@ -187,10 +190,10 @@ stored field — `stats` (status, member count, dates), `tags`, `type`,
 six Working State fields. A field with rows names itself and lets the rows
 speak; an empty one still renders, as `- constraints: 0 rows`, because "we
 never wrote one down" is itself an answer. Drill into a
-member with the ordinary `S12/T3` form (not the segment's own `E47/T3`
-ordinal — see Data Model above). Segments also come back from `query=`
-search alongside sessions and turns, and `filter.tag`/`filter.type` apply to
-them too.
+member with the ordinary `S12/T3` form, scoped or not (`E47/S12/T3` and
+`S12/T3` address the same turn — see Data Model above). Segments also come
+back from `query=` search alongside sessions and turns, and
+`filter.tag`/`filter.type` apply to them too.
 
 ### Step 4 — Turn detail and observations
 
@@ -247,7 +250,9 @@ Child collections are always shown as a fixed preview with a `+N more` hint. To 
 | `O87` | Single observation (global DB id) |
 | `T418` | Single turn (global DB id) |
 | `E*` / `E47` / `E5..9` | Segments — one arc of work, not a session |
-| `E47/T3` | One segment member, by in-segment ordinal (selection only — see Data Model) |
+| `E47/T*` | Every one of the segment's members |
+| `E47/S12/T3` | One segment member, by its ordinary `S<session>/T<prompt>` address |
+| `E47/S12/T3..S45/T7` | A range over the segment's own event order between two `S/T` endpoints (need not share a session) |
 
 In the `S12/T3` form the turn id is a session-scoped prompt number. Bare `T418` is the global DB id; prefer the `S/T` form unless you already hold a DB id.
 

@@ -3930,19 +3930,33 @@ export interface ParsedSegmentTimelineId {
 /**
  * Ticket 09 (read-write-contract spec): `E<n>/T...` — any trailing selector
  * — is EQUIVALENT to bare `E<n>` (spec: "`timeline(id="E31/T1...")` ≡
- * `timeline(id="E31")`"). The segment id is the scope; a trailing ordinal
- * selector has no separate meaning on this route (unlike `recall`'s own
- * `E<n>/T<m>` member-address grammar, a different tool's own route), so it
- * is accepted and ignored rather than rejected. `E*`/`E1..9` still reject —
- * those are range/wildcard forms on the segment id ITSELF, not a trailing
- * selector.
+ * `timeline(id="E31")`"). The segment id is the scope; a trailing selector
+ * has no separate meaning on this route (unlike `recall`'s own per-member
+ * addressing, a different tool's own route).
+ *
+ * Ticket 10 + [S15069/T1564]: a trailing member selector is now REFUSED here
+ * rather than accepted-and-ignored. This route renders the whole segment and
+ * has no windowing of its own, so accepting `E31/S12/T3..S12/T9` and silently
+ * returning everything hands the caller a view they did not ask for with
+ * nothing saying so — the same silent-fallback shape ruled against for
+ * `view: "lane"` and for the retired ordinal selector. `E*`/`E1..9` still
+ * reject as before (range/wildcard forms on the segment id ITSELF), and
+ * `E<n>/L...` never reaches here — the lane route parses first.
  */
 export function parseSegmentTimelineId(id: string): ParsedSegmentTimelineId | null {
-  const match = id.trim().match(/^E(\d+)(?:\/T.*)?$/i);
+  const match = id.trim().match(/^E(\d+)(?:\/T\*)?$/i);
   if (!match) {
     return null;
   }
   return { segmentId: Number(match[1]) };
+}
+
+/** A segment id carrying a trailing member selector this route cannot honor — refused by `timelineQuery`, never silently widened to the whole segment. */
+export function isSegmentIdWithMemberSelector(id: string): boolean {
+  const trimmed = id.trim();
+  // `E<n>/T*` is not a NARROWING selector — it names every member, which is
+  // what this route already renders, so it stays equivalent to the bare form.
+  return /^E\d+\/(?:T|S\d+\/T)/i.test(trimmed) && !/^E\d+\/T\*$/i.test(trimmed);
 }
 
 export interface SegmentTimelineInput {
@@ -4172,9 +4186,9 @@ export function renderSegmentTimeline(view: SegmentTimelineView): string {
 // a segment's declared lanes, each rendered as one header line plus one
 // representative chain. `E<n>/L*` lists every declared lane, newest-first;
 // `E<n>/L<n>` renders one, at the SAME 1-based ordinal the list itself would
-// show it at (a navigation handle, not a stable id — the same "positional
-// address" convention `recall`'s own `E<n>/T<m>` already uses for a
-// segment's member turns).
+// show it at — a navigation handle, not a stable id or a citation (a lane's
+// own member turns, by contrast, are ALWAYS cited by their `S<session>/T<prompt>`
+// home — one-address-grammar spec, ticket 10).
 // ---------------------------------------------------------------------------
 
 export interface ParsedSegmentLaneId {
@@ -4370,39 +4384,23 @@ function laneModalTypeEmoji(
   return bestWord === null ? PENDING_EMOJI : typeWordGlyph(bestWord);
 }
 
-/**
- * Addresses (ticket text): bare within the viewed segment, `E<seg>/` for a
- * turn owned by ANOTHER real segment, `S<session>/` for a homeless one.
- * Every trailing number in this render is the GLOBAL turn id — the one
- * `recall(id="T<n>")` resolves directly — never an ordinal or a prompt
- * number; the prefix is a pure locator, telling the reader where to find the
- * turn relative to the segment they are looking at, not a second address
- * grammar of its own (mirrors D7's `E<segment>/T<globalTurnId>` card form).
- */
-function laneNodeAddressPrefix(
-  turn: LaneCheckerTurnInput | undefined,
-  viewedSegmentId: number,
-): string {
-  if (!turn) {
-    return ""; // coverage gap — never fabricate a locator for a turn this projection did not load
-  }
-  if (turn.segment === undefined) {
-    const sessionId = turn.order ? turn.order[0] : 0;
-    return `S${sessionId}/`;
-  }
-  if (turn.segment === String(viewedSegmentId)) {
-    return "";
-  }
-  return `E${turn.segment}/`;
-}
-
 export interface SegmentLaneChainNode {
   turnId: number;
+  /**
+   * One-address-grammar spec (ticket 10): the turn's own `S<session>/T<prompt>`
+   * home. Retires this chain's earlier locator scheme — bare within the
+   * viewed segment, `E<seg>/` for a turn owned by ANOTHER segment, `S<session>/`
+   * for a homeless one, with a trailing GLOBAL turn id — since a segment is
+   * no longer part of any turn's address, only its scope. `renderLaneChainLine`
+   * decides whether THIS node's own render needs the full `S<session>/T<prompt>`
+   * form or the bare `T<prompt>` one (first node in the chain, or a session
+   * change from the previous node, print full; otherwise bare).
+   */
+  sessionId: number;
+  promptNumber: number;
   /** `null` on the chain's first (newest) node — no incoming edge is rendered for it. `"=>"` iff the edge INTO this node is a tagged `indexes` edge (D8); `"->"` otherwise. */
   arrowIn: "=>" | "->" | null;
   isTerminus: boolean;
-  /** `""` | `"E<seg>/"` | `"S<session>/"` — see `laneNodeAddressPrefix`. */
-  addressPrefix: string;
 }
 
 export interface SegmentLaneView {
@@ -4431,7 +4429,6 @@ function buildSegmentLaneChain(
   laneRecord: LaneRecord,
   interpretation: LaneInterpretation,
   turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
-  viewedSegmentId: number,
   itemBudget: number,
 ): Omit<SegmentLaneView, "laneIndex"> {
   const key: LaneKey = { segment: String(laneRecord.segmentId), tag: laneRecord.tag };
@@ -4468,12 +4465,21 @@ function buildSegmentLaneChain(
   const truncated = fullPath.length > itemBudget;
   const shown = truncated ? fullPath.slice(0, itemBudget) : fullPath;
 
-  const nodes: SegmentLaneChainNode[] = shown.map((step) => ({
-    turnId: step.turnId,
-    arrowIn: step.relationIn === null ? null : step.relationIn === "indexes" ? "=>" : "->",
-    isTerminus: lane.declaration.terminus !== null && step.turnId === lane.declaration.terminus,
-    addressPrefix: laneNodeAddressPrefix(turnsById.get(step.turnId), viewedSegmentId),
-  }));
+  const nodes: SegmentLaneChainNode[] = shown.map((step) => {
+    // `order` is `[sessionId, promptNumber]` — see `db/lane-checker-load.ts`'s
+    // `turnOrderKey`. A step this projection never loaded (defensive only —
+    // see `laneMemberOrder`'s own comment on the identical fallback) reads as
+    // session 0, promptNumber = its own global turn id — never fabricated as
+    // a real session.
+    const order = turnsById.get(step.turnId)?.order ?? [0, step.turnId];
+    return {
+      turnId: step.turnId,
+      sessionId: order[0],
+      promptNumber: order[1],
+      arrowIn: step.relationIn === null ? null : step.relationIn === "indexes" ? "=>" : "->",
+      isTerminus: lane.declaration.terminus !== null && step.turnId === lane.declaration.terminus,
+    };
+  });
 
   return {
     key,
@@ -4506,7 +4512,7 @@ export function buildSegmentLaneListView(
 
   const built = declared.map((laneRecord) => ({
     record: laneRecord,
-    view: buildSegmentLaneChain(laneRecord, interpretation, turnsById, segmentId, itemBudget),
+    view: buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget),
   }));
   // Newest-first (D8); a declared-but-memberless lane's fallback epoch (its
   // OWN declaration time) sorts it deterministically among the rest, tag
@@ -4539,13 +4545,26 @@ function renderLaneHeaderLine(lane: SegmentLaneView): string {
   return `[L${lane.laneIndex}] ${time} ${lane.headerEmoji} ${sanitizeTimelineField(lane.key.tag)}`;
 }
 
+/**
+ * One-address-grammar spec (ticket 10): every node renders `S<session>/T<prompt>`,
+ * whole — but only for the FIRST node in the chain and again whenever the
+ * SESSION changes from the previous node; every other node renders the bare
+ * `T<prompt>`. That is what keeps a long same-session chain affordable while
+ * a chain that crosses sessions still reads unambiguously at every hop.
+ */
 function renderLaneChainLine(lane: SegmentLaneView): string {
   if (lane.nodes.length === 0) {
     return `${RENDER_INDENT_STEP}(0)`;
   }
   let body = "";
+  let runSessionId: number | null = null;
   lane.nodes.forEach((node, index) => {
-    const label = `${node.isTerminus ? "◎" : ""}${node.addressPrefix}T${node.turnId}`;
+    const address =
+      index === 0 || node.sessionId !== runSessionId
+        ? `S${node.sessionId}/T${node.promptNumber}`
+        : `T${node.promptNumber}`;
+    runSessionId = node.sessionId;
+    const label = `${node.isTerminus ? "◎" : ""}${address}`;
     if (index === 0) {
       body = label;
       return;
@@ -4637,6 +4656,13 @@ export function timelineQuery(db: Database, input: TimelineInput): string {
         sequence,
       );
       return renderSegmentLaneView(view);
+    }
+    if (input.id !== undefined && isSegmentIdWithMemberSelector(input.id)) {
+      return (
+        `timeline error: timeline renders a whole segment — drop the trailing selector and pass "E<n>" ` +
+        `(or "E<n>/L*" for its lanes). A member window is recall's: ` +
+        `recall(id="E<n>/S<a>/T<b>..S<c>/T<d>").`
+      );
     }
     const segmentRoute = parseSegmentTimelineId(input.id);
     if (segmentRoute !== null) {

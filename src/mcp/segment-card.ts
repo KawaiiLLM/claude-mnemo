@@ -71,11 +71,13 @@ const CARD_ROW_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
 export { DEFAULT_TURN_TOKEN_BUDGET } from "./format";
 
 // ---------------------------------------------------------------------------
-// Event-order membership — the addressing axis (spec D8/D9): `E<n>/T<m>`'s
-// `<m>` is the member's 1-based position here, NOT its rank under
-// `rankSegmentMembers`' own anchors-first/derived-rank order (that order is
-// a SELECTION concern the old inline listing used; the card no longer lists
-// members inline at all — see the module comment above).
+// Event-order membership — an internal RESOLUTION axis (spec D8/D9), not a
+// public address any more (one-address-grammar spec, ticket 10, retired the
+// public `E<n>/T<m>` ordinal). It survives here as the ordering `recall.ts`
+// resolves an `E<n>/S<a>/T<b>..S<c>/T<d>` range's two S/T endpoints against
+// — NOT `rankSegmentMembers`' own anchors-first/derived-rank order (that
+// order is a SELECTION concern the old inline listing used; the card no
+// longer lists members inline at all — see the module comment above).
 // ---------------------------------------------------------------------------
 
 /**
@@ -97,7 +99,7 @@ export function chronologicalSegmentMembers(
   });
 }
 
-/** `E<n>/T<m>` resolution: the members at 1-based ordinals `ordinals` (empty = all), in event order. */
+/** The members at 1-based EVENT-ORDER ordinals `ordinals` (empty = all) — the internal resolution `recall.ts`'s segment-member routes (`E<n>/T*`, and the S/T-addressed single/range forms) share. */
 export function resolveSegmentMembersByOrdinal(
   db: Database,
   segment: Pick<SegmentRecord, "id">,
@@ -321,6 +323,13 @@ function maintenanceTurnsAgo(
 // declared ahead of any use still appears (as a bare tag, no address).
 // ---------------------------------------------------------------------------
 
+/** One lane-row address (ticket 10, one-address-grammar spec): the turn's own identity, resolved to its `S<session>/T<prompt>` home rather than its raw row id. */
+export interface SegmentLaneCardAddress {
+  turnId: number;
+  sessionId: number;
+  promptNumber: number;
+}
+
 export interface SegmentLaneCardEntry {
   tag: string;
   /**
@@ -330,7 +339,7 @@ export interface SegmentLaneCardEntry {
    * current terminus to show", matching D1's "no title, spend nothing extra"
    * economy the registry itself already applies to the tag.
    */
-  terminusTurnId: number | null;
+  terminusAddress: SegmentLaneCardAddress | null;
   /**
    * The lane's most recent member turn by TRUE chronological order (never
    * `declaration.latestEventTurn` — that field stays `null` for a lane no
@@ -339,7 +348,7 @@ export interface SegmentLaneCardEntry {
    * carries no live tagged edge at all yet (D2: "declaration precedes use"
    * — a lane can be declared ahead of any member).
    */
-  newestTurnId: number | null;
+  newestAddress: SegmentLaneCardAddress | null;
 }
 
 /**
@@ -349,21 +358,34 @@ export interface SegmentLaneCardEntry {
  * terminus is no longer the newest node (measured, spec D7: +25 chars across
  * all 63 of E60's lanes, because 38 of 39 declared lanes ARE their own
  * newest node) — never printed merely because the lane happens to be open.
- * Addresses are `E<segment>/T<globalTurnId>` (the turn's own row id — ticket
- * 06's pinned form, NOT the segment-local ordinal `E<n>/T<m>` uses elsewhere
- * on this card). A lane with no live edge yet (both fields `null`) renders
- * as the bare tag — the one shape D7's own three examples do not name.
+ *
+ * Addresses are `S<session>/T<prompt>` (one-address-grammar spec, ticket 10
+ * — retires this row's own `E<segment>/T<globalTurnId>` form, ticket 06's
+ * pinned shape). This row is at most a two-node chain (terminus, then
+ * newest), so the leading-full-address rule applies directly: the FIRST
+ * address printed is always whole; the second (the `→` clause) drops to a
+ * bare `T<prompt>` only when it shares the first's session — a lane whose
+ * terminus and newest node sit in different sessions prints both whole. A
+ * lane with no live edge yet (both fields `null`) renders as the bare tag —
+ * the one shape D7's own three examples do not name.
  */
-export function renderSegmentLaneCardEntry(segmentId: number, entry: SegmentLaneCardEntry): string {
-  const address = (turnId: number): string => `E${segmentId}/T${turnId}`;
-  if (entry.terminusTurnId !== null) {
-    const base = `${entry.tag} ◎${address(entry.terminusTurnId)}`;
-    return entry.newestTurnId !== null && entry.newestTurnId !== entry.terminusTurnId
-      ? `${base} →${address(entry.newestTurnId)}`
-      : base;
+export function renderSegmentLaneCardEntry(entry: SegmentLaneCardEntry): string {
+  const fullAddress = (address: SegmentLaneCardAddress): string =>
+    `S${address.sessionId}/T${address.promptNumber}`;
+
+  if (entry.terminusAddress !== null) {
+    const base = `${entry.tag} ◎${fullAddress(entry.terminusAddress)}`;
+    if (entry.newestAddress === null || entry.newestAddress.turnId === entry.terminusAddress.turnId) {
+      return base;
+    }
+    const second =
+      entry.newestAddress.sessionId === entry.terminusAddress.sessionId
+        ? `T${entry.newestAddress.promptNumber}`
+        : fullAddress(entry.newestAddress);
+    return `${base} →${second}`;
   }
-  if (entry.newestTurnId !== null) {
-    return `${entry.tag} ${address(entry.newestTurnId)}`;
+  if (entry.newestAddress !== null) {
+    return `${entry.tag} ${fullAddress(entry.newestAddress)}`;
   }
   return entry.tag;
 }
@@ -481,20 +503,36 @@ function buildSegmentLaneCardEntries(db: Database, segment: SegmentRecord): Segm
       { order: turn.order ?? [0, turn.id], createdAtEpoch: turn.createdAtEpoch ?? 0 },
     ]),
   );
+  // `order` is `[sessionId, promptNumber]` (`db/lane-checker-load.ts`'s
+  // `turnOrderKey`) — resolving a turn id to its `S<session>/T<prompt>` home
+  // needs no extra query, only this same map the newest-node lookup already
+  // built. A turnId this projection never loaded (defensive only — every id
+  // reachable here is an endpoint of a lane's own live edge, which the
+  // loader's own widening guarantees covers) falls back to `[0, turnId]`,
+  // the same "never fabricate, mark it unmistakably synthetic" convention
+  // `orderById`'s own construction above already uses for a turn missing its
+  // OWN `order` field.
+  const resolveAddress = (turnId: number | null): SegmentLaneCardAddress | null => {
+    if (turnId === null) {
+      return null;
+    }
+    const info = orderById.get(turnId) ?? { order: [0, turnId] as LaneOrderKey, createdAtEpoch: 0 };
+    return { turnId, sessionId: info.order[0], promptNumber: info.order[1] };
+  };
 
   const entries = laneRecords.map((record) => {
     const lane = interpretation.laneByToken.get(laneToken(segmentKey, record.tag));
     const newestInfo = newestLaneMemberInfo(lane, orderById);
     return {
       tag: record.tag,
-      terminusTurnId: lane?.declaration.terminus ?? null,
-      newestTurnId: newestInfo?.id ?? null,
+      terminusAddress: resolveAddress(lane?.declaration.terminus ?? null),
+      newestAddress: resolveAddress(newestInfo?.id ?? null),
       newestInfo,
     };
   });
 
   entries.sort(compareLaneEntriesNewestFirst);
-  return entries.map(({ tag, terminusTurnId, newestTurnId }) => ({ tag, terminusTurnId, newestTurnId }));
+  return entries.map(({ tag, terminusAddress, newestAddress }) => ({ tag, terminusAddress, newestAddress }));
 }
 
 // ---------------------------------------------------------------------------
@@ -662,7 +700,7 @@ export function renderSegmentCardRecord(
   // [S15069/T1022] failure mode the tags facet line was already fixed for).
   const laneEntries = buildSegmentLaneCardEntries(db, segment);
   if (laneEntries.length > 0) {
-    const renderedLaneEntries = laneEntries.map((entry) => renderSegmentLaneCardEntry(segment.id, entry));
+    const renderedLaneEntries = laneEntries.map((entry) => renderSegmentLaneCardEntry(entry));
     if (!elides) {
       headerLines.push(`${CARD_FIELD_INDENT}- lanes: ${renderedLaneEntries.join(" · ")}`);
     } else {
@@ -777,9 +815,11 @@ export function renderSegmentCardRecord(
 }
 
 // ---------------------------------------------------------------------------
-// `E<n>/T<m>` member rendering — the turn field-set switch applies exactly as
-// it does everywhere else in recall (spec: "Applies to every recall turn
-// render"), via the shared `renderNode`.
+// Segment member rendering (`E<n>/T*`, and the S/T-addressed single/range
+// forms recall.ts resolves to an ordinal list before calling this) — the
+// turn field-set switch applies exactly as it does everywhere else in
+// recall (spec: "Applies to every recall turn render"), via the shared
+// `renderNode`.
 // ---------------------------------------------------------------------------
 
 export interface RenderSegmentMembersOptions {
@@ -799,13 +839,17 @@ export interface RenderSegmentMembersOptions {
 
 /**
  * Render the segment's members at the given 1-based EVENT-ORDER ordinals
- * (empty = every member) in the one row hierarchy (spec 金样例
- * `recall(id="E31/T1..10")`): the `[E<n>]` line, a `[S<n>]` transition line
- * whenever the run changes session, then bare `[T<m>]` rows. The event-order
- * ordinal is a selection handle only (spec D9: "citations always S/T because
- * late-settling members shift event order") and no longer occupies the row —
- * the transition line plus the bare address IS the `S<n>/T<m>` citation, split
- * across two rungs instead of repeated on every row.
+ * (empty = every member) in the one row hierarchy (spec 金样例, originally
+ * `recall(id="E31/T1..10")`; one-address-grammar spec, ticket 10, moved the
+ * PUBLIC selector to `recall(id="E31/S<a>/T<b>..S<c>/T<d>")` — this
+ * renderer's own ordinal-indexed input is unchanged, only its caller now
+ * resolves S/T addresses to ordinals first): the `[E<n>]` line, a `[S<n>]`
+ * transition line whenever the run changes session, then bare `[T<m>]` rows.
+ * The event-order ordinal is a selection handle only (spec D9: "citations
+ * always S/T because late-settling members shift event order") and no
+ * longer occupies the row — the transition line plus the bare address IS the
+ * `S<n>/T<m>` citation, split across two rungs instead of repeated on every
+ * row.
  */
 export function renderSegmentMembersByOrdinal(
   db: Database,

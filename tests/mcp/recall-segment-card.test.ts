@@ -23,6 +23,7 @@ import {
   MAX_ATTACHED_SESSION_ROWS,
   renderSegmentLaneCardEntry,
   type SegmentCardFieldRows,
+  type SegmentLaneCardAddress,
 } from "../../src/mcp/segment-card";
 import { estimateTokens } from "../../src/utils/token-estimate";
 
@@ -182,19 +183,51 @@ describe("capRenderToTokenBudget", () => {
 // ---------------------------------------------------------------------------
 
 describe("renderSegmentLaneCardEntry", () => {
-  test("declared terminus that IS the lane's newest node: bare ◎, no → clause", () => {
-    const line = renderSegmentLaneCardEntry(60, { tag: "write-gate", terminusTurnId: 100, newestTurnId: 100 });
-    expect(line).toBe("write-gate ◎E60/T100");
+  // Ticket 10 (one-address-grammar spec): addresses are `S<session>/T<prompt>`
+  // now, never `E<segment>/T<globalTurnId>`.
+  const addr = (turnId: number, sessionId: number, promptNumber: number): SegmentLaneCardAddress => ({
+    turnId,
+    sessionId,
+    promptNumber,
   });
 
-  test("declared terminus that is NOT the newest node: → appended", () => {
-    const line = renderSegmentLaneCardEntry(60, { tag: "write-gate", terminusTurnId: 100, newestTurnId: 290 });
-    expect(line).toBe("write-gate ◎E60/T100 →E60/T290");
+  test("declared terminus that IS the lane's newest node: bare ◎, no → clause", () => {
+    const line = renderSegmentLaneCardEntry({
+      tag: "write-gate",
+      terminusAddress: addr(100, 60, 5),
+      newestAddress: addr(100, 60, 5),
+    });
+    expect(line).toBe("write-gate ◎S60/T5");
+  });
+
+  test("declared terminus that is NOT the newest node, same session: → appended BARE (leading-prefix rule, no session change)", () => {
+    const line = renderSegmentLaneCardEntry({
+      tag: "write-gate",
+      terminusAddress: addr(100, 60, 5),
+      newestAddress: addr(290, 60, 12),
+    });
+    expect(line).toBe("write-gate ◎S60/T5 →T12");
+  });
+
+  // The leading-prefix rule's session-switch half: a two-node row that
+  // crosses a session boundary prints the FULL address again for the
+  // second node, never the bare `T<prompt>` form.
+  test("declared terminus that is NOT the newest node, DIFFERENT session: → appended FULL (leading-prefix rule, session changed)", () => {
+    const line = renderSegmentLaneCardEntry({
+      tag: "write-gate",
+      terminusAddress: addr(100, 60, 5),
+      newestAddress: addr(290, 61, 3),
+    });
+    expect(line).toBe("write-gate ◎S60/T5 →S61/T3");
   });
 
   test("undeclared/reopened: bare tag + newest-node address, no ◎, no →", () => {
-    const line = renderSegmentLaneCardEntry(60, { tag: "codex-workflow", terminusTurnId: null, newestTurnId: 250 });
-    expect(line).toBe("codex-workflow E60/T250");
+    const line = renderSegmentLaneCardEntry({
+      tag: "codex-workflow",
+      terminusAddress: null,
+      newestAddress: addr(250, 60, 9),
+    });
+    expect(line).toBe("codex-workflow S60/T9");
     expect(line).not.toContain("◎");
     expect(line).not.toContain("→");
   });
@@ -202,7 +235,7 @@ describe("renderSegmentLaneCardEntry", () => {
   // Not one of D7's three named shapes, but reachable (a lane declared ahead
   // of any use, D2): no address at all rather than inventing a fourth marker.
   test("a registered lane with no live tagged edge yet: bare tag, no address", () => {
-    const line = renderSegmentLaneCardEntry(60, { tag: "brand-new", terminusTurnId: null, newestTurnId: null });
+    const line = renderSegmentLaneCardEntry({ tag: "brand-new", terminusAddress: null, newestAddress: null });
     expect(line).toBe("brand-new");
   });
 });
@@ -643,24 +676,45 @@ describe("recall(id=\"E<n>\") segment card", () => {
     }
   });
 
-  // ---- ordinal -> S/T mapping (mutation target 3/3) ----
+  // ---- S/T address -> event order resolution (mutation target 3/3) ----
 
-  test("E<n>/T<m> ordinals follow EVENT order (creation time), not DB insertion order or anchor/rank order", () => {
-    // t3 is created chronologically BEFORE t2 but inserted into the DB (and
-    // thus assigned a turn id) AFTER it — event order must follow the
-    // timestamp, never the id or insertion sequence.
+  test("E<n>/S<a>/T<b> addresses one segment member by its ordinary S/T address", () => {
+    const first = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T1` });
+    expect(first).toContain("research the card");
+
+    const second = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T2` });
+    expect(second).toContain("implement the card");
+  });
+
+  test("an E<n>/S<a>/T<b>..S<c>/T<d> range follows EVENT order (creation time), not DB insertion order or prompt-number order", () => {
+    // t3 is created chronologically BEFORE t1/t2 but inserted into the DB
+    // (and thus assigned a turn id, and a HIGHER prompt number) after them —
+    // event order must follow the timestamp, never the id, insertion
+    // sequence, or prompt-number magnitude. Its event-order position is now
+    // BEFORE t1/t2 despite T3 > T1/T2 as raw prompt numbers, so a range
+    // named "T3..T2" (descending in prompt-number terms) must still resolve
+    // to the ordinal-ascending span that covers all three.
     const t3 = makeTurn(3, { title: "earliest by clock, latest by id", epoch: CUTOFF - 500 });
     addSegmentMembers(db, segmentId, [t3], CUTOFF);
 
-    const first = recallMemory(db, { id: `E${segmentId}/T1` });
-    expect(first).toContain("earliest by clock, latest by id");
-
-    const third = recallMemory(db, { id: `E${segmentId}/T3` });
-    expect(third).toContain("implement the card");
+    const output = recallMemory(db, {
+      id: `E${segmentId}/S${sessionId}/T3..S${sessionId}/T2`,
+    });
+    expect(output).toContain("earliest by clock, latest by id");
+    expect(output).toContain("research the card");
+    expect(output).toContain("implement the card");
   });
 
-  test("an out-of-range ordinal reads as a miss, not a crash", () => {
-    expect(recallMemory(db, { id: `E${segmentId}/T99` })).toContain("not found");
+  test("the retired E<n>/T<m> ordinal form refuses, naming the new grammar — not a silent reinterpretation, not a miss", () => {
+    const output = recallMemory(db, { id: `E${segmentId}/T99` });
+    expect(output).toContain("retired");
+    expect(output).not.toContain("not found");
+  });
+
+  test("an E<n>/S<a>/T<b> address naming a turn outside the segment refuses, naming it — not a crash", () => {
+    const output = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T99` });
+    expect(output).toContain(`S${sessionId}/T99`);
+    expect(output).toContain("not a member");
   });
 
   // ---- election/tier absence ----
@@ -698,11 +752,11 @@ describe("recall(id=\"E<n>\") segment card", () => {
       CUTOFF,
     );
 
-    const unrequested = recallMemory(db, { id: `E${segmentId}/T3` });
+    const unrequested = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T3` });
     expect(unrequested).not.toContain("→");
 
     const requested = recallMemory(db, {
-      id: `E${segmentId}/T3`,
+      id: `E${segmentId}/S${sessionId}/T3`,
       filter: { fields: ["title", "relations"] },
     });
     expect(requested).toContain("→ extends T1 {seg-tag}");
@@ -756,10 +810,14 @@ describe("recall(id=\"E<n>\") segment card", () => {
     const output = recallMemory(db, { id: `E${segmentId}` });
     const laneLine = output.split("\n").find((line) => line.trimStart().startsWith("- lanes:"))!;
 
-    expect(laneLine).toContain(`alpha ◎E${segmentId}/T${a2}`);
-    expect(laneLine).not.toContain(`alpha ◎E${segmentId}/T${a2} →`);
-    expect(laneLine).toContain(`beta ◎E${segmentId}/T${b2} →E${segmentId}/T${b3}`);
-    expect(laneLine).toContain(`gamma E${segmentId}/T${g2}`);
+    // Ticket 10 (one-address-grammar spec): addresses are `S<session>/T<prompt>`
+    // now, never `E<segment>/T<globalTurnId>`. Every member here shares
+    // `sessionId`, so the leading-prefix rule prints the FIRST address of
+    // each entry whole and any SECOND one (the `→` clause) bare.
+    expect(laneLine).toContain(`alpha ◎S${sessionId}/T51`);
+    expect(laneLine).not.toContain(`alpha ◎S${sessionId}/T51 →`);
+    expect(laneLine).toContain(`beta ◎S${sessionId}/T53 →T54`);
+    expect(laneLine).toContain(`gamma S${sessionId}/T56`);
     expect(laneLine).not.toContain(`gamma ◎`);
 
     // Newest-lane-first (spec D7 / ticket 07's own rule: "the lane's NEWEST
@@ -772,12 +830,12 @@ describe("recall(id=\"E<n>\") segment card", () => {
     expect(betaIndex).toBeLessThan(alphaIndex);
   });
 
-  test("lane addresses are the turn's own row id (E<segment>/T<globalTurnId>), never a segment-local ordinal", () => {
-    // Chronologically the segment's FIRST member by event order (so its
-    // ordinal would be 1) but inserted into the DB after t1/t2 already exist
-    // (so its raw row id is not 1) — the same divergence the file's own
-    // ordinal test ("follow EVENT order... not DB insertion order") relies
-    // on, reused here to pin that the lane row shows the raw id.
+  test("lane addresses are S<session>/T<prompt>, resolved from the turn's own identity — never the raw row id or a segment-local ordinal", () => {
+    // Chronologically the segment's FIRST member by event order but inserted
+    // into the DB after t1/t2 already exist (so its raw row id is not small,
+    // and its prompt number 91 is unrelated to either) — pins that the lane
+    // row's address tracks the turn's own SESSION/PROMPT identity, not its
+    // insertion position in any sense.
     const base = makeTurn(90, { epoch: CUTOFF - 5000 });
     const decl = makeTurn(91, { epoch: CUTOFF - 4999 });
     addSegmentMembers(db, segmentId, [base, decl], CUTOFF);
@@ -790,8 +848,68 @@ describe("recall(id=\"E<n>\") segment card", () => {
 
     const output = recallMemory(db, { id: `E${segmentId}` });
     const laneLine = output.split("\n").find((line) => line.trimStart().startsWith("- lanes:"))!;
-    expect(decl).not.toBe(1); // guards the pin below against a coincidental match
-    expect(laneLine).toContain(`solo ◎E${segmentId}/T${decl}`);
+    expect(laneLine).toContain(`solo ◎S${sessionId}/T91`);
+  });
+
+  // The leading-prefix rule's session-switch half, at the integration level
+  // (the unit-level pin lives in `renderSegmentLaneCardEntry`'s own describe
+  // block above): a lane whose terminus and newest node sit in DIFFERENT
+  // sessions prints both addresses whole, never a bare `T<prompt>` for the
+  // second.
+  test("a lane whose terminus and newest node sit in different sessions prints both addresses whole", () => {
+    const otherSessionId = upsertSession(db, {
+      contentSessionId: "session-card-other",
+      project: "/tmp/project",
+      title: "Other session",
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: CUTOFF,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    const base = makeTurn(59);
+    const terminusTurn = makeTurn(60); // declares itself terminus via `indexes` below
+    const newestTurn = db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, title, tags, created_at_epoch,
+           user_prompt, assistant_response, content, files_read, files_modified
+         ) VALUES (?, 1, 'extracted', 'newest node in another session', '[]', ?,
+                   'user prompt text', 'assistant response text', 'turn body', '[]', '[]')
+         RETURNING id`,
+      )
+      .get(otherSessionId, CUTOFF + 1000)!.id; // clearly the newest by wall clock
+    reindexTurnFromDb(db, newestTurn);
+    addSegmentMembers(db, segmentId, [base, terminusTurn, newestTurn], CUTOFF);
+    insertLane(db, segmentId, "cross-session", CUTOFF);
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: terminusTurn },
+          cited: { kind: "turn", id: base },
+          relation: "indexes",
+          provenance: "asserted",
+          tags: ["cross-session"],
+        },
+        // A later narrows, from ANOTHER session, moves the newest node past
+        // the terminus without moving the terminus itself — mirrors "beta"
+        // above, but the newest node now sits in a different session.
+        {
+          citing: { kind: "turn", id: newestTurn },
+          cited: { kind: "turn", id: terminusTurn },
+          relation: "narrows",
+          provenance: "asserted",
+          tags: ["cross-session"],
+        },
+      ],
+      CUTOFF,
+    );
+
+    const output = recallMemory(db, { id: `E${segmentId}` });
+    const laneLine = output.split("\n").find((line) => line.trimStart().startsWith("- lanes:"))!;
+    expect(laneLine).toContain(`cross-session ◎S${sessionId}/T60 →S${otherSessionId}/T1`);
   });
 
   test("the budget cap actually bites: many lanes truncate on page 1 with a +N 条 tail, and page 2 shows every lane whole", () => {

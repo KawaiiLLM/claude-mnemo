@@ -126,7 +126,10 @@ describe("金样例 — the rendered row contract", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 金样例: `recall(id="E31/T1..10")` 段成员列表
+  // 金样例: `recall(id="E31/S15069/T823..S15069/T824")` 段成员列表 (one-address-
+  // grammar spec, ticket 10 — retired this call's earlier `E31/T1..10`
+  // event-order ordinal range; the render shape below is unchanged, only the
+  // selector reaching it moved to the segment's members' own S/T addresses).
   // -------------------------------------------------------------------------
 
   test("segment member listing: [E] → [S] → [T] → field rows, no per-row session prefix", () => {
@@ -148,7 +151,7 @@ describe("金样例 — the rendered row contract", () => {
     });
     addSegmentMembers(db, 31, [first, second], CUTOFF);
 
-    const output = recallMemory(db, { id: "E31/T1..10" });
+    const output = recallMemory(db, { id: "E31/S15069/T823..S15069/T824" });
 
     expect(output).toBe(
       [
