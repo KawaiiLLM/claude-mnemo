@@ -333,10 +333,56 @@ import { createHash } from "node:crypto";
  * so a bump to v11 would also be defensible — the version string lives only
  * in this file and its guard, and the hash is the real drift guard.
  * Budget after: 9461 rendered chars, 38 under the cap.
+ *
+ * v10→v11 (lane-declaration spec, .scratch/lane-declaration/spec.md Rev 3,
+ * ticket 08; rulings [S15069/T1524]-[T1562]): §Relations' lane sections are
+ * REPLACED WHOLESALE by the text the user authored and a peer round
+ * repaired, checked in verbatim at
+ * .scratch/lane-declaration/rubric-v11-lane-sections.md (b30022b) —
+ * reproduced here rather than paraphrased, in the user's own language,
+ * because a lane used to exist the moment anyone wrote a tagged edge:
+ * measured live, 72 lanes over 380 tagged edges, 30 of them two-member and
+ * 14 a single edge, while the six 12+-member lanes were the only real
+ * workflows. Two causes, two retirements: identity WAS the exact tag set,
+ * so every refinement minted a new lane instead of continuing one — identity
+ * is now `(segment, ONE tag)`, DECLARED before use (`remember`'s
+ * declare/undeclare verbs); and extends/narrows WERE required to carry a
+ * tag, so every related pair got one — no word is mandatory now, tagging
+ * moves to settlement as a hindsight judgment. A third change rides the same
+ * ticket (T1562): a lane is no longer phase-local — all eight words may
+ * carry a tag, so a tagged cross-phase `grounds` is how a decision line
+ * continues into the delivery that ships it, and an edge may carry several
+ * lanes' tags at once (confluence) exactly when its own content serves all
+ * of them. Retired bodily, verified absent by grep over the whole document:
+ * lane identity as an exact tag SET, BRANCH by proper superset, REOPEN by
+ * inheriting a closed lane's set, the phase-local lane, and the mandate that
+ * extends/narrows must carry a tag.
+ *
+ * What v11 does not restate is dropped as redundant, not silently lost: the
+ * release Axiom's old framing folds into the text's own #release example
+ * (same three facts — untagged indexes over shipped artifacts, consume
+ * chaining the previous release, no blanket declaration — plus the new
+ * per-lane `indexes` the campaign ruling [T1552]-[T1562] added); the R1
+ * dead-node/tagged-override-stays-live pair folds into the text's own
+ * 核心节点 (core-node) definition, which states the same content-preservation
+ * test for every member rather than only an override's victim; the
+ * ADOPTED-evidence sentence has no v11 counterpart and is cut for budget,
+ * the one deliberate content loss this pass makes knowingly. Retraction, the
+ * pre-registration rule and the citation-format sentence are unrelated to
+ * lane identity and carry over untouched, appended after the reproduced
+ * block. `src/worker/note-settlement-prompt.ts`'s own Block B edge contract
+ * and this ticket's teaching-surface sweep move with it, in the same
+ * ticket. Version bumps v10 -> v11: retiring a previously legal form
+ * (untagged extends/narrows) is the exact bar the v10 header itself set for
+ * a bump it chose not to take. Budget after: 6822 rendered chars (the
+ * version/hash-wrapped injection block; MEMORY_RUBRIC_TEXT alone is 6744),
+ * 2678 under the cap — the lane sections alone measure ~2300 of that, so
+ * this pass is a net compression even before counting the retired English
+ * prose it also removed.
  */
-export const MEMORY_RUBRIC_VERSION = "v10";
+export const MEMORY_RUBRIC_VERSION = "v11";
 
-export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v10
+export const MEMORY_RUBRIC_TEXT = `# Memory Rubric v11
 
 ## Fields
 
@@ -390,91 +436,44 @@ synonym drift into the earlier.
 
 ## Relations (turn→turn; recorded from the citing turn toward the cited)
 
-THE INTERPRETATION PRINCIPLE: a tagged edge acts on a LANE; an untagged edge
-acts on the cited turn itself. Every word shares this one reading — there are
-no special cases.
+**lane**: 段任务下明显可分离、会跨越当前交付继续的子任务，例如 #release / #rubric-design；随本轮或本批做完即结束的事务不是 lane，例如 #ticket-06-implement / #rubric-v5-design。身份是 \`(段, 一个 tag)\`：**先声明，再使用**；tag 须为 canonical 形式（NFC、去空白、小写、非空），且不得与该段的 curated tag 同名。一条带 tag 的边要求**两个端点各自所属的段都已声明该 tag**——无段的 turn 不得带 tag，跨段的边两侧都要声明。
 
-A LANE is a separable sub-workflow inside one phase, under a segment,
-identified by an exact SET of tags scoped to that segment: a DAG of tagged
-edges over AT LEAST TWO nodes, every node's own tags containing the lane's.
-One exact set names ONE lane — one component, one phase, ONE source, ONE
-sink; diamonds re-merge legally, dangling parallel heads or tails do not, and
-a node may start or end SEVERAL lanes. Membership is that DAG, never the
-nouns a turn carries, and every member carries a type in the lane's phase p,
-which no edge-level pairing may change along the chain — a multi-type middle
-node launders no phase switch. Lane B BRANCHES lane A when B starts inside A
-with a PROPER SUPERSET of A's tags; inheriting the exact set REOPENS a closed
-lane instead, and the machine knows only exact sets, parenthood is narration.
-Correcting another lane's result is an event of THAT family: branch at the
-corrected node, the citing turn carrying its tags plus the branch word and
-the edge the branch's set. A lane's tag set is as SMALL as discrimination
-allows, never including the segment's own. An isolated single-turn product
-needs no tag and joins no lane; it is still cited as usual.
+**成员资格**：只来自**带该 tag 的边**——节点自身的 tags 含该 tag 只是准入的必要条件，不构成成员；无 tag 的边既不建立也不延续 lane。lane 图中每个节点自身的 tags 都必须包含该 lane tag。lane 至少两个节点；一条边可带多个 tag，表示这几条 lane 共用它。
 
-Eight words. extends/narrows MUST carry lane tags — continuation names its
-line; override/consume/indexes MAY, cross-phase words never do:
-· override — the cited's main result no longer applies; this node fully
-  replaces it. Tagged: an in-lane correction — the lane reopens until a
-  fresh declaration. Untagged: global repudiation — every lane it closes
-  loses its terminus.
-· narrows  — part of the cited's CLAIM is withdrawn; this node corrects it.
-  A blocker satisfied by doing the work is completion (extends), not
-  correction of the blocking judgment.
-· extends  — the cited's result still applies; this node expands or
-  supplements it.
-· consume  — this node used its product and does not answer for it.
-  SAME-PHASE use only: a cross-phase dependency is grounds, always, not just
-  evidence→decision.
-· indexes  — this node represents the indexed, which the outside reaches
-  through it. Tagged: declares that lane CONVERGED — this node is its
-  terminus and indexes the lane's core valid nodes. Untagged: free
-  aggregation. An indexed node is never also consumed, unless both edges
-  carry lane tags.
-· grounds  — this node stands or falls with the cited. Where a separate
-  spec turn exists, THE SPEC carries the grounds and the other artifacts
-  consume that carrier; without one, each artifact grounds the decision
-  directly. PHASE SPLIT: a decision→delivery arc is TWO lanes hinged by
-  untagged inter-phase grounds; consume never crosses phases, seaming
-  delivery only where multi-type endpoints pair same-phase.
-· verifies / refutes — a check result this turn produced for / against the
-  cited conclusion; the source must carry an evidence phase.
+**相位配对**：一个节点可有多个 type、因而多个相位。两端的相位集合中**只要存在至少一组**满足该词同/异相位要求的配对，边即合法；其余不合法的配对不影响结论。
 
-Convergence never happens by silence: when a lane converges, its terminus
-declares it with a TAGGED indexes. All lane events reduce in turn order: the
-latest declaration wins, and continuing past one is normal life — the next
-supersedes it. A lane whose LATEST node is its declared terminus is CLOSED —
-VALID while any indexed core node lives, INVALID once all are dead;
-unconverged lanes stay OPEN.
-SUBSET INVARIANT: every tag on an edge must already exist
-on both endpoint turns' tags; a violation is refused, naming the gap.
+**状态**：lane 的所有事件按 **turn 顺序**归约。当 lane 的最新事件节点自身发出 \`indexes{该 lane tag}\`、且其后没有延续或重开事件时，该节点是**当前终点**，lane **closed**；否则 **open**。无 tag 的 \`indexes\` 不改变 lane 状态；而**来自 lane 之外**、指向现任终点的较新无 tag \`override\` 会取消该终点并重开 lane。closed 的 lane 在其被索引的**核心节点**尚有存活者时 **valid**，全部死亡则 **invalid**。**核心节点** = 终点的结果仍然保留并代表其内容的成员；存活只是必要条件。
 
-Three principles — what your edges aspire to; the checker reports facts and
-never enforces:
-· Reachability — a lane's members hang together on the segment's graph; a
-  valid terminus is cited from other phases, relaying to delivery.
-· Component emergence — distinct lanes come out as distinct components.
-· Minimality — lanes meet through few edges aimed at each other's termini;
-  in-lane edges point to the past, path counts are facts, never targets.
+**八词**（非自引边均可带 tag）:
 
-Axiom: a release indexes the artifacts it ships (untagged free aggregation)
-and consumes the previous release; the first release is the chain's legal
-root. It writes no grounds to settlements — the artifacts already carry the
-decision linkage.
+- **override** → 同相位：其主要结果不再适用，本节点完全替代之。带 tag = lane 内纠正，lane 重开待新宣告；无 tag = 对该结论的全局否决，所有以它为现任终点的 lane 一并失去终点。
+- **narrows** → 同相位：其部分结果不再适用，本节点作出纠正。
+- **extends** → 同相位：其结果仍然适用，本节点拓展、补充。
+- **consume** → 同相位：使用其产出，不为其正确性担责。
+- **indexes** → 同相位：表示收敛、汇聚、索引，达成阶段性成果。带 tag = 宣告该 lane 收敛，本节点即终点，索引该 lane 的核心节点；无 tag = 自由聚合（如发布索引所运工件）。同一目标不再另写**无 tag** 的 consume；带 tag 的 indexes 与带 tag 的 consume 可以并存，前者宣告收敛，后者表达 lane 内的使用与结构。
+- **grounds** → 异相位：本节点的成立依赖其成立，它若倒下，本节点随之倒下。有独立 spec 轮时由 spec 承担 grounds、其余工件 consume 该承担者；无 spec 时工件直接 grounds。
+- **verifies / refutes** → 异相位：以本轮产出的检验结果支持/反驳其结论；**引用方（本轮）**须含取证相位。
 
-A multi-phase turn's edge is legal when any pairing is. A self-citation means
-nothing beyond connectivity — legal only when one turn is both a lane's
-terminus and its implementer. Edges live in the relation parameters; content
-owes no citation format. Delete an edge found false and
-rewrite as needed — retraction and re-judgment are both acts of judgment,
-never tidying. A prediction made before its test lives in insight, not in
-the graph. A skipped or rewound turn is not a node; only an UNTAGGED override
-kills, leaving a dead node in the graph carrying the correction's story. A
-TAGGED override's victim stays live — live is not yet core: a closed lane's
-terminus indexes it only while it still carries content the terminus's result
-preserves and represents, a content judgment and never a mechanical
-workaround. Whether a lane was ADOPTED is a living judgment: the strongest
-evidence is an EXTERNAL delivery citation of its terminus, never a
-self-citation.
+**自引**：只允许裸 \`grounds\`，且本 turn 须含落地相位、并在本次写入后仍是自己以带 tag 的 \`indexes\` 宣告的某条 lane 的当前终点；其余七词不得自引。自引边一律不带 tag——带 tag 意味着点名一条 lane，而单节点自环不构成 lane。
+
+**skip/rewind**：被 skip 或 rewind 的 turn 不是节点，不得作为边的端点。
+
+**示例**（边由引用方指向被引方）:
+
+- **#release**：每次发布做三件事——\`consume{release}\` 串起上一次发布（这条 lane 永不收敛）；无 tag 的 \`indexes\` 聚合本次所运工件；对本批落地的每条 lane 各写一条 \`indexes{该 lane}\`，索引它自己的核心节点。没有「一次宣告涵盖多条 lane」这种写法。
+- **跨相位的一条线**：\`实现 —consume{rubric-design}→ spec —grounds{rubric-design}→ 设计终点\`。同一个 tag 贯穿决策与落地，不拆成两条 lane。
+- **共用边**：只有当**这一条边**的语义确实同时服务 A/B/C 时，它才带 \`{A,B,C}\`；批次里各自只服务一条 lane 的边只带自己的 tag。针对其中一条的纠正写**只点名那条**的 \`override{B}\`。
+
+**原则**（判断性，不强制；在**段的全图**上考察，路径可经过 lane 外的节点）:
+
+- **有效性**：无有效产出、重复的 turn 应该 skip。
+- **连通性**：lane 的所有成员应连成一体；indexes 不参与连通性计算。
+- **最小连通**：任意两个节点之间的路径应该只有一条，除非多出的那条路径带来了必要信息。如 A -> B -> C 表达 A 依赖的 B 依赖于 C，则 A -> C 表达需要通过 C 获取 B 处没有的必要信息；若无必要则冗余。
+
+Edges live in the relation parameters; content owes no citation format.
+Delete an edge found false and rewrite as needed — retraction and
+re-judgment are both acts of judgment, never tidying. A prediction made
+before its test lives in insight, not in the graph.
 
 ## Segments (membership and creation)
 
@@ -509,7 +508,15 @@ function computeHash(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 12);
 }
 
-/** A short content hash of `MEMORY_RUBRIC_TEXT` alone — the guard test's own independent recomputation compares against this. */
+/**
+ * A short content hash of `MEMORY_RUBRIC_TEXT` alone, rendered into the
+ * injected block's header so a running session declares WHICH rubric text it
+ * was given — that is a runtime identification aid, NOT a drift guard, and
+ * the self-consistency test beside it cannot fail: both sides run the same
+ * `sha256(MEMORY_RUBRIC_TEXT).slice(0, 12)` over the same input. Drift is
+ * caught by the CONTENT tests (verbatim sections present, retired ideas
+ * absent), which is where a real assertion has to live.
+ */
 export const MEMORY_RUBRIC_HASH = computeHash(MEMORY_RUBRIC_TEXT);
 
 const MEMORY_RUBRIC_OPEN_TAG = `<mnemo-memory-rubric version="${MEMORY_RUBRIC_VERSION}" hash="${MEMORY_RUBRIC_HASH}">`;

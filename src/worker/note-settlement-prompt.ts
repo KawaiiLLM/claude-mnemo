@@ -191,6 +191,51 @@ import type {
  * refusal is not that commit" — a REFUSED commit call is still a commit
  * call, so the old wording let a run read its own refusal as the one commit
  * it was allowed and stop there.
+ *
+ * LANE-DECLARATION TICKET 08'S AMENDMENT (.scratch/lane-declaration/spec.md
+ * Rev 3; rulings [S15069/T1524]-[T1562]): three sentences inside Block B's
+ * edges bullet, hand-amended rather than re-authored from a checked-in
+ * source (unlike Block A-D, which stay verbatim from the tag-mandate
+ * archive) because this is a different batch's ticket, not a later revision
+ * of the same one. (1) The opening paragraph drops "extends/narrows accept
+ * ONLY the tagged form" — the tag mandate retires, no word is required to
+ * carry one. (2) Step 2 (FORM LANES) drops "choose the smallest
+ * discriminating exact tag set ... resolve continuation versus
+ * proper-superset branch" — a lane is now `(segment, ONE tag)`, DECLARED via
+ * `remember` before use, so there is no set to discriminate and no branch to
+ * resolve; and drops "A decision→delivery arc is TWO lanes, hinged by
+ * untagged cross-phase grounds" — a lane is no longer phase-local, so that
+ * arc may now be ONE lane continued by a TAGGED cross-phase edge. (3) Step
+ * 5's closing sentence drops "opens a BRANCH — a proper-superset tag set
+ * rooted at the parent node" as the E5 repair move — branching no longer
+ * exists; an independent line of work takes a fresh declared tag instead
+ * (matching the E5 case comment already amended in
+ * `note-settlement-sdk-query.ts`, a file this ticket does not own).
+ *
+ * NOT amended by this ticket, deliberately: `note-settlement-sdk-query.ts`'s
+ * own tool descriptions (SETTLEMENT_NOTE_TOOL_DESCRIPTION,
+ * SETTLEMENT_REMEMBER_TOOL_DESCRIPTION, SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION)
+ * still teach the old mandate and the five-word taggability limit — that
+ * surface, and `shared/turn-phase.ts`'s TAGGABLE_RELATIONS/
+ * TAG_MANDATORY_RELATIONS constants the LIVE write gate still enforces, are
+ * lane-declaration ticket 02's scope, not this one's. Until ticket 02 lands,
+ * this file teaches a settlement run to skip tagging narrows/extends and to
+ * tag cross-phase words — both of which the live gate as of this commit
+ * still refuses (E1: an untagged extends/narrows anchors an error;
+ * TAGGABLE_RELATIONS has no entry for grounds/verifies/refutes). That is a
+ * known, reported inconsistency (see this ticket's own completion report),
+ * not an oversight.
+ *
+ * A SECOND, SHARPER gap the same report names: step 2 above tells a run to
+ * `declare` a fresh lane via `remember` when no existing tag fits. As of
+ * this commit `note-settlement-membership-facade.ts`'s own action enum is
+ * `["propose", "reassign", "create"]` — `declare`/`undeclare` reach only the
+ * MAIN agent's `remember` (`src/mcp/remember.ts`), not settlement's narrower
+ * facade — so that call is a hard schema rejection today, not merely a
+ * refusal with a repair message. This file's own scope is teaching text
+ * only; wiring settlement's facade to accept the two lane verbs is out of
+ * reach here and belongs wherever D4's "settlement's own facade must accept
+ * both" (spec.md) actually lands.
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -456,8 +501,9 @@ export function renderNoteSettlementPrompt(
     "     verifies/refutes fields. An entry is a bare address (\"S15069/T7\") — an",
     "     UNTAGGED edge acting on the cited turn itself — or a tagged entry",
     "     `{ \"turn\": \"S15069/T7\", \"tags\": [\"lane-tag\"] }` acting on the named",
-    "     LANE. extends/narrows accept ONLY the tagged form: continuation names",
-    "     its line. An edge's tags must already sit on BOTH endpoint turns' own",
+    "     LANE. Every word may carry the tagged form; none is required to —",
+    "     lane tagging is settlement's own hindsight judgment, not a mandate. An",
+    "     edge's tags must already sit on BOTH endpoint turns' own",
     "     tags — write the member turns' tags first, then the edge. An edge write",
     "     also needs your own current read of the citing turn's RELATIONS — the",
     "     batch audits earn it, your own writes keep it current, and a",
@@ -472,13 +518,16 @@ export function renderNoteSettlementPrompt(
     "        evidence — explicit resolution, a completed verification, a",
     "        release, or exact downstream adoption. There is no target number of",
     "        lanes or declarations.",
-    "     2. FORM LANES across all batches: merge fragments, choose the smallest",
-    "        discriminating exact tag set and one phase, resolve continuation",
-    "        versus proper-superset branch, and identify each lane's source,",
-    "        frontier and surviving core. Never the segment's own tags. A batch",
-    "        boundary contributes no topology — it is never a source, sink,",
-    "        branch point or convergence signal. A decision→delivery arc is TWO",
-    "        lanes, hinged by untagged cross-phase `grounds`.",
+    "     2. FORM LANES across all batches: continue a fragment onto an",
+    "        EXISTING declared tag (check the segment's own card, `recall`, for",
+    "        its declared lanes); `declare` a fresh one only when none fits. Identity is",
+    "        `(segment, ONE tag)` — no set to discriminate, no phase to fix.",
+    "        Identify each lane's source, frontier and surviving core. Never",
+    "        the segment's own tags. A batch boundary contributes no topology —",
+    "        it is never a source, sink or convergence signal. A lane is not",
+    "        phase-local: a decision→delivery arc may be ONE lane, continued",
+    "        across the phase boundary by a TAGGED cross-phase `grounds`,",
+    "        `verifies` or `refutes` edge.",
     "     3. JUDGE AND WRITE. For every candidate and every stock row you touch,",
     "        ignore the stored relation word and run the claim test as if no",
     "        edge existed — the old word is evidence of nothing. Still fully",
@@ -501,8 +550,9 @@ export function renderNoteSettlementPrompt(
     "        judged, never the work plan; every repair repeats step 3. WARNINGS",
     "        inform the topology and minimality review and never compel a",
     "        write. Keep each lane one source, one sink: diamonds that re-merge",
-    "        are fine; a fork the lane never re-joins opens a BRANCH — a",
-    "        proper-superset tag set rooted at the parent node.",
+    "        are fine; a fork the lane never re-joins is a shape error (E5) —",
+    "        an independent line of work takes a fresh, independently declared",
+    "        tag rather than branching from this one.",
     // ------------------------------------------------------------- end B --
     "   - `type` and `tags` are the two fields that yield INDEPENDENTLY: if",
     "     another writer touched one of them since this dispatch started,",

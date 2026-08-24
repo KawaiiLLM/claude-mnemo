@@ -482,13 +482,21 @@ describe("ticket 07 — Block A teaches the batched workstations, and timeline l
 });
 
 /**
- * TAG-MANDATE TICKET 06 — the edges bullet (authored Block B) is the prompt's
- * half of "the mandate reaches every teaching surface" (spec). Two things
- * the retired bullet did not say and the write gate now enforces: the entry
- * FORMS, and extends/narrows being tagged-form-ONLY. Pinned inside duty 2,
- * where the agent reads them, rather than anywhere in the prompt.
+ * TAG-MANDATE TICKET 06, amended by LANE-DECLARATION TICKET 08 — the edges
+ * bullet (authored Block B, hand-amended by ticket 08's own header comment
+ * in note-settlement-prompt.ts) is the prompt's half of "every teaching
+ * surface speaks the current lane model". Pinned inside duty 2, where the
+ * agent reads them, rather than anywhere in the prompt.
+ *
+ * The tag MANDATE this describe used to pin ("extends/narrows accept ONLY
+ * the tagged form") is GONE — ticket 08 retired it here to match the
+ * rubric's own retirement of the same idea (memory-rubric.test.ts, "the
+ * five retired v10 lane ideas"). See note-settlement-prompt.ts's own
+ * "LANE-DECLARATION TICKET 08'S AMENDMENT" comment for the full list of
+ * what changed and the known transient inconsistency with the live write
+ * gate (lane-declaration ticket 02, not yet built as of this commit).
  */
-describe("ticket 06 — the edges bullet teaches the tag mandate and the lane procedure", () => {
+describe("ticket 06 — the edges bullet teaches the entry forms and the lane procedure", () => {
   function edgesBullet(prompt: string): string {
     return prompt.slice(
       prompt.indexOf("   - edges: `note`'s"),
@@ -496,20 +504,54 @@ describe("ticket 06 — the edges bullet teaches the tag mandate and the lane pr
     );
   }
 
-  test("both entry forms, the tagged-only rule for extends/narrows, and the subset invariant", () => {
+  test("both entry forms, the retired mandate's absence, and the subset invariant", () => {
     const bullet = edgesBullet(renderPrompt());
 
     expect(bullet).toContain('An entry is a bare address ("S15069/T7") — an');
     expect(bullet).toContain("UNTAGGED edge acting on the cited turn itself");
     expect(bullet).toContain('`{ "turn": "S15069/T7", "tags": ["lane-tag"] }` acting on the named');
     expect(bullet).toContain("LANE.");
-    // THE MANDATE.
-    expect(bullet).toContain("extends/narrows accept ONLY the tagged form: continuation names");
-    expect(bullet).toContain("its line.");
+    // THE RETIRED MANDATE: every word may carry a tag, none is required to.
+    expect(bullet).toContain("Every word may carry the tagged form; none is required to");
+    expect(bullet).toContain("lane tagging is settlement's own hindsight judgment, not a mandate.");
+    expect(bullet).not.toContain("extends/narrows accept ONLY the tagged form");
     // The subset invariant, with its write ORDER — member tags first, or the
     // edge write is refused by the gate for a reason the agent cannot see.
-    expect(bullet).toContain("An edge's tags must already sit on BOTH endpoint turns' own");
+    expect(bullet).toContain("edge's tags must already sit on BOTH endpoint turns' own");
     expect(bullet).toContain("tags — write the member turns' tags first, then the edge.");
+  });
+
+  // Lane-declaration ticket 08: FORM LANES no longer discriminates an exact
+  // tag set or resolves a branch — a lane is DECLARED, `(segment, ONE tag)` —
+  // and a decision→delivery arc may now be ONE lane via a tagged cross-phase
+  // edge instead of always splitting into two hinged by an untagged one.
+  test("FORM LANES teaches declaration over discrimination, and a lane is no longer phase-local", () => {
+    const bullet = edgesBullet(renderPrompt());
+
+    expect(bullet).toContain("continue a fragment onto an");
+    expect(bullet).toContain("EXISTING declared tag (check the segment's own card, `recall`, for");
+    expect(bullet).toContain("its declared lanes); `declare` a fresh one only when none fits.");
+    expect(bullet).toContain("`(segment, ONE tag)` — no set to discriminate, no phase to fix.");
+    expect(bullet).toContain("A lane is not");
+    expect(bullet).toContain("phase-local: a decision→delivery arc may be ONE lane, continued");
+    expect(bullet).toContain("across the phase boundary by a TAGGED cross-phase `grounds`,");
+    expect(bullet).toContain("`verifies` or `refutes` edge.");
+    expect(bullet).not.toContain("discriminating exact tag set");
+    expect(bullet).not.toContain("proper-superset branch");
+    expect(bullet).not.toContain("hinged by untagged cross-phase");
+  });
+
+  // Lane-declaration ticket 08: the E5 repair move is no longer a branch —
+  // branching (proper-superset identity) retired with exact-set lane
+  // identity, so an independent line of work just takes a fresh tag.
+  test("CHECK AND REPAIR's E5 repair move is a fresh declared tag, not a branch", () => {
+    const bullet = edgesBullet(renderPrompt());
+
+    expect(bullet).toContain("a fork the lane never re-joins is a shape error (E5) —");
+    expect(bullet).toContain("an independent line of work takes a fresh, independently declared");
+    expect(bullet).toContain("tag rather than branching from this one.");
+    expect(bullet).not.toContain("opens a BRANCH");
+    expect(bullet).not.toContain("proper-superset tag set rooted at the parent node");
   });
 
   // T1466 (RB hand-off): the relations gate is enforced in `db/write-gate.ts`
@@ -1120,10 +1162,19 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
     expect(readAuthoredSections().length).toBe(4);
   });
 
-  test("blocks A, B and C each appear as contiguous word sequences", () => {
-    const sections = readAuthoredSections().slice(0, 3);
+  // Lane-declaration ticket 08 hand-amended three spans inside Block B (see
+  // note-settlement-prompt.ts's own "LANE-DECLARATION TICKET 08'S AMENDMENT"
+  // comment), so Block B is EXCLUDED here — indices 0 and 2 only (A and C),
+  // which stay untouched, byte-for-byte, from the tag-mandate archive. Block
+  // B gets its own test below, which applies the SAME three amendments to
+  // the archived text before checking for a contiguous match, so a future
+  // edit to either side (the archive or the prompt) that lets them drift
+  // apart in an UNAMENDED span still fails here.
+  test("blocks A and C each appear as contiguous word sequences", () => {
+    const sections = readAuthoredSections();
     const prompt = words(renderPrompt());
-    for (const section of sections) {
+    for (const index of [0, 2]) {
+      const section = sections[index]!;
       // Drop the heading line and, for block A, the placeholder tail.
       const body = section
         .slice(section.indexOf("\n") + 1)
@@ -1133,6 +1184,77 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
       const needle = words(body);
       expect(prompt.includes(needle)).toBe(true);
     }
+  });
+
+  // Block B, WITH lane-declaration ticket 08's three amendments applied to
+  // the archived text before comparison — the same guard shape as above,
+  // narrowed to admit exactly the known, named amendments and nothing else.
+  // A drift anywhere else in Block B (a hand-edit that missed the header
+  // comment, or a future edit to the archive) still fails this test.
+  //
+  // Word-normalized BEFORE the three `.replace()` calls (not after, unlike
+  // the plain block-A/C check above): the archived file's own indentation
+  // (2 spaces on the bullet, 5 on numbered sub-items) makes an exact
+  // multi-line literal match brittle, and `words()` is idempotent, so
+  // normalizing first costs nothing and removes that fragility entirely.
+  test("block B appears as a contiguous word sequence once ticket 08's three amendments are applied", () => {
+    const section = readAuthoredSections()[1]!;
+    const body = words(section.slice(section.indexOf("\n") + 1).trim());
+
+    const amended = body
+      .replace(
+        words(
+          "extends/narrows accept ONLY the tagged form: continuation names " +
+            "its line. An edge's tags must already sit on BOTH endpoint turns' own",
+        ),
+        words(
+          "Every word may carry the tagged form; none is required to — lane " +
+            "tagging is settlement's own hindsight judgment, not a mandate. An " +
+            "edge's tags must already sit on BOTH endpoint turns' own",
+        ),
+      )
+      .replace(
+        words(
+          "2. FORM LANES across all batches: merge fragments, choose the smallest " +
+            "discriminating exact tag set and one phase, resolve continuation " +
+            "versus proper-superset branch, and identify each lane's source, " +
+            "frontier and surviving core. Never the segment's own tags. A batch " +
+            "boundary contributes no topology — it is never a source, sink, " +
+            "branch point or convergence signal. A decision→delivery arc is TWO " +
+            "lanes, hinged by untagged cross-phase `grounds`.",
+        ),
+        words(
+          "2. FORM LANES across all batches: continue a fragment onto an " +
+            "EXISTING declared tag (check the segment's own card, `recall`, for " +
+            "its declared lanes); `declare` a fresh one only when none fits. Identity is " +
+            "`(segment, ONE tag)` — no set to discriminate, no phase to fix. " +
+            "Identify each lane's source, frontier and surviving core. Never " +
+            "the segment's own tags. A batch boundary contributes no topology — " +
+            "it is never a source, sink or convergence signal. A lane is not " +
+            "phase-local: a decision→delivery arc may be ONE lane, continued " +
+            "across the phase boundary by a TAGGED cross-phase `grounds`, " +
+            "`verifies` or `refutes` edge.",
+        ),
+      )
+      .replace(
+        words(
+          "are fine; a fork the lane never re-joins opens a BRANCH — a " +
+            "proper-superset tag set rooted at the parent node.",
+        ),
+        words(
+          "are fine; a fork the lane never re-joins is a shape error (E5) — " +
+            "an independent line of work takes a fresh, independently declared " +
+            "tag rather than branching from this one.",
+        ),
+      );
+
+    // The guard against a mistyped `.replace()`: if any needle above failed
+    // to match the archive, `amended` would still equal `body`, and this
+    // test would silently degrade into re-checking the RETIRED text.
+    expect(amended).not.toBe(body);
+
+    const prompt = words(renderPrompt());
+    expect(prompt.includes(amended)).toBe(true);
   });
 
   // Block D packages TWO separate insertion points (D1 into duty 3, D2
