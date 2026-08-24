@@ -53,22 +53,49 @@ export const EXCERPT_PROMPT_CP = 280;
  * agent-written summary field, not raw conversational text — structurally
  * the same "prose, usually shorter than a full user prompt" shape
  * `EXCERPT_PROMPT_CP` already governs, so there is no basis to size it
- * differently. The worst-case byte risk WAS checked: 1251 widened turns
- * (ticket 01's largest observed scope) each carrying a full 280-code-point
- * CJK content string adds up to ~1.05 MB of UTF-8 bytes on its own (3
- * bytes/code point worst case) — enough to push a scope that was "full"
- * under the old (no-content) measurement into `RESPONSE_BYTE_SOFT_MAX`
- * territory. That is not a reason to shrink the cap: `RESPONSE_BYTE_SOFT_MAX`
- * is an ADVISORY, POST-load cap this handler already enforces by truncating
- * turns/edges and reporting `stateCoverage: "partial"` (see
- * `applyGraphBounds` below) — the worst case degrades gracefully into a
- * correctly-labeled partial response instead of an oversized one, which is
- * exactly the contract the byte cap exists to keep.
+ * differently. The worst-case byte risk WAS checked: a widened scope's own
+ * turns each carrying a full 280-code-point CJK content string adds real
+ * weight (3 bytes/code point worst case) — but that is not a reason to
+ * shrink the cap: `RESPONSE_BYTE_SOFT_MAX` is an ADVISORY, POST-load budget
+ * this handler already enforces via `applyGraphAutoInterval` below (ticket
+ * 04, graph-byte-priority) — a worst case degrades gracefully into a
+ * correctly-labeled, COMPLETE narrower interval instead of an oversized
+ * response or an amputated one, which is exactly the contract the byte
+ * budget exists to keep.
  */
 export const EXCERPT_CONTENT_CP = 280;
-export const GRAPH_EDGE_MAX = 1000;
-export const WIDEN_NODE_MAX = 2000;
-export const RESPONSE_BYTE_SOFT_MAX = 1_000_000;
+/**
+ * Ticket 04 (graph-byte-priority, T1496 ruling): 1000 → 10000. Never the
+ * actual amputation culprit measured against segment-60 (its own 3400 edges
+ * were cut to 1000 by THIS cap before the byte trim loop cut them again, to
+ * 280 — the "graph with no edges" the user saw) — raised 10x so a session's
+ * or segment's real edge count clears it without narrowing, leaving
+ * `RESPONSE_BYTE_SOFT_MAX` (via the interval selector below) as the one
+ * mechanism that actually narrows a response.
+ */
+export const GRAPH_EDGE_MAX = 10_000;
+/**
+ * Ticket 04: 2000 → 10000, re-examined alongside `GRAPH_EDGE_MAX` (T1496
+ * ruling: "re-examine WIDEN_NODE_MAX alongside"). Unlike `GRAPH_EDGE_MAX`,
+ * this was NOT the culprit in the measured incident — segment-60's 1219
+ * turns already cleared the old 2000 cap with room to spare — so this raise
+ * is headroom parity with the other two caps rising 8-10x, not a repair of
+ * an observed amputation. Kept as a real (if now rarely-triggered)
+ * structural safety net: `applyGraphCountBounds` below still trims to a
+ * stable oldest-first prefix on the pre-display-load projection, unchanged
+ * in mechanism — the interval selector never sees a scope so pathological
+ * that this fires.
+ */
+export const WIDEN_NODE_MAX = 10_000;
+/**
+ * Ticket 04 (T1496 ruling): 1MB → 8MB. The 1MB figure was advisory
+ * guesswork (this constant's own former doc said so); segment-60's own
+ * whole-scope measurement (~1.5MB total: ~920KB turns + 73KB laneCheckText
+ * + edges) is the new sizing anchor — 8MB gives that real shape roughly 5x
+ * headroom before the interval selector (`applyGraphAutoInterval`) ever
+ * needs to narrow anything.
+ */
+export const RESPONSE_BYTE_SOFT_MAX = 8_000_000;
 /**
  * Election preview budget (ticket 03: "budget = ... the renderer's default
  * milestone budget 30 (DEFAULT_TIMELINE_PAGE_SIZE precedent)"). Redeclared
@@ -110,6 +137,21 @@ export interface ConsoleMeta {
    * one, and cheap since it never varies.
    */
   electionCoverage: "full-snapshot";
+  /**
+   * Ticket 04 (graph-byte-priority, T1498 ruling): the turn-id interval this
+   * graph response actually renders — `null` on the three non-graph routes
+   * (sessions/segments/segment; same "one uniform field, cheap since it
+   * never varies" posture as `electionCoverage` above) and on a graph
+   * response carrying zero turns (nothing to bound). Populated on every
+   * other graph response, WHETHER OR NOT the interval selector had to
+   * narrow anything — `isOldest`/`isNewest` are what the range bar (the
+   * shell) reads to decide whether "较早"/"最新" navigation is even
+   * possible, not `stateCoverage` alone (a `stateCoverage: "partial"` graph
+   * response can still be `isOldest: true` — e.g. the user has paged all
+   * the way back to the earliest turn a segment's own widened lane
+   * structure ever touched).
+   */
+  interval: ConsoleGraphInterval | null;
 }
 
 export interface ConsoleApiResult {
@@ -235,6 +277,28 @@ export interface ConsoleGraphLane {
   token: string;
 }
 
+/**
+ * Ticket 04 (graph-byte-priority): the interval selector's own render unit —
+ * a contiguous (in id-sorted order) slice of a graph response's `turns`,
+ * named by both its raw `turns.id` boundary (what the client sends back as
+ * the next `interval` query param, T1498 ruling's own round-trip) and its
+ * reader-facing "S<n>/T<m>" address (what the range bar actually prints —
+ * floor-and-render-fidelity ticket 03's own address-form convention, S15069/
+ * T1482). `isOldest`/`isNewest` compare against the FULL widened+count-
+ * bounded projection's own boundary turns (computed once per request,
+ * BEFORE the `interval` query param's own ceiling is applied) — so a
+ * response that is `isOldest: true` really has nothing older left to page
+ * to, never merely "nothing older within THIS request's own ceiling".
+ */
+export interface ConsoleGraphInterval {
+  fromTurnId: number;
+  toTurnId: number;
+  fromAddress: string;
+  toAddress: string;
+  isOldest: boolean;
+  isNewest: boolean;
+}
+
 // --------------------------------------------------------------- helpers ---
 
 function errorResult(status: number, code: string, message: string): ConsoleApiResult {
@@ -281,6 +345,7 @@ function buildMeta(input: {
   ctx: ConsoleRequestContext;
   stateCoverage: "full" | "partial";
   appliedBounds: ConsoleAppliedBound[];
+  interval: ConsoleGraphInterval | null;
 }): ConsoleMeta {
   return {
     scope: input.scope,
@@ -290,7 +355,13 @@ function buildMeta(input: {
     stateCoverage: input.stateCoverage,
     appliedBounds: input.appliedBounds,
     electionCoverage: "full-snapshot",
+    interval: input.interval,
   };
+}
+
+/** "S<sessionId>/T<promptNumber>" — the same reader-facing address form every other console surface uses (floor-and-render-fidelity ticket 03). */
+function turnAddress(turn: ConsoleGraphTurn): string {
+  return `S${turn.sessionId}/T${turn.promptNumber}`;
 }
 
 // ------------------------------------------------------------- sessions ----
@@ -336,6 +407,7 @@ export function handleSessionsRoute(
         ctx,
         stateCoverage: "full",
         appliedBounds,
+        interval: null,
       }),
     },
   };
@@ -360,6 +432,7 @@ export function handleSegmentsRoute(
         ctx,
         stateCoverage: "full",
         appliedBounds: [],
+        interval: null,
       }),
     },
   };
@@ -396,6 +469,7 @@ export function handleSegmentCardRoute(
         ctx,
         stateCoverage: "full",
         appliedBounds: [],
+        interval: null,
       }),
     },
   };
@@ -684,42 +758,57 @@ function envelopeBytes(
 }
 
 /**
- * The POST-load boundary rule's BYTE half, ticket R2 #2 repair: measures the
- * FINAL serialized envelope (meta included — see `envelopeBytes`'s own doc,
- * never the `{turns,edges,lanes,laneCheckText}` stand-in the reviewer's
- * repro caught) and truncates turns/edges further as a stable prefix (edges
- * first, then turns — the same discipline `applyGraphCountBounds` uses),
- * one item at a time, because bytes (unlike counts) cannot be pre-computed
- * per item without re-serializing.
+ * Ticket 04 (graph-byte-priority, T1496/T1498 rulings): the interval
+ * selector. REPLACES the old `applyGraphByteBound` drop-edges-then-turns
+ * loop — that mechanism is RETIRED; this is its one, unified successor.
+ * `turns`/`edges` are the FULL count-bounded widened projection (still
+ * behind `applyGraphCountBounds`'s own, unchanged, structural safety net —
+ * see that function's own doc), sorted ascending by id.
  *
- * Chicken-and-egg (ticket R2 #2): `meta.appliedBounds` itself changes the
- * byte count once a `RESPONSE_BYTE_SOFT_MAX` entry is added to it, and
- * `meta.counts` changes on every trim step. This does NOT chase a true
- * fixed point over `meta`'s own encoded size — the ticket's own allowance
- * ("measure with the final meta included conservatively, document the
- * approach") is what this takes: the INITIAL fits-or-not check measures with
- * the byte-bound entry ABSENT (it is not yet known one is needed). The
- * instant a trim is confirmed necessary, the byte-bound entry and
- * `stateCoverage: "partial"` are fixed for the REST of this call — every
- * subsequent measurement (through to the eventual response) uses that SAME
- * final `appliedBounds` array; only `counts.turns`/`counts.edges` vary
- * step to step, a cheap two-integer diff, never a second pass over the
- * byte-bound entry's own encoding. The one deliberately approximate number
- * is that entry's own `requested` field: the bytes of the PRE-trim envelope
- * measured WITHOUT the entry describing itself (informational provenance —
- * "how big before cutting started" — not a value the bound's own
- * enforcement depends on).
+ * `intervalCeilingId` is the `interval` query param — every turn with `id >
+ * intervalCeilingId` is excluded from candidacy before anything else runs.
+ * `null` (the param absent) means no ceiling: candidacy is the newest turn
+ * in the whole projection. This is how "requesting an older interval"
+ * round-trips (T1498 ruling): the client re-issues the identical request
+ * with `interval` set to one less than the earliest turn id its OWN last
+ * response returned (`ConsoleGraphInterval.fromTurnId - 1`), and the walk
+ * below reconstructs the immediately-older budget-filling interval from
+ * that ceiling — the SAME algorithm, SAME budget, every time ("every
+ * request is budget-guarded the same way").
  *
- * If turns AND edges both trim to empty and the envelope STILL exceeds the
- * bound (`unfittable: true`) — lanes/laneCheckText are large enough on their
- * own to blow it (ticket R2 #2's 600KB-lane-tag repro: turns/edges fully
- * trimmed, ~2.4MB shipped while claiming `applied: 1MB`) — the caller must
- * NOT ship `{turns: [], edges: [], lanes, laneCheckText}` (still oversized):
- * `handleGraphRoute` switches to the refusal-with-summary envelope instead
- * (`buildUnfittableGraphResult`; spec "Budgets and coverage": "413-style 200
- * envelope naming the bound").
+ * FAST PATH: does the entire ceiling-eligible set already fit
+ * `RESPONSE_BYTE_SOFT_MAX`? If so, return it whole — segment-60's own shape
+ * at the raised caps ("Today's whole-segment scope renders complete with
+ * zero narrowing").
+ *
+ * WALK (only reached when it does not): newest eligible turn first,
+ * backward, one turn at a time. Each turn is added ATOMICALLY WITH its own
+ * induced edges — every edge among `edges` whose OTHER endpoint has already
+ * joined the walk (walking strictly newest-to-oldest, an edge's other
+ * endpoint, if it is ever included at all, was necessarily visited in an
+ * EARLIER, newer step) — never a turn without its edges, never an edge
+ * before both its endpoints. The walk stops the INSTANT the next atomic
+ * addition would push the envelope over budget; the interval boundary is
+ * exactly the last turn that DID fit. Because every edge is only ever added
+ * in the same step as whichever endpoint is added SECOND, the endpoint-
+ * closure invariant (every returned edge's both endpoints are among the
+ * returned turns — the old ticket R2 #3 property) holds BY CONSTRUCTION
+ * here, with no separate post-filter pass required (a WIDEN_NODE_MAX-
+ * trimmed turn's own dangling edge, still present in `edges`, can never
+ * find its missing endpoint "already included" — that endpoint is never
+ * even a walk candidate).
+ *
+ * UNFITTABLE (ticket 04: "the unfittable refusal envelope survives only for
+ * the degenerate case an interval of one turn still overflows") falls out
+ * of the SAME loop with no separate check: if even the single newest
+ * eligible turn cannot be added without exceeding budget, the walk's first
+ * iteration rejects it and `included` stays empty — the caller (`
+ * handleGraphRoute`) reads that as `unfittable`. This is also how a huge
+ * lane tag alone (zero turns, R2 #2's own repro) still triggers the refusal:
+ * a one-turn attempt is strictly bigger than a zero-turn one, so if even
+ * that fails every smaller attempt already failed too.
  */
-function applyGraphByteBound(input: {
+function applyGraphAutoInterval(input: {
   turns: ConsoleGraphTurn[];
   edges: ConsoleGraphEdge[];
   lanes: ConsoleGraphLane[];
@@ -729,71 +818,204 @@ function applyGraphByteBound(input: {
   ctx: ConsoleRequestContext;
   preTrimAppliedBounds: ConsoleAppliedBound[];
   preTrimStateCoverage: "full" | "partial";
-}): { turns: ConsoleGraphTurn[]; edges: ConsoleGraphEdge[]; appliedBound: ConsoleAppliedBound | null; unfittable: boolean } {
-  const { lanes, laneCheckText, scope, asOf, ctx, preTrimAppliedBounds, preTrimStateCoverage } = input;
-  let turns = input.turns;
-  let edges = input.edges;
+  intervalCeilingId: number | null;
+}): {
+  turns: ConsoleGraphTurn[];
+  edges: ConsoleGraphEdge[];
+  interval: ConsoleGraphInterval | null;
+  appliedBounds: ConsoleAppliedBound[];
+  stateCoverage: "full" | "partial";
+  unfittable: boolean;
+} {
+  const { lanes, laneCheckText, scope, asOf, ctx, preTrimAppliedBounds, preTrimStateCoverage, intervalCeilingId } = input;
 
-  const noByteTrimMeta = buildMeta({
+  const fullOldestId = input.turns[0]?.id ?? null;
+  const fullNewestId = input.turns[input.turns.length - 1]?.id ?? null;
+
+  const intervalFor = (turns: ConsoleGraphTurn[]): ConsoleGraphInterval | null => {
+    if (turns.length === 0) return null;
+    const first = turns[0]!;
+    const last = turns[turns.length - 1]!;
+    return {
+      fromTurnId: first.id,
+      toTurnId: last.id,
+      fromAddress: turnAddress(first),
+      toAddress: turnAddress(last),
+      isOldest: first.id === fullOldestId,
+      isNewest: last.id === fullNewestId,
+    };
+  };
+  const coverageFor = (interval: ConsoleGraphInterval | null): "full" | "partial" =>
+    preTrimStateCoverage === "partial" || !interval || !(interval.isOldest && interval.isNewest)
+      ? "partial"
+      : "full";
+
+  const eligible =
+    intervalCeilingId === null ? input.turns : input.turns.filter((t) => t.id <= intervalCeilingId);
+  if (eligible.length === 0) {
+    // Zero candidate turns — either the whole widened projection carries
+    // none, or `intervalCeilingId` excluded all of them. Still must check
+    // the baseline (lanes/laneCheckText/meta alone, R2 #2's own huge-lane-
+    // tag repro): a zero-turn envelope is the SMALLEST this route can ever
+    // ship, so if even that overflows, every non-empty attempt would too —
+    // unfittable, not a silent empty-but-fine response.
+    const baselineMeta = buildMeta({
+      scope,
+      counts: { turns: 0, edges: 0, lanes: lanes.length },
+      asOf,
+      ctx,
+      stateCoverage: preTrimStateCoverage,
+      appliedBounds: preTrimAppliedBounds,
+      interval: null,
+    });
+    const baselineBytes = envelopeBytes([], [], lanes, laneCheckText, baselineMeta);
+    if (baselineBytes > RESPONSE_BYTE_SOFT_MAX) {
+      const appliedBound: ConsoleAppliedBound = {
+        bound: "RESPONSE_BYTE_SOFT_MAX",
+        requested: baselineBytes,
+        applied: RESPONSE_BYTE_SOFT_MAX,
+      };
+      return {
+        turns: [],
+        edges: [],
+        interval: null,
+        appliedBounds: [...preTrimAppliedBounds, appliedBound],
+        stateCoverage: "partial",
+        unfittable: true,
+      };
+    }
+    return {
+      turns: [],
+      edges: [],
+      interval: null,
+      appliedBounds: preTrimAppliedBounds,
+      stateCoverage: preTrimStateCoverage,
+      unfittable: false,
+    };
+  }
+
+  const eligibleIds = new Set(eligible.map((t) => t.id));
+  const eligibleEdges = input.edges.filter(
+    (e) => eligibleIds.has(e.citingId) && eligibleIds.has(e.citedId),
+  );
+  const eligibleInterval = intervalFor(eligible);
+  const eligibleCoverage = coverageFor(eligibleInterval);
+  const fastMeta = buildMeta({
     scope,
-    counts: { turns: turns.length, edges: edges.length, lanes: lanes.length },
+    counts: { turns: eligible.length, edges: eligibleEdges.length, lanes: lanes.length },
     asOf,
     ctx,
-    stateCoverage: preTrimStateCoverage,
+    stateCoverage: eligibleCoverage,
     appliedBounds: preTrimAppliedBounds,
+    interval: eligibleInterval,
   });
-  const requestedBytes = envelopeBytes(turns, edges, lanes, laneCheckText, noByteTrimMeta);
-  if (requestedBytes <= RESPONSE_BYTE_SOFT_MAX) {
-    return { turns, edges, appliedBound: null, unfittable: false };
+  const fastBytes = envelopeBytes(eligible, eligibleEdges, lanes, laneCheckText, fastMeta);
+  if (fastBytes <= RESPONSE_BYTE_SOFT_MAX) {
+    return {
+      turns: eligible,
+      edges: eligibleEdges,
+      interval: eligibleInterval,
+      appliedBounds: preTrimAppliedBounds,
+      stateCoverage: eligibleCoverage,
+      unfittable: false,
+    };
+  }
+
+  // Over budget: every edge touching ANY turn, indexed once — the walk
+  // below looks up "edges touching the turn just added" at each step.
+  const edgesByTurnId = new Map<number, ConsoleGraphEdge[]>();
+  for (const edge of input.edges) {
+    for (const turnId of [edge.citingId, edge.citedId]) {
+      const bucket = edgesByTurnId.get(turnId);
+      if (bucket) bucket.push(edge);
+      else edgesByTurnId.set(turnId, [edge]);
+    }
   }
 
   const appliedBound: ConsoleAppliedBound = {
     bound: "RESPONSE_BYTE_SOFT_MAX",
-    requested: requestedBytes,
+    requested: fastBytes,
     applied: RESPONSE_BYTE_SOFT_MAX,
   };
   const finalAppliedBounds = [...preTrimAppliedBounds, appliedBound];
-  const metaFor = (t: ConsoleGraphTurn[], e: ConsoleGraphEdge[]): ConsoleMeta =>
-    buildMeta({
+
+  const included: ConsoleGraphTurn[] = []; // accumulates NEWEST first; reversed once at the end
+  const includedIds = new Set<number>();
+  const includedEdges: ConsoleGraphEdge[] = [];
+  let newestIncluded: ConsoleGraphTurn | null = null;
+
+  for (let i = eligible.length - 1; i >= 0; i -= 1) {
+    const candidateTurn = eligible[i]!;
+    const inducedEdges: ConsoleGraphEdge[] = [];
+    for (const edge of edgesByTurnId.get(candidateTurn.id) ?? []) {
+      const otherId = edge.citingId === candidateTurn.id ? edge.citedId : edge.citingId;
+      if (includedIds.has(otherId)) inducedEdges.push(edge);
+    }
+    const candidateTurns = [candidateTurn, ...included];
+    const candidateEdges = [...includedEdges, ...inducedEdges];
+    const candidateInterval: ConsoleGraphInterval = {
+      fromTurnId: candidateTurn.id,
+      toTurnId: (newestIncluded ?? candidateTurn).id,
+      fromAddress: turnAddress(candidateTurn),
+      toAddress: turnAddress(newestIncluded ?? candidateTurn),
+      isOldest: candidateTurn.id === fullOldestId,
+      isNewest: (newestIncluded ?? candidateTurn).id === fullNewestId,
+    };
+    const candidateMeta = buildMeta({
       scope,
-      counts: { turns: t.length, edges: e.length, lanes: lanes.length },
+      counts: { turns: candidateTurns.length, edges: candidateEdges.length, lanes: lanes.length },
       asOf,
       ctx,
-      stateCoverage: "partial",
+      stateCoverage: "partial", // guaranteed: reached only because the whole eligible set did NOT fit
       appliedBounds: finalAppliedBounds,
+      interval: candidateInterval,
     });
-
-  // Trim from the END of each already-sorted array — a stable prefix, one
-  // item at a time, re-measuring the FULL envelope (meta included) at every
-  // step.
-  let bytes = envelopeBytes(turns, edges, lanes, laneCheckText, metaFor(turns, edges));
-  while (bytes > RESPONSE_BYTE_SOFT_MAX && edges.length > 0) {
-    edges = edges.slice(0, -1);
-    bytes = envelopeBytes(turns, edges, lanes, laneCheckText, metaFor(turns, edges));
-  }
-  while (bytes > RESPONSE_BYTE_SOFT_MAX && turns.length > 0) {
-    turns = turns.slice(0, -1);
-    bytes = envelopeBytes(turns, edges, lanes, laneCheckText, metaFor(turns, edges));
+    const candidateBytes = envelopeBytes(candidateTurns, candidateEdges, lanes, laneCheckText, candidateMeta);
+    if (candidateBytes > RESPONSE_BYTE_SOFT_MAX) {
+      break; // this turn (and every older one) would overflow — the interval boundary is set
+    }
+    included.push(candidateTurn);
+    includedIds.add(candidateTurn.id);
+    includedEdges.push(...inducedEdges);
+    if (!newestIncluded) newestIncluded = candidateTurn;
   }
 
-  return { turns, edges, appliedBound, unfittable: bytes > RESPONSE_BYTE_SOFT_MAX };
+  if (included.length === 0) {
+    return {
+      turns: [],
+      edges: [],
+      interval: null,
+      appliedBounds: finalAppliedBounds,
+      stateCoverage: "partial",
+      unfittable: true,
+    };
+  }
+
+  included.reverse();
+  return {
+    turns: included,
+    edges: sortEdgesForDisplay(includedEdges) as ConsoleGraphEdge[],
+    interval: intervalFor(included),
+    appliedBounds: finalAppliedBounds,
+    stateCoverage: "partial",
+    unfittable: false,
+  };
 }
 
 /**
- * Ticket R2 #2's refusal-with-summary path (spec "Budgets and coverage": a
+ * Ticket 04's refusal-with-summary path (spec "Budgets and coverage": a
  * scope the budgets cannot hold returns EITHER a refusal-with-summary
  * ("413-style 200 envelope naming the bound") OR a partial graph — this is
- * the first arm). Reached only when `applyGraphByteBound` trimmed turns AND
- * edges to nothing and the envelope STILL exceeds `RESPONSE_BYTE_SOFT_MAX`:
- * lanes/laneCheckText alone are big enough to blow the bound. Ships the
- * contract's own four keys, never omitted, just emptied (`turns: [] edges:
- * [] lanes: [] laneCheckText: ""`) plus an `error` field naming the bound —
- * never the oversized lanes/laneCheckText themselves, which is exactly the
- * "payload larger than the bound carrying an applied-bound claim" ticket R2
- * rules out. `counts` reports the emptied arrays' own lengths (0/0/0) —
- * same "counts is the literal length of what this response actually
- * carries" convention every other route in this file already follows
- * (see `handleSegmentCardRoute`'s own doc on that point).
+ * the first arm). Reached only when `applyGraphAutoInterval` could not fit
+ * even a single-turn interval (see that function's own "UNFITTABLE" doc).
+ * Ships the contract's own four keys, never omitted, just emptied (`turns:
+ * [] edges: [] lanes: [] laneCheckText: ""`) plus an `error` field naming
+ * the bound — never the oversized lanes/laneCheckText themselves, which is
+ * exactly the "payload larger than the bound carrying an applied-bound
+ * claim" ticket R2 rules out. `counts` reports the emptied arrays' own
+ * lengths (0/0/0) — same "counts is the literal length of what this
+ * response actually carries" convention every other route in this file
+ * already follows (see `handleSegmentCardRoute`'s own doc on that point).
  */
 function buildUnfittableGraphResult(input: {
   scope: unknown;
@@ -811,7 +1033,7 @@ function buildUnfittableGraphResult(input: {
       error: {
         code: "graph_exceeds_byte_bound",
         message:
-          `graph scope exceeds RESPONSE_BYTE_SOFT_MAX (${RESPONSE_BYTE_SOFT_MAX} bytes) even with turns and edges fully trimmed; narrow the session range or choose a segment and retry`,
+          `graph scope exceeds RESPONSE_BYTE_SOFT_MAX (${RESPONSE_BYTE_SOFT_MAX} bytes) even for a single-turn interval; narrow the session range or choose a segment and retry`,
       },
       meta: buildMeta({
         scope: input.scope,
@@ -820,6 +1042,7 @@ function buildUnfittableGraphResult(input: {
         ctx: input.ctx,
         stateCoverage: "partial",
         appliedBounds: input.appliedBounds,
+        interval: null,
       }),
     },
   };
@@ -830,6 +1053,16 @@ export function handleGraphRoute(
   url: URL,
   ctx: ConsoleRequestContext,
 ): ConsoleApiResult {
+  // Ticket 04 (graph-byte-priority, T1498 ruling): the interval selector's
+  // own ceiling — a turn id, validated FIRST (before any reader call at
+  // all, same discipline `resolveGraphScope` itself follows for session/
+  // segment/from/to) even though it is only consumed much later
+  // (`applyGraphAutoInterval`, after the projection loads).
+  const intervalParam = parseOptionalIntParam(url, "interval");
+  if (!intervalParam.ok) {
+    return errorResult(400, "bad_request", "interval must be a non-negative integer");
+  }
+
   const preLoadAppliedBounds: ConsoleAppliedBound[] = [];
   const resolution = resolveGraphScope(reader, url, preLoadAppliedBounds);
   if ("error" in resolution) {
@@ -917,12 +1150,15 @@ export function handleGraphRoute(
         : null,
   }));
 
-  // BYTE cap second, on the fully-built display payload — see
-  // `applyGraphByteBound`'s own doc for why it must measure the FINAL
+  // Interval selection third, on the fully-built display payload (ticket 04,
+  // T1496/T1498 rulings) — replaces the old byte-trim loop entirely. See
+  // `applyGraphAutoInterval`'s own doc for why it must measure the FINAL
   // envelope (meta included), never a `{turns,edges,lanes,laneCheckText}`
-  // stand-in (ticket R2 #2).
-  const preByteAppliedBounds = [...preLoadAppliedBounds, ...countBounded.appliedBounds];
-  const byteBounded = applyGraphByteBound({
+  // stand-in (ticket R2 #2, preserved through the rewrite), and for why its
+  // own construction already satisfies ticket R2 #3's endpoint-closure
+  // invariant with no separate post-filter pass.
+  const preIntervalAppliedBounds = [...preLoadAppliedBounds, ...countBounded.appliedBounds];
+  const autoInterval = applyGraphAutoInterval({
     turns: countCappedTurnsPayload,
     edges: countCappedEdgesPayload,
     lanes,
@@ -930,59 +1166,35 @@ export function handleGraphRoute(
     scope: scopeDescriptor,
     asOf: run.asOf,
     ctx,
-    preTrimAppliedBounds: preByteAppliedBounds,
+    preTrimAppliedBounds: preIntervalAppliedBounds,
     preTrimStateCoverage: countBounded.overCap ? "partial" : "full",
+    intervalCeilingId: intervalParam.value ?? null,
   });
 
-  if (byteBounded.unfittable) {
+  if (autoInterval.unfittable) {
     return buildUnfittableGraphResult({
       scope: scopeDescriptor,
       asOf: run.asOf,
       ctx,
-      appliedBounds: [...preByteAppliedBounds, byteBounded.appliedBound!],
+      appliedBounds: autoInterval.appliedBounds,
     });
   }
-
-  // Ticket R2 #3: endpoint-closed projection. Count caps and byte trims
-  // each independently truncate turns/edges (a turn beyond WIDEN_NODE_MAX
-  // can drop while the edge naming it survives GRAPH_EDGE_MAX untouched —
-  // the reviewer's 2001-turn repro) — this is the ONE place, after every
-  // trim path above has run, that restores the invariant: every returned
-  // edge's both endpoints exist among returned turns. Filtering here only
-  // ever REMOVES edges, so it cannot push the envelope back over the byte
-  // bound `applyGraphByteBound` already confirmed above.
-  const retainedTurnIds = new Set(byteBounded.turns.map((turn) => turn.id));
-  const turnsPayload = byteBounded.turns;
-  const edgesPayload = byteBounded.edges.filter(
-    (edge) => retainedTurnIds.has(edge.citingId) && retainedTurnIds.has(edge.citedId),
-  );
-
-  const appliedBounds = [
-    ...preByteAppliedBounds,
-    ...(byteBounded.appliedBound ? [byteBounded.appliedBound] : []),
-  ];
-  // A pre-load `GRAPH_WINDOW_MAX` clamp alone (no post-load overage) still
-  // reads as `stateCoverage: "full"`: the CLAMPED request was fully loaded
-  // and fully returned — only a post-load truncation drops the
-  // lane_check-equivalence claim (spec's own boundary rule is stated
-  // entirely in terms of the actual loaded result, never the request shape).
-  const stateCoverage: "full" | "partial" =
-    countBounded.overCap || byteBounded.appliedBound !== null ? "partial" : "full";
 
   return {
     status: 200,
     body: {
-      turns: turnsPayload,
-      edges: edgesPayload,
+      turns: autoInterval.turns,
+      edges: autoInterval.edges,
       lanes,
       laneCheckText,
       meta: buildMeta({
         scope: scopeDescriptor,
-        counts: { turns: turnsPayload.length, edges: edgesPayload.length, lanes: lanes.length },
+        counts: { turns: autoInterval.turns.length, edges: autoInterval.edges.length, lanes: lanes.length },
         asOf: run.asOf,
         ctx,
-        stateCoverage,
-        appliedBounds,
+        stateCoverage: autoInterval.stateCoverage,
+        appliedBounds: autoInterval.appliedBounds,
+        interval: autoInterval.interval,
       }),
     },
   };

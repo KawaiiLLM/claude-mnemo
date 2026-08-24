@@ -338,3 +338,49 @@ describe("console-shell.html behavior-matrix wiring spot checks", () => {
     expect(html).not.toContain("`◎T${l.state.terminus}`");
   });
 });
+
+// floor-and-render-fidelity ticket 04 (T1498 ruling): the range bar — same
+// source-text spot-check style as the section above, not a jsdom execution.
+describe("console-shell.html range bar (ticket 04)", () => {
+  const html = readFileSync(HTML_PATH, "utf8");
+
+  test("the graph fetch carries the interval param, and the current graph target is retained for interval re-navigation", () => {
+    expect(html).toContain(
+      'if (target.interval !== undefined && target.interval !== null) params.set("interval", target.interval);',
+    );
+    expect(html).toContain("currentGraphTarget = target;");
+  });
+
+  test("applyGraph renders the range bar from meta.interval on every load", () => {
+    expect(html).toContain("renderRangeBar(data.meta);");
+    expect(html).toContain("function renderRangeBar(meta){");
+  });
+
+  test("a null meta.interval (zero-turn response) hides the range bar instead of rendering a stale one", () => {
+    expect(html).toContain('if (!iv) { rangeBar.style.display = "none"; return; }');
+  });
+
+  test("\"较早\" (older) is offered only when not already at the oldest turn, and requests the immediately-older interval by ceiling", () => {
+    expect(html).toContain("if (!iv.isOldest) {");
+    expect(html).toContain(
+      "older.addEventListener(\"click\", () => loadGraph({ ...currentGraphTarget, interval: iv.fromTurnId - 1 }));",
+    );
+  });
+
+  test("\"最新\" (newest) is offered only when not already at the newest turn, and drops the interval param entirely (round-trips to the default/latest)", () => {
+    expect(html).toContain("if (!iv.isNewest) {");
+    expect(html).toContain("delete target.interval;");
+  });
+
+  test("the range bar label reads via textContent, never innerHTML — server-formatted addresses, not raw payload text", () => {
+    const block = html.slice(html.indexOf("function renderRangeBar"), html.indexOf("function renderRangeBar") + 900);
+    expect(block).toContain("label.textContent = `区间 ${iv.fromAddress}");
+    expect(block).not.toMatch(/rangeBar\.innerHTML\s*=\s*`/);
+  });
+
+  test("the partial banner's new copy names the range bar's own affordance, never claims rows inside the shown interval were removed", () => {
+    expect(html).toContain("更早的区间未显示");
+    expect(html).toContain("较早");
+    expect(html).not.toContain("已按预算截断，不等价于完整");
+  });
+});

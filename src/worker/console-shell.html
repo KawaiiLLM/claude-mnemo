@@ -53,6 +53,11 @@
   .sep { width:1px; height:16px; background:var(--line); margin:0 2px; }
   #search { margin-left:auto; border:1px solid var(--line); border-radius:6px; padding:4px 9px; font-size:12.5px; width:180px; background:var(--panel); }
 
+  #rangeBar { display:none; align-items:center; gap:9px; padding:5px 24px; border-bottom:1px solid var(--line); flex:none; font-size:12px; color:var(--faint); }
+  #rangeBar .rangeLabel { font-family:"SF Mono",Menlo,monospace; color:var(--ink); }
+  #rangeBar .rangeNav { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:5px; padding:2px 9px; font-size:11.5px; cursor:pointer; }
+  #rangeBar .rangeNav:hover { border-color:var(--lane); color:var(--lane); }
+
   #lanes { padding:8px 24px 4px; flex:none; }
   #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }
   #lanes .lt { font-size:11px; color:var(--faint); margin-right:4px; min-width:72px; }
@@ -123,6 +128,7 @@
     <div id="stoppedBanner"><span>worker 无响应 — 当前展示的是最后一次成功加载的快照</span><button id="stoppedRetry" type="button">重试</button></div>
     <div id="partialBanner"></div>
     <header><h1><span id="scopeTitle"></span><span id="meta"></span><span id="selbadge"></span></h1></header>
+    <div id="rangeBar"></div>
     <div id="bar"></div>
     <div id="lanes"></div>
     <div id="phases">
@@ -200,6 +206,12 @@ let sessionsList = [], segmentsList = [];
 let sessionsNextCursor = null;
 let sessionsLoadingMore = false;
 let currentScope = null; // { kind: "session"|"segment", id }
+// The exact params object behind the CURRENT graph response (floor-and-
+// render-fidelity ticket 04) — kept so the range bar's "较早"/"最新"
+// buttons can re-issue the identical request with only `interval`
+// overridden, never reconstructing session/segment from `currentScope`
+// alone (which drops any `interval` already in effect).
+let currentGraphTarget = null;
 let lastLoad = null; // retry hook for the worker-stopped banner
 
 let selLanes = new Set();
@@ -212,6 +224,7 @@ function clearFocus(){ selLanes = new Set(); solo = null; sel = null; panel.styl
 const sesBox = document.getElementById("sessions");
 const segBox = document.getElementById("segments");
 const bar = document.getElementById("bar");
+const rangeBar = document.getElementById("rangeBar");
 const laneBox = document.getElementById("lanes");
 const svg = document.getElementById("svg");
 const wrap = document.getElementById("wrap");
@@ -347,12 +360,14 @@ async function loadGraph(target){
   const params = new URLSearchParams();
   if (target.session !== undefined) params.set("session", target.session);
   if (target.segment !== undefined) params.set("segment", target.segment);
+  if (target.interval !== undefined && target.interval !== null) params.set("interval", target.interval);
   const url = "/api/console/graph?" + params.toString();
   try {
     const data = await fetchJson(url);
     currentScope = target.session !== undefined
       ? { kind: "session", id: target.session }
       : { kind: "segment", id: target.segment };
+    currentGraphTarget = target;
     applyGraph(data);
     hideStopped();
     renderSidebar();
@@ -378,6 +393,7 @@ function applyGraph(data){
   }
   clearFocus();
   renderHeader(data.meta);
+  renderRangeBar(data.meta);
   renderLanes();
   renderGraphSvg();
   paintFilters();
@@ -393,12 +409,53 @@ function renderHeader(meta){
 
   if (meta.stateCoverage === "partial") {
     const bounds = meta.appliedBounds.map(b => `${b.bound} ${b.requested}→${b.applied}`).join(", ");
-    // No completeness claim, no "REAL states" framing (spec "Budgets and
-    // coverage"): this view is a truncated projection, plainly labeled.
-    partialBanner.textContent = "部分结果(已按预算截断，不等价于完整 lane_check；election tier 按完整快照计算，不受本次截断影响): " + bounds;
+    // Ticket 04 banner semantics update (T1496/T1498 rulings): "partial"
+    // means an OLDER interval is not currently shown — never that rows
+    // inside the shown interval were silently removed (the old drop-edges-
+    // then-turns amputation is retired; the interval selector always ships
+    // a COMPLETE sub-graph for whatever interval it picked). The lane_check-
+    // equivalence caveat stays: laneCheckText still reflects only the
+    // rendered interval, not the segment/session's whole stock.
+    const boundsNote = bounds ? `(${bounds})` : "";
+    partialBanner.textContent =
+      `部分结果 — 更早的区间未显示,可点击下方「较早」查看;当前显示区间内容完整,` +
+      `不等价于完整 lane_check;election tier 按完整快照计算,不受区间选择影响 ${boundsNote}`;
     partialBanner.style.display = "block";
   } else {
     partialBanner.style.display = "none";
+  }
+}
+
+/* ---- range bar: the interval selector (floor-and-render-fidelity ticket
+   04, T1498 ruling) — shows the interval this response actually renders and
+   lets the user page to an older one. `meta.interval` is `null` only for a
+   zero-turn graph response, in which case the bar stays hidden. ---- */
+function renderRangeBar(meta){
+  const iv = meta.interval;
+  if (!iv) { rangeBar.style.display = "none"; return; }
+  rangeBar.style.display = "flex";
+  rangeBar.innerHTML = "";
+  const label = document.createElement("span");
+  label.className = "rangeLabel";
+  label.textContent = `区间 ${iv.fromAddress}–${iv.toAddress}`; // textContent — addresses are server-formatted, not raw payload text
+  rangeBar.appendChild(label);
+  if (!iv.isOldest) {
+    const older = document.createElement("button");
+    older.type = "button"; older.className = "rangeNav";
+    older.textContent = "‹ 较早";
+    older.addEventListener("click", () => loadGraph({ ...currentGraphTarget, interval: iv.fromTurnId - 1 }));
+    rangeBar.appendChild(older);
+  }
+  if (!iv.isNewest) {
+    const newest = document.createElement("button");
+    newest.type = "button"; newest.className = "rangeNav";
+    newest.textContent = "最新 ›";
+    newest.addEventListener("click", () => {
+      const target = { ...currentGraphTarget };
+      delete target.interval;
+      loadGraph(target);
+    });
+    rangeBar.appendChild(newest);
   }
 }
 

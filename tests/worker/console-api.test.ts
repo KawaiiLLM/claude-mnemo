@@ -711,12 +711,17 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     expectEdgesEndpointClosed(body);
   });
 
-  test("oversized serialized bytes (huge excerpts, counts within cap) -> byte-trimmed, partial, RESPONSE_BYTE_SOFT_MAX named", () => {
-    const turnCount = 200;
+  test("oversized serialized bytes (huge titles, counts within cap) -> auto-interval narrows to the newest-filling subset, partial, RESPONSE_BYTE_SOFT_MAX named", () => {
+    const turnCount = 20;
     const turns = turnsOfCount(turnCount);
-    const hugeText = "x".repeat(20_000); // 200 * ~20KB >> 1MB
+    // `title` is the one turn field `codePointExcerpt` never caps (unlike
+    // promptExcerpt/contentExcerpt) — the size driver here, at the ticket
+    // 04 scale (8MB budget): 20 * ~500KB ~= 10MB, comfortably over budget
+    // but small enough (n=20) that the walk's own O(n^2) re-serialization
+    // stays fast.
+    const hugeTitle = "x".repeat(500_000);
     const displayFields = new Map<number, ConsoleTurnDisplayFields>(
-      turns.map((t) => [t.id, { sessionId: 1, promptNumber: t.id, title: hugeText, userPrompt: hugeText, content: hugeText }]),
+      turns.map((t) => [t.id, { sessionId: 1, promptNumber: t.id, title: hugeTitle, userPrompt: null, content: null }]),
     );
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
@@ -729,28 +734,30 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
       CTX,
     );
     const body = result.body as any;
+    expect(body.turns.length).toBeGreaterThan(0);
     expect(body.turns.length).toBeLessThan(turnCount);
     expect(body.meta.stateCoverage).toBe("partial");
     const byteBound = body.meta.appliedBounds.find((b: any) => b.bound === "RESPONSE_BYTE_SOFT_MAX");
     expect(byteBound).toBeDefined();
     expect(byteBound.applied).toBe(RESPONSE_BYTE_SOFT_MAX);
-    // R2 #2: the trim loop now measures the FINAL envelope (meta included),
-    // not a {turns,edges,lanes,laneCheckText} stand-in — so the actually
-    // shipped bytes must respect the cap with NO slack. Before the fix, the
-    // reviewer's repro showed the stand-in read 999,797 bytes internally
-    // while the real (meta-appended) response was 1,000,001 — this
-    // assertion, with the slack removed, is exactly what would have caught
-    // that gap.
     expect(new TextEncoder().encode(JSON.stringify(body)).length).toBeLessThanOrEqual(RESPONSE_BYTE_SOFT_MAX);
     expectEdgesEndpointClosed(body);
+    // Ticket 04: the auto-selected interval is the NEWEST-filling one — the
+    // last (highest-id) turn is always kept, and the boundary names it.
+    expect(body.turns.at(-1).id).toBe(turns.at(-1)!.id);
+    expect(body.meta.interval).toBeDefined();
+    expect(body.meta.interval.toTurnId).toBe(turns.at(-1)!.id);
+    expect(body.meta.interval.isNewest).toBe(true);
+    expect(body.meta.interval.isOldest).toBe(false);
   });
 
-  test("R2 #2: an untrimmable lane (no turns/edges left to cut) still over the byte bound triggers the refusal-with-summary envelope — never a payload larger than RESPONSE_BYTE_SOFT_MAX carrying an applied-bound claim", () => {
-    // Reviewer's 600KB-lane-tag repro, generalized: a single lane whose own
-    // tagSet is huge enough that `lanes` + `laneCheckText` (both render the
-    // tag) alone exceed RESPONSE_BYTE_SOFT_MAX, with zero turns/edges to
-    // trim in the first place.
-    const hugeTag = "t".repeat(1_400_000);
+  test("R2 #2: an untrimmable lane (zero turns to begin with) still over the byte bound triggers the refusal-with-summary envelope — never a payload larger than RESPONSE_BYTE_SOFT_MAX carrying an applied-bound claim", () => {
+    // Reviewer's original 600KB-lane-tag repro, rescaled for ticket 04's 8MB
+    // budget: `laneToken` (used for both `membershipComponentId` and
+    // `token`) plus `tagSet` itself each embed the tag text, so a single
+    // huge tag renders at least 3x — comfortable margin over 8MB even if
+    // laneCheckText contributes nothing at all.
+    const hugeTag = "t".repeat(4_000_000);
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () =>
@@ -782,9 +789,8 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     );
     expect(result.status).toBe(200);
     const body = result.body as any;
-    // The core invariant R2 #2 rules out: whatever ships must actually
-    // respect RESPONSE_BYTE_SOFT_MAX — the reviewer's repro shipped ~2.4MB
-    // while claiming applied=1MB.
+    // The core invariant this rules out: whatever ships must actually
+    // respect RESPONSE_BYTE_SOFT_MAX.
     expect(new TextEncoder().encode(JSON.stringify(body)).length).toBeLessThanOrEqual(RESPONSE_BYTE_SOFT_MAX);
     expect(body.turns).toEqual([]);
     expect(body.edges).toEqual([]);
@@ -794,47 +800,154 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     expect(body.error.code).toBeDefined();
     expect(body.error.message).toContain("RESPONSE_BYTE_SOFT_MAX");
     expect(body.meta.stateCoverage).toBe("partial");
+    expect(body.meta.interval).toBeNull();
     const byteBound2 = body.meta.appliedBounds.find((b: any) => b.bound === "RESPONSE_BYTE_SOFT_MAX");
     expect(byteBound2).toBeDefined();
     expect(byteBound2.applied).toBe(RESPONSE_BYTE_SOFT_MAX);
   });
 
-  test("R2 #2 acceptance pin: edge-granularity trim exits within one edge of the bound — only a meta-inclusive measurement keeps the real envelope under RESPONSE_BYTE_SOFT_MAX", () => {
-    // The lane tag renders 3x into `lanes` (key + state.key) and 1x into
-    // `laneCheckText` (calibrated), parking ~960KB of untrimmable payload
-    // just under the bound; 1000 small edges (~76B each) supply the overage,
-    // so the byte-trim loop converges inside the EDGE loop and exits within
-    // ONE edge's bytes of the bound. A measurement that omits `meta` (~300B)
-    // then ships an envelope over the bound by construction — the reviewer's
-    // 999,797-internal vs 1,000,001-real gap, reconstructed
-    // deterministically instead of hoping a turn-granularity fixture
-    // happens to land in the ~300B knife-edge (calibrated: the meta-less
-    // stand-in ships 1,000,252 bytes here).
-    const bigTag = "t".repeat(240_000);
+  test("ticket 04: the auto-interval walk is TURN-ATOMIC — a turn is never included without its own full induced-edge set, and an excluded turn contributes zero edges", () => {
+    // 5 turns (ids ascending 1..5, "newest" = 5), each carrying a title big
+    // enough that only the newest few fit under RESPONSE_BYTE_SOFT_MAX:
+    // 2 turns ~= 7.0MB (fits), 3 turns ~= 10.5MB (does not) — a safe (non
+    // knife-edge) margin either side of the 8MB budget. 500 edges cycle
+    // through the ring (1,2)(2,3)(3,4)(4,5)(5,1), 100 copies each.
     const turns = turnsOfCount(5);
-    const edges = edgesOfCount(1000, 5);
+    const edges = edgesOfCount(500, 5);
+    const bigTitle = "x".repeat(3_500_000);
+    const displayFields = new Map<number, ConsoleTurnDisplayFields>(
+      turns.map((t) => [t.id, { sessionId: 1, promptNumber: t.id, title: bigTitle, userPrompt: null, content: null }]),
+    );
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
-      runLaneCheck: () =>
-        emptyLaneCheckRun({
-          turns,
-          edges,
-          result: {
-            ...emptyLaneCheckRun().result,
-            lanes: [
-              {
-                key: { segment: "E1", tagSet: [bigTag] },
-                phases: [],
-                members: [],
-                edgeCountsByRelation: {},
-                declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-                state: { key: { segment: "E1", tagSet: [bigTag] }, closure: "open", validity: null, terminus: null, lastDeclarer: null },
-                citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
-                coverage: { status: "whole", missingTurnIds: [] },
-              },
-            ],
-          },
-        }),
+      runLaneCheck: () => emptyLaneCheckRun({ turns, edges }),
+      loadTurnDisplayFields: () => displayFields,
+    });
+    const result = handleGraphRoute(
+      reader,
+      new URL("http://x/api/console/graph?session=1&from=1&to=1"),
+      CTX,
+    );
+    const body = result.body as any;
+    // Deterministic pin at these calibrated sizes: exactly turns 4 and 5
+    // survive, and exactly the 100 (4,5) edges among them — never a partial
+    // slice of that edge set, and never the (3,4)/(5,1) edges whose other
+    // endpoint did not make it in.
+    expect(body.turns.map((t: any) => t.id).sort((a: number, b: number) => a - b)).toEqual([4, 5]);
+    expect(body.edges).toHaveLength(100);
+    expect(body.edges.every((e: any) => e.citingId === 4 && e.citedId === 5)).toBe(true);
+    expectEdgesEndpointClosed(body);
+    expect(new TextEncoder().encode(JSON.stringify(body)).length).toBeLessThanOrEqual(RESPONSE_BYTE_SOFT_MAX);
+    expect(body.meta.interval).toEqual({
+      fromTurnId: 4,
+      toTurnId: 5,
+      fromAddress: "S1/T4",
+      toAddress: "S1/T5",
+      isOldest: false,
+      isNewest: true,
+    });
+  });
+
+  test("ticket 04: the interval param round-trips — requesting an older interval (ceiling below the previous response's fromTurnId) returns that older interval, budget-guarded identically", () => {
+    const turns = turnsOfCount(5);
+    const edges = edgesOfCount(500, 5);
+    const bigTitle = "x".repeat(3_500_000);
+    const displayFields = new Map<number, ConsoleTurnDisplayFields>(
+      turns.map((t) => [t.id, { sessionId: 1, promptNumber: t.id, title: bigTitle, userPrompt: null, content: null }]),
+    );
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () => emptyLaneCheckRun({ turns, edges }),
+      loadTurnDisplayFields: () => displayFields,
+    });
+    // First load (no interval param): auto-narrows to [4,5] (pinned above).
+    const first = handleGraphRoute(
+      reader,
+      new URL("http://x/api/console/graph?session=1&from=1&to=1"),
+      CTX,
+    ).body as any;
+    expect(first.meta.interval.fromTurnId).toBe(4);
+
+    // Client re-issues with interval = fromTurnId - 1 (the shell's own
+    // "较早" affordance) — same session/segment scope, older ceiling.
+    const second = handleGraphRoute(
+      reader,
+      new URL(`http://x/api/console/graph?session=1&from=1&to=1&interval=${first.meta.interval.fromTurnId - 1}`),
+      CTX,
+    ).body as any;
+    expect(second.turns.map((t: any) => t.id).sort((a: number, b: number) => a - b)).toEqual([2, 3]);
+    expect(second.meta.interval).toMatchObject({ fromTurnId: 2, toTurnId: 3, isNewest: false });
+    // Budget-guarded identically: still respects the same bound, still
+    // endpoint-closed, still turn-atomic.
+    expectEdgesEndpointClosed(second);
+    expect(new TextEncoder().encode(JSON.stringify(second)).length).toBeLessThanOrEqual(RESPONSE_BYTE_SOFT_MAX);
+  });
+
+  test("ticket 04: election tiers are unchanged by interval choice — the SAME turn's tier is identical whether it appears in the full response or a narrower explicit interval", () => {
+    const turns = turnsOfCount(5);
+    const edges = edgesOfCount(500, 5);
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () => emptyLaneCheckRun({ turns, edges }),
+      loadTurnDisplayFields: () => new Map(),
+    });
+    const full = (handleGraphRoute(
+      reader,
+      new URL("http://x/api/console/graph?session=1&from=1&to=1"),
+      CTX,
+    ).body as any).turns;
+    const narrowed = (handleGraphRoute(
+      reader,
+      new URL("http://x/api/console/graph?session=1&from=1&to=1&interval=3"),
+      CTX,
+    ).body as any).turns;
+    for (const t of narrowed) {
+      const same = full.find((f: any) => f.id === t.id);
+      expect(same).toBeDefined();
+      expect(t.electionTier).toBe(same.electionTier);
+    }
+  });
+
+  test("ticket 04: an interval ceiling with nothing eligible under it (below the oldest widened turn) returns an empty, non-unfittable response", () => {
+    const turns = turnsOfCount(3); // ids 1,2,3
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () => emptyLaneCheckRun({ turns }),
+      loadTurnDisplayFields: () => new Map(),
+    });
+    const result = handleGraphRoute(
+      reader,
+      new URL("http://x/api/console/graph?session=1&from=1&to=1&interval=0"),
+      CTX,
+    );
+    expect(result.status).toBe(200);
+    const body = result.body as any;
+    expect(body.turns).toEqual([]);
+    expect(body.edges).toEqual([]);
+    expect(body.error).toBeUndefined();
+    expect(body.meta.interval).toBeNull();
+  });
+
+  for (const bad of ["abc", "-1", "1.5"]) {
+    test(`interval=${bad} -> 400`, () => {
+      // No reader method stubbed at all (beyond the default "throws
+      // loudly") — `interval` validates BEFORE `resolveGraphScope` runs, so
+      // this 400 must come back without ever touching the reader.
+      const reader = makeFakeReader();
+      const result = handleGraphRoute(
+        reader,
+        new URL(`http://x/api/console/graph?session=1&interval=${bad}`),
+        CTX,
+      );
+      expect(result.status).toBe(400);
+    });
+  }
+
+  test("whole scope fits under the raised caps with zero narrowing -> meta.interval spans the full set (isOldest and isNewest both true)", () => {
+    const turns = turnsOfCount(5);
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () => emptyLaneCheckRun({ turns }),
       loadTurnDisplayFields: () => new Map(),
     });
     const result = handleGraphRoute(
@@ -843,18 +956,19 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
       CTX,
     );
     const body = result.body as any;
-    // Knife-edge preconditions: the trim really converged inside the edge
-    // loop — turns intact, edges partially cut. If either fails, the fixture
-    // sizes drifted and the test must be retuned, not deleted.
     expect(body.turns).toHaveLength(5);
-    expect(body.edges.length).toBeGreaterThan(0);
-    expect(body.edges.length).toBeLessThan(1000);
-    const byteBound = body.meta.appliedBounds.find((b: any) => b.bound === "RESPONSE_BYTE_SOFT_MAX");
-    expect(byteBound).toBeDefined();
-    // The teeth: the ACTUAL serialized response respects the cap with zero
-    // slack allowance.
-    expect(new TextEncoder().encode(JSON.stringify(body)).length).toBeLessThanOrEqual(RESPONSE_BYTE_SOFT_MAX);
-    expectEdgesEndpointClosed(body);
+    expect(body.meta.stateCoverage).toBe("full");
+    expect(body.meta.interval).toEqual({
+      fromTurnId: 1,
+      toTurnId: 5,
+      // No `loadTurnDisplayFields` override here -> `sessionId` falls back
+      // to `turn.order[0]`, which `turnsOfCount`'s own fixture sets to 0
+      // (a placeholder, not a real session id).
+      fromAddress: "S0/T1",
+      toAddress: "S0/T5",
+      isOldest: true,
+      isNewest: true,
+    });
   });
 
   test("R2 #3: a turn dropped by WIDEN_NODE_MAX leaves its own edge dangling — filtered out, never shipped with a missing endpoint (reviewer's 2001-turn repro)", () => {
@@ -1172,18 +1286,21 @@ describe("routeConsoleApiRequest", () => {
   });
 });
 
-// Constants sanity — pins the ticket 01 values verbatim, so a future edit
+// Constants sanity — pins the current values verbatim, so a future edit
 // that silently drifts one of them fails a test instead of only a diff.
-describe("bound constants (ticket 01's recommended values, verbatim)", () => {
+// GRAPH_EDGE_MAX/WIDEN_NODE_MAX/RESPONSE_BYTE_SOFT_MAX were raised by ticket
+// 04 (graph-byte-priority, T1496 ruling) from ticket 01's original values
+// (1000/2000/1_000_000) — everything else here is still ticket 01's own.
+describe("bound constants (verbatim)", () => {
   test("values", () => {
     expect(SESSIONS_PAGE_MAX).toBe(50);
     expect(GRAPH_WINDOW_DEFAULT).toBe(50);
     expect(GRAPH_WINDOW_MAX).toBe(2000);
     expect(EXCERPT_PROMPT_CP).toBe(280);
     expect(EXCERPT_CONTENT_CP).toBe(280);
-    expect(GRAPH_EDGE_MAX).toBe(1000);
-    expect(WIDEN_NODE_MAX).toBe(2000);
-    expect(RESPONSE_BYTE_SOFT_MAX).toBe(1_000_000);
+    expect(GRAPH_EDGE_MAX).toBe(10_000);
+    expect(WIDEN_NODE_MAX).toBe(10_000);
+    expect(RESPONSE_BYTE_SOFT_MAX).toBe(8_000_000);
     expect(ELECTION_PREVIEW_BUDGET).toBe(30);
   });
 });

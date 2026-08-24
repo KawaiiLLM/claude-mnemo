@@ -188,7 +188,7 @@ describe("release artifacts", () => {
       // 0.18.0 — memory console (worker HTTP seam): the request gate and the
       // final-envelope byte bound; a stale worker bundle would 404 /console.
       "evaluateRequestGate",
-      "applyGraphByteBound",
+      "applyGraphAutoInterval",
       "electionCoverage", // R2 #11: election tiers computed on the full snapshot
       // 0.18.0 — semantic conformance: the checker's vocabulary fact block and
       // the settlement re-annotation duty (non-conforming is never standing
