@@ -444,3 +444,24 @@ describe("console-shell.html range bar (ticket 04)", () => {
     expect(html).not.toContain("已按预算截断，不等价于完整");
   });
 });
+
+// T1527/T1529: arc depth means REACH. The wide band's old slope spent 9px over
+// spans 1..6 while 76% of real wide-band edges sit at span <= 5, so two
+// citations leaving one node drew as a single stroke. Pinned as source text
+// because the geometry itself has no seam below a rendering engine — the
+// headless layout check in the demo harness is what measures the result.
+describe("console-shell.html edge geometry", () => {
+  const html = readFileSync(join(import.meta.dir, "../../src/worker/console-shell.html"), "utf8");
+
+  test("the wide band separates short spans instead of bunching them at its floor", () => {
+    expect(html).toContain("Math.min(330, 150 + span*12)");
+    expect(html).not.toContain("Math.min(330, 150 + span*1.9)");
+  });
+
+  test("an edge that cannot be placed is counted and reported, never dropped in silence", () => {
+    expect(html).toContain("if (!Number.isFinite(y1)||!Number.isFinite(y2)) { undrawnEdges++; continue; }");
+    expect(html).toContain("if (undrawnEdges > 0) {");
+    expect(html).toContain("条边的端点不在本次载入的节点集内,未能绘制");
+    expect(html).not.toContain("if (!Number.isFinite(y1)||!Number.isFinite(y2)) continue;");
+  });
+});

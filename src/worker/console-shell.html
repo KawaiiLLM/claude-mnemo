@@ -57,6 +57,8 @@
   #rangeBar .rangeLabel { font-family:"SF Mono",Menlo,monospace; color:var(--ink); }
   #rangeBar .rangeNav { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:5px; padding:2px 9px; font-size:11.5px; cursor:pointer; }
   #rangeBar .rangeNav:hover { border-color:var(--lane); color:var(--lane); }
+  /* an edge the shell could not place — loud on purpose, never a silent drop */
+  #rangeBar .rangeWarn { color:var(--override); font-weight:600; }
 
   #lanes { padding:8px 24px 4px; flex:none; }
   #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }
@@ -549,13 +551,23 @@ function renderGraphSvg(){
   // an arc, and it doubles as a full-width row guide across the rail.
   const bgg = mk("g",{}); svg.appendChild(bgg);
   const eg = mk("g",{}); svg.appendChild(eg);
+  let undrawnEdges = 0;
   for (const e of edges) {
     const y1=yOf(e.citingId), y2=yOf(e.citedId);
-    if (!Number.isFinite(y1)||!Number.isFinite(y2)) continue;
+    // Asserted unreachable — the server only ships an edge whose BOTH endpoints
+    // are in the interval it selected. Counted and reported below rather than
+    // dropped in silence (T1529 ruling, "不要静默隐藏该有的线"): a line the data
+    // says exists must never just fail to appear.
+    if (!Number.isFinite(y1)||!Number.isFinite(y2)) { undrawnEdges++; continue; }
     const span = Math.abs(idx.get(e.citingId)-idx.get(e.citedId));
+    // Arc depth is REACH. The wide band's old slope (150 + span*1.9) spent 9px
+    // across spans 1..6 while 76% of real wide-band edges live at span <= 5, so
+    // two citations from one node came out as one stroke (T1527). At span*12
+    // the same band separates them by 60px and saturates only past span 15,
+    // where the endpoints are already far enough apart to tell the arcs apart.
     const depth = STRUCT.has(e.relation)
       ? Math.min(120, 16 + span*2.4)
-      : Math.min(330, 150 + span*1.9);
+      : Math.min(330, 150 + span*12);
     const p = mk("path",{class:"edge "+(e.tags.length?"laned":"plain"),
       d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,stroke:css("--"+e.relation)});
     if (DASH.has(e.relation)) p.setAttribute("stroke-dasharray","5 3");
@@ -566,6 +578,17 @@ function renderGraphSvg(){
       (e.tags.length?` <span class="lg">{${esc(e.tags.join(","))}}</span>`:"")));
     p.addEventListener("mouseleave", hideTip);
     eg.appendChild(p); edgeEls.push(p);
+  }
+
+  // T1529 ruling: an edge that could not be drawn is REPORTED, never swallowed.
+  // The range bar already carries this response's scope line, so the warning
+  // lands where the reader is told what they are looking at.
+  if (undrawnEdges > 0) {
+    const warn = document.createElement("span");
+    warn.className = "rangeWarn";
+    warn.textContent = `⚠ ${undrawnEdges} 条边的端点不在本次载入的节点集内,未能绘制`;
+    rangeBar.appendChild(warn);
+    rangeBar.style.display = "flex";
   }
 
   const ng = mk("g",{}); svg.appendChild(ng);
