@@ -39,7 +39,10 @@ WRITABLE SET:
   `{ "turn": "S15069/T7", "tags": ["lane-tag"] }` acting on the named
   LANE. extends/narrows accept ONLY the tagged form: continuation names
   its line. An edge's tags must already sit on BOTH endpoint turns' own
-  tags — write the member turns' tags first, then the edge. The
+  tags — write the member turns' tags first, then the edge. An edge
+  write also needs your own current read of the citing turn's RELATIONS —
+  Step 0's relations field is that read, and your own writes keep it
+  current. The
   `retract<Relation>` mirrors delete one row each and still accept bare
   addresses (legacy rows stay deletable). One pair may carry several
   relations at once; a call carrying nothing but relations is valid.
