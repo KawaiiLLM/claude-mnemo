@@ -459,11 +459,381 @@ function seedLanesFromClassification(
 }
 
 // ---------------------------------------------------------------------------
+// M3 — legal membership, by explicit allowlist
+// ---------------------------------------------------------------------------
+
+export const LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT = "lane-declaration-m3-membership";
+
+/**
+ * D6/M3 (peer P1-4, "a count is not provenance"). Rev 1 stamped a segment's
+ * curated tags onto its tagless members whenever the segment held "≤2"
+ * curated tags — a legacy segment carrying two DERIVED tags (the pre-ticket-07
+ * frequency mush, not hand-curated identity) would have been stamped just as
+ * readily as a genuinely curated one, and a hand-curated THREE-tag segment
+ * would have been skipped. This hard-coded, reviewed list is the ONLY
+ * eligibility test: `(segment id, EXACT curated tag set)`, order-independent —
+ * a segment whose curated tags do not match one of these entries exactly is
+ * always reported, never stamped, whatever its member count.
+ *
+ * Measured live (2026-08-24): E60's curated tags are `["claude-mnemo"]` and it
+ * is the only segment on this list — E53/E58/E59 carry 29/21/18 entries, the
+ * old derived-tag mechanism's leftovers (predating ticket 07's "tags are
+ * hand-curated identity, not derived"), and are reported, never touched.
+ * Extending this list is a reviewed, deliberate act — never automatic.
+ */
+const LANE_MIGRATION_MEMBERSHIP_ALLOWLIST: ReadonlyArray<{
+  segmentId: number;
+  curatedTags: readonly string[];
+}> = [{ segmentId: 60, curatedTags: ["claude-mnemo"] }];
+
+/** Order-independent set equality, used only for the allowlist's exact-match test above. */
+function tagSetsEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((tag, index) => tag === sortedB[index]);
+}
+
+export interface LaneMigrationStampedSegment {
+  segmentId: number;
+  curatedTags: string[];
+  /** Turn ids this call actually rewrote, ascending — the audit trail for the stamp. */
+  stampedTurnIds: number[];
+}
+
+export interface LaneMigrationReportedSegment {
+  segmentId: number;
+  curatedTags: string[];
+  /** How many members are missing at least one curated tag — reported, never touched. */
+  taglessMemberCount: number;
+}
+
+export interface LaneMigrationMalformedMember {
+  turnId: number;
+  segmentId: number;
+  /** The `tags` column verbatim. Never present for a NULL column — see the reason field. */
+  rawTags: string;
+  /** `malformed-tags-column` = not even valid JSON; `non-array-tags-column` = valid JSON, but not an array (a bare string, an object, ...). A NULL column is neither — it reads as `[]`, same as `db/segments.ts`'s own `parseMemberFacetArray` convention. */
+  reason: "malformed-tags-column" | "non-array-tags-column";
+}
+
+export interface LaneMigrationMembershipReceipt {
+  stamped: LaneMigrationStampedSegment[];
+  reported: LaneMigrationReportedSegment[];
+  malformed: LaneMigrationMalformedMember[];
+}
+
+interface SegmentCuratedTagsRow {
+  id: number;
+  tags: string;
+}
+
+interface SegmentMemberTagsRow {
+  turnId: number;
+  tags: string | null;
+}
+
+type MemberTagColumnRead =
+  | { ok: true; tags: string[] }
+  | { ok: false; reason: LaneMigrationMalformedMember["reason"] };
+
+/**
+ * `turns.tags` carries no `json_valid` CHECK (db/segments.ts's own
+ * `parseMemberFacetArray` notes the same fact), so a malformed value is
+ * storable. NULL is a legitimate "no tags stated" — treated as `[]`, never
+ * reported — matching the codebase's standing "empty is never a claim"
+ * convention; only a NON-NULL value that fails to parse, or parses to
+ * something other than an array, is malformed.
+ */
+function readMemberTagsColumn(raw: string | null): MemberTagColumnRead {
+  if (raw === null) {
+    return { ok: true, tags: [] };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "malformed-tags-column" };
+  }
+  if (!Array.isArray(parsed)) {
+    return { ok: false, reason: "non-array-tags-column" };
+  }
+  return {
+    ok: true,
+    tags: parsed.filter((tag): tag is string => typeof tag === "string"),
+  };
+}
+
+/**
+ * M3 (spec D6, ticket 04): repairs the legal-membership gap ticket 07's
+ * `checkSegmentMembershipTagGate` (db/segments.ts) created retroactively — a
+ * segment's curated tags gate every NEW membership write, but every member
+ * that joined BEFORE that gate existed may still lack them, which is exactly
+ * what breaks D2's subset invariant for a tagged edge among that segment's
+ * turns. Scans every segment with non-empty curated tags (an EMPTY set gates
+ * nothing — the same vacuous-pass rule `checkSegmentMembershipTagGate` itself
+ * applies, so a segment with no curated tags is not even a candidate here),
+ * finds members missing at least one, and STAMPS — a UNION onto the member's
+ * existing tags, never a replacement, so nothing already stored is lost —
+ * only when `(segmentId, curatedTags)` exactly matches the allowlist above.
+ * Every other segment with tagless members is named in `reported` and left
+ * byte-for-byte untouched.
+ *
+ * `turns.updated_at_epoch` is deliberately left as-is: this is a mechanical
+ * repair, not a content edit, and no read surface in this codebase orders
+ * turns by it (checked: no `ORDER BY ... updated_at_epoch` reads it off
+ * `turns` anywhere in `src/`).
+ */
+function classifyAndRepairMembership(db: Database): LaneMigrationMembershipReceipt {
+  const segments = db
+    .query<SegmentCuratedTagsRow, []>(
+      `SELECT id, tags FROM segments WHERE json_array_length(tags) > 0 ORDER BY id ASC`,
+    )
+    .all();
+
+  const stamped: LaneMigrationStampedSegment[] = [];
+  const reported: LaneMigrationReportedSegment[] = [];
+  const malformed: LaneMigrationMalformedMember[] = [];
+
+  const listMembers = db.query<SegmentMemberTagsRow, [number]>(
+    `SELECT t.id AS turnId, t.tags AS tags
+     FROM segment_members sm JOIN turns t ON t.id = sm.turn_id
+     WHERE sm.segment_id = ?
+     ORDER BY t.id ASC`,
+  );
+  const updateTurnTags = db.query<unknown, [string, number]>(
+    `UPDATE turns SET tags = ? WHERE id = ?`,
+  );
+
+  for (const segment of segments) {
+    const curatedTags = (JSON.parse(segment.tags) as unknown[]).filter(
+      (tag): tag is string => typeof tag === "string",
+    );
+    const allowlisted = LANE_MIGRATION_MEMBERSHIP_ALLOWLIST.find(
+      (entry) =>
+        entry.segmentId === segment.id && tagSetsEqual(entry.curatedTags, curatedTags),
+    );
+
+    const stampedTurnIds: number[] = [];
+    let taglessMemberCount = 0;
+
+    for (const member of listMembers.all(segment.id)) {
+      const read = readMemberTagsColumn(member.tags);
+      if (!read.ok) {
+        malformed.push({
+          turnId: member.turnId,
+          segmentId: segment.id,
+          rawTags: member.tags ?? "",
+          reason: read.reason,
+        });
+        continue;
+      }
+      const memberTags = new Set(read.tags);
+      const missing = curatedTags.filter((tag) => !memberTags.has(tag));
+      if (missing.length === 0) {
+        continue;
+      }
+      taglessMemberCount += 1;
+      if (allowlisted) {
+        const nextTags = [...read.tags, ...missing];
+        updateTurnTags.run(JSON.stringify(nextTags), member.turnId);
+        stampedTurnIds.push(member.turnId);
+      }
+    }
+
+    if (taglessMemberCount === 0) {
+      continue;
+    }
+    if (allowlisted) {
+      stamped.push({ segmentId: segment.id, curatedTags, stampedTurnIds });
+    } else {
+      reported.push({ segmentId: segment.id, curatedTags, taglessMemberCount });
+    }
+  }
+
+  return { stamped, reported, malformed };
+}
+
+// ---------------------------------------------------------------------------
+// M4 — illegal edges, by relation class
+// ---------------------------------------------------------------------------
+
+export const LANE_REGISTRY_M4_DISPOSAL_RECEIPT = "lane-declaration-m4-disposal";
+
+/**
+ * D6/M4 (peer P1-3). `extends`/`narrows` are the checker's own CONTINUATION
+ * relations: an UNTAGGED one is itself rejected by the checker (E1), the same
+ * way a tagged one with an undeclared endpoint is — so stripping tags off one
+ * of these would trade one illegal shape for another, not repair it. Every
+ * other relation carries no such constraint untagged, so it downgrades
+ * instead of being deleted.
+ */
+const CONTINUATION_RELATIONS: ReadonlySet<string> = new Set(["extends", "narrows"]);
+
+export interface LaneMigrationDeletedEdge {
+  edgeId: number;
+  citingTurnId: number;
+  citingAddress: string;
+  citedTurnId: number;
+  citedAddress: string;
+  relation: string;
+  tags: string[];
+}
+
+export interface LaneMigrationDowngradedEdge {
+  edgeId: number;
+  citingTurnId: number;
+  citingAddress: string;
+  citedTurnId: number;
+  citedAddress: string;
+  relation: string;
+  tags: string[];
+  /**
+   * "downgraded" = this row's OWN tags were cleared to untagged in place.
+   * "merged" = an untagged row for the same (pair, relation) already
+   * existed, so this row was deleted rather than colliding with the
+   * `(pair, relation, tags)` UNIQUE key — its fact is absorbed into that
+   * pre-existing row, named by `mergedIntoEdgeId`.
+   */
+  disposition: "downgraded" | "merged";
+  mergedIntoEdgeId?: number;
+}
+
+export interface LaneMigrationDisposalReceipt {
+  deleted: LaneMigrationDeletedEdge[];
+  downgraded: LaneMigrationDowngradedEdge[];
+}
+
+interface DisposalEdgeRow {
+  id: number;
+  citingId: number;
+  citedId: number;
+  relation: string;
+  tags: string;
+}
+
+/** `S<session>/T<prompt>`, matching every other write surface's address form (e.g. `db/segments.ts`'s `SegmentMembershipGateViolation.turnAddress`). Falls back to a bare id if the turn row is somehow gone. */
+function resolveTurnAddress(db: Database, turnId: number): string {
+  const row = db
+    .query<{ sessionId: number; promptNumber: number }, [number]>(
+      `SELECT session_id AS sessionId, prompt_number AS promptNumber FROM turns WHERE id = ?`,
+    )
+    .get(turnId);
+  return row ? `S${row.sessionId}/T${row.promptNumber}` : `turn ${turnId}`;
+}
+
+/**
+ * M4 (spec D6, ticket 04): disposes of every edge M0 classified
+ * `notPlaceable` — a homeless endpoint can never gain a segment declaration
+ * through this migration (that is a live `assign` operator act, not a
+ * repair), so every entry here is PERMANENTLY illegal under D2 rule 2, not
+ * merely illegal today. Ticket 01's own doc comment on the orchestrator named
+ * this exactly: "a later ticket consumes `notPlaceable` off the M0 receipt."
+ *
+ * Acts on the CURRENT row (looked up fresh by `edgeId`), not the M0 snapshot's
+ * own relation/tags — defensive against a row that no longer matches between
+ * phases; a row that is simply gone is silently skipped, since there is
+ * nothing left to repair.
+ *
+ * `memory_edge_tags` maintenance is TARGETED, not a full rebuild (there is no
+ * `rebuildMemoryEdgeTagsIndex` call here on purpose: that helper opens its OWN
+ * `runWriteTransaction`, and nesting one inside another does not compose under
+ * bun:sqlite's `.immediate()` — see `note-settlement-completion.ts`'s
+ * `completeNoteSettlementJobIfSegmentedCore` for the same constraint). A
+ * DELETE (continuation relation, or a merge collision) already cascades via
+ * `memory_edge_tags.edge_row_id REFERENCES memory_edges(id) ON DELETE CASCADE`
+ * (schema.ts); only the in-place downgrade needs its own tag-index row
+ * cleared explicitly, since that edge survives with a different tag set.
+ */
+function disposeIllegalEdges(
+  db: Database,
+  notPlaceable: readonly LaneMigrationClassifiedEdge[],
+): LaneMigrationDisposalReceipt {
+  const deleted: LaneMigrationDeletedEdge[] = [];
+  const downgraded: LaneMigrationDowngradedEdge[] = [];
+
+  const readEdge = db.query<DisposalEdgeRow, [number]>(
+    `SELECT id, citing_id AS citingId, cited_id AS citedId, relation, tags
+     FROM memory_edges WHERE id = ?`,
+  );
+  const deleteEdge = db.query<unknown, [number]>(`DELETE FROM memory_edges WHERE id = ?`);
+  const findUntaggedRow = db.query<{ id: number }, [number, number, string]>(
+    `SELECT id FROM memory_edges
+     WHERE citing_kind = 'turn' AND citing_id = ?
+       AND cited_kind = 'turn' AND cited_id = ?
+       AND relation = ? AND tags = '[]'`,
+  );
+  const downgradeEdgeTags = db.query<unknown, [number]>(
+    `UPDATE memory_edges SET tags = '[]' WHERE id = ?`,
+  );
+  const clearTagIndexForEdge = db.query<unknown, [number]>(
+    `DELETE FROM memory_edge_tags WHERE edge_row_id = ?`,
+  );
+
+  for (const entry of notPlaceable) {
+    const row = readEdge.get(entry.edgeId);
+    if (!row) {
+      continue;
+    }
+    const citingAddress = resolveTurnAddress(db, row.citingId);
+    const citedAddress = resolveTurnAddress(db, row.citedId);
+    const tags = JSON.parse(row.tags) as string[];
+
+    if (CONTINUATION_RELATIONS.has(row.relation)) {
+      deleteEdge.run(row.id);
+      deleted.push({
+        edgeId: row.id,
+        citingTurnId: row.citingId,
+        citingAddress,
+        citedTurnId: row.citedId,
+        citedAddress,
+        relation: row.relation,
+        tags,
+      });
+      continue;
+    }
+
+    const existingUntagged = findUntaggedRow.get(row.citingId, row.citedId, row.relation);
+    if (existingUntagged) {
+      deleteEdge.run(row.id);
+      downgraded.push({
+        edgeId: row.id,
+        citingTurnId: row.citingId,
+        citingAddress,
+        citedTurnId: row.citedId,
+        citedAddress,
+        relation: row.relation,
+        tags,
+        disposition: "merged",
+        mergedIntoEdgeId: existingUntagged.id,
+      });
+    } else {
+      downgradeEdgeTags.run(row.id);
+      clearTagIndexForEdge.run(row.id);
+      downgraded.push({
+        edgeId: row.id,
+        citingTurnId: row.citingId,
+        citingAddress,
+        citedTurnId: row.citedId,
+        citedAddress,
+        relation: row.relation,
+        tags,
+        disposition: "downgraded",
+      });
+    }
+  }
+
+  return { deleted, downgraded };
+}
+
+// ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
 
 /**
- * D6/M0-M2: ordered, durable, per-phase receipts — a phase is skipped only
+ * D6/M0-M4: ordered, durable, per-phase receipts — a phase is skipped only
  * when ITS OWN receipt row exists, never inferred from `lanes` having rows
  * (the first process to open an upgraded database is often a hook, and a
  * crash between phases must not silently skip the rest forever). `lanes`
@@ -471,15 +841,20 @@ function seedLanesFromClassification(
  * `CREATE TABLE IF NOT EXISTS` DDL in SCHEMA_SQL (schema.ts) — already
  * idempotent, so table creation needs no receipt of its own.
  *
- * M0 and M2 run in SEPARATE transactions (not one): M0's classification must
- * be fully committed before M2 reads it back, so a crash between the two
- * leaves M0's receipt durable and M2 still pending on the NEXT process to
- * open this database — never re-classifying, never silently skipping the
- * seed.
+ * Every phase runs in its OWN transaction (not one big one): a crash between
+ * phases leaves the earlier ones' receipts durable and the rest still pending
+ * on the NEXT process to open this database — never re-running a finished
+ * phase, never silently skipping a pending one. M2 and M4 both read M0's
+ * receipt back rather than re-classifying, which is exactly why M0 must be
+ * fully committed first.
  *
- * M3/M4 (legal membership by allowlist; illegal edges by relation class) are
- * OUT OF SCOPE for this ticket (issue 01: "D1, D4, D6/M0-M2") — a later
- * ticket consumes `notPlaceable` off the M0 receipt.
+ * M3 (ticket 04) reads no earlier receipt — it re-derives directly from
+ * `segments`/`segment_members`/`turns`, independent of M0's edge-only
+ * classification. M4 (ticket 04) consumes M0's `notPlaceable` bucket, per
+ * ticket 01's own note above this function's earlier revision. Ordered M3
+ * before M4 to match D6's own enumeration; the two touch disjoint columns
+ * (`turns.tags` vs `memory_edges`) so their relative order carries no
+ * functional weight of its own.
  */
 export function runLaneRegistryMigration(
   db: Database,
@@ -507,5 +882,25 @@ export function runLaneRegistryMigration(
       nowEpoch,
     );
     writeMigrationReceipt(db, LANE_REGISTRY_M2_SEED_RECEIPT, nowEpoch, seedReceipt);
+  });
+
+  runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT)) {
+      return;
+    }
+    const membershipReceipt = classifyAndRepairMembership(db);
+    writeMigrationReceipt(db, LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT, nowEpoch, membershipReceipt);
+  });
+
+  runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, LANE_REGISTRY_M4_DISPOSAL_RECEIPT)) {
+      return;
+    }
+    const classification = readMigrationReceiptPayload<LaneMigrationClassification>(
+      db,
+      LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
+    );
+    const disposalReceipt = disposeIllegalEdges(db, classification?.notPlaceable ?? []);
+    writeMigrationReceipt(db, LANE_REGISTRY_M4_DISPOSAL_RECEIPT, nowEpoch, disposalReceipt);
   });
 }
