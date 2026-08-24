@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { parseInlineCitations } from "../db/citations";
+import { loadLaneCheckScope } from "../db/lane-checker-load";
+import { listLanesForSegment, type LaneRecord } from "../db/lanes";
 import { getRelationEdgesAmongTurns, getRolledBackCiterIds } from "../db/memory-edges";
 import {
   getSegmentMembershipForTurns,
@@ -15,6 +17,16 @@ import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { estimateDiaryTokens } from "../diary/domain";
 import { isSegmentEra } from "../segment-era";
+import type { LaneCheckerTurnInput } from "../shared/lane-checker";
+import {
+  compareOrderKeyAcrossSessions,
+  deriveLaneInterpretation,
+  laneToken,
+  type Lane,
+  type LaneInterpretation,
+  type LaneKey,
+  type LaneOrderKey,
+} from "../shared/lane-interpretation";
 import {
   electMilestones,
   type LaneEdgeInput,
@@ -76,7 +88,20 @@ export interface TimelineInput {
   id: string;
   page?: number;
   pageSize?: number;
-  view?: TimelineViewKind;
+  /**
+   * Ticket 07 (lane-declaration spec D8): `"lane"` is accepted here (the
+   * schema-level literal the tool surface exposes, `mcp/definitions.ts`) so
+   * the exact call the spec names — `timeline(id="E60/L*", view="lane")` —
+   * does not fail `.strict()` validation. It is otherwise INERT: routing to
+   * the lane view is driven entirely by the id's own `E<n>/L*`/`E<n>/L<n>`
+   * suffix (`parseSegmentLaneId`), never by this field, so a bare `E<n>` (or
+   * `S<n>`) id with `view: "lane"` falls back to that route's ordinary
+   * default view — `timelineQuery`'s own `narrowToBaseView` is what strips
+   * it back to `undefined` before either of the other two routes ever reads
+   * it, keeping `buildTimelineView`/`buildSegmentTimelineView`'s own
+   * `TimelineViewKind` switch exactly as narrow as before this ticket.
+   */
+  view?: TimelineViewKind | "lane";
   /**
    * Milestones only: show the trailing `pageSize` kept milestones (the most
    * recent end) instead of front-aligned page 1. Selection still runs over the
@@ -1619,7 +1644,9 @@ export function buildTimelineView(
   preloadedTurns?: TurnRecord[],
 ): TimelineView {
   const parsed = parseTimelineId(input.id);
-  const viewKind = input.view ?? "turns";
+  // Ticket 07: `"lane"` is a segment-scoped concept with no meaning on a
+  // plain `S<n>` session id — see `narrowToBaseView`'s own doc comment.
+  const viewKind = narrowToBaseView(input.view) ?? "turns";
   const session = getSession(db, parsed.sessionId);
 
   if (!session) {
@@ -4140,6 +4167,411 @@ export function renderSegmentTimeline(view: SegmentTimelineView): string {
   return appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated });
 }
 
+// ---------------------------------------------------------------------------
+// `E<n>/L*` / `E<n>/L<n>` addressing (ticket 07, lane-declaration spec D8):
+// a segment's declared lanes, each rendered as one header line plus one
+// representative chain. `E<n>/L*` lists every declared lane, newest-first;
+// `E<n>/L<n>` renders one, at the SAME 1-based ordinal the list itself would
+// show it at (a navigation handle, not a stable id — the same "positional
+// address" convention `recall`'s own `E<n>/T<m>` already uses for a
+// segment's member turns).
+// ---------------------------------------------------------------------------
+
+export interface ParsedSegmentLaneId {
+  segmentId: number;
+  /** `"all"` for `/L*`; a 1-based ordinal for `/L<n>`. Syntax only — an out-of-range or zero ordinal is a builder-time error, not a parse failure, so the message stays on-topic ("lane ordinal out of range") rather than falling through to an unrelated id-grammar rejection. */
+  laneIndex: number | "all";
+}
+
+export function parseSegmentLaneId(id: string): ParsedSegmentLaneId | null {
+  const match = id.trim().match(/^E(\d+)\/L(\*|\d+)$/i);
+  if (!match) {
+    return null;
+  }
+  const segmentId = Number(match[1]);
+  if (match[2] === "*") {
+    return { segmentId, laneIndex: "all" };
+  }
+  return { segmentId, laneIndex: Number(match[2]) };
+}
+
+/**
+ * D8's own chain domain: the five relation words the ticket's own tie-break
+ * order names (`extends`/`narrows` > `indexes` > `consume` > `override`).
+ * `grounds`/`verifies`/`refutes` never appear in `Lane.taggedEdges` filtered
+ * through this — a lane's tagged edges can in principle carry any relation
+ * word, but only these five are STRUCTURAL continuation of the lane's own
+ * line of work; testimony/aggregation edges are a member's own citedness
+ * fact, not a step of the chain.
+ */
+const LANE_CHAIN_RELATIONS: ReadonlySet<string> = new Set([
+  "extends",
+  "narrows",
+  "indexes",
+  "consume",
+  "override",
+]);
+
+/** D8's own tie-break order — ONLY consulted between two branches of otherwise EQUAL node coverage (see `selectLaneChainPath`). Any relation outside `LANE_CHAIN_RELATIONS` cannot reach here (the chain graph is pre-filtered), so the `4` fallback is defensive only. */
+function laneChainRelationRank(relation: string): number {
+  if (relation === "extends" || relation === "narrows") return 0;
+  if (relation === "indexes") return 1;
+  if (relation === "consume") return 2;
+  if (relation === "override") return 3;
+  return 4;
+}
+
+/** Per-lane-chain node cap (D8's own "within the item budget"). Not exposed on `TimelineInput` — the ticket asks for a bounded representative chain, not a caller-tunable one; a lane's own member count (always rendered) is what tells the reader how much more exists. */
+export const DEFAULT_LANE_CHAIN_ITEM_BUDGET = 8;
+
+interface LaneOrderLookup {
+  order: LaneOrderKey;
+  createdAtEpoch?: number;
+}
+
+function laneMemberOrder(
+  id: number,
+  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
+): LaneOrderLookup {
+  const turn = turnsById.get(id);
+  return { order: turn?.order ?? [0, id], createdAtEpoch: turn?.createdAtEpoch };
+}
+
+/**
+ * D8's own "NOT greedy" path selection (peer finding P2-7, ticket text: "A
+ * greedy walk that shows a two-hop branch while hiding a five-node one is a
+ * failed acceptance"). A proper longest-node-count-path DP over the lane's
+ * own structural (`LANE_CHAIN_RELATIONS`) tagged edges, walking BACKWARD in
+ * time (citing -> cited) from `startId` — never a step-by-step "best
+ * immediate relation, then recency" choice. `bestCoverage` memoizes, per
+ * node, the most member turns reachable by continuing optimally from there;
+ * the outer walk then greedily follows the argmax CHILD at each step, which
+ * is sound (not merely locally greedy) precisely because that argmax already
+ * accounts for everything reachable beneath it. The D8 relation-preference
+ * order and recency apply ONLY when two candidate children have EQUAL
+ * `bestCoverage` — never to choose a branch outright.
+ */
+export function selectLaneChainPath(
+  startId: number,
+  edgesByCitingId: ReadonlyMap<number, ReadonlyArray<{ citedId: number; relation: string }>>,
+  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
+): Array<{ turnId: number; relationIn: string | null }> {
+  const coverage = new Map<number, number>();
+  const visiting = new Set<number>();
+
+  function bestCoverage(nodeId: number): number {
+    const cached = coverage.get(nodeId);
+    if (cached !== undefined) return cached;
+    if (visiting.has(nodeId)) return 0; // cycle guard: corrupt input contributes 0, never hangs
+    visiting.add(nodeId);
+    let best = 0;
+    const targets = new Set((edgesByCitingId.get(nodeId) ?? []).map((edge) => edge.citedId));
+    for (const target of targets) {
+      best = Math.max(best, bestCoverage(target));
+    }
+    visiting.delete(nodeId);
+    const result = 1 + best;
+    coverage.set(nodeId, result);
+    return result;
+  }
+
+  const path: Array<{ turnId: number; relationIn: string | null }> = [];
+  const seen = new Set<number>();
+  let current = startId;
+  let relationIn: string | null = null;
+  for (;;) {
+    seen.add(current);
+    path.push({ turnId: current, relationIn });
+    const children = edgesByCitingId.get(current) ?? [];
+    // Parallel relations into the SAME node are one route (lane-checker.ts's
+    // own "one route" convention) — keep the best-RANKED relation among them
+    // so the tie-break below (and the rendered arrow) sees the strongest one.
+    const byTarget = new Map<number, string>();
+    for (const child of children) {
+      const existing = byTarget.get(child.citedId);
+      if (existing === undefined || laneChainRelationRank(child.relation) < laneChainRelationRank(existing)) {
+        byTarget.set(child.citedId, child.relation);
+      }
+    }
+    let bestTarget: number | null = null;
+    let bestTargetCoverage = -1;
+    let bestTargetRank = Number.POSITIVE_INFINITY;
+    let bestTargetOrder: LaneOrderLookup = { order: [0, 0] };
+    for (const [targetId, relation] of byTarget) {
+      if (seen.has(targetId)) continue; // cycle guard on the CHOSEN path itself
+      const targetCoverage = bestCoverage(targetId);
+      const rank = laneChainRelationRank(relation);
+      const order = laneMemberOrder(targetId, turnsById);
+      const better =
+        bestTarget === null ||
+        targetCoverage > bestTargetCoverage ||
+        (targetCoverage === bestTargetCoverage &&
+          (rank < bestTargetRank ||
+            (rank === bestTargetRank && compareOrderKeyAcrossSessions(order, bestTargetOrder) > 0)));
+      if (better) {
+        bestTarget = targetId;
+        bestTargetCoverage = targetCoverage;
+        bestTargetRank = rank;
+        bestTargetOrder = order;
+      }
+    }
+    if (bestTarget === null) {
+      break;
+    }
+    current = bestTarget;
+    relationIn = byTarget.get(bestTarget)!;
+  }
+  return path;
+}
+
+function laneNewestMemberId(
+  memberIds: readonly number[],
+  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
+): number | null {
+  let bestId: number | null = null;
+  let bestOrder: LaneOrderLookup | null = null;
+  for (const id of memberIds) {
+    if (!turnsById.has(id)) continue; // coverage gap — never fabricate a position for a turn this projection did not load
+    const order = laneMemberOrder(id, turnsById);
+    if (bestOrder === null || compareOrderKeyAcrossSessions(order, bestOrder) > 0) {
+      bestOrder = order;
+      bestId = id;
+    }
+  }
+  return bestId;
+}
+
+/** The header's "modal TYPE emoji across its member turns" (D8): the single WORD stated by the most members (dead included — a typological fact about the turn, independent of override status), ties broken by `MEMORY_TYPES`' own order — "the rubric's own type order" the ticket names. `PENDING_EMOJI` when no member stated any word at all. */
+function laneModalTypeEmoji(
+  memberIds: readonly number[],
+  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
+): string {
+  const counts = new Map<string, number>();
+  for (const id of memberIds) {
+    const turn = turnsById.get(id);
+    if (!turn) continue;
+    for (const word of turn.type) {
+      counts.set(word, (counts.get(word) ?? 0) + 1);
+    }
+  }
+  const rubricOrder = MEMORY_TYPES as readonly string[];
+  let bestWord: string | null = null;
+  let bestCount = 0;
+  let bestRank = Number.POSITIVE_INFINITY;
+  for (const [word, count] of counts) {
+    const rank = rubricOrder.indexOf(word);
+    const effectiveRank = rank === -1 ? rubricOrder.length : rank;
+    if (bestWord === null || count > bestCount || (count === bestCount && effectiveRank < bestRank)) {
+      bestWord = word;
+      bestCount = count;
+      bestRank = effectiveRank;
+    }
+  }
+  return bestWord === null ? PENDING_EMOJI : typeWordGlyph(bestWord);
+}
+
+/**
+ * Addresses (ticket text): bare within the viewed segment, `E<seg>/` for a
+ * turn owned by ANOTHER real segment, `S<session>/` for a homeless one.
+ * Every trailing number in this render is the GLOBAL turn id — the one
+ * `recall(id="T<n>")` resolves directly — never an ordinal or a prompt
+ * number; the prefix is a pure locator, telling the reader where to find the
+ * turn relative to the segment they are looking at, not a second address
+ * grammar of its own (mirrors D7's `E<segment>/T<globalTurnId>` card form).
+ */
+function laneNodeAddressPrefix(
+  turn: LaneCheckerTurnInput | undefined,
+  viewedSegmentId: number,
+): string {
+  if (!turn) {
+    return ""; // coverage gap — never fabricate a locator for a turn this projection did not load
+  }
+  if (turn.segment === undefined) {
+    const sessionId = turn.order ? turn.order[0] : 0;
+    return `S${sessionId}/`;
+  }
+  if (turn.segment === String(viewedSegmentId)) {
+    return "";
+  }
+  return `E${turn.segment}/`;
+}
+
+export interface SegmentLaneChainNode {
+  turnId: number;
+  /** `null` on the chain's first (newest) node — no incoming edge is rendered for it. `"=>"` iff the edge INTO this node is a tagged `indexes` edge (D8); `"->"` otherwise. */
+  arrowIn: "=>" | "->" | null;
+  isTerminus: boolean;
+  /** `""` | `"E<seg>/"` | `"S<session>/"` — see `laneNodeAddressPrefix`. */
+  addressPrefix: string;
+}
+
+export interface SegmentLaneView {
+  key: LaneKey;
+  /** 1-based, newest-first — the `[L<n>]` the header renders, stable across the list and a single-lane (`E<n>/L<n>`) render of the SAME lane. */
+  laneIndex: number;
+  /** The lane's newest member's `createdAtEpoch`; a declared-but-memberless lane falls back to its own `lanes.created_at_epoch`. */
+  headerEpoch: number;
+  headerEmoji: string;
+  /** The lane's total member count — the chain's own trailing `(N)`, ALWAYS this number, whether or not the shown nodes were truncated. */
+  memberCount: number;
+  /** The selected path's nodes, sliced to `DEFAULT_LANE_CHAIN_ITEM_BUDGET`. */
+  nodes: SegmentLaneChainNode[];
+  /** `true` iff the SELECTED path itself had more nodes than the item budget could show — the ONLY condition that renders the `-> ...` truncation marker ahead of `(N)`. A fork whose branch was never followed appends nothing of its own (D8) — `(N)` alone (always present) already signals that the chain does not necessarily cover the whole lane. */
+  truncated: boolean;
+}
+
+export interface SegmentLaneListView {
+  segment: SegmentRecord;
+  /** Already ordered/sliced per the request — every declared lane (newest-first) for `/L*`, or the one requested ordinal for `/L<n>`. */
+  lanes: SegmentLaneView[];
+  totalDeclaredCount: number;
+}
+
+function buildSegmentLaneChain(
+  laneRecord: LaneRecord,
+  interpretation: LaneInterpretation,
+  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
+  viewedSegmentId: number,
+  itemBudget: number,
+): Omit<SegmentLaneView, "laneIndex"> {
+  const key: LaneKey = { segment: String(laneRecord.segmentId), tag: laneRecord.tag };
+  const lane: Lane | undefined = interpretation.laneByToken.get(laneToken(key.segment, key.tag));
+
+  if (lane === undefined || lane.members.length === 0) {
+    // Declared but no tagged edge has ever named it yet (`deriveLaneInterpretation`
+    // only creates a group from an EDGE) — a real, legal state right after
+    // `remember(verb="declare", ...)`, not an error.
+    return {
+      key,
+      headerEpoch: laneRecord.createdAtEpoch,
+      headerEmoji: PENDING_EMOJI,
+      memberCount: 0,
+      nodes: [],
+      truncated: false,
+    };
+  }
+
+  const memberIds = lane.members.map((member) => member.id);
+  const newestId = laneNewestMemberId(memberIds, turnsById) ?? memberIds[memberIds.length - 1]!;
+  const headerEpoch = turnsById.get(newestId)?.createdAtEpoch ?? laneRecord.createdAtEpoch;
+  const headerEmoji = laneModalTypeEmoji(memberIds, turnsById);
+
+  const chainEdges = lane.taggedEdges.filter((edge) => LANE_CHAIN_RELATIONS.has(edge.relation));
+  const edgesByCitingId = new Map<number, Array<{ citedId: number; relation: string }>>();
+  for (const edge of chainEdges) {
+    const bucket = edgesByCitingId.get(edge.citingId) ?? [];
+    bucket.push({ citedId: edge.citedId, relation: edge.relation });
+    edgesByCitingId.set(edge.citingId, bucket);
+  }
+
+  const fullPath = selectLaneChainPath(newestId, edgesByCitingId, turnsById);
+  const truncated = fullPath.length > itemBudget;
+  const shown = truncated ? fullPath.slice(0, itemBudget) : fullPath;
+
+  const nodes: SegmentLaneChainNode[] = shown.map((step) => ({
+    turnId: step.turnId,
+    arrowIn: step.relationIn === null ? null : step.relationIn === "indexes" ? "=>" : "->",
+    isTerminus: lane.declaration.terminus !== null && step.turnId === lane.declaration.terminus,
+    addressPrefix: laneNodeAddressPrefix(turnsById.get(step.turnId), viewedSegmentId),
+  }));
+
+  return {
+    key,
+    headerEpoch,
+    headerEmoji,
+    memberCount: lane.members.length,
+    nodes,
+    truncated,
+  };
+}
+
+export function buildSegmentLaneListView(
+  db: Database,
+  segmentId: number,
+  laneIndex: number | "all",
+  itemBudget: number = DEFAULT_LANE_CHAIN_ITEM_BUDGET,
+): SegmentLaneListView {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    throw new Error(`timeline: segment E${segmentId} not found`);
+  }
+
+  const declared = listLanesForSegment(db, segmentId);
+  const projection = loadLaneCheckScope(db, {
+    kind: "lanes",
+    laneKeys: declared.map((lane) => ({ segment: String(segmentId), tag: lane.tag })),
+  });
+  const turnsById = new Map(projection.turns.map((turn) => [turn.id, turn]));
+  const interpretation = deriveLaneInterpretation(projection.turns, projection.edges);
+
+  const built = declared.map((laneRecord) => ({
+    record: laneRecord,
+    view: buildSegmentLaneChain(laneRecord, interpretation, turnsById, segmentId, itemBudget),
+  }));
+  // Newest-first (D8); a declared-but-memberless lane's fallback epoch (its
+  // OWN declaration time) sorts it deterministically among the rest, tag
+  // ascending breaking any exact-epoch tie.
+  built.sort((a, b) => {
+    if (a.view.headerEpoch !== b.view.headerEpoch) {
+      return b.view.headerEpoch - a.view.headerEpoch;
+    }
+    return a.record.tag.localeCompare(b.record.tag);
+  });
+  const ordered: SegmentLaneView[] = built.map((entry, index) => ({
+    ...entry.view,
+    laneIndex: index + 1,
+  }));
+
+  if (laneIndex === "all") {
+    return { segment, lanes: ordered, totalDeclaredCount: ordered.length };
+  }
+
+  if (laneIndex < 1 || laneIndex > ordered.length) {
+    throw new Error(
+      `timeline: lane ordinal L${laneIndex} out of range for E${segmentId} (${ordered.length} declared lane(s))`,
+    );
+  }
+  return { segment, lanes: [ordered[laneIndex - 1]!], totalDeclaredCount: ordered.length };
+}
+
+function renderLaneHeaderLine(lane: SegmentLaneView): string {
+  const time = `${formatLocalMonthDay(lane.headerEpoch)} ${formatLocalTime(lane.headerEpoch)}`;
+  return `[L${lane.laneIndex}] ${time} ${lane.headerEmoji} ${sanitizeTimelineField(lane.key.tag)}`;
+}
+
+function renderLaneChainLine(lane: SegmentLaneView): string {
+  if (lane.nodes.length === 0) {
+    return `${RENDER_INDENT_STEP}(0)`;
+  }
+  let body = "";
+  lane.nodes.forEach((node, index) => {
+    const label = `${node.isTerminus ? "◎" : ""}${node.addressPrefix}T${node.turnId}`;
+    if (index === 0) {
+      body = label;
+      return;
+    }
+    body += `${node.arrowIn === "=>" ? " => " : " -> "}${label}`;
+  });
+  const tail = lane.truncated ? ` -> ...(${lane.memberCount})` : `(${lane.memberCount})`;
+  return `${RENDER_INDENT_STEP}${body}${tail}`;
+}
+
+export function renderSegmentLaneView(view: SegmentLaneListView): string {
+  if (view.lanes.length === 0) {
+    return appendNavigationLegend(`(no lanes declared for E${view.segment.id})`, {
+      truncated: false,
+    });
+  }
+  const lines: string[] = [];
+  let truncatedAny = false;
+  for (const lane of view.lanes) {
+    lines.push(renderLaneHeaderLine(lane));
+    lines.push(renderLaneChainLine(lane));
+    truncatedAny = truncatedAny || lane.truncated;
+  }
+  return appendNavigationLegend(lines.join("\n"), { truncated: truncatedAny });
+}
+
 function recordTimelineReadGrants(
   db: Database,
   readerId: string | null | undefined,
@@ -4156,16 +4588,61 @@ function recordTimelineReadGrants(
   recordReadGrants(db, readerId, entries, (now ?? (() => Math.floor(Date.now() / 1000)))(), sequence);
 }
 
+/**
+ * Ticket 07: `"lane"` is a schema-level literal only (`TimelineInput.view`'s
+ * own doc comment) — neither `buildSegmentTimelineView` nor `buildTimelineView`
+ * knows the word. Anywhere the id's own `E<n>/L*`/`E<n>/L<n>` suffix did NOT
+ * already route the call into the lane view below, a stray `view: "lane"` is
+ * simply dropped back to `undefined` (that route's own default), rather than
+ * widening either builder's `TimelineViewKind` switch to a case that would
+ * make no sense on a plain session or segment id.
+ */
+function narrowToBaseView(view: TimelineViewKind | "lane" | undefined): TimelineViewKind | undefined {
+  return view === "lane" ? undefined : view;
+}
+
 export function timelineQuery(db: Database, input: TimelineInput): string {
   // Ticket 14 (P1-3 fix, spec "授权序列渲染前快照"): captured before EITHER
   // branch below reads a single row.
   const sequence = snapshotWriteGateSequence(db);
   try {
+    // `view: "lane"` on a bare `E<n>` means the same thing as `E<n>/L*` — a
+    // request the caller spelled the other way, not a request to silently
+    // hand back the ordinary turns view. Falling back without a word is the
+    // shape the user ruled against in S15069/T1529; routing it is the only
+    // reading under which the parameter means anything at all.
+    const laneRoute =
+      parseSegmentLaneId(input.id) ??
+      (input.view === "lane" && input.id !== undefined
+        ? parseSegmentLaneId(`${input.id}/L*`)
+        : null);
+    if (laneRoute !== null) {
+      const view = buildSegmentLaneListView(db, laneRoute.segmentId, laneRoute.laneIndex);
+      // Write gate (ticket 01): the segment itself, plus every turn that
+      // actually appears on a rendered chain (across every lane shown).
+      const shownTurnIds = new Set<number>();
+      for (const lane of view.lanes) {
+        for (const node of lane.nodes) {
+          shownTurnIds.add(node.turnId);
+        }
+      }
+      recordTimelineReadGrants(
+        db,
+        input.readerId,
+        input.now,
+        [
+          { entityType: "segment", entityId: view.segment.id },
+          ...[...shownTurnIds].map((turnId) => ({ entityType: "turn" as const, entityId: turnId })),
+        ],
+        sequence,
+      );
+      return renderSegmentLaneView(view);
+    }
     const segmentRoute = parseSegmentTimelineId(input.id);
     if (segmentRoute !== null) {
       const view = buildSegmentTimelineView(db, {
         segmentId: segmentRoute.segmentId,
-        view: input.view,
+        view: narrowToBaseView(input.view),
         page: input.page,
         pageSize: input.pageSize,
         pageBudget: input.pageBudget,
