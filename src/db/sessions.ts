@@ -91,80 +91,159 @@ const SESSION_SELECT = `
   FROM sessions
 `;
 
+const SESSION_UPSERT_RETURNING = `
+  RETURNING
+    id,
+    content_session_id AS contentSessionId,
+    project,
+    transcript_path AS transcriptPath,
+    title,
+    content,
+    insight,
+    next_steps AS nextSteps,
+    decision,
+    done,
+    "current" AS current,
+    "reference" AS reference,
+    last_compact_turn AS lastCompactTurn,
+        summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+    scan_cursor_byte_offset AS scanCursorByteOffset,
+    scan_cursor_line AS scanCursorLine,
+    parent_session_id AS parentSessionId,
+    lineage_status AS lineageStatus,
+    last_remember_turn_id AS lastRememberTurnId,
+    created_at_epoch AS createdAtEpoch,
+    updated_at_epoch AS updatedAtEpoch,
+    completed_at_epoch AS completedAtEpoch
+`;
+
+/**
+ * UPDATE-first, insert-only-when-missing (ticket 01, session-id-burn). The
+ * prior shape was a single `INSERT ... ON CONFLICT DO UPDATE`, which SQLite
+ * implements by allocating a fresh AUTOINCREMENT id for the attempted insert
+ * BEFORE the conflict is detected and the DO UPDATE branch runs — so every
+ * touch of an already-registered session (the overwhelming majority of calls;
+ * a session is created once and touched many times) burned one never-reused
+ * `sqlite_sequence` number. Session ids render into every `[S<n>/T<m>]`
+ * citation address, so the burn is a compounding token cost (production: 221
+ * rows, sequence 23484 — ~105x). UPDATE never touches AUTOINCREMENT, so
+ * repeated touches of an existing row now cost nothing; a genuinely new
+ * session still takes the INSERT path and advances the sequence by exactly
+ * one, same as before. The INSERT keeps its `ON CONFLICT` clause as a pure
+ * race guard for the gap between "UPDATE found no row" and "INSERT runs" —
+ * under concurrent callers on the same content_session_id, the loser's
+ * UPDATE returns null, its INSERT then conflicts with the winner's newly
+ * committed row, and the ON CONFLICT DO UPDATE (identical merge semantics)
+ * makes it converge on the same result instead of throwing. The whole
+ * read-modify-write is one transaction (nested safely via bun:sqlite
+ * SAVEPOINT support when the caller already holds one) so no writer can
+ * observe or act on the gap between the UPDATE miss and the INSERT.
+ */
 export function upsertSession(
   db: Database,
   input: UpsertSessionInput,
 ): SessionRecord {
-  const session =
-  db
-    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, string | null, number | null, number | null, number, number | null, number | null]>(`
-      INSERT INTO sessions (
-        content_session_id,
-        project,
-        transcript_path,
-        title,
-        content,
-        insight,
-        next_steps,
-        last_compact_turn,
-        summary_updated_at_epoch,
-        created_at_epoch,
-        updated_at_epoch,
-        completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(content_session_id) DO UPDATE SET
-        project = excluded.project,
-        -- First-non-NULL, and deliberately the reverse of project's
-        -- last-writer-wins: the transcript directory is fixed at the session's
-        -- STARTING cwd, so a later upsert from a different cwd must not move it.
-        transcript_path = COALESCE(sessions.transcript_path, excluded.transcript_path),
-        title = COALESCE(excluded.title, sessions.title),
-        content = COALESCE(excluded.content, sessions.content),
-        insight = COALESCE(excluded.insight, sessions.insight),
-        next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
-        last_compact_turn = COALESCE(excluded.last_compact_turn, sessions.last_compact_turn),
-        summary_updated_at_epoch = COALESCE(excluded.summary_updated_at_epoch, sessions.summary_updated_at_epoch),
-        created_at_epoch = excluded.created_at_epoch,
-        updated_at_epoch = excluded.updated_at_epoch,
-        completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
-      RETURNING
-        id,
-        content_session_id AS contentSessionId,
-        project,
-        transcript_path AS transcriptPath,
-        title,
-        content,
-        insight,
-        next_steps AS nextSteps,
-        decision,
-        done,
-        "current" AS current,
-        "reference" AS reference,
-        last_compact_turn AS lastCompactTurn,
-            summary_updated_at_epoch AS summaryUpdatedAtEpoch,
-        scan_cursor_byte_offset AS scanCursorByteOffset,
-        scan_cursor_line AS scanCursorLine,
-        parent_session_id AS parentSessionId,
-        lineage_status AS lineageStatus,
-        last_remember_turn_id AS lastRememberTurnId,
-        created_at_epoch AS createdAtEpoch,
-        updated_at_epoch AS updatedAtEpoch,
-        completed_at_epoch AS completedAtEpoch
-    `)
-    .get(
-      input.contentSessionId,
-      input.project,
-      input.transcriptPath ?? null,
-      input.title,
-      input.content ?? null,
-      input.insight,
-      input.nextSteps ?? null,
-      input.lastCompactTurn ?? null,
-      input.summaryUpdatedAtEpoch ?? null,
-      input.createdAtEpoch,
-      input.updatedAtEpoch,
-      input.completedAtEpoch,
-    );
+  const runUpsert = db.transaction(() => {
+    const updated = db
+      .query<SessionRecord, [
+        string,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        number | null,
+        number | null,
+        number,
+        number | null,
+        number | null,
+        string,
+      ]>(`
+        UPDATE sessions SET
+          project = ?,
+          -- First-non-NULL, and deliberately the reverse of project's
+          -- last-writer-wins: the transcript directory is fixed at the
+          -- session's STARTING cwd, so a later upsert from a different cwd
+          -- must not move it.
+          transcript_path = COALESCE(transcript_path, ?),
+          title = COALESCE(?, title),
+          content = COALESCE(?, content),
+          insight = COALESCE(?, insight),
+          next_steps = COALESCE(?, next_steps),
+          last_compact_turn = COALESCE(?, last_compact_turn),
+          summary_updated_at_epoch = COALESCE(?, summary_updated_at_epoch),
+          created_at_epoch = ?,
+          updated_at_epoch = ?,
+          completed_at_epoch = COALESCE(?, completed_at_epoch)
+        WHERE content_session_id = ?
+        ${SESSION_UPSERT_RETURNING}
+      `)
+      .get(
+        input.project,
+        input.transcriptPath ?? null,
+        input.title,
+        input.content ?? null,
+        input.insight,
+        input.nextSteps ?? null,
+        input.lastCompactTurn ?? null,
+        input.summaryUpdatedAtEpoch ?? null,
+        input.createdAtEpoch,
+        input.updatedAtEpoch,
+        input.completedAtEpoch,
+        input.contentSessionId,
+      );
+
+    if (updated) {
+      return updated;
+    }
+
+    return db
+      .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, string | null, number | null, number | null, number, number | null, number | null]>(`
+        INSERT INTO sessions (
+          content_session_id,
+          project,
+          transcript_path,
+          title,
+          content,
+          insight,
+          next_steps,
+          last_compact_turn,
+          summary_updated_at_epoch,
+          created_at_epoch,
+          updated_at_epoch,
+          completed_at_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(content_session_id) DO UPDATE SET
+          project = excluded.project,
+          transcript_path = COALESCE(sessions.transcript_path, excluded.transcript_path),
+          title = COALESCE(excluded.title, sessions.title),
+          content = COALESCE(excluded.content, sessions.content),
+          insight = COALESCE(excluded.insight, sessions.insight),
+          next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
+          last_compact_turn = COALESCE(excluded.last_compact_turn, sessions.last_compact_turn),
+          summary_updated_at_epoch = COALESCE(excluded.summary_updated_at_epoch, sessions.summary_updated_at_epoch),
+          created_at_epoch = excluded.created_at_epoch,
+          updated_at_epoch = excluded.updated_at_epoch,
+          completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
+        ${SESSION_UPSERT_RETURNING}
+      `)
+      .get(
+        input.contentSessionId,
+        input.project,
+        input.transcriptPath ?? null,
+        input.title,
+        input.content ?? null,
+        input.insight,
+        input.nextSteps ?? null,
+        input.lastCompactTurn ?? null,
+        input.summaryUpdatedAtEpoch ?? null,
+        input.createdAtEpoch,
+        input.updatedAtEpoch,
+        input.completedAtEpoch,
+      );
+  });
+
+  const session = runUpsert.immediate();
 
   if (!session) {
     throw new Error("Failed to upsert session.");

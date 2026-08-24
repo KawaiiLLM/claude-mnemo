@@ -177,6 +177,240 @@ describe("session queries", () => {
     expect(updated.nextSteps).toBe("- keep working");
   });
 
+  // Ticket 01 (session-id-burn): upsertSession is now UPDATE-first, so a
+  // touch of an already-registered session must never allocate a fresh
+  // AUTOINCREMENT id — only a genuinely new content_session_id may.
+  describe("sequence burn (ticket 01)", () => {
+    function readSequence(): number {
+      return (
+        db
+          .query<{ seq: number }, []>(
+            `SELECT seq FROM sqlite_sequence WHERE name = 'sessions'`,
+          )
+          .get()?.seq ?? 0
+      );
+    }
+
+    test("repeated touches of an existing session leave sqlite_sequence unchanged", () => {
+      const created = upsertSession(db, {
+        contentSessionId: "seq-content-1",
+        project: "claude-mnemo",
+        title: "Initial",
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 100,
+        completedAtEpoch: null,
+      });
+
+      const sequenceAfterCreate = readSequence();
+      expect(sequenceAfterCreate).toBe(created.id);
+
+      upsertSession(db, {
+        contentSessionId: "seq-content-1",
+        project: "claude-mnemo",
+        title: "Touch 2",
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 110,
+        completedAtEpoch: null,
+      });
+      upsertSession(db, {
+        contentSessionId: "seq-content-1",
+        project: "claude-mnemo",
+        title: "Touch 3",
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 120,
+        completedAtEpoch: null,
+      });
+
+      expect(readSequence()).toBe(sequenceAfterCreate);
+    });
+
+    test("a genuinely new session advances sqlite_sequence by exactly 1", () => {
+      const first = upsertSession(db, {
+        contentSessionId: "seq-content-a",
+        project: "claude-mnemo",
+        title: null,
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 100,
+        completedAtEpoch: null,
+      });
+
+      // Burn the first session's sequence budget with repeated touches —
+      // must not move the counter (this is the regression the ticket fixes).
+      upsertSession(db, {
+        contentSessionId: "seq-content-a",
+        project: "claude-mnemo",
+        title: "again",
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 105,
+        completedAtEpoch: null,
+      });
+
+      const sequenceBeforeNew = readSequence();
+
+      const second = upsertSession(db, {
+        contentSessionId: "seq-content-b",
+        project: "claude-mnemo",
+        title: null,
+        insight: null,
+        createdAtEpoch: 200,
+        updatedAtEpoch: 200,
+        completedAtEpoch: null,
+      });
+
+      expect(second.id).toBe(first.id + 1);
+      expect(readSequence()).toBe(sequenceBeforeNew + 1);
+    });
+  });
+
+  // Ticket 01: every field's merge rule pinned individually, matching the
+  // ticket's list exactly.
+  describe("merge semantics, field by field (ticket 01)", () => {
+    test("project is last-writer-wins (unconditional overwrite)", () => {
+      upsertSession(db, {
+        contentSessionId: "merge-project",
+        project: "/Users/me/alpha",
+        title: null,
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 100,
+        completedAtEpoch: null,
+      });
+
+      const updated = upsertSession(db, {
+        contentSessionId: "merge-project",
+        project: "/Users/me/beta",
+        title: null,
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 110,
+        completedAtEpoch: null,
+      });
+
+      expect(updated.project).toBe("/Users/me/beta");
+    });
+
+    test("title/content/insight/nextSteps/lastCompactTurn/summaryUpdatedAtEpoch/completedAtEpoch are non-null-last-writer", () => {
+      const created = upsertSession(db, {
+        contentSessionId: "merge-fields",
+        project: "claude-mnemo",
+        title: "t1",
+        content: "c1",
+        insight: "i1",
+        nextSteps: "n1",
+        lastCompactTurn: 5,
+        summaryUpdatedAtEpoch: 900,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 100,
+        completedAtEpoch: 1000,
+      });
+
+      // Pass 1: non-null values overwrite.
+      const overwritten = upsertSession(db, {
+        contentSessionId: "merge-fields",
+        project: "claude-mnemo",
+        title: "t2",
+        content: "c2",
+        insight: "i2",
+        nextSteps: "n2",
+        lastCompactTurn: 6,
+        summaryUpdatedAtEpoch: 901,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 110,
+        completedAtEpoch: 1001,
+      });
+
+      expect(overwritten.title).toBe("t2");
+      expect(overwritten.content).toBe("c2");
+      expect(overwritten.insight).toBe("i2");
+      expect(overwritten.nextSteps).toBe("n2");
+      expect(overwritten.lastCompactTurn).toBe(6);
+      expect(overwritten.summaryUpdatedAtEpoch).toBe(901);
+      expect(overwritten.completedAtEpoch).toBe(1001);
+
+      // Pass 2: omitted (undefined -> null on the wire) fields preserve the
+      // prior value instead of clearing it.
+      const preserved = upsertSession(db, {
+        contentSessionId: "merge-fields",
+        project: "claude-mnemo",
+        title: null,
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 120,
+        completedAtEpoch: null,
+      });
+
+      expect(preserved.title).toBe("t2");
+      expect(preserved.content).toBe("c2");
+      expect(preserved.insight).toBe("i2");
+      expect(preserved.nextSteps).toBe("n2");
+      expect(preserved.lastCompactTurn).toBe(6);
+      expect(preserved.summaryUpdatedAtEpoch).toBe(901);
+      expect(preserved.completedAtEpoch).toBe(1001);
+      expect(created.id).toBe(overwritten.id);
+      expect(created.id).toBe(preserved.id);
+    });
+
+    test("transcript_path is first-non-null (reversed direction: existing wins over a later non-null)", () => {
+      const created = upsertSession(db, {
+        contentSessionId: "merge-transcript",
+        project: "/Users/me/alpha",
+        transcriptPath: "/first.jsonl",
+        title: null,
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 100,
+        completedAtEpoch: null,
+      });
+
+      const updated = upsertSession(db, {
+        contentSessionId: "merge-transcript",
+        project: "/Users/me/beta",
+        transcriptPath: "/second.jsonl",
+        title: null,
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 110,
+        completedAtEpoch: null,
+      });
+
+      expect(created.transcriptPath).toBe("/first.jsonl");
+      expect(updated.transcriptPath).toBe("/first.jsonl");
+    });
+
+    test("created_at_epoch and updated_at_epoch are unconditionally overwritten, including moving updated_at_epoch back to null", () => {
+      upsertSession(db, {
+        contentSessionId: "merge-epochs",
+        project: "claude-mnemo",
+        title: null,
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 500,
+        completedAtEpoch: null,
+      });
+
+      const updated = upsertSession(db, {
+        contentSessionId: "merge-epochs",
+        project: "claude-mnemo",
+        title: null,
+        insight: null,
+        createdAtEpoch: 999,
+        updatedAtEpoch: null,
+        completedAtEpoch: null,
+      });
+
+      // Both fields take whatever this call passed, with no COALESCE guard —
+      // even a "regression" (created_at_epoch to a different value, or
+      // updated_at_epoch clobbered back to null) lands verbatim.
+      expect(updated.createdAtEpoch).toBe(999);
+      expect(updated.updatedAtEpoch).toBeNull();
+    });
+  });
+
   test("getRecentSessions orders by createdAtEpoch descending", () => {
     upsertSession(db, {
       contentSessionId: "content-3",
