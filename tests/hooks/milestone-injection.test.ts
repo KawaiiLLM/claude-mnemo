@@ -7,7 +7,9 @@ import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import {
+  MILESTONE_INJECTION_RECENT_TURNS,
   MILESTONE_INJECTION_TOKEN_BUDGET,
+  renderMilestoneInjection,
   renderSessionMilestoneInjection,
 } from "../../src/hooks/milestone-injection";
 import {
@@ -420,6 +422,325 @@ describe("SessionStart milestone injection = the arc view", () => {
     // over at most 30 units).
     expect(elapsedMs).toBeLessThan(1_500);
     expect(injected.length).toBeGreaterThan(0);
+    db.close();
+  });
+});
+
+// injection-milestone-split spec, ticket 01: the SessionStart arc now renders
+// as two half-budget `milestones`-view calls split at
+// `lastPromptNumber - MILESTONE_INJECTION_RECENT_TURNS`, so a session with
+// more turns than that window no longer lets old high-score anchors starve
+// every recent row out of the single shared budget.
+
+/** A cheap, edge-free filler turn: always tier ⑤ ("everything else") in the election. */
+function fillerRow(promptNumber: number, epoch: number, title?: string): SeedRow {
+  return {
+    promptNumber,
+    prompt: `第 ${promptNumber} 轮`,
+    title: title ?? `filler turn ${promptNumber}`,
+    type: "feature",
+    grade: 3,
+    epoch,
+  };
+}
+
+/**
+ * An untagged self-`indexes` edge — the cheapest way to put a turn in
+ * election tier ① ("untagged-`indexes` writers") without touching the lane
+ * machinery tier ② depends on (`shared/milestone-election.ts` step 2/③:
+ * self-edges are explicitly in-scope, "no `citingId !== citedId` filter
+ * anywhere"). Tier ① always outranks tier ⑤, so a self-indexed turn survives
+ * any budget cut a plain filler row would not.
+ */
+function selfIndex(
+  db: ReturnType<typeof createDatabase>,
+  sessionId: number,
+  promptNumber: number,
+): void {
+  const id = turnDbId(db, sessionId, promptNumber);
+  writeMemoryEdges(
+    db,
+    [
+      {
+        citing: { kind: "turn" as const, id },
+        cited: { kind: "turn" as const, id },
+        relation: "indexes" as const,
+        provenance: "judged" as const,
+      },
+    ],
+    ERA_BASE,
+  );
+}
+
+describe("SessionStart milestone injection = the two-call recent/old split (ticket 01)", () => {
+  test("MILESTONE_INJECTION_RECENT_TURNS is pinned at 200", () => {
+    expect(MILESTONE_INJECTION_RECENT_TURNS).toBe(200);
+  });
+
+  test("partition pins exactly at max-200: that turn is OLD, the next one is RECENT — sub-rows never cross the boundary", () => {
+    const db = createDatabase(":memory:");
+    const total = MILESTONE_INJECTION_RECENT_TURNS + 2; // boundary lands at prompt 2
+    const rows: SeedRow[] = [];
+    for (let n = 1; n <= total; n += 1) {
+      rows.push(fillerRow(n, ERA_BASE + n * 60));
+    }
+    rows[1] = fillerRow(2, ERA_BASE + 2 * 60, "OLD anchor at the boundary");
+    rows[2] = fillerRow(3, ERA_BASE + 3 * 60, "RECENT anchor just past it");
+    const sessionId = seedSession(db, "boundary-pin", rows);
+    selfIndex(db, sessionId, 2);
+    selfIndex(db, sessionId, 3);
+    // T3 cites T2 (any relation survives on `↳` — ticket uses `verifies`,
+    // same as `cite()` elsewhere in this file): only elected iff BOTH ends
+    // are elected in the SAME window's own selection.
+    cite(db, sessionId, 3, [2]);
+
+    const boundary = total - MILESTONE_INJECTION_RECENT_TURNS; // 2
+    const oldView = buildTimelineView(db, {
+      id: `S${sessionId}/T..${boundary}`,
+      view: "milestones",
+      pageSize: Number.MAX_SAFE_INTEGER,
+    });
+    const recentView = buildTimelineView(db, {
+      id: `S${sessionId}/T${boundary + 1}..`,
+      view: "milestones",
+      pageSize: Number.MAX_SAFE_INTEGER,
+    });
+
+    const oldPrompts = oldView.pagedMilestones.map((m) => m.turn.promptNumber);
+    const recentPrompts = recentView.pagedMilestones.map((m) => m.turn.promptNumber);
+    expect(oldPrompts).toContain(2);
+    expect(oldPrompts).not.toContain(3);
+    expect(recentPrompts).toContain(3);
+    expect(recentPrompts).not.toContain(2);
+    // T2 is in the OLD window's own selection, so T3's `↳` line (which only
+    // ever lists a citee elected in the SAME call) never lists it — the
+    // sub-row does not cross the boundary with its parent.
+    const t3Row = recentView.pagedMilestones.find((m) => m.turn.promptNumber === 3)!;
+    expect(t3Row.antecedents).toEqual([]);
+
+    const injected = renderSessionMilestoneInjection(db, sessionId);
+    expect(injected).toContain("OLD anchor at the boundary");
+    expect(injected).toContain("RECENT anchor just past it");
+    db.close();
+  });
+
+  test("an empty side reallocates the whole budget to the other (OLD side here is all `compact`-typed, so it has turns but zero candidates)", () => {
+    const db = createDatabase(":memory:");
+    const oldCount = 10;
+    const recentCount = MILESTONE_INJECTION_RECENT_TURNS;
+    const total = oldCount + recentCount;
+    const rows: SeedRow[] = [];
+    for (let n = 1; n <= oldCount; n += 1) {
+      rows.push({ ...fillerRow(n, ERA_BASE + n * 60), type: "compact" });
+    }
+    for (let n = oldCount + 1; n <= total; n += 1) {
+      rows.push(fillerRow(n, ERA_BASE + n * 60));
+    }
+    const sessionId = seedSession(db, "empty-old-side", rows);
+    // ENOUGH guaranteed-kept RECENT anchors that the render is budget-bound:
+    // at floor(budget/2) the fitter must drop rows it keeps at the full
+    // budget, so the reallocation is observable in bytes — one small anchor
+    // fits under either budget and pins nothing (a mutation to half-budget
+    // survived exactly that fixture).
+    for (let n = oldCount + 1; n <= oldCount + 16; n += 1) {
+      selfIndex(db, sessionId, n);
+    }
+
+    const boundary = total - MILESTONE_INJECTION_RECENT_TURNS;
+    expect(boundary).toBe(oldCount);
+    const oldView = buildTimelineView(db, {
+      id: `S${sessionId}/T..${boundary}`,
+      view: "milestones",
+      pageSize: Number.MAX_SAFE_INTEGER,
+    });
+    expect(oldView.pagedMilestones).toEqual([]); // turns exist, but all excluded (compact)
+
+    const recentView = buildTimelineView(db, {
+      id: `S${sessionId}/T${boundary + 1}..`,
+      view: "milestones",
+      pageSize: Number.MAX_SAFE_INTEGER,
+    });
+
+    // Production-scale, not a toy value: this fixture's header/shape-signal
+    // overhead (ten compact boundaries) runs ~250 tokens and the fitter's
+    // drop-everything floor sits above 600, so small budgets render
+    // identically at full and half and the discriminator below loses its
+    // teeth. At 2000 vs 1000 the kept-row sets genuinely differ.
+    const budget = 2000;
+    const injected = renderSessionMilestoneInjection(db, sessionId, { tokenBudget: budget });
+    // The empty OLD side is skipped outright — RECENT alone gets the FULL
+    // budget, not `floor(budget/2)`. The second assertion is the
+    // discriminator: at this fixture's size the two budgets render
+    // differently, so a half-budget regression cannot hide behind a render
+    // that fits either way.
+    expect(injected).toBe(renderMilestoneInjection(recentView, { tokenBudget: budget }));
+    expect(injected).not.toBe(
+      renderMilestoneInjection(recentView, { tokenBudget: Math.floor(budget / 2) }),
+    );
+    db.close();
+  });
+
+  test("both sides non-empty: each renders at floor(budget/2), concatenated as one attachment, and the recency guarantee holds (a recent-only row a single whole-session call would have starved now survives)", () => {
+    const db = createDatabase(":memory:");
+    const oldTierOneCount = 35; // > the 30-row election budget on its own
+    const recentCount = MILESTONE_INJECTION_RECENT_TURNS;
+    const total = oldTierOneCount + recentCount;
+    const rows: SeedRow[] = [];
+    for (let n = 1; n <= total; n += 1) {
+      rows.push(fillerRow(n, ERA_BASE + n * 60));
+    }
+    const sessionId = seedSession(db, "recency-guarantee", rows);
+    // Every OLD turn is tier ①: on a single whole-session election these 35
+    // alone already fill the 30-row budget, so none of the 200 RECENT
+    // (tier ⑤) turns can ever seat — the live E60 regression this ticket
+    // fixes.
+    for (let n = 1; n <= oldTierOneCount; n += 1) {
+      selfIndex(db, sessionId, n);
+    }
+
+    // Baseline: the OLD single-call shape this ticket replaces.
+    const legacyWholeSessionView = buildTimelineView(db, {
+      id: `S${sessionId}`,
+      view: "milestones",
+      pageSize: Number.MAX_SAFE_INTEGER,
+    });
+    const legacyRendered = renderMilestoneInjection(legacyWholeSessionView);
+    expect(legacyRendered).not.toContain(`[T${total}]`); // last RECENT turn: starved
+
+    const boundary = total - MILESTONE_INJECTION_RECENT_TURNS;
+    expect(boundary).toBe(oldTierOneCount);
+    const oldView = buildTimelineView(db, {
+      id: `S${sessionId}/T..${boundary}`,
+      view: "milestones",
+      pageSize: Number.MAX_SAFE_INTEGER,
+    });
+    const recentView = buildTimelineView(db, {
+      id: `S${sessionId}/T${boundary + 1}..`,
+      view: "milestones",
+      pageSize: Number.MAX_SAFE_INTEGER,
+    });
+    expect(oldView.pagedMilestones.length).toBeGreaterThan(0);
+    expect(recentView.pagedMilestones.length).toBeGreaterThan(0);
+
+    const budget = MILESTONE_INJECTION_TOKEN_BUDGET;
+    const half = Math.floor(budget / 2);
+    const injected = renderSessionMilestoneInjection(db, sessionId, { tokenBudget: budget });
+    const expected =
+      renderMilestoneInjection(oldView, { tokenBudget: half }) +
+      "\n\n" +
+      renderMilestoneInjection(recentView, { tokenBudget: half });
+    expect(injected).toBe(expected);
+    // The recency guarantee, restated on the actual split output: the last
+    // RECENT turn — starved above — now survives.
+    expect(injected).toContain(`[T${total}]`);
+    db.close();
+  });
+
+  test("eraCutoffEpoch and showEarlierHint:false thread through both calls unchanged", () => {
+    const db = createDatabase(":memory:");
+    const oldTierOneCount = 35;
+    const recentCount = MILESTONE_INJECTION_RECENT_TURNS;
+    const total = oldTierOneCount + recentCount;
+    const rows: SeedRow[] = [];
+    for (let n = 1; n <= total; n += 1) {
+      rows.push(fillerRow(n, ERA_BASE + n * 60));
+    }
+    const sessionId = seedSession(db, "era-cutoff-split", rows);
+    for (let n = 1; n <= oldTierOneCount; n += 1) {
+      selfIndex(db, sessionId, n);
+    }
+
+    // A cutoff after every seeded turn: `eraCutoffEpoch` reaches both calls,
+    // exercised as a plain pass-through (spec D11 says the value is not
+    // renegotiated here) rather than by asserting on segment-spine content,
+    // which this ticket's territory does not otherwise touch.
+    const eraCutoffEpoch = ERA_BASE + (total + 1) * 60;
+    const boundary = total - MILESTONE_INJECTION_RECENT_TURNS;
+    const oldView = buildTimelineView(db, {
+      id: `S${sessionId}/T..${boundary}`,
+      view: "milestones",
+      pageSize: Number.MAX_SAFE_INTEGER,
+      eraCutoffEpoch,
+    });
+    const recentView = buildTimelineView(db, {
+      id: `S${sessionId}/T${boundary + 1}..`,
+      view: "milestones",
+      pageSize: Number.MAX_SAFE_INTEGER,
+      eraCutoffEpoch,
+    });
+    expect(oldView.eraCutoffEpoch).toBe(eraCutoffEpoch);
+    expect(recentView.eraCutoffEpoch).toBe(eraCutoffEpoch);
+
+    const budget = MILESTONE_INJECTION_TOKEN_BUDGET;
+    const half = Math.floor(budget / 2);
+    const injected = renderSessionMilestoneInjection(db, sessionId, {
+      tokenBudget: budget,
+      eraCutoffEpoch,
+    });
+    const expected =
+      renderMilestoneInjection(oldView, { tokenBudget: half }) +
+      "\n\n" +
+      renderMilestoneInjection(recentView, { tokenBudget: half });
+    expect(injected).toBe(expected);
+    expect(injected).not.toContain("earlier: timeline(");
+    db.close();
+  });
+
+  test("a side whose content is ALL era-side (empty legacy body, spine/orphan rows only) still counts as non-empty — the split runs two-sided, no reallocation misfire", () => {
+    // Pins `hasMilestoneRows`' spine/orphan clauses: a mutation reducing it
+    // to `pagedMilestones.length > 0` reads an era-era window as "empty",
+    // misfires the reallocation rule, and renders the OLD side alone at the
+    // full budget.
+    const db = createDatabase(":memory:");
+    const oldTierOneCount = 35;
+    const recentCount = MILESTONE_INJECTION_RECENT_TURNS;
+    const total = oldTierOneCount + recentCount;
+    const rows: SeedRow[] = [];
+    for (let n = 1; n <= total; n += 1) {
+      rows.push(fillerRow(n, ERA_BASE + n * 60));
+    }
+    const sessionId = seedSession(db, "era-recent-side", rows);
+    for (let n = 1; n <= oldTierOneCount; n += 1) {
+      selfIndex(db, sessionId, n);
+    }
+    for (let n = oldTierOneCount + 1; n <= oldTierOneCount + 6; n += 1) {
+      selfIndex(db, sessionId, n);
+    }
+
+    // Cutoff BETWEEN the sides: OLD is legacy (paged body), RECENT is era
+    // (segment spine / orphan anchors, empty legacy body by construction).
+    const eraCutoffEpoch = ERA_BASE + oldTierOneCount * 60 + 30;
+    const boundary = total - MILESTONE_INJECTION_RECENT_TURNS;
+    const oldView = buildTimelineView(db, {
+      id: `S${sessionId}/T..${boundary}`,
+      view: "milestones",
+      pageSize: Number.MAX_SAFE_INTEGER,
+      eraCutoffEpoch,
+    });
+    const recentView = buildTimelineView(db, {
+      id: `S${sessionId}/T${boundary + 1}..`,
+      view: "milestones",
+      pageSize: Number.MAX_SAFE_INTEGER,
+      eraCutoffEpoch,
+    });
+    // Preconditions that make this fixture the discriminator: the RECENT
+    // side's legacy body is empty while its era surfaces carry rows.
+    expect(recentView.pagedMilestones).toEqual([]);
+    expect(
+      recentView.segmentSpine.length + recentView.orphanAnchors.length,
+    ).toBeGreaterThan(0);
+
+    const budget = MILESTONE_INJECTION_TOKEN_BUDGET;
+    const half = Math.floor(budget / 2);
+    const injected = renderSessionMilestoneInjection(db, sessionId, {
+      tokenBudget: budget,
+      eraCutoffEpoch,
+    });
+    const expected =
+      renderMilestoneInjection(oldView, { tokenBudget: half }) +
+      "\n\n" +
+      renderMilestoneInjection(recentView, { tokenBudget: half });
+    expect(injected).toBe(expected);
     db.close();
   });
 });
