@@ -22,6 +22,8 @@ Ticket 08 reproduces this wording rather than paraphrasing it.
 - **grounds** → 异相位：本节点的成立依赖其成立，它若倒下，本节点随之倒下。有独立 spec 轮时由 spec 承担 grounds、其余工件 consume 该承担者；无 spec 时工件直接 grounds。
 - **verifies / refutes** → 异相位：以本轮产出的检验结果支持/反驳其结论；源节点须含取证相位。
 
+**自引**：自引边（citing 与 cited 是同一节点）不得带 tag。带 tag 意味着点名一条 lane，而单节点自环不构成 lane（lane 至少两个节点）。
+
 **示例**（边由引用方指向被引方）:
 
 - **#release**:每次发布 `consume{release}` 上一次发布——lane 由这条边串起,永不收敛。同一个节点另写**无 tag** 的 `indexes` 聚合本次所交付的工件:两个 indexes 用途不同,只有带 tag 的那个才宣告收敛。
