@@ -548,7 +548,10 @@ function laneChip(l){
   // two-logics-at-once the toggle exists to end.
   const termAddr = l.state.terminus !== null && idx.has(l.state.terminus) ? addrOf(l.state.terminus) : l.state.terminusAddress;
   const term = closed ? `◎${termAddr}` : (l.state.terminus ? `…◎${termAddr}` : "无宣告");
-  c.innerHTML = `${esc(l.tagSet.join("+"))}<span class="term">${term}${closed && !valid ? " ✝" : ""}</span>`;
+  // D5, v11 (lane-declaration ticket 05): a lane's identity is ONE tag now
+  // (`ConsoleGraphLane.tag`, never an array) — the prototype's `tagSet.join`
+  // is retired along with the exact-set identity it rendered.
+  c.innerHTML = `${esc(l.tag)}<span class="term">${term}${closed && !valid ? " ✝" : ""}</span>`;
   c.addEventListener("click", () => {
     const toks = lanesTouchingComponentForLane(l.token);
     if (sameFocus(toks)) { clearFocus(); }
@@ -612,7 +615,16 @@ function renderGraphSvg(){
       d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,stroke:css("--"+e.relation)});
     if (DASH.has(e.relation)) p.setAttribute("stroke-dasharray","5 3");
     p.dataset.r=e.relation; p.dataset.s=e.citingId; p.dataset.t=e.citedId;
-    p.dataset.lane = e.laneToken ?? "";
+    // lane-declaration ticket 05 (spec D5, "What this CHANGES about existing
+    // verdicts"): an edge can carry several tags now, so it belongs to
+    // SEVERAL lanes — `ConsoleGraphEdge.laneTokens` (plural). `dataset` only
+    // holds strings, and `laneToken()` is itself a JSON-stringified pair
+    // (`shared/lane-interpretation.ts`), so joining tokens into one dataset
+    // string would need an escaping scheme for no benefit: this is a same-
+    // document, same-JS-context array, so a plain element property carries
+    // it losslessly. `paintFilters` below tests SET MEMBERSHIP (`.some`),
+    // never the old single-token string equality.
+    p.laneTokens = e.laneTokens;
     p.addEventListener("mousemove", ev=>tip(ev,
       `${addrOf(e.citingId)} —${esc(e.relation)}→ ${addrOf(e.citedId)}` +
       (e.tags.length?` <span class="lg">{${esc(e.tags.join(","))}}</span>`:"")));
@@ -725,7 +737,9 @@ function paintFilters(){
     p.classList.remove("off","gray","hot");
     if (!on[p.dataset.r]) { p.classList.add("off"); continue; }
     if (!anyFocus) continue;
-    const inComp = p.dataset.lane!=="" && selLanes.has(p.dataset.lane);
+    // Set-membership test (ticket 05): an edge in lanes {a,b} lights when
+    // EITHER is focused — `.some`, never the retired single-token `===`.
+    const inComp = p.laneTokens.some(t=>selLanes.has(t));
     const soloDirect = solo!==null && (p.dataset.s==solo || p.dataset.t==solo);
     // 卡片节点(sel)的入边出边一律上色,带不带 tag 都是——T1416 ruling;
     // 权重/虚线语义不变,只解除灰化。
@@ -793,7 +807,10 @@ function renderTurnPanel(id){
   const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`—${esc(e.relation)}→ ${addrOf(e.citedId)}`:`${addrOf(e.citingId)} —${esc(e.relation)}→`}${e.tags.length?` <span class="etags">{${esc(e.tags.join(","))}}</span>`:""}</div>`;
   const laneChipsHtml = t.lanes.map(tok => {
     const l = laneByToken.get(tok);
-    return `<span class="chip lane">${esc(l ? l.tagSet.join("+") : tok)}</span>`;
+    // D5, v11 (ticket 05): the panel's per-turn lane chips reflect SET
+    // MEMBERSHIP — one chip per lane token this turn belongs to, each
+    // labelled by that lane's own single tag, never a joined tagSet.
+    return `<span class="chip lane">${esc(l ? l.tag : tok)}</span>`;
   }).join("");
   pbody.innerHTML =
     `<div class="addr">${esc(addrOf(t.id))}${addrOf(t.id) !== sessionAddr(t) ? `<span class="addrcite">${esc(sessionAddr(t))}</span>` : ""}</div><h2>${esc(t.title||"(无笔记)")}</h2>

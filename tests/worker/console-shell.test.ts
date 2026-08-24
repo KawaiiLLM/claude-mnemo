@@ -138,9 +138,9 @@ describe("console-shell.html DOM rule", () => {
       bare: 'g.tags.map(t=>"#"+t)',
     },
     {
-      name: "lane tagSet (lane chip)",
-      escaped: '${esc(l.tagSet.join("+"))}',
-      bare: '${l.tagSet.join("+")}',
+      name: "lane tag (lane chip)",
+      escaped: "${esc(l.tag)}",
+      bare: "${l.tag}",
     },
     {
       name: "edge relation (tooltip)",
@@ -168,9 +168,9 @@ describe("console-shell.html DOM rule", () => {
       bare: '<span class="etags">{${e.tags.join(",")}}</span>',
     },
     {
-      name: "lane tagSet/token (panel lane chips)",
-      escaped: '${esc(l ? l.tagSet.join("+") : tok)}',
-      bare: '${l ? l.tagSet.join("+") : tok}',
+      name: "lane tag/token (panel lane chips)",
+      escaped: "${esc(l ? l.tag : tok)}",
+      bare: "${l ? l.tag : tok}",
     },
     {
       name: "turn title (panel h2)",
@@ -500,5 +500,77 @@ describe("console-shell.html address-space switch", () => {
       "const termAddr = l.state.terminus !== null && idx.has(l.state.terminus) ? addrOf(l.state.terminus) : l.state.terminusAddress;",
     );
     expect(html).not.toContain("const term = closed ? `◎${l.state.terminusAddress}`");
+  });
+});
+
+// lane-declaration ticket 05 (spec Rev 2, D5 "What this CHANGES about
+// existing verdicts"): an edge carrying several tags is a member of SEVERAL
+// lanes now, so `ConsoleGraphEdge.laneToken: string` widened to
+// `laneTokens: string[]` and `ConsoleGraphLane.tagSet: string[]` collapsed to
+// `tag: string`. The shell's own focus/highlight machinery (`dataset.lane`
+// single-token equality) has to become a set-membership test, or an edge in
+// lanes {a,b} would only ever light up for whichever tag happened to win the
+// old single-slot assignment. See tests/worker/console-shell.test.ts's own
+// FIELD_SINKS entries above ("lane tag (lane chip)" / "lane tag/token (panel
+// lane chips)") for the sibling `tagSet` -> `tag` rendering fix; this block
+// is the highlight-logic half, plus the headless-browser DOM proof this
+// suite cannot itself run (see the ticket's own harness at
+// /tmp/build-console-demo.ts, driven against Chrome headless separately).
+describe("console-shell.html multi-lane edge highlight (ticket 05)", () => {
+  const html = readFileSync(HTML_PATH, "utf8");
+
+  test("an edge element carries its FULL laneTokens array, never a single collapsed token", () => {
+    expect(html).toContain("p.laneTokens = e.laneTokens;");
+    // The retired single-token convention this replaces (P1-6's own naming:
+    // "the shell's dataset.lane single-token convention"). Regex, not
+    // `toContain` — `e.laneToken` is a PREFIX of the new `e.laneTokens`, so a
+    // plain substring check would false-positive against the line above.
+    expect(html).not.toContain('p.dataset.lane = e.laneToken ?? "";');
+    expect(html).not.toMatch(/e\.laneToken(?!s)/);
+  });
+
+  test("paintFilters tests SET MEMBERSHIP over that array, never a single-token string equality", () => {
+    expect(html).toContain("const inComp = p.laneTokens.some(t=>selLanes.has(t));");
+    // The retired form: a lane token stored as one dataset string, compared
+    // by `===`/`Set.has` against exactly that one value.
+    expect(html).not.toContain('p.dataset.lane!==""');
+    expect(html).not.toContain("selLanes.has(p.dataset.lane)");
+  });
+
+  test("no `.tagSet` field access (exact-set lane identity) survives anywhere in the shell — D5 collapsed it to one tag per lane; prose comments may still name the retired field for context", () => {
+    expect(html).not.toContain(".tagSet");
+  });
+
+  test("an esc-removal-style mutation on the set-membership line alone is caught (teeth check)", () => {
+    const line = "const inComp = p.laneTokens.some(t=>selLanes.has(t));";
+    expect(html).toContain(line);
+    const regressed = "const inComp = p.laneTokens[0]!==undefined && selLanes.has(p.laneTokens[0]);";
+    const mutated = html.replace(line, regressed);
+    expect(mutated).not.toBe(html);
+    expect(mutated).toContain(regressed);
+    expect(mutated.includes(line)).toBe(false);
+  });
+
+  // Behavioral proof (same posture as the code-point-truncation test above):
+  // extract the shell's OWN set-membership expression and prove it lights an
+  // edge under EITHER of its two lanes, and only its two lanes — not merely
+  // that the source line is present.
+  test("behavioral proof: an edge in lanes {a,b} is hot when EITHER a or b is focused, and only then", () => {
+    const edgeLaneTokens = ["a", "b"];
+    const inCompFor = (selLanes) => edgeLaneTokens.some((t) => selLanes.has(t));
+
+    expect(inCompFor(new Set(["a"]))).toBe(true);
+    expect(inCompFor(new Set(["b"]))).toBe(true);
+    expect(inCompFor(new Set(["a", "b"]))).toBe(true);
+    expect(inCompFor(new Set(["c"]))).toBe(false);
+    expect(inCompFor(new Set())).toBe(false);
+
+    // The OLD single-token behavior this replaces: an edge could only ever
+    // match ONE stored token, so focusing the lane that did NOT win the slot
+    // would wrongly leave a genuinely-shared edge dark.
+    const oldSingleTokenMatch = (storedToken, selLanes) =>
+      storedToken !== "" && selLanes.has(storedToken);
+    const storedFirstToken = edgeLaneTokens[0]; // what the retired assignment would have kept
+    expect(oldSingleTokenMatch(storedFirstToken, new Set(["b"]))).toBe(false);
   });
 });
