@@ -22,7 +22,11 @@ import {
   resolveSettlementWritableSet,
   type NoteSettlementContext,
 } from "../../src/worker/note-settlement-context";
-import { renderNoteSettlementPrompt } from "../../src/worker/note-settlement-prompt";
+import {
+  NOTE_SETTLEMENT_SYSTEM_PROMPT,
+  renderNoteSettlementPrompt,
+} from "../../src/worker/note-settlement-prompt";
+import { SETTLEMENT_ALLOWED_TOOLS } from "../../src/worker/note-settlement-sdk-query";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
@@ -1151,5 +1155,70 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
     const prompt = words(renderPrompt());
     expect(prompt.includes(words(d1Match![1]!.trim()))).toBe(true);
     expect(prompt.includes(words(d2Match![1]!.trim()))).toBe(true);
+  });
+});
+
+/**
+ * Ticket 01, light-review-repairs (peer P1-1): the system half's "Work
+ * entirely through the ... tools" sentence used to name only
+ * remember/note/commit — three of the six tools the child process is actually
+ * registered with (`SETTLEMENT_ALLOWED_TOOLS`, note-settlement-sdk-query.ts).
+ * Since system instructions win over the user half, a compliant agent could
+ * refuse the very `recall` (Block A, every batch) and `lane_check` (Block B
+ * step 5) calls the user half now mandates.
+ *
+ * The guard: mechanically extract every backtick-quoted, single-word token
+ * from the RENDERED USER HALF that is also a real registered tool name (the
+ * same `SETTLEMENT_ALLOWED_TOOLS` list, not a hand-copied one), then assert
+ * each one is a member of the system sentence's own slash-separated
+ * allowlist. This is what makes the two contracts unable to drift apart
+ * silently again: widen what the user half instructs calling without
+ * widening the system sentence, and this test goes red.
+ */
+describe("ticket 01 (peer P1-1) — cross-contract superset guard: system sentence permits every tool the user half instructs calling", () => {
+  const KNOWN_TOOL_NAMES = new Set(
+    SETTLEMENT_ALLOWED_TOOLS.map((name) => name.replace("mcp__mnemo__", "")),
+  );
+
+  /** Every backtick-quoted single word that is also a real registered tool name. */
+  function extractInstructedToolNames(text: string): Set<string> {
+    const found = new Set<string>();
+    for (const match of text.matchAll(/`([a-zA-Z_]+)`/g)) {
+      if (KNOWN_TOOL_NAMES.has(match[1]!)) {
+        found.add(match[1]!);
+      }
+    }
+    return found;
+  }
+
+  test("the extraction itself still finds every registered tool (guards the guard against silently degrading)", () => {
+    const calledTools = extractInstructedToolNames(renderPrompt());
+    expect(calledTools).toEqual(KNOWN_TOOL_NAMES);
+  });
+
+  test("every tool the user half instructs calling, by name, is in the system sentence's allowlist", () => {
+    const calledTools = extractInstructedToolNames(renderPrompt());
+    expect(calledTools.size).toBeGreaterThan(0);
+
+    const allowlistMatch = NOTE_SETTLEMENT_SYSTEM_PROMPT.match(
+      /Work entirely through the ([a-zA-Z_/]+) tools/,
+    );
+    expect(allowlistMatch).not.toBeNull();
+    const allowlistedTools = new Set(allowlistMatch![1]!.split("/"));
+
+    // Superset, not equality: a tool the system half permits but the user
+    // half happens not to name in this fixture is not a contract violation.
+    for (const tool of calledTools) {
+      expect(allowlistedTools.has(tool)).toBe(true);
+    }
+  });
+
+  test("the system sentence's allowlist is exactly the six registered tools", () => {
+    const allowlistMatch = NOTE_SETTLEMENT_SYSTEM_PROMPT.match(
+      /Work entirely through the ([a-zA-Z_/]+) tools/,
+    );
+    expect(allowlistMatch).not.toBeNull();
+    const allowlistedTools = new Set(allowlistMatch![1]!.split("/"));
+    expect(allowlistedTools).toEqual(KNOWN_TOOL_NAMES);
   });
 });
