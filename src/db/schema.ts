@@ -1021,17 +1021,37 @@ const SCHEMA_SQL = `
   -- CONTEXT.md). entity_type widens to session up front — a CHECK
   -- constraint cannot be ALTERed, and ticket 05's settlement narrative write
   -- is the same table, not a second one.
+  --
+  -- light-review-repairs 04 (P1): epoch is the writer's own
+  -- write_gate_epochs value at the moment this grant was recorded — the
+  -- writer-context-epoch soundness boundary that replaced PreCompact's
+  -- two-table DELETE. getReadGrant only returns a row whose epoch matches
+  -- the writer's CURRENT epoch; a bump (PreCompact, and its
+  -- SessionStart(compact) idempotent re-bump) makes every row recorded under
+  -- an older epoch invisible without physically touching it — physical
+  -- removal is deferred to the age/epoch janitor (sweepStaleReadGrants).
+  -- DEFAULT 0 with no prior write_gate_epochs row also defaulting to 0
+  -- (getWriterEpoch) keeps every pre-migration row's behavior byte-identical
+  -- until its writer's first bump.
   CREATE TABLE IF NOT EXISTS write_gate_reads (
     writer TEXT NOT NULL,
     entity_type TEXT NOT NULL CHECK (entity_type IN ('segment', 'turn', 'session')),
     entity_id INTEGER NOT NULL,
     read_at_epoch INTEGER NOT NULL,
     read_sequence INTEGER NOT NULL,
+    epoch INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (writer, entity_type, entity_id)
   );
 
   CREATE INDEX IF NOT EXISTS idx_write_gate_reads_entity
     ON write_gate_reads (entity_type, entity_id);
+
+  -- light-review-repairs 04 (P2): the age janitor filters on read_at_epoch
+  -- alone (sweepStaleReadGrants) — without this, that scan has no index to
+  -- seek from and degrades to a full table scan bounded only by its own
+  -- LIMIT, i.e. the LIMIT bounds deletions, never the scan itself.
+  CREATE INDEX IF NOT EXISTS idx_write_gate_reads_read_at
+    ON write_gate_reads (read_at_epoch);
 
   -- One field's freshness stamp: who wrote it last, and at what point in the
   -- monotonic write sequence (CONTEXT.md "Stale") — never epoch seconds, so
@@ -1078,11 +1098,23 @@ const SCHEMA_SQL = `
     -- captured before any row is read), never a record-time lookup.
     recorded_sequence INTEGER NOT NULL,
     recorded_at_epoch INTEGER NOT NULL,
+    -- light-review-repairs 04 (P1): same writer-context-epoch fact as
+    -- write_gate_reads.epoch, recorded at the same render pass — see that
+    -- column's own comment. checkRelationsGate and checkFieldGate's
+    -- requireCompleteRead both read through getFieldCompleteness, so a
+    -- completeness row this writer earned before its last bump is exactly as
+    -- dead as the grant row it rode in on.
+    epoch INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (writer, entity_type, entity_id, field)
   );
 
   CREATE INDEX IF NOT EXISTS idx_write_gate_field_completeness_entity
     ON write_gate_field_completeness (entity_type, entity_id);
+
+  -- light-review-repairs 04 (P2): same rationale as
+  -- idx_write_gate_reads_read_at, for the janitor's other half of the sweep.
+  CREATE INDEX IF NOT EXISTS idx_write_gate_field_completeness_recorded_at
+    ON write_gate_field_completeness (recorded_at_epoch);
 
   -- The write gate's single monotonic counter (db/write-gate.ts). One row,
   -- incremented inside the SAME transaction as the field stamp it numbers —
@@ -1091,6 +1123,22 @@ const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS write_gate_sequence (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     value INTEGER NOT NULL DEFAULT 0
+  );
+
+  -- light-review-repairs 04 (P1): one row per writer that has ever been
+  -- bumped — PreCompact (the context an active writer's grants were earned
+  -- on being destroyed) and SessionStart(source=compact)'s idempotent
+  -- re-bump (the crash backstop for a PreCompact bump that failed). A writer
+  -- with no row here is implicitly epoch 0 (getWriterEpoch), matching every
+  -- pre-migration write_gate_reads/write_gate_field_completeness row's own
+  -- DEFAULT 0 — so a writer nobody has ever bumped reads exactly as it did
+  -- before this ticket. Deliberately its own tiny table rather than a column
+  -- folded onto sessions/claims: a claim writer (claimWriterId) has no
+  -- backing row in any entity table this schema owns, and the epoch counter
+  -- must exist for it identically.
+  CREATE TABLE IF NOT EXISTS write_gate_epochs (
+    writer TEXT PRIMARY KEY,
+    epoch INTEGER NOT NULL DEFAULT 0
   );
 
   ${MEMORY_FTS_DDL}
@@ -2556,6 +2604,7 @@ export function initializeSchema(db: Database): void {
   ensureSettlementClaimGenerationColumn(db);
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
+  ensureWriteGateEpochColumns(db);
   ensureShadowNoteWriterOriginColumn(db);
   ensureNoteDebtReasonVocabulary(db);
   ensureNoteDebtRemindedColumn(db);
@@ -3272,6 +3321,23 @@ function ensureObservationExtractionExclusionColumn(db: Database): void {
     db,
     "observations",
     "excluded_from_extraction",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
+}
+
+// light-review-repairs 04 (P1): `write_gate_reads` and
+// `write_gate_field_completeness` predate the writer-context-epoch, so a
+// database that already has either table needs the column added by ALTER —
+// CREATE TABLE IF NOT EXISTS is a no-op once the table exists. Old rows land
+// on 0, the exact value a writer with no write_gate_epochs row also reads as
+// (getWriterEpoch's default) — so an existing row's gate behavior is
+// unchanged until its writer's first PreCompact bump.
+function ensureWriteGateEpochColumns(db: Database): void {
+  addColumnIfMissing(db, "write_gate_reads", "epoch", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(
+    db,
+    "write_gate_field_completeness",
+    "epoch",
     "INTEGER NOT NULL DEFAULT 0",
   );
 }

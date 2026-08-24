@@ -99,6 +99,63 @@ export function snapshotWriteGateSequence(db: Database): number {
 }
 
 // ---------------------------------------------------------------------------
+// Writer context epoch (light-review-repairs 04, ticket 01's P1 repair): the
+// soundness boundary that replaced PreCompact's two-table DELETE-as-wipe.
+// ---------------------------------------------------------------------------
+
+/**
+ * `writer`'s own count of `write_gate_epochs` bumps. A writer with no row
+ * here reads as epoch 0 — the exact default every pre-migration
+ * `write_gate_reads`/`write_gate_field_completeness` row also carries (see
+ * those columns' own comments in `db/schema.ts`), so a writer nobody has
+ * ever bumped behaves exactly as it did before this ticket.
+ */
+function getWriterEpoch(db: Database, writer: string): number {
+  const row = db
+    .query<{ epoch: number }, [string]>(
+      `SELECT epoch FROM write_gate_epochs WHERE writer = ?`,
+    )
+    .get(writer);
+  return row?.epoch ?? 0;
+}
+
+/**
+ * Advances `writer`'s context epoch by one and returns the new value — the
+ * writer-context-epoch soundness boundary (light-review-repairs 04, repair
+ * to grant-lifecycle ticket 01's P1) that replaces PreCompact's two-table
+ * DELETE. Every read grant and completeness row `writer` earned under an
+ * OLDER epoch becomes invisible to `checkFieldGate`/`checkRelationsGate` the
+ * instant this commits — `getReadGrant` and `getFieldCompleteness` both
+ * filter on the writer's CURRENT epoch — without physically touching either
+ * row. That is the whole point: PreCompact (`hooks/handlers/compact.ts`)
+ * calls this instead of the old `clearReadGrantsForWriter` DELETE, shrinking
+ * PreCompact's own failure surface from two unbounded DELETEs to one
+ * single-row UPSERT. Physical removal of the now-dead rows is deferred to
+ * the janitor (`sweepStaleReadGrants`), which sweeps old-epoch rows
+ * alongside its existing age sweep.
+ *
+ * `SessionStart(source=compact)`'s bare context handler
+ * (`hooks/handlers/context.ts`) calls this AGAIN, unconditionally, before it
+ * records the segment roster's own new grants — the crash backstop: if the
+ * PreCompact bump above failed (it is best-effort, wrapped in its own
+ * try/catch there), this second bump still lands before anything can be
+ * granted under the writer's post-compact identity, so no grant earned
+ * before compact survives either way. Calling this twice in a row is
+ * harmless — nothing is granted between the two calls, so whether the
+ * writer's current epoch ends up N+1 or N+2 decides nothing further: every
+ * pre-compact row is equally dead under both.
+ */
+export function bumpWriterEpoch(db: Database, writer: string): number {
+  return db
+    .query<{ epoch: number }, [string]>(
+      `INSERT INTO write_gate_epochs (writer, epoch) VALUES (?, 1)
+       ON CONFLICT(writer) DO UPDATE SET epoch = epoch + 1
+       RETURNING epoch`,
+    )
+    .get(writer)!.epoch;
+}
+
+// ---------------------------------------------------------------------------
 // Read grants (spec: "读集... 统一渲染器渲染即记录").
 // ---------------------------------------------------------------------------
 
@@ -128,13 +185,15 @@ export function recordReadGrant(
   nowEpoch: number,
   sequence: number,
 ): void {
-  db.query<unknown, [string, string, number, number, number]>(
-    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence)
-     VALUES (?, ?, ?, ?, ?)
+  const epoch = getWriterEpoch(db, writer);
+  db.query<unknown, [string, string, number, number, number, number]>(
+    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence, epoch)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
        read_at_epoch = excluded.read_at_epoch,
-       read_sequence = excluded.read_sequence`,
-  ).run(writer, entityType, entityId, nowEpoch, sequence);
+       read_sequence = excluded.read_sequence,
+       epoch = excluded.epoch`,
+  ).run(writer, entityType, entityId, nowEpoch, sequence, epoch);
 }
 
 /**
@@ -153,15 +212,17 @@ export function recordReadGrants(
   if (entries.length === 0) {
     return;
   }
-  const stmt = db.query<unknown, [string, string, number, number, number]>(
-    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence)
-     VALUES (?, ?, ?, ?, ?)
+  const epoch = getWriterEpoch(db, writer);
+  const stmt = db.query<unknown, [string, string, number, number, number, number]>(
+    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence, epoch)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
        read_at_epoch = excluded.read_at_epoch,
-       read_sequence = excluded.read_sequence`,
+       read_sequence = excluded.read_sequence,
+       epoch = excluded.epoch`,
   );
   for (const entry of entries) {
-    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence);
+    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence, epoch);
   }
 }
 
@@ -170,34 +231,48 @@ interface ReadGrantRow {
   readSequence: number;
 }
 
+/**
+ * Light-review-repairs 04 (P1): only a row recorded under `writer`'s CURRENT
+ * epoch (`getWriterEpoch`) is visible here — a row earned under an older
+ * epoch reads as "never read", the same verdict a physically deleted row
+ * would produce, without this function (or its caller) needing to know
+ * whether the row still physically exists.
+ */
 function getReadGrant(
   db: Database,
   writer: string,
   entityType: WriteGateEntityType,
   entityId: number,
 ): ReadGrantRow | null {
+  const epoch = getWriterEpoch(db, writer);
   return (
     db
-      .query<ReadGrantRow, [string, string, number]>(
+      .query<ReadGrantRow, [string, string, number, number]>(
         `SELECT read_at_epoch AS readAtEpoch, read_sequence AS readSequence
          FROM write_gate_reads
-         WHERE writer = ? AND entity_type = ? AND entity_id = ?`,
+         WHERE writer = ? AND entity_type = ? AND entity_id = ? AND epoch = ?`,
       )
-      .get(writer, entityType, entityId) ?? null
+      .get(writer, entityType, entityId, epoch) ?? null
   );
 }
 
 /**
- * Clears every read grant a writer holds — the grant-lifecycle wipe (ticket
- * 01, spec: "compact后才清空一次授权"). Called from PreCompact
- * (`hooks/handlers/compact.ts`), the event that actually destroys the
- * context those grants were earned on — NOT SessionEnd, since a plain resume
- * reloads the full transcript and the model still sees every read it made.
- * Also sweeps that writer's own per-field completeness rows (ticket 04):
- * they are keyed by writer exactly like a grant, so a wiped writer's
- * completeness facts (including the relations pseudo-field,
- * `RELATIONS_GATE_FIELD`) are just as stale as its grants and must not
- * survive to be misread by anything reusing the id.
+ * Physically clears every read grant AND per-field completeness row a writer
+ * holds, unconditionally — a direct nuke, independent of epoch.
+ *
+ * Light-review-repairs 04 (P1): PreCompact (`hooks/handlers/compact.ts`) no
+ * longer calls this. The grant-lifecycle wipe's soundness boundary is now
+ * `bumpWriterEpoch` (a single-row UPSERT that makes every pre-bump row
+ * invisible to the gates without touching it), because this DELETE pair was
+ * itself the risk ticket 04 closes: two unbounded DELETEs is a larger failure
+ * surface than one tiny UPSERT, and a failure here used to leave the
+ * destroyed context's writer holding whole-field and relations licenses
+ * until the next compact or the 30-day janitor. The physical removal this
+ * function performs is now the janitor's job (`sweepStaleReadGrants`, which
+ * sweeps old-epoch rows alongside its age sweep) — this function is kept as
+ * a direct, unconditional writer-nuke primitive for any caller that genuinely
+ * wants one (there is none in `src/` today), not as part of the correctness
+ * path.
  */
 export function clearReadGrantsForWriter(db: Database, writer: string): number {
   const clearedCompleteness = db
@@ -223,10 +298,13 @@ export const STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
 /**
  * Janitor backstop: sweeps read-grant AND field-completeness rows untouched
  * for `maxAgeSeconds` or more (spec: "janitor 兜底"; ticket 01 re-keys this
- * from "session completed" to AGE). Both tables are swept by the same rule —
- * a completeness row surviving without its grant row (or the reverse) is
- * exactly as dead as its counterpart, so there is no reason to key one off
- * the other.
+ * from "session completed" to AGE), PLUS — light-review-repairs 04, P1 —
+ * rows recorded under a writer's OLD context epoch, now that PreCompact bumps
+ * the epoch instead of physically deleting. Both staleness reasons are swept
+ * for both tables by the same rule — a completeness row surviving without its
+ * grant row (or the reverse), or a grant row already invisible to every gate
+ * because its epoch is behind (or its counterpart's), is exactly as dead as
+ * its sibling, so there is no reason to key one off the other.
  *
  * Deliberately NOT keyed off `sessions.completed_at_epoch` any more: a
  * completed session's grants still license a same-writer resume (it reloads
@@ -237,9 +315,14 @@ export const STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
  *
  * `nowEpoch` is the caller's own clock reading (not looked up here), so a
  * test can assert the exact boundary without waiting real days. `limit`
- * bounds each table's own delete, same discipline as the SessionEnd call
- * site that invokes this on every session's exit — a routine sweep must
- * never become an unbounded table scan.
+ * bounds each table's delete PER STALENESS REASON (age, then epoch), same
+ * discipline as the SessionEnd call site that invokes this on every session's
+ * exit — a routine sweep must never become an unbounded table scan. The
+ * epoch-mismatch delete drives from `write_gate_epochs` — one row per writer
+ * that has EVER been bumped, so it is small — and joins into each swept
+ * table on `writer` (indexed: the leading column of that table's own primary
+ * key), rather than scanning the swept table directly for a mismatch no
+ * single-column index could express.
  */
 export function sweepStaleReadGrants(
   db: Database,
@@ -251,21 +334,44 @@ export function sweepStaleReadGrants(
   // as inclusive of the boundary itself, hence `<=`: a row exactly
   // `maxAgeSeconds` old is already stale, not one second short of it.
   const cutoffEpoch = nowEpoch - maxAgeSeconds;
-  const clearedGrants = db
+  const clearedGrantsByAge = db
     .query<unknown, [number, number]>(
       `DELETE FROM write_gate_reads WHERE rowid IN (
          SELECT rowid FROM write_gate_reads WHERE read_at_epoch <= ? LIMIT ?
        )`,
     )
     .run(cutoffEpoch, limit).changes;
-  const clearedCompleteness = db
+  const clearedGrantsByEpoch = db
+    .query<unknown, [number]>(
+      `DELETE FROM write_gate_reads WHERE rowid IN (
+         SELECT r.rowid FROM write_gate_epochs we
+         JOIN write_gate_reads r ON r.writer = we.writer AND r.epoch != we.epoch
+         LIMIT ?
+       )`,
+    )
+    .run(limit).changes;
+  const clearedCompletenessByAge = db
     .query<unknown, [number, number]>(
       `DELETE FROM write_gate_field_completeness WHERE rowid IN (
          SELECT rowid FROM write_gate_field_completeness WHERE recorded_at_epoch <= ? LIMIT ?
        )`,
     )
     .run(cutoffEpoch, limit).changes;
-  return clearedGrants + clearedCompleteness;
+  const clearedCompletenessByEpoch = db
+    .query<unknown, [number]>(
+      `DELETE FROM write_gate_field_completeness WHERE rowid IN (
+         SELECT c.rowid FROM write_gate_epochs we
+         JOIN write_gate_field_completeness c ON c.writer = we.writer AND c.epoch != we.epoch
+         LIMIT ?
+       )`,
+    )
+    .run(limit).changes;
+  return (
+    clearedGrantsByAge +
+    clearedGrantsByEpoch +
+    clearedCompletenessByAge +
+    clearedCompletenessByEpoch
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -308,14 +414,19 @@ export function recordFieldCompleteness(
   if (entries.length === 0) {
     return;
   }
-  const stmt = db.query<unknown, [string, string, number, string, number, number, number]>(
+  const epoch = getWriterEpoch(db, writer);
+  const stmt = db.query<
+    unknown,
+    [string, string, number, string, number, number, number, number]
+  >(
     `INSERT INTO write_gate_field_completeness
-       (writer, entity_type, entity_id, field, complete, recorded_sequence, recorded_at_epoch)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+       (writer, entity_type, entity_id, field, complete, recorded_sequence, recorded_at_epoch, epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(writer, entity_type, entity_id, field) DO UPDATE SET
        complete = excluded.complete,
        recorded_sequence = excluded.recorded_sequence,
-       recorded_at_epoch = excluded.recorded_at_epoch`,
+       recorded_at_epoch = excluded.recorded_at_epoch,
+       epoch = excluded.epoch`,
   );
   for (const entry of entries) {
     stmt.run(
@@ -326,6 +437,7 @@ export function recordFieldCompleteness(
       entry.complete ? 1 : 0,
       sequence,
       nowEpoch,
+      epoch,
     );
   }
 }
@@ -336,7 +448,14 @@ export interface FieldCompletenessRecord {
   recordedAtEpoch: number;
 }
 
-/** `writer`'s own last-recorded completeness fact for one field, or `null` if no render pass of theirs ever showed it. */
+/**
+ * `writer`'s own last-recorded completeness fact for one field, or `null` if
+ * no render pass of theirs ever showed it. Light-review-repairs 04 (P1): only
+ * a row recorded under `writer`'s CURRENT epoch is visible — same rule as
+ * `getReadGrant`, and for the same reason (`checkRelationsGate`'s
+ * unconditional completeness requirement depends on this exactly as much as
+ * `checkFieldGate`'s `requireCompleteRead` does).
+ */
 export function getFieldCompleteness(
   db: Database,
   writer: string,
@@ -344,16 +463,17 @@ export function getFieldCompleteness(
   entityId: number,
   field: string,
 ): FieldCompletenessRecord | null {
+  const epoch = getWriterEpoch(db, writer);
   const row = db
     .query<
       { complete: number; sequence: number; recordedAtEpoch: number },
-      [string, string, number, string]
+      [string, string, number, string, number]
     >(
       `SELECT complete, recorded_sequence AS sequence, recorded_at_epoch AS recordedAtEpoch
        FROM write_gate_field_completeness
-       WHERE writer = ? AND entity_type = ? AND entity_id = ? AND field = ?`,
+       WHERE writer = ? AND entity_type = ? AND entity_id = ? AND field = ? AND epoch = ?`,
     )
-    .get(writer, entityType, entityId, field);
+    .get(writer, entityType, entityId, field, epoch);
   return row
     ? { complete: row.complete === 1, sequence: row.sequence, recordedAtEpoch: row.recordedAtEpoch }
     : null;

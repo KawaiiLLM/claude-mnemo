@@ -21,7 +21,7 @@ import { renderSessionStartPersonaInjection } from "../../diary/persona-render";
 import { markSessionRunStart } from "../../db/session-run";
 import { createRuleStore } from "../../db/rules";
 import { renderRuleDigest } from "../../rules/digest";
-import { sessionWriterId } from "../../db/write-gate";
+import { bumpWriterEpoch, sessionWriterId } from "../../db/write-gate";
 import {
   notifyWorkerTrigger,
   type WorkerClientDeps,
@@ -241,6 +241,37 @@ export function createContextHandler(
         dependencies.workerEnv,
       );
     }
+    // Write gate (light-review-repairs 04, P1): the crash backstop for
+    // PreCompact's own epoch bump (`hooks/handlers/compact.ts`). Bumping
+    // AGAIN here, unconditionally on source=compact and strictly BEFORE
+    // `buildContextOutput` below records the segment roster's new grants,
+    // means that even if PreCompact's bump failed (it is best-effort there),
+    // this one still lands before anything can be granted under this
+    // writer's post-compact identity — so no grant earned before compact
+    // survives either way. A double bump is harmless: nothing is granted
+    // between the two calls, so every pre-compact row is equally dead
+    // whether the writer's current epoch ends up one or two past it. Kept
+    // best-effort and non-fatal for the same reason PreCompact's own bump
+    // is: a failure here must never cost the session its SessionStart
+    // injection.
+    if (input.sessionId && input.source === "compact") {
+      const compactingSession = getSessionByContentId(
+        dependencies.db,
+        input.sessionId,
+      );
+      if (compactingSession) {
+        try {
+          bumpWriterEpoch(dependencies.db, sessionWriterId(compactingSession.id));
+        } catch (error) {
+          process.stderr.write(
+            `[claude-mnemo] SessionStart(compact) write-gate epoch re-bump failed for session ${
+              compactingSession.id
+            }: ${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        }
+      }
+    }
+
     const hookSpecificOutput = buildContextOutput(
       dependencies.db,
       input,

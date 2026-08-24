@@ -5,7 +5,9 @@ import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import {
+  bumpWriterEpoch,
   checkFieldGate,
+  checkRelationsGate,
   claimWriterId,
   clearReadGrantsForWriter,
   formatWriterForDisplay,
@@ -15,9 +17,11 @@ import {
   recordFieldCompleteness,
   recordReadGrant,
   recordReadGrants,
+  RELATIONS_GATE_FIELD,
   snapshotWriteGateSequence,
   sessionWriterId,
   stampField,
+  stampTurnRelationsRevision,
   STALE_READ_GRANT_AGE_SECONDS,
   sweepStaleReadGrants,
 } from "../../src/db/write-gate";
@@ -684,5 +688,216 @@ describe("checkFieldGate — `write` over existing content also requires a compl
       expect(withoutRemedy.message).toContain("bigger budget");
       expect(withRemedy.message).toContain("edit");
     }
+  });
+});
+
+/**
+ * Light-review-repairs 04 (P1 repair to grant-lifecycle ticket 01): the
+ * writer-context-epoch soundness boundary that replaces PreCompact's
+ * two-table DELETE. `bumpWriterEpoch` makes every read grant and
+ * completeness row a writer earned under an OLDER epoch invisible to both
+ * gates, without physically touching either row — a bump-only unit-level
+ * counterpart to the hook-level fixtures in tests/hooks/compact.test.ts.
+ */
+describe("writer context epoch (light-review-repairs 04)", () => {
+  test("a fresh writer nobody has ever bumped behaves exactly as before this ticket — every earlier test in this file already assumes epoch 0", () => {
+    stampField(db, "segment", 1, "goal", "session:9", 100);
+    recordReadGrant(db, "session:1", "segment", 1, 200, snapshotWriteGateSequence(db));
+    expect(checkFieldGate(db, "session:1", "segment", 1, "goal", "E1").ok).toBe(true);
+  });
+
+  test("bumping the writer's epoch turns a granted field gate back into never-read, without deleting the row", () => {
+    stampField(db, "segment", 1, "goal", "session:9", 100);
+    recordReadGrant(db, "session:1", "segment", 1, 200, snapshotWriteGateSequence(db));
+    expect(checkFieldGate(db, "session:1", "segment", 1, "goal", "E1").ok).toBe(true);
+
+    bumpWriterEpoch(db, "session:1");
+
+    const verdict = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1");
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("never-read");
+    }
+    // The row is still physically there — a bump invalidates, it does not delete.
+    const rows = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = 'session:1' AND entity_id = 1",
+      )
+      .get();
+    expect(rows?.count).toBe(1);
+  });
+
+  test("bumping also turns a complete-read authorization back into incomplete-read, without deleting the completeness row", () => {
+    stampField(db, "segment", 1, "goal", "session:9", 100);
+    recordReadGrant(db, "session:1", "segment", 1, 200, snapshotWriteGateSequence(db));
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: true }],
+      200,
+      snapshotWriteGateSequence(db),
+    );
+    expect(
+      checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", { requireCompleteRead: true })
+        .ok,
+    ).toBe(true);
+
+    bumpWriterEpoch(db, "session:1");
+
+    const verdict = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1", {
+      requireCompleteRead: true,
+    });
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      // The grant died first (never-read outranks incomplete-read as a
+      // rejection reason here, since getReadGrant itself now returns null).
+      expect(verdict.reason).toBe("never-read");
+    }
+    const rows = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM write_gate_field_completeness WHERE writer = 'session:1' AND entity_id = 1",
+      )
+      .get();
+    expect(rows?.count).toBe(1);
+  });
+
+  test("bumping invalidates the relations gate identically — a pre-bump complete relations read no longer authorizes an edge write", () => {
+    const turnId = 7;
+    stampTurnRelationsRevision(db, turnId, "session:9", 100);
+    recordReadGrant(db, "session:1", "turn", turnId, 200, snapshotWriteGateSequence(db));
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [{ entityType: "turn", entityId: turnId, field: RELATIONS_GATE_FIELD, complete: true }],
+      200,
+      snapshotWriteGateSequence(db),
+    );
+    expect(checkRelationsGate(db, "session:1", turnId, "T7").ok).toBe(true);
+
+    bumpWriterEpoch(db, "session:1");
+
+    const verdict = checkRelationsGate(db, "session:1", turnId, "T7");
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("incomplete-read");
+    }
+  });
+
+  test("bumping one writer never invalidates another writer's grant on the same entity", () => {
+    stampField(db, "segment", 1, "goal", "session:9", 100);
+    recordReadGrant(db, "session:1", "segment", 1, 200, snapshotWriteGateSequence(db));
+    recordReadGrant(db, "session:2", "segment", 1, 200, snapshotWriteGateSequence(db));
+
+    bumpWriterEpoch(db, "session:1");
+
+    expect(checkFieldGate(db, "session:1", "segment", 1, "goal", "E1").ok).toBe(false);
+    expect(checkFieldGate(db, "session:2", "segment", 1, "goal", "E1").ok).toBe(true);
+  });
+
+  test("a bump is not a dead end — a fresh read recorded AFTER the bump is granted under the writer's new epoch", () => {
+    stampField(db, "segment", 1, "goal", "session:9", 100);
+    recordReadGrant(db, "session:1", "segment", 1, 200, snapshotWriteGateSequence(db));
+    bumpWriterEpoch(db, "session:1");
+    expect(checkFieldGate(db, "session:1", "segment", 1, "goal", "E1").ok).toBe(false);
+
+    recordReadGrant(db, "session:1", "segment", 1, 300, snapshotWriteGateSequence(db));
+    expect(checkFieldGate(db, "session:1", "segment", 1, "goal", "E1").ok).toBe(true);
+  });
+
+  test("a double bump (the SessionStart(compact) idempotent re-bump backstop) is harmless — nothing granted between the two bumps stays granted, and nothing changes that the first bump did not already decide", () => {
+    stampField(db, "segment", 1, "goal", "session:9", 100);
+    recordReadGrant(db, "session:1", "segment", 1, 200, snapshotWriteGateSequence(db));
+
+    const afterFirstBump = bumpWriterEpoch(db, "session:1");
+    const afterSecondBump = bumpWriterEpoch(db, "session:1");
+
+    expect(afterSecondBump).toBe(afterFirstBump + 1);
+    const verdict = checkFieldGate(db, "session:1", "segment", 1, "goal", "E1");
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("never-read");
+    }
+  });
+});
+
+describe("janitor sweep — epoch-keyed (light-review-repairs 04, P1)", () => {
+  test("sweeps a row recorded under an old epoch even though it is NOT aged", () => {
+    recordReadGrant(db, "session:1", "segment", 1, 999_999, snapshotWriteGateSequence(db));
+    bumpWriterEpoch(db, "session:1");
+
+    // The row is brand new by the clock — an age-only sweep would leave it.
+    const swept = sweepStaleReadGrants(db, 999_999, 100);
+
+    expect(swept).toBe(1);
+    const rows = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = 'session:1'",
+      )
+      .get();
+    expect(rows?.count).toBe(0);
+  });
+
+  test("sweeps a stale-by-epoch completeness row the same way", () => {
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: true }],
+      999_999,
+      snapshotWriteGateSequence(db),
+    );
+    bumpWriterEpoch(db, "session:1");
+
+    const swept = sweepStaleReadGrants(db, 999_999, 100);
+
+    expect(swept).toBe(1);
+    expect(getFieldCompleteness(db, "session:1", "segment", 1, "goal")).toBeNull();
+  });
+
+  test("a row recorded AFTER the bump (the writer's current epoch) survives the epoch sweep", () => {
+    bumpWriterEpoch(db, "session:1");
+    recordReadGrant(db, "session:1", "segment", 1, 999_999, snapshotWriteGateSequence(db));
+
+    const swept = sweepStaleReadGrants(db, 999_999, 100);
+
+    expect(swept).toBe(0);
+    expect(
+      db
+        .query<{ count: number }, []>(
+          "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = 'session:1'",
+        )
+        .get()?.count,
+    ).toBe(1);
+  });
+
+  test("a writer nobody ever bumped contributes nothing to the epoch sweep — only aged rows go", () => {
+    recordReadGrant(db, "session:1", "segment", 1, 999_999, snapshotWriteGateSequence(db));
+    const swept = sweepStaleReadGrants(db, 999_999, 100);
+    expect(swept).toBe(0);
+  });
+});
+
+describe("janitor sweep — indexed scan (light-review-repairs 04, P2)", () => {
+  function planDetail(sql: string): string {
+    return db
+      .query<{ detail: string }, []>(`EXPLAIN QUERY PLAN ${sql}`)
+      .all()
+      .map((row) => row.detail)
+      .join(" | ");
+  }
+
+  test("the age scan over write_gate_reads uses the new timestamp index, not a table scan", () => {
+    const detail = planDetail(
+      "SELECT rowid FROM write_gate_reads WHERE read_at_epoch <= 1000 LIMIT 10",
+    );
+    expect(detail).toContain("idx_write_gate_reads_read_at");
+    expect(detail).not.toContain("SCAN write_gate_reads");
+  });
+
+  test("the age scan over write_gate_field_completeness uses its own timestamp index, not a table scan", () => {
+    const detail = planDetail(
+      "SELECT rowid FROM write_gate_field_completeness WHERE recorded_at_epoch <= 1000 LIMIT 10",
+    );
+    expect(detail).toContain("idx_write_gate_field_completeness_recorded_at");
+    expect(detail).not.toContain("SCAN write_gate_field_completeness");
   });
 });

@@ -16,6 +16,7 @@ import {
   stampTurnRelationsRevision,
 } from "../../src/db/write-gate";
 import { createCompactHandler } from "../../src/hooks/handlers/compact";
+import { createContextHandler } from "../../src/hooks/handlers/context";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
 function createInput(
@@ -204,5 +205,108 @@ describe("handleCompactHook — write gate grant wipe", () => {
 
     expect(result).toEqual({ continue: true });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  // -------------------------------------------------------------------------
+  // Light-review-repairs 04 (P1): the soundness counterpart to the
+  // notify-survives test above. That test proves a failed epoch bump never
+  // blocks the compact notification; THIS one proves the crash backstop
+  // actually catches what the failed bump dropped — SessionStart(source=
+  // compact)'s own idempotent re-bump (hooks/handlers/context.ts, fired
+  // BEFORE the roster records any new grants) still invalidates every grant
+  // and completeness row this writer earned before compact, even though
+  // PreCompact's own bump never landed.
+  // -------------------------------------------------------------------------
+
+  function sessionStartCompactInput(): NormalizedHookInput {
+    return {
+      eventName: "SessionStart",
+      source: "compact",
+      sessionId: "session-compact",
+      cwd: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      stopHookActive: false,
+      raw: {},
+    };
+  }
+
+  test("the PreCompact-failure fixture (field gate): PreCompact's bump forced to fail → the grant survives that alone, but SessionStart(compact)'s bump alone still invalidates it", async () => {
+    const writer = sessionWriterId(sessionId);
+    stampField(db, "segment", 1, "goal", "session:9999", 100);
+    recordReadGrant(db, writer, "segment", 1, 150, snapshotWriteGateSequence(db));
+    recordFieldCompleteness(
+      db,
+      writer,
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: true }],
+      150,
+      snapshotWriteGateSequence(db),
+    );
+    expect(
+      checkFieldGate(db, writer, "segment", 1, "goal", "E1", { requireCompleteRead: true }).ok,
+    ).toBe(true);
+
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const failingTransaction = () => {
+      throw new Error("simulated busy database");
+    };
+    const compactHandler = createCompactHandler({
+      db,
+      workerClientDeps: { fetchImpl },
+      workerEnv: {},
+      runHookWriteTransaction: failingTransaction as never,
+    });
+    await compactHandler(createInput());
+
+    // PreCompact's own bump never landed — on its own, the pre-compact grant
+    // is still authorized.
+    expect(checkFieldGate(db, writer, "segment", 1, "goal", "E1").ok).toBe(true);
+
+    // SessionStart(source=compact) fires next, on a REAL (non-failing)
+    // transaction. Its own re-bump is the crash backstop.
+    const contextHandler = createContextHandler({ db, workerClientDeps: { fetchImpl } });
+    await contextHandler(sessionStartCompactInput());
+
+    const verdict = checkFieldGate(db, writer, "segment", 1, "goal", "E1");
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("never-read");
+    }
+  });
+
+  test("the PreCompact-failure fixture (relations gate): the same failed-then-backstopped bump also invalidates a pre-compact relations read", async () => {
+    const writer = sessionWriterId(sessionId);
+    const turnId = 42;
+    stampTurnRelationsRevision(db, turnId, "session:9999", 100);
+    recordReadGrant(db, writer, "turn", turnId, 150, snapshotWriteGateSequence(db));
+    recordFieldCompleteness(
+      db,
+      writer,
+      [{ entityType: "turn", entityId: turnId, field: RELATIONS_GATE_FIELD, complete: true }],
+      150,
+      snapshotWriteGateSequence(db),
+    );
+    expect(checkRelationsGate(db, writer, turnId, "T42").ok).toBe(true);
+
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const failingTransaction = () => {
+      throw new Error("simulated busy database");
+    };
+    const compactHandler = createCompactHandler({
+      db,
+      workerClientDeps: { fetchImpl },
+      workerEnv: {},
+      runHookWriteTransaction: failingTransaction as never,
+    });
+    await compactHandler(createInput());
+
+    expect(checkRelationsGate(db, writer, turnId, "T42").ok).toBe(true);
+
+    const contextHandler = createContextHandler({ db, workerClientDeps: { fetchImpl } });
+    await contextHandler(sessionStartCompactInput());
+
+    const verdict = checkRelationsGate(db, writer, turnId, "T42");
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("incomplete-read");
+    }
   });
 });
