@@ -1614,7 +1614,7 @@ describe("ticket 06 — an E5 commit refusal names the repair, not just the anch
           expect(text).toContain("[E5]");
           expect(text).toContain("has a second sink");
           expect(text).toContain("a lane has exactly one start and one end");
-          expect(text).toContain("Retag this chain into a lane of its own");
+          expect(text).toContain("Retag this chain onto a DIFFERENT tag of its own");
           expect(text).toContain("bridge it to the lane's real start/end");
           // Both the anchor AND the canonical node are ADDRESSES: the repair
           // is a choice between two shapes, and neither is decidable without
@@ -1954,11 +1954,12 @@ describe("T1466 — an extra-SOURCE E5 blocks the window owning the CITER", () =
           expect(text).not.toContain("this turn dangles");
           // …and say why the refusal is nonetheless the anchor's to clear.
           expect(text).toContain(`you own the edge into S${sessionDbId}/T2`);
-          // P2-7: proper-superset is CONDITIONAL, and the default for an
-          // unrelated chain is its own independent exact set.
-          expect(text).toContain("an independent line of work takes its own independent EXACT tag set");
+          // D5, v11: superset BRANCH is RETIRED — an independent line of work
+          // simply takes a DIFFERENT tag now, with no set relationship to the
+          // original at all (relating them is narration's job, not the tag's).
+          expect(text).toContain("an independent line of work simply takes a different tag");
           expect(text).toContain(
-            "a proper-superset set is the BRANCH idiom only when the new chain is rooted at a node of the parent lane",
+            "there is no tag-SET relationship between lanes any more; relate the two lines in narration, not in the tag",
           );
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };

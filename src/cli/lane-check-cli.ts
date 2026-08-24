@@ -48,8 +48,11 @@ Options:
   --help           show this message
 
 --lane's <segment> is either a segment id or the literal word "default"
-(the sentinel scope every turn with no segment shares). Several --lane
-flags may be given; every named lane is widened and reported together.`;
+(the sentinel scope every turn with no segment shares). A lane is one tag
+(segment, ONE tag) — each comma-separated tag names its own independent
+lane in that segment. Several --lane flags, and several comma-separated
+tags within one --lane, may be given; every named lane is widened and
+reported together.`;
 
 export interface LaneCheckCliOptions {
   scope: LaneCheckScope | null;
@@ -68,7 +71,14 @@ const DEFAULT_IO: LaneCheckCliIo = {
   stderr: (line) => console.error(line),
 };
 
-function parseLaneArgument(raw: string): LaneKey {
+/**
+ * D5, v11: a lane is `(segment, ONE tag)`, not `(segment, tag SET)` — a
+ * `--lane <segment>:<tag1>,<tag2>` still names several lanes at once (the
+ * merge, applied at this interface too), but each COMMA-SEPARATED tag now
+ * names its OWN independent lane in that segment, so this returns one
+ * `LaneKey` per tag rather than one `LaneKey` carrying the whole set.
+ */
+function parseLaneArgument(raw: string): LaneKey[] {
   const colon = raw.indexOf(":");
   if (colon === -1) {
     throw new Error(`--lane must be "<segment>:<tag1>,<tag2>,...", got "${raw}"`);
@@ -85,10 +95,8 @@ function parseLaneArgument(raw: string): LaneKey {
   if (tags.length === 0) {
     throw new Error(`--lane "${raw}" names no tags`);
   }
-  return {
-    segment: segmentToken === "default" ? DEFAULT_SEGMENT : segmentToken,
-    tagSet: canonicalTagSet(tags),
-  };
+  const segment = segmentToken === "default" ? DEFAULT_SEGMENT : segmentToken;
+  return canonicalTagSet(tags).map((tag) => ({ segment, tag }));
 }
 
 /** Throws on any malformed or ambiguous argument set; never partially fills `options.scope`. */
@@ -136,7 +144,7 @@ export function parseLaneCheckArguments(argv: readonly string[]): LaneCheckCliOp
         break;
       case "--lane":
         if (next === undefined) throw new Error("--lane requires a value");
-        laneKeys.push(parseLaneArgument(next));
+        laneKeys.push(...parseLaneArgument(next));
         index += 1;
         break;
       default:

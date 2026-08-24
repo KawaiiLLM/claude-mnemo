@@ -492,12 +492,12 @@ describe("GET /api/console/graph — lane nullable semantics", () => {
             ...emptyLaneCheckRun().result,
             lanes: [
               {
-                key: { segment: "E1", tagSet: ["focus"] },
+                key: { segment: "E1", tag: "focus" },
                 phases: [],
                 members: [{ id: 1, dead: false }],
                 edgeCountsByRelation: {},
                 declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-                state: { key: { segment: "E1", tagSet: ["focus"] }, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+                state: { key: { segment: "E1", tag: "focus" }, closure: "open", validity: null, terminus: null, lastDeclarer: null },
                 citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
                 coverage: { status: "whole", missingTurnIds: [] },
               },
@@ -527,7 +527,7 @@ describe("GET /api/console/graph — lane nullable semantics", () => {
     expect(lane.declarationTerminus).toBeNull();
     // empty-as-[], not null/omitted
     expect(lane.phases).toEqual([]);
-    expect(lane.tagSet).toEqual(["focus"]);
+    expect(lane.tag).toBe("focus");
   });
 });
 
@@ -551,7 +551,7 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
         ...emptyLaneCheckRun().result,
         lanes: [
           {
-            key: { segment: "E1", tagSet: ["focus"] },
+            key: { segment: "E1", tag: "focus" },
             phases: ["decision"],
             members: [
               { id: 1, dead: true },
@@ -559,7 +559,7 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
             ],
             edgeCountsByRelation: { indexes: 1 },
             declaration: { state: "declared", terminus: 2, latestEventTurn: 2 },
-            state: { key: { segment: "E1", tagSet: ["focus"] }, closure: "closed", validity: "invalid", terminus: 2, lastDeclarer: 2 },
+            state: { key: { segment: "E1", tag: "focus" }, closure: "closed", validity: "invalid", terminus: 2, lastDeclarer: 2 },
             citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
             coverage: { status: "whole", missingTurnIds: [] },
           },
@@ -647,12 +647,12 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
             ...emptyLaneCheckRun().result,
             lanes: [
               {
-                key: { segment: "E1", tagSet: ["focus"] },
+                key: { segment: "E1", tag: "focus" },
                 phases: ["decision"],
                 members: [{ id: 1, dead: false }],
                 edgeCountsByRelation: {},
                 declaration: { state: "declared", terminus: 1, latestEventTurn: 1 },
-                state: { key: { segment: "E1", tagSet: ["focus"] }, closure: "closed", validity: "valid", terminus: 1, lastDeclarer: 1 },
+                state: { key: { segment: "E1", tag: "focus" }, closure: "closed", validity: "valid", terminus: 1, lastDeclarer: 1 },
                 citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
                 coverage: { status: "whole", missingTurnIds: [] },
               },
@@ -684,7 +684,7 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
     expect(body.turns[0].isDead).toBe(false);
   });
 
-  test("the tagged edge's laneToken matches the lane payload's own token; an untagged edge's laneToken is null", () => {
+  test("the tagged edge's laneTokens contains the lane payload's own token; an untagged edge's laneTokens is []", () => {
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () => ({
@@ -701,8 +701,49 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
     const laneToken_: string = body.lanes[0].token;
     const tagged = body.edges.find((e: any) => e.relation === "indexes");
     const untagged = body.edges.find((e: any) => e.relation === "consume");
-    expect(tagged.laneToken).toBe(laneToken_);
-    expect(untagged.laneToken).toBeNull();
+    expect(tagged.laneTokens).toEqual([laneToken_]);
+    expect(untagged.laneTokens).toEqual([]);
+  });
+
+  // D5 (v11), lane-declaration spec Rev 2 "What this CHANGES": "an edge
+  // belongs to several lanes now, so the payload's single `laneToken`
+  // becomes `laneTokens: string[]` ... an edge in two lanes appears under
+  // both." — the plural shape's own reason to exist.
+  test("an edge carrying TWO tags appears under BOTH lane tokens in laneTokens", () => {
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () => ({
+        ...twoTurnLaneRun(),
+        edges: [{ citingId: 2, citedId: 1, relation: "indexes", tags: ["focus", "other"] }],
+        result: {
+          ...twoTurnLaneRun().result,
+          lanes: [
+            ...twoTurnLaneRun().result.lanes,
+            {
+              key: { segment: "E1", tag: "other" },
+              phases: ["decision"],
+              members: [
+                { id: 1, dead: true },
+                { id: 2, dead: false },
+              ],
+              edgeCountsByRelation: { indexes: 1 },
+              declaration: { state: "declared", terminus: 2, latestEventTurn: 2 },
+              state: { key: { segment: "E1", tag: "other" }, closure: "closed", validity: "invalid", terminus: 2, lastDeclarer: 2 },
+              citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+              coverage: { status: "whole", missingTurnIds: [] },
+            },
+          ],
+        },
+      }),
+      loadTurnDisplayFields: () => new Map(),
+    });
+    const result = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=1&to=2"), CTX);
+    const body = result.body as any;
+    expect(body.lanes).toHaveLength(2);
+    const focusToken = body.lanes.find((l: any) => l.tag === "focus").token;
+    const otherToken = body.lanes.find((l: any) => l.tag === "other").token;
+    const edge = body.edges.find((e: any) => e.relation === "indexes");
+    expect(edge.laneTokens.sort()).toEqual([focusToken, otherToken].sort());
   });
 });
 
@@ -996,7 +1037,7 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
   test("R2 #2: an untrimmable lane (zero turns to begin with) still over the byte bound triggers the refusal-with-summary envelope — never a payload larger than RESPONSE_BYTE_SOFT_MAX carrying an applied-bound claim", () => {
     // Reviewer's original 600KB-lane-tag repro, rescaled for ticket 04's 8MB
     // budget: `laneToken` (used for both `membershipComponentId` and
-    // `token`) plus `tagSet` itself each embed the tag text, so a single
+    // `token`) plus `tag` itself each embed the tag text, so a single
     // huge tag renders at least 3x — comfortable margin over 8MB even if
     // laneCheckText contributes nothing at all.
     const hugeTag = "t".repeat(4_000_000);
@@ -1010,12 +1051,12 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
             ...emptyLaneCheckRun().result,
             lanes: [
               {
-                key: { segment: "E1", tagSet: [hugeTag] },
+                key: { segment: "E1", tag: hugeTag },
                 phases: [],
                 members: [],
                 edgeCountsByRelation: {},
                 declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-                state: { key: { segment: "E1", tagSet: [hugeTag] }, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+                state: { key: { segment: "E1", tag: hugeTag }, closure: "open", validity: null, terminus: null, lastDeclarer: null },
                 citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
                 coverage: { status: "whole", missingTurnIds: [] },
               },
@@ -1437,9 +1478,14 @@ describe("single-source pin — T900-1001 fixture", () => {
     }
     for (const e of body.edges) {
       if (e.tags.length > 0) {
-        expect(typeof e.laneToken).toBe("string");
+        // D5, v11: one token PER TAG the edge carries.
+        expect(Array.isArray(e.laneTokens)).toBe(true);
+        expect(e.laneTokens.length).toBe(e.tags.length);
+        for (const tok of e.laneTokens) {
+          expect(typeof tok).toBe("string");
+        }
       } else {
-        expect(e.laneToken).toBeNull();
+        expect(e.laneTokens).toEqual([]);
       }
     }
   });
@@ -1474,15 +1520,15 @@ describe("single-source pin — T900-1001 fixture", () => {
 
     const byToken = new Map<string, any>();
     for (const lane of body.lanes) {
-      byToken.set(`${lane.segment} ${lane.tagSet.join(",")}`, lane);
+      byToken.set(`${lane.segment} ${lane.tag}`, lane);
     }
 
     // "ownership" and "settlement-scope" both list T900 as a member in the
     // fixture's own `lanes` provenance block — lane-membership connectivity
     // (spec "Focus domain") must therefore place them in the SAME component,
     // even though they are unrelated in report 2/3's structural-edge domain.
-    const ownership = [...byToken.values()].find((l) => l.tagSet.includes("ownership"));
-    const settlementScope = [...byToken.values()].find((l) => l.tagSet.includes("settlement-scope"));
+    const ownership = [...byToken.values()].find((l) => l.tag === "ownership");
+    const settlementScope = [...byToken.values()].find((l) => l.tag === "settlement-scope");
     if (ownership && settlementScope) {
       expect(ownership.membershipComponentId).toBe(settlementScope.membershipComponentId);
     }

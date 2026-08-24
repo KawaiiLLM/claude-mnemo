@@ -87,9 +87,10 @@ import {
  * loader bug post-widening) or a test fixture that never populated `order`.
  */
 
-function formatTagSet(key: LaneKey): string {
+/** `{tag}` (D5, v11: a lane is one tag, not a set) — the braces stay as the reader's visual cue "this is a lane identifier", even though there is never more than one tag inside them now. */
+function formatLaneKey(key: LaneKey): string {
   const scope = key.segment === DEFAULT_SEGMENT ? "default" : "E" + key.segment;
-  return scope + ":{" + key.tagSet.join(",") + "}";
+  return scope + ":{" + key.tag + "}";
 }
 
 function formatMembers(members: readonly LaneMember[]): string {
@@ -168,7 +169,7 @@ function formatLaneState(state: LaneState, addresses: LaneAnchorAddresses | unde
 
 function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresses): string[] {
   const lines: string[] = [];
-  lines.push("Lane " + formatTagSet(lane.key) + " - phases: " + (lane.phases.join(",") || "(none)"));
+  lines.push("Lane " + formatLaneKey(lane.key) + " - phases: " + (lane.phases.join(",") || "(none)"));
   lines.push("  members: " + formatMembers(lane.members));
   const edgeCounts = Object.entries(lane.edgeCountsByRelation)
     .map(([relation, count]) => relation + "=" + count)
@@ -224,7 +225,7 @@ function renderComponentReport(
   const lines: string[] = [];
   const health = component.componentCount === 1 ? "healthy" : "SEVERED";
   lines.push(
-    "Lane " + formatTagSet(component.key) + " - components: " + component.componentCount + " (" + health + ")",
+    "Lane " + formatLaneKey(component.key) + " - components: " + component.componentCount + " (" + health + ")",
   );
   for (const island of component.islands) {
     lines.push(
@@ -260,7 +261,7 @@ function renderPathReport(path: LanePathReport, addresses?: LaneAnchorAddresses)
   if (path.status === "skipped") {
     lines.push(
       "Lane " +
-        formatTagSet(path.key) +
+        formatLaneKey(path.key) +
         " - paths: skipped (" +
         path.skipReason +
         "); starts: " +
@@ -274,7 +275,7 @@ function renderPathReport(path: LanePathReport, addresses?: LaneAnchorAddresses)
   }
   lines.push(
     "Lane " +
-      formatTagSet(path.key) +
+      formatLaneKey(path.key) +
       " - paths: " +
       path.pathCount +
       " (terminus " +
@@ -294,12 +295,12 @@ function renderPathReport(path: LanePathReport, addresses?: LaneAnchorAddresses)
 }
 
 function renderInterfacePair(pair: LaneInterfacePair): string {
-  return "  " + formatTagSet(pair.laneA) + " <-> " + formatTagSet(pair.laneB) + ": " + pair.count;
+  return "  " + formatLaneKey(pair.laneA) + " <-> " + formatLaneKey(pair.laneB) + ": " + pair.count;
 }
 
 function renderBypassReport(report: LaneBypassReport, addresses?: LaneAnchorAddresses): string[] {
   const lines: string[] = [];
-  lines.push("  Lane " + formatTagSet(report.key) + " - bypass: " + report.count);
+  lines.push("  Lane " + formatLaneKey(report.key) + " - bypass: " + report.count);
   for (const edge of report.edges) {
     const tags = edge.tags.length > 0 ? " {" + edge.tags.join(",") + "}" : "";
     lines.push(
@@ -343,7 +344,7 @@ function renderSharedNodes(
       formatTurnRef(node.id, addresses) +
       (node.designedShape ? " (designed fork/merge)" : " (judgment)") +
       ": " +
-      node.citingLanesByStance.map(formatTagSet).join(", "),
+      node.citingLanesByStance.map(formatLaneKey).join(", "),
   );
 }
 
@@ -432,7 +433,7 @@ function renderLaneError(
       return (
         head +
         "lane " +
-        formatTagSet(error.key) +
+        formatLaneKey(error.key) +
         " has a second " +
         error.role +
         ": " +
@@ -561,7 +562,7 @@ export function renderLaneCheckerReports(
         "component@" +
           formatTurnRef(shared.representative, anchorAddresses) +
           ": " +
-          shared.lanes.map(formatTagSet).join(", "),
+          shared.lanes.map(formatLaneKey).join(", "),
       );
       sections.push(...renderSharedNodes(shared, anchorAddresses));
     }
@@ -679,9 +680,9 @@ function truncateToColumns(line: string): string {
   return line.slice(0, MAX_DIGRAPH_COLUMNS - 3) + "...";
 }
 
-/** Segment + exact canonical tag set equality — via `laneToken`'s own escaped join (round-4 review #6: a plain `tagSet.join("")` collides `{"a","bc"}` with `{"ab","c"}`). */
+/** Segment + tag equality (D5, v11 — a lane's identity is one tag, not a set) — via `laneToken`'s own escaped join (round-4 review #6's collision-avoidance reasoning, still load-bearing). */
 function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
-  return laneToken(a.segment, a.tagSet) === laneToken(b.segment, b.tagSet);
+  return laneToken(a.segment, a.tag) === laneToken(b.segment, b.tag);
 }
 
 /**
@@ -737,7 +738,7 @@ export function renderLaneDigraph(result: LaneCheckerResult, addresses?: LaneAnc
     const path = result.paths.find((entry) => sameLaneKey(entry.key, lane.key));
     const terminus = path && path.status === "ok" ? path.terminus : null;
 
-    lines.push(truncateToColumns("Lane " + formatTagSet(lane.key)));
+    lines.push(truncateToColumns("Lane " + formatLaneKey(lane.key)));
 
     const seenElsewhere = new Set<number>();
     for (const otherLane of result.lanes) {

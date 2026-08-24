@@ -20,14 +20,19 @@ const edge = (
 
 function laneOf(
   derivation: ReturnType<typeof deriveLaneInterpretation>,
-  tags: string[],
+  tag: string,
   segment: string = DEFAULT_SEGMENT,
 ) {
-  return derivation.laneByToken.get(laneToken(segment, tags));
+  return derivation.laneByToken.get(laneToken(segment, tag));
 }
 
 describe("lane enumeration", () => {
-  test("coexisting untagged/{A}/{B}/{A,B} rows on one pair enumerate THREE distinct lanes; the untagged row forms none", () => {
+  // REPLACES the old pin (v10) that {A}, {B}, {A,B} enumerate THREE
+  // independent lanes, none unioned — lane-declaration spec Rev 2, D5: the
+  // user ruled MERGE. A lane is now (segment, ONE tag), so {A,B} is not a
+  // third lane at all; it is a second membership for the SAME lane A and the
+  // SAME lane B the {A} and {B} rows already formed.
+  test("coexisting untagged/{A}/{B}/{A,B} rows on one pair enumerate TWO lanes — A and B — with the {A,B} row a member of BOTH (the merge, D5)", () => {
     const turns = [design(1), design(2)];
     const edges = [
       edge(2, "extends", 1, []),
@@ -36,18 +41,18 @@ describe("lane enumeration", () => {
       edge(2, "extends", 1, ["A", "B"]),
     ];
     const derivation = deriveLaneInterpretation(turns, edges);
-    expect(derivation.lanes.length).toBe(3);
+    expect(derivation.lanes.length).toBe(2);
 
-    const laneA = laneOf(derivation, ["A"]);
-    const laneB = laneOf(derivation, ["B"]);
-    const laneAB = laneOf(derivation, ["A", "B"]);
-    expect(laneA?.taggedEdges.length).toBe(1);
-    expect(laneB?.taggedEdges.length).toBe(1);
-    expect(laneAB?.taggedEdges.length).toBe(1);
-    // {A}+{B} (two rows) is a DIFFERENT fact from {A,B} (one row) — three
-    // independent lanes, none unioned, matching the draft's "不同事实".
+    const laneA = laneOf(derivation, "A");
+    const laneB = laneOf(derivation, "B");
+    // Each lane's own tagged edges include BOTH its single-tag row and the
+    // multi-tag {A,B} row — the {A,B} edge is one of lane A's own tagged
+    // edges AND one of lane B's own tagged edges at once, not a third
+    // lane's private fact.
+    expect(laneA?.taggedEdges.length).toBe(2);
+    expect(laneB?.taggedEdges.length).toBe(2);
     expect(laneA?.members.map((m) => m.id)).toEqual([1, 2]);
-    expect(laneAB?.members.map((m) => m.id)).toEqual([1, 2]);
+    expect(laneB?.members.map((m) => m.id)).toEqual([1, 2]);
   });
 
   test("a tag set with no tagged edge never enumerates — untagged edges alone produce zero lanes", () => {
@@ -66,10 +71,37 @@ describe("event reduction — the four override cases", () => {
       edge(102, "indexes", 101, ["x"]),
       edge(103, "override", 102, ["x"]),
     ];
-    const lane = laneOf(deriveLaneInterpretation(turns, edges), ["x"]);
+    const lane = laneOf(deriveLaneInterpretation(turns, edges), "x");
     expect(lane?.declaration).toEqual({ state: "reopened", terminus: null, latestEventTurn: 103 });
     expect(lane?.members.find((m) => m.id === 102)?.dead).toBe(true);
     expect(lane?.members.find((m) => m.id === 101)?.dead).toBe(false);
+  });
+
+  // THE MERGE (lane-declaration spec Rev 2, D5; the peer's own failure
+  // figure, "What this CHANGES about existing verdicts") — pinned. Under the
+  // OLD exact-set identity, `{a,b}` was a third, untouched lane, so lane `a`
+  // stood undisturbed by an override naming `{a,b}`. Under the merge, an
+  // override tagged with a SUPERSET of a lane's own tag still reaches that
+  // lane: `T2 --indexes{a}--> T1` closes lane `a` (terminus T2); then
+  // `T3 --override{a,b}--> T2` kills T2 in lane `a` too and REOPENS it —
+  // this is accepted, not worked around.
+  test("the merge: an override tagged {a,b} reopens lane {a} it only partially names, and is simultaneously lane {b}'s own first event", () => {
+    const turns = [design(1), design(2), design(3)];
+    const edges = [
+      edge(2, "indexes", 1, ["a"]), // T2 declares lane a, terminus = T2
+      edge(3, "override", 2, ["a", "b"]), // multi-tag override
+    ];
+    const derivation = deriveLaneInterpretation(turns, edges);
+    const laneA = laneOf(derivation, "a");
+    const laneB = laneOf(derivation, "b");
+    expect(laneA?.declaration).toEqual({ state: "reopened", terminus: null, latestEventTurn: 3 });
+    expect(laneA?.members.find((m) => m.id === 2)?.dead).toBe(true);
+    // The identical row is simultaneously lane `b`'s own first-ever event —
+    // T2 marked dead in a lane nobody had declared yet (the ordinary
+    // "override touched an undeclared lane" case, now reached via a shared
+    // tag rather than lane {b}'s own exclusive edge).
+    expect(laneB?.declaration.state).toBe("undeclared");
+    expect(laneB?.members.find((m) => m.id === 2)?.dead).toBe(true);
   });
 
   test("untagged override GLOBALLY kills the target — dead in every lane it belongs to, not just the one it terminates", () => {
@@ -81,8 +113,8 @@ describe("event reduction — the four override cases", () => {
       edge(204, "extends", 202, ["z"]), // 202 is ALSO a {z} member, via a different lane
     ];
     const derivation = deriveLaneInterpretation(turns, edges);
-    const laneY = laneOf(derivation, ["y"]);
-    const laneZ = laneOf(derivation, ["z"]);
+    const laneY = laneOf(derivation, "y");
+    const laneZ = laneOf(derivation, "z");
     // {y}: 202 WAS its terminus -> reopened.
     expect(laneY?.declaration).toEqual({ state: "reopened", terminus: null, latestEventTurn: 203 });
     expect(laneY?.members.find((m) => m.id === 202)?.dead).toBe(true);
@@ -93,20 +125,20 @@ describe("event reduction — the four override cases", () => {
     expect(laneZ?.members.find((m) => m.id === 202)?.dead).toBe(true);
   });
 
-  test("an override tagged with a DIFFERENT lane's tag is indifferent — the untouched lane keeps its terminus and a clean member", () => {
+  test("an override tagged with a lane's OWN tag absent is indifferent — the untouched lane keeps its terminus and a clean member", () => {
     const turns = [design(301), design(302), design(303)];
     const edges = [
       edge(302, "extends", 301, ["p"]),
       edge(302, "indexes", 301, ["p"]),
-      edge(303, "override", 302, ["q"]), // a DIFFERENT lane's business entirely
+      edge(303, "override", 302, ["q"]), // a DIFFERENT lane's business entirely — no shared tag
     ];
     const derivation = deriveLaneInterpretation(turns, edges);
-    const laneP = laneOf(derivation, ["p"]);
+    const laneP = laneOf(derivation, "p");
     expect(laneP?.declaration).toEqual({ state: "declared", terminus: 302, latestEventTurn: 302 });
     expect(laneP?.members.find((m) => m.id === 302)?.dead).toBe(false);
     // {q} itself auto-vivifies from this one tagged (override) edge — an
     // override CAN be a lane's sole tagged edge.
-    const laneQ = laneOf(derivation, ["q"]);
+    const laneQ = laneOf(derivation, "q");
     expect(laneQ?.declaration.state).toBe("undeclared");
     expect(laneQ?.members.find((m) => m.id === 302)?.dead).toBe(true);
   });
@@ -114,7 +146,7 @@ describe("event reduction — the four override cases", () => {
   test("a lane with no reduction event at all (pure continuation) is undeclared with latestEventTurn null — distinct from an override-touched-but-never-declared lane", () => {
     const turns = [design(401), design(402), design(403)];
     const edges = [edge(402, "extends", 401, ["silent"]), edge(403, "extends", 402, ["silent"])];
-    const lane = laneOf(deriveLaneInterpretation(turns, edges), ["silent"]);
+    const lane = laneOf(deriveLaneInterpretation(turns, edges), "silent");
     expect(lane?.declaration).toEqual({ state: "undeclared", terminus: null, latestEventTurn: null });
   });
 });
@@ -141,7 +173,7 @@ describe("declaration/override/continuation ordering by turn — the mutation-de
     const e3 = edge(500, "extends", 999, ["m"]);
     const e4 = edge(100, "extends", 500, ["m"]);
 
-    const lane = laneOf(deriveLaneInterpretation(turns, [e1, e2, e3, e4]), ["m"]);
+    const lane = laneOf(deriveLaneInterpretation(turns, [e1, e2, e3, e4]), "m");
     // A reducer sorting by raw id (100 < 500 < 999) would process
     // citingId=100 BEFORE citingId=500, landing terminus=500 — the old,
     // wrong reading. Correct order-key reduction processes order=2 (id 500)
@@ -152,7 +184,7 @@ describe("declaration/override/continuation ordering by turn — the mutation-de
     // Sanity: shuffling the ARRAY order of the exact same edges agrees —
     // the result depends only on `order`, never on array position either.
     const reordered = [e4, e3, e2, e1];
-    const laneReordered = laneOf(deriveLaneInterpretation(turns, reordered), ["m"]);
+    const laneReordered = laneOf(deriveLaneInterpretation(turns, reordered), "m");
     expect(laneReordered?.declaration.terminus).toBe(100);
   });
 
@@ -161,7 +193,7 @@ describe("declaration/override/continuation ordering by turn — the mutation-de
     const e1 = edge(404, "indexes", 403, ["m"]); // latest declaration, turn 404
     const e2 = edge(402, "indexes", 401, ["m"]); // earlier declaration, turn 402
     const scrambled = [e1, e2]; // array order does not match id order either
-    const lane = laneOf(deriveLaneInterpretation(turns, scrambled), ["m"]);
+    const lane = laneOf(deriveLaneInterpretation(turns, scrambled), "m");
     expect(lane?.declaration.terminus).toBe(404);
   });
 
@@ -172,7 +204,7 @@ describe("declaration/override/continuation ordering by turn — the mutation-de
       edge(21, "indexes", 20, ["cont"]), // declares at 21
       edge(22, "extends", 21, ["cont"]), // continuation past the declaration
     ];
-    const lane = laneOf(deriveLaneInterpretation(turns, edges), ["cont"]);
+    const lane = laneOf(deriveLaneInterpretation(turns, edges), "cont");
     expect(lane?.declaration.terminus).toBe(21); // continuation never moves the terminus
     expect(lane?.declaration.latestEventTurn).toBe(22); // but it IS the freshest activity
   });
@@ -184,7 +216,7 @@ describe("declaration/override/continuation ordering by turn — the mutation-de
       edge(502, "indexes", 501, ["c"]), // declares at 502
       edge(503, "extends", 502, ["c"]), // plain continuation, no re-declaration
     ];
-    const lane = laneOf(deriveLaneInterpretation(turns, edges), ["c"]);
+    const lane = laneOf(deriveLaneInterpretation(turns, edges), "c");
     expect(lane?.declaration.terminus).toBe(502);
     expect(lane?.declaration.state).toBe("declared");
     // 503 is a member (endpoint of the lane's own tagged edge) but never
@@ -213,7 +245,7 @@ describe("order key is a lexicographically-compared tuple, never a scalar encodi
       edge(2, "indexes", 1, ["ord"]),
       edge(3, "indexes", 1, ["ord"]),
     ];
-    const lane = laneOf(deriveLaneInterpretation([base, early, late], edges), ["ord"]);
+    const lane = laneOf(deriveLaneInterpretation([base, early, late], edges), "ord");
     // `late` (order [2,0]) must win regardless of array/id position — id 3 >
     // id 2 here too, so this alone would not distinguish a correct
     // lexicographic-tuple reducer from a buggy id-fallback one; the real
@@ -245,22 +277,23 @@ describe("compareOrderKeyAcrossSessions — the tuple's session-id half never st
   });
 });
 
-describe("laneToken never collides a differently-split tag set with one containing the delimiter literally (round-5 review #14)", () => {
-  test("['a','b'] and a single tag whose text literally contains the old U+0001 join character are distinct lane tokens", () => {
-    // The defect: the old join was `canonicalTagSet(tags).join(\"\\u0001\")`
-    // then `segment + \"\\u0000\" + tagSetKey`. A tag whose own text CONTAINS
-    // that join character collides with a differently-split tag set that
-    // joins to the identical string: `[\"a\",\"b\"]` joined on U+0001
-    // produces \"a\\u0001b\", and the single tag `[\"a\\u0001b\"]` (one
-    // element, no separator emitted) joins to the SAME string.
-    const tokenSplit = laneToken(DEFAULT_SEGMENT, ["a", "b"]);
-    const tokenLiteral = laneToken(DEFAULT_SEGMENT, ["a\u0001b"]);
-    expect(tokenSplit).not.toBe(tokenLiteral);
+describe("laneToken (D5, v11: segment + ONE tag) never collides two different (segment, tag) pairs", () => {
+  // v10's own defect (round-5 review #14) was a delimiter JOIN across a tag
+  // SET colliding with a differently-split set. D5 retires the tag SET from
+  // a lane's identity entirely — `laneToken` now takes exactly ONE tag, so
+  // there is no set left to split or join; a tag containing the OLD U+0001
+  // join character is simply one ordinary tag string, nothing to collide.
+  test("a tag containing the old U+0001 join character round-trips as an ordinary single tag, colliding with nothing", () => {
+    const token = laneToken(DEFAULT_SEGMENT, "a\u0001b");
+    expect(token).toBe(JSON.stringify([DEFAULT_SEGMENT, "a\u0001b"]));
   });
 
-  test("a segment name containing the old U+0000 separator does not collide two different (segment, tagSet) pairs", () => {
-    const a = laneToken("x\u0000y", ["z"]);
-    const b = laneToken("x", ["y\u0000z"]);
+  test("a segment/tag pair never collides with a differently-split pair carrying the same two characters across the boundary", () => {
+    // JSON.stringify's own per-element quoting marks the segment/tag
+    // boundary regardless of what either string contains — there is no
+    // separate delimiter left for a crafted string to imitate.
+    const a = laneToken("ab", "c");
+    const b = laneToken("a", "bc");
     expect(a).not.toBe(b);
   });
 });
@@ -274,8 +307,8 @@ describe("cross-segment tagged edges — dual appearance and warnings (round-4 r
     const edges = [edge(2, "extends", 1, ["x"])]; // citing turn 2 in segment B cites turn 1 in segment A
     const derivation = deriveLaneInterpretation(turns, edges);
 
-    const laneA = laneOf(derivation, ["x"], "A");
-    const laneB = laneOf(derivation, ["x"], "B");
+    const laneA = laneOf(derivation, "x", "A");
+    const laneB = laneOf(derivation, "x", "B");
     expect(laneA).toBeDefined();
     expect(laneB).toBeDefined();
     // Both sides see the SAME members/tagged edges — it is the same fact,
@@ -294,7 +327,7 @@ describe("cross-segment tagged edges — dual appearance and warnings (round-4 r
     const edges = [edge(2, "extends", 1, ["y"])];
     const derivation = deriveLaneInterpretation(turns, edges);
     expect(derivation.warnings).toEqual([]);
-    expect(derivation.lanes.filter((lane) => lane.key.tagSet.join("") === "y")).toHaveLength(1);
+    expect(derivation.lanes.filter((lane) => lane.key.tag === "y")).toHaveLength(1);
   });
 
   test("a cross-segment declaration (tagged indexes) is reduced identically on both sides", () => {
@@ -304,8 +337,8 @@ describe("cross-segment tagged edges — dual appearance and warnings (round-4 r
     ];
     const edges = [edge(11, "indexes", 10, ["z"])];
     const derivation = deriveLaneInterpretation(turns, edges);
-    const laneA = laneOf(derivation, ["z"], "A");
-    const laneB = laneOf(derivation, ["z"], "B");
+    const laneA = laneOf(derivation, "z", "A");
+    const laneB = laneOf(derivation, "z", "B");
     expect(laneA?.declaration).toEqual({ state: "declared", terminus: 11, latestEventTurn: 11 });
     expect(laneB?.declaration).toEqual({ state: "declared", terminus: 11, latestEventTurn: 11 });
   });
@@ -320,12 +353,12 @@ describe("cross-segment tagged edges — dual appearance and warnings (round-4 r
 function stateOf(
   turns: readonly LaneTurnInput[],
   edges: readonly LaneEdgeInput[],
-  tags: string[],
+  tag: string,
   segment: string = DEFAULT_SEGMENT,
 ) {
   const derivation = deriveLaneInterpretation(turns, edges);
   const states = deriveLaneStates(derivation.lanes, turns);
-  return states.get(laneToken(segment, tags));
+  return states.get(laneToken(segment, tag));
 }
 
 describe("lane-state helper — closed/open, valid/invalid, lastDeclarer", () => {
@@ -339,7 +372,7 @@ describe("lane-state helper — closed/open, valid/invalid, lastDeclarer", () =>
     // Sanity: the raw reduction (companion test above) reports this lane
     // "declared" with terminus 21 and latestEventTurn 22 — a naive helper
     // reading only `state === "declared"` would (wrongly) call this closed.
-    const state = stateOf(turns, edges, ["cont"]);
+    const state = stateOf(turns, edges, "cont");
     expect(state?.closure).toBe("open");
     expect(state?.validity).toBeNull();
     expect(state?.terminus).toBe(21);
@@ -353,7 +386,7 @@ describe("lane-state helper — closed/open, valid/invalid, lastDeclarer", () =>
       edge(102, "indexes", 101, ["x"]),
       edge(103, "override", 102, ["x"]), // reopens
     ];
-    const state = stateOf(turns, edges, ["x"]);
+    const state = stateOf(turns, edges, "x");
     expect(state?.closure).toBe("open");
     expect(state?.validity).toBeNull();
     expect(state?.terminus).toBeNull(); // the raw declaration.terminus is null...
@@ -363,7 +396,7 @@ describe("lane-state helper — closed/open, valid/invalid, lastDeclarer", () =>
   test("an undeclared lane (only structural continuation, no `indexes` ever) reads OPEN with lastDeclarer null — 'open, no declarer, no seat'", () => {
     const turns = [design(401), design(402), design(403)];
     const edges = [edge(402, "extends", 401, ["silent"]), edge(403, "extends", 402, ["silent"])];
-    const state = stateOf(turns, edges, ["silent"]);
+    const state = stateOf(turns, edges, "silent");
     expect(state?.closure).toBe("open");
     expect(state?.validity).toBeNull();
     expect(state?.terminus).toBeNull();
@@ -373,7 +406,7 @@ describe("lane-state helper — closed/open, valid/invalid, lastDeclarer", () =>
   test("a plain closed lane with a living core reads CLOSED/valid, and lastDeclarer equals the terminus", () => {
     const turns = [design(30), design(31)];
     const edges = [edge(31, "extends", 30, ["v"]), edge(31, "indexes", 30, ["v"])];
-    const state = stateOf(turns, edges, ["v"]);
+    const state = stateOf(turns, edges, "v");
     expect(state?.closure).toBe("closed");
     expect(state?.validity).toBe("valid");
     expect(state?.terminus).toBe(31);
@@ -387,7 +420,7 @@ describe("lane-state helper — closed/open, valid/invalid, lastDeclarer", () =>
       edge(12, "override", 11, ["dead"]), // repudiate 11 first
       edge(13, "indexes", 11, ["dead"]), // then declare closure indexing the dead core
     ];
-    const state = stateOf(turns, edges, ["dead"]);
+    const state = stateOf(turns, edges, "dead");
     expect(state?.closure).toBe("closed");
     expect(state?.validity).toBe("invalid");
     expect(state?.terminus).toBe(13);
@@ -403,7 +436,7 @@ describe("lane-state helper — closed/open, valid/invalid, lastDeclarer", () =>
       edge(43, "indexes", 41, ["mix"]),
       edge(43, "indexes", 42, ["mix"]), // 42 (living) joins the declared core too
     ];
-    const state = stateOf(turns, edges, ["mix"]);
+    const state = stateOf(turns, edges, "mix");
     expect(state?.closure).toBe("closed");
     expect(state?.validity).toBe("valid");
   });

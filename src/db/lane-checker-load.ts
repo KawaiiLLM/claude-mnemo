@@ -37,24 +37,33 @@ import { liveTurnSql } from "./turn-liveness";
  *      segment's members, an EXPLICIT turn-id set, or explicitly named lanes)
  *      into a starting turn-id set (empty for the `lanes` scope, whose seed
  *      IS the named lane).
- *   2. DISCOVER — for the three seeded scopes, find every LANE (segment +
- *      exact canonical tag set) touched by a tagged edge with either
- *      endpoint in the seed set. The `lanes` scope skips this: its lane set
- *      is exactly what the caller named. BOTH endpoints' owning segments
- *      yield a lane key (round-5 review #13) — a cross-segment tagged edge
- *      is a real, legal shape (`lane-interpretation.ts`'s own dual
- *      appearance), so discovering only the citing side's copy would leave
- *      the cited side's own segment scan blind to a lane it is genuinely a
- *      member of.
- *   3. WIDEN — for every involved lane, load its FULL tagged edge set
- *      (every `memory_edges` row anywhere in the database whose canonical
- *      tag set matches exactly, filtered to match the lane's own segment
- *      from EITHER endpoint, round-5 review #13 — the same dual-appearance
- *      reasoning as DISCOVER, applied on the read-back side so a
- *      caller-named lane resolves regardless of which side of a
- *      cross-segment edge it names), not merely the rows that happened to
- *      touch the seed range. This is what makes a lane declared long before
- *      or extended long after the requested window still resolve whole.
+ *   2. DISCOVER — for the three seeded scopes, find every LANE (segment + ONE
+ *      tag — D5, v11: `LaneKey` is `{segment, tag}`, not `{segment, tagSet}`)
+ *      touched by a tagged edge with either endpoint in the seed set. A
+ *      multi-tag edge discovers ONE lane key PER TAG it carries (the merge:
+ *      an edge tagged `{a,b}` discovers both lane `a` and lane `b`, in every
+ *      applicable segment), not one lane key for its whole tag set. The
+ *      `lanes` scope skips this: its lane set is exactly what the caller
+ *      named. BOTH endpoints' owning segments yield lane keys (round-5 review
+ *      #13) — a cross-segment tagged edge is a real, legal shape
+ *      (`lane-interpretation.ts`'s own dual appearance), so discovering only
+ *      the citing side's copy would leave the cited side's own segment scan
+ *      blind to a lane it is genuinely a member of.
+ *   3. WIDEN — for every involved lane, load its FULL tagged edge set (every
+ *      `memory_edges` row anywhere in the database whose canonical tag set
+ *      CONTAINS the lane's one tag — D5: "every live edge carrying that
+ *      tag" — filtered to match the lane's own segment from EITHER endpoint,
+ *      round-5 review #13 — the same dual-appearance reasoning as DISCOVER,
+ *      applied on the read-back side so a caller-named lane resolves
+ *      regardless of which side of a cross-segment edge it names), not
+ *      merely the rows that happened to touch the seed range. This is what
+ *      makes a lane declared long before or extended long after the
+ *      requested window still resolve whole. Per-tag membership (rather than
+ *      exact-set match) simplifies this pass over the old one: `tag IN
+ *      memory_edge_tags` alone is now the complete match, with no JS-side
+ *      exact-set filter layered on top (that filter's own collision-safety
+ *      reasoning, round-5 review #14, is now `laneToken`'s own job — see
+ *      `laneKeyToken`).
  *
  * A fourth pass loads the SUPPLEMENTARY edges the core's reports need beyond
  * a lane's own tagged edges: cross-phase citedness into lane members
@@ -232,28 +241,11 @@ function segmentKeyFor(owningSegmentByTurn: ReadonlyMap<number, number>, turnId:
  * separately maintained delimiter join here drifted from the core's own
  * fix and reintroduced the identical collision — a tag containing the
  * delimiter character collides one tag set with a differently-split one).
+ * D5, v11: `key.tag` is now the whole of a lane's non-segment identity, no
+ * canonical-SET encoding needed on this side either.
  */
 function laneKeyToken(key: LaneKey): string {
-  return laneToken(key.segment, key.tagSet);
-}
-
-/**
- * The segment-free half of `laneToken`'s own encoding: a canonical tag SET
- * serialized as a JSON array, which is what the WIDEN pass compares an edge
- * row's stored tags against (peer round T1466, finding P2-9). The former
- * `canonicalTagSet(...).join("<U+0001>")` collided exactly the way round-5
- * review #14 already found for the lane token — a tag that CONTAINS the
- * delimiter merges into its neighbour, so `["a","b","c"]` and
- * `["a","b<U+0001>c"]` joined identically and each lane pulled in the other's
- * edges (both sets share the first canonical tag, so the `memory_edge_tags`
- * prefilter above admits both candidates and cannot rule the collision out).
- * `JSON.stringify` self-delimits every element through its own quoting, so
- * no two distinct sets can serialize alike. Deliberately NOT `laneToken`
- * itself: an edge row carries no segment of its own, only its endpoint turns
- * do, and the segment filter is applied separately in `loadLaneCheckScope`.
- */
-function tagSetToken(tags: readonly string[]): string {
-  return JSON.stringify(canonicalTagSet(tags));
+  return laneToken(key.segment, key.tag);
 }
 
 /** Every `segment_members` row's owning segment for the given turn ids, batched in one query (`MIN` mirrors `getOwningSegmentId`'s own "lowest id wins" tie-break for a legacy multi-membership row). */
@@ -331,12 +323,19 @@ function loadTaggedEdgesTouching(db: Database, turnIds: readonly number[]): Edge
     .all(...turnIds, ...turnIds);
 }
 
-/** Every live, relation-carrying turn-turn edge anywhere in the database whose canonical tag set is exactly `tagSet` — the WIDEN pass. `memory_edge_tags` (indexed on `tag`) narrows the scan to candidates carrying one of the set's own tags before the exact-set filter runs in JS. */
-function loadEdgesForExactTagSet(db: Database, tagSet: readonly string[]): EdgeLiteRow[] {
-  if (tagSet.length === 0) {
-    return [];
-  }
-  const rows = db
+/**
+ * Every live, relation-carrying turn-turn edge anywhere in the database whose
+ * canonical tag set CONTAINS `tag` — the WIDEN pass (D5, v11: a lane's own
+ * tagged edges are every edge carrying its one tag, not an exact-SET match).
+ * `memory_edge_tags` (indexed on `tag`) is the COMPLETE match on its own now
+ * — every row it names carries `tag` by construction, so the JS-side
+ * exact-set filter the old `tagSetToken` comparison ran (peer round T1466,
+ * finding P2-9) is no longer needed at all: there is no second, wider tag set
+ * to accidentally admit or collide against, only "does this row's tag index
+ * include this one tag".
+ */
+function loadEdgesForTag(db: Database, tag: string): EdgeLiteRow[] {
+  return db
     .query<EdgeLiteRow, [string]>(
       `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
        FROM memory_edges me
@@ -347,10 +346,7 @@ function loadEdgesForExactTagSet(db: Database, tagSet: readonly string[]): EdgeL
          AND me.relation IS NOT NULL
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
-    .all(tagSet[0]!);
-  // Collision-free exact-set compare (finding P2-9) - see `tagSetToken`.
-  const wanted = tagSetToken(tagSet);
-  return rows.filter((row) => tagSetToken(JSON.parse(row.tags) as string[]) === wanted);
+    .all(tag);
 }
 
 /** Every live turn-turn edge touching any of `turnIds` (either endpoint) whose relation is one of `relations` — the SUPPLEMENTARY pass (cross-phase citedness, untagged override, the component neighbourhood). */
@@ -638,11 +634,16 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     );
     const seen = new Map<string, LaneKey>();
     for (const row of discoveryRows) {
+      // D5, v11 (the merge): one lane key PER TAG the row carries, not one
+      // key for its whole tag set — a row tagged `{a,b}` discovers lane `a`
+      // AND lane `b`, in every applicable segment below.
       const tagSet = canonicalTagSet(JSON.parse(row.tags) as string[]);
-      const citingKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citingId), tagSet };
-      const citedKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citedId), tagSet };
-      seen.set(laneKeyToken(citingKey), citingKey);
-      seen.set(laneKeyToken(citedKey), citedKey);
+      for (const tag of tagSet) {
+        const citingKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citingId), tag };
+        const citedKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citedId), tag };
+        seen.set(laneKeyToken(citingKey), citingKey);
+        seen.set(laneKeyToken(citedKey), citedKey);
+      }
     }
     involvedLaneKeys = [...seen.values()];
   }
@@ -650,7 +651,7 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   // ---- WIDEN: each involved lane's full tagged edge set, its own segment only ----
   const widenedByKey = new Map<string, EdgeLiteRow[]>();
   for (const laneKey of involvedLaneKeys) {
-    const candidates = loadEdgesForExactTagSet(db, laneKey.tagSet);
+    const candidates = loadEdgesForTag(db, laneKey.tag);
     if (candidates.length === 0) {
       widenedByKey.set(laneKeyToken(laneKey), []);
       continue;

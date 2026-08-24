@@ -1794,6 +1794,72 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     ).toHaveLength(1);
   });
 
+  // THE MERGE (lane-declaration spec Rev 2, D5) reaches Gate C too — the
+  // ticket's own "self-ground eligibility" re-baselining bar. Same shape as
+  // the stale-declaration test above, but the reopening override carries an
+  // EXTRA tag (`lane-b`) the declaration itself never used.
+  //
+  //   - OLD (retired) exact-set identity: `{lane-a,lane-b}` is a THIRD,
+  //     independent lane from `{lane-a}` — the override never touches
+  //     `{lane-a}` at all, T3 remains its terminus, and a fresh self-grounds
+  //     would still PASS.
+  //   - NEW (merge): the override carries tag `lane-a`, so it ALSO fires in
+  //     lane `{lane-a}` — T3 dies there and the lane reopens, exactly like
+  //     the same-tag case above. A fresh self-grounds now REJECTS.
+  test("the merge: a fresh self-grounds rejects when a MULTI-tag override reopens the declared lane, even though the override's own tag set never equals the declaration's", () => {
+    setType(targetTurnId, ["design", "implement"]);
+    setType(earlierTurnId, ["design"]);
+    setTags(targetTurnId, ["lane-a", "lane-b"]);
+    setTags(earlierTurnId, ["lane-a"]);
+
+    // T3 declares itself the {lane-a} terminus and self-grounds in one call — legal.
+    const declare = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        indexes: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }],
+        grounds: [`S${sessionId}/T3`],
+      },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(isNoteSuccess(declare)).toBe(true);
+
+    // A later turn, T4, overrides T3 with tags {lane-a, lane-b} — NOT the
+    // same exact set the declaration used ({lane-a} alone).
+    const laterTurnId = db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
+      )
+      .get(sessionId, 4, "Fourth turn — multi-tag reopen", 120)!.id;
+    setType(laterTurnId, ["design"]);
+    setTags(laterTurnId, ["lane-a", "lane-b"]);
+
+    const reopen = noteTool(
+      db,
+      { turn: `S${sessionId}/T4`, override: [{ turn: `S${sessionId}/T3`, tags: ["lane-a", "lane-b"] }] },
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(isNoteSuccess(reopen)).toBe(true);
+
+    // A FRESH self-grounds attempt by T3 must reject — {lane-a} reopened,
+    // and T3 declared no OTHER lane that could still cover it.
+    const staleAttempt = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T3`] },
+      { now: () => 1000, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(staleAttempt)).toStartWith("Parameter error:");
+    expect(resultText(staleAttempt)).toContain(`grounds "S${sessionId}/T3"`);
+    expect(resultText(staleAttempt)).toContain("TAGGED");
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).filter(
+        (edge) => edge.relation === "grounds" && edge.cited.id === targetTurnId,
+      ),
+    ).toHaveLength(1);
+  });
+
   test("a call carrying no field and no edge parameter still names what it needs", () => {
     const result = noteTool(
       db,

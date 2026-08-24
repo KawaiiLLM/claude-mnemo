@@ -1,10 +1,18 @@
 /**
- * v10 lane-model FOUR-REPORT CHECKER (rubric-v10 ticket 05; issue's "Report
- * domains" paragraph, T1300/T1321/T1323). Built on `lane-interpretation.ts`'s
+ * v11 lane-model FOUR-REPORT CHECKER (rubric-v10 ticket 05, issue's "Report
+ * domains" paragraph, T1300/T1321/T1323; identity narrowed to ONE tag per
+ * lane by lane-declaration spec Rev 2, D5). Built on `lane-interpretation.ts`'s
  * pure enumeration/reduction — this module adds the four report shapes and
  * nothing else: no rendering, no candidate-edge suggestions, no advisory
  * text. Numbers, names, states only; the CLI/settlement-tool renderers
  * (ticket 06) are the only consumers that turn this into prose or a digraph.
+ *
+ * D5 (v11): `LaneKey` is `{segment, tag}`, not `{segment, tagSet}` — every
+ * comparison below against "a lane's own tag set" now reads "a lane's own
+ * tag", and "an edge whose tag set equals the lane's exact set" (the old,
+ * now-retired exclusion for the lane's OWN structural edges) becomes "an
+ * edge whose tag set CONTAINS the lane's tag" — see `computeInterfaces` and
+ * `computeBypass` below for the two spots this actually changes behaviour.
  *
  * ## Report 4 splits into three blocks (rubric-v10 ticket 08, T1343 ruling)
  *
@@ -16,8 +24,8 @@
  *       unordered pair of reported lanes, the count of edges crossing
  *       between them over the SAME domain reports 2/3 already use
  *       (`LANE_COMPONENT_RELATIONS`: stance + consume + grounds), excluding
- *       an edge whose own tag set already equals either lane's exact set (a
- *       lane's own structural edge is never counted as crossing INTO
+ *       an edge whose own tag set already CONTAINS either lane's tag (D5,
+ *       v11 — a lane's own structural edge is never counted as crossing INTO
  *       itself). Per DECLARED lane, bypass counts an incoming same-domain
  *       edge from outside the lane that lands on a member OTHER than the
  *       lane's current (event-reduced) `declaration.terminus` — reusing
@@ -127,8 +135,8 @@
  * `usedFromNonMembers` sits alongside `groundsFromNonMembers`/
  * `testimonyFromNonMembers` in `citedness`, same lane-wide "target is ANY
  * member, citer is NOT a member" filter, for relation `consume` (any tag
- * state — a `consume` edge tagged with THIS lane's own exact set would
- * already make its citing turn a member by construction, so "citer is not a
+ * state — a `consume` edge carrying THIS lane's own tag would already make
+ * its citing turn a member by construction, so "citer is not a
  * member" already excludes that case structurally, exactly like `grounds`
  * above). This is the T1351 trap fix: a lane adopted only through an
  * external `consume` citation used to render with an empty
@@ -186,7 +194,7 @@
  *     turns' own `tags` — the subset invariant `turn-phase.ts`'s Gate B
  *     enforces at write time, checked again over STOCK because a later tag
  *     EDIT on an endpoint turn can orphan a row the gate once passed.
- *   - **E5** a LANE (one segment, one exact tag set) with more than one
+ *   - **E5** a LANE (one segment, one tag — D5, v11) with more than one
  *     SOURCE or more than one SINK — the spec's lane-shape law is "exactly
  *     ONE start and ONE end". One instance per EXTRA source/sink, NAMING
  *     that node and anchored at the turn that owns an in-lane edge touching
@@ -772,9 +780,9 @@ function findForkJoinNodes(out: ReadonlyMap<number, ReadonlySet<number>>): { for
   return { forkNodes, joinNodes };
 }
 
-/** Exact tag-SET equality (both pre-canonicalized: deduped, ascending) — deliberately NOT `sameLaneKey`/`laneToken`, which also fold in a segment; an edge carries no segment of its own, only its two endpoint turns do, so the interfaces exclusion (module header block (a)) compares tag arrays alone. */
-function tagSetEqualsExact(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((tag, index) => tag === b[index]);
+/** Whether an edge's own canonical tag set CONTAINS a given lane's tag (D5, v11 — a lane's own tagged edges are every edge carrying its tag, not an exact-set match) — deliberately NOT `sameLaneKey`/`laneToken`, which also fold in a segment; an edge carries no segment of its own, only its two endpoint turns do, so the interfaces exclusion (module header block (a)) tests the tag alone. */
+function edgeCarriesLaneTag(edgeTagSet: readonly string[], tag: string): boolean {
+  return edgeTagSet.includes(tag);
 }
 
 /**
@@ -782,10 +790,10 @@ function tagSetEqualsExact(a: readonly string[], b: readonly string[]): boolean 
  * reported `lanes`, the count of `LANE_COMPONENT_RELATIONS` edges in the
  * FULL edge set with one endpoint a member of one lane and the other a
  * member of the other, excluding an edge whose own canonical tag set already
- * equals either lane's exact set — that edge is one of the lane's OWN
- * tagged edges (by `deriveLaneInterpretation`'s own grouping, an edge tagged
- * with a lane's exact set makes both its endpoints members of THAT lane,
- * never merely "the other side" of a crossing), not a crossing between two
+ * CONTAINS either lane's tag (D5, v11) — that edge is one of the lane's OWN
+ * tagged edges (by `deriveLaneInterpretation`'s own grouping, an edge
+ * carrying a lane's tag makes both its endpoints members of THAT lane, never
+ * merely "the other side" of a crossing), not a crossing between two
  * distinct lanes. Only pairs with `count > 0` are emitted — a sparse report.
  */
 function computeInterfaces(lanes: readonly Lane[], allEdges: readonly LaneEdgeInput[]): LaneInterfacePair[] {
@@ -805,7 +813,7 @@ function computeInterfaces(lanes: readonly Lane[], allEdges: readonly LaneEdgeIn
           (membersB.has(edge.citingId) && membersA.has(edge.citedId));
         if (!crosses) continue;
         const edgeTagSet = canonicalTagSet(edge.tags);
-        if (tagSetEqualsExact(edgeTagSet, laneA.key.tagSet) || tagSetEqualsExact(edgeTagSet, laneB.key.tagSet)) {
+        if (edgeCarriesLaneTag(edgeTagSet, laneA.key.tag) || edgeCarriesLaneTag(edgeTagSet, laneB.key.tag)) {
           continue;
         }
         count += 1;
@@ -825,7 +833,7 @@ function computeInterfaces(lanes: readonly Lane[], allEdges: readonly LaneEdgeIn
  * member but is NOT `lane.declaration.terminus` — the event-reduced
  * terminus `lane-interpretation.ts` already computed, read here directly,
  * never re-derived. No tag-set exclusion is needed here (unlike the
- * interfaces half): an edge tagged with the lane's own exact set would make
+ * interfaces half): an edge carrying the lane's own tag would make
  * its citing turn a member of the lane by construction, so "citing turn
  * outside the lane" already rules that case out structurally.
  */
@@ -1210,7 +1218,7 @@ function errorWord(error: LaneCheckerError): string {
 /** The compare's last key: E4's own tag set, and for E5 the lane token — the only thing distinguishing two instances a single node earns in two different lanes (or in one cross-segment lane's two copies). */
 function errorDetail(error: LaneCheckerError): string {
   if (error.class === "E4") return error.tags.join(",");
-  if (error.class === "E5") return laneToken(error.key.segment, error.key.tagSet);
+  if (error.class === "E5") return laneToken(error.key.segment, error.key.tag);
   return "";
 }
 
@@ -1297,7 +1305,7 @@ export function checkLanes(
 
   for (const lane of lanes) {
     const memberIds = new Set(lane.members.map((member) => member.id));
-    const thisLaneToken = laneToken(lane.key.segment, lane.key.tagSet);
+    const thisLaneToken = laneToken(lane.key.segment, lane.key.tag);
     // Guaranteed present: `deriveLaneStates` keys one entry per lane in
     // `lanes`, by that same lane's own token, and `lane` is drawn from that
     // identical `lanes` array — see `checkLanes`'s own `laneStates` call above.
@@ -1431,9 +1439,9 @@ export function checkLanes(
   };
 }
 
-/** Segment + exact canonical tag set equality — via `laneToken`'s own escaped join (round-4 review #6: a plain `tagSet.join("")` collides `{"a","bc"}` with `{"ab","c"}`). */
+/** Segment + tag equality (D5, v11 — a lane's identity is one tag, not a set) — via `laneToken`'s own escaped join (round-4 review #6's collision-avoidance reasoning, still load-bearing: a plain string concat can still merge a segment/tag pair with a different one). */
 function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
-  return laneToken(a.segment, a.tagSet) === laneToken(b.segment, b.tagSet);
+  return laneToken(a.segment, a.tag) === laneToken(b.segment, b.tag);
 }
 
 function buildLaneStats(
@@ -1541,12 +1549,12 @@ function buildPathReport(
   // `lane` — `crossPhaseGrounds` already filtered `!memberIds.has(citingId)`
   // — but the guard is kept explicit rather than relying on that exclusion
   // alone).
-  const thisLaneToken = laneToken(lane.key.segment, lane.key.tagSet);
+  const thisLaneToken = laneToken(lane.key.segment, lane.key.tag);
   const foldedInLanes = new Set<string>([thisLaneToken]);
   const citerLanePairs: Array<readonly [number, number]> = [];
   for (const citerId of new Set(crossPhaseGrounds.map((edge) => edge.citingId))) {
     for (const otherLane of allLanes) {
-      const token = laneToken(otherLane.key.segment, otherLane.key.tagSet);
+      const token = laneToken(otherLane.key.segment, otherLane.key.tag);
       if (foldedInLanes.has(token)) continue;
       if (!otherLane.members.some((member) => member.id === citerId)) continue;
       foldedInLanes.add(token);

@@ -1,5 +1,6 @@
 /**
- * v10 lane-model INTERPRETATION CORE (rubric-v10 ticket 05; concept doc
+ * v11 lane-model INTERPRETATION CORE (lane-declaration spec Rev 2, D5;
+ * `.scratch/lane-declaration/spec.md`; supersedes rubric-v10 ticket 05's
  * `.scratch/rubric-v10/draft-lane-model.md`, "统一解读原则" + "校验体系"). Pure
  * derivation over plain arrays — no database, no I/O, no module-level state,
  * the same contract `shared/flows.ts`'s `deriveFlows` follows for the
@@ -7,15 +8,56 @@
  * an edge row an immutable canonical tag set; this module is the first
  * reader of that identity).
  *
- * ## The unified interpretation principle (the draft's own anchor)
+ * ## Lane identity is now ONE tag (D5) — the merge
  *
- * A TAGGED same-phase edge acts on the LANE its exact tag set identifies; an
- * UNTAGGED same-phase edge acts on the cited TURN itself (global, free
- * aggregation) — every taggable word (override/narrows/extends/consume/
- * indexes) reads this ONE rule, no per-word special case. Only `indexes` and
- * `override` carry graph-STATE for a lane (a terminus); `narrows`/`extends`/
- * `consume` are structural — they matter to path counting (`lane-checker.ts`)
- * but never move a lane's terminus:
+ * A lane's identity USED TO BE `(segment, EXACT tag SET)`: `{a}`, `{b}` and
+ * `{a,b}` were three independent lanes, none unioned. The user ruled MERGE
+ * [T1541]: a lane is `(segment, ONE tag)`, so an edge carrying `["a","b"]` is
+ * a member of lane `a` AND lane `b` at once — not a third lane of its own.
+ * Mechanically, every tagged edge's own canonical tag SET (`db/lanes.ts`'s
+ * ticket-01 invariant, unchanged — `memory_edges.tags` is still a sorted,
+ * deduped JSON array) fans out into ONE membership/event PER TAG it carries,
+ * crossed with the segment fan-out that already existed (a cross-segment edge
+ * still dual-registers, once per side). A same-segment edge tagged `{a,b}`
+ * therefore joins TWO lane groups from ONE segment, where it used to join
+ * exactly one.
+ *
+ * This is not cosmetic: an `override` or `indexes` event on a multi-tag edge
+ * now fires ONCE PER TAG, so a single write can act on a lane its own tag set
+ * only partially names. The peer's own failure figure (spec "What this
+ * CHANGES about existing verdicts"): `T2 --indexes{a}--> T1` declares lane
+ * `a` (terminus T2); then `T3 --override{a,b}--> T2`. Under the OLD exact-set
+ * identity, `{a,b}` was a third, untouched lane, so lane `a` stood
+ * undisturbed. Under the merge, that same row is ALSO an event in lane `a`
+ * (it carries tag `a`): T2 dies in lane `a` too, and since T2 was `a`'s
+ * terminus, lane `a` REOPENS — no terminus until a fresh declaration. The
+ * identical row is simultaneously lane `b`'s own first-ever event (T2 marked
+ * dead in a lane nobody had declared yet — the ordinary "override touched an
+ * undeclared lane" case this module already handled for a single-tag edge).
+ * This is accepted, not worked around (spec: "This is accepted, not worked
+ * around").
+ *
+ * Three rubric clauses RETIRE with the old exact-set identity (spec D5, v11):
+ * exact-set identity itself, superset BRANCH (a narrower tag set used to mint
+ * a brand-new, unrelated lane instead of continuing one), and set REOPEN
+ * (widening an edge's tag set used to be the only way to touch a second
+ * lane's terminus at all). A tag SET is never compared as a whole anywhere in
+ * this module any more — every lane-identity comparison is per-tag. Branching
+ * is now a different lane related only by narration; reopening is simply a
+ * tagged `override` naming the lane's own tag, which needs no set arithmetic.
+ *
+ * ## The unified interpretation principle (draft-lane-model.md's own anchor,
+ * carried over from v10 with one wording fix: "the lane" -> "every lane named
+ * by one of the tags")
+ *
+ * A TAGGED same-phase edge acts on EVERY LANE named by one of the tags in its
+ * exact tag set; an UNTAGGED same-phase edge acts on the cited TURN itself
+ * (global, free aggregation) — every taggable word (override/narrows/extends/
+ * consume/indexes) reads this ONE rule, no per-word special case beyond the
+ * per-tag fan-out above. Only `indexes` and `override` carry graph-STATE for
+ * a lane (a terminus); `narrows`/`extends`/`consume` are structural — they
+ * matter to path counting (`lane-checker.ts`) but never move a lane's
+ * terminus:
  *
  *   - tagged indexes     -> DECLARATION: the citing turn becomes the lane's
  *                           terminus. Latest wins, reduced in CITING-TURN
@@ -32,19 +74,24 @@
  *                           same number) and loses precision at the sizes
  *                           this schema can reach; a tuple has neither
  *                           failure mode.
- *   - tagged override,    -> lane-local correction: the cited turn loses its
- *     same tag as this        EFFECTIVE status in this lane (a dead node)
- *     lane                    regardless of whether it currently is the
- *                              terminus. If it WAS the terminus, the lane
- *                              enters REOPENED state (terminus-less until a
- *                              new declaration).
+ *   - tagged override,    -> lane-local correction, once PER TAG the override
+ *     carrying tag T          carries: in lane T, the cited turn loses its
+ *                              EFFECTIVE status (a dead node) regardless of
+ *                              whether it currently is that lane's terminus.
+ *                              If it WAS lane T's terminus, lane T enters
+ *                              REOPENED state (terminus-less until a new
+ *                              declaration) — this is the merge (D5): an
+ *                              override tagged `{a,b}` is TWO such events at
+ *                              once, one in lane `a` and one in lane `b`,
+ *                              even though only one of the two may have ever
+ *                              been declared.
  *   - untagged override  -> GLOBAL kill: the cited turn dies in EVERY lane it
  *                           is a member of (not only where it terminates);
  *                           every lane it currently terminates loses that
  *                           terminus (reopened).
- *   - override tagged     -> indifferent to THIS lane — it is another lane's
- *     with a DIFFERENT         event entirely.
- *     lane's tag set
+ *   - override tagged     -> indifferent to lane T — T is not among the
+ *     with tags that do          tags this override carries, so it is that
+ *     not include T             other lane's event entirely, not this one's.
  *
  * A lane never enumerates from an untagged or single-endpoint product: the
  * write-time self-citation gate (`turn-phase.ts`'s `validateRelationTarget`)
@@ -176,11 +223,11 @@ export interface LaneEdgeInput {
 
 export type LaneDeclarationState = "declared" | "reopened" | "undeclared";
 
-/** A lane's machine identity: segment + exact canonical tag set. No subset/hierarchy is read here — that is a human layer over this exact-set data (draft: "层级是解读,不是机制"). */
+/** A lane's machine identity (D5, v11): segment + ONE canonical tag — never a set. No subset/hierarchy is read here — that is a human layer over this per-tag data (draft: "层级是解读,不是机制"). */
 export interface LaneKey {
   segment: string;
-  /** Canonical: deduped, ascending. */
-  tagSet: readonly string[];
+  /** Canonical (the write-time predicate `db/lanes.ts` enforces, D1) — this module trusts the caller's edge rows and never re-canonicalizes a single tag itself. */
+  tag: string;
 }
 
 export interface LaneMember {
@@ -213,7 +260,7 @@ export interface Lane {
   /** Ascending by id, dead members included (separated by the `dead` flag, never dropped — "被推翻的节点留在图中,作为死节点承载纠正叙事"). */
   members: readonly LaneMember[];
   declaration: LaneDeclaration;
-  /** This lane's own tagged edges (exact tag-set match), input order. */
+  /** This lane's own tagged edges — every edge whose canonical tag set CONTAINS this lane's one tag (D5: "every live edge carrying that tag"), input order. A multi-tag edge appears here in EVERY lane it names, not just one. */
   taggedEdges: readonly LaneEdgeInput[];
 }
 
@@ -229,12 +276,15 @@ export interface LaneCrossSegmentWarning {
 
 export interface LaneInterpretation {
   /**
-   * Every enumerated lane, ordered by segment then canonical tag key —
-   * deterministic, not input order. A cross-segment tagged edge (citing and
-   * cited turns in different segments) enumerates its lane TWICE, once per
-   * side's segment — "the lane is enumerable from both sides' segment
-   * scans" — both copies share the same members/tagged edges/declaration
-   * state, differing only in `key.segment`.
+   * Every enumerated lane, ordered by segment then tag — deterministic, not
+   * input order. TWO independent fan-outs put one edge into several `lanes`
+   * entries: a cross-segment tagged edge (citing and cited turns in
+   * different segments) enumerates once per side's segment — "the lane is
+   * enumerable from both sides' segment scans", both copies sharing the same
+   * members/tagged edges/declaration state and differing only in
+   * `key.segment` — and (D5, v11) a multi-tag edge enumerates once per tag it
+   * carries, each a genuinely DIFFERENT lane with its own independent
+   * declaration state (the merge).
    */
   lanes: readonly Lane[];
   laneByToken: ReadonlyMap<string, Lane>;
@@ -248,22 +298,23 @@ export function canonicalTagSet(tags: readonly string[]): string[] {
 }
 
 /**
- * The token a lane is grouped and looked up by: segment + canonical tag set.
- * JSON-encoded as a `[segment, tagSet]` pair (round-5 review #14) -- the
- * former U+0000/U+0001-delimited join collided whenever a real tag happened
- * to CONTAIN the delimiter character itself: `["a","b"]` joined on U+0001
- * produces the identical string to the single tag `["a\u0001b"]` joined the
- * same way. `JSON.stringify` self-delimits every element via its own
- * quoting/escaping, so no input can ever produce two different
- * `[segment, tagSet]` pairs that serialize identically.
+ * The token a lane is grouped and looked up by: segment + ONE tag (D5, v11 --
+ * a lane's identity is no longer a whole set). JSON-encoded as a `[segment,
+ * tag]` pair (round-5 review #14's own reasoning, carried over unchanged):
+ * a plain delimited join collides whenever a real string happens to CONTAIN
+ * the delimiter character itself -- `segment + tag` merges segment `"ab"` +
+ * tag `"c"` with a DIFFERENT segment `"a"` + tag `"bc"`. `JSON.stringify`
+ * self-delimits both elements via its own quoting/escaping, so no input can
+ * ever produce two different `[segment, tag]` pairs that serialize
+ * identically.
  */
-export function laneToken(segment: string, tags: readonly string[]): string {
-  return JSON.stringify([segment, canonicalTagSet(tags)]);
+export function laneToken(segment: string, tag: string): string {
+  return JSON.stringify([segment, tag]);
 }
 
 interface MutableLaneGroup {
   segment: string;
-  tagSet: string[];
+  tag: string;
   edges: LaneEdgeInput[];
 }
 
@@ -298,19 +349,22 @@ export function deriveLaneInterpretation(
   const segmentFor = (id: number): string => segmentOf.get(id) ?? DEFAULT_SEGMENT;
   const orderFor = (id: number): LaneOrderKey => orderOf.get(id) ?? [0, id];
 
-  // ---- lane enumeration: group by (a segment, exact tag set) ----
-  // A cross-segment tagged edge (citing/cited segments differ) is a real,
+  // ---- lane enumeration: group by (a segment, ONE tag) — D5, v11 ----
+  // TWO independent fan-outs put one edge into several groups: a
+  // cross-segment tagged edge (citing/cited segments differ) is a real,
   // allowed shape (draft: "偶尔耦合允许") — DUAL APPEARANCE: it registers in
-  // BOTH sides' segment groups, so a caller scanning either segment's lanes
-  // finds it, and is recorded once in `warnings` (legal, warned, never
-  // rejected — the write gate's business is elsewhere, not this module's).
+  // BOTH sides' segment groups, recorded once in `warnings` (legal, warned,
+  // never rejected — the write gate's business is elsewhere, not this
+  // module's); and (the merge) a multi-tag edge registers once PER TAG it
+  // carries, in each applicable segment — `{a,b}` on a same-segment edge
+  // joins TWO groups from that one segment, not one.
   const groups = new Map<string, MutableLaneGroup>();
   const warnings: LaneCrossSegmentWarning[] = [];
-  function addToGroup(segment: string, canon: readonly string[], edge: LaneEdgeInput): string {
-    const token = laneToken(segment, canon);
+  function addToGroup(segment: string, tag: string, edge: LaneEdgeInput): string {
+    const token = laneToken(segment, tag);
     let group = groups.get(token);
     if (group === undefined) {
-      group = { segment, tagSet: [...canon], edges: [] };
+      group = { segment, tag, edges: [] };
       groups.set(token, group);
     }
     group.edges.push(edge);
@@ -321,9 +375,15 @@ export function deriveLaneInterpretation(
     if (canon.length === 0) continue; // untagged: forms no lane (requirement 2)
     const citingSegment = segmentFor(edge.citingId);
     const citedSegment = segmentFor(edge.citedId);
-    addToGroup(citingSegment, canon, edge);
+    for (const tag of canon) {
+      addToGroup(citingSegment, tag, edge);
+      if (citedSegment !== citingSegment) {
+        addToGroup(citedSegment, tag, edge);
+      }
+    }
     if (citedSegment !== citingSegment) {
-      addToGroup(citedSegment, canon, edge);
+      // Once per cross-segment EDGE, not per tag — the warning names the
+      // edge's whole tag set informationally; it is not a lane identity.
       warnings.push({
         citingId: edge.citingId,
         citedId: edge.citedId,
@@ -335,6 +395,11 @@ export function deriveLaneInterpretation(
   }
 
   // ---- unified event reduction, in TURN-ORDER (never edge array order, never raw id when `order` differs) ----
+  // D5, v11: an `indexes`/`override` on a multi-tag edge pushes ONE event PER
+  // TAG (crossed with the segment fan-out below) — this is the merge itself.
+  // `T3 --override{a,b}--> T2` pushes an event into lane `a` AND lane `b`,
+  // each reduced independently by the batch logic below exactly as if it had
+  // been two separate single-tag override edges.
   const events: ReduceEvent[] = [];
   function pushEvent(citingId: number, citedId: number, relation: "indexes" | "override", token: string | null): void {
     events.push({ citingId, citedId, relation, token });
@@ -351,16 +416,18 @@ export function deriveLaneInterpretation(
     }
     const citingSegment = segmentFor(edge.citingId);
     const citedSegment = segmentFor(edge.citedId);
-    const citingToken = laneToken(citingSegment, canon);
-    // defensive: every tagged indexes/override is itself a tagged edge, so
-    // its group(s) always exist — kept for robustness against malformed input.
-    if (groups.has(citingToken)) {
-      pushEvent(edge.citingId, edge.citedId, edge.relation, citingToken);
-    }
-    if (citedSegment !== citingSegment) {
-      const citedToken = laneToken(citedSegment, canon);
-      if (groups.has(citedToken)) {
-        pushEvent(edge.citingId, edge.citedId, edge.relation, citedToken);
+    for (const tag of canon) {
+      const citingToken = laneToken(citingSegment, tag);
+      // defensive: every tagged indexes/override is itself a tagged edge, so
+      // its group(s) always exist — kept for robustness against malformed input.
+      if (groups.has(citingToken)) {
+        pushEvent(edge.citingId, edge.citedId, edge.relation, citingToken);
+      }
+      if (citedSegment !== citingSegment) {
+        const citedToken = laneToken(citedSegment, tag);
+        if (groups.has(citedToken)) {
+          pushEvent(edge.citingId, edge.citedId, edge.relation, citedToken);
+        }
       }
     }
   }
@@ -464,7 +531,7 @@ export function deriveLaneInterpretation(
     const state: LaneDeclarationState =
       terminus !== null ? "declared" : everDeclared.get(token) ? "reopened" : "undeclared";
     const lane: Lane = {
-      key: { segment: group.segment, tagSet: group.tagSet },
+      key: { segment: group.segment, tag: group.tag },
       members,
       declaration: {
         state,
@@ -579,7 +646,7 @@ function laneValidity(lane: Lane): LaneValidity {
  * lane in `lanes` (typically `deriveLaneInterpretation(turns, edges).lanes`,
  * passed straight through) — pure, keyed by the same lane token
  * `laneByToken` uses, so a caller already holding one `deriveLaneInterpretation`
- * result can look a lane's state up by `laneToken(key.segment, key.tagSet)`
+ * result can look a lane's state up by `laneToken(key.segment, key.tag)`
  * with no re-derivation. `turns` is needed again here only for the same
  * `order` lookup `deriveLaneInterpretation` itself builds internally — this
  * helper does not read `deriveLaneInterpretation`'s own internal state, only
@@ -600,7 +667,7 @@ export function deriveLaneStates(
     const closed =
       lane.declaration.state === "declared" &&
       lane.declaration.terminus === lane.declaration.latestEventTurn;
-    const token = laneToken(lane.key.segment, lane.key.tagSet);
+    const token = laneToken(lane.key.segment, lane.key.tag);
     states.set(token, {
       key: lane.key,
       closure: closed ? "closed" : "open",

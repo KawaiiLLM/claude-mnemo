@@ -238,21 +238,23 @@ export interface ConsoleGraphEdge {
   relation: string;
   tags: string[];
   /**
-   * Ticket 04 additive field: the lane token this edge's own canonical tag
-   * set names in the CITING turn's segment (`null` for an untagged edge —
-   * untagged edges form no lane at all, `shared/lane-interpretation.ts`'s own
-   * "untagged: forms no lane" rule). The citing side is used as the edge's
-   * one "home" segment for this display field even on the rare cross-segment
-   * dual-appearance edge (`LaneCrossSegmentWarning`) — the shell's own
-   * highlight/dim logic only needs ONE token per edge to match against the
-   * focused component's lane tokens, and the citing side is the edge's own
-   * structural direction (`turn-phase.ts`'s "citing is always later"
-   * convention). Restores the prototype's own pre-fetch `e.laneToken` field
-   * (console-shell.html's `p.dataset.lane = e.tags.length ? e.laneToken :
-   * ""`) so the shell can set that dataset attribute directly from the
-   * payload instead of recomputing a lane token client-side.
+   * Ticket 04 additive field, WIDENED to plural by lane-declaration spec Rev
+   * 2 (D5, "What this CHANGES about existing verdicts": "an edge belongs to
+   * several lanes now, so the payload's single `laneToken` becomes
+   * `laneTokens: string[]`"). One token per tag this edge carries (`[]` for
+   * an untagged edge — untagged edges form no lane at all,
+   * `shared/lane-interpretation.ts`'s own "untagged: forms no lane" rule),
+   * each in the CITING turn's segment. The citing side is used as the
+   * edge's one "home" segment for this display field even on the rare
+   * cross-segment dual-appearance edge (`LaneCrossSegmentWarning`) — the
+   * citing side is the edge's own structural direction (`turn-phase.ts`'s
+   * "citing is always later" convention). Restores the prototype's own
+   * pre-fetch `e.laneToken` field (console-shell.html's `p.dataset.lane =
+   * e.tags.length ? e.laneToken : ""`) at the new plural shape so the shell
+   * can be updated (ticket 05) to set that dataset attribute directly from
+   * the payload instead of recomputing lane tokens client-side.
    */
-  laneToken: string | null;
+  laneTokens: string[];
 }
 
 /**
@@ -260,7 +262,7 @@ export interface ConsoleGraphEdge {
  * (the CORRECTED closed-valid/closed-invalid/open reading — see
  * `shared/lane-checker.ts`'s own module header, "Report 1 gains a state
  * line") with `key` stripped (already carried at this object's own top
- * level via `segment`/`tagSet`, so nesting it again would just duplicate the
+ * level via `segment`/`tag`, so nesting it again would just duplicate the
  * same two fields). `declarationState`/`declarationTerminus` are the RAW
  * `LaneDeclaration` facts alongside it — both are shipped because they
  * answer different questions: `state` is "what should the UI call this
@@ -299,7 +301,8 @@ export interface ConsoleGraphEdge {
  */
 export interface ConsoleGraphLane {
   segment: string;
-  tagSet: string[];
+  /** D5, v11: a lane's identity is one tag, not a set — this field carries that one tag (never an array; `LaneKey.tag`'s own console mirror). */
+  tag: string;
   state: {
     closure: string;
     validity: string | null;
@@ -314,7 +317,7 @@ export interface ConsoleGraphLane {
   membershipComponentId: string;
   /**
    * Ticket 04 additive field: this lane's own stable identity key —
-   * `laneToken(segment, tagSet)`, the same value already computed internally
+   * `laneToken(segment, tag)`, the same value already computed internally
    * (`tokenFor`) for `membershipComponentId`'s own union-find, now shipped
    * verbatim so the shell can build its `laneByToken` map directly from the
    * payload instead of recomputing the token client-side (spec: "the shell
@@ -577,9 +580,9 @@ export function handleSegmentCardRoute(
 
 // ------------------------------------------------------------------ graph --
 
-/** Segment + exact canonical tag set — the same token `shared/lane-interpretation.ts`'s own `laneToken` computes, re-derived here only for the union-find key (that function is already imported for the payload's own use). */
+/** Segment + tag (D5, v11) — the same token `shared/lane-interpretation.ts`'s own `laneToken` computes, re-derived here only for the union-find key (that function is already imported for the payload's own use). */
 function tokenFor(lane: Pick<LaneStatsReport, "key">): string {
-  return laneToken(lane.key.segment, lane.key.tagSet);
+  return laneToken(lane.key.segment, lane.key.tag);
 }
 
 /** Path-compressed union-find over lane TOKENS (not turn ids) — the focus domain's own connectivity unit is "two lanes", not "two turns". Kept local: this is a different domain from `shared/lane-checker.ts`'s internal turn-id `UnionFind`, not a reuse candidate. */
@@ -1259,7 +1262,7 @@ export function handleGraphRoute(
   const { lanesByTurnId, terminusTurnIds, deadTurnIds } = computePerTurnLaneFacts(run.result.lanes);
   const lanes: ConsoleGraphLane[] = run.result.lanes.map((lane) => ({
     segment: lane.key.segment,
-    tagSet: [...lane.key.tagSet],
+    tag: lane.key.tag,
     state: {
       closure: lane.state.closure,
       validity: lane.state.validity,
@@ -1320,10 +1323,11 @@ export function handleGraphRoute(
     citedId: edge.citedId,
     relation: edge.relation,
     tags: [...edge.tags],
-    laneToken:
-      edge.tags.length > 0
-        ? laneToken(segmentByTurnId.get(edge.citingId) ?? DEFAULT_SEGMENT, edge.tags)
-        : null,
+    // D5, v11 (the merge): one token PER TAG this edge carries — an edge in
+    // two lanes appears under both, `[]` for an untagged edge.
+    laneTokens: edge.tags.map((tag) =>
+      laneToken(segmentByTurnId.get(edge.citingId) ?? DEFAULT_SEGMENT, tag),
+    ),
   }));
 
   // Interval selection, over the FULL display payload (ticket 04,

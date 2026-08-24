@@ -408,25 +408,24 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
       //      refusal is nonetheless the anchor's: it owns the only in-lane
       //      row touching the dangling node, which is the repair power the
       //      anchor field exists to guarantee.
-      //   2. It CONDITIONS the branch idiom (finding P2-7). Proper-superset
-      //      is not the general answer to a second source/sink: two chains
-      //      that share no node are independent lines of work and take
-      //      independent EXACT tag sets. A superset says "this line grows out
-      //      of that one", which is only true when the new chain is rooted at
-      //      a node the parent lane already holds. The unconditional wording
-      //      taught the model to bolt a tag onto anything that dangled, which
-      //      manufactures a subset relation the content does not support.
+      //   2. (RETIRED by lane-declaration spec Rev 2, D5, v11 — superset
+      //      BRANCH no longer exists; the paragraph below described it.) A
+      //      lane is now ONE tag, not a set, so "retag onto a superset" is no
+      //      longer a repair move at all — an independent line of work
+      //      simply takes a DIFFERENT tag, with no set relationship to the
+      //      original; relating the two is narration's job, not the tag
+      //      mechanism's.
       return (
-        `[E5] ${anchor}: lane {${error.key.tagSet.join(",")}} has a second ${error.role} — ` +
+        `[E5] ${anchor}: lane {${error.key.tag}} has a second ${error.role} — ` +
         `${turnAddressFor(db, error.nodeId)} dangles beside ${turnAddressFor(db, error.canonicalId)}, ` +
         "and a lane has exactly one start and one end" +
         (error.anchorId === error.nodeId
           ? ""
           : `; you own the edge into ${turnAddressFor(db, error.nodeId)}, which is why this one is yours to repair`) +
-        ". Retag this chain into a lane of its own — an independent line of work takes its own " +
-        "independent EXACT tag set; a proper-superset set is the BRANCH idiom only when the new " +
-        "chain is rooted at a node of the parent lane — or bridge it to the lane's real start/end " +
-        "with an edge the content actually supports."
+        ". Retag this chain onto a DIFFERENT tag of its own — a lane is a single tag, so an " +
+        "independent line of work simply takes a different tag (there is no tag-SET relationship " +
+        "between lanes any more; relate the two lines in narration, not in the tag) — or bridge it " +
+        "to the lane's real start/end with an edge the content actually supports."
       );
     default: {
       // Exhaustive over `LaneErrorClass` today (E1-E5). A class added to the

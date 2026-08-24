@@ -21,7 +21,7 @@ import { DEFAULT_SEGMENT } from "../../src/shared/lane-interpretation";
  * LOAD-BEARING PROPERTY: every edge this adapter returns has BOTH endpoints
  * present among the turns it also returns — the adapter's own answer to
  * "declare coverage when it cannot [widen]" is that it structurally CANNOT
- * emit a dangling edge (`loadEdgesForExactTagSet`/`loadEdgesByRelationTouching`
+ * emit a dangling edge (`loadEdgesForTag`/`loadEdgesByRelationTouching`
  * INNER JOIN both endpoints against `turns` with the law-8 predicate before
  * an edge is ever admitted, and the final turn load is exactly the union of
  * every admitted edge's own endpoints) — so `checkLanes`'s own report 1
@@ -184,7 +184,7 @@ describe("segment scope", () => {
     const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
 
     expect(projection.involvedLaneKeys).toEqual([
-      { segment: String(segment.id), tagSet: ["decision"] },
+      { segment: String(segment.id), tag: "decision" },
     ]);
     assertNoDanglingEdges(projection);
 
@@ -235,7 +235,7 @@ describe("named-lanes scope", () => {
 
     const projection = loadLaneCheckScope(db, {
       kind: "lanes",
-      laneKeys: [{ segment: String(segmentA.id), tagSet: ["shared-tag"] }],
+      laneKeys: [{ segment: String(segmentA.id), tag: "shared-tag" }],
     });
 
     const turnIds = new Set(projection.turns.map((turn) => turn.id));
@@ -254,7 +254,7 @@ describe("named-lanes scope", () => {
 
     const projection = loadLaneCheckScope(db, {
       kind: "lanes",
-      laneKeys: [{ segment: DEFAULT_SEGMENT, tagSet: ["homeless-lane"] }],
+      laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "homeless-lane" }],
     });
 
     expect(projection.edges).toHaveLength(1);
@@ -266,7 +266,7 @@ describe("named-lanes scope", () => {
   test("an unmatched lane (no edge carries that exact tag set) resolves empty, not an error", () => {
     const projection = loadLaneCheckScope(db, {
       kind: "lanes",
-      laneKeys: [{ segment: DEFAULT_SEGMENT, tagSet: ["nothing-tagged-this"] }],
+      laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "nothing-tagged-this" }],
     });
 
     expect(projection.turns).toEqual([]);
@@ -293,7 +293,7 @@ describe("named-lanes scope", () => {
 
     const projection = loadLaneCheckScope(db, {
       kind: "lanes",
-      laneKeys: [{ segment: String(segmentA.id), tagSet: ["cross-seg"] }],
+      laneKeys: [{ segment: String(segmentA.id), tag: "cross-seg" }],
     });
 
     expect(projection.edges).toHaveLength(1);
@@ -320,9 +320,9 @@ describe("cited-side discovery — both endpoints' owning segments yield a lane 
     // Discovery must register segment A's OWN copy of this lane (the dual
     // appearance the pure core itself produces), not only segment B's --
     // the old citing-side-only discovery reported involvedLaneKeys as
-    // [{segment: B, tagSet: ["x"]}], mislabelling A's own scan.
+    // [{segment: B, tag: "x"}], mislabelling A's own scan.
     expect(projection.involvedLaneKeys).toEqual(
-      expect.arrayContaining([{ segment: String(segmentA.id), tagSet: ["x"] }]),
+      expect.arrayContaining([{ segment: String(segmentA.id), tag: "x" }]),
     );
     expect(projection.edges).toHaveLength(1);
   });
@@ -480,7 +480,7 @@ describe("load-bearing property: no edge ever points at a turn absent from the p
 
     for (const scope of [
       { kind: "range", sessionId, promptStart: 1, promptEnd: 2 } as const,
-      { kind: "lanes", laneKeys: [{ segment: DEFAULT_SEGMENT, tagSet: ["ownership"] }] } as const,
+      { kind: "lanes", laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "ownership" }] } as const,
     ]) {
       const projection = loadLaneCheckScope(db, scope);
       assertNoDanglingEdges(projection);
@@ -558,7 +558,7 @@ describe("segment-global component widening (round-4 review #4a)", () => {
 
     const projection = loadLaneCheckScope(db, {
       kind: "lanes",
-      laneKeys: [{ segment: String(segment.id), tagSet: ["lane"] }],
+      laneKeys: [{ segment: String(segment.id), tag: "lane" }],
     });
     expect(
       projection.edges.some((edge) => edge.citingId === h3 && edge.citedId === h2 && edge.relation === "consume"),
@@ -613,7 +613,7 @@ describe("homeless-lane fixpoint component widening (round-5 review #12)", () =>
 
     const projection = loadLaneCheckScope(db, {
       kind: "lanes",
-      laneKeys: [{ segment: DEFAULT_SEGMENT, tagSet: ["bridge"] }],
+      laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "bridge" }],
     });
     expect(
       projection.edges.some((edge) => edge.citingId === h3 && edge.citedId === h2 && edge.relation === "consume"),
@@ -641,7 +641,7 @@ describe("homeless-lane fixpoint component widening (round-5 review #12)", () =>
 
     const projection = loadLaneCheckScope(db, {
       kind: "lanes",
-      laneKeys: [{ segment: DEFAULT_SEGMENT, tagSet: ["isolated"] }],
+      laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "isolated" }],
     });
 
     const result = checkLanes(projection.turns, projection.edges);
@@ -841,71 +841,122 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
   });
 });
 
-// ------------------------- peer round T1466: collision-free exact-set match (P2-9)
+// ------------------------- D5 (v11): WIDEN matches by ONE tag, not a joined SET
 
 /**
- * LOAD-BEARING PROPERTY. The WIDEN pass decides which rows belong to a lane by
- * comparing canonical tag SETS. It used to compare a U+0001-delimited JOIN of
- * the set, which collides exactly the way round-5 review #14 already found for
- * the lane token: a tag that CONTAINS the delimiter character merges into its
- * neighbour, so the three-tag set {a, b, c} and the two-tag set {a, "b<SEP>c"}
- * produce the identical string. The `memory_edge_tags` prefilter cannot rule
- * this out — both sets share the tag "a", so both rows are candidates — and a
- * hit pulls ANOTHER lane's edges into this lane's projection, and from there
- * into the commit gate's verdict. The compare is a canonical JSON array now,
- * self-delimiting through its own quoting.
+ * D5 (v11) RETIRES the exact-tag-SET-match mechanism this describe block
+ * used to guard (peer round T1466, finding P2-9: a delimiter-joined tag SET
+ * comparison collided a three-tag set with a differently-split two-tag set
+ * that happened to join to the identical string). A lane's identity is now
+ * `(segment, ONE tag)` — `loadEdgesForTag` matches directly against
+ * `memory_edge_tags WHERE tag = ?`, with no JS-side set comparison, no join,
+ * and so no delimiter left to collide through. What replaces the old
+ * property as load-bearing: naming ONE tag loads every row carrying it
+ * (including a row that carries OTHER tags alongside it — the merge), and
+ * never a row that merely shares a DIFFERENT tag with some unrelated edge.
  */
-describe("exact tag-SET matching is collision-free (T1466 P2-9)", () => {
-  // Built rather than written as a literal so this file carries no control
-  // byte of its own.
-  const SEP = String.fromCharCode(1);
+describe("WIDEN loads exactly the rows carrying a lane's ONE tag (D5, v11)", () => {
+  test("naming lane {a} loads the edge tagged {a,b} too (the merge), never an edge tagged only {x}", () => {
+    const sessionId = seedSession("tag-widen-precision");
+    const a1 = insertTurn(sessionId, 1, { tags: ["a", "b"] });
+    const a2 = insertTurn(sessionId, 2, { tags: ["a", "b"] });
+    const x1 = insertTurn(sessionId, 3, { tags: ["x"] });
+    const x2 = insertTurn(sessionId, 4, { tags: ["x"] });
+    tagEdge(a2, a1, "extends", ["a", "b"]); // a member of BOTH lane {a} and lane {b}
+    tagEdge(x2, x1, "extends", ["x"]); // an unrelated lane entirely — shares nothing with {a}
 
-  test("two DIFFERENT tag arrays that join identically stay two lanes — neither pulls the other's edges", () => {
-    const sessionId = seedSession("tag-collision");
-    // Each turn carries its edge's own tags, so the fixture is clean under
-    // E4 too and the only thing left that could raise an error is the
-    // collision itself.
-    const a1 = insertTurn(sessionId, 1, { tags: ["a", "b", "c"] });
-    const a2 = insertTurn(sessionId, 2, { tags: ["a", "b", "c"] });
-    const b1 = insertTurn(sessionId, 3, { tags: ["a", "b" + SEP + "c"] });
-    const b2 = insertTurn(sessionId, 4, { tags: ["a", "b" + SEP + "c"] });
-    tagEdge(a2, a1, "extends", ["a", "b", "c"]);
-    tagEdge(b2, b1, "extends", ["a", "b" + SEP + "c"]);
-
-    // Naming the three-tag lane must load ITS edge only.
-    const three = loadLaneCheckScope(db, {
+    const laneA = loadLaneCheckScope(db, {
       kind: "lanes",
-      laneKeys: [{ segment: DEFAULT_SEGMENT, tagSet: ["a", "b", "c"] }],
+      laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "a" }],
     });
-    expect(three.edges).toEqual([
-      { citingId: a2, citedId: a1, relation: "extends", tags: ["a", "b", "c"] },
+    expect(laneA.edges).toEqual([
+      { citingId: a2, citedId: a1, relation: "extends", tags: ["a", "b"] },
     ]);
-    expect(three.turns.map((turn) => turn.id).sort((x, y) => x - y)).toEqual([a1, a2]);
+    expect(laneA.turns.map((turn) => turn.id).sort((x, y) => x - y)).toEqual([a1, a2]);
 
-    // And the colliding two-tag lane loads only its own.
-    const two = loadLaneCheckScope(db, {
-      kind: "lanes",
-      laneKeys: [{ segment: DEFAULT_SEGMENT, tagSet: ["a", "b" + SEP + "c"] }],
-    });
-    expect(two.edges).toEqual([
-      { citingId: b2, citedId: b1, relation: "extends", tags: ["a", "b" + SEP + "c"] },
-    ]);
-    expect(two.turns.map((turn) => turn.id).sort((x, y) => x - y)).toEqual([b1, b2]);
-
-    // End to end: a scope holding both still reports TWO lanes with disjoint
-    // members, never one merged lane (which would then report a shape error
-    // it never earned).
-    const both = loadLaneCheckScope(db, { kind: "turns", turnIds: [a1, a2, b1, b2] });
+    // End to end: a scope holding both edges reports TWO lanes for the {a,b}
+    // edge (a and b) plus the unrelated {x} lane — three total, each with
+    // its own disjoint-or-shared membership exactly as D5 predicts, never a
+    // fourth "merged" lane the old exact-set identity would never have
+    // produced either, and never {a}/{x} cross-contaminating each other.
+    const both = loadLaneCheckScope(db, { kind: "turns", turnIds: [a1, a2, x1, x2] });
     const result = checkLanes(both.turns, both.edges, both.outOfVocabularyEdges);
-    expect(result.lanes.map((lane) => lane.key.tagSet)).toEqual([
-      ["a", "b", "c"],
-      ["a", "b" + SEP + "c"],
-    ]);
-    expect(result.lanes.map((lane) => lane.members.map((member) => member.id))).toEqual([
-      [a1, a2],
-      [b1, b2],
-    ]);
+    expect(result.lanes.map((lane) => lane.key.tag).sort()).toEqual(["a", "b", "x"]);
     expect(result.errors).toEqual([]);
+  });
+
+  // DISCOVER's own per-tag fan-out (D5, v11): a seed range touching only the
+  // multi-tag edge itself must discover BOTH lanes it names, then WIDEN each
+  // one out to its full edge set — including the parts of each lane sitting
+  // far OUTSIDE the requested range, exactly like a single-tag lane already
+  // widens. Neither lane's own additional edge shares a tag with the other.
+  test("a range scope seeded on a multi-tag edge discovers AND widens BOTH lanes it touches", () => {
+    const sessionId = seedSession("multi-tag-discover");
+    const t1 = insertTurn(sessionId, 1, { tags: ["a", "b"] });
+    const t2 = insertTurn(sessionId, 2, { tags: ["a", "b"] });
+    // Far outside the requested [1,2] range — each lane's OWN other member.
+    const t10 = insertTurn(sessionId, 10, { tags: ["a"] });
+    const t11 = insertTurn(sessionId, 11, { tags: ["a"] });
+    const t20 = insertTurn(sessionId, 20, { tags: ["b"] });
+    const t21 = insertTurn(sessionId, 21, { tags: ["b"] });
+    tagEdge(t2, t1, "extends", ["a", "b"]); // the seed's own multi-tag edge
+    tagEdge(t11, t10, "extends", ["a"]); // lane {a}'s other edge, far outside the range
+    tagEdge(t21, t20, "extends", ["b"]); // lane {b}'s other edge, far outside the range
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+
+    expect(projection.involvedLaneKeys.map((k) => k.tag).sort()).toEqual(["a", "b"]);
+    expect(projection.edges).toHaveLength(3);
+    const turnIds = new Set(projection.turns.map((turn) => turn.id));
+    for (const id of [t1, t2, t10, t11, t20, t21]) {
+      expect(turnIds.has(id)).toBe(true);
+    }
+    assertNoDanglingEdges(projection);
+
+    const result = checkLanes(projection.turns, projection.edges);
+    expect(result.lanes.map((lane) => lane.key.tag).sort()).toEqual(["a", "b"]);
+    const laneA = result.lanes.find((lane) => lane.key.tag === "a")!;
+    const laneB = result.lanes.find((lane) => lane.key.tag === "b")!;
+    expect(laneA.members.map((m) => m.id).sort((x, y) => x - y)).toEqual([t1, t2, t10, t11]);
+    expect(laneB.members.map((m) => m.id).sort((x, y) => x - y)).toEqual([t1, t2, t20, t21]);
+  });
+
+  // The same fan-out under the scope the CONSOLE actually asks for. The range
+  // case above was the only multi-tag discovery test, and a per-scope-kind
+  // regression would leave one whole reader under-discovering silently — the
+  // segment scope is where the merge is most visible, since a segment's lanes
+  // are exactly what the card and the graph render.
+  test("a segment scope discovers BOTH lanes of a multi-tag edge, and widens each past the roster", () => {
+    const sessionId = seedSession("multi-tag-segment-discover");
+    const t1 = insertTurn(sessionId, 1, { tags: ["a", "b"] });
+    const t2 = insertTurn(sessionId, 2, { tags: ["a", "b"] });
+    const t10 = insertTurn(sessionId, 10, { tags: ["a"] });
+    const t11 = insertTurn(sessionId, 11, { tags: ["a"] });
+    const t20 = insertTurn(sessionId, 20, { tags: ["b"] });
+    const t21 = insertTurn(sessionId, 21, { tags: ["b"] });
+    tagEdge(t2, t1, "extends", ["a", "b"]);
+    tagEdge(t11, t10, "extends", ["a"]);
+    tagEdge(t21, t20, "extends", ["b"]);
+    const segment = createSegment(db, { title: "multi-tag segment", nowEpoch: NOW });
+    // Only the multi-tag pair is a MEMBER; the two far pairs are reached by the
+    // lane widening alone.
+    addSegmentMembers(db, segment.id, [t1, t2, t10, t11, t20, t21], NOW);
+
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
+
+    expect(projection.involvedLaneKeys.map((k) => k.tag).sort()).toEqual(["a", "b"]);
+    const result = checkLanes(projection.turns, projection.edges);
+    expect(result.lanes.map((lane) => lane.key.tag).sort()).toEqual(["a", "b"]);
+    const laneA = result.lanes.find((lane) => lane.key.tag === "a")!;
+    const laneB = result.lanes.find((lane) => lane.key.tag === "b")!;
+    expect(laneA.members.map((m) => m.id).sort((x, y) => x - y)).toEqual([t1, t2, t10, t11]);
+    expect(laneB.members.map((m) => m.id).sort((x, y) => x - y)).toEqual([t1, t2, t20, t21]);
+    assertNoDanglingEdges(projection);
   });
 });
 
@@ -1034,7 +1085,7 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
       kind: "turns",
       turnIds: [laneStart, laneMiddle, windowTurn],
     });
-    expect(projection.involvedLaneKeys).toEqual([{ segment: DEFAULT_SEGMENT, tagSet: ["ownership"] }]);
+    expect(projection.involvedLaneKeys).toEqual([{ segment: DEFAULT_SEGMENT, tag: "ownership" }]);
     expect(projection.turns.map((turn) => turn.id)).toContain(laneEnd);
 
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);

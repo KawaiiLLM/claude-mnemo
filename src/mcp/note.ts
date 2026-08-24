@@ -839,31 +839,35 @@ export function checkSelfGroundsTerminusPostWrite(
     return null;
   }
 
-  // Every tag set this turn has EVER declared a terminus for (its own
-  // outgoing tagged `indexes` edges) — the candidate lanes Gate C must
-  // re-examine against the live graph.
-  const declaredTagSets = new Map<string, string[]>();
+  // Every TAG this turn has EVER declared a terminus for, via its own
+  // outgoing tagged `indexes` edges — the candidate lanes Gate C must
+  // re-examine against the live graph. D5 (v11, the merge): a lane is one
+  // tag, so a multi-tag declaration `indexes{a,b}` is a candidate
+  // declaration in BOTH lane `a` and lane `b` independently, not one lane
+  // `{a,b}` — collected per TAG (deduped across edges), not per tag SET.
+  const declaredTags = new Set<string>();
   for (const edge of getOutgoingEdges(db, { kind: "turn", id: citingTurnId })) {
     if (edge.relation !== "indexes" || edge.tags.length === 0) {
       continue;
     }
-    const canon = canonicalTagSet(edge.tags);
-    declaredTagSets.set(canon.join("\u0001"), canon);
+    for (const tag of canonicalTagSet(edge.tags)) {
+      declaredTags.add(tag);
+    }
   }
 
   const segmentId = getOwningSegmentId(db, citingTurnId);
   const segment = segmentId === null ? DEFAULT_SEGMENT : String(segmentId);
-  const laneKeys: LaneKey[] = [...declaredTagSets.values()].map((tagSet) => ({ segment, tagSet }));
+  const laneKeys: LaneKey[] = [...declaredTags].map((tag) => ({ segment, tag }));
 
   const facts: RelationEdgeFact[] = [];
   if (laneKeys.length > 0) {
     const projection = loadLaneCheckScope(db, { kind: "lanes", laneKeys });
     const interpretation = deriveLaneInterpretation(projection.turns, projection.edges);
     for (const key of laneKeys) {
-      const lane = interpretation.laneByToken.get(laneToken(key.segment, key.tagSet));
+      const lane = interpretation.laneByToken.get(laneToken(key.segment, key.tag));
       facts.push({
         relation: "indexes",
-        tags: key.tagSet,
+        tags: [key.tag],
         isCurrentTerminus: lane?.declaration.terminus === citingTurnId,
       });
     }

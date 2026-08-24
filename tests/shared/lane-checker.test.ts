@@ -20,19 +20,14 @@ const edge = (
   tags: string[] = [],
 ): LaneEdgeInput => ({ citingId, relation, citedId, tags });
 
-const tagSetSignature = (tags: readonly string[]) => [...new Set(tags)].sort().join("\u0001");
-
-function findLaneStats(result: ReturnType<typeof checkLanes>, tagSet: string[]) {
-  const signature = tagSetSignature(tagSet);
-  return result.lanes.find((lane) => tagSetSignature(lane.key.tagSet) === signature);
+function findLaneStats(result: ReturnType<typeof checkLanes>, tag: string) {
+  return result.lanes.find((lane) => lane.key.tag === tag);
 }
-function findComponent(result: ReturnType<typeof checkLanes>, tagSet: string[]) {
-  const signature = tagSetSignature(tagSet);
-  return result.components.find((c) => tagSetSignature(c.key.tagSet) === signature);
+function findComponent(result: ReturnType<typeof checkLanes>, tag: string) {
+  return result.components.find((c) => c.key.tag === tag);
 }
-function findPath(result: ReturnType<typeof checkLanes>, tagSet: string[]) {
-  const signature = tagSetSignature(tagSet);
-  return result.paths.find((p) => tagSetSignature(p.key.tagSet) === signature);
+function findPath(result: ReturnType<typeof checkLanes>, tag: string) {
+  return result.paths.find((p) => p.key.tag === tag);
 }
 
 // ---------------------------------------------------------------- golden fixture
@@ -83,9 +78,9 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   test("every declared lane has component count 1 and (unfolded) path count 1", () => {
     expect(declaredLaneTags.length).toBe(11);
     for (const tag of declaredLaneTags) {
-      const stats = findLaneStats(result, [tag]);
-      const component = findComponent(result, [tag]);
-      const path = findPath(result, [tag]);
+      const stats = findLaneStats(result, tag);
+      const component = findComponent(result, tag);
+      const path = findPath(result, tag);
       expect(stats?.declaration.state).toBe("declared");
       expect(component?.componentCount).toBe(1);
       expect(path?.status).toBe("ok");
@@ -145,18 +140,18 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
     };
     expect(Object.keys(expectedFolded).sort()).toEqual([...declaredLaneTags].sort());
     for (const tag of declaredLaneTags) {
-      const path = findPath(result, [tag]);
+      const path = findPath(result, tag);
       expect(path?.folded?.pathCount).toBe(expectedFolded[tag]);
     }
   });
 
   test("{write-gate} reports undeclared — no `indexes` ever tagged write-gate, only a same-tag override of its latest structural node", () => {
-    const stats = findLaneStats(result, ["write-gate"]);
+    const stats = findLaneStats(result, "write-gate");
     expect(stats?.declaration.state).toBe("undeclared");
     expect(stats?.declaration.terminus).toBe(null);
     expect(stats?.declaration.latestEventTurn).toBe(958); // T958's override of T957
     expect(stats?.members.find((m) => m.id === 957)?.dead).toBe(true);
-    const path = findPath(result, ["write-gate"]);
+    const path = findPath(result, "write-gate");
     expect(path?.status).toBe("skipped");
     expect(path?.skipReason).toBe("undeclared");
   });
@@ -168,7 +163,7 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   });
 
   test("{ownership}'s cited-ness shows MID-MEMBER grounds (T936->T910, T946->T912) — a terminus-only reading would show none, since nothing cites T913 directly", () => {
-    const stats = findLaneStats(result, ["ownership"]);
+    const stats = findLaneStats(result, "ownership");
     const pairs = stats?.citedness.groundsFromNonMembers.map((f) => `${f.citingId}->${f.citedId}`).sort();
     expect(pairs).toEqual(["936->910", "946->912"]);
     // Confirm the terminus itself really is never directly cited — the
@@ -178,7 +173,7 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   });
 
   test("{ownership}'s phases include delivery too (T900 is typed design+ops — ops is delivery-phase), edge counts by word tally the lane's own 7 tagged edges", () => {
-    const stats = findLaneStats(result, ["ownership"]);
+    const stats = findLaneStats(result, "ownership");
     // Not a single "decision" phase: T900 carries both design (decision) and
     // ops (delivery) types, and phases are unioned across ALL members
     // (dead included) — a real anomaly signal report 1 is meant to surface,
@@ -201,7 +196,7 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   // hand-guessed, the same methodology the folded-path goldens above use.
   test("report 4a golden — inter-lane interface pairs", () => {
     const pairs = result.interfaces
-      .map((pair) => `${pair.laneA.tagSet.join(",")}<->${pair.laneB.tagSet.join(",")}:${pair.count}`)
+      .map((pair) => `${pair.laneA.tag}<->${pair.laneB.tag}:${pair.count}`)
       .sort();
     expect(pairs).toEqual([
       "cadence<->segment-audit:1",
@@ -213,7 +208,7 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   test("report 4a golden — per-declared-lane bypass counts (write-gate is undeclared and never appears)", () => {
     const counts: Record<string, number> = {};
     for (const report of result.bypass) {
-      counts[report.key.tagSet.join(",")] = report.count;
+      counts[report.key.tag] = report.count;
     }
     expect(counts).toEqual({
       cadence: 2,
@@ -229,7 +224,7 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
       "view-spec": 0,
     });
     expect(Object.keys(counts).sort()).toEqual([...declaredLaneTags].sort());
-    expect(result.bypass.some((report) => report.key.tagSet.join(",") === "write-gate")).toBe(false);
+    expect(result.bypass.some((report) => report.key.tag === "write-gate")).toBe(false);
   });
 
   // The 900-heavy shared root: T900 is a member of THREE lanes at once
@@ -241,7 +236,7 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   // bypass count, since a same-tag edge structurally makes its citing turn
   // a member of that lane).
   test("ownership's 5 bypass edges are exactly the non-ownership-tagged edges landing on T900 (mid-member) plus T910/T912 (mid-members)", () => {
-    const ownershipBypass = result.bypass.find((report) => report.key.tagSet.join(",") === "ownership");
+    const ownershipBypass = result.bypass.find((report) => report.key.tag === "ownership");
     const pairs = ownershipBypass?.edges.map((e) => `${e.citingId}->${e.citedId}`).sort();
     expect(pairs).toEqual(["901->900", "902->900", "906->900", "936->910", "946->912"]);
   });
@@ -258,12 +253,12 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   // {write-gate} is the one undeclared lane — open, no declarer at all.
   test("report 1 golden — every declared lane's state is closed-valid; {write-gate} is open with no declarer", () => {
     for (const tag of declaredLaneTags) {
-      const stats = findLaneStats(result, [tag]);
+      const stats = findLaneStats(result, tag);
       expect(stats?.state.closure).toBe("closed");
       expect(stats?.state.validity).toBe("valid");
       expect(stats?.state.lastDeclarer).toBe(stats?.declaration.terminus);
     }
-    const writeGate = findLaneStats(result, ["write-gate"]);
+    const writeGate = findLaneStats(result, "write-gate");
     expect(writeGate?.state).toEqual({
       key: writeGate!.key,
       closure: "open",
@@ -313,9 +308,9 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   });
 
   test("report 1 golden — used[] lists the fixture's real external consume citations", () => {
-    const ownership = findLaneStats(result, ["ownership"]);
+    const ownership = findLaneStats(result, "ownership");
     expect(ownership?.citedness.usedFromNonMembers).toEqual([{ citingId: 902, citedId: 900 }]);
-    const segmentAudit = findLaneStats(result, ["segment-audit"]);
+    const segmentAudit = findLaneStats(result, "segment-audit");
     const pairs = segmentAudit?.citedness.usedFromNonMembers
       .map((f) => `${f.citingId}->${f.citedId}`)
       .sort();
@@ -324,6 +319,48 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
 });
 
 // ---------------------------------------------------------------- synthetic checks
+
+// THE MERGE, pinned at the CHECKER (lane-declaration spec Rev 2, D5; Testing
+// decisions: "Checker — the peer's own figure as a fixture: indexes{a} then
+// override{a,b}, asserting lane a reopens. This is the merge, pinned.").
+// `deriveLaneInterpretation`'s own reduction is pinned separately
+// (`tests/shared/lane-interpretation.test.ts`); this fixture instead proves
+// the CHECKER's own report 1 output — `LaneStatsReport.declaration`/`state`,
+// consumed straight from `deriveLaneStates` — reflects the reopen, not just
+// the lower-level reduction. Under the RETIRED exact-set identity this
+// suite pinned through v10, `{a,b}` was a third, independent lane and lane
+// `{a}` read closed-valid, undisturbed, right up to this ticket.
+describe("the merge (D5): a multi-tag override reaches into a lane it only partially names", () => {
+  test("T2 --indexes{a}--> T1 closes lane {a}; T3 --override{a,b}--> T2 kills T2 in lane {a} too and REOPENS it", () => {
+    const turns = [design(1), design(2), design(3)];
+    const edges = [
+      edge(2, "indexes", 1, ["a"]), // T2 declares lane {a}, terminus = T2
+      edge(3, "override", 2, ["a", "b"]), // multi-tag override — the merge
+    ];
+    const result = checkLanes(turns, edges);
+
+    const laneA = findLaneStats(result, "a");
+    expect(laneA?.declaration).toEqual({ state: "reopened", terminus: null, latestEventTurn: 3 });
+    expect(laneA?.state.closure).toBe("open");
+    expect(laneA?.state.terminus).toBeNull();
+    expect(laneA?.members.find((m) => m.id === 2)?.dead).toBe(true);
+
+    // The identical row is simultaneously lane {b}'s own first-ever event —
+    // an override touching a lane nobody had declared yet.
+    const laneB = findLaneStats(result, "b");
+    expect(laneB?.declaration.state).toBe("undeclared");
+    expect(laneB?.members.find((m) => m.id === 2)?.dead).toBe(true);
+
+    // Two lanes total — {a,b} is NOT a third lane (the old, retired v10
+    // pin). Report 4b's path graph also sees both independently: lane {a}
+    // is reopened (skipped, no terminus to count paths to), never
+    // conflated with a lane {a,b} that would have stood declared.
+    expect(result.lanes.map((lane) => lane.key.tag).sort()).toEqual(["a", "b"]);
+    const pathA = findPath(result, "a");
+    expect(pathA?.status).toBe("skipped");
+    expect(pathA?.skipReason).toBe("reopened");
+  });
+});
 
 describe("cited-ness self-cite exclusion", () => {
   test("a self-grounds edge (settlement+implementer turn) never inflates its own lane's cited-ness", () => {
@@ -334,7 +371,7 @@ describe("cited-ness self-cite exclusion", () => {
       edge(501, "grounds", 501, []), // self-cite: citer IS a member
     ];
     const result = checkLanes(turns, edges);
-    const stats = findLaneStats(result, ["s"]);
+    const stats = findLaneStats(result, "s");
     expect(stats?.citedness.groundsFromNonMembers).toEqual([]);
   });
 });
@@ -386,9 +423,9 @@ describe("vocabulary conformance — reported, never enforced (semantic-conforma
     // entirely (not even an `edgeCountsByRelation.supersedes` key), and
     // report 4's path graph is unaffected (still exactly the extends+indexes
     // shape) — proof this is reported, not folded into any graph computation.
-    const stats = findLaneStats(result, ["vc3"]);
+    const stats = findLaneStats(result, "vc3");
     expect(stats?.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
-    const path = findPath(result, ["vc3"]);
+    const path = findPath(result, "vc3");
     expect(path?.pathCount).toBe(1);
   });
 
@@ -406,7 +443,7 @@ describe("vocabulary conformance — reported, never enforced (semantic-conforma
       edge(724, "supersedes", 723, ["vc3b"]), // same tag set as the real lane
     ];
     const result = checkLanes(turns, edges);
-    const stats = findLaneStats(result, ["vc3b"]);
+    const stats = findLaneStats(result, "vc3b");
     // 724 never becomes a member: the supersedes edge was diverted before
     // `deriveLaneInterpretation` ever grouped it in.
     expect(stats?.members.map((m) => m.id)).toEqual([722, 723]);
@@ -474,12 +511,12 @@ describe("partial-input coverage", () => {
     const turns = [design(601)]; // 602 deliberately absent
     const edges = [edge(602, "extends", 601, ["w"]), edge(602, "indexes", 601, ["w"])];
     const result = checkLanes(turns, edges);
-    const stats = findLaneStats(result, ["w"]);
+    const stats = findLaneStats(result, "w");
     expect(stats?.members.map((m) => m.id)).toEqual([601, 602]);
     expect(stats?.coverage).toEqual({ status: "partial", missingTurnIds: [602] });
     // still reported WHOLE: terminus/path resolve despite the missing turn object.
     expect(stats?.declaration.terminus).toBe(602);
-    const path = findPath(result, ["w"]);
+    const path = findPath(result, "w");
     expect(path?.status).toBe("ok");
     expect(path?.pathCount).toBe(1);
     // phase only reflects the resolvable member (601); 602 contributes nothing unmapped.
@@ -504,7 +541,7 @@ describe("path counting — fork, merge, and one cross-phase fold, hand-computed
     edge(5, "grounds", 3, []),
   ];
   const result = checkLanes(turns, edges);
-  const path = findPath(result, ["f"]);
+  const path = findPath(result, "f");
 
   test("unfolded path count is 2 (fork+merge)", () => {
     expect(path?.status).toBe("ok");
@@ -550,7 +587,7 @@ describe("the fold merges the citer's OWN lane too, not just its bare entry edge
   const result = checkLanes(turns, edges);
 
   test("folded pathCount for {left} is 2 — the citer's own lane {right} joins the merged graph, not just its entry edge", () => {
-    const path = findPath(result, ["left"]);
+    const path = findPath(result, "left");
     expect(path?.folded?.citingTurnsFolded).toEqual([4]);
     expect(path?.folded?.pathCount).toBe(2);
   });
@@ -564,7 +601,7 @@ describe("the fold merges the citer's OWN lane too, not just its bare entry edge
       edge(5, "grounds", 2, []),
     ];
     const plainResult = checkLanes(plainTurns, plainEdges);
-    const path = findPath(plainResult, ["solo"]);
+    const path = findPath(plainResult, "solo");
     expect(path?.folded?.pathCount).toBe(1);
   });
 });
@@ -580,7 +617,7 @@ describe("reports 2/3 build from stance+consume+grounds only — override is exc
       edge(12, "override", 11, ["ov"]), // the ONLY edge touching 12 at all
     ];
     const result = checkLanes(turns, edges);
-    const component = findComponent(result, ["ov"]);
+    const component = findComponent(result, "ov");
     // {ov} members are {10,11,12}; 12 is connected to NOTHING via
     // stance/consume/grounds, so it is its own island — component count 2.
     expect(component?.componentCount).toBe(2);
@@ -594,10 +631,10 @@ describe("R1 edge counts, R4 excludes indexes from the structural graph", () => 
     const turns = [design(701), design(702)];
     const edges = [edge(702, "indexes", 701, ["lone"])];
     const result = checkLanes(turns, edges);
-    const stats = findLaneStats(result, ["lone"]);
+    const stats = findLaneStats(result, "lone");
     expect(stats?.declaration.state).toBe("declared");
     expect(stats?.edgeCountsByRelation).toEqual({ indexes: 1 });
-    const path = findPath(result, ["lone"]);
+    const path = findPath(result, "lone");
     expect(path?.status).toBe("ok");
     expect(path?.starts).toEqual([]);
     // indexes is excluded from the path graph entirely — no structural chain
@@ -626,7 +663,7 @@ describe("R2/R3 union-find is PARTITIONED BY SEGMENT (round-4 review #4b)", () =
       edge(32, "grounds", 31),
     ];
     const result = checkLanes(turns, edges);
-    const component = findComponent(result, ["seg"]);
+    const component = findComponent(result, "seg");
     expect(component?.componentCount).toBe(2);
     const islandReps = component?.islands.map((i) => i.representative).sort((a, b) => (a ?? 0) - (b ?? 0));
     expect(islandReps).toEqual([30, 31]);
@@ -640,13 +677,21 @@ describe("R2/R3 union-find is PARTITIONED BY SEGMENT (round-4 review #4b)", () =
     ];
     const edges = [edge(41, "extends", 40, ["seg2"]), edge(41, "indexes", 40, ["seg2"]), edge(42, "grounds", 40)];
     const result = checkLanes(turns, edges);
-    const component = findComponent(result, ["seg2"]);
+    const component = findComponent(result, "seg2");
     expect(component?.componentCount).toBe(1);
   });
 });
 
-describe("sameLaneKey uses collision-safe canonical serialization (round-4 review #6)", () => {
-  test("{a,bc} and {ab,c} are DISTINCT lane keys, not merged by a delimiter-free join", () => {
+// D5 (v11) retires the tag-SET join this describe block used to guard
+// (round-4 review #6: a naive `tagSet.join("")` merged `{a,bc}` with
+// `{ab,c}`) — a lane's identity is never a joined SET any more, so that
+// specific collision cannot occur. What remains true, and worth pinning, is
+// the merge itself: an edge tagged `{a,bc}` and a different edge tagged
+// `{ab,c}` enumerate FOUR distinct single-tag lanes (a, bc, ab, c), not two
+// coarser ones — `sameLaneKey`'s collision-safe `laneToken` comparison is
+// what keeps report 3 from accidentally conflating any pair of them.
+describe("report 3 keeps every distinct tag its own lane, even across multi-tag edges (D5, v11)", () => {
+  test("an edge tagged {a,bc} and a different edge tagged {ab,c} enumerate FOUR distinct lanes sharing one component", () => {
     const turns = [design(1), design(2), design(3)];
     const edges = [
       edge(2, "extends", 1, ["a", "bc"]),
@@ -655,14 +700,13 @@ describe("sameLaneKey uses collision-safe canonical serialization (round-4 revie
       edge(3, "indexes", 1, ["ab", "c"]),
     ];
     const result = checkLanes(turns, edges);
-    // Both lanes' members reach turn 1 via `extends` (a stance relation), so
-    // they share one global component -- report 3 must see BOTH distinct
-    // lane keys there, not collapse the second into the first via a
-    // `tagSet.join("")` collision ("a"+"bc" === "ab"+"c").
+    // All four lanes' members reach turn 1 via `extends` (a stance
+    // relation), so they share one global component -- report 3 must see
+    // all FOUR distinct lane keys there, not merge "a"+"bc" with "ab"+"c".
     expect(result.multiLaneComponents).toHaveLength(1);
     const shared = result.multiLaneComponents[0]!;
-    const tagSets = shared.lanes.map((key) => key.tagSet.slice().sort().join(","));
-    expect(tagSets.sort()).toEqual(["a,bc", "ab,c"]);
+    const tags = shared.lanes.map((key) => key.tag).sort();
+    expect(tags).toEqual(["a", "ab", "bc", "c"]);
   });
 });
 
@@ -682,8 +726,8 @@ describe("report 3 gains shared-node sets with a designed-shape annotation (roun
     const node = shared.sharedNodes[0]!;
     expect(node.id).toBe(10);
     expect(node.designedShape).toBe(true);
-    expect(node.citingLanesByStance.map((key) => key.tagSet)).toEqual(
-      expect.arrayContaining([["left"], ["right"]]),
+    expect(node.citingLanesByStance.map((key) => key.tag)).toEqual(
+      expect.arrayContaining(["left", "right"]),
     );
   });
 
@@ -702,7 +746,7 @@ describe("report 3 gains shared-node sets with a designed-shape annotation (roun
     const shared = result.multiLaneComponents[0]!;
     const node = shared.sharedNodes.find((n) => n.id === 10);
     expect(node?.designedShape).toBe(false);
-    expect(node?.citingLanesByStance.map((key) => key.tagSet)).toEqual([["left"]]);
+    expect(node?.citingLanesByStance.map((key) => key.tag)).toEqual(["left"]);
   });
 });
 
@@ -725,8 +769,8 @@ describe("report 3 also detects a CITING-side merge node, not just a cited-side 
     const node = shared.sharedNodes.find((n) => n.id === 3);
     expect(node).toBeDefined();
     expect(node?.designedShape).toBe(true);
-    expect(node?.citingLanesByStance.map((key) => key.tagSet)).toEqual(
-      expect.arrayContaining([["left"], ["right"]]),
+    expect(node?.citingLanesByStance.map((key) => key.tag)).toEqual(
+      expect.arrayContaining(["left", "right"]),
     );
   });
 });
@@ -745,7 +789,7 @@ describe("report 4 gains fork/join node lists (round-4 review #7b)", () => {
       edge(4, "indexes", 2, ["fj"]),
     ];
     const result = checkLanes(turns, edges);
-    const path = findPath(result, ["fj"]);
+    const path = findPath(result, "fj");
     expect(path?.pathCount).toBe(2);
     expect(path?.forkNodes).toEqual([1]);
     expect(path?.joinNodes).toEqual([4]);
@@ -759,7 +803,7 @@ describe("report 4 gains fork/join node lists (round-4 review #7b)", () => {
       edge(803, "indexes", 802, ["chain"]),
     ];
     const result = checkLanes(turns, edges);
-    const path = findPath(result, ["chain"]);
+    const path = findPath(result, "chain");
     expect(path?.pathCount).toBe(1);
     expect(path?.forkNodes).toEqual([]);
     expect(path?.joinNodes).toEqual([]);
@@ -798,8 +842,8 @@ describe("report 4a — inter-lane interfaces + per-declared-lane bypass", () =>
     edge(202, "extends", 201, ["beta"]),
     edge(202, "indexes", 201, ["beta"]),
   ];
-  const alphaKey = { segment: DEFAULT_SEGMENT, tagSet: ["alpha"] };
-  const betaKey = { segment: DEFAULT_SEGMENT, tagSet: ["beta"] };
+  const alphaKey = { segment: DEFAULT_SEGMENT, tag: "alpha" };
+  const betaKey = { segment: DEFAULT_SEGMENT, tag: "beta" };
 
   test("an untagged consume bridge between two lanes counts as ONE inter-lane interface", () => {
     const edges = [...laneEdges, edge(202, "consume", 102, [])]; // beta's terminus -> alpha's mid member
@@ -810,18 +854,18 @@ describe("report 4a — inter-lane interfaces + per-declared-lane bypass", () =>
   test("the bridge landing on a declared lane's MID member (not its terminus) is bypass 1", () => {
     const edges = [...laneEdges, edge(202, "consume", 102, [])];
     const result = checkLanes(turns, edges);
-    const alphaBypass = result.bypass.find((report) => tagSetSignature(report.key.tagSet) === tagSetSignature(["alpha"]));
+    const alphaBypass = result.bypass.find((report) => report.key.tag === "alpha");
     expect(alphaBypass?.count).toBe(1);
     expect(alphaBypass?.edges).toEqual([{ citingId: 202, citedId: 102, relation: "consume", tags: [] }]);
     // beta itself is never bypassed by this edge — 202 is beta's OWN terminus (the citing side), not an outside citation into beta.
-    const betaBypass = result.bypass.find((report) => tagSetSignature(report.key.tagSet) === tagSetSignature(["beta"]));
+    const betaBypass = result.bypass.find((report) => report.key.tag === "beta");
     expect(betaBypass?.count).toBe(0);
   });
 
   test("re-pointing the SAME bridge at the lane's own terminus drops bypass to 0 — interface count is unaffected", () => {
     const edges = [...laneEdges, edge(202, "consume", 103, [])]; // now lands on alpha's terminus, 103
     const result = checkLanes(turns, edges);
-    const alphaBypass = result.bypass.find((report) => tagSetSignature(report.key.tagSet) === tagSetSignature(["alpha"]));
+    const alphaBypass = result.bypass.find((report) => report.key.tag === "alpha");
     expect(alphaBypass?.count).toBe(0);
     expect(alphaBypass?.edges).toEqual([]);
     expect(result.interfaces).toEqual([{ laneA: alphaKey, laneB: betaKey, count: 1 }]);
@@ -846,7 +890,7 @@ describe("report 4a — inter-lane interfaces + per-declared-lane bypass", () =>
     const gammaEdges = [edge(302, "extends", 301, ["gamma"])];
     const edges = [...laneEdges, ...gammaEdges];
     const result = checkLanes([...turns, design(301), design(302)], edges);
-    const gammaBypass = result.bypass.find((report) => tagSetSignature(report.key.tagSet) === tagSetSignature(["gamma"]));
+    const gammaBypass = result.bypass.find((report) => report.key.tag === "gamma");
     expect(gammaBypass).toBeUndefined();
   });
 });
@@ -930,7 +974,7 @@ describe("report 1's state line (milestone-election ticket 04) — closed-valid 
     const turns = [design(30), design(31)];
     const edges = [edge(31, "extends", 30, ["v"]), edge(31, "indexes", 30, ["v"])];
     const result = checkLanes(turns, edges);
-    const stats = findLaneStats(result, ["v"]);
+    const stats = findLaneStats(result, "v");
     expect(stats?.state.closure).toBe("closed");
     expect(stats?.state.validity).toBe("valid");
     expect(stats?.state.terminus).toBe(31);
@@ -948,7 +992,7 @@ describe("report 1's state line (milestone-election ticket 04) — closed-valid 
       edge(13, "indexes", 11, ["dead"]), // then declare closure indexing the dead core
     ];
     const result = checkLanes(turns, edges);
-    const stats = findLaneStats(result, ["dead"]);
+    const stats = findLaneStats(result, "dead");
     expect(stats?.state.closure).toBe("closed");
     expect(stats?.state.validity).toBe("invalid");
     expect(stats?.state.terminus).toBe(13);
@@ -966,7 +1010,7 @@ describe("report 1's state line (milestone-election ticket 04) — closed-valid 
       edge(103, "override", 102, ["x"]), // reopens: the lane has no living terminus any more
     ];
     const result = checkLanes(turns, edges);
-    const stats = findLaneStats(result, ["x"]);
+    const stats = findLaneStats(result, "x");
     expect(stats?.state.closure).toBe("open");
     expect(stats?.state.validity).toBeNull();
     expect(stats?.state.terminus).toBeNull(); // no living "last stable milestone"
@@ -979,7 +1023,7 @@ describe("report 1's state line (milestone-election ticket 04) — closed-valid 
     const turns = [design(401), design(402), design(403)];
     const edges = [edge(402, "extends", 401, ["silent"]), edge(403, "extends", 402, ["silent"])];
     const result = checkLanes(turns, edges);
-    const stats = findLaneStats(result, ["silent"]);
+    const stats = findLaneStats(result, "silent");
     expect(stats?.state.closure).toBe("open");
     expect(stats?.state.lastDeclarer).toBeNull();
     const text = renderLaneCheckerReports(result);
@@ -1004,7 +1048,7 @@ describe("used[] — consume-class external citations (the T1351 trap fix)", () 
     edge(6, "verifies", 1, []), // EXTERNAL testimony, a DIFFERENT citer -> must NOT appear in used[]
   ];
   const result = checkLanes(turns, edges);
-  const stats = findLaneStats(result, ["u"]);
+  const stats = findLaneStats(result, "u");
 
   test("external consume citations (untagged and differently-tagged) both land in usedFromNonMembers", () => {
     const pairs = stats?.citedness.usedFromNonMembers.map((f) => `${f.citingId}->${f.citedId}`).sort();
@@ -1431,10 +1475,10 @@ describe("errors E1-E4 — detection and anchoring", () => {
     const edges = [edge(401, "extends", 400, ["L"]), edge(401, "indexes", 400, ["L"]), edge(401, "supersedes", 400, [])];
     const result = checkLanes(turns, edges);
     expect(result.errors.map((e) => e.class)).toEqual(["E2"]);
-    const stats = findLaneStats(result, ["L"]);
+    const stats = findLaneStats(result, "L");
     expect(stats?.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
     expect(stats?.state.closure).toBe("closed");
-    expect(findPath(result, ["L"])?.pathCount).toBe(1);
+    expect(findPath(result, "L")?.pathCount).toBe(1);
   });
 });
 
@@ -1506,12 +1550,12 @@ describe("errors E5 — lane shape: one start, one end", () => {
       edge(504, "extends", 503, ["L"]),
     ]);
 
-    expect(findLaneStats(result, ["L"])?.members.map((m) => m.id)).toEqual([501, 502, 503, 504]);
+    expect(findLaneStats(result, "L")?.members.map((m) => m.id)).toEqual([501, 502, 503, 504]);
     expect(result.errors).toEqual([
       {
         class: "E5",
         anchorId: 502,
-        key: { segment: DEFAULT_SEGMENT, tagSet: ["L"] },
+        key: { segment: DEFAULT_SEGMENT, tag: "L" },
         role: "sink",
         nodeId: 502,
         canonicalId: 504,
@@ -1522,7 +1566,7 @@ describe("errors E5 — lane shape: one start, one end", () => {
         // — the repairable edge into it belongs to T504, so that is the
         // anchor. `nodeId` still names T503.
         anchorId: 504,
-        key: { segment: DEFAULT_SEGMENT, tagSet: ["L"] },
+        key: { segment: DEFAULT_SEGMENT, tag: "L" },
         role: "source",
         nodeId: 503,
         canonicalId: 501,
@@ -1593,8 +1637,8 @@ describe("errors E5 — lane shape: one start, one end", () => {
     expect(result.errors).toEqual([]);
     // Not vacuous: the diamond really does fork and re-merge — report 4(b)
     // sees two routes over the same nodes E5 just declared conforming.
-    expect(findPath(result, ["L"])?.forkNodes).toEqual([560]);
-    expect(findPath(result, ["L"])?.joinNodes).toEqual([563]);
+    expect(findPath(result, "L")?.forkNodes).toEqual([560]);
+    expect(findPath(result, "L")?.joinNodes).toEqual([563]);
   });
 
   test("a plain chain of any length produces nothing", () => {
@@ -1620,7 +1664,7 @@ describe("errors E5 — lane shape: one start, one end", () => {
       edge(582, "override", 581, ["L"]),
     ]);
     expect(result.errors).toEqual([]);
-    expect(findLaneStats(result, ["L"])?.members.map((m) => m.id)).toEqual([580, 581, 582]);
+    expect(findLaneStats(result, "L")?.members.map((m) => m.id)).toEqual([580, 581, 582]);
   });
 
   test("DOMAIN — a declaring turn attached only by tagged `indexes` is a real in-lane node, not a dangling end", () => {
@@ -1633,7 +1677,7 @@ describe("errors E5 — lane shape: one start, one end", () => {
       edge(592, "indexes", 591, ["L"]),
     ]);
     expect(result.errors).toEqual([]);
-    expect(findLaneStats(result, ["L"])?.declaration.terminus).toBe(592);
+    expect(findLaneStats(result, "L")?.declaration.terminus).toBe(592);
   });
 
   test("DOMAIN — a fork the declaration never re-joins IS an extra end", () => {
@@ -1667,7 +1711,7 @@ describe("errors E5 — lane shape: one start, one end", () => {
       edge(613, "extends", 612, ["L"]),
       edge(613, "extends", 612, ["M"]),
     ]);
-    expect(shapeErrors(result).map((e) => e.class === "E5" && e.key.tagSet.join(","))).toEqual(["L", "L"]);
+    expect(shapeErrors(result).map((e) => e.class === "E5" && e.key.tag)).toEqual(["L", "L"]);
     // Nodes 611 (extra sink) and 612 (extra source); the source's anchor is
     // its in-lane citer T613 (T1466).
     expect(shapeErrors(result).map((e) => (e.class === "E5" ? e.nodeId : 0))).toEqual([611, 612]);

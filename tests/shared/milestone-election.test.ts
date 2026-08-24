@@ -227,6 +227,44 @@ describe("tier 2 — closed-valid termini and open lanes' last declarer", () => 
     expect(tierOf(result, 13)?.tier).toBe(5);
   });
 
+  // THE MERGE (lane-declaration spec Rev 2, D5) RE-BASELINES A TIER — the
+  // ticket's own acceptance bar ("any tier that changes is listed... a
+  // quietly updated expectation is a failed acceptance"). Same
+  // repudiate-then-declare shape as the test above, but the repudiating
+  // override is tagged `{a,c}`, not the bare `{a}` its own declaration uses.
+  //
+  //   - OLD (retired) exact-set identity: `{a,c}` is a third, INDEPENDENT
+  //     lane from `{a}` — the override never touches `{a}` at all, T1 stays
+  //     alive there, T4's later `indexes{a}` declares a CLOSED-VALID
+  //     terminus -> **tier 2** ("closed-valid-terminus"), verified by
+  //     running this exact fixture with the override retagged to a
+  //     genuinely unrelated tag (`["ac"]`, isolating it the way `{a,c}`
+  //     used to be isolated): T4 reads tier 2 there.
+  //   - NEW (merge): the override carries tag `a`, so it ALSO fires in lane
+  //     `{a}` — T1 dies in-lane before T4's declaration ever runs, T4's
+  //     declared core is `[T1]`, entirely dead -> closed-INVALID, no tier-2
+  //     seat. T4 falls through to **tier 5** ("other"): not an
+  //     untagged-indexes writer (tier 1), no elected node indexes it (tier
+  //     3), and it wrote no override and cites no rolled-back turn (tier 4).
+  //
+  // T3 (the override's own writer) is tier 4 in BOTH readings — candidacy
+  // exclusion and the corrector tier are raw edge-relation facts, unrelated
+  // to lane identity, so this fixture isolates the ONE thing that actually
+  // moved.
+  test("the merge: a multi-tag override that used to name an unrelated lane now invalidates a lane it shares only one tag with, and a terminus drops from tier 2 to tier 5", () => {
+    const turns = [turn(1), turn(3), turn(4)];
+    const edges = [
+      edge(3, "override", 1, ["a", "c"]), // repudiate T1 first — shares tag `a` with the lane below
+      edge(4, "indexes", 1, ["a"]), // then declare closure, indexing the now-dead-in-{a} T1
+    ];
+    const result = electMilestones(turns, edges, 5);
+    expect(tierOf(result, 4)?.tier).toBe(5);
+    expect(tierOf(result, 4)?.reason).toBe("other");
+    expect(tierOf(result, 3)?.tier).toBe(4);
+    expect(tierOf(result, 3)?.reason).toBe("corrector");
+    expect(result.excluded).toContain(1);
+  });
+
   test("an undeclared lane (only structural continuation, no indexes ever) seats no one at tier 2 — 'open, no declarer, no seat'", () => {
     const turns = [turn(401), turn(402), turn(403)];
     const edges = [edge(402, "extends", 401, ["silent"]), edge(403, "extends", 402, ["silent"])];

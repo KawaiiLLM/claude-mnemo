@@ -21,7 +21,7 @@ import { DEFAULT_SEGMENT } from "../../src/shared/lane-interpretation";
  * printing it would fail these.
  */
 
-const LANE_KEY = { segment: "42", tagSet: ["ownership"] };
+const LANE_KEY = { segment: "42", tag: "ownership" };
 
 // semantic-conformance ticket 02 — every hand-built `LaneCheckerResult`
 // fixture in this file needs this field now that the renderer reads it
@@ -119,31 +119,31 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
 
   test("report 1's state line renders all three forms — closed-valid, closed-invalid, and open with/without a last declarer", () => {
     const closedValid: LaneCheckerResult["lanes"][number] = {
-      key: { segment: "1", tagSet: ["cv"] },
+      key: { segment: "1", tag: "cv" },
       phases: [],
       members: [],
       edgeCountsByRelation: {},
       declaration: { state: "declared", terminus: 31, latestEventTurn: 31 },
-      state: { key: { segment: "1", tagSet: ["cv"] }, closure: "closed", validity: "valid", terminus: 31, lastDeclarer: 31 },
+      state: { key: { segment: "1", tag: "cv" }, closure: "closed", validity: "valid", terminus: 31, lastDeclarer: 31 },
       citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
       coverage: { status: "whole", missingTurnIds: [] },
     };
     const closedInvalid: LaneCheckerResult["lanes"][number] = {
       ...closedValid,
-      key: { segment: "1", tagSet: ["ci"] },
-      state: { key: { segment: "1", tagSet: ["ci"] }, closure: "closed", validity: "invalid", terminus: 13, lastDeclarer: 13 },
+      key: { segment: "1", tag: "ci" },
+      state: { key: { segment: "1", tag: "ci" }, closure: "closed", validity: "invalid", terminus: 13, lastDeclarer: 13 },
     };
     const openWithDeclarer: LaneCheckerResult["lanes"][number] = {
       ...closedValid,
-      key: { segment: "1", tagSet: ["ow"] },
+      key: { segment: "1", tag: "ow" },
       declaration: { state: "reopened", terminus: null, latestEventTurn: 103 },
-      state: { key: { segment: "1", tagSet: ["ow"] }, closure: "open", validity: null, terminus: null, lastDeclarer: 102 },
+      state: { key: { segment: "1", tag: "ow" }, closure: "open", validity: null, terminus: null, lastDeclarer: 102 },
     };
     const openNoDeclarer: LaneCheckerResult["lanes"][number] = {
       ...closedValid,
-      key: { segment: "1", tagSet: ["on"] },
+      key: { segment: "1", tag: "on" },
       declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-      state: { key: { segment: "1", tagSet: ["on"] }, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+      state: { key: { segment: "1", tag: "on" }, closure: "open", validity: null, terminus: null, lastDeclarer: null },
     };
 
     const result: LaneCheckerResult = {
@@ -166,13 +166,13 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     const result: LaneCheckerResult = {
       lanes: [
         {
-          key: { segment: DEFAULT_SEGMENT, tagSet: ["homeless-lane"] },
+          key: { segment: DEFAULT_SEGMENT, tag: "homeless-lane" },
           phases: [],
           members: [],
           edgeCountsByRelation: {},
           declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
           state: {
-            key: { segment: DEFAULT_SEGMENT, tagSet: ["homeless-lane"] },
+            key: { segment: DEFAULT_SEGMENT, tag: "homeless-lane" },
             closure: "open",
             validity: null,
             terminus: null,
@@ -214,9 +214,9 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       multiLaneComponents: [
         {
           representative: 5,
-          lanes: [LANE_KEY, { segment: "9", tagSet: ["other"] }],
+          lanes: [LANE_KEY, { segment: "9", tag: "other" }],
           sharedNodes: [
-            { id: 5, citingLanesByStance: [LANE_KEY, { segment: "9", tagSet: ["other"] }], designedShape: true },
+            { id: 5, citingLanesByStance: [LANE_KEY, { segment: "9", tag: "other" }], designedShape: true },
           ],
         },
       ],
@@ -262,7 +262,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           folded: null,
         },
         {
-          key: { segment: "9", tagSet: ["b"] },
+          key: { segment: "9", tag: "b" },
           status: "ok",
           starts: [1],
           terminus: 3,
@@ -290,7 +290,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
   });
 
   test("report 4a prints an inter-lane interface pair's count and a declared lane's bypass edges", () => {
-    const otherKey = { segment: "9", tagSet: ["b"] };
+    const otherKey = { segment: "9", tag: "b" };
     const result: LaneCheckerResult = {
       ...emptyResult(),
       interfaces: [{ laneA: LANE_KEY, laneB: otherKey, count: 3 }],
@@ -407,7 +407,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
         {
           class: "E5",
           anchorId: 502,
-          key: { segment: DEFAULT_SEGMENT, tagSet: ["L"] },
+          key: { segment: DEFAULT_SEGMENT, tag: "L" },
           role: "sink",
           nodeId: 502,
           canonicalId: 504,
@@ -415,7 +415,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
         {
           class: "E5",
           anchorId: 503,
-          key: { segment: "42", tagSet: ["a", "b"] },
+          key: { segment: "42", tag: "ab" },
           role: "source",
           nodeId: 503,
           canonicalId: 501,
@@ -429,7 +429,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
         " a lane has exactly one start and one end (retag one chain, or bridge them)",
     );
     expect(text).toContain(
-      "[E5] anchor T503 -- lane E42:{a,b} has a second source: T503 dangles beside T501;",
+      "[E5] anchor T503 -- lane E42:{ab} has a second source: T503 dangles beside T501;",
     );
   });
 
@@ -446,7 +446,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
         {
           class: "E5",
           anchorId: 512, // the citer that owns the in-lane edge into T511
-          key: { segment: DEFAULT_SEGMENT, tagSet: ["L"] },
+          key: { segment: DEFAULT_SEGMENT, tag: "L" },
           role: "source",
           nodeId: 511,
           canonicalId: 509,
@@ -520,7 +520,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       {
         class: "E5",
         anchorId: 7,
-        key: { segment: DEFAULT_SEGMENT, tagSet: ["L"] },
+        key: { segment: DEFAULT_SEGMENT, tag: "L" },
         role: "sink",
         nodeId: 7,
         canonicalId: 9,
@@ -664,7 +664,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
   });
 
   test("a member shared with another lane renders as a reference line, not a second branch column", () => {
-    const otherKey = { segment: "9", tagSet: ["b"] };
+    const otherKey = { segment: "9", tag: "b" };
     const result: LaneCheckerResult = {
       lanes: [
         {
@@ -711,13 +711,13 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     const result: LaneCheckerResult = {
       lanes: [
         {
-          key: { segment: "1234567890", tagSet: ["a-very-long-tag-name-that-pushes-width", "another-tag"] },
+          key: { segment: "1234567890", tag: "a-very-long-tag-name-that-pushes-width-another-tag" },
           phases: ["decision"],
           members: manyMembers,
           edgeCountsByRelation: {},
           declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
           state: {
-            key: { segment: "1234567890", tagSet: ["a-very-long-tag-name-that-pushes-width", "another-tag"] },
+            key: { segment: "1234567890", tag: "a-very-long-tag-name-that-pushes-width-another-tag" },
             closure: "open",
             validity: null,
             terminus: null,
