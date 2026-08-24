@@ -55,6 +55,20 @@ describe("lane enumeration", () => {
     expect(laneB?.members.map((m) => m.id)).toEqual([1, 2]);
   });
 
+  // Lane-declaration ticket 12 (P1-7): the grouping loop keys on `edge.tags`
+  // alone, never `edge.relation` — pinning this at the CORE interpretation
+  // layer (independent of `lane-checker.ts`'s own reports) since it is the
+  // foundation the checker's fix depends on, and no existing test named a
+  // cross-phase relation at all before this ticket.
+  test("a tagged CROSS-PHASE edge (grounds) enumerates and groups membership exactly like a tagged same-phase edge", () => {
+    const turns = [design(1), design(2)];
+    const edges = [edge(2, "grounds", 1, ["x"])];
+    const derivation = deriveLaneInterpretation(turns, edges);
+    const lane = laneOf(derivation, "x");
+    expect(lane?.members.map((m) => m.id)).toEqual([1, 2]);
+    expect(lane?.taggedEdges).toEqual([{ citingId: 2, citedId: 1, relation: "grounds", tags: ["x"] }]);
+  });
+
   test("a tag set with no tagged edge never enumerates — untagged edges alone produce zero lanes", () => {
     const turns = [design(1), design(2), design(3)];
     const edges = [edge(2, "extends", 1), edge(3, "consume", 2)];

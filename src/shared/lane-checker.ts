@@ -50,27 +50,63 @@
  *       even form — report 4(b)'s existing cycle guard (contributes 0, never
  *       hangs) stays exactly as-is underneath, unrelated to this check.
  *
- * ## Report domains — three distinct participations, per word
+ * ## Report domains — a lane's own graph vs the external structure (lane-declaration ticket 12, P1-7)
  *
- * Reports 2/3 build their graph from **stance + consume + grounds** edges
- * only. `indexes` (aggregation) and `verifies`/`refutes` (testimony
- * adjudicates, it does not join) never enter component analysis — and
- * neither does `override`: an override edge is a graph-STATE event (read by
- * `lane-interpretation.ts`'s reduction), not a structural join, so it is
- * deliberately excluded from `LANE_COMPONENT_RELATIONS` even though it sits
- * same-phase alongside the words that are included. `STANCE_RELATIONS` is
- * imported from `flows.ts` rather than redeclared — the same two words mean
- * the same thing in both modules.
+ * Every lane-shaped question a lane's OWN graph asks — membership
+ * (`lane-interpretation.ts`, unchanged, already word-agnostic: its grouping
+ * loop keys on `edge.tags` alone, never `edge.relation`), component (report
+ * 2/3, below) and path (report 4(b), `LANE_PATH_RELATIONS`) — reads the SAME
+ * predicate: an edge belongs to lane X's own structural graph exactly when
+ * it carries X's tag, whatever the relation word is. Two words are excluded
+ * regardless of tag, for reasons unrelated to phase and unchanged by this
+ * ticket: `indexes` (rubric: "indexes 不参与连通性计算" — a declaration is not
+ * a step of the path/component) and `override` (a graph-STATE event read by
+ * `lane-interpretation.ts`'s reduction, not a structural join). Every other
+ * word — narrows/extends/consume (same-phase) and, since the user's ruling
+ * [T1562] widened which words may carry a tag, grounds/verifies/refutes
+ * (cross-phase) alike — is structural for whichever lane(s) its own tag set
+ * names.
+ *
+ * This is a SEPARATE question from the EXTERNAL structure, which keeps
+ * asking its own (AC2): `LANE_COMPONENT_RELATIONS` (stance + consume +
+ * grounds) is the TAG-AGNOSTIC word-set reports 2/3's shared global graph
+ * and `computeInterfaces`/`computeBypass` read, UNCHANGED by this ticket —
+ * an UNTAGGED `grounds` edge legitimately bridges two lanes' neighbourhoods
+ * here, exactly as it always has (that behaviour predates the tag-widening
+ * and is not this ticket's concern). `verifies`/`refutes` are deliberately
+ * NOT added to this word-set even now: an untagged testimony edge stays a
+ * pure citedness fact (report 1) and never bridges a component or counts as
+ * an interface/bypass crossing — admitting it tag-agnostically here is
+ * exactly the "naive widening" the ticket rejects. A TAGGED `verifies`/
+ * `refutes` (or `grounds`) edge still reaches reports 2/3's shared graph,
+ * but through the OTHER predicate — `checkLanes`'s own union step ORs
+ * `LANE_COMPONENT_RELATIONS` membership with "this edge carries some lane's
+ * own tag and is not indexes/override" (`unionsLaneComponentGraph` below):
+ * two predicates, never one relation-set union. `computeInterfaces`/
+ * `computeBypass` deliberately do NOT gain this second predicate — both read
+ * only `edge.relation`, never `edge.tags`, so a tagged testimony edge takes
+ * the identical (excluded) code path an untagged one already does. They
+ * measure the crossing BETWEEN two different lanes, which is exactly the
+ * domain AC2 says keeps asking its own question, and nothing in the ticket
+ * asks it to widen.
  *
  * Report 4 counts NODE paths (parallel relations on one pair are ONE route,
  * the T1241 precedent — enforced by de-duplicating the adjacency into a
- * `Set` per source node) over the lane's own tagged stance/consume edges
- * (`indexes` excluded — a declaration is not a step of the path). The
- * cross-phase fold splits by word: `grounds` citations fold in and count
- * toward path multiplicity; `verifies`/`refutes` citations participate as
- * cited-ness FACTS (report 1, `citedness`) and coupling display but never
- * add to path counts (duplicate probes are legal fact multiplicity, not
- * extra routes).
+ * `Set` per source node) over the lane's own tagged STRUCTURAL edges
+ * (`LANE_PATH_RELATIONS` — every word except indexes/override; ticket 12
+ * widened this from stance+consume alone). A TAGGED `grounds`/`verifies`/
+ * `refutes` edge is now an ordinary member of this BASE graph — not routed
+ * through the fold at all. The fold below still exists for what the tag
+ * predicate can never cover: an UNTAGGED cross-phase citation from a turn
+ * that is NOT a member of this lane. Because a tagged edge's citing turn is
+ * always a member by construction (`lane-interpretation.ts`'s grouping), the
+ * fold's own `!memberIds.has(citingId)` guard already keeps a lane's own
+ * tagged cross-phase edges out of the fold, so admitting them into the base
+ * graph creates no double-count. `verifies`/`refutes` citations still never
+ * fold when UNTAGGED-and-external — they participate as cited-ness FACTS
+ * (report 1, `citedness`) and coupling display but never add to path counts
+ * (duplicate probes are legal fact multiplicity, not extra routes); that
+ * half of the design is unchanged.
  *
  * FOLD SEMANTICS (`buildPathReport`'s `folded` half — round-4 review #3
  * corrected an earlier draft's "folding never changes any count" reading,
@@ -341,15 +377,36 @@ export type {
 } from "./lane-interpretation";
 export { DEFAULT_SEGMENT } from "./lane-interpretation";
 
-/** Reports 2/3's graph: stance (narrows/extends) + consume + grounds ONLY — see module header. Undirected. */
+/**
+ * The EXTERNAL, tag-agnostic bridge domain reports 2/3's shared graph and
+ * `computeInterfaces`/`computeBypass` read — stance (narrows/extends) +
+ * consume + grounds, UNCHANGED by ticket 12's widening (module header,
+ * "Report domains"). This is HALF of reports 2/3's own union test now: a
+ * lane's own TAGGED structural edge (any word except indexes/override) is
+ * the other half, checked directly against the edge's own tag set rather
+ * than folded into this word-set (`unionsLaneComponentGraph` below) — the
+ * two-predicate design that keeps an UNTAGGED `verifies`/`refutes` edge a
+ * pure citedness fact, never a bridge. `computeInterfaces`/`computeBypass`
+ * intentionally read ONLY this word-set, unchanged. Undirected.
+ */
 export const LANE_COMPONENT_RELATIONS: ReadonlySet<string> = new Set([
   ...STANCE_RELATIONS,
   "consume",
   "grounds",
 ]);
 
-/** Report 4's base (unfolded) path graph: the lane's own tagged stance/consume edges — `indexes` excluded. */
-export const LANE_PATH_RELATIONS: ReadonlySet<string> = new Set([...STANCE_RELATIONS, "consume"]);
+/**
+ * Report 4's base (unfolded) path graph: the lane's own tagged STRUCTURAL
+ * edges — every relation except `indexes` (a declaration is not a step of
+ * the path) and `override` (a graph-state event, not a join). Ticket 12
+ * widened this from stance+consume alone to admit a tagged `grounds`/
+ * `verifies`/`refutes` edge as an ordinary hop: `lane.taggedEdges` (this
+ * set's only ever caller) is already scoped to the lane's own tag, so there
+ * is no untagged-testimony leak to guard against here (module header).
+ */
+export const LANE_PATH_RELATIONS: ReadonlySet<string> = new Set(
+  EDGE_RELATIONS.filter((relation) => relation !== "indexes" && relation !== "override"),
+);
 
 // ---------------------------------------------------------------- Report 1
 
@@ -783,6 +840,25 @@ function findForkJoinNodes(out: ReadonlyMap<number, ReadonlySet<number>>): { for
 /** Whether an edge's own canonical tag set CONTAINS a given lane's tag (D5, v11 — a lane's own tagged edges are every edge carrying its tag, not an exact-set match) — deliberately NOT `sameLaneKey`/`laneToken`, which also fold in a segment; an edge carries no segment of its own, only its two endpoint turns do, so the interfaces exclusion (module header block (a)) tests the tag alone. */
 function edgeCarriesLaneTag(edgeTagSet: readonly string[], tag: string): boolean {
   return edgeTagSet.includes(tag);
+}
+
+/**
+ * Report 2/3's shared global graph union test (lane-declaration ticket 12,
+ * P1-7 — module header "Report domains"). TWO predicates, ORed, never one
+ * widened relation-set: `LANE_COMPONENT_RELATIONS` is the tag-agnostic
+ * EXTERNAL bridge domain (unchanged); the second clause is "this edge
+ * carries SOME lane's own tag and is not indexes/override" — a lane's own
+ * tagged structural edge always keeps ITS OWN members connected, whatever
+ * the relation word, without ever admitting an UNTAGGED `verifies`/
+ * `refutes` edge (AC2's "must not leak"). `grounds` already satisfies the
+ * first clause unconditionally (pre-dates this ticket), so a tagged
+ * `grounds` edge matches both clauses — harmless, since this is an OR.
+ */
+function unionsLaneComponentGraph(edge: LaneEdgeInput): boolean {
+  if (LANE_COMPONENT_RELATIONS.has(edge.relation)) {
+    return true;
+  }
+  return edge.tags.length > 0 && edge.relation !== "indexes" && edge.relation !== "override";
 }
 
 /**
@@ -1289,7 +1365,7 @@ export function checkLanes(
   for (const edge of vocabEdges) {
     uf.add(edge.citingId);
     uf.add(edge.citedId);
-    if (LANE_COMPONENT_RELATIONS.has(edge.relation) && segmentFor(edge.citingId) === segmentFor(edge.citedId)) {
+    if (unionsLaneComponentGraph(edge) && segmentFor(edge.citingId) === segmentFor(edge.citedId)) {
       uf.union(edge.citingId, edge.citedId);
     }
   }

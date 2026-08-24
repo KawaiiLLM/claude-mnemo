@@ -626,6 +626,112 @@ describe("reports 2/3 build from stance+consume+grounds only — override is exc
   });
 });
 
+// ------------------------------------------------------------------------
+// Ticket 12 (P1-7): a lane's own graph asks "does this edge carry THIS
+// lane's tag", not "is the relation word in some fixed set". Before this
+// ticket, `grounds` sat outside `LANE_PATH_RELATIONS` (report 4b's base
+// graph) entirely, and the fold's own `!memberIds.has(citingId)` guard
+// assumed every cross-phase citer was an outsider — an assumption only true
+// while `grounds` could never carry a tag. `verifies`/`refutes` never
+// entered ANY structural graph, tagged or not. See lane-checker.ts's module
+// header, "Report domains", for the two-predicate design this fixes it with.
+describe("ticket 12 — the peer's own failure case: a lane made of a tagged grounds + verifies pair", () => {
+  // T2 --grounds{x}--> T1 and T2 --verifies{x}--> T1: the ticket's own
+  // pinned fixture. Before the fix: `grounds` was excluded from
+  // LANE_PATH_RELATIONS and excluded from the fold (its citing turn, T2, IS
+  // a member by construction once it carries the tag, so the fold's
+  // non-member guard already ruled it out) — the lane rendered as two
+  // disconnected single-node starts. `verifies` never touched a structural
+  // graph at all.
+  const turns = [design(1), design(2, ["research"])];
+  const edges = [edge(2, "grounds", 1, ["x"]), edge(2, "verifies", 1, ["x"])];
+  const result = checkLanes(turns, edges);
+
+  test("membership: both turns are members of lane x", () => {
+    expect(findLaneStats(result, "x")?.members.map((m) => m.id)).toEqual([1, 2]);
+  });
+
+  test("component: ONE connected island, not two severed single-node islands", () => {
+    const component = findComponent(result, "x");
+    expect(component?.componentCount).toBe(1);
+    expect(component?.islands).toEqual([{ representative: 1, memberIds: [1, 2] }]);
+  });
+
+  test("path: the base structural graph has T1 as the SOLE start — a real (if undeclared) path, not two disconnected starts", () => {
+    const path = findPath(result, "x");
+    // undeclared (no tagged `indexes` ever named this lane) — status is
+    // "skipped", but the STRUCTURAL shape underneath is what this ticket
+    // fixes: before, neither tagged edge was in `LANE_PATH_RELATIONS`, so
+    // `starts` would have been `[1, 2]` (T2 with no outgoing edge in an
+    // otherwise-empty base graph too) — two severed starts, not a path.
+    expect(path?.status).toBe("skipped");
+    expect(path?.skipReason).toBe("undeclared");
+    expect(path?.starts).toEqual([1]);
+  });
+
+  test("declared: adding a tagged indexes closes the lane with a real pathCount over the SAME two cross-phase edges", () => {
+    const declared = checkLanes(turns, [...edges, edge(2, "indexes", 1, ["x"])]);
+    const path = findPath(declared, "x");
+    expect(path?.status).toBe("ok");
+    expect(path?.terminus).toBe(2);
+    expect(path?.starts).toEqual([1]);
+    // Two parallel relations (grounds, verifies) on the SAME pair are ONE
+    // route (the T1241 precedent, module header) — pathCount is 1, not 2.
+    expect(path?.pathCount).toBe(1);
+  });
+});
+
+describe("ticket 12 — untagged cross-phase edges never leak into the shared component graph (AC2, no naive widening)", () => {
+  // Lane {y} = {1,2} via narrows+indexes. Lane {z} = {3,4} via
+  // narrows+indexes. `verifies`/`refutes` were NEVER in
+  // `LANE_COMPONENT_RELATIONS`, tagged or not — this isolates ticket 12's
+  // uf-widening cleanly, since (unlike `grounds`) there is no pre-existing
+  // unconditional inclusion to accidentally piggyback on.
+  const baseTurns = [design(1), design(2), design(3), design(4, ["implement"])];
+  const baseEdges = [
+    edge(2, "narrows", 1, ["y"]),
+    edge(2, "indexes", 1, ["y"]),
+    edge(4, "narrows", 3, ["z"]),
+    edge(4, "indexes", 3, ["z"]),
+  ];
+
+  test("an UNTAGGED refutes bridging {y} and {z} does not merge them into a reported multi-lane component", () => {
+    const result = checkLanes(baseTurns, [...baseEdges, edge(4, "refutes", 1, [])]);
+    expect(result.multiLaneComponents).toEqual([]);
+    expect(findComponent(result, "y")?.componentCount).toBe(1);
+    expect(findComponent(result, "z")?.componentCount).toBe(1);
+  });
+
+  test("the SAME refutes edge TAGGED {y} instead correctly connects T4 into lane y's own component — it is now lane y's own structural edge", () => {
+    const result = checkLanes(baseTurns, [...baseEdges, edge(4, "refutes", 1, ["y"])]);
+    // T4 is now a member of BOTH y (the tagged refutes) and z (narrows) —
+    // lane y's OWN component must include it, not report it severed.
+    const componentY = findComponent(result, "y");
+    expect(componentY?.componentCount).toBe(1);
+    expect(componentY?.islands[0]?.memberIds).toEqual([1, 2, 4]);
+  });
+});
+
+describe("ticket 12 — computeInterfaces/computeBypass deliberately do NOT widen (decided NOT to change)", () => {
+  test("a tagged verifies edge crossing between two lanes still never counts as an interface or a bypass", () => {
+    const turns = [design(101), design(102), design(201, ["research"]), design(202, ["research"])];
+    const edges = [
+      edge(102, "extends", 101, ["alpha"]),
+      edge(102, "indexes", 101, ["alpha"]),
+      edge(202, "extends", 201, ["beta"]),
+      edge(202, "indexes", 201, ["beta"]),
+      // tagged with a THIRD lane's own tag, crossing alpha/beta — computeInterfaces/
+      // computeBypass read only `edge.relation`, never `edge.tags`, so this
+      // takes the identical excluded code path an untagged verifies would.
+      edge(202, "verifies", 101, ["gamma"]),
+    ];
+    const result = checkLanes(turns, edges);
+    expect(result.interfaces).toEqual([]);
+    expect(result.bypass.find((b) => b.key.tag === "alpha")?.count ?? 0).toBe(0);
+    expect(result.bypass.find((b) => b.key.tag === "beta")?.count ?? 0).toBe(0);
+  });
+});
+
 describe("R1 edge counts, R4 excludes indexes from the structural graph", () => {
   test("a lane with ONLY an indexes declaration (no narrows/extends/consume) has zero structural edges — path count 0, not 1", () => {
     const turns = [design(701), design(702)];
@@ -640,6 +746,21 @@ describe("R1 edge counts, R4 excludes indexes from the structural graph", () => 
     // indexes is excluded from the path graph entirely — no structural chain
     // connects the declared terminus to any start, so the honest count is 0.
     expect(path?.pathCount).toBe(0);
+  });
+
+  // AC4 (ticket 12): "indexes 不参与连通性计算" must survive the rewrite —
+  // pinned on the COMPONENT graph specifically (the path-graph case above
+  // predates ticket 12; this one exercises `unionsLaneComponentGraph`'s own
+  // `edge.relation !== "indexes"` clause, which no earlier test touched).
+  test("a lane with ONLY a tagged indexes edge has componentCount 2 — indexes never unions its endpoints", () => {
+    const turns = [design(701), design(702)];
+    const edges = [edge(702, "indexes", 701, ["lone"])];
+    const result = checkLanes(turns, edges);
+    // Membership still forms (word-agnostic grouping) — both turns are
+    // members — but the component graph must not connect them.
+    expect(findLaneStats(result, "lone")?.members.map((m) => m.id)).toEqual([701, 702]);
+    const component = findComponent(result, "lone");
+    expect(component?.componentCount).toBe(2);
   });
 });
 

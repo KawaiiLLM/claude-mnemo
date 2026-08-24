@@ -52,12 +52,26 @@
  *
  * A TAGGED same-phase edge acts on EVERY LANE named by one of the tags in its
  * exact tag set; an UNTAGGED same-phase edge acts on the cited TURN itself
- * (global, free aggregation) — every taggable word (override/narrows/extends/
- * consume/indexes) reads this ONE rule, no per-word special case beyond the
- * per-tag fan-out above. Only `indexes` and `override` carry graph-STATE for
- * a lane (a terminus); `narrows`/`extends`/`consume` are structural — they
- * matter to path counting (`lane-checker.ts`) but never move a lane's
- * terminus:
+ * (global, free aggregation) — the five SAME-PHASE words (override/narrows/
+ * extends/consume/indexes) read this ONE rule, no per-word special case
+ * beyond the per-tag fan-out above. Only `indexes` and `override` carry
+ * graph-STATE for a lane (a terminus); `narrows`/`extends`/`consume` are
+ * structural — they matter to path counting (`lane-checker.ts`) but never
+ * move a lane's terminus:
+ *
+ * The GROUPING loop below (which lane(s) an edge is a member of) was
+ * already word-agnostic before this list existed — it keys on `edge.tags`
+ * alone, never `edge.relation` — so the user's ruling [T1562] widening which
+ * words may carry a tag to all eight needed NO change here: a tagged
+ * `grounds`/`verifies`/`refutes` edge groups into its named lane(s) exactly
+ * like a tagged same-phase edge already did. What the paragraph above does
+ * NOT cover is the cross-phase words' UNTAGGED form: an untagged `grounds`/
+ * `verifies`/`refutes` edge is a plain citedness/testimony fact (`lane-
+ * checker.ts`'s report 1), never "free aggregation" the way an untagged
+ * `indexes` is — the two cross-phase words never carried graph-state and
+ * still don't; see `lane-checker.ts`'s module header ("Report domains",
+ * lane-declaration ticket 12) for how the CHECKER'S OWN reports read a
+ * cross-phase edge's tag state.
  *
  *   - tagged indexes     -> DECLARATION: the citing turn becomes the lane's
  *                           terminus. Latest wins, reduced in CITING-TURN

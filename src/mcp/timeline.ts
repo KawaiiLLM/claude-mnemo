@@ -36,6 +36,7 @@ import {
 } from "../shared/milestone-election";
 import { resolveSessionTranscriptPath } from "../shared/paths";
 import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
+import { EDGE_RELATIONS } from "../shared/turn-phase";
 import {
   LEGACY_TYPE_GLYPH,
   MEMORY_TYPES,
@@ -4210,23 +4211,24 @@ export function parseSegmentLaneId(id: string): ParsedSegmentLaneId | null {
 }
 
 /**
- * D8's own chain domain: the five relation words the ticket's own tie-break
- * order names (`extends`/`narrows` > `indexes` > `consume` > `override`).
- * `grounds`/`verifies`/`refutes` never appear in `Lane.taggedEdges` filtered
- * through this — a lane's tagged edges can in principle carry any relation
- * word, but only these five are STRUCTURAL continuation of the lane's own
- * line of work; testimony/aggregation edges are a member's own citedness
- * fact, not a step of the chain.
+ * D8's own chain domain — originally the five relation words the ticket's
+ * own tie-break order names (`extends`/`narrows` > `indexes` > `consume` >
+ * `override`). Lane-declaration ticket 12 (P1-7) widens this to ALL EIGHT: a
+ * tagged `grounds`/`verifies`/`refutes` edge is now an ordinary hop, exactly
+ * like the five structural/state words already here. This is safe without
+ * the tag-vs-untagged split reports 2/3's shared graph needs
+ * (`lane-checker.ts`'s `unionsLaneComponentGraph`): `chainEdges` below
+ * filters `Lane.taggedEdges`, which is ALREADY scoped to THIS lane's own tag
+ * (`lane-checker.ts`'s module header, "Report domains") — there is no
+ * untagged-testimony leak to guard against on an already tag-scoped list.
+ * Arrow choice (ticket 12, pinned by test): a tagged cross-phase hop renders
+ * the same ordinary "->" every non-`indexes` relation already does
+ * (`arrowIn` below) — `indexes` alone keeps its "=>" declaration glyph; no
+ * new glyph for the three newly-admitted words.
  */
-const LANE_CHAIN_RELATIONS: ReadonlySet<string> = new Set([
-  "extends",
-  "narrows",
-  "indexes",
-  "consume",
-  "override",
-]);
+const LANE_CHAIN_RELATIONS: ReadonlySet<string> = new Set(EDGE_RELATIONS);
 
-/** D8's own tie-break order — ONLY consulted between two branches of otherwise EQUAL node coverage (see `selectLaneChainPath`). Any relation outside `LANE_CHAIN_RELATIONS` cannot reach here (the chain graph is pre-filtered), so the `4` fallback is defensive only. */
+/** D8's own tie-break order — ONLY consulted between two branches of otherwise EQUAL node coverage (see `selectLaneChainPath`). `grounds`/`verifies`/`refutes` (ticket 12) fall through to the same defensive rank 4 as any relation this tie-break never ranked explicitly — lowest priority, so a same-phase structural/state hop wins over a cross-phase one whenever coverage ties. The fallback is otherwise unreachable now that `LANE_CHAIN_RELATIONS` spans the whole eight-word vocabulary — only a malformed stock relation could still reach it. */
 function laneChainRelationRank(relation: string): number {
   if (relation === "extends" || relation === "narrows") return 0;
   if (relation === "indexes") return 1;

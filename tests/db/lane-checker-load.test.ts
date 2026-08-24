@@ -960,6 +960,33 @@ describe("WIDEN loads exactly the rows carrying a lane's ONE tag (D5, v11)", () 
   });
 });
 
+// Ticket 12 (lane-declaration spec, P1-7): DISCOVER (`loadTaggedEdgesTouching`)
+// and WIDEN (`loadEdgesForTag`) were already relation-word-agnostic — neither
+// filters on `me.relation`, only on `me.tags != '[]'` / tag-index membership
+// — so no loader code changes for this ticket. This test pins that directly,
+// since `lane-checker.ts`'s own fix (`unionsLaneComponentGraph`,
+// `LANE_PATH_RELATIONS`) depends on a tagged cross-phase edge actually
+// reaching `checkLanes` in the first place.
+describe("ticket 12 — DISCOVER/WIDEN load a tagged cross-phase edge exactly like a tagged same-phase one", () => {
+  test("a segment scope discovers and widens a lane whose ONLY tagged edge is a cross-phase grounds", () => {
+    const sessionId = seedSession("cross-phase-widen");
+    const t1 = insertTurn(sessionId, 1, { tags: ["x"] });
+    const t2 = insertTurn(sessionId, 2, { tags: ["x"], type: ["research"] });
+    tagEdge(t2, t1, "grounds", ["x"]);
+    const segment = createSegment(db, { title: "cross-phase seg", nowEpoch: NOW });
+    addSegmentMembers(db, segment.id, [t1, t2], NOW);
+
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
+    expect(projection.involvedLaneKeys.map((k) => k.tag)).toEqual(["x"]);
+    expect(projection.edges).toContainEqual({ citingId: t2, citedId: t1, relation: "grounds", tags: ["x"] });
+
+    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+    const lane = result.lanes.find((l) => l.key.tag === "x")!;
+    expect(lane.members.map((m) => m.id).sort((a, b) => a - b)).toEqual([t1, t2]);
+    assertNoDanglingEdges(projection);
+  });
+});
+
 // ------------------------------- peer round T1466: the turn-id seed scope (P1-1)
 
 /**

@@ -282,6 +282,33 @@ describe("=> vs -> and the ◎ terminus marker", () => {
   });
 });
 
+// Ticket 12 (lane-declaration spec, P1-7): the timeline lane chain admits a
+// tagged cross-phase edge (grounds/verifies/refutes) as an ordinary hop.
+// Before this ticket, `LANE_CHAIN_RELATIONS` only ever named the five
+// same-phase/state words, so a lane whose only edge was a tagged `grounds`
+// rendered as a SINGLE-NODE chain (`selectLaneChainPath` had no outgoing
+// edge to walk from the newest member at all) even though the lane has two
+// real members.
+describe("ticket 12 — a tagged cross-phase edge is an ordinary chain hop, not a severed/single-node lane", () => {
+  test("a lane made of a single tagged grounds edge renders as a connected two-node chain with the ordinary -> arrow", () => {
+    const sessionId = seedSession();
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    const t1 = insertTurn(sessionId, 1);
+    const t2 = insertTurn(sessionId, 2, { type: ["research"] });
+    addSegmentMembers(db, segment.id, [t1, t2], NOW);
+    insertLane(db, segment.id, "cross-phase", NOW);
+    tagEdge(t2, t1, "grounds", ["cross-phase"]);
+
+    const view = buildSegmentLaneListView(db, segment.id, "all");
+    const lane = view.lanes.find((entry) => entry.key.tag === "cross-phase")!;
+    expect(lane.memberCount).toBe(2);
+    expect(lane.nodes.map((node) => node.turnId)).toEqual([t2, t1]);
+    // Ordinary "->" hop — `grounds` earns no special glyph (ticket 12's own
+    // "arrow choice" call); only a tagged `indexes` ever renders "=>".
+    expect(renderSegmentLaneView(view)).toContain(`S${sessionId}/T2 -> T1(2)`);
+  });
+});
+
 // Ticket 10 (one-address-grammar spec): a lane chain node's own address is
 // ALWAYS its `S<session>/T<prompt>` home — the earlier `E<seg>/` (a turn
 // owned by another segment) / `S<session>/` (a homeless turn) locator scheme
