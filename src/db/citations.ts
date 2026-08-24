@@ -79,6 +79,29 @@ export function isCitationRelation(value: unknown): value is CitationRelation {
   );
 }
 
+/**
+ * RETRACTION-ONLY words (peer round T1466, finding P1-2): storable and
+ * therefore RETRACTABLE, never assertable. Exactly `CITATION_RELATIONS`
+ * minus `shared/turn-phase.ts`'s `EDGE_RELATIONS` — stated as a literal here
+ * rather than computed, so this storage-layer module keeps its zero runtime
+ * dependency on the write vocabulary; a guard test pins the two definitions
+ * against each other.
+ *
+ * THE ASYMMETRY IS THE POINT, and it is a fix for a DEADLOCK, not a
+ * convenience. `supersedes` was frozen out of the write vocabulary while ten
+ * measured rows carrying it still stand; E2 (a relation word outside the
+ * eight) anchors at the citing turn, and the settlement commit gate refuses
+ * while any E2 anchors inside the writable set. With no way to delete such a
+ * row, a window owning one could never commit — a permanently failing job,
+ * the terminal-state trap. So the retraction MIRRORS extend to this word and
+ * the assertion fields never do: both write surfaces derive their `retract…`
+ * parameters from `EDGE_RELATIONS` ∪ this list, and their relation
+ * parameters from `EDGE_RELATIONS` alone. Adding a word here re-opens a
+ * deletion path; adding one to `EDGE_RELATIONS` re-opens a WRITE path, which
+ * is a different decision entirely.
+ */
+export const RETRACTION_ONLY_RELATIONS = ["supersedes"] as const;
+
 export interface TurnCitationEdge {
   citingTurnId: number;
   citedTurnId: number;

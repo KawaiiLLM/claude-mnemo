@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { relationsReadRemedy } from "../../src/db/write-gate";
 import { noteInputShape, settlementNoteInputShape } from "../../src/mcp/definitions";
+import { SETTLEMENT_NOTE_TOOL_DESCRIPTION } from "../../src/worker/note-settlement-sdk-query";
 
 /**
  * tag-mandate spec, "The mandate reaches every teaching surface" (ruled
@@ -47,6 +49,14 @@ function teachingSurfaceFiles(): string[] {
     "src/mcp/definitions.ts",
     // The settlement prompt (checklist + call-shape teaching).
     "src/worker/note-settlement-prompt.ts",
+    // The settlement TOOL descriptions (peer round T1466, finding P2-4). The
+    // facade registers its own `note` description rather than reusing
+    // `MNEMO_TOOL_DESCRIPTIONS.note`, so it is a fourth independently-editable
+    // teacher — and it was the one still saying "bare or tagged" for all eight
+    // words after the mandate landed everywhere else. It carries the commit
+    // gate's own refusal copy too, which is the surface a settlement run reads
+    // most often.
+    "src/worker/note-settlement-sdk-query.ts",
     // The rubric text — read-only here (see this file's header).
     "src/shared/memory-rubric.ts",
   ];
@@ -152,6 +162,7 @@ describe("the tag mandate reaches every teaching surface", () => {
     const files = teachingSurfaceFiles();
     expect(files).toContain("src/mcp/definitions.ts");
     expect(files).toContain("src/worker/note-settlement-prompt.ts");
+    expect(files).toContain("src/worker/note-settlement-sdk-query.ts");
     expect(files).toContain("src/shared/memory-rubric.ts");
     expect(files.filter((file) => file.startsWith(SKILL_DOCS_ROOT)).length).toBeGreaterThan(0);
     for (const file of files) {
@@ -203,6 +214,52 @@ describe("the tag mandate reaches every teaching surface", () => {
         expect(description).toContain("untagged — acts on the cited turn itself");
       });
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // The settlement facade's OWN note description (peer round T1466, P2-4)
+  // -------------------------------------------------------------------------
+
+  describe("the settlement note description splits assertion from retraction", () => {
+    test("assertion is tagged-only for the two continuation words, either form for the other six", () => {
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
+        "extends/narrows accept ONLY the tagged `{turn, tags}` entry",
+      );
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("a bare address is REFUSED");
+      // The mandate is exactly two words wide here too — the other six still
+      // offer the bare address, and a description that over-applied the rule
+      // would teach the model to refuse itself calls the gate accepts.
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
+        "The other six accept either: a bare address acts on the cited turn itself",
+      );
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
+        "every tag must already be on both this turn's and the target's own tags",
+      );
+    });
+
+    test("retraction keeps the bare form and names the retraction-only ninth word", () => {
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("RETRACTION is the other half");
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("keeps the BARE form for legacy stock");
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("`retractSupersedes`");
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("no assertion field");
+    });
+
+    // RB's hand-off: the relations gate refuses an edge write whose run never
+    // read the citing turn's current set, and the remedy it names is one exact
+    // recall. A description that mentioned the requirement without the call
+    // would leave the model guessing which read satisfies it.
+    test("the relations-read requirement names the exact recall filter that satisfies it", () => {
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
+        "Writing an edge also needs THIS run's own current read of the citing turn's relations",
+      );
+      // The SAME read the gate's own rejection prescribes. Pinned as the
+      // shared fragment rather than the whole clause: the rejection addresses
+      // one turn and this description addresses any of them, so the sentences
+      // differ by design while the CALL must not.
+      const sharedRead = 'filter={fields:["relations"]}';
+      expect(relationsReadRemedy("S1/T2")).toContain(sharedRead);
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(`\`${sharedRead}\``);
+    });
   });
 
   describe("retraction mirrors are not captioned by the mandate", () => {

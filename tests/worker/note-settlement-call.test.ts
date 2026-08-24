@@ -398,9 +398,13 @@ describe("settlement context assembly", () => {
     expect(prompt).toContain("4. THE WORD comes from the cited CLAIM");
     expect(prompt).toContain("still fully valid and built");
     expect(prompt).toContain("upon = extends; partly withdrawn or re-scoped = narrows; replaced");
-    expect(prompt).toContain("outright = override; merely used, same phase = consume; an evidence");
-    expect(prompt).toContain("Shared topic,");
-    expect(prompt).toContain("adjacency, or preserving lane shape are never extends evidence");
+    expect(prompt).toContain("outright = override; merely used, same phase = consume; a check");
+    // T1466 (finding P2-5): the amended step routes a check THIS turn
+    // produced to verifies/refutes and names `extends` as the wrong reach.
+    expect(prompt).toContain("THIS turn produced, for or against the cited conclusion, is");
+    expect(prompt).toContain("verifies or refutes, never extends; an evidence product cited from");
+    expect(prompt).toContain("another phase takes `grounds`. Shared topic, adjacency,");
+    expect(prompt).toContain("or preserving lane shape are never extends evidence");
     expect(prompt).toContain("One pair may carry several");
     expect(prompt).toContain("relations at once; a call carrying nothing but relations is valid.");
     expect(prompt).toContain(

@@ -595,6 +595,23 @@ export const noteInputShape = {
       "Addresses whose refutes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
         RETRACTION_TAG_FORM_LINE,
     ),
+  // The RETRACTION-ONLY ninth word (peer round T1466, finding P1-2). Its
+  // assertion twin below stays retired and `.omit()`ed; this mirror is not,
+  // and the asymmetry is deliberate — see `db/citations.ts`'s
+  // `RETRACTION_ONLY_RELATIONS`. Ten measured `supersedes` rows still stand,
+  // E2 (a relation word outside the eight) anchors at the citing turn, and
+  // the settlement commit gate refuses while any E2 anchors inside the
+  // writable set: with no deletion path a window owning such a row could
+  // never commit at all. Declared beside the eight mirrors rather than
+  // derived with them because it mirrors no relation parameter — there is no
+  // `supersedes` field left for `retract` + capitalisation to build from.
+  retractSupersedes: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose frozen-legacy supersedes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. Retraction only — this word cannot be written back, so use extends/override for a fresh claim. " +
+        RETRACTION_TAG_FORM_LINE,
+    ),
   // Frozen legacy: `supersedes` retired from the NOTE TOOL's own surface —
   // `noteInputSchema` below `.omit()`s this key, so a caller sending it gets
   // `.strict()`'s parse error naming the unrecognised key, same as any other
@@ -894,6 +911,13 @@ export const settlementNoteInputShape = {
   retractGrounds: noteInputShape.retractGrounds,
   retractVerifies: noteInputShape.retractVerifies,
   retractRefutes: noteInputShape.retractRefutes,
+  // The retraction-only ninth word (finding P1-2), the SAME field object —
+  // settlement is the surface that actually MEETS a frozen-legacy row (the
+  // commit gate's E2 refusal names it), so a settlement window with no way to
+  // delete one is the deadlock this parameter exists to break. No
+  // `supersedes` assertion field joins it here, exactly as on the main
+  // surface.
+  retractSupersedes: noteInputShape.retractSupersedes,
   insight: noteInputShape.insight,
   content: z.string().optional(),
 };

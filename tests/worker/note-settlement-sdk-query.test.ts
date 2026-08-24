@@ -21,7 +21,10 @@ import {
   createNoteSettlementSdkQuery,
   SETTLEMENT_ALLOWED_TOOLS,
 } from "../../src/worker/note-settlement-sdk-query";
-import { settlementTurnWriteInputShape } from "../../src/worker/note-settlement-turn-facade";
+import {
+  settlementTurnWriteInputSchema,
+  settlementTurnWriteInputShape,
+} from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
@@ -87,7 +90,19 @@ function seedFixture(db: Database): { sessionDbId: number; t1: number; job: Note
  * to render a non-empty state line and `used[]`, proving both facts reach
  * the settlement surface (not just the CLI).
  */
-function seedLaneCheckFixture(db: Database): { sessionDbId: number; job: NoteSettlementJob } {
+function seedLaneCheckFixture(db: Database): {
+  sessionDbId: number;
+  job: NoteSettlementJob;
+  /**
+   * The lane's own three turns. Peer round T1466 (finding P1-1): the checker
+   * projection is seeded from the dispatch's WRITABLE SET now, not from the
+   * job's prompt-number range, so a fixture has to hand its turns to the
+   * request instead of relying on `windowStart`/`windowEnd` to find them.
+   * `outside` (the external consume citer) stays out — it is discovered by
+   * the loader's own closure, which is the property these tests exercise.
+   */
+  laneTurnIds: number[];
+} {
   const sessionDbId = upsertSession(db, {
     contentSessionId: "settlement-sdk-query-lane-check-session",
     project: "/tmp/project-settlement-sdk-query-lane-check",
@@ -138,7 +153,7 @@ function seedLaneCheckFixture(db: Database): { sessionDbId: number; job: NoteSet
   if (!job) {
     throw new Error("fixture failed to claim a settlement job");
   }
-  return { sessionDbId, job };
+  return { sessionDbId, job, laneTurnIds: [t1, t2, t3] };
 }
 
 /** Mirrors diary-sdk-query.test.ts's mocking pattern: capture every registered tool's name/description/shape/handler. */
@@ -385,7 +400,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
-      const { sessionDbId, job } = seedLaneCheckFixture(db);
+      const { sessionDbId, job, laneTurnIds } = seedLaneCheckFixture(db);
 
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
@@ -418,7 +433,9 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        writableTurnIds: new Set(),
+        // T1466 (finding P1-1): `lane_check`'s projection is this set, so an
+        // empty one is now an empty report — the fixture states its scope.
+        writableTurnIds: new Set(laneTurnIds),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 3,
@@ -538,7 +555,8 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         jobId: job.id,
         claimGeneration: job.claimGeneration,
         sessionId: sessionDbId,
-        writableTurnIds: new Set(),
+        // T1466 (finding P1-1): the writable set IS the checker projection.
+        writableTurnIds: new Set([t1, t2]),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -1620,6 +1638,406 @@ describe("ticket 06 — an E5 commit refusal names the repair, not just the anch
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 3,
+      });
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PEER ROUND T1466 — THE PROJECTION, THE FROZEN WORD, AND THE E5 ANCHOR.
+//
+// Three repairs that only meet at this seam, so all three are proved through
+// the REGISTERED handlers rather than against `evaluateSettlementCommitGate`
+// in isolation: the projection the gate judges is built from the request's own
+// frozen writable set (P1-1), a frozen-legacy `supersedes` row has a deletion
+// path in the same run that met it (P1-2), and an extra-SOURCE E5 blocks the
+// window owning the CITER rather than the window owning the dangling node
+// (P1-3).
+// ---------------------------------------------------------------------------
+
+describe("T1466 — the commit projection is seeded from the frozen writable set", () => {
+  /**
+   * A window of exactly ONE turn (prompt 3) whose writable set also carries a
+   * LOOKBACK turn (prompt 2) holding two defects of its own: an empty `type`
+   * (E3) and an untagged `extends` (E1), both anchored at that lookback turn.
+   *
+   * The lookback turn's prompt number sits OUTSIDE `[windowStart, windowEnd]`,
+   * which is the whole point: no prompt-number range that describes this
+   * window can contain it, so the old range-seeded projection never LOADED
+   * either row and the gate's anchor filter — a subset operation over what the
+   * projection produced — could not recover them.
+   */
+  function seedLookbackStockFixture(db: Database): {
+    sessionDbId: number;
+    lookback: number;
+    windowTurn: number;
+    job: NoteSettlementJob;
+  } {
+    const sessionDbId = seedPullSession(db, "settlement-lookback-stock");
+    const cited = insertTypedTurn(db, sessionDbId, 1);
+    const lookback = insertTypedTurn(db, sessionDbId, 2, { type: "[]" });
+    const windowTurn = insertTypedTurn(db, sessionDbId, 3);
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: lookback },
+          cited: { kind: "turn", id: cited },
+          relation: "extends",
+          provenance: "asserted",
+          tags: [],
+        },
+      ],
+      NOW,
+    );
+    return { sessionDbId, lookback, windowTurn, job: claimWindow(db, sessionDbId, 3, 3) };
+  }
+
+  test("a lookback turn's E1 and E3 refuse commit, though no window range contains that turn", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, lookback, windowTurn, job } = seedLookbackStockFixture(db);
+      const capturedDb = db;
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const refused = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const text = refused.content[0]!.text;
+          expect(text).toContain("Commit refused");
+          // BOTH classes, both anchored at the LOOKBACK turn (prompt 2) — the
+          // turn the window's own range excludes by construction.
+          expect(text).toContain("[E1]");
+          expect(text).toContain("[E3]");
+          expect(text).toContain(`S${sessionDbId}/T2`);
+          expect(text).toContain("type is empty");
+          expect(text).toContain("carries no lane tag");
+          // A refusal is an ordinary in-run rejection: the job row is untouched.
+          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
+
+          // Both repairs, on the lookback turn the set makes writable.
+          await handlers.get("note")!({ turn: `S${sessionDbId}/T2`, type: ["design"] });
+          await handlers.get("recall")!({
+            id: `S${sessionDbId}/T2`,
+            filter: { fields: ["relations"] },
+            turn: 4_000,
+          });
+          const retracted = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T2`,
+            retractExtends: [`S${sessionDbId}/T1`],
+          })) as { content: Array<{ text: string }> };
+          expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
+
+          const committed = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(committed.content[0]!.text).toContain("Committed");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        // window ∪ declared lookback — the frozen set, exactly as the dispatch
+        // hands it to the write facade and the gate.
+        writableTurnIds: new Set([lookback, windowTurn]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 3,
+        windowEnd: 3,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      expect(getTurnById(db, lookback)!.type).toEqual(["design"]);
+      expect(getOutgoingEdges(db, { kind: "turn", id: lookback })).toHaveLength(0);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("an E2 written from a lookback turn to an outside endpoint refuses, and retractSupersedes clears it in the same run", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const sessionDbId = seedPullSession(db, "settlement-lookback-e2");
+      // The cited endpoint sits far outside the window AND outside the
+      // writable set: nothing but this row's own citing side pulls it in.
+      const far = insertTypedTurn(db, sessionDbId, 1);
+      const lookback = insertTypedTurn(db, sessionDbId, 8);
+      const windowTurn = insertTypedTurn(db, sessionDbId, 9);
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: lookback },
+            cited: { kind: "turn", id: far },
+            relation: "supersedes",
+            provenance: "asserted",
+            tags: [],
+          },
+        ],
+        NOW,
+      );
+      const job = claimWindow(db, sessionDbId, 9, 9);
+      const capturedDb = db;
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const refused = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const text = refused.content[0]!.text;
+          expect(text).toContain("Commit refused");
+          expect(text).toContain("[E2]");
+          expect(text).toContain(`S${sessionDbId}/T8`);
+          expect(text).toContain('"supersedes"');
+
+          // THE DEADLOCK THIS BREAKS: `supersedes` is frozen out of the write
+          // vocabulary, so before `retractSupersedes` existed there was no
+          // call that could clear this row, and the window could never commit.
+          await handlers.get("recall")!({
+            id: `S${sessionDbId}/T8`,
+            filter: { fields: ["relations"] },
+            turn: 4_000,
+          });
+          const retracted = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T8`,
+            retractSupersedes: [`S${sessionDbId}/T1`],
+          })) as { content: Array<{ text: string }> };
+          expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
+
+          // The word is retractable and NEVER assertable: writing it back is a
+          // parse error at the schema, not a legal call the facade weighs.
+          expect(
+            settlementTurnWriteInputSchema.safeParse({
+              turn: `S${sessionDbId}/T8`,
+              supersedes: [`S${sessionDbId}/T1`],
+            }).success,
+          ).toBe(false);
+
+          const committed = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(committed.content[0]!.text).toContain("Committed");
+          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("done");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([lookback, windowTurn]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 9,
+        windowEnd: 9,
+      });
+
+      expect(getOutgoingEdges(db, { kind: "turn", id: lookback })).toHaveLength(0);
+      expect(getTurnById(db, far)).not.toBeNull();
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+/**
+ * T1466 (finding P1-3 + P2-7): an extra SOURCE owns no outgoing row — that
+ * absence is what makes it a source — so the only retractable/retaggable row
+ * touching it belongs to a CITER. The anchor moved there, and the refusal copy
+ * has to follow: it names the dangling node explicitly (it is no longer "this
+ * turn"), says why the anchor is the one being asked to repair, and stops
+ * calling proper-superset the unconditional answer.
+ */
+describe("T1466 — an extra-SOURCE E5 blocks the window owning the CITER", () => {
+  /** Lane {shape}: T3 cites BOTH T1 and T2, so the lane has two sources and one sink. */
+  function seedExtraSourceFixture(db: Database): {
+    sessionDbId: number;
+    t1: number;
+    t2: number;
+    t3: number;
+  } {
+    const sessionDbId = seedPullSession(db, "settlement-e5-source");
+    const t1 = insertTypedTurn(db, sessionDbId, 1, { tags: '["shape"]' });
+    const t2 = insertTypedTurn(db, sessionDbId, 2, { tags: '["shape"]' });
+    const t3 = insertTypedTurn(db, sessionDbId, 3, { tags: '["shape"]' });
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t3 },
+          cited: { kind: "turn", id: t1 },
+          relation: "extends",
+          provenance: "asserted",
+          tags: ["shape"],
+        },
+        {
+          citing: { kind: "turn", id: t3 },
+          cited: { kind: "turn", id: t2 },
+          relation: "extends",
+          provenance: "asserted",
+          tags: ["shape"],
+        },
+      ],
+      NOW,
+    );
+    return { sessionDbId, t1, t2, t3 };
+  }
+
+  test("the citer's window is refused, and the copy names the dangling node and conditions the branch idiom", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, t3 } = seedExtraSourceFixture(db);
+      const job = claimWindow(db, sessionDbId, 3, 3);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const refused = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const text = refused.content[0]!.text;
+          expect(text).toContain("Commit refused");
+          expect(text).toContain("[E5]");
+          expect(text).toContain("has a second source");
+          // The DANGLING node is T2 and the ANCHOR is T3; the line has to name
+          // the dangling node, because "this turn dangles" is false here.
+          expect(text).toContain(`S${sessionDbId}/T2 dangles beside S${sessionDbId}/T1`);
+          expect(text).not.toContain("this turn dangles");
+          // …and say why the refusal is nonetheless the anchor's to clear.
+          expect(text).toContain(`you own the edge into S${sessionDbId}/T2`);
+          // P2-7: proper-superset is CONDITIONAL, and the default for an
+          // unrelated chain is its own independent exact set.
+          expect(text).toContain("an independent line of work takes its own independent EXACT tag set");
+          expect(text).toContain(
+            "a proper-superset set is the BRANCH idiom only when the new chain is rooted at a node of the parent lane",
+          );
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        // The window that owns the CITER — the turn holding the repairable row.
+        writableTurnIds: new Set([t3]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 3,
+        windowEnd: 3,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a window holding only the dangling node commits clean — the checker still REPORTS the instance", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const { sessionDbId, t2 } = seedExtraSourceFixture(db);
+      const job = claimWindow(db, sessionDbId, 2, 2);
+      const capturedDb = db;
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          // The instance is VISIBLE — the projection widens to the whole lane
+          // from this one seed turn — and it is advisory here, not blocking:
+          // reporting and blocking are two different questions, and only the
+          // anchor answers the second.
+          const preview = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(preview.content[0]!.text).toContain("[E5]");
+          expect(preview.content[0]!.text).toContain(`anchor S${sessionDbId}/T3`);
+
+          const committed = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(committed.content[0]!.text).toContain("Committed");
+          expect(committed.content[0]!.text).not.toContain("Commit refused");
+          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("done");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        // ONLY the dangling node — it owns no row that could clear this.
+        writableTurnIds: new Set([t2]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 2,
+        windowEnd: 2,
       });
     } finally {
       db?.close();

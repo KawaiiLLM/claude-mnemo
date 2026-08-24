@@ -381,7 +381,17 @@ describe("ticket 06 — Step 0 teaches exhaustive paging, and timeline licenses 
     // The exact call shape a reader can copy — a range plus the three fields
     // Step 0 asks to have seen.
     expect(procedure).toContain('recall(id="S<s>/T<a>..T<b>"');
-    expect(procedure).toContain('filter={fields:["metadata","content","relations"]}');
+    // T1466 (finding P1-4): explicit `fields` REPLACE recall's defaults, so a
+    // list omitting title/insight silently made Step 0's own coverage promise
+    // unreachable — the agent would page every turn and still never be shown
+    // two of the five things it is told to have seen. Both the field list and
+    // the sentence naming what must have been seen are pinned, because the
+    // failure was exactly the two drifting apart.
+    expect(procedure).toContain(
+      'filter={fields:["title","metadata","content","insight","relations"]}',
+    );
+    expect(procedure).toContain("until you have seen each turn's title, its type and tags, its content and");
+    expect(procedure).toContain("insight, and its existing relations.");
     expect(procedure).toContain("A truncated field is re-read with a bigger `turn` budget, never");
     expect(procedure).toContain("skipped.");
   });
@@ -438,6 +448,23 @@ describe("ticket 06 — the edges bullet teaches the tag mandate and the lane pr
     expect(bullet).toContain("tags — write the member turns' tags first, then the edge.");
   });
 
+  // T1466 (RB hand-off): the relations gate is enforced in `db/write-gate.ts`
+  // (`checkRelationsGate`) and refuses an edge write from a run that never
+  // read the citing turn's current relation set. Under pull nothing renders
+  // that set for free, so the prompt has to say where the read comes from —
+  // otherwise the first edge of every window is a refusal the agent has to
+  // reverse-engineer.
+  test("an edge write is taught to need the citing turn's current relations read", () => {
+    const bullet = edgesBullet(renderPrompt());
+
+    expect(bullet).toContain("An edge");
+    expect(bullet).toContain("write also needs your own current read of the citing turn's RELATIONS");
+    // Step 0 is named as the read that satisfies it — the gate consumes the
+    // completeness record `filter={fields:["relations"]}` writes.
+    expect(bullet).toContain("Step 0's relations field is that read, and your own writes keep it");
+    expect(bullet).toContain("current.");
+  });
+
   test("the seven lane steps are present and ordered, ending in stock repair", () => {
     const bullet = edgesBullet(renderPrompt());
 
@@ -468,6 +495,19 @@ describe("ticket 06 — the edges bullet teaches the tag mandate and the lane pr
     expect(bullet).toContain("an untagged extends/narrows row inside your writable");
     expect(bullet).toContain("set is illegal.");
   });
+
+  // T1466 (finding P2-5): step 4 listed no routing for a turn that TESTED the
+  // cited claim, and `extends` is the nearest neighbour a model reaches for —
+  // so a verification landed as continuation, which is a same-phase lane edge
+  // where the truth is a cross-phase stance. The amended step names the two
+  // stance words and forbids the fallback explicitly.
+  test("step 4 routes a check this turn produced to verifies/refutes, never extends", () => {
+    const bullet = edgesBullet(renderPrompt());
+
+    expect(bullet).toContain("a check");
+    expect(bullet).toContain("THIS turn produced, for or against the cited conclusion, is");
+    expect(bullet).toContain("verifies or refutes, never extends;");
+  });
 });
 
 /**
@@ -492,6 +532,21 @@ describe("ticket 06 — the commit paragraph carries the gate contract", () => {
     // anchor must still be able to converge.
     expect(duty4).toContain("Errors");
     expect(duty4).toContain("anchored outside your set belong to other windows and never block you.");
+  });
+
+  // T1466 (finding P1-5): the prompt used to allow a no-op exit without any
+  // commit, which collides with the job's ONLY done-transition — the window
+  // would be retried with every write already standing. "Exactly one commit"
+  // was no better: a gate REFUSAL is a commit call, so a run could read its
+  // refusal as the one commit it was allowed and stop. The amended rule names
+  // the exit condition as a SUCCESSFUL commit and says a refusal is not it.
+  test("the exit condition is one SUCCESSFUL commit, and a refusal never counts as it", () => {
+    const prompt = renderPrompt();
+    const duty4 = prompt.slice(prompt.indexOf("4. COMMIT."), prompt.indexOf("## Segment roster"));
+
+    expect(duty4).toContain("You end this job only through ONE SUCCESSFUL commit — a window with");
+    expect(duty4).toContain("nothing to change still commits empty-handed, and a refusal never counts");
+    expect(duty4).toContain("as that commit: repair what it names and commit again.");
   });
 });
 

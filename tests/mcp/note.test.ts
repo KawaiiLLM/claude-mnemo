@@ -179,6 +179,11 @@ describe("note tool", () => {
       "retractGrounds",
       "retractVerifies",
       "retractRefutes",
+      // Peer round T1466 (finding P1-2): the retraction-only ninth mirror.
+      // It has no assertion twin above and must never gain one — the frozen
+      // `supersedes` word stays deletable so a window owning a legacy row can
+      // clear its E2 and commit at all.
+      "retractSupersedes",
       "insight",
       "content",
     ]);
@@ -2476,6 +2481,70 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
       expect(isNoteSuccess(result)).toBe(true);
       expect(resultText(result)).toContain("Retracted 2 relation(s).");
       expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+    });
+
+    // Peer round T1466 (finding P1-2): the ninth word is RETRACTION-ONLY.
+    // `supersedes` was frozen out of the write vocabulary while measured rows
+    // carrying it still stand — and the lane checker classes such a row as E2,
+    // which the settlement commit gate refuses over. With no deletion path the
+    // window owning one could never commit, so the mirror exists on both write
+    // surfaces while the assertion field stays retired on both.
+    test("retractSupersedes deletes a frozen-legacy row, and supersedes itself stays unwritable", () => {
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: targetTurnId },
+            cited: { kind: "turn", id: earlierTurnId },
+            relation: "supersedes",
+            provenance: "asserted",
+          },
+        ],
+        800,
+      );
+      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(1);
+
+      // The assertion half is a parse error, not a call the tool weighs.
+      expect(
+        noteInputSchema.safeParse({
+          turn: `S${sessionId}/T3`,
+          supersedes: [`S${sessionId}/T1`],
+        }).success,
+      ).toBe(false);
+      // …and the retraction half goes through, on a bare address (a
+      // frozen-legacy row predates the tag model and is never tagged).
+      expect(
+        noteInputSchema.safeParse({
+          turn: `S${sessionId}/T3`,
+          retractSupersedes: [`S${sessionId}/T1`],
+        }).success,
+      ).toBe(true);
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, retractSupersedes: [`S${sessionId}/T1`] },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain("Retracted 1 relation(s).");
+      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+    });
+
+    // The other half of "never restore the assertion": a retraction naming a
+    // row that is not there is refused BY NAME, so "already gone" and "wrong
+    // address" stay distinguishable for this word too.
+    test("retractSupersedes on an address carrying no such edge is refused by name", () => {
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, retractSupersedes: [`S${sessionId}/T1`] },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(isNoteSuccess(result)).toBe(false);
+      expect(resultText(result)).toContain("retraction field rejected");
+      expect(resultText(result)).toContain("supersedes");
+      expect(resultText(result)).toContain("is not a relation this turn currently carries");
     });
   });
 });

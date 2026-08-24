@@ -89,6 +89,18 @@ export const SETTLEMENT_ALLOWED_TOOLS = [
  * The duty-level instructions (which turns are reviewable) live in the
  * settlement prompt, not here — this text states the CALL contract only.
  *
+ * PEER ROUND T1466 (finding P2-4): the edge paragraph used to teach "bare or
+ * tagged" for all eight words at once, which is the shape the write gate
+ * REFUSES for extends/narrows — a stale teacher produces a call the gate then
+ * rejects, and the rejection reads as a bug rather than a rule. The paragraph
+ * splits three ways now: ASSERTION (tagged-only for the two continuation
+ * words, either form for the other six), the RELATIONS READ an edge write
+ * consumes (finding P1-8's gate, named with the exact recall that satisfies
+ * it), and RETRACTION, which keeps the bare form because a legacy untagged
+ * row must stay deletable — `retractSupersedes` included. This file joined
+ * `tests/shared/tag-mandate-teaching-surfaces.test.ts`'s enumerated surface
+ * set in the same repair, so the split cannot silently rot back.
+ *
  * Ticket 05 (read-write-contract spec "结算(直写改造)"): DIRECT WRITE, not
  * staged — this call validates fully right now AND lands, in this same
  * transaction, before the tool result returns. There is no `commit` left to
@@ -119,16 +131,29 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "while the other still lands. " +
   "override/narrows/extends/indexes/consume/grounds/verifies/refutes: " +
   "address lists — the SAME eight relations and legality validator the main " +
-  "agent's own `note` tool uses. Each entry is a bare address (untagged — " +
-  "acts on the cited turn itself) or `{turn, tags}` (acts on that lane " +
-  "instead); every tag must already be on both this turn's and the " +
-  "target's own tags. An edge stands on its own: no prose citation, no " +
+  "agent's own `note` tool uses. ASSERTION takes two entry forms, and which " +
+  "one is not a free choice. extends/narrows accept ONLY the tagged " +
+  "`{turn, tags}` entry, with a non-empty tag set — a bare address is " +
+  "REFUSED, because continuation names the line of work it continues. The " +
+  "other six accept either: a bare address acts on the cited turn itself, a " +
+  "tagged entry acts on that lane. Either way every tag must already be on " +
+  "both this turn's and the target's own tags. " +
+  "An edge stands on its own: no prose citation, no " +
   "pre-existing link between the two turns, and one pair may carry several " +
   "relations at once; a structurally illegal call (wrong phase, an illegal " +
   "tag, an illegal self-citation) is rejected, naming what is missing. " +
-  "Each has a retract… mirror (retractOverride …) that deletes that edge; " +
-  "an address carrying no such edge rejects the call, naming it, and " +
-  "nothing is deleted. Which relation, if any, is the Memory Rubric's own " +
+  "Writing an edge also needs THIS run's own current read of the citing " +
+  "turn's relations — a relation write states how that turn's edges stand, " +
+  "so recall the turn with `filter={fields:[\"relations\"]}` first (Step 0's " +
+  "own field list already delivers it) or the call is refused naming that " +
+  "read; your own edge writes keep the set current afterwards. " +
+  "RETRACTION is the other half and keeps the BARE form for legacy stock: " +
+  "each relation has a retract… mirror (retractOverride …), plus " +
+  "`retractSupersedes` for the frozen-legacy ninth word no assertion field " +
+  "offers at all. An untagged entry deletes the bare row and a tagged one " +
+  "deletes that exact tag-set row; an address carrying no such edge rejects " +
+  "the call, naming it, and nothing is deleted. " +
+  "Which relation, if any, is the Memory Rubric's own " +
   "vocabulary above — this call only enforces phase domains, tag legality " +
   "and the self-citation gate. " +
   "On `session`: `title`/`content` only — type/tags/edges are refused. " +
@@ -175,15 +200,17 @@ const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
  * rubric-v10 ticket 06 (spec "settlement agent (v2 duty)"): the four-report
  * lane checker, wired through the SAME `shared/lane-checker.ts` core the CLI
  * renders (`scripts/lane-check.ts`) — no digraph, and no parameters: the
- * scope is always this dispatch's own window (`request.sessionId` +
- * `windowStart`/`windowEnd`), never a range the model could name itself, so
- * there is nothing for it to get wrong here. Advisory only (spec: "findings
+ * scope is always this dispatch's own IMMUTABLE WRITABLE SET
+ * (`request.writableTurnIds`, peer round T1466 finding P1-1 — formerly the
+ * job's prompt-number range, which is strictly narrower), never a scope the
+ * model could name itself, so there is nothing for it to get wrong here.
+ * Advisory only (spec: "findings
  * enter the agent's EXISTING supply/correct/propose judgment... never an
  * automatic write obligation") — this tool computes and reports, it never
  * writes.
  */
 const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
-  "Run the lane checker over THIS window's own scope (no parameters) and " +
+  "Run the lane checker over THIS window's own writable set (no parameters) and " +
   "return its findings as compact numbers and names — never a digraph, " +
   "never a write. The output splits in two. ERRORS come first: states the " +
   "grammar forbids, each naming the turn it is ANCHORED at — an untagged " +
@@ -262,28 +289,48 @@ function textResult(text: string) {
 // The commit gate (tag-mandate ticket 05, spec "The commit gate")
 // ---------------------------------------------------------------------------
 
-/** The window this dispatch settles, as the lane checker's own `range` scope takes it. */
-export interface SettlementWindowScope {
-  sessionId: number;
-  windowStart: number;
-  windowEnd: number;
+/**
+ * The scope both settlement checker callers judge — this dispatch's own
+ * IMMUTABLE WRITABLE SET, nothing else.
+ *
+ * PEER ROUND T1466 (finding P1-1): this used to be the job's prompt-number
+ * RANGE (`windowStart..windowEnd`), and the range was strictly SMALLER than
+ * the set the gate then filtered anchors against. The writable set is window
+ * ∪ declared lookback ∪ deadlock-guard closure — a lookback turn can sit
+ * anywhere in the session, so no range expresses it. Errors living on those
+ * turns never LOADED, and filtering a projection cannot recover what the
+ * projection never contained: a lookback turn's untagged extends (E1) or
+ * empty type (E3) was invisible, and so was an E2 whose out-of-vocabulary row
+ * runs from a lookback turn to an endpoint nothing else pulled in. The frozen
+ * set goes in verbatim now, through the loader's `{ kind: "turns", turnIds }`
+ * seed.
+ */
+export interface SettlementProjectionScope {
+  writableTurnIds: ReadonlySet<number>;
 }
 
 /**
  * ONE projection, one semantics: the `lane_check` tool and the commit gate
  * run the IDENTICAL `loadLaneCheckScope` -> `checkLanes` pass over the job's
- * own window (spec's implementation decision: "the same
+ * own WRITABLE SET (spec's implementation decision: "the same
  * loadLaneCheckScope→checkLanes pass the lane_check tool uses — one
  * projection, no second semantics"). Two callers of one function, so the
  * cheap look the agent may take before committing and the verdict it is
  * judged by can never disagree about a fact.
+ *
+ * The seed is the SAME value three other readers already hold — the write
+ * facade's range check, the commit gate's anchor filter and the prompt's
+ * printed declaration — so "what you may write", "what you are shown" and
+ * "what you are judged on" are one set rather than three that happen to
+ * overlap. The loader still WIDENS from that seed (each touched lane's full
+ * edge set, the component closure, the seed-scoped out-of-vocabulary pass),
+ * so an error anchored outside the set can still be REPORTED; the gate's own
+ * anchor filter is what decides that it does not block.
  */
-function checkWindowLanes(db: Database, scope: SettlementWindowScope) {
+function checkWindowLanes(db: Database, scope: SettlementProjectionScope) {
   const projection = loadLaneCheckScope(db, {
-    kind: "range",
-    sessionId: scope.sessionId,
-    promptStart: scope.windowStart,
-    promptEnd: scope.windowEnd,
+    kind: "turns",
+    turnIds: [...scope.writableTurnIds],
   });
   return {
     result: checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges),
@@ -349,12 +396,36 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
       // reason). Tag-mandate ticket 06 gave this class its own case: it used
       // to fall through to the bare default below, which handed the agent an
       // anchor and no move at all — a refusal it could not act on.
+      //
+      // TWO T1466 REPAIRS TO THE COPY.
+      //
+      //   1. It names `error.nodeId` (finding P1-3's hand-off). The anchor is
+      //      the EDGE-OWNING CITER now, which for an extra SOURCE is a
+      //      DIFFERENT turn from the dangling node — so "this turn dangles"
+      //      was simply false there, and the agent was sent to re-shape a
+      //      turn the report never accused. The parenthetical says why the
+      //      refusal is nonetheless the anchor's: it owns the only in-lane
+      //      row touching the dangling node, which is the repair power the
+      //      anchor field exists to guarantee.
+      //   2. It CONDITIONS the branch idiom (finding P2-7). Proper-superset
+      //      is not the general answer to a second source/sink: two chains
+      //      that share no node are independent lines of work and take
+      //      independent EXACT tag sets. A superset says "this line grows out
+      //      of that one", which is only true when the new chain is rooted at
+      //      a node the parent lane already holds. The unconditional wording
+      //      taught the model to bolt a tag onto anything that dangled, which
+      //      manufactures a subset relation the content does not support.
       return (
         `[E5] ${anchor}: lane {${error.key.tagSet.join(",")}} has a second ${error.role} — ` +
-        `this turn dangles beside ${turnAddressFor(db, error.canonicalId)}, and a lane has exactly ` +
-        "one start and one end. Retag this chain into a lane of its own (a proper-superset tag " +
-        "set is the BRANCH idiom), or bridge it to the lane's real start/end with an edge the " +
-        "content actually supports."
+        `${turnAddressFor(db, error.nodeId)} dangles beside ${turnAddressFor(db, error.canonicalId)}, ` +
+        "and a lane has exactly one start and one end" +
+        (error.anchorId === error.nodeId
+          ? ""
+          : `; you own the edge into ${turnAddressFor(db, error.nodeId)}, which is why this one is yours to repair`) +
+        ". Retag this chain into a lane of its own — an independent line of work takes its own " +
+        "independent EXACT tag set; a proper-superset set is the BRANCH idiom only when the new " +
+        "chain is rooted at a node of the parent lane — or bridge it to the lane's real start/end " +
+        "with an edge the content actually supports."
       );
     default: {
       // Exhaustive over `LaneErrorClass` today (E1-E5). A class added to the
@@ -369,12 +440,19 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
 }
 
 /**
- * The gate itself: run the checker over the job's window and REFUSE while any
- * error anchors INSIDE this run's immutable writable set.
+ * The gate itself: run the checker over the job's immutable writable set and
+ * REFUSE while any error anchors INSIDE it.
  *
  * Returns the refusal payload, or `null` when the window is clean enough to
- * commit. Three properties this function exists to hold:
+ * commit. Four properties this function exists to hold:
  *
+ *   - **The projection is the writable set** (peer round T1466, finding
+ *     P1-1). Seed and filter are now the SAME value — `checkWindowLanes`
+ *     above — so "an error the gate could refuse over" and "an error the
+ *     projection loaded" cannot come apart. When they did, a lookback turn's
+ *     E1/E3 and an external-endpoint E2 were unreachable by construction: the
+ *     filter below is a subset operation, and no subset of a projection that
+ *     never loaded a row can produce that row.
  *   - **Anchor filtering is the whole verdict.** `LaneCheckerError.anchorId`
  *     is a turn id the repairing agent can address (an edge error anchors at
  *     its CITING turn, a type error at the turn itself), and membership in
@@ -395,7 +473,7 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
  */
 export function evaluateSettlementCommitGate(
   db: Database,
-  scope: SettlementWindowScope & { writableTurnIds: ReadonlySet<number> },
+  scope: SettlementProjectionScope,
 ): string | null {
   const { result } = checkWindowLanes(db, scope);
   const blocking = result.errors.filter((error) => scope.writableTurnIds.has(error.anchorId));
@@ -601,9 +679,6 @@ export function createNoteSettlementSdkQuery(
             // terminal would answer a question nothing can act on.
             if (writes.getLastCommitMetrics() === null) {
               const refusal = evaluateSettlementCommitGate(options.db, {
-                sessionId: request.sessionId,
-                windowStart: request.windowStart,
-                windowEnd: request.windowEnd,
                 writableTurnIds: request.writableTurnIds,
               });
               if (refusal !== null) {
@@ -625,11 +700,12 @@ export function createNoteSettlementSdkQuery(
             // list `commit` judges. Ticket 06 additionally hands the render
             // that projection's turns, so an anchor prints as
             // `S<session>/T<prompt>` — the address the repair call itself
-            // takes, matching the commit refusal's own vocabulary.
+            // takes, matching the commit refusal's own vocabulary. Finding
+            // P1-1: the scope is this dispatch's WRITABLE SET, the same seed
+            // the gate builds from — a preview over a narrower projection
+            // would hide exactly the rows the gate is about to refuse over.
             const { result, turns } = checkWindowLanes(options.db, {
-              sessionId: request.sessionId,
-              windowStart: request.windowStart,
-              windowEnd: request.windowEnd,
+              writableTurnIds: request.writableTurnIds,
             });
             return textResult(
               renderLaneCheckerReports(result, buildLaneAnchorAddresses(turns)),

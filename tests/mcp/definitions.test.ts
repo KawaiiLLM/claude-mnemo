@@ -11,6 +11,7 @@ import {
   settlementNoteInputShape,
   workerRecallInputShape,
 } from "../../src/mcp/definitions";
+import { CITATION_RELATIONS, RETRACTION_ONLY_RELATIONS } from "../../src/db/citations";
 import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../../src/mcp/note";
 import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import { estimateTokens } from "../../src/utils/token-estimate";
@@ -578,17 +579,51 @@ describe("tool surface", () => {
   // by hand, one describe each, so the guard pins that the two agree — a
   // relation added to `EDGE_RELATIONS` without its retraction parameter
   // declared here fails right here.
-  it("RETRACTION_FIELD_ENTRIES mirrors the relation fields one for one, and every name is a real schema parameter", () => {
+  //
+  // Peer round T1466 (finding P1-2): the mirror set is now WIDER than the
+  // relation set by exactly `RETRACTION_ONLY_RELATIONS`. That asymmetry is
+  // the deliverable, so it is asserted as an identity in both directions
+  // rather than loosened into "at least the eight".
+  it("RETRACTION_FIELD_ENTRIES mirrors the relation fields one for one, plus the retraction-only words", () => {
     const relations = RETRACTION_FIELD_ENTRIES.map(([, relation]) => relation).sort();
-    expect(relations).toEqual([...EDGE_RELATIONS].sort());
+    expect(relations).toEqual([...EDGE_RELATIONS, ...RETRACTION_ONLY_RELATIONS].sort());
 
     const pairs = RELATION_FIELD_ENTRIES.map(([key, relation]) => [relation, key] as const);
     for (const [key, relation] of RETRACTION_FIELD_ENTRIES) {
-      const relationField = pairs.find(([r]) => r === relation)![1];
+      // A retraction-only word mirrors no relation parameter (there is none
+      // to capitalise), so its own name is the spelling rule's input.
+      const relationField = pairs.find(([r]) => r === relation)?.[1] ?? relation;
       expect(key).toBe(
         `retract${relationField.charAt(0).toUpperCase()}${relationField.slice(1)}`,
       );
       expect(key in noteInputSchema.shape, `${key} should be a schema parameter`).toBe(true);
+    }
+  });
+
+  // THE ASYMMETRY ITSELF (finding P1-2). `supersedes` is retractable and
+  // never assertable, and the failure this guards against is a future edit
+  // "completing the symmetry" by adding the relation field back — which would
+  // re-open a write path for a word ten stale rows already prove nobody should
+  // write, and turn the E2 refusal into a state the model can recreate.
+  it("the retraction-only words are exactly the storage vocabulary minus the write vocabulary, and none is assertable", () => {
+    expect([...RETRACTION_ONLY_RELATIONS].sort()).toEqual(
+      CITATION_RELATIONS.filter(
+        (relation) => !(EDGE_RELATIONS as readonly string[]).includes(relation),
+      ).sort(),
+    );
+
+    for (const relation of RETRACTION_ONLY_RELATIONS) {
+      // No relation field, on either write surface's wiring…
+      expect(RELATION_FIELD_ENTRIES.some(([, r]) => r === relation)).toBe(false);
+      // …and no assertable parameter on either schema. `noteInputShape` keeps
+      // `supersedes` as frozen documentation, but `noteInputSchema` omits it,
+      // so a caller sending it is a parse error on both surfaces.
+      expect(relation in noteInputSchema.shape).toBe(false);
+      expect(relation in settlementNoteInputShape).toBe(false);
+      // The retraction mirror, on both.
+      const mirror = `retract${relation.charAt(0).toUpperCase()}${relation.slice(1)}`;
+      expect(mirror in noteInputSchema.shape).toBe(true);
+      expect(mirror in settlementNoteInputShape).toBe(true);
     }
   });
 
