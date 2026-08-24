@@ -712,10 +712,14 @@ export type TurnRenderFields = ReadonlySet<RecallTurnField>;
  * the shown rows; d0590fe's read of that sentence as excluding metadata from
  * the default set was itself the regression this ticket corrects), and
  * `content`, and nothing else. The `prompt` bullet left this default with the
- * row redesign — the row label already falls back to the prompt text when no
- * title exists, so the bullet only ever restated something the reader had. A
- * caller after `response`, `insight`, `files`, or `observations` asks for it
- * explicitly. `filter.fields` is
+ * row redesign, when the row label still fell back to the prompt text and the
+ * bullet only restated what the reader already had; ticket 02 retired that
+ * fallback and did NOT move `prompt` back in — a default is a selection like
+ * any other, and the ruling it implements ([S15069/T1477]) is that an
+ * unselected field renders nothing. A caller after `prompt`, `response`,
+ * `insight`, `files`, or `observations` asks for it explicitly — see
+ * `CONTEXT_TURN_RENDER_FIELDS` for the fixed-shape surfaces that do.
+ * `filter.fields` is
  * the SOLE field-selection mechanism (spec: "07 的 filter.fields 从加法机制
  * 升为唯一机制") — there is no longer a second, depth-driven default field
  * set for a caller to fall back on; an explicit narrow selection (e.g. just
@@ -728,6 +732,28 @@ export const DEFAULT_TURN_RENDER_FIELDS: TurnRenderFields = new Set<RecallTurnFi
   "title",
   "metadata",
   "content",
+]);
+
+/**
+ * `DEFAULT_TURN_RENDER_FIELDS` plus `prompt` — the set a FIXED-SHAPE surface
+ * declares when it renders a turn as CONTEXT for something else and the
+ * caller has no say in its fields (ticket 02: recall's `O*` routes, where the
+ * turn row is a header over the observations under it, and the search feed's
+ * observation-only turn rows). Those two surfaces used to get a note-less
+ * turn's prompt for free out of the label fallback; with the fallback retired
+ * they OPT IN, and the opt-in is strictly cheaper than what it replaces —
+ * `capRenderToTokenBudget` caps the whole block at the per-item `turn`
+ * budget, so adding a field can only redistribute those tokens, never exceed
+ * them, whereas the fallback's label was uncapped.
+ *
+ * Not a second default: a surface whose caller CAN pass `filter.fields`
+ * (every addressed recall route, the segment-member route) resolves through
+ * `resolveTurnFields` and gets `DEFAULT_TURN_RENDER_FIELDS`, so asking for
+ * the prompt there stays the caller's own explicit act.
+ */
+export const CONTEXT_TURN_RENDER_FIELDS: TurnRenderFields = new Set<RecallTurnField>([
+  ...DEFAULT_TURN_RENDER_FIELDS,
+  "prompt",
 ]);
 
 /**
@@ -883,24 +909,28 @@ function formatTurnLabel(
   // turns), so rendering it taught the exact anti-pattern.
   const prefix = `${indent}${renderTurnAddress(turn.promptNumber, sessionId, includeSessionPrefix)}`;
 
-  // The label always needs SOME identifying text: the stored title when
-  // `fields` selects it and one exists, else the raw prompt (collapsed to
-  // one line — a task notification or pasted payload carries newlines that
-  // would otherwise split one turn's label across several), else a bare
-  // placeholder. This fallback is structural, not a `fields` selection in
-  // its own right — it is what keeps a turn's label non-empty regardless of
-  // what the caller asked to see.
-  const titleSelected = fields.has("title") && turn.title !== null;
-  const title = titleSelected
-    ? turn.title!
-    : turn.promptPreview
-      ? `"${collapseToSingleLine(turn.promptPreview)}"`
-      : "Untitled";
+  // The label carries the STORED TITLE and nothing else (render-fidelity
+  // ticket 02, user ruling [S15069/T1477]: "prompt 不也是字段，如果不选就应该忠
+  // 实留空，而不是替调用者决定"). A title the caller did not select, or a turn
+  // that has none yet, leaves the bare address — which is already what
+  // identifies the row — plus whatever tail markers apply.
+  //
+  // What retired here: a structural fallback to `turn.promptPreview` (and to
+  // an `Untitled` placeholder below that). It rendered a field nobody
+  // selected, and it rendered it in the ONE position no budget can reach —
+  // `capRenderToTokenBudget` keeps line 0 whole however small the cap — so a
+  // single synthetic multi-kilobyte prompt spent a whole page on a row the
+  // caller never asked for, and the delivery envelope behind it then dropped
+  // the grants of every field that WAS asked for (the [S15069/T1469]
+  // incident). The prompt still renders, as its own budgeted field row in
+  // `formatTurnBody`, whenever the caller selects it or the search matched it.
+  const titleText = fields.has("title") ? turn.title : null;
+  const titleSegment = titleText ? ` ${titleText}` : "";
 
   const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
 
-  return `${prefix} ${title}${formatStatus(turn.status)}${dbIdSegment}${rewindSegment}`;
+  return `${prefix}${titleSegment}${formatStatus(turn.status)}${dbIdSegment}${rewindSegment}`;
 }
 
 function formatObservationLabel(
@@ -1093,17 +1123,20 @@ function formatTurnBody(
     lines.push(`${fieldIndent}- content: ${turn.content}`);
   }
 
-  // The prompt bullet only ADDS information when the label is showing the
-  // polished TITLE, not the raw prompt (see `formatTurnLabel`'s own
-  // fallback) — if the label already fell back to the prompt text itself
-  // (no title selected/stored), a second copy here would just repeat it.
-  // This gate applies whether `prompt` renders because the caller asked for
-  // it or because it matched the search (`isTurnFieldActive`) — the
-  // redundancy it guards against is the same either way.
-  const titleSelected = fields.has("title") && turn.title !== null;
+  // `prompt` is a field like any other (ticket 02): it renders exactly when
+  // this render is showing it — the caller selected it, or the search's own
+  // probe found the query inside the prompt text (`isTurnFieldActive`) — and
+  // it renders HERE, in the body, where the per-item `turn` budget cuts it
+  // the same way it cuts `content` and `response` (one join, one
+  // `capRenderToTokenBudget` pass in `renderNode`).
+  //
+  // The retired `titleSelected` gate suppressed this row whenever the label
+  // had fallen back to the prompt text, to avoid printing it twice. With the
+  // fallback gone the label never carries a prompt, so the only thing that
+  // gate still did was silence the one row a note-less turn has to offer —
+  // which is precisely what settlement's Step 0 reads a note-less turn by.
   if (
     isTurnFieldActive("prompt", fields, options.matchedFields) &&
-    titleSelected &&
     turn.promptPreview
   ) {
     lines.push(

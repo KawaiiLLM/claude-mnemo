@@ -305,7 +305,14 @@ export function renderNoteSettlementPrompt(
     // The authored text's own line, long on purpose: reflowing it would split
     // the sentence the coverage pins read as one line.
     "insight, and its existing relations. A truncated field is re-read with a bigger `turn` budget, never",
-    "skipped. `timeline` helps navigate; it substitutes for none of this",
+    // Ticket 02 (floor-and-render-fidelity): the note-less-turn sentence the
+    // authored file gained once the label stopped leaking the prompt — a turn
+    // with no note renders EMPTY under Step 0's field list, so the reading
+    // the coverage promise names has to say where its evidence comes from.
+    "skipped. A turn carrying no note yet renders nothing under those fields:",
+    "read it with `prompt` and `response` added to the selection — the raw",
+    "exchange is what you judge it by, and a field never delivered licenses",
+    "nothing. `timeline` helps navigate; it substitutes for none of this",
     "reading and licenses nothing. Reading is also your write license: a",
     "whole-field `write` over another writer's text requires your own",
     "untruncated read of that field. Turns outside the set may be read freely",

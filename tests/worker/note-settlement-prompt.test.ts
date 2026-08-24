@@ -396,6 +396,22 @@ describe("ticket 06 — Step 0 teaches exhaustive paging, and timeline licenses 
     expect(procedure).toContain("skipped.");
   });
 
+  // floor-and-render-fidelity ticket 02: the label stopped falling back to the
+  // prompt, so a turn with no note renders EMPTY under Step 0's own field list
+  // — the coverage promise above would otherwise send the agent to page every
+  // turn and judge the note-less ones off blank rows. The authored amendment
+  // names the fields that carry the evidence instead, and restates why a field
+  // that never arrived authorizes nothing.
+  test("the coverage step says how to read a turn that has no note yet", () => {
+    const procedure = procedureText(renderPrompt());
+
+    expect(procedure).toContain("A turn carrying no note yet renders nothing under those fields:");
+    expect(procedure).toContain("read it with `prompt` and `response` added to the selection");
+    expect(procedure).toContain("the raw");
+    expect(procedure).toContain("exchange is what you judge it by, and a field never delivered licenses");
+    expect(procedure).toContain("nothing.");
+  });
+
   test("timeline is named as navigation that licenses nothing, and reading is stated as the write licence", () => {
     const procedure = procedureText(renderPrompt());
 

@@ -96,9 +96,16 @@ describe("the replay axis is untouched by the segment era", () => {
   });
 
   test("recall's direct turn address is unaffected by the hit-set filter", () => {
+    // The prompt is SELECTED, not inherited: floor-and-render-fidelity ticket
+    // 02 retired the row label's fallback to the prompt text (ruling
+    // [S15069/T1477] — an unselected field renders nothing), and this test's
+    // own property is that a direct address still reaches the turn's words,
+    // not which field slot happens to carry them. The retired `depth:
+    // "expanded"` param went with it (ticket 11: `filter.fields` is the sole
+    // field-selection mechanism).
     const output = recallMemory(db, {
       id: `S${sessionId}/T1`,
-      depth: "expanded",
+      filter: { fields: ["title", "prompt", "response"] },
     });
     expect(output).toContain("the exact words the user typed");
   });

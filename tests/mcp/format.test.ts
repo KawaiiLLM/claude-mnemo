@@ -11,6 +11,7 @@ import {
   truncateText,
 } from "../../src/mcp/format";
 import { RECALL_TURN_FIELD_NAMES, type RecallTurnField } from "../../src/mcp/memory-filter";
+import { estimateTokens } from "../../src/utils/token-estimate";
 
 const createdAtEpoch = Math.floor(Date.UTC(2026, 3, 5, 14, 30) / 1000);
 
@@ -370,27 +371,113 @@ describe("MCP format renderer", () => {
     );
   });
 
-  test("a multi-line prompt standing in for a missing note is collapsed to one line", () => {
-    // A turn with no note falls back to its user prompt for the title slot,
-    // and a machine-generated prompt carries newlines. They reached the
-    // layout intact and spilled one turn's label across four lines.
+  // -------------------------------------------------------------------------
+  // Ticket 02 (floor-and-render-fidelity), ruling [S15069/T1477]: the label
+  // renders the STORED TITLE or nothing. The prompt fallback and its
+  // `Untitled` placeholder are gone from the label — both rendered a field
+  // the caller never selected, in the one position no budget can cut.
+  // -------------------------------------------------------------------------
+
+  test("a note-less turn's label is the bare address — no prompt fallback, no placeholder", () => {
+    const promptPreview =
+      "<task-notification>\n<task-id>a1758e6c</task-id>\n<output-file>/tmp/x.txt</output-file>\n</task-notification>";
+    const noteless: FormattedTurn = {
+      id: 21,
+      promptNumber: 21,
+      title: null,
+      promptPreview,
+    };
+
+    // Default fields (title selected, no title stored): the address alone.
+    expect(renderNode({ type: "turn", value: noteless }, { sessionId: 15069 })).toBe(
+      "[T21]",
+    );
+    // A status marker still attaches to the bare address, in its usual slot.
+    expect(
+      renderNode(
+        { type: "turn", value: { ...noteless, status: "extracted" } },
+        { sessionId: 15069 },
+      ),
+    ).toBe("[T21] [extracted]");
+    // Not even a placeholder when there is no prompt text either.
+    expect(
+      renderNode({ type: "turn", value: { ...noteless, promptPreview: null } }, {}),
+    ).toBe("[T21]");
+    expect(
+      renderNode({ type: "turn", value: noteless }, { sessionId: 15069 }),
+    ).not.toContain("task-notification");
+  });
+
+  test("a stored title that the caller did not select leaves the address bare", () => {
+    const titled: FormattedTurn = {
+      id: 22,
+      promptNumber: 22,
+      title: "Diagnose auth",
+      content: "Refresh overlap diagnosed",
+      promptPreview: "Why am I getting 401 errors?",
+    };
+
+    expect(
+      renderNode(
+        { type: "turn", value: titled },
+        { fields: new Set<RecallTurnField>(["content"]) },
+      ),
+    ).toBe(["[T22]", "    - content: Refresh overlap diagnosed"].join("\n"));
+  });
+
+  test("a note-less turn renders its prompt when — and only when — `prompt` is selected, collapsed to one line", () => {
+    // A machine-generated prompt carries newlines; they used to reach the
+    // layout intact through the label and spill one row across four lines.
     const promptPreview =
       "<task-notification>\n<task-id>a1758e6c</task-id>\n<output-file>/tmp/x.txt</output-file>\n</task-notification>";
     const rendered = renderNode(
       {
         type: "turn",
-        value: {
-          id: 21,
-          promptNumber: 21,
-          title: null,
-          promptPreview,
-        },
+        value: { id: 21, promptNumber: 21, title: null, promptPreview },
       },
-      { sessionId: 15069 },
+      { fields: new Set<RecallTurnField>(["title", "prompt"]), sessionId: 15069 },
     );
 
-    expect(rendered.split("\n")).toHaveLength(1);
-    expect(rendered).toContain("<task-notification> <task-id>a1758e6c</task-id>");
+    expect(rendered.split("\n")).toHaveLength(2);
+    expect(rendered.split("\n")[0]).toBe("[T21]");
+    expect(rendered).toContain(
+      '    - prompt: "<task-notification> <task-id>a1758e6c</task-id>',
+    );
+  });
+
+  test("the prompt row obeys the per-item turn budget on both channels — selection and search match", () => {
+    // The starvation case: a synthetic prompt far larger than any per-item
+    // budget. As a label it was uncuttable; as a field row the ordinary
+    // budget cut applies, so the block cannot exceed what the caller allowed.
+    const giant = `open ${"payload ".repeat(4_000)}`;
+    const noteless: FormattedTurn = {
+      id: 30,
+      promptNumber: 30,
+      title: null,
+      promptPreview: giant,
+    };
+
+    const selected = renderNode(
+      { type: "turn", value: noteless },
+      { fields: new Set<RecallTurnField>(["title", "prompt"]), turnBudget: 60 },
+    );
+    expect(estimateTokens(selected)).toBeLessThanOrEqual(60);
+    expect(selected).toContain('- prompt: "open payload');
+    expect(selected).toContain("…");
+
+    // Match-conditional channel (`MATCH_CONDITIONAL_TURN_FIELDS`): the same
+    // row, reached because the search's probe found the term in the prompt —
+    // and capped by the same budget, not exempted for being evidence.
+    const matched = renderNode(
+      { type: "turn", value: noteless },
+      {
+        fields: DEFAULT_TURN_RENDER_FIELDS,
+        matchedFields: new Set<RecallTurnField>(["prompt"]),
+        turnBudget: 60,
+      },
+    );
+    expect(estimateTokens(matched)).toBeLessThanOrEqual(60);
+    expect(matched).toContain('- prompt: "open payload');
   });
 
   test("the prompt and response detail lines are one line each, newlines collapsed", () => {

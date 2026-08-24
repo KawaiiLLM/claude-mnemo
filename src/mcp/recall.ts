@@ -34,8 +34,8 @@ import { typeListsEqual } from "../shared/type-vocabulary";
 import {
   appendNavigationLegend,
   composeTurnMetadata,
+  CONTEXT_TURN_RENDER_FIELDS,
   createTruncationSignal,
-  DEFAULT_TURN_RENDER_FIELDS,
   DEFAULT_TURN_TOKEN_BUDGET,
   GATED_TURN_FIELDS,
   pushFieldCompleteness,
@@ -1006,6 +1006,12 @@ function renderObservationScope(
           { type: "turn", value: turnView },
           {
             indent: RENDER_INDENT_STEP,
+            // Ticket 02: a FIXED-SHAPE surface — the `O*` routes render this
+            // turn row as the header its observations hang under, and no
+            // caller field selection reaches it. It declares `prompt` so a
+            // note-less turn still says what was asked of it, now inside the
+            // per-item `turn` budget instead of in the uncappable label.
+            fields: CONTEXT_TURN_RENDER_FIELDS,
             sessionId: session.id,
             includeDbTurnIds,
             turnBudget,
@@ -1729,16 +1735,19 @@ function renderGroupedSearchResults(
     for (const turn of turns) {
       blockGrants.push({ entityType: "turn", entityId: turn.id });
       // A turn pulled in only via an observation hit (never itself a direct
-      // turn-layer hit) renders at the DEFAULT field set regardless of what
-      // the caller asked for — same "collapsed" floor the pre-ticket-11
-      // depth switch gave it; a turn that WAS itself a direct hit gets the
-      // caller's own field selection. Computed BEFORE `buildTurnView` (edge-
-      // read-surface spec, ticket 01) so a turn that downgrades to the
-      // default set — which never includes `relations` — never pays for the
-      // relations query it will not render.
+      // turn-layer hit) renders at a FIXED field set regardless of what the
+      // caller asked for — same "collapsed" floor the pre-ticket-11 depth
+      // switch gave it; a turn that WAS itself a direct hit gets the caller's
+      // own field selection. Ticket 02: that fixed set is the CONTEXT one
+      // (default + `prompt`), since this row is the only thing naming a
+      // note-less turn the search dragged in via one of its tool calls, and
+      // the label no longer supplies the prompt for free. Computed BEFORE
+      // `buildTurnView` (edge-read-surface spec, ticket 01) so a turn that
+      // downgrades to that set — which never includes `relations` — never
+      // pays for the relations query it will not render.
       const turnFields =
         group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id)
-          ? DEFAULT_TURN_RENDER_FIELDS
+          ? CONTEXT_TURN_RENDER_FIELDS
           : fields;
       const turnView = withTurnSearchSnippet(
         buildTurnView(db, turn, eraCutoffEpoch, turnFields),
@@ -2270,9 +2279,17 @@ const BROWSE_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
 
 /**
  * The browse row's label (spec 金样例): the bracketed address, the turn's own
- * identifying text, then tail status markers. `title` never renders as a field
- * line here — it IS the row — so the label falls back to the prompt the same
- * way `format.ts`'s own turn label does when no title is stored.
+ * stored title when `title` is selected, then tail status markers. `title`
+ * never renders as a field line here — it IS the row.
+ *
+ * Ticket 02: this row's own copy of the prompt fallback (and its `Untitled`
+ * placeholder) retired with `format.ts`'s, for the same two reasons — it
+ * rendered a field the caller had not selected, and it rendered it in the one
+ * position the feed's per-field cut never reaches, so an oversized prompt
+ * displaced the whole page's budget. A caller who wants the prompt on a
+ * browse row selects `prompt`, which renders as a `- prompt:` field line
+ * below, sharing the per-field character limit with every other selected
+ * field.
  */
 function formatBrowseTurnLabel(
   turn: TurnRecord,
@@ -2282,11 +2299,11 @@ function formatBrowseTurnLabel(
   titleText: string | null,
 ): string {
   const address = renderTurnAddress(turn.promptNumber, sessionId, includeSessionPrefix);
-  const label = titleText ?? (turn.userPrompt ? `"${turn.userPrompt.replace(/\s+/g, " ").trim()}"` : "Untitled");
+  const labelSegment = titleText ? ` ${titleText}` : "";
   const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
   const statusSegment = turn.status ? ` [${turn.status}]` : "";
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
-  return `${BROWSE_TURN_INDENT}${address} ${label}${statusSegment}${dbIdSegment}${rewindSegment}`;
+  return `${BROWSE_TURN_INDENT}${address}${labelSegment}${statusSegment}${dbIdSegment}${rewindSegment}`;
 }
 
 /**
@@ -2326,7 +2343,21 @@ function renderBrowseTurnBlock(
       return [];
     }
     const text = browseFieldText(db, turn, field);
-    return text ? [{ field, text }] : [];
+    if (!text) {
+      // Ticket 02: a selected field the turn simply has nothing stored for
+      // still DELIVERED — there was nothing to cut, so it is recorded
+      // complete. Without this a note-less, zero-edge turn could never earn
+      // the relations gate on this surface, even though the caller selected
+      // `relations` and the feed showed it everything it had. The unified
+      // renderer already works this way (`recordTurnFieldCompleteness` pushes
+      // for every selected gated field, text or no text) and so does `title`
+      // three lines above; this is the same rule reaching the rest of them.
+      if (GATED_TURN_FIELDS.includes(field)) {
+        pushFieldCompleteness(signal, "turn", turn.id, field, true);
+      }
+      return [];
+    }
+    return [{ field, text }];
   });
 
   if (values.length === 0) {

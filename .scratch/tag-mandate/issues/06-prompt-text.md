@@ -22,7 +22,10 @@ writable set with `recall` (ranges — `recall(id="S<s>/T<a>..T<b>",
 filter={fields:["title","metadata","content","insight","relations"]})`)
 until you have seen each turn's title, its type and tags, its content and
 insight, and its existing relations. A truncated field is re-read with a bigger `turn` budget, never
-skipped. `timeline` helps navigate; it substitutes for none of this
+skipped. A turn carrying no note yet renders nothing under those fields:
+read it with `prompt` and `response` added to the selection — the raw
+exchange is what you judge it by, and a field never delivered licenses
+nothing. `timeline` helps navigate; it substitutes for none of this
 reading and licenses nothing. Reading is also your write license: a
 whole-field `write` over another writer's text requires your own
 untruncated read of that field. Turns outside the set may be read freely
