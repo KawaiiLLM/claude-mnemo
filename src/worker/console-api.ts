@@ -72,6 +72,11 @@ export const EXCERPT_CONTENT_CP = 280;
  * or segment's real edge count clears it without narrowing, leaving
  * `RESPONSE_BYTE_SOFT_MAX` (via the interval selector below) as the one
  * mechanism that actually narrows a response.
+ *
+ * Ticket 03 (peer P1-3/P2-7): moved to apply AFTER interval resolution, to
+ * the RESOLVED edge set only — see `WIDEN_NODE_MAX`'s own doc for why
+ * pre-cutting the full projection was the bug, and
+ * `applyPostIntervalCountBounds` for the new mechanism.
  */
 export const GRAPH_EDGE_MAX = 10_000;
 /**
@@ -81,10 +86,23 @@ export const GRAPH_EDGE_MAX = 10_000;
  * turns already cleared the old 2000 cap with room to spare — so this raise
  * is headroom parity with the other two caps rising 8-10x, not a repair of
  * an observed amputation. Kept as a real (if now rarely-triggered)
- * structural safety net: `applyGraphCountBounds` below still trims to a
- * stable oldest-first prefix on the pre-display-load projection, unchanged
- * in mechanism — the interval selector never sees a scope so pathological
- * that this fires.
+ * structural safety net.
+ *
+ * Ticket 03 (peer P1-3/P2-7): this cap now applies AFTER
+ * `applyGraphAutoInterval` resolves its own interval, to the RESOLVED
+ * turns/edges — never before. Applying it before (the original mechanism)
+ * cut a stable OLDEST-first prefix of the FULL projection ahead of the
+ * interval walk, so the walk closed over a damaged graph (an in-interval
+ * edge could vanish because its endpoint's turn, or the edge row itself,
+ * never survived the pre-cut) and, past this cap, the true newest turns
+ * became permanently unreachable by any interval — the opposite of what a
+ * "show me the newest" console should do. `applyPostIntervalCountBounds`
+ * (below `applyGraphAutoInterval`) is the new mechanism: NEWEST-first (keeps
+ * the tail of the ascending-sorted resolved turns, drops the older excess),
+ * and it re-derives the reported interval boundary and re-filters edges to
+ * endpoint closure against the smaller turn set when it fires, so the
+ * "every in-interval edge survives" contract keeps holding even when this
+ * safety net trims something.
  */
 export const WIDEN_NODE_MAX = 10_000;
 /**
@@ -254,11 +272,31 @@ export interface ConsoleGraphEdge {
  * token in the component — rather than report 2's numeric turn-id
  * `representative`, so the two ID spaces can never be confused for one
  * another even by shape.
+ *
+ * `state.terminusAddress` (ticket 03, peer P2-5/P2-6): lanes/`laneCheckText`
+ * are computed over the FULL lane-check scope, WHOLE-SNAPSHOT — never
+ * projected down to whichever interval `applyGraphAutoInterval` happens to
+ * be rendering (same posture as `ConsoleMeta.electionCoverage`, stated out
+ * loud in the shell's own copy). A lane's terminus can therefore name a turn
+ * OUTSIDE the currently-rendered interval's own `turns` array, so the shell
+ * cannot resolve its address by looking the id up in `turns` (its `addrOf`
+ * helper's own last-resort `"T"+id` fallback — exactly the bare-dbid text a
+ * reader-facing surface must never print, floor-and-render-fidelity ticket
+ * 03). This field ships the address the payload already has in hand
+ * (`buildLaneAnchorAddresses(run.turns)`, the SAME map `laneCheckText`
+ * itself renders through) so the shell never needs that fallback for a
+ * terminus at all — `null` only when `state.terminus` itself is `null`.
  */
 export interface ConsoleGraphLane {
   segment: string;
   tagSet: string[];
-  state: { closure: string; validity: string | null; terminus: number | null; lastDeclarer: number | null };
+  state: {
+    closure: string;
+    validity: string | null;
+    terminus: number | null;
+    terminusAddress: string | null;
+    lastDeclarer: number | null;
+  };
   memberCount: number;
   phases: string[];
   declarationState: string;
@@ -284,11 +322,17 @@ export interface ConsoleGraphLane {
  * the next `interval` query param, T1498 ruling's own round-trip) and its
  * reader-facing "S<n>/T<m>" address (what the range bar actually prints —
  * floor-and-render-fidelity ticket 03's own address-form convention, S15069/
- * T1482). `isOldest`/`isNewest` compare against the FULL widened+count-
- * bounded projection's own boundary turns (computed once per request,
- * BEFORE the `interval` query param's own ceiling is applied) — so a
- * response that is `isOldest: true` really has nothing older left to page
- * to, never merely "nothing older within THIS request's own ceiling".
+ * T1482). `isOldest`/`isNewest` compare against the FULL projection's own
+ * boundary turns (computed once per request, BEFORE the `interval` query
+ * param's own ceiling is applied AND before either post-load count cap —
+ * ticket 03, peer P1-3/P2-7: the caps used to run first and could hide the
+ * true newest turn from ever being reachable, which is exactly what this
+ * comparison must not do) — so a response that is `isOldest: true` really
+ * has nothing older left to page to, never merely "nothing older within
+ * THIS request's own ceiling". A `WIDEN_NODE_MAX` post-cap can still flip a
+ * PREVIOUSLY-true `isOldest` back to `false` on the same response (see
+ * `applyPostIntervalCountBounds`) — it never touches `isNewest`, since it
+ * only ever trims from the OLD end.
  */
 export interface ConsoleGraphInterval {
   fromTurnId: number;
@@ -704,41 +748,6 @@ function resolveGraphScope(
 }
 
 /**
- * The POST-load boundary rule's COUNT half, verbatim from ticket 01:
- * widened-turn-count <= WIDEN_NODE_MAX AND widened-edge-count <=
- * GRAPH_EDGE_MAX, each truncated to a stable prefix (both arrays already
- * sorted) independently when exceeded. Operates on the bare projection rows
- * — BEFORE display fields are loaded — so a turn beyond `WIDEN_NODE_MAX`
- * never costs a `loadTurnDisplayFields` lookup it will not appear in the
- * response to justify.
- */
-function applyGraphCountBounds(
-  sortedTurns: LaneTurnInput[],
-  sortedEdges: LaneEdgeInput[],
-): {
-  turns: LaneTurnInput[];
-  edges: LaneEdgeInput[];
-  overCap: boolean;
-  appliedBounds: ConsoleAppliedBound[];
-} {
-  const appliedBounds: ConsoleAppliedBound[] = [];
-
-  const turnsOverCap = sortedTurns.length > WIDEN_NODE_MAX;
-  if (turnsOverCap) {
-    appliedBounds.push({ bound: "WIDEN_NODE_MAX", requested: sortedTurns.length, applied: WIDEN_NODE_MAX });
-  }
-  const turns = turnsOverCap ? sortedTurns.slice(0, WIDEN_NODE_MAX) : sortedTurns;
-
-  const edgesOverCap = sortedEdges.length > GRAPH_EDGE_MAX;
-  if (edgesOverCap) {
-    appliedBounds.push({ bound: "GRAPH_EDGE_MAX", requested: sortedEdges.length, applied: GRAPH_EDGE_MAX });
-  }
-  const edges = edgesOverCap ? sortedEdges.slice(0, GRAPH_EDGE_MAX) : sortedEdges;
-
-  return { turns, edges, overCap: turnsOverCap || edgesOverCap, appliedBounds };
-}
-
-/**
  * Measures the bytes of the REAL envelope this route ships for a given
  * (turns, edges) pair — `{turns, edges, lanes, laneCheckText, meta}`, meta
  * included. Ticket R2 #2: the reviewer's repro measured a cheaper stand-in
@@ -761,9 +770,17 @@ function envelopeBytes(
  * Ticket 04 (graph-byte-priority, T1496/T1498 rulings): the interval
  * selector. REPLACES the old `applyGraphByteBound` drop-edges-then-turns
  * loop — that mechanism is RETIRED; this is its one, unified successor.
- * `turns`/`edges` are the FULL count-bounded widened projection (still
- * behind `applyGraphCountBounds`'s own, unchanged, structural safety net —
- * see that function's own doc), sorted ascending by id.
+ * `turns`/`edges` are the FULL projection, display-loaded, sorted ascending
+ * by id — ticket 03 (peer P1-3/P2-7): NEITHER `WIDEN_NODE_MAX` nor
+ * `GRAPH_EDGE_MAX` has run yet at this point. Those two caps used to trim a
+ * stable OLDEST-first prefix of the full projection BEFORE this selector
+ * ever saw it, which (a) could silently remove an edge whose both endpoints
+ * this selector would otherwise have kept inside its own chosen interval,
+ * and (b) made every turn past the cap permanently unreachable by any
+ * interval, including the newest ones a "show me the latest" console exists
+ * to surface. This selector now always walks the true full index; the two
+ * count caps apply AFTER it resolves, to its OWN output —
+ * `applyPostIntervalCountBounds`, below.
  *
  * `intervalCeilingId` is the `interval` query param — every turn with `id >
  * intervalCeilingId` is excluded from candidacy before anything else runs.
@@ -923,9 +940,15 @@ function applyGraphAutoInterval(input: {
 
   // Over budget: every edge touching ANY turn, indexed once — the walk
   // below looks up "edges touching the turn just added" at each step.
+  // `new Set([citingId, citedId])` (peer P2-4): a self-edge (`citingId ===
+  // citedId`, a real shape — Gate C self-`grounds` writes one) has only ONE
+  // distinct endpoint turn, so it must be bucketed once, not twice — the
+  // plain two-element array this replaced pushed the SAME edge object into
+  // the SAME bucket twice for a self-edge, which would have doubled it in
+  // `inducedEdges` below.
   const edgesByTurnId = new Map<number, ConsoleGraphEdge[]>();
   for (const edge of input.edges) {
-    for (const turnId of [edge.citingId, edge.citedId]) {
+    for (const turnId of new Set([edge.citingId, edge.citedId])) {
       const bucket = edgesByTurnId.get(turnId);
       if (bucket) bucket.push(edge);
       else edgesByTurnId.set(turnId, [edge]);
@@ -948,8 +971,17 @@ function applyGraphAutoInterval(input: {
     const candidateTurn = eligible[i]!;
     const inducedEdges: ConsoleGraphEdge[] = [];
     for (const edge of edgesByTurnId.get(candidateTurn.id) ?? []) {
+      // A self-edge (peer P2-4): `otherId` resolves to `candidateTurn.id`
+      // itself, which is not yet in `includedIds` at this point in the loop
+      // (it is only added after this block, below) — the plain
+      // `includedIds.has(otherId)` check this replaces therefore never rode
+      // a self-edge in with its own turn. `otherId === candidateTurn.id`
+      // holds true if and only if the edge is a genuine self-edge (for any
+      // other edge touching this turn, `otherId` is the OTHER endpoint by
+      // construction), so it is the exact, minimal condition to special-case.
       const otherId = edge.citingId === candidateTurn.id ? edge.citedId : edge.citingId;
-      if (includedIds.has(otherId)) inducedEdges.push(edge);
+      const isSelfEdge = otherId === candidateTurn.id;
+      if (isSelfEdge || includedIds.has(otherId)) inducedEdges.push(edge);
     }
     const candidateTurns = [candidateTurn, ...included];
     const candidateEdges = [...includedEdges, ...inducedEdges];
@@ -1000,6 +1032,79 @@ function applyGraphAutoInterval(input: {
     stateCoverage: "partial",
     unfittable: false,
   };
+}
+
+/**
+ * The POST-load boundary rule's COUNT half (ticket 01), relocated here by
+ * ticket 03 (peer P1-3/P2-7): applied AFTER `applyGraphAutoInterval` has
+ * already resolved its own byte-budgeted interval, to THAT interval's own
+ * `turns`/`edges` — never before, and never to the full projection (see
+ * `WIDEN_NODE_MAX`'s own doc for why running these caps first was the bug).
+ * `RESPONSE_BYTE_SOFT_MAX` is the primary narrowing mechanism; these two
+ * remain rarely-triggered structural safety nets for the case a resolved
+ * interval's turn/edge COUNT is itself pathological even though its bytes
+ * fit (many small turns/edges).
+ *
+ * Both arrays arrive already sorted ascending by id (the invariant
+ * `applyGraphAutoInterval` returns), so "NEWEST-first" trimming — the
+ * direction fix itself, replacing the old oldest-first prefix cut — is
+ * simply keeping the TAIL: `.slice(-N)` instead of `.slice(0, N)`.
+ *
+ * A `WIDEN_NODE_MAX` firing does three things atomically, not just an array
+ * slice: (1) trims `turns` to its own newest `WIDEN_NODE_MAX`; (2)
+ * re-filters `edges` to endpoint closure against that SMALLER turn set —
+ * without this, an edge naming a turn this trim just dropped would ship
+ * with a dangling endpoint, the exact R2 #3 defect ticket 04 already closed
+ * once; (3) re-derives the reported `interval`'s `fromTurnId`/`fromAddress`/
+ * `isOldest` from the new oldest surviving turn — an interval whose own
+ * metadata still claimed the OLD (now-trimmed) boundary would be lying
+ * about what the response actually carries. `isNewest` never changes: this
+ * trim only ever removes from the old end.
+ *
+ * `GRAPH_EDGE_MAX` fires independently, on whatever `edges` remains after
+ * the `WIDEN_NODE_MAX` step (if any) — a pure edge-count cap, so it never
+ * touches `turns`/`interval` itself.
+ */
+function applyPostIntervalCountBounds(input: {
+  turns: ConsoleGraphTurn[];
+  edges: ConsoleGraphEdge[];
+  interval: ConsoleGraphInterval | null;
+  appliedBounds: ConsoleAppliedBound[];
+  stateCoverage: "full" | "partial";
+}): {
+  turns: ConsoleGraphTurn[];
+  edges: ConsoleGraphEdge[];
+  interval: ConsoleGraphInterval | null;
+  appliedBounds: ConsoleAppliedBound[];
+  stateCoverage: "full" | "partial";
+} {
+  let turns = input.turns;
+  let edges = input.edges;
+  let interval = input.interval;
+  const appliedBounds = [...input.appliedBounds];
+  let stateCoverage = input.stateCoverage;
+
+  const turnsOverCap = turns.length > WIDEN_NODE_MAX;
+  if (turnsOverCap) {
+    appliedBounds.push({ bound: "WIDEN_NODE_MAX", requested: turns.length, applied: WIDEN_NODE_MAX });
+    turns = turns.slice(-WIDEN_NODE_MAX);
+    const keptIds = new Set(turns.map((t) => t.id));
+    edges = edges.filter((e) => keptIds.has(e.citingId) && keptIds.has(e.citedId));
+    if (interval && turns.length > 0) {
+      const newOldest = turns[0]!;
+      interval = { ...interval, fromTurnId: newOldest.id, fromAddress: turnAddress(newOldest), isOldest: false };
+    }
+    stateCoverage = "partial";
+  }
+
+  const edgesOverCap = edges.length > GRAPH_EDGE_MAX;
+  if (edgesOverCap) {
+    appliedBounds.push({ bound: "GRAPH_EDGE_MAX", requested: edges.length, applied: GRAPH_EDGE_MAX });
+    edges = edges.slice(-GRAPH_EDGE_MAX);
+    stateCoverage = "partial";
+  }
+
+  return { turns, edges, interval, appliedBounds, stateCoverage };
 }
 
 /**
@@ -1078,8 +1183,12 @@ export function handleGraphRoute(
   // floor-and-render-fidelity ticket 03: `laneCheckText` is reader-facing
   // (it ships in the console payload) and gets the same address form every
   // other lane_check surface does, built from this exact projection's own
-  // turns — no second load.
-  const laneCheckText = renderLaneCheckerReports(run.result, buildLaneAnchorAddresses(run.turns));
+  // turns — no second load. Ticket 03 (peer P2-5/P2-6): hoisted to a local so
+  // `ConsoleGraphLane.state.terminusAddress` below can reuse the SAME map —
+  // both are FULL-SNAPSHOT facts over this whole-scope projection, never
+  // narrowed to whichever interval `applyGraphAutoInterval` later selects.
+  const laneAddresses = buildLaneAnchorAddresses(run.turns);
+  const laneCheckText = renderLaneCheckerReports(run.result, laneAddresses);
 
   // Election preview (ticket 03): per-turn tier from the pure election
   // module, over the SAME projection inputs `checkLanes` just consumed.
@@ -1099,6 +1208,7 @@ export function handleGraphRoute(
       closure: lane.state.closure,
       validity: lane.state.validity,
       terminus: lane.state.terminus,
+      terminusAddress: lane.state.terminus !== null ? (laneAddresses.get(lane.state.terminus) ?? null) : null,
       lastDeclarer: lane.state.lastDeclarer,
     },
     memberCount: lane.members.length,
@@ -1118,12 +1228,14 @@ export function handleGraphRoute(
   const sortedTurns = sortTurnsById(run.turns);
   const sortedEdges = sortEdgesForDisplay(run.edges);
 
-  // COUNT caps first, on the bare projection rows — cheapest to check, and
-  // shrinks the set `loadTurnDisplayFields` below has to resolve.
-  const countBounded = applyGraphCountBounds(sortedTurns, sortedEdges);
-
-  const displayFields = reader.loadTurnDisplayFields(countBounded.turns.map((turn) => turn.id));
-  const countCappedTurnsPayload: ConsoleGraphTurn[] = countBounded.turns.map((turn) => {
+  // Display-load EVERY turn in the full projection (ticket 03, peer
+  // P1-3/P2-7) — no pre-interval WIDEN_NODE_MAX cap narrows this set first
+  // anymore (see `WIDEN_NODE_MAX`'s own doc). `applyGraphAutoInterval` below
+  // needs each turn's real excerpt/title bytes to measure its own envelope
+  // correctly, and the interval it selects must be able to reach any turn in
+  // the true full index, including the newest ones past 10000.
+  const displayFields = reader.loadTurnDisplayFields(sortedTurns.map((turn) => turn.id));
+  const turnsPayload: ConsoleGraphTurn[] = sortedTurns.map((turn) => {
     const fields = displayFields.get(turn.id);
     return {
       id: turn.id,
@@ -1139,7 +1251,7 @@ export function handleGraphRoute(
       isDead: deadTurnIds.has(turn.id),
     };
   });
-  const countCappedEdgesPayload: ConsoleGraphEdge[] = countBounded.edges.map((edge) => ({
+  const edgesPayload: ConsoleGraphEdge[] = sortedEdges.map((edge) => ({
     citingId: edge.citingId,
     citedId: edge.citedId,
     relation: edge.relation,
@@ -1150,24 +1262,24 @@ export function handleGraphRoute(
         : null,
   }));
 
-  // Interval selection third, on the fully-built display payload (ticket 04,
-  // T1496/T1498 rulings) — replaces the old byte-trim loop entirely. See
-  // `applyGraphAutoInterval`'s own doc for why it must measure the FINAL
+  // Interval selection, over the FULL display payload (ticket 04,
+  // T1496/T1498 rulings; ticket 03 fix: no pre-cap ahead of this anymore —
+  // see this function's own doc). Replaces the old byte-trim loop entirely.
+  // See `applyGraphAutoInterval`'s own doc for why it must measure the FINAL
   // envelope (meta included), never a `{turns,edges,lanes,laneCheckText}`
   // stand-in (ticket R2 #2, preserved through the rewrite), and for why its
   // own construction already satisfies ticket R2 #3's endpoint-closure
   // invariant with no separate post-filter pass.
-  const preIntervalAppliedBounds = [...preLoadAppliedBounds, ...countBounded.appliedBounds];
   const autoInterval = applyGraphAutoInterval({
-    turns: countCappedTurnsPayload,
-    edges: countCappedEdgesPayload,
+    turns: turnsPayload,
+    edges: edgesPayload,
     lanes,
     laneCheckText,
     scope: scopeDescriptor,
     asOf: run.asOf,
     ctx,
-    preTrimAppliedBounds: preIntervalAppliedBounds,
-    preTrimStateCoverage: countBounded.overCap ? "partial" : "full",
+    preTrimAppliedBounds: preLoadAppliedBounds,
+    preTrimStateCoverage: "full",
     intervalCeilingId: intervalParam.value ?? null,
   });
 
@@ -1180,21 +1292,33 @@ export function handleGraphRoute(
     });
   }
 
+  // COUNT caps LAST (ticket 03, peer P1-3/P2-7): applied to the RESOLVED
+  // interval's own turns/edges, never before — see
+  // `applyPostIntervalCountBounds`'s own doc for the newest-first direction
+  // and why a turns trim also re-derives `interval`/re-filters `edges`.
+  const postCount = applyPostIntervalCountBounds({
+    turns: autoInterval.turns,
+    edges: autoInterval.edges,
+    interval: autoInterval.interval,
+    appliedBounds: autoInterval.appliedBounds,
+    stateCoverage: autoInterval.stateCoverage,
+  });
+
   return {
     status: 200,
     body: {
-      turns: autoInterval.turns,
-      edges: autoInterval.edges,
+      turns: postCount.turns,
+      edges: postCount.edges,
       lanes,
       laneCheckText,
       meta: buildMeta({
         scope: scopeDescriptor,
-        counts: { turns: autoInterval.turns.length, edges: autoInterval.edges.length, lanes: lanes.length },
+        counts: { turns: postCount.turns.length, edges: postCount.edges.length, lanes: lanes.length },
         asOf: run.asOf,
         ctx,
-        stateCoverage: autoInterval.stateCoverage,
-        appliedBounds: autoInterval.appliedBounds,
-        interval: autoInterval.interval,
+        stateCoverage: postCount.stateCoverage,
+        appliedBounds: postCount.appliedBounds,
+        interval: postCount.interval,
       }),
     },
   };

@@ -334,8 +334,44 @@ describe("console-shell.html behavior-matrix wiring spot checks", () => {
   });
 
   test("a lane's terminus mark addresses the turn instead of printing its bare id", () => {
-    expect(html).toContain("const term = closed ? `◎${addrOf(l.state.terminus)}`");
+    expect(html).toContain("const term = closed ? `◎${l.state.terminusAddress}`");
     expect(html).not.toContain("`◎T${l.state.terminus}`");
+  });
+});
+
+// ticket 03 (peer P2-5/P2-6): lanes/laneCheckText are declared FULL SNAPSHOT
+// (never projected to the currently-rendered interval), and every remaining
+// `addrOf`-fallback call site is closed off — the focus badge reads through
+// `addrOf` (always in-range, by construction) rather than printing the raw
+// dbid, and a lane's terminus reads the server-supplied `terminusAddress`
+// instead of calling `addrOf` at all (whose own fallback the ticket asserts
+// unreachable).
+describe("console-shell.html full-snapshot lanes/checker copy and T<dbid> removal (ticket 03)", () => {
+  const html = readFileSync(HTML_PATH, "utf8");
+
+  test("the partial banner states lanes/laneCheckText cover the whole scope, not the current interval", () => {
+    expect(html).toContain("lanes 与检验文本覆盖整个范围,图仅显示当前所选区间");
+    // The old (wrong) claim — lane_check falls short of the full picture,
+    // when the payload was already whole-scope — must be gone.
+    expect(html).not.toContain("不等价于完整 lane_check");
+  });
+
+  test("the focus badge (syncBadge) never prints a bare `T${sel}`/`T${solo}` — every id routes through addrOf", () => {
+    const block = html.slice(html.indexOf("function syncBadge(){"), html.indexOf("selBadge.onclick"));
+    expect(block).not.toContain("T${sel}");
+    expect(block).not.toContain("T${solo}");
+    expect(block).toContain("addrOf(sel)");
+    expect(block).toContain("addrOf(solo)");
+  });
+
+  test("laneChip's terminus mark reads state.terminusAddress, never calls addrOf on the terminus id", () => {
+    const block = html.slice(html.indexOf("function laneChip(l){"), html.indexOf("c.addEventListener"));
+    expect(block).toContain("l.state.terminusAddress");
+    expect(block).not.toContain("addrOf(l.state.terminus)");
+  });
+
+  test("addrOf's own doc states its bare-id fallback is now asserted unreachable, not a lane-terminus escape hatch", () => {
+    expect(html).toContain("asserted UNREACHABLE");
   });
 });
 

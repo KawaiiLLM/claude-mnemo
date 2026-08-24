@@ -187,9 +187,16 @@ const relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";
 // Reader-facing turn text is always the S<n>/T<m> address (floor-and-render-
 // fidelity ticket 03, user ruling S15069/T1482) — internal `turns.id` stays
 // a DATA KEY only (idx/edge citingId/citedId/nodeEls/rowEls), never printed.
-// A turn id absent from the currently-loaded `turns` array (a lane terminus
-// trimmed out by the graph's own byte/count bounds) falls back to the bare
-// `T<id>` form — the same marked last resort the server-side renderer uses.
+// The bare `T<id>` fallback below is a marked last resort, same posture as
+// the server-side renderer's own `formatTurnRef` (shared/lane-checker-
+// render.ts): every call site this shell has now ships a server-supplied
+// address for any id that can legitimately fall outside the currently-loaded
+// `turns` array — a lane's terminus reads `state.terminusAddress` (ticket
+// 03, peer P2-5/P2-6) instead of calling `addrOf` on it, and every id
+// `addrOf` IS called with (edge endpoints, the focus badge's `sel`/`solo`,
+// panel erows) is, by construction, always a member of the currently-loaded
+// `turns`. The fallback is therefore asserted UNREACHABLE on any real graph
+// response, kept only as defensive dead code for a malformed fixture.
 const addrOf = id => { const t = turns[idx.get(id)]; return t ? `S${t.sessionId}/T${t.promptNumber}` : "T"+id; };
 
 /* ---- mutable render state: reset on every graph load ---- */
@@ -413,13 +420,18 @@ function renderHeader(meta){
     // means an OLDER interval is not currently shown — never that rows
     // inside the shown interval were silently removed (the old drop-edges-
     // then-turns amputation is retired; the interval selector always ships
-    // a COMPLETE sub-graph for whatever interval it picked). The lane_check-
-    // equivalence caveat stays: laneCheckText still reflects only the
-    // rendered interval, not the segment/session's whole stock.
+    // a COMPLETE sub-graph for whatever interval it picked).
+    // Ticket 03 (peer P2-5/P2-6): lanes and laneCheckText are ONE declared
+    // semantics — FULL SNAPSHOT, same posture as election tier — never
+    // projected down to whichever interval the graph happens to be showing.
+    // The old copy claimed lane_check fell short of the full picture, when
+    // the payload was already whole-scope; this states the true, single
+    // semantics instead.
     const boundsNote = bounds ? `(${bounds})` : "";
     partialBanner.textContent =
-      `部分结果 — 更早的区间未显示,可点击下方「较早」查看;当前显示区间内容完整,` +
-      `不等价于完整 lane_check;election tier 按完整快照计算,不受区间选择影响 ${boundsNote}`;
+      `部分结果 — 更早的区间未显示,可点击下方「较早」查看;当前显示区间内容完整;` +
+      `lanes 与检验文本覆盖整个范围,图仅显示当前所选区间;` +
+      `election tier 按完整快照计算,不受区间选择影响 ${boundsNote}`;
     partialBanner.style.display = "block";
   } else {
     partialBanner.style.display = "none";
@@ -478,7 +490,12 @@ function laneChip(l){
   const closed = l.state.closure === "closed";
   const valid = l.state.validity === "valid";
   c.className = "lchip" + (closed ? (valid ? "" : " invalid") : " openlane");
-  const term = closed ? `◎${addrOf(l.state.terminus)}` : (l.state.terminus ? `…◎${addrOf(l.state.terminus)}` : "无宣告");
+  // Ticket 03 (peer P2-5/P2-6): lanes are FULL-SNAPSHOT — a terminus can name
+  // a turn outside the currently-rendered (auto-narrowed) interval's own
+  // `turns` array, so this reads the server-supplied `state.terminusAddress`
+  // directly rather than calling `addrOf` (whose own dbid fallback would
+  // otherwise be reachable for exactly that turn).
+  const term = closed ? `◎${l.state.terminusAddress}` : (l.state.terminus ? `…◎${l.state.terminusAddress}` : "无宣告");
   c.innerHTML = `${esc(l.tagSet.join("+"))}<span class="term">${term}${closed && !valid ? " ✝" : ""}</span>`;
   c.addEventListener("click", () => {
     const toks = lanesTouchingComponentForLane(l.token);
@@ -639,11 +656,16 @@ function paintFilters(){
   if (sel!==null) keep.add(sel);
   for (const t of turns) dimRow(t.id, !keep.has(t.id));
 }
+// Ticket 03 (peer P2-5/P2-6): `sel`/`solo` print through `addrOf`, never the
+// bare `T<dbid>` — every id here comes from `select(id)`, always a turn
+// already present in the currently-loaded `turns` (the addrOf fallback is
+// unreachable at this call site; it exists only for the lane-terminus case,
+// now handled by the server-supplied `terminusAddress` field instead).
 function syncBadge(){
   if (selLanes.size===0 && solo===null && sel===null){ selBadge.style.display="none"; return; }
   selBadge.textContent = (selLanes.size
-    ? `聚焦分量:${selLanes.size} 条 lane${sel!==null ? ` · 面板 T${sel}` : ""}`
-    : solo!==null ? `聚焦 T${solo}(无 lane,亮直连边)` : `面板 T${sel}`) + " · 空白处/Esc 清除";
+    ? `聚焦分量:${selLanes.size} 条 lane${sel!==null ? ` · 面板 ${addrOf(sel)}` : ""}`
+    : solo!==null ? `聚焦 ${addrOf(solo)}(无 lane,亮直连边)` : `面板 ${addrOf(sel)}`) + " · 空白处/Esc 清除";
   selBadge.style.display = "inline-block";
 }
 selBadge.onclick = () => { clearFocus(); paintFilters(); syncBadge(); };

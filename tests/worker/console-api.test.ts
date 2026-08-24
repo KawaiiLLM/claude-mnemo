@@ -517,6 +517,10 @@ describe("GET /api/console/graph — lane nullable semantics", () => {
     // present-as-null, not omitted
     expect("terminus" in lane.state).toBe(true);
     expect(lane.state.terminus).toBeNull();
+    // ticket 03 (peer P2-5/P2-6): terminusAddress mirrors terminus's own
+    // null-ness — present, null, never omitted.
+    expect("terminusAddress" in lane.state).toBe(true);
+    expect(lane.state.terminusAddress).toBeNull();
     expect("lastDeclarer" in lane.state).toBe(true);
     expect(lane.state.lastDeclarer).toBeNull();
     expect("declarationTerminus" in lane).toBe(true);
@@ -608,6 +612,64 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
     expect(body.turns.find((t: any) => t.id === 2).lanes).toEqual([laneToken_]);
   });
 
+  test("ticket 03 (peer P2-5/P2-6): a declared lane's terminusAddress is server-supplied and matches the terminus turn's own S<n>/T<m>", () => {
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () => twoTurnLaneRun(),
+      loadTurnDisplayFields: () => new Map(),
+    });
+    const result = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=1&to=2"), CTX);
+    const body = result.body as any;
+    expect(body.lanes).toHaveLength(1);
+    expect(body.lanes[0].state.terminus).toBe(2);
+    const t2 = body.turns.find((t: any) => t.id === 2);
+    expect(body.lanes[0].state.terminusAddress).toBe(`S${t2.sessionId}/T${t2.promptNumber}`);
+  });
+
+  test("ticket 03 (peer P2-5/P2-6): a lane's terminusAddress resolves even when the terminus turn is OUTSIDE the auto-narrowed interval — lanes are FULL-SNAPSHOT, never projected to the interval", () => {
+    // Same byte-budget calibration as the turn-atomic test below: 5 turns,
+    // huge titles on all of them -> only the newest 2 (ids 4,5) survive
+    // `applyGraphAutoInterval`'s own walk. The lane's terminus is turn 1 —
+    // EXCLUDED from `body.turns` — so this is exactly the scenario where the
+    // shell's OLD `addrOf(l.state.terminus)` call would have hit its bare
+    // `T1` fallback (the id absent from the loaded `turns` array).
+    const turns = Array.from({ length: 5 }, (_, i) => ({ id: i + 1, type: ["design"], order: [0, i + 1] as const }));
+    const bigTitle = "x".repeat(3_500_000);
+    const displayFields = new Map<number, ConsoleTurnDisplayFields>(
+      turns.map((t) => [t.id, { sessionId: 1, promptNumber: t.id, title: bigTitle, userPrompt: null, content: null }]),
+    );
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () =>
+        emptyLaneCheckRun({
+          turns,
+          result: {
+            ...emptyLaneCheckRun().result,
+            lanes: [
+              {
+                key: { segment: "E1", tagSet: ["focus"] },
+                phases: ["decision"],
+                members: [{ id: 1, dead: false }],
+                edgeCountsByRelation: {},
+                declaration: { state: "declared", terminus: 1, latestEventTurn: 1 },
+                state: { key: { segment: "E1", tagSet: ["focus"] }, closure: "closed", validity: "valid", terminus: 1, lastDeclarer: 1 },
+                citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+                coverage: { status: "whole", missingTurnIds: [] },
+              },
+            ],
+          },
+        }),
+      loadTurnDisplayFields: () => displayFields,
+    });
+    const result = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=1&to=1"), CTX);
+    const body = result.body as any;
+    // The interval genuinely excludes turn 1 — the precondition this test needs.
+    expect(body.turns.some((t: any) => t.id === 1)).toBe(false);
+    expect(body.lanes).toHaveLength(1);
+    expect(body.lanes[0].state.terminus).toBe(1);
+    expect(body.lanes[0].state.terminusAddress).toBe("S0/T1");
+  });
+
   test("a laneless turn carries lanes: [] (never omitted/null)", () => {
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
@@ -644,6 +706,38 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
   });
 });
 
+/**
+ * LOAD-BEARING PROPERTIES (ticket 03, peer P1-3/P2-4/P2-7 — mutation
+ * acceptance, each pinned by its own test below):
+ *
+ *   1. INTERVAL SELECTION SEES THE FULL INDEX. `applyGraphAutoInterval` runs
+ *      on the un-count-capped `turns`/`edges` — a scope whose TOTAL edge
+ *      count exceeds `GRAPH_EDGE_MAX` (or turn count exceeds
+ *      `WIDEN_NODE_MAX`) does not corrupt what the walk can see. Re-inserting
+ *      a pre-cap ahead of the interval selector reddens the P1-3
+ *      counterexample test (an edge between two turns the walk WOULD select
+ *      goes missing because it never survived a stable-oldest-prefix cut
+ *      that ran before the walk).
+ *   2. THE TWO COUNT CAPS APPLY AFTER INTERVAL RESOLUTION, NEWEST-FIRST.
+ *      `applyPostIntervalCountBounds` trims the RESOLVED turns/edges, tail
+ *      (newest) kept, head (oldest) dropped — the reverse of the retired
+ *      oldest-first prefix cut. Reverting the slice direction (or moving the
+ *      call back before `applyGraphAutoInterval`) reddens the
+ *      newest-turn-reachability test: the true newest turn becomes invisible
+ *      to both the default view and interval navigation.
+ *   3. A WIDEN_NODE_MAX TRIM STAYS ENDPOINT-CLOSED AND HONEST ABOUT ITS OWN
+ *      BOUNDARY. Trimming turns without re-filtering `edges` against the
+ *      smaller turn set reddens `expectEdgesEndpointClosed`; trimming turns
+ *      without re-deriving `interval.fromTurnId`/`fromAddress`/`isOldest`
+ *      leaves the response's own `meta.interval` claiming a turn range wider
+ *      than what it actually ships.
+ *   4. SELF-EDGES JOIN THE WALK EXACTLY ONCE. A self-edge
+ *      (`citingId === citedId`) rides in with its own turn's inclusion step
+ *      (its "other" endpoint IS the turn being added) and is bucketed once,
+ *      not twice — dropping the self-edge special case reddens the
+ *      self-edge test by omission; not deduping the `edgesByTurnId` bucket
+ *      reddens it by duplication.
+ */
 describe("GET /api/console/graph — post-load bounds and partial labeling", () => {
   function turnsOfCount(n: number) {
     return Array.from({ length: n }, (_, i) => ({ id: i + 1, type: ["design"], order: [0, i + 1] as const }));
@@ -657,14 +751,19 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     }));
   }
 
-  test("widened turns over WIDEN_NODE_MAX -> truncated to a stable prefix, partial, appliedBounds names the bound", () => {
-    const turns = turnsOfCount(WIDEN_NODE_MAX + 10);
+  test("widened turns over WIDEN_NODE_MAX -> truncated NEWEST-first, partial, appliedBounds names the bound; the true newest turn is reachable in the default view AND by paging older via interval", () => {
+    const turns = turnsOfCount(WIDEN_NODE_MAX + 10); // ids 1..WIDEN_NODE_MAX+10
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       getSessionMaxPromptNumber: () => 1,
       runLaneCheck: () => emptyLaneCheckRun({ turns, result: emptyLaneCheckRun().result }),
       loadTurnDisplayFields: () => new Map(),
     });
+
+    // Default view (no `interval` param): the response is the NEWEST
+    // WIDEN_NODE_MAX turns (ids 11..WIDEN_NODE_MAX+10) — the reverse of the
+    // retired oldest-first prefix (which pinned ids 1..WIDEN_NODE_MAX and
+    // made the true newest 10 turns unreachable by ANY interval at all).
     const result = handleGraphRoute(
       reader,
       new URL("http://x/api/console/graph?session=1&from=1&to=1"),
@@ -672,7 +771,9 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     );
     const body = result.body as any;
     expect(body.turns).toHaveLength(WIDEN_NODE_MAX);
-    expect(body.turns.map((t: any) => t.id)).toEqual(turns.slice(0, WIDEN_NODE_MAX).map((t) => t.id));
+    expect(body.turns.map((t: any) => t.id)).toEqual(turns.slice(-WIDEN_NODE_MAX).map((t) => t.id));
+    // The true newest turn is right there in the default view.
+    expect(body.turns.at(-1).id).toBe(turns.at(-1)!.id);
     expect(body.meta.stateCoverage).toBe("partial");
     expect(body.meta.appliedBounds).toContainEqual({
       bound: "WIDEN_NODE_MAX",
@@ -680,16 +781,54 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
       applied: WIDEN_NODE_MAX,
     });
     expectEdgesEndpointClosed(body);
+    // A WIDEN_NODE_MAX trim re-derives the interval's own boundary: it is no
+    // longer the absolute oldest turn (10 older ones were cut), but it IS
+    // still the absolute newest.
+    expect(body.meta.interval.fromTurnId).toBe(turns.at(-WIDEN_NODE_MAX)!.id);
+    expect(body.meta.interval.isOldest).toBe(false);
+    expect(body.meta.interval.isNewest).toBe(true);
     // R2 #11: still "full-snapshot" under trimming — election tiers were
     // computed on the FULL projection before this response's own truncation
     // ran, so the field's meaning does not change just because the response
     // became partial.
     expect(body.meta.electionCoverage).toBe("full-snapshot");
+
+    // Paging OLDER via the interval mechanism reaches the remaining 10
+    // turns the default view's own WIDEN_NODE_MAX trim excluded — the exact
+    // reachability the retired mechanism broke ("past WIDEN_NODE_MAX turns,
+    // the true newest turns become unreachable by ANY interval" also meant
+    // no interval value could ever bring the EXCLUDED older turns back
+    // either, since the old cut ran before the interval selector could ever
+    // see them).
+    const older = handleGraphRoute(
+      reader,
+      new URL(`http://x/api/console/graph?session=1&from=1&to=1&interval=${body.meta.interval.fromTurnId - 1}`),
+      CTX,
+    );
+    const olderBody = older.body as any;
+    expect(olderBody.turns.map((t: any) => t.id)).toEqual(turns.slice(0, 10).map((t) => t.id));
+    expect(olderBody.meta.interval.isOldest).toBe(true);
+    expect(olderBody.meta.interval.isNewest).toBe(false);
+    expectEdgesEndpointClosed(olderBody);
   });
 
-  test("widened edges over GRAPH_EDGE_MAX -> truncated, partial", () => {
-    const turns = turnsOfCount(5);
-    const edges = edgesOfCount(GRAPH_EDGE_MAX + 20, 5);
+  test("widened edges over GRAPH_EDGE_MAX -> truncated NEWEST-first (the tail of the ascending sort survives, not the head)", () => {
+    // A "complete DAG" over 201 turns (every later turn cites every earlier
+    // one) — C(201,2) = 20100 distinct (citingId,citedId) pairs, comfortably
+    // over GRAPH_EDGE_MAX, and every pair is UNIQUE (no ties on the
+    // (citingId,citedId,relation) sort key), so which specific edges survive
+    // is unambiguous — unlike a small cyclic ring, where every surviving
+    // edge is indistinguishable from a cut one by content alone.
+    const turnCount = 201;
+    const turns = turnsOfCount(turnCount);
+    const edges: { citingId: number; citedId: number; relation: string; tags: string[] }[] = [];
+    for (let citing = 2; citing <= turnCount; citing += 1) {
+      for (let cited = 1; cited < citing; cited += 1) {
+        edges.push({ citingId: citing, citedId: cited, relation: "consume", tags: [] });
+      }
+    }
+    expect(edges.length).toBeGreaterThan(GRAPH_EDGE_MAX);
+
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () => emptyLaneCheckRun({ turns, edges }),
@@ -705,9 +844,112 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     expect(body.meta.stateCoverage).toBe("partial");
     expect(body.meta.appliedBounds).toContainEqual({
       bound: "GRAPH_EDGE_MAX",
-      requested: GRAPH_EDGE_MAX + 20,
+      requested: edges.length,
       applied: GRAPH_EDGE_MAX,
     });
+    expectEdgesEndpointClosed(body);
+    // NEWEST-first, the direction fix itself: the earliest possible pair
+    // (turn 2 -> turn 1, first in ascending sort order) is exactly what the
+    // retired oldest-first cut would have KEPT — it must be gone now. The
+    // latest possible pair (turn 201 -> turn 200, last in ascending sort
+    // order) is exactly what the old cut would have DROPPED — it must
+    // survive now.
+    expect(body.edges.some((e: any) => e.citingId === 2 && e.citedId === 1)).toBe(false);
+    expect(body.edges.some((e: any) => e.citingId === turnCount && e.citedId === turnCount - 1)).toBe(true);
+  });
+
+  test("ticket 03 (peer P1-3): in-interval edge completeness holds even when the TOTAL edge count exceeds GRAPH_EDGE_MAX — the P1-3 counterexample (red pre-fix)", () => {
+    // The bug this pins: pre-fix, GRAPH_EDGE_MAX cut a stable oldest-first
+    // prefix of the FULL edge list BEFORE the interval walk ever ran. Here,
+    // 10005 "filler" edges (citingId/citedId 1..10006, never matching any
+    // real turn) sort ahead of every real structural edge (whose turns are
+    // numbered 20000+) purely by numeric citingId — so the old oldest-first
+    // cut would keep the fillers and discard EVERY real edge, even though
+    // none of the filler edges could ever appear in a response (their
+    // endpoints are not real turns) and every real edge connects turns that
+    // DO end up in the selected interval. Post-fix, the filler edges never
+    // reach the walk's own per-turn edge buckets at all (they key on real
+    // turn ids only) and are excluded from `eligibleEdges` before any byte
+    // accounting — so they cost nothing and hide nothing.
+    const REAL_BASE = 20_000;
+    const turns = Array.from({ length: 5 }, (_, i) => ({ id: REAL_BASE + i, type: ["design"], order: [0, REAL_BASE + i] as const }));
+    const bigTitle = "x".repeat(3_500_000); // same calibration as the turn-atomic test below: only the newest 2 of 5 survive
+    const displayFields = new Map<number, ConsoleTurnDisplayFields>(
+      turns.map((t) => [t.id, { sessionId: 1, promptNumber: t.id, title: bigTitle, userPrompt: null, content: null }]),
+    );
+    const realEdges = Array.from({ length: 500 }, (_, i) => ({
+      citingId: REAL_BASE + (i % 5),
+      citedId: REAL_BASE + ((i + 1) % 5),
+      relation: "consume",
+      tags: [] as string[],
+    }));
+    const fillerEdges = Array.from({ length: 10_005 }, (_, i) => ({
+      citingId: i + 1,
+      citedId: i + 2,
+      relation: "consume",
+      tags: [] as string[],
+    }));
+    const edges = [...fillerEdges, ...realEdges];
+    expect(edges.length).toBeGreaterThan(GRAPH_EDGE_MAX);
+
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () => emptyLaneCheckRun({ turns, edges }),
+      loadTurnDisplayFields: () => displayFields,
+    });
+    const result = handleGraphRoute(
+      reader,
+      new URL("http://x/api/console/graph?session=1&from=1&to=1"),
+      CTX,
+    );
+    const body = result.body as any;
+    // Same pin as the turn-atomic test: exactly the newest 2 turns survive
+    // the byte walk, connected by exactly their 100 real ring edges — and
+    // GRAPH_EDGE_MAX never even fires on this response (100 << 10000),
+    // because the filler edges were never candidates for inclusion.
+    expect(body.turns.map((t: any) => t.id).sort((a: number, b: number) => a - b)).toEqual([
+      REAL_BASE + 3,
+      REAL_BASE + 4,
+    ]);
+    expect(body.edges).toHaveLength(100);
+    expect(body.edges.every((e: any) => e.citingId === REAL_BASE + 3 && e.citedId === REAL_BASE + 4)).toBe(true);
+    expectEdgesEndpointClosed(body);
+    expect(body.meta.appliedBounds.some((b: any) => b.bound === "GRAPH_EDGE_MAX")).toBe(false);
+  });
+
+  test("ticket 03 (peer P2-4): a self-edge (citingId === citedId) survives the over-budget walk with its own turn, exactly once — never dropped, never duplicated", () => {
+    // Same 5-turn/big-title calibration as the turn-atomic test: only turns
+    // 4 and 5 survive. A real self-edge shape (Gate C self-`grounds`) is
+    // added on turn 5, alongside the same 500-edge ring.
+    const turns = turnsOfCount(5);
+    const ringEdges = Array.from({ length: 500 }, (_, i) => ({
+      citingId: (i % 5) + 1,
+      citedId: ((i + 1) % 5) + 1,
+      relation: "consume",
+      tags: [] as string[],
+    }));
+    const selfEdge = { citingId: 5, citedId: 5, relation: "grounds", tags: [] as string[] };
+    const edges = [...ringEdges, selfEdge];
+    const bigTitle = "x".repeat(3_500_000);
+    const displayFields = new Map<number, ConsoleTurnDisplayFields>(
+      turns.map((t) => [t.id, { sessionId: 1, promptNumber: t.id, title: bigTitle, userPrompt: null, content: null }]),
+    );
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () => emptyLaneCheckRun({ turns, edges }),
+      loadTurnDisplayFields: () => displayFields,
+    });
+    const result = handleGraphRoute(
+      reader,
+      new URL("http://x/api/console/graph?session=1&from=1&to=1"),
+      CTX,
+    );
+    const body = result.body as any;
+    expect(body.turns.map((t: any) => t.id).sort((a: number, b: number) => a - b)).toEqual([4, 5]);
+    const selfEdgesInBody = body.edges.filter((e: any) => e.citingId === 5 && e.citedId === 5 && e.relation === "grounds");
+    expect(selfEdgesInBody).toHaveLength(1);
+    // The 100 (4,5) ring edges survive alongside it, unaffected.
+    expect(body.edges.filter((e: any) => e.citingId === 4 && e.citedId === 5)).toHaveLength(100);
     expectEdgesEndpointClosed(body);
   });
 
@@ -971,8 +1213,11 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     });
   });
 
-  test("R2 #3: a turn dropped by WIDEN_NODE_MAX leaves its own edge dangling — filtered out, never shipped with a missing endpoint (reviewer's 2001-turn repro)", () => {
-    const turns = turnsOfCount(WIDEN_NODE_MAX + 1); // 2001 turns, ids 1..2001
+  test("R2 #3 (ticket 03 direction fix): a turn dropped by the NEWEST-first WIDEN_NODE_MAX trim leaves its own edge dangling — filtered out, never shipped with a missing endpoint", () => {
+    const turns = turnsOfCount(WIDEN_NODE_MAX + 1); // ids 1..WIDEN_NODE_MAX+1
+    // citingId=1 is the OLDEST turn — exactly the one the newest-first trim
+    // now drops (the reverse of this test's pre-ticket-03 shape, where the
+    // oldest-first trim dropped the NEWEST turn, WIDEN_NODE_MAX+1, instead).
     const danglingEdge = { citingId: 1, citedId: WIDEN_NODE_MAX + 1, relation: "consume", tags: [] as string[] };
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
@@ -987,8 +1232,10 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     );
     const body = result.body as any;
     expect(body.turns).toHaveLength(WIDEN_NODE_MAX);
-    expect(body.turns.some((t: any) => t.id === WIDEN_NODE_MAX + 1)).toBe(false);
-    // T2001 (the edge's own citedId) was trimmed out — the edge naming it
+    // The newest turn (WIDEN_NODE_MAX+1) survives; the oldest (id 1) does not.
+    expect(body.turns.some((t: any) => t.id === WIDEN_NODE_MAX + 1)).toBe(true);
+    expect(body.turns.some((t: any) => t.id === 1)).toBe(false);
+    // T1 (the edge's own citingId) was trimmed out — the edge naming it
     // must not survive.
     expect(body.edges).toEqual([]);
     expect(body.meta.counts.edges).toBe(0);
