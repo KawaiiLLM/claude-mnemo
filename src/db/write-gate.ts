@@ -188,11 +188,16 @@ function getReadGrant(
 }
 
 /**
- * Clears every read grant a writer holds — session-end cleanup (spec:
- * "session 终结时清理其读集"). Also sweeps that writer's own per-field
- * completeness rows (ticket 04): they are keyed by writer exactly like a
- * grant, so a completed writer's completeness facts are just as stale as its
- * grants and must not survive to be misread by anything reusing the id.
+ * Clears every read grant a writer holds — the grant-lifecycle wipe (ticket
+ * 01, spec: "compact后才清空一次授权"). Called from PreCompact
+ * (`hooks/handlers/compact.ts`), the event that actually destroys the
+ * context those grants were earned on — NOT SessionEnd, since a plain resume
+ * reloads the full transcript and the model still sees every read it made.
+ * Also sweeps that writer's own per-field completeness rows (ticket 04):
+ * they are keyed by writer exactly like a grant, so a wiped writer's
+ * completeness facts (including the relations pseudo-field,
+ * `RELATIONS_GATE_FIELD`) are just as stale as its grants and must not
+ * survive to be misread by anything reusing the id.
  */
 export function clearReadGrantsForWriter(db: Database, writer: string): number {
   const clearedCompleteness = db
@@ -205,31 +210,62 @@ export function clearReadGrantsForWriter(db: Database, writer: string): number {
 }
 
 /**
- * Janitor backstop: sweeps read grants held by `session:<id>` writers whose
- * session has already completed (spec: "janitor 兜底"). A completed
- * session's SessionEnd hook should already have cleared its own grants via
- * `clearReadGrantsForWriter` — this is what self-heals a missed one (a crash
- * between completion and that call, for instance), bounded by `limit` so a
- * routine SessionEnd is never turned into an unbounded table scan.
+ * Read-write contract ticket 01: how old an untouched read-grant or
+ * field-completeness row must be before the janitor sweep reclaims it. Pure
+ * table hygiene, NOT a soundness boundary — the wipe that actually matters to
+ * correctness is `clearReadGrantsForWriter`'s PreCompact call, which fires
+ * the instant a writer's context is destroyed. A row surviving this long
+ * licenses nothing a fresh read would not immediately re-earn; the number
+ * only bounds how long a dead writer's rows linger in the two tables.
  */
-export function sweepReadGrantsForCompletedSessions(
+export const STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
+
+/**
+ * Janitor backstop: sweeps read-grant AND field-completeness rows untouched
+ * for `maxAgeSeconds` or more (spec: "janitor 兜底"; ticket 01 re-keys this
+ * from "session completed" to AGE). Both tables are swept by the same rule —
+ * a completeness row surviving without its grant row (or the reverse) is
+ * exactly as dead as its counterpart, so there is no reason to key one off
+ * the other.
+ *
+ * Deliberately NOT keyed off `sessions.completed_at_epoch` any more: a
+ * completed session's grants still license a same-writer resume (it reloads
+ * the full transcript), and the completion marker is never cleared on resume
+ * (a separate, out-of-scope latent defect) — keying the sweep off it would
+ * have kept destroying a live resume's grants for a session id the marker
+ * never let go of. Age is a rule that self-heals independent of that marker.
+ *
+ * `nowEpoch` is the caller's own clock reading (not looked up here), so a
+ * test can assert the exact boundary without waiting real days. `limit`
+ * bounds each table's own delete, same discipline as the SessionEnd call
+ * site that invokes this on every session's exit — a routine sweep must
+ * never become an unbounded table scan.
+ */
+export function sweepStaleReadGrants(
   db: Database,
+  nowEpoch: number,
   limit: number,
+  maxAgeSeconds: number = STALE_READ_GRANT_AGE_SECONDS,
 ): number {
-  const rows = db
-    .query<{ writer: string }, [number]>(
-      `SELECT DISTINCT r.writer AS writer
-       FROM write_gate_reads r
-       JOIN sessions s ON s.id = CAST(substr(r.writer, 9) AS INTEGER)
-       WHERE r.writer LIKE 'session:%' AND s.completed_at_epoch IS NOT NULL
-       LIMIT ?`,
+  // "30+ days" (spec, and the acceptance box's "30-day-stale rows go") reads
+  // as inclusive of the boundary itself, hence `<=`: a row exactly
+  // `maxAgeSeconds` old is already stale, not one second short of it.
+  const cutoffEpoch = nowEpoch - maxAgeSeconds;
+  const clearedGrants = db
+    .query<unknown, [number, number]>(
+      `DELETE FROM write_gate_reads WHERE rowid IN (
+         SELECT rowid FROM write_gate_reads WHERE read_at_epoch <= ? LIMIT ?
+       )`,
     )
-    .all(limit);
-  let cleared = 0;
-  for (const row of rows) {
-    cleared += clearReadGrantsForWriter(db, row.writer);
-  }
-  return cleared;
+    .run(cutoffEpoch, limit).changes;
+  const clearedCompleteness = db
+    .query<unknown, [number, number]>(
+      `DELETE FROM write_gate_field_completeness WHERE rowid IN (
+         SELECT rowid FROM write_gate_field_completeness WHERE recorded_at_epoch <= ? LIMIT ?
+       )`,
+    )
+    .run(cutoffEpoch, limit).changes;
+  return clearedGrants + clearedCompleteness;
 }
 
 // ---------------------------------------------------------------------------

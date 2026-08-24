@@ -15,10 +15,12 @@ import type { NormalizedHookInput } from "../../src/hooks/types";
 import { BUILD_ID } from "../../src/shared/build-id";
 import {
   checkFieldGate,
+  recordFieldCompleteness,
   recordReadGrant,
   sessionWriterId,
   snapshotWriteGateSequence,
   stampField,
+  STALE_READ_GRANT_AGE_SECONDS,
 } from "../../src/db/write-gate";
 
 function createInput(
@@ -552,11 +554,13 @@ describe("handleSessionEndHook — note settlement boundary (retired, ticket 04)
 });
 
 // ---------------------------------------------------------------------------
-// Write gate cleanup (ticket 01, read-write-contract spec: "session 终结时
-// 清理其读集;janitor 兜底").
+// Write gate — grant lifecycle (ticket 01, read-write-contract spec "compact
+// 后才清空一次授权"): SessionEnd no longer wipes its own writer's grants
+// (PreCompact does, see tests/hooks/compact.test.ts) — it only runs the
+// age-keyed janitor sweep now.
 // ---------------------------------------------------------------------------
 
-describe("handleSessionEndHook — write gate cleanup", () => {
+describe("handleSessionEndHook — write gate grant lifecycle", () => {
   let db: Database;
   let sessionId: number;
 
@@ -580,26 +584,50 @@ describe("handleSessionEndHook — write gate cleanup", () => {
     db.close();
   });
 
-  test("clears the ending session's own read grants", async () => {
-    // Someone else wrote the field, THEN this session read it — the grant
-    // covers the current state, so it may write the field ungranted-free.
+  test("no longer clears the ending session's own grants — a simulated exit + same-writer continuation reuses them for a whole-field overwrite of an unchanged foreign field, without a re-read", async () => {
+    // Someone else wrote the field, THEN this session read it whole.
     stampField(db, "segment", 1, "goal", "session:9999", 100);
     recordReadGrant(db, sessionWriterId(sessionId), "segment", 1, 150, snapshotWriteGateSequence(db));
-    expect(checkFieldGate(db, sessionWriterId(sessionId), "segment", 1, "goal", "E1").ok).toBe(
-      true,
+    recordFieldCompleteness(
+      db,
+      sessionWriterId(sessionId),
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: true }],
+      150,
+      snapshotWriteGateSequence(db),
     );
 
-    const handler = createSessionEndHandler({ db });
+    // The simulated exit: SessionEnd fires.
+    const handler = createSessionEndHandler({ db, now: () => 1_000 });
     await handler(createInput({ sessionId: "write-gate-end-1" }));
+
+    // The same-writer continuation (a resume reloads the FULL transcript, so
+    // the pre-exit grant still describes exactly what it can see): a
+    // whole-field overwrite of the unchanged foreign field succeeds without
+    // any re-read.
+    const verdict = checkFieldGate(db, sessionWriterId(sessionId), "segment", 1, "goal", "E1", {
+      requireCompleteRead: true,
+    });
+    expect(verdict.ok).toBe(true);
+  });
+
+  test("the freshness guard still refuses when the field changed after the pre-exit read — grant survival never bypasses staleness", async () => {
+    recordReadGrant(db, sessionWriterId(sessionId), "segment", 1, 100, snapshotWriteGateSequence(db));
+
+    const handler = createSessionEndHandler({ db, now: () => 1_000 });
+    await handler(createInput({ sessionId: "write-gate-end-1" }));
+
+    // A FOREIGN write lands after the pre-exit read (and after SessionEnd,
+    // which the surviving grant makes irrelevant to this judgment).
+    stampField(db, "segment", 1, "goal", "session:9999", 2_000);
 
     const verdict = checkFieldGate(db, sessionWriterId(sessionId), "segment", 1, "goal", "E1");
     expect(verdict.ok).toBe(false);
     if (!verdict.ok) {
-      expect(verdict.reason).toBe("never-read");
+      expect(verdict.reason).toBe("stale");
     }
   });
 
-  test("janitor backstop sweeps another already-completed session's grants too", async () => {
+  test("the janitor sweeps by age only: a completed-but-recent writer's grants survive another session's SessionEnd; 30-day-stale rows go", async () => {
     const staleSessionId = upsertSession(db, {
       contentSessionId: "write-gate-stale-1",
       project: "/tmp/write-gate",
@@ -610,40 +638,52 @@ describe("handleSessionEndHook — write gate cleanup", () => {
       updatedAtEpoch: 60,
       completedAtEpoch: 60,
     }).id;
-    recordReadGrant(db, sessionWriterId(staleSessionId), "segment", 2, 55, snapshotWriteGateSequence(db));
-
-    const handler = createSessionEndHandler({ db });
-    await handler(createInput({ sessionId: "write-gate-end-1" }));
-
-    const rows = db
-      .query<{ count: number }, []>(
-        "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ?",
-      )
-      .get(sessionWriterId(staleSessionId));
-    expect(rows?.count).toBe(0);
-  });
-
-  test("does not touch a still-live session's grants", async () => {
-    const liveSessionId = upsertSession(db, {
-      contentSessionId: "write-gate-live-1",
+    // Completed just as long ago, but its grant was recorded RECENTLY
+    // (e.g. a late resume glance) — completion status no longer decides
+    // anything; only the grant row's own age does.
+    const recentCompletedSessionId = upsertSession(db, {
+      contentSessionId: "write-gate-recent-completed-1",
       project: "/tmp/write-gate",
       title: null,
       content: null,
       insight: null,
       createdAtEpoch: 50,
       updatedAtEpoch: 60,
-      completedAtEpoch: null,
+      completedAtEpoch: 60,
     }).id;
-    recordReadGrant(db, sessionWriterId(liveSessionId), "segment", 3, 55, snapshotWriteGateSequence(db));
+    const nowEpoch = 10_000_000;
+    recordReadGrant(
+      db,
+      sessionWriterId(staleSessionId),
+      "segment",
+      2,
+      nowEpoch - STALE_READ_GRANT_AGE_SECONDS,
+      snapshotWriteGateSequence(db),
+    );
+    recordReadGrant(
+      db,
+      sessionWriterId(recentCompletedSessionId),
+      "segment",
+      3,
+      nowEpoch - 60,
+      snapshotWriteGateSequence(db),
+    );
 
-    const handler = createSessionEndHandler({ db });
+    const handler = createSessionEndHandler({ db, now: () => nowEpoch });
     await handler(createInput({ sessionId: "write-gate-end-1" }));
 
-    const rows = db
-      .query<{ count: number }, []>(
+    const staleRows = db
+      .query<{ count: number }, [string]>(
         "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ?",
       )
-      .get(sessionWriterId(liveSessionId));
-    expect(rows?.count).toBe(1);
+      .get(sessionWriterId(staleSessionId));
+    expect(staleRows?.count).toBe(0);
+
+    const recentRows = db
+      .query<{ count: number }, [string]>(
+        "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ?",
+      )
+      .get(sessionWriterId(recentCompletedSessionId));
+    expect(recentRows?.count).toBe(1);
   });
 });

@@ -14,21 +14,16 @@ import {
 } from "../../worker/client";
 import { getMaxTurnId } from "../../db/turns";
 import { resolveSessionTranscriptPath } from "../../shared/paths";
-import {
-  clearReadGrantsForWriter,
-  sessionWriterId,
-  sweepReadGrantsForCompletedSessions,
-} from "../../db/write-gate";
+import { sweepStaleReadGrants } from "../../db/write-gate";
 import { runCaptureRepair, type CaptureRepairLog } from "../capture-repair";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 /**
- * Read-write contract (ticket 01): how many OTHER completed sessions' read
- * grants a single SessionEnd call sweeps as its janitor backstop, beside
- * clearing its own. Small and bounded — this runs on every session's exit,
- * so it must never turn into a table scan; it only needs to catch up on a
- * rare miss (e.g. a crash between an earlier session's completion and its
- * own SessionEnd call), not clear a backlog in one pass.
+ * Read-write contract (ticket 01): how many age-stale rows per table a
+ * single SessionEnd call's janitor sweep clears (`sweepStaleReadGrants`).
+ * Small and bounded — this runs on every session's exit, so it must never
+ * turn into a table scan; it only needs to make steady progress against
+ * whatever has aged out, not clear a backlog in one pass.
  */
 export const WRITE_GATE_JANITOR_SWEEP_LIMIT = 20;
 
@@ -216,25 +211,26 @@ export function createSessionEndHandler(
       }
     }
 
-    // Write gate (ticket 01, read-write-contract spec "回收"): this session
-    // is terminating, so its own read grants are cleared, plus an
-    // opportunistic bounded sweep of any OTHER completed session's grants —
-    // the janitor backstop for a miss (a crash between an earlier session's
-    // completion and its own SessionEnd call). Best-effort and strictly
-    // subordinate, same discipline as the repair above: a failure here must
-    // never block orphan finalization, which the diary readiness gate is
-    // waiting on.
+    // Write gate (ticket 01, read-write-contract spec "compact后才清空一次
+    // 授权"): SessionEnd no longer clears this session's own read grants — a
+    // plain resume reloads the FULL transcript, so grants earned before exit
+    // still describe exactly what the model can see on return, and wiping
+    // them here would only force a pointless re-read. PreCompact
+    // (`hooks/handlers/compact.ts`) owns that wipe now, since compact is the
+    // event that actually destroys the context a grant was earned on.
+    // SessionEnd's own remaining contribution is the bounded janitor sweep
+    // of AGE-stale rows (`sweepStaleReadGrants`, any writer, not just this
+    // session's) — a backstop against rows nothing else was ever going to
+    // reclaim. Best-effort and strictly subordinate, same discipline as the
+    // repair above: a failure here must never block orphan finalization,
+    // which the diary readiness gate is waiting on.
     try {
       writeTransaction(dependencies.db, () => {
-        clearReadGrantsForWriter(dependencies.db, sessionWriterId(session.id));
-        sweepReadGrantsForCompletedSessions(
-          dependencies.db,
-          WRITE_GATE_JANITOR_SWEEP_LIMIT,
-        );
+        sweepStaleReadGrants(dependencies.db, now(), WRITE_GATE_JANITOR_SWEEP_LIMIT);
       });
     } catch (error) {
       repairLog(
-        `session-end write-gate cleanup failed for session ${session.id}: ${
+        `session-end write-gate sweep failed for session ${session.id}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

@@ -18,7 +18,8 @@ import {
   snapshotWriteGateSequence,
   sessionWriterId,
   stampField,
-  sweepReadGrantsForCompletedSessions,
+  STALE_READ_GRANT_AGE_SECONDS,
+  sweepStaleReadGrants,
 } from "../../src/db/write-gate";
 
 /**
@@ -188,49 +189,120 @@ describe("read grants", () => {
   });
 });
 
-describe("janitor backstop", () => {
-  function seedSession(contentId: string, completedAtEpoch: number | null): number {
-    return upsertSession(db, {
-      contentSessionId: contentId,
+describe("janitor sweep — age-keyed (ticket 01, re-keyed from 'session completed')", () => {
+  test("30-day-stale rows go; a completed-but-recent writer's grants survive another writer's sweep", () => {
+    // A foreign write on each field, so checkFieldGate actually exercises
+    // the grant below (rule 3 would otherwise admit an unwritten field
+    // regardless of grant state).
+    stampField(db, "segment", 1, "goal", "session:9999", 0);
+    stampField(db, "segment", 2, "goal", "session:9999", 0);
+    // Exactly 30 days old at sweep time — "30-day-stale" is inclusive of the
+    // boundary itself.
+    recordReadGrant(db, sessionWriterId(1), "segment", 1, 0, snapshotWriteGateSequence(db));
+    // One second short of 30 days old — recent, must survive.
+    recordReadGrant(
+      db,
+      sessionWriterId(2),
+      "segment",
+      2,
+      STALE_READ_GRANT_AGE_SECONDS - 1,
+      snapshotWriteGateSequence(db),
+    );
+
+    const swept = sweepStaleReadGrants(db, STALE_READ_GRANT_AGE_SECONDS, 100);
+
+    expect(swept).toBe(1);
+    expect(checkFieldGate(db, sessionWriterId(1), "segment", 1, "goal", "E1").ok).toBe(false);
+    expect(checkFieldGate(db, sessionWriterId(2), "segment", 2, "goal", "E2").ok).toBe(true);
+  });
+
+  test("session completion no longer decides anything — a completed session's fresh grant survives, a live session's aged one does not", () => {
+    const completed = upsertSession(db, {
+      contentSessionId: "done",
       project: "/tmp/p",
       title: null,
       insight: null,
       createdAtEpoch: 1,
       updatedAtEpoch: 1,
-      completedAtEpoch,
+      completedAtEpoch: 500,
     }).id;
-  }
+    const live = upsertSession(db, {
+      contentSessionId: "live",
+      project: "/tmp/p",
+      title: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    stampField(db, "segment", 1, "goal", "session:9999", 0);
+    stampField(db, "segment", 2, "goal", "session:9999", 0);
+    // The completed session's grant is FRESH.
+    recordReadGrant(
+      db,
+      sessionWriterId(completed),
+      "segment",
+      1,
+      STALE_READ_GRANT_AGE_SECONDS,
+      snapshotWriteGateSequence(db),
+    );
+    // The live session's grant is AGED OUT.
+    recordReadGrant(db, sessionWriterId(live), "segment", 2, 0, snapshotWriteGateSequence(db));
 
-  test("sweeps grants belonging to already-completed sessions", () => {
-    const completed = seedSession("done", 500);
-    const live = seedSession("live", null);
-    recordReadGrant(db, sessionWriterId(completed), "segment", 1, 100, snapshotWriteGateSequence(db));
-    recordReadGrant(db, sessionWriterId(live), "segment", 2, 100, snapshotWriteGateSequence(db));
-
-    const swept = sweepReadGrantsForCompletedSessions(db, 100);
+    const swept = sweepStaleReadGrants(db, STALE_READ_GRANT_AGE_SECONDS, 100);
 
     expect(swept).toBe(1);
-    expect(checkFieldGate(db, sessionWriterId(live), "segment", 2, "goal", "E2").ok).toBe(true);
-    // The live session's OWN grant on segment 2 is untouched.
-    stampField(db, "segment", 2, "goal", "session:999", 50);
-    recordReadGrant(db, sessionWriterId(live), "segment", 2, 60, snapshotWriteGateSequence(db));
-    expect(checkFieldGate(db, sessionWriterId(live), "segment", 2, "goal", "E2").ok).toBe(true);
+    expect(checkFieldGate(db, sessionWriterId(completed), "segment", 1, "goal", "E1").ok).toBe(
+      true,
+    );
+    expect(checkFieldGate(db, sessionWriterId(live), "segment", 2, "goal", "E2").ok).toBe(false);
   });
 
-  test("is idempotent and self-heals a session whose own cleanup call was missed", () => {
-    const completed = seedSession("crashed", 500);
-    recordReadGrant(db, sessionWriterId(completed), "segment", 1, 100, snapshotWriteGateSequence(db));
+  test("sweeps a stale completeness row independent of its grant row's own age", () => {
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [{ entityType: "segment", entityId: 1, field: "goal", complete: true }],
+      0,
+      snapshotWriteGateSequence(db),
+    );
+    // The grant for the SAME writer/entity is fresh — only the completeness
+    // row's own timestamp decides its fate; a stale completeness row without
+    // its grant is as dead as the reverse.
+    recordReadGrant(
+      db,
+      "session:1",
+      "segment",
+      1,
+      STALE_READ_GRANT_AGE_SECONDS,
+      snapshotWriteGateSequence(db),
+    );
 
-    expect(sweepReadGrantsForCompletedSessions(db, 100)).toBe(1);
-    expect(sweepReadGrantsForCompletedSessions(db, 100)).toBe(0);
+    const swept = sweepStaleReadGrants(db, STALE_READ_GRANT_AGE_SECONDS, 100);
+
+    expect(swept).toBe(1);
+    expect(getFieldCompleteness(db, "session:1", "segment", 1, "goal")).toBeNull();
+    expect(
+      db
+        .query<{ count: number }, []>(
+          "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = 'session:1'",
+        )
+        .get()?.count,
+    ).toBe(1);
   });
 
-  test("bounds its own work with limit", () => {
+  test("is idempotent — a row swept once is gone on the next pass", () => {
+    recordReadGrant(db, "session:1", "segment", 1, 0, snapshotWriteGateSequence(db));
+
+    expect(sweepStaleReadGrants(db, STALE_READ_GRANT_AGE_SECONDS, 100)).toBe(1);
+    expect(sweepStaleReadGrants(db, STALE_READ_GRANT_AGE_SECONDS, 100)).toBe(0);
+  });
+
+  test("bounds its own work with limit, per table", () => {
     for (let i = 0; i < 5; i += 1) {
-      const id = seedSession(`s${i}`, 500);
-      recordReadGrant(db, sessionWriterId(id), "segment", i + 1, 100, snapshotWriteGateSequence(db));
+      recordReadGrant(db, `session:${i}`, "segment", i + 1, 0, snapshotWriteGateSequence(db));
     }
-    const swept = sweepReadGrantsForCompletedSessions(db, 2);
+    const swept = sweepStaleReadGrants(db, STALE_READ_GRANT_AGE_SECONDS, 2);
     expect(swept).toBeLessThanOrEqual(2);
   });
 });
