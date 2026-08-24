@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { insertLane } from "../../src/db/lanes";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { reindexTurnFromDb } from "../../src/db/search";
@@ -17,8 +18,10 @@ import { getTurn } from "../../src/db/turns";
 import { capRenderToTokenBudget, DEFAULT_TURN_TOKEN_BUDGET, NAVIGATION_LEGEND } from "../../src/mcp/format";
 import { recallMemory } from "../../src/mcp/recall";
 import {
+  buildSegmentLaneCardRow,
   elideSegmentCardFields,
   MAX_ATTACHED_SESSION_ROWS,
+  renderSegmentLaneCardEntry,
   type SegmentCardFieldRows,
 } from "../../src/mcp/segment-card";
 import { estimateTokens } from "../../src/utils/token-estimate";
@@ -169,6 +172,79 @@ describe("capRenderToTokenBudget", () => {
     expect(lines[1]).not.toContain("…");
     // The dropped line leaves no trace at all — not even a partial digit.
     expect(capped).not.toContain("9");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The lane row's own rendering + truncation — the pure mechanisms (ticket
+// 06, spec D7). Mutation targets: the three row shapes, and "truncate
+// against the budget" dropping whole entries, never mid-entry.
+// ---------------------------------------------------------------------------
+
+describe("renderSegmentLaneCardEntry", () => {
+  test("declared terminus that IS the lane's newest node: bare ◎, no → clause", () => {
+    const line = renderSegmentLaneCardEntry(60, { tag: "write-gate", terminusTurnId: 100, newestTurnId: 100 });
+    expect(line).toBe("write-gate ◎E60/T100");
+  });
+
+  test("declared terminus that is NOT the newest node: → appended", () => {
+    const line = renderSegmentLaneCardEntry(60, { tag: "write-gate", terminusTurnId: 100, newestTurnId: 290 });
+    expect(line).toBe("write-gate ◎E60/T100 →E60/T290");
+  });
+
+  test("undeclared/reopened: bare tag + newest-node address, no ◎, no →", () => {
+    const line = renderSegmentLaneCardEntry(60, { tag: "codex-workflow", terminusTurnId: null, newestTurnId: 250 });
+    expect(line).toBe("codex-workflow E60/T250");
+    expect(line).not.toContain("◎");
+    expect(line).not.toContain("→");
+  });
+
+  // Not one of D7's three named shapes, but reachable (a lane declared ahead
+  // of any use, D2): no address at all rather than inventing a fourth marker.
+  test("a registered lane with no live tagged edge yet: bare tag, no address", () => {
+    const line = renderSegmentLaneCardEntry(60, { tag: "brand-new", terminusTurnId: null, newestTurnId: null });
+    expect(line).toBe("brand-new");
+  });
+});
+
+describe("buildSegmentLaneCardRow", () => {
+  test("under budget: every entry kept, no tail", () => {
+    const result = buildSegmentLaneCardRow(["a E1/T1", "b E1/T2", "c E1/T3"], 1000);
+    expect(result).toEqual({ line: "a E1/T1 · b E1/T2 · c E1/T3", droppedCount: 0 });
+  });
+
+  test("over budget: kept entries are a PREFIX of the caller's own order (never a later one instead of an earlier one), overflow folds into a +N 条 tail", () => {
+    const entries = Array.from({ length: 10 }, (_, i) => `tag${i} E1/T${100 + i}`);
+    const budget = estimateTokens(entries.slice(0, 4).join(" · ")); // room for a handful, not all 10
+    const result = buildSegmentLaneCardRow(entries, budget);
+
+    expect(result.droppedCount).toBeGreaterThan(0);
+    expect(result.droppedCount).toBeLessThan(entries.length);
+    const keptCount = entries.length - result.droppedCount;
+    expect(result.line.startsWith(entries.slice(0, keptCount).join(" · "))).toBe(true);
+    expect(result.line).not.toContain(`tag${entries.length - 1}`); // the very last entry never survives here
+    expect(result.line).toMatch(new RegExp(`\\+${result.droppedCount} 条$`));
+  });
+
+  // The acceptance criterion itself: "a test pins that the row respects the
+  // budget" — not merely that the tail string appears.
+  test("the whole line (kept entries + tail) never exceeds the budget, at E60's own measured scale", () => {
+    const entries = Array.from({ length: 63 }, (_, i) => `lane-tag-${i} E60/T${8000 + i}`);
+    const budget = DEFAULT_TURN_TOKEN_BUDGET; // the same item-knife budget the tags/type facet lines take
+    const result = buildSegmentLaneCardRow(entries, budget);
+
+    expect(result.droppedCount).toBeGreaterThan(0);
+    expect(estimateTokens(result.line)).toBeLessThanOrEqual(budget);
+    expect(result.line).toMatch(/\+\d+ 条$/);
+  });
+
+  test("a budget too small even for one entry plus its own tail folds everything into the bare count", () => {
+    const result = buildSegmentLaneCardRow(["a-long-lane-tag E1/T1", "another-tag E1/T2"], 1);
+    expect(result).toEqual({ line: "+2 条", droppedCount: 2 });
+  });
+
+  test("zero entries: empty line, nothing dropped", () => {
+    expect(buildSegmentLaneCardRow([], 1000)).toEqual({ line: "", droppedCount: 0 });
   });
 });
 
@@ -630,6 +706,144 @@ describe("recall(id=\"E<n>\") segment card", () => {
       filter: { fields: ["title", "relations"] },
     });
     expect(requested).toContain("→ extends T1 {seg-tag}");
+  });
+
+  // ---- ticket 06 (spec D7): the segment card's lane list ----
+
+  test("no declared lanes: the card carries no `- lanes:` row at all", () => {
+    const output = recallMemory(db, { id: `E${segmentId}` });
+    expect(output.split("\n").some((line) => line.trimStart().startsWith("- lanes:"))).toBe(false);
+  });
+
+  test("the three lane row shapes render together, newest-lane-first", () => {
+    // alpha: declared, terminus IS the newest node.
+    const a1 = makeTurn(50);
+    const a2 = makeTurn(51);
+    addSegmentMembers(db, segmentId, [a1, a2], CUTOFF);
+    insertLane(db, segmentId, "alpha", CUTOFF);
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: a2 }, cited: { kind: "turn", id: a1 }, relation: "indexes", provenance: "asserted", tags: ["alpha"] }],
+      CUTOFF,
+    );
+
+    // beta: declared, but a later narrows moved the newest node past the terminus.
+    const b1 = makeTurn(52);
+    const b2 = makeTurn(53);
+    const b3 = makeTurn(54);
+    addSegmentMembers(db, segmentId, [b1, b2, b3], CUTOFF);
+    insertLane(db, segmentId, "beta", CUTOFF);
+    writeMemoryEdges(
+      db,
+      [
+        { citing: { kind: "turn", id: b2 }, cited: { kind: "turn", id: b1 }, relation: "indexes", provenance: "asserted", tags: ["beta"] },
+        { citing: { kind: "turn", id: b3 }, cited: { kind: "turn", id: b2 }, relation: "narrows", provenance: "asserted", tags: ["beta"] },
+      ],
+      CUTOFF,
+    );
+
+    // gamma: undeclared — a narrows edge only, no indexes/override ever.
+    const g1 = makeTurn(55);
+    const g2 = makeTurn(56);
+    addSegmentMembers(db, segmentId, [g1, g2], CUTOFF);
+    insertLane(db, segmentId, "gamma", CUTOFF);
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: g2 }, cited: { kind: "turn", id: g1 }, relation: "narrows", provenance: "asserted", tags: ["gamma"] }],
+      CUTOFF,
+    );
+
+    const output = recallMemory(db, { id: `E${segmentId}` });
+    const laneLine = output.split("\n").find((line) => line.trimStart().startsWith("- lanes:"))!;
+
+    expect(laneLine).toContain(`alpha ◎E${segmentId}/T${a2}`);
+    expect(laneLine).not.toContain(`alpha ◎E${segmentId}/T${a2} →`);
+    expect(laneLine).toContain(`beta ◎E${segmentId}/T${b2} →E${segmentId}/T${b3}`);
+    expect(laneLine).toContain(`gamma E${segmentId}/T${g2}`);
+    expect(laneLine).not.toContain(`gamma ◎`);
+
+    // Newest-lane-first (spec D7 / ticket 07's own rule: "the lane's NEWEST
+    // node's time"): gamma's newest (T56) > beta's (T54) > alpha's (T51).
+    const gammaIndex = laneLine.indexOf("gamma");
+    const betaIndex = laneLine.indexOf("beta");
+    const alphaIndex = laneLine.indexOf("alpha");
+    expect(gammaIndex).toBeGreaterThan(-1);
+    expect(gammaIndex).toBeLessThan(betaIndex);
+    expect(betaIndex).toBeLessThan(alphaIndex);
+  });
+
+  test("lane addresses are the turn's own row id (E<segment>/T<globalTurnId>), never a segment-local ordinal", () => {
+    // Chronologically the segment's FIRST member by event order (so its
+    // ordinal would be 1) but inserted into the DB after t1/t2 already exist
+    // (so its raw row id is not 1) — the same divergence the file's own
+    // ordinal test ("follow EVENT order... not DB insertion order") relies
+    // on, reused here to pin that the lane row shows the raw id.
+    const base = makeTurn(90, { epoch: CUTOFF - 5000 });
+    const decl = makeTurn(91, { epoch: CUTOFF - 4999 });
+    addSegmentMembers(db, segmentId, [base, decl], CUTOFF);
+    insertLane(db, segmentId, "solo", CUTOFF);
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: decl }, cited: { kind: "turn", id: base }, relation: "indexes", provenance: "asserted", tags: ["solo"] }],
+      CUTOFF,
+    );
+
+    const output = recallMemory(db, { id: `E${segmentId}` });
+    const laneLine = output.split("\n").find((line) => line.trimStart().startsWith("- lanes:"))!;
+    expect(decl).not.toBe(1); // guards the pin below against a coincidental match
+    expect(laneLine).toContain(`solo ◎E${segmentId}/T${decl}`);
+  });
+
+  test("the budget cap actually bites: many lanes truncate on page 1 with a +N 条 tail, and page 2 shows every lane whole", () => {
+    const laneCount = 63; // E60's own measured scale (spec D7: ~1449 tokens at full length)
+    const tags: string[] = [];
+    let promptNumber = 100;
+    for (let index = 0; index < laneCount; index += 1) {
+      const tag = `lane-tag-${index.toString().padStart(3, "0")}`;
+      tags.push(tag);
+      const t1 = makeTurn(promptNumber);
+      promptNumber += 1;
+      const t2 = makeTurn(promptNumber);
+      promptNumber += 1;
+      addSegmentMembers(db, segmentId, [t1, t2], CUTOFF);
+      insertLane(db, segmentId, tag, CUTOFF);
+      writeMemoryEdges(
+        db,
+        [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "indexes", provenance: "asserted", tags: [tag] }],
+        CUTOFF,
+      );
+    }
+
+    const page1 = recallMemory(db, { id: `E${segmentId}` });
+    const laneLine1 = page1.split("\n").find((line) => line.trimStart().startsWith("- lanes:"))!;
+    // The row's own content budget is the tags/type facet lines' item knife
+    // (DEFAULT_TURN_TOKEN_BUDGET); the rendered LINE also carries the
+    // `- lanes: ` label, a small fixed overhead the same tolerance the
+    // existing tags-facet-line test in this file already allows for.
+    expect(estimateTokens(laneLine1)).toBeLessThanOrEqual(DEFAULT_TURN_TOKEN_BUDGET + 20);
+    expect(laneLine1).toMatch(/\+\d+ 条/);
+    const droppedOnPage1 = tags.filter((tag) => !laneLine1.includes(tag)).length;
+    expect(droppedOnPage1).toBeGreaterThan(0);
+    // The truncation signal actually fires — the reader sees the navigation
+    // hint, not just a silently shortened row.
+    expect(page1).toContain(NAVIGATION_LEGEND);
+
+    const page2 = recallMemory(db, { id: `E${segmentId}`, page: 2 });
+    const laneLine2 = page2.split("\n").find((line) => line.trimStart().startsWith("- lanes:"))!;
+    expect(laneLine2).not.toMatch(/\+\d+ 条/);
+    for (const tag of tags) {
+      expect(laneLine2).toContain(tag);
+    }
+
+    // The CALLER's own budget governs this row, not a constant baked into it.
+    // Every other assertion here runs at the default, so a version that
+    // hardcoded DEFAULT_TURN_TOKEN_BUDGET would satisfy them all — this is the
+    // one that tells the two apart.
+    const tight = recallMemory(db, { id: `E${segmentId}`, turn: 40 });
+    const tightLine = tight.split("\n").find((line) => line.trimStart().startsWith("- lanes:"))!;
+    expect(estimateTokens(tightLine)).toBeLessThan(estimateTokens(laneLine1));
+    const droppedUnderTightBudget = tags.filter((tag) => !tightLine.includes(tag)).length;
+    expect(droppedUnderTightBudget).toBeGreaterThan(droppedOnPage1);
   });
 });
 
